@@ -1,830 +1,949 @@
-# AI Service OS — Enhanced Execution PRD
+# AI Service OS — Product Requirements Document
 
-## Consolidated Master PRD · Phases 0–7 · Optimized for Claude Code + Cowork
-
----
-
-## How to Use This Document
-
-This PRD is structured for **AI-agent-driven development** using Claude Code and Cowork. Every story includes:
-
-- **Allowed files/modules** — scope boundaries for the coding agent
-- **Acceptance criteria** — verifiable conditions, not vibes
-- **Non-goals** — explicit fences so the agent doesn't sprawl
-- **Build prompt** — the instruction to send to the coding agent
-- **Review prompt** — the instruction to send to the review agent
-- **Automated checks** — what the CI pipeline validates
-
-### Execution Protocol
-
-```
-1. Copy the story's Build Prompt into Claude Code
-2. Verify output stays within Allowed Files/Modules
-3. Run Automated Checks
-4. Send Review Prompt to a separate Claude Code session
-5. Human signoff on stories marked "Heavy" human review
-6. Merge only when all checks pass
-```
-
-### CLAUDE.md Integration
-
-Drop this into your repo root as `CLAUDE.md` so Claude Code has persistent context:
-
-```markdown
-# AI Service OS — Claude Code Context
-
-## Project Structure
-- /infra — AWS CDK stacks (TypeScript)
-- /packages/api — Backend API (TypeScript, Node, Express/Fastify)
-- /packages/web — Frontend (React, TypeScript, Tailwind)
-- /packages/shared — Shared types, contracts, constants
-
-## Core Patterns
-- All money: integer cents, never floating point
-- All times: stored UTC, rendered in tenant timezone
-- All entities: tenant_id column + RLS
-- All mutations: emit audit events
-- All AI calls: route through LLM gateway (packages/api/src/ai/gateway)
-- All proposals: typed payloads validated by Zod contracts
-
-## Story Execution Rules
-- Only modify files listed in "Allowed files/modules"
-- Run automated checks before requesting review
-- Never auto-execute proposals — all require human approval
-- Use the shared billing engine for all financial calculations
-- Use the async worker pattern (P0-009) for background jobs
-- Use the webhook base (P0-014) for all external webhook handlers
-```
+**Version**: 2.0
+**Status**: Canonical product reference (supersedes v1)
+**Last revised**: 2026-05-17
+**Owner**: Product
 
 ---
 
-## Executive Summary
+## About this document
 
-AI Service OS is a voice-first, proposal-driven operating system for small HVAC and plumbing businesses. Owners, dispatchers, and technicians interact through conversation and voice. The AI interprets input and generates typed, reviewable proposals. Humans approve before any operational data changes.
+This PRD is the single source of truth for **what we're building, who it's
+for, and why.** It is the product-level reference for every team:
+engineering, design, sales, support, and leadership.
 
-**Primary beta value propositions:**
-1. Faster, more consistent estimate drafting
-2. Faster path from completed work to invoice and payment
-3. Day-of operations managed through conversation + dispatch board
+**Companion documents** (treat as authoritative for their domain):
+- `docs/strategy/day-in-the-life.md` — the emotional and operational spine;
+  the personas; the bad-day failure modes.
+- `docs/strategy/roadmap-audit.md` — how the current build maps against
+  this PRD, with cut / defer / pull-forward recommendations.
+- `docs/PRD-execution-catalog.md` — the engineering execution catalog (was
+  v1 of this PRD). Per-story build prompts, review prompts, acceptance
+  criteria, and dependencies. **Still the source of truth for story-level
+  detail on stories not amended in this v2.**
+- `CLAUDE.md` — the persistent agent context (locked patterns, allowed
+  files, build verification rules).
 
-**Headline metric:** Time to cash
+**When this doc and v1 disagree, this doc wins.** Stories from v1 that
+are not contradicted here are still in effect; stories explicitly
+amended or replaced here override v1.
+
+**Versioning rule**: This PRD is bumped (1.0 → 2.0 → 3.0) when product
+strategy changes. It is the artifact that boards, designers, and new hires
+read first.
 
 ---
 
-## Locked Product Decisions
+## 1. Executive summary
 
-| Area | Decision |
-|------|----------|
-| Cloud + deployment | AWS CDK (TypeScript), ECS/Fargate, RDS Postgres, S3, SQS, CloudWatch, Sentry |
-| Auth | Clerk with tenant bootstrap on first owner signup |
-| Channels in beta | In-app voice + in-app chat + operational SMS context |
-| AI safety model | AI creates typed proposals → humans review and approve → deterministic execution |
-| LLM strategy | Provider-agnostic gateway with tiered model routing (lightweight/standard/complex) |
-| Initial verticals | HVAC and Plumbing via vertical packs |
-| Financial | Integer cents, Stripe payment links after invoice approval, deposits as partial payments |
-| Dispatch | Appointment-centric day view, drag/drop creates proposals |
-| Beta integrations | Twilio SMS, Stripe payment links, QuickBooks one-way invoice sync |
+### The pitch (one sentence)
+
+> **You learned the trade. We'll run the business.**
+> AI answers your phone, books your jobs, sends your estimates, and chases
+> your invoices. You approve what matters in 30 seconds a day.
+> Built for the shop with 2 trucks and no office.
+
+### What it is
+
+A voice-and-SMS-first **AI back office** for small home-service businesses
+(HVAC and plumbing in V1). The owner does not run a dashboard. The owner
+runs their trade. The AI runs the business side: phone answering, intake,
+scheduling, estimating, invoicing, payment chasing, review monitoring, and
+end-of-day reporting — and surfaces only the decisions that require a human.
+
+### What it is not
+
+- Not a CRM the owner logs into every morning.
+- Not a dispatch console for a 10-person ops team.
+- Not a customer-facing self-service portal.
+- Not a marketing automation platform.
+- Not a tax/payroll/legal tool.
+
+(See §7 for the full in-scope / out-of-scope list.)
+
+### Headline metric
+
+**Owner hours returned per week.** This is the north star. The unit of
+value we sell. Every feature is judged by whether it adds or subtracts
+from this number.
+
+Secondary headline: **time-to-cash** (days between job completion and
+payment received), because it's the financial proxy the customer feels.
+
+### Why now
+
+Three things only became true in the last 18 months:
+1. Real-time voice models can hold a competent service-business
+   conversation under $1/min in COGS.
+2. SMS + payment links + Stripe/Twilio APIs are mature enough that an AI
+   can run an entire money flow.
+3. The owner-operator labor crisis (no admin staff available, no time to
+   train one) is forcing demand. Ten years ago the answer was "hire a
+   receptionist." Today nobody can.
 
 ---
 
-## System Architecture
+## 2. Customers and personas
+
+### ICP definition
+
+Primary ICP: **owner-operator home-service shops with 1–3 trucks, no
+dedicated office staff, revenue $200K–$1M, in HVAC or plumbing.**
+
+Disqualifying signals:
+- 5+ employees with a dedicated office manager
+- Already on ServiceTitan and happy
+- Want to grow into a 20-truck fleet (we serve owner-operators by
+  preference, not aspirationally)
+- Don't carry a smartphone
+
+### Primary persona — Mike Rivera (HVAC, 2 trucks)
+
+Phoenix HVAC owner. 38. Married, two young kids. Wife works full-time as
+a nurse. One employee (Carlos, cousin, technician). Revenue $680K. His
+real job title is *dispatcher, CSR, estimator, bookkeeper, collections
+agent, marketing manager, and HVAC technician* — only the last is the one
+he wanted.
+
+**Full narrative**: `docs/strategy/day-in-the-life.md` §"Persona 1 —
+Mike."
+
+### Secondary persona — Jenna Walsh (plumbing, solo)
+
+Cleveland solo plumber. 41. Divorced, raising a 14-year-old son. 18
+years in the trade, 3 years on her own. Revenue $340K. Doesn't want to
+grow into a fleet — wants to stay solo and reclaim her life. Her admin
+load is single-threaded (one phone, one person), which makes the AI back
+office *more* urgent, not less.
+
+**Full narrative**: `docs/strategy/day-in-the-life.md` §"Persona 2 —
+Jenna."
+
+### Anti-personas (do not optimize for)
+
+- **The dispatcher at a 12-truck shop.** Different product. Buys
+  ServiceTitan.
+- **The franchise owner.** Wants brand compliance tooling, not a back
+  office.
+- **The hobbyist / side-hustle plumber.** Doesn't have the revenue to
+  justify $300–$500/mo.
+
+### The 3rd persona we will ship for (Wave 3+)
+
+**The owner-operator's spouse, doing the books at the kitchen table on
+Saturday morning.** Often the unseen second user. The end-of-day digest
+and weekly summary must work for them.
+
+---
+
+## 3. Locked product decisions
+
+These are the 14 commitments that drive every feature and design
+decision. They are repeated here from `day-in-the-life.md` so this PRD
+is self-contained.
+
+| # | Decision | Implication |
+|---|----------|-------------|
+| 1 | SMS is the primary interface | Every proposal is dispatchable as SMS with Approve/Edit/Reject affordances. The web app exists for audit and configuration; no daily action requires opening it. |
+| 2 | End-of-day digest is the dashboard | A 6–9pm SMS summary, with a *"what I wasn't sure about today"* section. No real-time charts. |
+| 3 | One-tap approvals with dictation edits | Every proposal SMS supports Approve / Edit / Reject. Edits accept voice dictation. No forms. |
+| 4 | Confidence is surfaced, not hidden | Where the system is unsure (parts, prices, urgency, model numbers), the doubt is visible to the owner. Not a percentage on every line — surfaced only where it matters. |
+| 5 | Supervisor-agent review of every booking and quote | A cheaper classifier reviews the primary system's outputs for missed urgency, pricing anomalies, and out-of-pattern decisions. |
+| 6 | Emergency intent overrides automation | Urgency + vulnerability signals (medical, age, weather, water-damage-in-progress) route to the owner's phone immediately. Voice triage, not booking. |
+| 7 | AI never discounts or commits to scope changes | Pricing pushback, scope expansion, "let me talk to the owner" requests all route through the owner with a recommendation. |
+| 8 | Dropped calls trigger automatic SMS recovery | Voice → text fallback within 60 seconds, with partial transcript context. |
+| 9 | B2B account recognition is first-class | Property managers, real-estate agents, and repeat commercial accounts route differently from one-off residential calls. |
+| 10 | Vertical packs matter | Plumbing: MMS-to-quote and severity triage. HVAC: equipment history and seasonal load awareness. Architecture supports both without forks. |
+| 11 | Google review monitoring with draft-response approval | Shipped from day one. Reputation recovery is part of the back office. |
+| 12 | Brand voice is configurable, then locked | Every AI utterance — calls, texts, invoices, follow-ups, review responses — sounds like the shop. |
+| 13 | Every AI mistake is a learning event | The owner's correction updates the system. The digest reports back what the system has learned. |
+| 14 | No feature ships that adds admin work to the owner's day | The litmus test. |
+
+---
+
+## 4. Trust and failure-mode architecture
+
+### The trust thesis
+
+No AI system is right 100% of the time. **The trust mechanism is not
+perfection — it's how the system behaves when it's wrong.** ServiceTitan,
+HCP, Rosie, Goodcall, and the other AI receptionists paper over their
+failures. Our wedge is being the system that **tells the truth about
+itself**.
+
+### The four trust pillars
+
+1. **The AI surfaces its own uncertainty.** When the system is <80%
+   confident on a part, price, or urgency call, the doubt is visible
+   to the owner before the message goes out.
+2. **A supervisor agent reviews high-stakes outputs.** A cheaper, separate
+   classifier reviews every booking and quote post-hoc for missed
+   urgency, pricing anomalies, and out-of-pattern decisions. It flags
+   within 60 seconds.
+3. **The AI never makes irreversible-for-the-business decisions
+   unilaterally.** Discounts, scope changes, commitments of a human, and
+   refunds always route through the owner.
+4. **The end-of-day digest tells the truth.** A "what I wasn't sure about
+   today" section appears every evening. Receptionists like Rosie/Goodcall
+   never tell you what they got wrong.
+
+### The seven failure modes the product is designed to handle
+
+Catalogued in detail in `docs/strategy/day-in-the-life.md` §"When
+Serviceos fails — Mike's bad Tuesday":
+
+1. **Wrong quote** (stale labor rate) → caught in approval queue with a
+   correction prompt; rate updates forward.
+2. **Hallucinated part** → low-confidence badge + escalate-to-Carlos
+   flow.
+3. **Missed emergency intent** → supervisor agent flags within minutes.
+4. **Dropped call** → automatic SMS recovery in 60 seconds.
+5. **Customer game-plays the price** → AI refuses to negotiate; routes
+   to owner with recommendation.
+6. **Bad outcome that already happened** (Carlos no-show, 1-star
+   review) → review monitoring + draft public response + private apology
+   + service credit, all in approval queue within an hour.
+7. **End-of-day "what I got wrong today"** → built into every digest.
+
+### Confidence-surfacing rules
+
+The product does **not** display a confidence percentage on every line.
+That creates alarm fatigue. Confidence is surfaced when:
+
+- **Parts**: model number was not in the customer's history or the
+  tenant's inventory.
+- **Prices**: labor rate or part price differs >10% from the tenant's
+  rolling-30-day average for similar items.
+- **Urgency**: caller's vocabulary or affect is inconsistent with the
+  classifier's confidence (e.g., flat tone + "it's 102° in here").
+- **B2B account identification**: caller's phone number doesn't match a
+  known account but they claim to represent one.
+- **Brand voice**: the generated copy deviates from the locked tone
+  profile (e.g., uses banned phrases or unusual register).
+
+Anything else is shipped silently. The owner is the supervisor for
+edge cases, not for the bulk of the work.
+
+---
+
+## 5. System architecture
+
+### Updated architecture diagram
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Channels                              │
-│  In-App Voice │ In-App Chat │ SMS (Twilio) │ Future     │
-└──────────┬──────────┬──────────┬────────────────────────┘
-           │          │          │
-┌──────────▼──────────▼──────────▼────────────────────────┐
-│              Conversation Layer                           │
-│  Threads │ Messages │ Transcripts │ Clarifications       │
-└──────────────────────┬──────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                       Channels                                │
+│  Inbound Voice (Twilio) │ SMS │ MMS │ Web (audit only)        │
+└──────────┬──────────┬──────────┬──────────┬──────────────────┘
+           │          │          │          │
+┌──────────▼──────────▼──────────▼──────────▼──────────────────┐
+│                  Intake & Triage Layer                         │
+│  Intent Classification │ Vulnerability Detector │ Severity     │
+│  B2B Account Recognizer │ Dropped-Call Recovery                │
+└──────────────────────┬────────────────────────────────────────┘
                        │
-┌──────────────────────▼──────────────────────────────────┐
-│              AI Orchestration                             │
-│  Intent Classification │ Context Assembly │ Task Routing  │
-└──────────────────────┬──────────────────────────────────┘
+┌──────────────────────▼────────────────────────────────────────┐
+│                  Conversation Layer                            │
+│  Threads │ Messages │ Transcripts │ Clarifications             │
+│  Linked Accounts (B2B) │ Customer History                      │
+└──────────────────────┬────────────────────────────────────────┘
                        │
-┌──────────────────────▼──────────────────────────────────┐
-│              LLM Gateway (P2-027)                         │
-│  Provider Adapters │ Model Router │ Health │ Cache        │
-│  ┌─────────┐ ┌──────────┐ ┌───────────┐                 │
-│  │Tier 1   │ │Tier 2    │ │Tier 3     │                 │
-│  │8B model │ │30-35B MoE│ │Frontier   │                 │
-│  │classify │ │proposals │ │estimates  │                 │
-│  └─────────┘ └──────────┘ └───────────┘                 │
-└──────────────────────┬──────────────────────────────────┘
+┌──────────────────────▼────────────────────────────────────────┐
+│                  AI Orchestration                               │
+│  Context Assembly │ Vertical-Pack Routing │ Task Selection      │
+└──────────────────────┬────────────────────────────────────────┘
                        │
-┌──────────────────────▼──────────────────────────────────┐
-│              Proposal Engine (Trust Boundary)             │
-│  Typed Contracts │ Confidence │ Expiry │ Review UX       │
-└──────────────────────┬──────────────────────────────────┘
+┌──────────────────────▼────────────────────────────────────────┐
+│                  LLM Gateway                                    │
+│  Provider Adapters │ Tier Routing │ Health │ Cache              │
+│  ┌─────────┐ ┌──────────┐ ┌───────────┐                        │
+│  │Tier 1   │ │Tier 2    │ │Tier 3     │                        │
+│  │classify │ │proposals │ │estimates  │                        │
+│  └─────────┘ └──────────┘ └───────────┘                        │
+└──────────────────────┬────────────────────────────────────────┘
+                       │
+┌──────────────────────▼────────────────────────────────────────┐
+│              Proposal Engine (Trust Boundary)                   │
+│  Typed Contracts │ Confidence Markers │ Brand-Voice Validator   │
+│  Negotiation Guardrails │ Expiry                                │
+└──────────────────────┬────────────────────────────────────────┘
+                       │
+┌──────────────────────▼────────────────────────────────────────┐
+│              ★ NEW: Supervisor Agent (review pass)              │
+│  Re-scores Urgency │ Detects Pricing Anomalies │ Flags Edge     │
+│  Cases │ Latency budget < 60s post-proposal                    │
+└──────────────────────┬────────────────────────────────────────┘
+                       │
+┌──────────────────────▼────────────────────────────────────────┐
+│              ★ NEW: SMS Approval Transport                       │
+│  Renders proposals as SMS with one-tap actions │ Accepts        │
+│  voice-dictated edit replies │ Tracks approval state            │
+└──────────────────────┬────────────────────────────────────────┘
                        │ (approved only)
-┌──────────────────────▼──────────────────────────────────┐
-│              Deterministic Execution                      │
-│  Entity Mutations │ Idempotency │ Audit │ Rollback-safe  │
-└──────────────────────┬──────────────────────────────────┘
+┌──────────────────────▼────────────────────────────────────────┐
+│              Deterministic Execution                            │
+│  Entity Mutations │ Idempotency │ Audit │ Rollback-safe         │
+└──────────────────────┬────────────────────────────────────────┘
                        │
-┌──────────────────────▼──────────────────────────────────┐
-│              Operational Data Layer                        │
-│  Customers│Jobs│Appointments│Estimates│Invoices│Payments  │
-│  Tenant-scoped │ RLS │ Audit │ Revisions │ Diffs         │
-└──────────────────────┬──────────────────────────────────┘
+┌──────────────────────▼────────────────────────────────────────┐
+│              Operational Data Layer                             │
+│  Customers │ Accounts (B2B) │ Jobs │ Appointments │ Estimates  │
+│  Invoices │ Payments │ Tenant-scoped │ RLS │ Audit │ Diffs     │
+└──────────────────────┬────────────────────────────────────────┘
                        │
-┌──────────────────────▼──────────────────────────────────┐
-│              Learning Foundations                          │
-│  AI Runs │ Prompt Versions │ Revisions │ Edit Deltas     │
-│  Proposal Outcomes │ Eval Datasets │ Quality Metrics     │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────▼────────────────────────────────────────┐
+│         Reporting & Learning (★ NEW: End-of-Day Digest)         │
+│  AI Runs │ Prompt Versions │ Edit Deltas │ Correction Loop      │
+│  Daily Digest Generator │ Weekly Summary │ Quality Metrics      │
+└──────────────────────┬────────────────────────────────────────┘
+                       │
+┌──────────────────────▼────────────────────────────────────────┐
+│              ★ NEW: Reputation Layer                             │
+│  Google Business Polling │ Review Classifier │ Draft Response   │
+│  Customer Re-engagement Proposals                               │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Core Architectural Principles
+★ = added or substantially changed in v2.
 
-1. **Proposal-first safety** — AI creates typed proposals; deterministic services execute approved actions
-2. **Voice-first interaction** — primary beta experience is in-app voice + conversation
-3. **Tenant isolation** — all entities, conversations, proposals, AI artifacts are tenant-scoped with RLS
-4. **Learning-ready data model** — AI runs, prompt versions, revisions, diffs preserved for quality improvement
-5. **Vertical-pack model** — HVAC/plumbing behavior layered on shared core
-6. **Provider-agnostic AI** — LLM gateway abstracts model providers; tiered routing optimizes cost/quality
+### Architectural principles
 
----
+Carried from v1:
+1. **Proposal-first safety** — AI creates typed proposals; deterministic
+   services execute approved actions.
+2. **Tenant isolation** — all entities, conversations, proposals, AI
+   artifacts are tenant-scoped with RLS.
+3. **Learning-ready data model** — AI runs, prompt versions, revisions,
+   diffs preserved for quality improvement.
+4. **Vertical-pack model** — HVAC/plumbing behavior layered on shared
+   core.
+5. **Provider-agnostic AI** — LLM gateway abstracts model providers;
+   tiered routing optimizes cost/quality.
 
-## AI-Heavy Delivery Model
+Added in v2:
+6. **SMS-first surface** — every owner-facing interaction the product
+   must be completable via SMS without opening the web app.
+7. **Supervisor-agent review** — every high-stakes AI output (booking,
+   quote, payment-related communication) gets a second pass from a
+   cheaper classifier before reaching the owner or customer.
+8. **Honest uncertainty** — the system surfaces its own confidence; the
+   end-of-day digest reports what it learned and what it got wrong.
 
-### Story Sizing Policy
+### Vertical pack architecture
 
-| Size | Definition | AI Agent Execution |
-|------|-----------|-------------------|
-| XS | Isolated change, one objective, minimal blast radius | Direct to Claude Code |
-| S | One contained implementation unit | Direct to Claude Code |
-| M+ | Must split before implementation | **Never send to coding agent** |
+Each pack provides:
+- **Terminology and taxonomy** (HVAC parts vs. plumbing fittings)
+- **Severity classifier** (e.g., "active leak > frozen no leak" for
+  plumbing; "no AC + medical + heat" for HVAC)
+- **Intake skill set** (e.g., MMS-to-quote for plumbing photo flow)
+- **Estimate templates** (vertical-specific bundles)
+- **Equipment-history awareness** (HVAC unit model + service age;
+  plumbing fixture age)
+- **Brand-voice defaults** (vertical-appropriate tone seed)
 
-Every story in this catalog is XS or S.
+Packs are loaded per tenant; tenants can be in one or both verticals
+(rare but allowed).
 
-### AI vs Human Review Matrix
+### Key invariants
 
-| Work Type | AI Buildability | Human Review Focus |
-|-----------|----------------|-------------------|
-| CRUD entities / APIs | High | Field semantics, tenant boundaries |
-| DB schema + migrations | Medium | Irreversible decisions, money/time semantics |
-| RBAC / auth | Medium | Security, least privilege |
-| Proposal engine | Medium | Trust, lifecycle, stale context |
-| Estimate/invoice calculations | Medium | Financial correctness |
-| LLM gateway / model routing | High | Provider contracts, credential security, routing decisions |
-| Conversation / UI | High | UX clarity, mobile practicality |
-| Voice / transcription | Medium | Recovery behavior, source preservation |
-| Integrations | Medium | Webhook idempotency, operational support |
-
----
-
-## Testing Strategy
-
-Testing is a first-class concern in this PRD, not a downstream activity. Every story includes test requirements, and the CI pipeline enforces coverage thresholds. The full testing strategy document lives at `docs/testing.md` in the repo.
-
-### Testing Framework
-
-| Tool | Purpose |
-|------|---------|
-| Vitest | Unit and integration tests (all packages) |
-| Supertest | HTTP route integration tests |
-| Testing Library | React component tests |
-| Playwright | E2E tests (Phase 7+ beta hardening) |
-| testcontainers | Postgres container for integration tests |
-
-### Coverage Thresholds (CI-Enforced)
-
-| Module Category | Line Coverage | Branch Coverage |
-|----------------|--------------|-----------------|
-| Billing engine | 100% | 100% |
-| Proposal execution | 95% | 90% |
-| Auth / RBAC / permissions | 95% | 90% |
-| Appointment time validation | 95% | 90% |
-| AI gateway / routing | 90% | 85% |
-| Entity CRUD / services | 80% | 75% |
-| UI components | 70% | — |
-
-### Test Categories Required per Story
-
-Every story must include tests for:
-1. **Happy path** — primary use case works end-to-end
-2. **Validation** — invalid input rejected with structured errors
-3. **Tenant isolation** — cross-tenant access denied at data layer
-4. **Permissions** — unauthorized roles rejected (for protected routes)
-5. **Edge cases** — empty data, boundary values, concurrent access
-
-### Test Conventions
-
-- **Test files:** `packages/*/tests/` mirroring `src/` structure
-- **Naming:** `<module>.test.ts` for unit, `<module>.integration.test.ts` for integration
-- **Test data:** Factory functions, never raw fixtures
-- **DB isolation:** Transaction rollback after each test
-- **CI order:** `tsc --noEmit` → `lint` → `migrate:up` → `test --coverage` → `check-coverage`
-
-### AI-Specific Testing
-
-For AI task handlers (P2-016 estimate drafting, P5-003A invoice drafting):
-- Use deterministic mock LLM provider for unit tests
-- Validate AI output against Zod proposal contracts
-- Verify billing engine recalculates totals (override AI-suggested totals)
-- Golden dataset regression tests after beta has real approval data
-
-For LLM gateway (P2-027):
-- Provider swap tests (change config → same result)
-- Tier routing tests (task type → correct model tier)
-- Failover tests (degrade primary → automatic fallback)
-- Cache hit tests (same input → cached response → no LLM call)
-
-### E2E Test Flows (Phase 7 Beta Readiness)
-
-These five critical flows must have passing E2E tests before external beta:
-1. **Dispatcher intake:** Voice → transcript → proposals → approve → customer + job + appointment
-2. **Estimate flow:** Conversation → draft estimate → edit → approve → estimate with provenance
-3. **Invoice flow:** Completed work → draft invoice → approve → Stripe payment link → payment
-4. **Dispatch flow:** Drag/drop → scheduling proposal → conflict check → approve → assignment
-5. **Technician flow:** Voice update → transcript → proposal routed to dispatcher → approve
-
-### Load Testing Targets (Phase 7)
-
-- 50 concurrent tenants
-- 100 requests/second
-- P95 < 500ms for CRUD, < 3s for AI tasks
-- Zero cross-tenant data leakage under load
+- **Money**: integer cents, never floating point.
+- **Time**: stored UTC, rendered in tenant timezone.
+- **Entities**: every row has `tenant_id`; RLS enforced.
+- **Mutations**: emit audit events.
+- **AI calls**: route through LLM gateway.
+- **Proposals**: typed Zod contracts; never auto-executed.
+- **High-stakes outputs**: reviewed by supervisor agent before reaching
+  owner/customer.
+- **Owner-facing interactions**: completable via SMS.
 
 ---
 
-## AI Quality Metrics and Beta Thresholds
+## 6. Functional scope
 
-The AI components need measurable quality gates before going to external beta. These thresholds are tracked by the analytics foundations built in Phases 1, 2, and 4.
+### In scope for V1 (Waves 1–3)
 
-### Estimate AI Quality (Phase 4 Exit Criteria)
+**Intake & answering**
+- Inbound voice call answering with shop-specific voice
+- SMS triage and replies in the shop's voice
+- MMS (photo) intake for plumbing
+- Severity- and vulnerability-aware triage
+- B2B account recognition
+- Dropped-call SMS recovery
 
-| Metric | Threshold | Measurement |
-|--------|-----------|-------------|
-| Approval rate | > 70% | % of estimate proposals approved or approved-with-edits |
-| Clean approval rate | > 30% | % approved without any edits |
-| Edit rate | < 40% | % of approved proposals that required edits |
-| Execution failure rate | < 5% | % of approved proposals where execution fails |
-| Average time-to-review | < 90 seconds | Median time from proposal ready_for_review to approved/rejected |
-| Low-confidence rate | < 25% | % of AI tasks routed to clarification or safe failure |
+**Customer & job management**
+- Customer + B2B account entities
+- Service location, job, appointment entities
+- Customer history and equipment history (HVAC)
+- Internal notes
 
-### Invoice AI Quality (Phase 5 Exit Criteria)
+**Quoting**
+- Estimate drafting from call recordings + customer history
+- MMS-to-quote (plumbing photo flow)
+- Confidence-surfaced line items
+- SMS approval transport
+- Vertical-pack templates and pricing
 
-| Metric | Threshold | Measurement |
-|--------|-----------|-------------|
-| Approval rate | > 75% | % of invoice proposals approved |
-| Clean approval rate | > 40% | % approved without edits |
-| Time-to-cash improvement | > 30% | Reduction vs manual invoice creation time |
+**Invoicing & payments**
+- Invoice drafting from completed jobs + tech notes
+- Stripe payment link generation
+- Unpaid invoice follow-up (on-brand, on schedule)
+- Partial payment handling
 
-### Proposal System Health (Phase 2 Exit Criteria)
+**Daily operations**
+- Schedule visibility (no owner-facing dispatch board)
+- Customer reminders + late-arrival heads-ups
+- End-of-day digest with "what I wasn't sure about" section
+- Tech "I'm out" one-tap status
 
-| Metric | Threshold | Measurement |
-|--------|-----------|-------------|
-| Proposal execution success rate | > 99% | % of approved proposals that execute without error |
-| Stale proposal rate | < 10% | % of proposals that expire before review |
-| Clarification resolution rate | > 60% | % of clarification requests that lead to successful proposals |
+**Trust & quality**
+- Supervisor-agent review pass
+- Brand-voice config (locked after onboarding)
+- Correction-loop UX (owner edits → system learns)
+- Google review monitoring + draft-response approval
+- Audit trail of every AI action
 
-### LLM Gateway Health (P2-027–P2-031)
+**Languages**: English V1; Spanish in Wave 3.
 
-| Metric | Threshold | Measurement |
-|--------|-----------|-------------|
-| Gateway availability | > 99.5% | % of requests that receive a response (including fallback) |
-| P95 latency (lightweight tier) | < 2s | Intent classification, entity extraction |
-| P95 latency (standard tier) | < 5s | Proposal generation |
-| P95 latency (complex tier) | < 15s | Estimate drafting |
-| Cache hit rate (deterministic tasks) | > 40% | After 1 week of usage |
-| Failover trigger rate | < 5% | % of requests that trigger automatic failover |
+### Out of scope for V1 (post-PMF)
+
+- Customer self-service portal
+- Multi-location aggregation / team hierarchies
+- Outbound marketing / lifecycle automation
+- Maintenance agreement management (light surface only in V1)
+- Parts inventory & supplier integration
+- Route optimization / geofencing
+- Predictive maintenance / equipment-health AI
+- Multi-location dispatch optimization
+- Visual day-view dispatch board (for shops with dedicated dispatchers)
+
+### Out of scope, ever
+
+- Tax filing
+- Payroll calculation (surface hours; QuickBooks/Gusto pays)
+- Legal advice
+- Vendor price negotiation
+- HR / firing decisions
+- AI-initiated discounting or scope changes without owner approval
+- Anything that requires the owner to log into a separate dashboard for
+  >30 seconds
 
 ---
 
-## Phase 0 — Platform Foundation
+## 7. Wave plan
 
-**Purpose:** Secure, deployable, observable, multi-tenant platform foundation before AI mutates business workflows.
+V1 is delivered in three waves. v1 of this PRD was organized into 8 phases
+(P0–P7); v2 re-sequences those phases into waves aligned to the customer-
+visible product. See `docs/strategy/roadmap-audit.md` for the mapping
+from old phases to new waves.
 
-**Exit criteria:** Environments deploy cleanly; users sign in; tenancy and roles enforced; logs/errors visible; files, conversations, audio, transcripts, AI runs, and revisions stored safely.
+### Wave 1 — Foundation (in-flight; finish as planned)
 
-### Locked Decisions
+**Goal**: production-ready platform, core entities, proposal engine,
+LLM gateway. The owner cannot use it yet, but everything the AI back
+office sits on is ready.
 
-| Decision | Choice |
-|----------|--------|
-| IaC / runtime | AWS CDK (TypeScript) with ECS/Fargate |
-| Auth | Clerk with tenant bootstrap on first owner signup |
-| Storage | RDS Postgres + S3 + SQS |
-| Monitoring | CloudWatch for logs; Sentry for errors |
-| Learning readiness | AI runs, prompt versions, revisions, diffs from the start |
+**Includes**:
+- All of P0 (platform foundation, AI run logging, prompt registry,
+  diff worker)
+- All of P1 (core entities) + new `account_type` field on customer
+  (pulled forward from P13)
+- All of P2 (proposal engine + LLM gateway) + 3 new stories:
+  - **SMS-Approval-Transport** (see §9)
+  - **Confidence-Surfacing-Spec** (see §9)
+  - **Negotiation-Guardrail-Handler** (see §9)
 
-### Story Catalog
+**Exit criteria**: A proposal can be created, dispatched to SMS,
+approved via one-tap reply (or edited via voice dictation), and executed.
+All proposal types from v1 plus the three new guardrail behaviors are
+wired.
 
-#### P0-001 — Cloud environments and CDK baseline `[S]`
+**Estimated**: 4–6 weeks remaining.
+
+### Wave 2 — AI back office MVP (the heart of the product)
+
+**Goal**: Mike's good Tuesday and Jenna's good Tuesday both work end-to-
+end. The owner can stop opening their email and start running their day
+from SMS.
+
+**Includes**:
+- **P4 vertical packs** (HVAC + plumbing) with three additions:
+  - MMS-to-quote for plumbing
+  - Severity-aware plumbing triage
+  - HVAC equipment-history awareness
+- **P5 invoice intelligence + payments**, plus:
+  - **End-of-Day Digest** with "what I wasn't sure about" section
+  - **Correction-Loop UX** (owner edits → system learns)
+- **P7 integrations** (slimmed): Twilio SMS, Stripe payment links,
+  **Google review monitoring + draft response** (new). QuickBooks deep
+  sync deferred to Wave 4.
+- **P2.5 (new): Supervisor Agent Review Pass**
+- **P8 inbound calling agent** plus two additions:
+  - **Dropped-Call SMS Recovery**
+  - **Vulnerability-Aware Emergency Triage**
+- **Brand-voice configurator** (in P4 or P2).
+
+**Exit criteria**: A pilot customer (Mike-like or Jenna-like) runs their
+business for two weeks without opening the web app for daily work.
+Time-to-cash improves 30%+ vs. their baseline. The end-of-day digest is
+their dashboard.
+
+**Estimated**: 12–16 weeks (largest wave).
+
+### Wave 3 — Beta hardening and launch
+
+**Goal**: 10–25 beta customers running on the product. AI quality gates
+met. Launch press-readiness.
+
+**Includes**:
+- P11 voice/UI parity (slimmed): Spanish (STT/TTS/classifier), lookup
+  skills. UI compose forms deferred.
+- P18 acceptance-criteria tests + bad-day simulation suite (see §12).
+- Launch readiness checklist (subset of P7).
+- Support tooling: AI run search, proposal lookup, customer activity
+  view.
+
+**Exit criteria**: 90% of pilot customers retain after week 4. AI
+quality thresholds met (see §11). No P0 / P1 trust incidents in 14
+consecutive days.
+
+**Estimated**: 4–6 weeks.
+
+### Wave 4 — Post-PMF expansion
+
+**Goal**: Expand the ICP, deepen integrations, and add the second-user
+experiences (dispatcher, spouse, larger shops).
+
+**Includes** (in priority order, validated by Wave 3 customer signal):
+- P3 conversation thread UI (for dispatcher persona)
+- P6 dispatch board (for 3+-truck shops)
+- P9 leads + service agreements
+- QuickBooks deep sync
+- P12 field operations (route optimization)
+- P13 multi-location
+- P10 customer portal (only if customer demand validated; default: no)
+- P14 inventory + parts
+- P15–P19 in priority order
+
+**Not estimated**; driven by Wave 3 learnings.
+
+---
+
+## 8. Critical path and dependencies
+
+The single most important sequence:
+
+```
+P0 platform foundation
+  ↓
+P1 core entities + account_type
+  ↓
+P2 proposal engine + LLM gateway
+  ↓
+  ┌──→ SMS-Approval-Transport ──┐
+  ├──→ Confidence-Surfacing ────┤
+  └──→ Negotiation-Guardrail ───┘
+  ↓
+P4 vertical packs (HVAC + plumbing + MMS + severity + equipment)
+  ↓
+  ┌──→ P5 invoice intelligence
+  ├──→ P8 inbound calling agent
+  ├──→ P2.5 supervisor agent ← critical: cannot ship to customers without
+  ├──→ End-of-day digest        this; trust mechanism is incomplete
+  ├──→ Dropped-call recovery
+  ├──→ Vulnerability triage
+  ├──→ Correction-loop UX
+  └──→ Google review monitoring
+  ↓
+Wave 2 exit: Mike's day works end-to-end on SMS
+  ↓
+Wave 3 hardening → external beta
+```
+
+The **supervisor agent (P2.5)** is the most under-prioritized story
+relative to its importance. It is the difference between an AI assistant
+that occasionally embarrasses the owner and one that doesn't.
+
+---
+
+## 9. New and amended stories
+
+Per the audit (`docs/strategy/roadmap-audit.md`), the following stories
+are new or amended in v2. **Stories from v1's execution catalog that are
+not listed here are unchanged.**
+
+> The full dispatchable story specs (with Allowed Files, Build Prompts,
+> Review Prompts, Automated Checks, and Required Tests) for the eleven
+> new stories below live at
+> `docs/stories/wave-2-strategic-stories.md`. The PRD §9 summary you are
+> reading is the strategic spec; the story file is the engineering
+> execution artifact. Use `/dispatch-story <ID>` (e.g.
+> `/dispatch-story P2-034`) to send a story to an isolated build agent.
+
+### NEW stories
+
+#### N-001 / **P2-034** — SMS-Approval-Transport `[S]`
 
 | Attribute | Value |
 |-----------|-------|
-| Layer | Platform/Infra |
-| AI Buildability | High |
-| Human Review | Moderate |
-| Dependencies | None |
-| Allowed Files | `infra/**`, `.github/workflows/**`, `package.json`, `tsconfig.json`, `CLAUDE.md` |
+| Layer | Proposal Engine |
+| Wave | 1 |
+| Dependencies | P2-001 (proposal entity), P2-002 (typed contracts), P0-014 (webhook base) |
+| Allowed Files | `packages/api/src/proposals/sms/**`, `packages/api/src/sms/**`, `packages/api/migrations/*proposal_sms*` |
 
-**Build prompt:** Provision AWS CDK stacks for dev/staging/prod on ECS/Fargate with ALB, ECR, health checks, and GitHub Actions CI/CD. Use TypeScript CDK. Create a monorepo structure with `/infra`, `/packages/api`, `/packages/web`, `/packages/shared` directories.
+**Build prompt**: Implement an SMS rendering and approval transport for
+every proposal type. For each proposal, render a concise SMS body with
+the proposal summary, key fields, and three reply tokens: APPROVE, EDIT,
+REJECT. Inbound SMS replies are parsed: APPROVE → mark proposal
+approved; REJECT → mark rejected with reason; EDIT → open an edit
+session that accepts a voice memo (audio MMS or text) interpreted as a
+delta against the proposal. Track delivery, read receipts (where Twilio
+supports), and approval state on the proposal.
 
-**Review prompt:** Review environment separation, security groups, health checks, rollback path, naming/tagging consistency, and whether the monorepo structure supports bounded story-level changes.
+**Acceptance criteria**:
+- Every proposal type has an SMS render template.
+- One-tap reply transitions the proposal state correctly.
+- Voice-dictated edits produce a structured delta on the proposal
+  before re-rendering for approval.
+- Idempotent: duplicate inbound SMS for the same proposal is a no-op.
+- All SMS interactions audit-logged.
 
-**Automated checks:** `cdk synth; deploy smoke; health-check validation; typecheck`
+**Non-goals**: Rich-media approval cards (deferred); MMS attachments in
+proposal SMS (deferred); group-SMS approval (out of scope).
 
-**Acceptance criteria:**
-- CDK synth succeeds for all three stacks
-- Dev deploys with a passing health check
-- GitHub Actions pipeline runs lint + typecheck + deploy on push to main
-
-**Non-goals:** Do not configure production domains, SSL, or custom VPC beyond default. Do not set up frontend build yet.
-
----
-
-#### P0-002 — Clerk auth and tenant bootstrap `[S]`
-
-| Attribute | Value |
-|-----------|-------|
-| Layer | Auth |
-| AI Buildability | High |
-| Human Review | Moderate |
-| Dependencies | P0-001 |
-| Allowed Files | `packages/api/src/auth/**`, `packages/api/src/tenants/**`, `packages/api/src/middleware/**` |
-
-**Build prompt:** Implement Clerk sign-up/sign-in with webhook-based tenant bootstrap. On first owner signup: create tenant record, map Clerk user to internal user, set owner role. Use Clerk middleware for session validation. Store tenant_id in session context for all downstream queries.
-
-**Review prompt:** Review identity mapping, session handling, tenant bootstrap idempotency, and whether re-signup or Clerk webhook replay causes duplicate tenants.
-
-**Automated checks:** `auth integration tests; permission tests; tenant bootstrap idempotency tests`
-
-**Acceptance criteria:**
-- New user signup creates exactly one tenant and one owner user
-- Clerk webhook replay does not duplicate
-- Session middleware injects tenant_id and user_id into request context
-- Unauthenticated requests return 401
-
-**Non-goals:** Do not implement invitation flow, team management, or social login.
-
----
-
-#### P0-003 — RBAC for owner / dispatcher / technician `[S]`
+#### N-002 / **P2-035** — Confidence-Surfacing-Spec `[S]`
 
 | Attribute | Value |
 |-----------|-------|
-| Layer | Auth |
-| AI Buildability | High |
-| Human Review | Heavy |
-| Dependencies | P0-002 |
-| Allowed Files | `packages/api/src/auth/**`, `packages/api/src/middleware/permissions.*` |
+| Layer | Proposal Engine |
+| Wave | 1 |
+| Dependencies | P2-012 (confidence storage) |
+| Allowed Files | `packages/api/src/proposals/confidence/**`, `packages/api/src/ai/confidence/**` |
 
-**Build prompt:** Add role model (owner, dispatcher, technician) with shared permission middleware. Create permission constants enum, role-to-permission mapping, and route-level guards. Owners get full access, dispatchers get operational access, technicians get assigned-work-only access.
+**Build prompt**: Replace generic "confidence score" UX with a typed
+confidence-marker system. Markers are emitted by AI tasks when:
+(a) a part model is not in tenant inventory or customer history;
+(b) a labor rate or part price differs >10% from the tenant's rolling-
+30-day average for similar items;
+(c) urgency classification confidence is <80%;
+(d) B2B account claim is unverified;
+(e) brand-voice deviation is detected.
+Markers surface in both the SMS approval message and the web audit view.
+No "X% confident" badges anywhere in the product.
 
-**Review prompt:** Review permission matrix, least-privilege enforcement, and whether the model supports future proposal-approval restrictions (technicians cannot approve financial proposals).
+**Acceptance criteria**:
+- Markers attached to proposal line items where applicable.
+- SMS template includes a concise "I'm not sure about: …" line when
+  any marker is present.
+- Confidence markers are logged with proposal outcomes for retraining.
 
-**Automated checks:** `permission matrix tests; route auth tests; role escalation tests`
+**Non-goals**: Global confidence percentage display; user-configurable
+thresholds in V1.
 
-**Acceptance criteria:**
-- Each role has a defined permission set
-- Route guards reject unauthorized access with 403
-- Permission constants are importable by any module
-- Tests cover all role-route combinations
-
-**Non-goals:** Do not implement custom roles or per-tenant role config.
-
----
-
-#### P0-004 — Tenant-safe Postgres schema + RLS `[S]`
-
-| Attribute | Value |
-|-----------|-------|
-| Layer | Data |
-| AI Buildability | Medium |
-| Human Review | Heavy |
-| Dependencies | P0-001, P0-002 |
-| Allowed Files | `packages/api/src/db/**`, `packages/api/migrations/**`, `packages/api/src/entities/base.*` |
-
-**Build prompt:** Provision RDS Postgres. Implement tenant_id column convention, RLS policies, migration workflow with up/down scripts, standard audit fields (created_at, updated_at, created_by, updated_by) on base entity. Create shared base migration and migration runner.
-
-**Review prompt:** Review RLS policy completeness, cross-tenant safety, index strategy, migration rollback safety.
-
-**Automated checks:** `migration tests; schema validation; tenant isolation tests; cross-tenant query tests`
-
-**Acceptance criteria:**
-- RLS prevents cross-tenant reads and writes
-- Migrations run forward and backward cleanly
-- All tables include tenant_id and audit fields
-- A test proves user A cannot read user B's tenant data
-
-**Non-goals:** Do not create business entity tables yet. Do not implement soft-delete pattern yet.
-
----
-
-#### P0-005 — Backend service skeleton and shared contracts `[S]`
+#### N-003 / **P2-036** — Negotiation-Guardrail-Handler `[S]`
 
 | Attribute | Value |
 |-----------|-------|
-| Layer | Platform |
-| AI Buildability | High |
-| Human Review | Moderate |
-| Dependencies | P0-001, P0-002, P0-004 |
-| Allowed Files | `packages/api/src/shared/**`, `packages/api/src/health/**`, `packages/api/src/example/**` |
+| Layer | Proposal Engine |
+| Wave | 1 |
+| Dependencies | P2-013 (low-confidence policy), N-001 |
+| Allowed Files | `packages/api/src/proposals/guardrails/**`, `packages/api/src/conversations/negotiation/**` |
 
-**Build prompt:** Create TypeScript service skeleton with Zod-based request validation, typed error responses with error codes, health endpoint, tenant-aware request context type, shared API response envelope, and example CRUD module showing the full pattern.
+**Build prompt**: Add a guardrail layer that detects negotiation
+intents in inbound messages — discount requests, scope-change
+requests, "let me talk to your manager," refund requests, deadline
+threats. The AI never responds with a substantive answer to these. It
+acknowledges politely ("Let me check with [owner first name] on that —
+I'll get back to you within the hour") and emits a proposal to the
+owner with a recommendation (e.g., "don't discount: high-LTV customer
+who will come back; offer $100 courtesy + Friday slot instead").
 
-**Review prompt:** Review layering consistency, error model clarity, and whether an AI coding agent can follow the pattern to generate new entity modules without ambiguity.
+**Acceptance criteria**:
+- Detection on text and voice channels.
+- Acknowledgment message uses the locked brand voice.
+- Owner receives the proposal via SMS within 30 seconds of detection.
+- AI cannot generate discount or scope-change commitments without
+  approved proposal.
 
-**Automated checks:** `typecheck; unit tests; contract tests; pattern-conformance lint`
+**Non-goals**: Negotiation playbooks per tenant (V2); price-floor
+configuration (V2 — V1 just blocks discounts).
 
-**Acceptance criteria:**
-- Health endpoint returns 200 with version and environment
-- Error responses follow the shared envelope
-- Validation errors return structured field-level errors
-- Example module demonstrates full CRUD pattern with tenant scoping
-
-**Non-goals:** Do not build real business entities. Example module is a reference pattern only.
-
----
-
-#### P0-006 — Secrets and config framework `[S]`
-
-| Attribute | Value |
-|-----------|-------|
-| Layer | Platform |
-| AI Buildability | High |
-| Human Review | Moderate |
-| Dependencies | P0-001, P0-005 |
-| Allowed Files | `packages/api/src/config/**`, `packages/api/src/secrets/**` |
-
-**Build prompt:** Implement environment-aware config loading from env vars and AWS Secrets Manager. Validate required config at startup — fail fast. Separate platform secrets (DB, AWS) from integration secrets (Clerk, Stripe, Twilio). Typed config accessor.
-
-**Review prompt:** Review secret exposure risks in logs/errors, config validation strictness, environment parity, rotation readiness.
-
-**Automated checks:** `startup config tests; secret resolution tests; missing-secret failure tests`
-
-**Acceptance criteria:**
-- App fails to start if required secrets are missing
-- Secrets never appear in logs or error responses
-- Config is typed and accessible from any module
-- Dev environment works with .env file fallback
-
-**Non-goals:** Do not implement secret rotation. Do not build integration-specific config yet.
-
----
-
-#### P0-007 — Audit logging foundation `[S]`
+#### N-004 / **P2-037** — Supervisor Agent Review Pass `[M]`
 
 | Attribute | Value |
 |-----------|-------|
-| Layer | Trust |
-| AI Buildability | High |
-| Human Review | Moderate |
-| Dependencies | P0-002, P0-004, P0-005 |
-| Allowed Files | `packages/api/src/audit/**`, `packages/api/migrations/*audit*` |
+| Layer | AI Orchestration (new sub-layer) |
+| Wave | 2 |
+| Dependencies | P2-007 (orchestration), P2-027 (gateway), P5-001 (invoice proposals) |
+| Allowed Files | `packages/api/src/ai/supervisor/**`, `packages/api/src/ai/runs/**`, `packages/api/migrations/*supervisor*` |
 
-**Build prompt:** Create immutable audit event model: actor_id, tenant_id, event_type enum, entity_type, entity_id, timestamp, correlation_id, metadata JSONB. Provide emitAuditEvent() helper. Append-only audit_events table.
+**Build prompt**: Implement a second-pass classifier that reviews every
+booking, quote, and invoice proposal produced by the primary system,
+before the proposal reaches the owner's SMS queue. Uses a cheaper /
+faster model (Tier 1). Checks for:
+- **Missed urgency**: caller signals (vocabulary, age, weather, medical
+  mention) inconsistent with the booking's scheduled time.
+- **Pricing anomalies**: total or line items differ >20% from rolling
+  averages for similar jobs.
+- **Brand-voice drift**: message uses banned phrases or unusual
+  register.
+- **Account-routing errors**: residential proposal for a known B2B
+  account, or vice versa.
 
-**Review prompt:** Review audit event coverage, separation from debug logs, and compliance query support.
+Flags become confidence markers (per N-002). If a critical flag fires
+(e.g., medical mention not escalated), the proposal is held and a
+direct owner alert is sent.
 
-**Automated checks:** `audit event tests; traceability checks; append-only enforcement tests`
+**Acceptance criteria**:
+- Review completes within 60 seconds of proposal creation in P95.
+- Critical-flag holds reach owner via direct alert (not just queued).
+- All reviews logged to AI runs for measurement.
+- Supervisor agent uses a different model than the primary task
+  (configurable per task type).
 
-**Acceptance criteria:**
-- Audit events persisted with all required fields
-- Audit table is append-only (no UPDATE/DELETE)
-- Events queryable by tenant, entity, and time range
-- Shared helper makes emitting events trivial
+**Non-goals**: Supervisor agent for SMS-only conversations (V2);
+custom rules per tenant (V2).
 
-**Non-goals:** Do not build audit UI or search API.
-
----
-
-#### P0-008 — Observability, structured logging, and Sentry `[S]`
-
-| Attribute | Value |
-|-----------|-------|
-| Layer | Ops |
-| AI Buildability | High |
-| Human Review | Moderate |
-| Dependencies | P0-001, P0-005 |
-| Allowed Files | `packages/api/src/logging/**`, `packages/api/src/monitoring/**`, `packages/api/src/middleware/correlation.*` |
-
-**Build prompt:** Structured JSON logging with correlation IDs. CloudWatch log sinks. Sentry exception tracking with tenant/user context. Health metrics endpoint. PII redaction for email, phone, name fields.
-
-**Review prompt:** Review PII redaction completeness, alert coverage, correlation ID propagation across async boundaries.
-
-**Automated checks:** `logging tests; PII redaction tests; sentry smoke; correlation propagation tests`
-
-**Acceptance criteria:**
-- All log entries are structured JSON with correlation_id
-- PII fields masked in logs
-- Sentry captures unhandled exceptions with tenant context
-- Health metrics endpoint returns request count, error rate, latency
-
-**Non-goals:** Do not build dashboards. Do not implement distributed tracing.
-
----
-
-#### P0-009 — Async job processing with SQS `[S]`
+#### N-005 / **P5-020** — End-of-Day Digest Generator `[M]`
 
 | Attribute | Value |
 |-----------|-------|
-| Layer | Workers |
-| AI Buildability | High |
-| Human Review | Moderate |
-| Dependencies | P0-001, P0-005, P0-008 |
-| Allowed Files | `packages/api/src/workers/**`, `packages/api/src/queues/**`, `infra/sqs-stacks.*` |
+| Layer | Reporting & Learning |
+| Wave | 2 |
+| Dependencies | P1 entities, P2 proposals, P5 invoices, N-002 |
+| Allowed Files | `packages/api/src/digest/**`, `packages/api/src/workers/digest.*`, `packages/api/migrations/*digest*` |
 
-**Build prompt:** SQS-backed async job pattern: typed job payloads, worker polling loop, configurable retry with exponential backoff, dead-letter queue, idempotency key support, structured logging per job. Base worker class that concrete workers extend.
+**Build prompt**: Generate a daily SMS summary delivered between 6pm
+and 9pm in tenant timezone. Content:
+- Jobs completed (count, revenue invoiced, revenue collected)
+- Quotes sent (count, pipeline value)
+- Follow-ups sent on unpaid invoices (count, outcomes)
+- Tomorrow's schedule confirmation
+- **"What I wasn't sure about today"** section: lists all proposals
+  where confidence markers fired and what the owner did about them.
+- **"What I learned today"** section: lists corrections applied to
+  prior outputs (e.g., "labor rate is $145 going forward").
+- Single approve-style reply ("Looks good" / "Tell me more") for
+  feedback.
 
-**Review prompt:** Review idempotency enforcement, poison message handling, visibility timeout, and pattern clarity for AI-generated workers.
+**Acceptance criteria**:
+- Digest sent within the configured window; failed sends retry up to
+  3 times.
+- Digest content is deterministic from the day's data; regenerable.
+- "What I wasn't sure about" section omitted if zero items.
+- Owner reply triggers a brief follow-up if requested.
 
-**Automated checks:** `queue tests; retry tests; idempotency tests; DLQ tests`
+**Non-goals**: Weekly digest in V1 (Wave 3); email digest (Wave 3);
+per-user customization of digest contents (V2).
 
-**Acceptance criteria:**
-- Jobs enqueued with typed payloads and idempotency keys
-- Workers retry with backoff up to configurable limit
-- Failed jobs land in DLQ
-- Duplicate submissions deduplicated
-- Worker execution logged with correlation IDs
-
-**Non-goals:** Do not implement concrete workers yet. Framework only.
-
----
-
-#### P0-010 — File upload and attachment storage `[S]`
-
-| Attribute | Value |
-|-----------|-------|
-| Layer | Storage |
-| AI Buildability | High |
-| Human Review | Light |
-| Dependencies | P0-001, P0-004, P0-005 |
-| Allowed Files | `packages/api/src/files/**`, `packages/api/migrations/*file*` |
-
-**Build prompt:** S3 upload with presigned URLs, file metadata table (tenant_id, entity_type, entity_id, filename, content_type, size_bytes, s3_key, uploaded_by, created_at), signed retrieval URLs, tenant-prefixed S3 keys, file size/type validation.
-
-**Automated checks:** `upload tests; authz tests; metadata tests; file-type validation tests`
-
-**Acceptance criteria:** Files upload via presigned URL with tenant-prefixed keys. Metadata persisted and queryable by entity. Retrieval URLs signed and time-limited.
-
-**Non-goals:** No file browsing UI, image processing, thumbnails, or virus scanning.
-
----
-
-#### P0-011 — Conversation and message persistence `[S]`
+#### N-006 / **P7-026** — Google Review Monitoring + Draft Response `[M]`
 
 | Attribute | Value |
 |-----------|-------|
-| Layer | Conversation |
-| AI Buildability | High |
-| Human Review | Moderate |
-| Dependencies | P0-004, P0-010 |
-| Allowed Files | `packages/api/src/conversations/**`, `packages/api/migrations/*conversation*`, `packages/api/migrations/*message*` |
+| Layer | Reputation |
+| Wave | 2 |
+| Dependencies | P0-014 (webhook base), N-001, P2-002 |
+| Allowed Files | `packages/api/src/reputation/**`, `packages/api/src/workers/google-reviews.*`, `packages/api/migrations/*review*` |
 
-**Build prompt:** Thread model: tenant_id, status, created_by, linked_customer_id (nullable), linked_job_id (nullable). Message model: thread_id, message_type enum (text, transcript, system_event, note, proposal_summary), sender_type (user, system, ai), content, metadata JSONB, created_at. Chronological retrieval with pagination.
+**Build prompt**: Poll Google Business Profile for new reviews on a 15-
+minute interval. For each new review, classify sentiment and content
+(praise / specific complaint / vague complaint / wrong-business). For
+non-positive reviews, draft a public response in the locked brand voice
+and a private apology message to the customer if identifiable. Create a
+proposal containing both drafts plus an optional service-credit
+suggestion. Owner approves via SMS.
 
-**Automated checks:** `thread/message tests; linkage tests; pagination tests`
+**Acceptance criteria**:
+- New reviews detected within 30 minutes of posting.
+- Drafted public response is on-brand and addresses the specific
+  complaint where possible.
+- Customer matching to existing accounts attempted; flagged when
+  uncertain.
+- Owner can approve, edit, or reject via SMS.
 
-**Acceptance criteria:** Threads tenant-scoped. Messages typed. Chronological pagination. Entity linkage nullable. Mixed message types in a thread.
+**Non-goals**: Yelp, Facebook, Nextdoor monitoring (Wave 3); proactive
+review-request sending (Wave 3).
 
-**Non-goals:** No conversation UI, real-time delivery, or message search.
-
----
-
-#### P0-012 — Voice ingestion and transcription pipeline `[S]`
-
-| Attribute | Value |
-|-----------|-------|
-| Layer | Voice |
-| AI Buildability | Medium |
-| Human Review | Heavy |
-| Dependencies | P0-009, P0-010, P0-011 |
-| Allowed Files | `packages/api/src/voice/**`, `packages/api/src/workers/transcription.*`, `packages/api/migrations/*transcript*` |
-
-**Build prompt:** Audio file upload → S3 storage → enqueue transcription job → persist status (queued/processing/completed/failed) and result → link to conversation message. Pluggable provider interface with stub implementation.
-
-**Automated checks:** `upload tests; transcription state tests; retry tests; provider-swap tests`
-
-**Acceptance criteria:** Audio stored and linked. Transcription jobs queued and processed. Status tracked. Failed transcriptions retryable. Provider swappable without pipeline changes.
-
-**Non-goals:** No real transcription provider (use stub). No voice capture UI.
-
----
-
-#### P0-013 — Feature flags and environment gating `[XS]`
+#### N-007 / **P8-015** — Dropped-Call SMS Recovery `[S]`
 
 | Attribute | Value |
 |-----------|-------|
-| Layer | Release |
-| AI Buildability | High |
-| Human Review | Light |
-| Dependencies | P0-006 |
-| Allowed Files | `packages/api/src/flags/**`, `packages/api/migrations/*flag*` |
+| Layer | Intake |
+| Wave | 2 |
+| Dependencies | P8 inbound calling agent |
+| Allowed Files | `packages/api/src/voice/recovery/**`, `packages/api/src/sms/recovery/**` |
 
-**Build prompt:** Lightweight feature flags with environment-level and tenant-level overrides. Simple isEnabled(flagName, tenantId?) check. Seed flags for Phase 1+ features.
+**Build prompt**: Detect when an inbound voice session ends without
+resolution (caller hung up, dropped, audio quality failure, system
+error) and, within 60 seconds, send the caller an SMS in the shop's
+voice with any partial transcript context. Track conversation
+continuity (the SMS reply belongs to the same intake thread as the
+dropped call).
 
-**Automated checks:** `flag tests; rollout tests; precedence tests`
+**Acceptance criteria**:
+- Drop detected within 5 seconds of session end.
+- SMS sent within 60 seconds in P95.
+- Inbound SMS reply is threaded to the original intake.
+- No SMS sent if the caller successfully booked or was transferred to
+  the owner.
 
-**Acceptance criteria:** Flags checkable by name with optional tenant context. Environment overrides tenant. Missing flags default to false.
+**Non-goals**: Outbound voice callback (V2); recovery for SMS-initiated
+conversations (different problem).
 
-**Non-goals:** No flag management UI. No percentage-based rollout.
-
----
-
-#### P0-014 — Webhook security and idempotency foundation `[S]`
-
-| Attribute | Value |
-|-----------|-------|
-| Layer | Integrations |
-| AI Buildability | Medium |
-| Human Review | Moderate |
-| Dependencies | P0-006, P0-009 |
-| Allowed Files | `packages/api/src/webhooks/**`, `packages/api/migrations/*webhook*` |
-
-**Build prompt:** Secure webhook base: pluggable signature verification, replay protection via event ID dedup, async handoff to worker queue, structured failure logging. Reusable base for Clerk/Stripe/Twilio.
-
-**Automated checks:** `webhook signature tests; idempotency tests; replay protection tests`
-
-**Acceptance criteria:** Signatures verified. Duplicates rejected. Events handed off async. Failures logged with full context.
-
-**Non-goals:** No provider-specific handlers. Foundation only.
-
----
-
-#### P0-015 — AI run logging foundation `[S]`
+#### N-008 / **P8-016** — Vulnerability-Aware Emergency Triage `[S]`
 
 | Attribute | Value |
 |-----------|-------|
-| Layer | AI Foundations |
-| AI Buildability | High |
-| Human Review | Moderate |
-| Dependencies | P0-004, P0-005, P0-007 |
-| Allowed Files | `packages/api/src/ai/runs/**`, `packages/api/migrations/*ai_run*` |
+| Layer | Intake |
+| Wave | 2 |
+| Dependencies | P8 inbound calling agent, customer entity |
+| Allowed Files | `packages/api/src/voice/triage/**`, `packages/api/src/ai/vulnerability/**` |
 
-**Build prompt:** AI run log model: id, tenant_id, task_type, model_identifier, prompt_version_id, input/output snapshot refs, status (queued/running/completed/failed/timeout), timing, token_count_input, token_count_output, cost_estimate_usd. logAiRun() helper.
+**Build prompt**: Extend the inbound calling agent's escalation skill
+to weigh vulnerability signals in urgency classification:
+- **Age**: caller mentions or known to be >65 (from customer record).
+- **Weather**: tenant's locale has extreme temperature in last 24h
+  (>100°F or <20°F).
+- **Medical**: caller mentions oxygen, dialysis, breathing, illness, or
+  similar.
+- **Property type**: known B2B account flagged "occupied" (e.g.,
+  property manager dealing with residents).
 
-**Automated checks:** `persistence tests; query tests; cost-tracking tests`
+Vulnerability + urgency → voice patch to owner's cell with a 5-second
+context preface, **not booking**. Vulnerability alone (no urgency) →
+high-priority booking, owner notified.
 
-**Acceptance criteria:** AI runs logged with all fields. Queryable by tenant, task type, status, time range. Helper captures timing automatically.
+**Acceptance criteria**:
+- Signals detected from utterance content + customer record + weather
+  API.
+- Patch-through latency <30 seconds.
+- Owner receives context preface before being connected to caller.
+- Falls back to high-priority booking if owner unreachable in 60s.
 
-**Non-goals:** No AI/LLM calls. No run viewing UI.
+**Non-goals**: Real-time vital monitoring (not our domain); medical
+priority routing (we don't claim medical authority).
 
----
-
-#### P0-016 — Prompt version registry `[S]`
-
-| Attribute | Value |
-|-----------|-------|
-| Layer | AI Foundations |
-| AI Buildability | High |
-| Human Review | Light |
-| Dependencies | P0-015 |
-| Allowed Files | `packages/api/src/ai/prompts/**`, `packages/api/migrations/*prompt*` |
-
-**Build prompt:** Prompt registry: task_type, version, prompt_template, is_active, created_at. Active prompt lookup per task type. AI run linkage. Rollback by re-activation.
-
-**Automated checks:** `persistence tests; query tests; version rollback tests`
-
-**Acceptance criteria:** Prompts versioned per task type. One active per type. AI runs reference version. Previous version re-activatable.
-
-**Non-goals:** No prompt authoring UI. No A/B testing.
-
----
-
-#### P0-017 — Document revision storage foundation `[S]`
+#### N-009 / **P2-038** — Correction-Loop UX `[M]`
 
 | Attribute | Value |
 |-----------|-------|
-| Layer | AI Foundations |
-| AI Buildability | Medium |
-| Human Review | Moderate |
-| Dependencies | P0-004, P0-005 |
-| Allowed Files | `packages/api/src/revisions/**`, `packages/api/migrations/*revision*` |
+| Layer | Reporting & Learning |
+| Wave | 2 |
+| Dependencies | P0-018 (diff worker), P2-005 (approve/reject/edit), N-005 |
+| Allowed Files | `packages/api/src/learning/corrections/**`, `packages/api/src/ai/prompts/**` |
 
-**Build prompt:** Generic revision model: entity_type, entity_id, revision_number, snapshot_payload JSONB, source_type, actor_id, created_at. Revision history and latest revision queries.
+**Build prompt**: When the owner edits a proposal, extract structured
+lessons from the edit and apply them forward. Examples:
+- Labor rate change → update tenant's default labor rate.
+- Part price change → update tenant's price for that SKU.
+- Banned phrase rejected → add to tenant brand-voice negative-prompt.
+- Scope re-classified → adjust vertical-pack template selection
+  weight.
 
-**Automated checks:** `persistence tests; query tests; revision ordering tests`
+Surfaced in the end-of-day digest as "what I learned today." The
+correction is auditable and reversible.
 
-**Acceptance criteria:** Revisions per entity with monotonic numbers. Full history retrievable. Latest queryable efficiently.
+**Acceptance criteria**:
+- Lessons extracted from at least the four edit categories above.
+- Forward-applied within the current day.
+- Owner can review and undo any learned change via web audit.
+- Digest references the learned change in the same day's report.
 
-**Non-goals:** No diff generation. No revision UI.
+**Non-goals**: Cross-tenant learning (privacy concern); model fine-
+tuning from corrections (V2 — this is prompt-level adjustment only).
 
----
-
-#### P0-018 — Async diff-analysis worker foundation `[S]`
+#### N-010 / **P6-028** — Tech "I'm Out" One-Tap Status `[XS]`
 
 | Attribute | Value |
 |-----------|-------|
-| Layer | AI Foundations |
-| AI Buildability | Medium |
-| Human Review | Moderate |
-| Dependencies | P0-009, P0-017 |
-| Allowed Files | `packages/api/src/workers/diff.*`, `packages/api/src/revisions/diff.*`, `packages/api/migrations/*diff*` |
+| Layer | Field Ops |
+| Wave | 2 |
+| Dependencies | P1-008 (technician assignment) |
+| Allowed Files | `packages/api/src/sms/tech-status/**`, `packages/api/src/scheduling/**` |
 
-**Build prompt:** Worker comparing two revision snapshots. Diff format: array of {field_path, change_type, old_value, new_value}. Store in diff_results table linked to revision pair.
+**Build prompt**: Allow technicians to mark themselves out (sick,
+emergency, unavailable) via a single SMS keyword reply. System
+re-routes their day's appointments through proposal flow (reschedule
+proposals to owner). Prevents the Carlos-no-show scenario from §4.
 
-**Automated checks:** `diff worker tests; diff format tests; retry tests`
+**Acceptance criteria**:
+- Tech texts "OUT" or "SICK" → status updated.
+- Day's appointments enter reschedule proposal queue immediately.
+- Customer-facing reschedule SMS drafted in brand voice.
+- Owner approves the cascading reschedules in one tap each.
 
-**Acceptance criteria:** Diffs generated between revisions. Structured format. Stored and queryable. Uses async job framework with idempotency.
+**Non-goals**: Multi-day out status (V2 — V1 is same-day only); partial
+day (e.g., out for the afternoon).
 
-**Non-goals:** No semantic diff. Structural field-level only.
+#### N-011 / **P4-015** — Brand-Voice Configurator `[S]`
 
----
+| Attribute | Value |
+|-----------|-------|
+| Layer | Onboarding / Tenant Settings |
+| Wave | 2 |
+| Dependencies | P4 vertical packs |
+| Allowed Files | `packages/api/src/tenants/brand/**`, `packages/web/src/onboarding/brand/**` |
 
-## Phase 1 — Core Business Entities
+**Build prompt**: During onboarding, capture brand-voice settings:
+register (formal / friendly / casual), preferred opening lines, sign-
+off, banned phrases, shop persona name (e.g., "M&R Mechanical's
+office"). Validate all subsequent AI utterances against the locked
+profile. Allow updates only via explicit web action (not SMS), and
+re-validate.
 
-**Purpose:** Deterministic operational model for customers, locations, jobs, appointments, estimates, invoices, and payments.
+**Acceptance criteria**:
+- Onboarding flow captures all six fields.
+- Every AI-generated message tagged with brand-voice version used.
+- Detection of deviation triggers confidence marker (per N-002).
+- Voice changes audit-logged.
 
-**Exit criteria:** All core entities work end-to-end; estimate provenance and revision hooks exist for future learning.
+**Non-goals**: Multiple brand voices per tenant (V2); per-channel voice
+variation (V2).
 
-### Locked Decisions
+### AMENDED stories
 
-| Decision | Choice |
-|----------|--------|
-| Customer model | Customer and service location are separate entities |
-| Scheduling | Appointment separate from job; stores scheduled time + arrival window |
-| Estimate/invoice | Shared line-item schema; document-level subtotal, discount, tax, total |
-| Money | Integer cents everywhere, no floating point |
-| Timezone | Store UTC, render in tenant timezone |
+These v1 stories require a spec change to align with v2 decisions.
+Implementation owners must read both the v1 story (in
+`docs/PRD-execution-catalog.md`) and the amendment here.
 
-### Story Catalog
+#### AMEND P1-001 — Customer entity + CRUD
 
-> **Note:** Phase 1 stories follow the same enhanced format as Phase 0. For brevity in this document, Phase 1–7 stories use the compact format. The full expanded versions with all fields are available in the Linear import CSV.
+**Amendment**: Add `account_type` enum field with values `residential`,
+`commercial`, `property_manager`. Default `residential`. Add
+`parent_account_id` nullable FK for commercial sub-accounts. Migration
+must be safe on existing data (all current rows default to
+`residential`).
 
-| ID | Title | Size | Layer | AI Build | Human Review | Dependencies |
-|----|-------|------|-------|----------|--------------|-------------|
-| P1-001 | Customer entity + CRUD | S | Core Entity | High | Moderate | P0-002, P0-004, P0-005, P0-007 |
-| P1-002 | Customer communication methods | S | Core Entity | High | Light | P1-001 |
-| P1-003 | Service location entity | S | Core Entity | High | Moderate | P1-001 |
-| P1-004 | Deterministic duplicate prevention | S | Validation | Medium | Moderate | P1-001, P1-003 |
-| P1-005 | Job entity + CRUD | S | Core Entity | High | Moderate | P1-001, P1-003 |
-| P1-006 | Job lifecycle and timeline events | S | Workflow | Medium | Moderate | P1-005, P0-007 |
-| P1-007 | Appointment entity + schedule/arrival window | S | Scheduling | Medium | Heavy | P1-005 |
-| P1-007A | Appointment validation rules | S | Validation | High | Moderate | P1-007 |
-| P1-008 | Technician assignment model | S | Scheduling | High | Moderate | P0-003, P1-007 |
-| P1-009 | Estimate entity + shared line-item schema | S | Billing | Medium | Heavy | P1-005 |
-| P1-009A | Shared line-item validation + calculation engine | S | Billing | Medium | Heavy | P1-009 |
-| P1-009B | Estimate provenance metadata | S | Learning | High | Light | P1-009, P0-011, P0-015 |
-| P1-009C | Estimate revisions + final approved version | S | Learning | Medium | Moderate | P1-009, P0-017 |
-| P1-009D | Structured estimate edit deltas | S | Learning | Medium | Moderate | P1-009C, P0-018 |
-| P1-009E | Estimate approval outcomes | S | Learning | High | Moderate | P1-009, P0-007 |
-| P1-009F | Estimate learning analytics foundation | S | Learning | Medium | Light | P1-009D, P1-009E |
-| P1-010 | Estimate numbering + statuses | S | Billing | High | Moderate | P1-009, P1-017 |
-| P1-011 | Invoice entity + balance calculations | S | Billing | Medium | Heavy | P1-005, P1-009 |
-| P1-012 | Invoice numbering + due dates + statuses | S | Billing | High | Moderate | P1-011, P1-017 |
-| P1-013 | Payment entity + partial payments | S | Billing | Medium | Heavy | P1-011 |
-| P1-014 | Conversation linkage to customers and jobs | S | Conversation | High | Light | P0-011, P1-001, P1-005 |
-| P1-015 | Internal notes across key entities | S | Usability | High | Light | P1-001, P1-003, P1-005, P1-009, P1-011 |
-| P1-016 | Operational list/detail views, filters, search | S | UI | High | Moderate | P0-003, P1-001, P1-003, P1-005, P1-007, P1-009, P1-011, P1-013 |
-| P1-017 | Tenant business settings and numbering preferences | S | Settings | High | Moderate | P0-002 |
+#### AMEND P2-007 — AI task orchestration baseline
 
----
+**Amendment**: Every orchestrated task that produces a proposal must
+hand off to the supervisor agent (N-004) before SMS dispatch (N-001).
+Skip is permitted only for proposals tagged `tier=internal`.
 
-## Phase 2 — Proposal Engine + AI Safety
+#### AMEND P2-012 — Confidence storage and display
 
-**Purpose:** Introduce typed proposal model that converts AI output into reviewable, auditable, human-approved operational actions.
+**Amendment**: Replace the planned numeric-confidence display with the
+typed marker system from N-002. Storage remains; display changes.
 
-**Exit criteria:** Proposals generated, reviewed, edited, approved, rejected, executed deterministically, and analyzed.
+#### AMEND P4 vertical-pack stories
 
-### Locked Decisions
+**Amendment**: All P4-002 (HVAC) and P4-003 (plumbing) stories must
+include:
+- HVAC: equipment-history awareness (unit model + service age from
+  customer history feeds context assembly).
+- Plumbing: MMS-to-quote intake path (photo + customer history →
+  draft quote with confidence markers).
+- Plumbing: severity classifier (active leak > frozen no leak >
+  routine).
+- Both: brand-voice validation (per N-011).
 
-| Decision | Choice |
-|----------|--------|
-| Proposal safety | AI never writes directly to operational entities |
-| Scope in beta | Customer, job, appointment, estimate proposals; invoice proposals start Phase 5 |
-| Approval policy | Owners and dispatchers approve; technicians cannot approve financial proposals |
-| Low confidence | Never auto-executes; routes to clarification, partial proposal, or safe failure |
-| LLM access | All AI calls route through the LLM gateway (P2-027) — no direct provider calls |
+#### AMEND P8 (inbound calling agent)
 
-### Story Catalog
+**Amendment**: All P8 escalation stories must integrate vulnerability-
+aware triage (N-008). Dropped-call recovery (N-007) is a sibling
+story, not an extension.
 
-| ID | Title | Size | Layer | AI Build | Human Review | Dependencies |
-|----|-------|------|-------|----------|--------------|-------------|
-| P2-001 | Proposal entity and core schema | S | AI Safety | High | Heavy | P0-004, P0-015, P1-014 |
-| P2-002 | Typed proposal contracts | S | AI Safety | High | Heavy | P2-001, P1-001, P1-005, P1-007, P1-009 |
-| P2-003 | Proposal lifecycle transitions | S | Workflow | High | Moderate | P2-001 |
-| P2-004 | Proposal list and detail views | S | UI | High | Moderate | P2-001, P2-002, P1-016 |
-| P2-005 | Approve / reject / edit interactions | S | UI + Workflow | Medium | Heavy | P2-004 |
-| P2-006 | Proposal audit timeline and entity linkage | S | Trust | High | Light | P2-001, P0-007 |
-| P2-007 | AI task orchestration baseline | S | Orchestration | Medium | Heavy | P0-015, P0-016, P2-001 |
-| P2-008 | Source-context packaging | S | Orchestration | Medium | Moderate | P1-014, P1-017, P2-007 |
-| P2-009 | AI run to proposal linkage | S | AI Foundations | High | Light | P0-015, P0-016, P2-001 |
-| P2-010 | Deterministic proposal execution engine | S | Execution | Medium | Heavy | P2-002, P2-003, P1-001, P1-005, P1-007, P1-009 |
-| P2-011 | Execution idempotency controls | S | Execution | Medium | Heavy | P2-010 |
-| P2-012 | Confidence storage and display | S | Guardrails | High | Moderate | P2-001, P2-004 |
-| P2-013 | Low-confidence handling policy | S | Guardrails | Medium | Heavy | P2-012, P0-013 |
-| P2-014 | Clarification request workflow | S | Conversation | Medium | Moderate | P2-007, P2-013 |
-| P2-015 | Proposal expiration and stale-context handling | S | Guardrails | Medium | Moderate | P2-003, P2-010 |
-| P2-016 | Estimate draft proposal generation | S | Estimate AI | Medium | Heavy | P1-009, P2-008, P2-010 |
-| P2-017 | Estimate proposal review + inline edit | S | Estimate AI | Medium | Heavy | P2-005, P2-016, P1-009B, P1-009E |
-| P2-018 | Proposal rejection reasons + correction signals | S | Learning | High | Moderate | P2-005, P2-009 |
-| P2-019 | Proposal outcome analytics foundation | S | Analytics | Medium | Light | P2-003, P2-009, P2-018 |
-| P2-020 | Evaluation dataset hooks | S | Evaluation | Medium | Moderate | P0-015, P0-016, P2-019 |
-| P2-021 | Proposal inbox prioritization | XS | UI | High | Light | P2-004, P2-015 |
-| P2-022 | Inline proposal rendering in conversation | S | Conversation | High | Moderate | P0-011, P2-004 |
-| **P2-027** | **Provider-agnostic LLM gateway** | **S** | **AI/Platform** | **High** | **Heavy** | **P0-015, P0-016, P2-007** |
-| **P2-028** | **Task-complexity-based model routing** | **S** | **AI/Orchestration** | **Medium** | **Heavy** | **P2-027, P2-008** |
-| **P2-029** | **Provider health monitoring + failover** | **S** | **AI/Operations** | **High** | **Moderate** | **P2-027, P0-008** |
-| **P2-030** | **Model shadow comparison framework** | **S** | **AI/Analytics** | **Medium** | **Moderate** | **P2-027, P2-020, P0-015** |
-| **P2-031** | **Response caching for deterministic tasks** | **S** | **AI/Platform** | **High** | **Moderate** | **P2-027** |
-
+#### AMEND P10-001 (customer portal) — **DEFER**
 ### Story Details — LLM Gateway (P2-027–P2-031)
 
 The gateway and its surrounding modules were scaffolded out-of-band before these stories were written. These specs reflect the actual remaining work: composing, integrating, and persisting — not greenfield construction. See `packages/api/src/ai/gateway/` for the existing scaffolding.
@@ -974,220 +1093,231 @@ The gateway and its surrounding modules were scaffolded out-of-band before these
 
 ---
 
-## Phase 3 — Conversation + Voice Experience
+**Amendment**: Defer indefinitely. The strategy commits to SMS, not
+portal. Re-evaluate only if Wave 3 customer signal demands it.
 
-**Purpose:** Turn the proposal system into a day-to-day conversational product.
+#### AMEND P10-002 (executive dashboard) — **REPLACE**
 
-**Exit criteria:** Users work conversationally with transcripts, inline proposals, clarifications, linked context, and role-aware views.
+**Amendment**: Replaced by N-005 end-of-day digest. The digest is the
+dashboard.
 
-### Story Catalog
+### Deferred / cut stories
 
-| ID | Title | Size | Layer | AI Build | Human Review | Dependencies |
-|----|-------|------|-------|----------|--------------|-------------|
-| P3-001 | Core conversation thread UI | S | Conversation UI | High | Moderate | P0-011, P2-022, P1-016 |
-| P3-002 | Voice capture UI | S | Voice UI | Medium | Moderate | P0-012 |
-| P3-003 | Transcript rendering and status | S | Voice UI | High | Light | P0-011, P0-012, P3-001 |
-| P3-004 | Transcript review and correction | S | Voice UI | Medium | Moderate | P3-003, P0-017 |
-| P3-005 | Clarification rendering and response flow | S | Conversation UI | Medium | Moderate | P2-014, P3-001 |
-| P3-006 | Inline proposal rendering with quick actions | S | Conversation UI | High | Moderate | P2-004, P2-005, P3-001 |
-| P3-007 | Conversation-side context panel | S | Context UI | High | Moderate | P1-014, P1-016, P3-001 |
-| P3-008 | Technician voice update workflow | S | Technician UX | Medium | Heavy | P1-008, P3-002, P2-016 |
-| P3-009 | Dispatcher conversational intake workflow | S | Dispatcher UX | Medium | Heavy | P2-016, P2-005, P3-001, P3-002 |
-| P3-010 | Proposal trigger modes by workflow type | S | Orchestration UX | Medium | Moderate | P2-007, P3-002, P3-008, P3-009 |
-| P3-011 | Conversation state and retry handling | S | Reliability | High | Light | P3-001, P3-003, P2-016 |
-| P3-012 | Conversation search and recent threads | S | Conversation UI | High | Light | P0-011, P1-014, P1-016 |
-| P3-013 | Mobile-friendly technician interactions | S | Technician UX | High | Moderate | P3-008, P1-016 |
-| P3-014 | Conversation-to-estimate linkage | S | Learning | Medium | Light | P1-009B, P1-009C, P2-016, P3-001 |
-| P3-015 | Conversation permissions and visibility | S | Security | Medium | Heavy | P0-003, P3-001, P3-007 |
+| Story | Action | Rationale |
+|-------|--------|-----------|
+| P6 (dispatch board, full) | Defer to Wave 4 | Owner-operators don't dispatch; visual day-view is wrong artifact for ICP. |
+| P9 (lead pipeline + agreements) | Defer to Wave 4 | Validate demand first; not in day-in-the-life. |
+| P10-001 (customer portal) | Cut from V1 | Customers want SMS, not portal. |
+| P10-002 (exec dashboard) | Replace with N-005 | Digest is the dashboard. |
+| P12 (field operations: route opt, offline) | Defer to Wave 4 | Real, but post-PMF. |
+| P13 (multi-location) | Defer to Wave 4; pull only `account_type` field forward | Not ICP for V1. |
+| P14 (inventory, full) | Defer to Wave 4 | Owner-operator carries parts in the truck. |
+| P15–P19 | Defer to Wave 4 | Premium / hardening tiers; post-PMF. |
 
 ---
 
-## Phases 4–7 — Summary Tables
+## 10. Data model changes (summary)
 
-> Phases 4–7 retain the same story structure from the source PRD. The full expanded versions with allowed files, acceptance criteria, and non-goals are in the Linear import CSV. Summary tables below for reference.
+Net new tables / columns introduced by v2 stories:
 
-### Phase 4 — Vertical Packs + Estimate Intelligence (26 stories)
+| Table | Source | Purpose |
+|-------|--------|---------|
+| `customers.account_type` (enum) | AMEND P1-001 | B2B vs residential routing. |
+| `customers.parent_account_id` (FK) | AMEND P1-001 | Commercial sub-accounts. |
+| `proposals.confidence_markers` (JSONB) | N-002 | Typed uncertainty markers. |
+| `proposals.sms_thread_id` (FK) | N-001 | Approval transport linkage. |
+| `proposal_sms_events` | N-001 | Approval state transitions via SMS. |
+| `supervisor_reviews` | N-004 | Review pass results + flags. |
+| `digest_entries` | N-005 | Per-day digest content + status. |
+| `digest_send_log` | N-005 | Delivery + retry tracking. |
+| `reputation_reviews` | N-006 | Google review polling + state. |
+| `reputation_response_proposals` | N-006 | Draft responses awaiting approval. |
+| `correction_lessons` | N-009 | Structured corrections from edits. |
+| `tenants.brand_voice` (JSONB) | N-011 | Locked tone profile. |
+| `brand_voice_versions` | N-011 | History + rollback. |
+| `tech_status_events` | N-010 | "I'm out" history. |
+| `vulnerability_signals` | N-008 | Per-call vulnerability scores. |
 
-**Purpose:** Make estimates trade-aware for HVAC and plumbing. Begin improving drafts using vertical context and tenant history.
-
-Key stories: Vertical pack registry (P4-001A–C), HVAC/plumbing terminology and taxonomy (P4-002A–P4-003B), estimate templates (P4-004A–C), approved-estimate retrieval (P4-005A–C), bundle patterns (P4-006A–B), wording preferences (P4-007A–B), missing-item signals (P4-008A–B), vertical-aware context assembly (P4-009A–C), quality metrics (P4-011A), beta benchmark (P4-012).
-
-### Phase 5 — Invoice Intelligence + Payments (29 stories)
-
-**Purpose:** Extend AI from estimates to invoices and payment readiness. Accelerate time to cash.
-
-Key stories: Invoice draft proposal (P5-001–003C), invoice review UI (P5-004A–C), execution (P5-005), Stripe payment links (P5-010A–F), payment recording (P5-011A–C), time-to-cash analytics (P5-013A–B), beta benchmark (P5-015).
-
-### Phase 6 — Dispatch Board + Scheduling (27 stories)
-
-**Purpose:** Day-of operational layer for dispatchers and technicians.
-
-Key stories: Day-view board (P6-001–006), drag/drop scheduling proposals (P6-007–008), appointment proposal types (P6-009–014), technician availability (P6-015A–C), conflict detection (P6-016–018), technician view (P6-019), analytics (P6-022A–B).
-
-### Phase 7 — Integrations + Beta Hardening (18 stories)
-
-**Purpose:** Core integrations, support tooling, and reliability for external beta.
-
-Key stories: Twilio SMS (P7-001–004), Stripe (P7-005–006), QuickBooks sync (P7-007–010), diagnostics (P7-011–014), beta flags (P7-015), degraded-mode UX (P7-016), backup/recovery (P7-017), launch readiness (P7-018).
+All tables follow standard tenant_id + RLS + audit conventions
+(invariants in §5).
 
 ---
 
-## Testing Strategy
+## 11. Success metrics
 
-> Testing is a first-class concern in this PRD, not an afterthought. Every story must include tests. This section defines the conventions, coverage requirements, and AI-specific quality thresholds.
+### North star
 
-### Test Framework
+**Owner hours returned per week.** Measured by surveying pilot
+customers in Wave 2 and Wave 3 with a structured time-diary baseline
+(pre-product) and re-measurement at 4 and 8 weeks.
 
-| Tool | Purpose | Introduced |
-|------|---------|-----------|
-| Vitest | Unit + integration tests (all packages) | P0-001 |
-| Supertest | HTTP integration tests | P0-005 |
-| Testing Library | React component tests | P1-016 |
-| Playwright | E2E browser tests | P7-018 |
-| testcontainers | Real Postgres for integration tests | P0-004 |
+**Target**: 12+ hours/week saved at week 8 for the median pilot.
 
-### Test File Conventions
+### Day-in-the-life KPIs (per persona)
 
-- **Unit tests:** Co-located as `module.test.ts` next to source
-- **Integration tests:** `packages/api/tests/integration/[domain]/`
-- **Test factories:** `packages/api/tests/factories/` — one per entity, uses Faker
-- **Naming:** Describe blocks use story IDs: `describe('P0-004: Tenant isolation', () => { ... })`
-- **Never hardcode IDs** — always generate via factory
+For Mike (HVAC, 2 trucks):
 
-### Coverage Requirements
+| Metric | Baseline (typical) | Target (Wave 2 exit) |
+|--------|---------------------|----------------------|
+| Calls answered during work hours | ~40% | 100% |
+| Quotes drafted within 4 hours of intake | ~30% | >90% |
+| Invoices sent within 24 hours of completion | ~50% | >90% |
+| Time-to-cash (median days, invoice → paid) | 14–21 | <10 |
+| Owner SMS approvals/day | n/a | <15 (sustainable) |
+| Owner SMS approval median latency | n/a | <10 minutes during business hours |
 
-| Module Category | Minimum | Rationale |
-|----------------|---------|-----------|
-| Billing engine | 95% | Financial correctness is non-negotiable |
-| Payments | 90% | Money movement |
-| Estimates/invoices | 90% | Customer-facing financial docs |
-| Proposal execution | 85% | Trust boundary |
-| Auth/RBAC | 85% | Security boundary |
-| AI gateway | 80% | Provider abstraction reliability |
-| CRUD + validation | 70% | High AI-buildability, moderate risk |
-| UI components | 60% | Behavior, not pixel-perfect |
+For Jenna (plumbing, solo):
 
-### Required Tests by Story Type
+| Metric | Baseline | Target |
+|--------|----------|--------|
+| Frozen-pipe-season calls answered | <30% | 100% |
+| B2B property-manager calls routed correctly | n/a | >95% |
+| Photo-to-quote median time | 4–24h | <2h |
+| Owner SMS approvals/day | n/a | <12 |
 
-**Every story:** Happy path + validation + tenant isolation (if DB-touching)
+### AI quality gates
 
-**Financial stories** additionally: zero amount, rounding boundary, large amount (>$100K), negative amount, 100% discount, partial payment arithmetic
+Inherited from v1 PRD, retained:
 
-**Permission stories** additionally: role escalation, missing auth (401), wrong tenant (403)
+| Metric | Threshold | Gate |
+|--------|-----------|------|
+| Estimate proposal approval rate | ≥70% | Wave 2 exit |
+| Clean approval rate (no edits) | ≥30% | Wave 2 exit |
+| Invoice proposal approval rate | ≥75% | Wave 2 exit |
+| Proposal execution success | >99% | Wave 1 exit |
+| LLM gateway availability | >99.5% | Wave 1 exit |
 
-**Proposal stories** additionally: invalid transition, stale context, idempotency, execution failure recovery
+New in v2:
 
-**AI/LLM stories** additionally: mock provider, malformed AI output, timeout handling, provider swap
+| Metric | Threshold | Gate |
+|--------|-----------|------|
+| Supervisor agent critical-flag false-positive rate | <5% | Wave 2 exit |
+| Supervisor agent critical-flag false-negative rate | <2% on labeled set | Wave 2 exit |
+| Dropped-call SMS recovery latency (P95) | <60s | Wave 2 exit |
+| Vulnerability triage correct-escalation rate | >95% on labeled set | Wave 2 exit |
+| Brand-voice deviation detection precision | >85% | Wave 2 exit |
+| End-of-day digest delivery rate | >99% within window | Wave 2 exit |
+| Google review draft-response approval rate | >70% | Wave 2 exit |
 
-### AI Quality Thresholds (Beta Gate)
+### Business metrics
 
-These must be met before promoting from Phase 4 to Phase 5:
-
-| Metric | Beta Threshold | Measured By |
-|--------|---------------|-------------|
-| Estimate proposal approval rate | ≥ 60% | P2-019 |
-| Wrong-entity rejection rate | < 5% | P2-018 |
-| Line-item edit rate | < 40% of items edited | P2-017 |
-| Intent classification accuracy | ≥ 85% | P2-020 eval hooks |
-| AI response schema validation | ≥ 95% pass | P2-027 gateway |
-| Mean time to first proposal | < 15 seconds | P2-007 timing |
-
-### CI Pipeline
-
-**PR checks:** typecheck → lint → unit tests → integration tests → coverage check
-**Staging deploy:** all PR checks → CDK synth → migration dry-run → deploy → smoke tests
-**Beta quality gate:** full eval dataset → AI thresholds → financial test suite → human review of 20 random proposals
-
-### Story-Level Test Checklist
-
-Every PR must confirm:
-- [ ] Unit tests added/updated
-- [ ] Integration tests (if DB-touching)
-- [ ] Tenant isolation test (if new entity)
-- [ ] Financial edge cases (if money-related)
-- [ ] Permission tests (if new endpoint)
-- [ ] All existing tests pass
-- [ ] Coverage thresholds maintained
+| Metric | Wave 2 target | Wave 3 target |
+|--------|---------------|---------------|
+| Pilot customers active | 3 | 10–25 |
+| Week-4 retention | 80% | 90% |
+| MRR per customer | $300–500 | $300–500 |
+| Time from signup to first AI-handled call | <48h | <24h |
+| NPS (pilot) | n/a | >50 |
 
 ---
 
-## Effort and Timing Estimates
+## 12. Testing and quality
 
-| Phase | Outcome | AI-Buildable | Human Review | Calendar Range* |
-|-------|---------|-------------|--------------|----------------|
-| 0 | Secure platform foundation | ~65% | ~35% | 3–5 weeks |
-| 1 | Core business entities | ~70% | ~30% | 4–6 weeks |
-| 2 | Proposal engine + AI safety + LLM gateway | ~55% | ~45% | 5–7 weeks |
-| 3 | Conversation + voice UX | ~60% | ~40% | 3–5 weeks |
-| 4 | Vertical packs + estimate intelligence | ~55% | ~45% | 3–5 weeks |
-| 5 | Invoice intelligence + payments | ~55% | ~45% | 3–5 weeks |
-| 6 | Dispatch board + scheduling | ~50% | ~50% | 4–6 weeks |
-| 7 | Integrations + beta hardening | ~45% | ~55% | 4–6 weeks |
+### Inherits from v1
 
-*Assumes 2 engineers using AI tools heavily + founder/product oversight.
+The testing framework, coverage thresholds, and CI pipeline from v1
+(`docs/PRD-execution-catalog.md` §"Testing Strategy") remain in force.
+Highlights:
 
-### Recommended Beta Cut
+- Vitest, Supertest, Testing Library, Playwright (Wave 3+),
+  testcontainers
+- 95% coverage on billing engine, 90% on proposal execution + auth
+- Required tests per story: happy path, validation, tenant isolation,
+  permissions, edge cases
 
-- **Must-have before external beta:** Phases 0–3 + estimate intelligence from Phase 4 + payment-link/support essentials from Phases 5 and 7
-- **Strong beta target:** Complete Phases 0–6 + core Phase 7 integrations
-- **Defer if needed:** Route optimization, automated reminders, outbound AI calling, advanced accounting sync
+### New in v2
 
----
+**Bad-day simulation suite.** A dedicated test suite that simulates each
+of the seven failure modes from §4 and verifies the recovery flow
+end-to-end:
 
-## Critical Path: Phase 0 Execution Order
+| Simulation | Asserts |
+|-----------|---------|
+| Stale labor rate | Proposal flagged in queue, rate update prompted. |
+| Hallucinated part | Confidence marker fires; Carlos-ask flow triggers. |
+| Flat-voice elder caller | Supervisor agent catches; owner alerted. |
+| Mid-call audio failure | SMS recovery within 60s. |
+| Customer discount request | Guardrail blocks; owner proposal generated. |
+| 1-star Google review | Polled, classified, draft proposal in queue within 30 min. |
+| End-of-day digest | "Wasn't sure about" + "learned today" sections populate correctly. |
 
-Based on dependency analysis, here is the parallelizable execution order for Phase 0:
+**SMS approval flow tests** (new test category):
+- Every proposal type renders to SMS within 320-character soft limit
+  (split if longer).
+- One-tap reply tokens parse correctly across major carriers.
+- Voice-dictated edit replies produce structured deltas.
+- Duplicate inbound SMS for same proposal is idempotent.
 
-```
-Week 1 (parallel):
-  P0-001 Cloud environments ──→ P0-002 Clerk auth
-  
-Week 2 (parallel, after P0-001 + P0-002):
-  P0-003 RBAC
-  P0-004 Tenant-safe Postgres
-  P0-005 Backend skeleton (after P0-004)
-  
-Week 3 (parallel, after P0-005):
-  P0-006 Secrets framework
-  P0-007 Audit logging
-  P0-008 Observability
-  P0-009 Async workers
-  P0-010 File upload
-  
-Week 4 (parallel, after P0-009 + P0-010):
-  P0-011 Conversation persistence
-  P0-012 Voice pipeline
-  P0-013 Feature flags (after P0-006)
-  P0-014 Webhook base (after P0-006 + P0-009)
-  
-Week 5 (parallel, after P0-004 + P0-005 + P0-007):
-  P0-015 AI run logging
-  P0-016 Prompt registry (after P0-015)
-  P0-017 Revision storage
-  P0-018 Diff worker (after P0-009 + P0-017)
-```
+**Brand-voice regression tests**:
+- A golden dataset of "would Mike say this?" examples; >85% pass
+  before Wave 3.
+- Banned-phrase detection regression.
+
+### Chaos / load (Wave 3)
+
+- 50 concurrent tenants, 100 req/sec
+- Inbound voice surge: 30 calls/min sustained for 10 min (simulating
+  Phoenix afternoon peak)
+- LLM gateway: simulate primary-provider outage; verify automatic
+  failover within 5s without dropped proposals
 
 ---
 
-## Dependency Graph: Phase 2 Model Routing Integration
+## 13. Risk register
 
-```
-P0-015 (AI run logging) ──┐
-P0-016 (Prompt registry) ──┤
-P2-001 (Proposal entity) ──┤
-                           ▼
-               P2-007 (Orchestration baseline)
-                           │
-                           ▼
-               P2-027 (LLM Gateway) ◄── P0-008 (Observability)
-                    │    │    │
-         ┌─────────┘    │    └──────────┐
-         ▼              ▼               ▼
-   P2-028           P2-029          P2-031
-   (Model Router)   (Health/Failover) (Response Cache)
-         │
-         ▼
-   P2-030 (Shadow Comparison) ◄── P2-020 (Eval Hooks)
-```
+Top 10 risks, ordered by likelihood × impact.
 
-P2-027 is the critical story — it must ship before or alongside P2-007 so all orchestration goes through the gateway from day one.
+| # | Risk | Mitigation | Owner |
+|---|------|-----------|-------|
+| 1 | AI confidently mis-quotes and owner approves without reading; customer angry. | Confidence markers (N-002) on price/part anomalies; supervisor agent flags out-of-pattern totals. | Eng |
+| 2 | Voice quality / accent / kid-screaming caller is mis-understood; bad booking made. | Dropped-call SMS recovery (N-007); supervisor agent re-classifies; confidence marker on urgency. | Eng |
+| 3 | Owner ignores SMS approvals during a busy day; backlog grows. | Approval-count target <15/day; digest summarizes pending. Onboarding sets expectations. | Product |
+| 4 | Pilot customer churns because "it's not magic enough" — wanted full autonomy. | Manage expectations in sales: this is approval-gated. The autonomy story is intentional. | GTM |
+| 5 | Supervisor agent has high false-positive rate; alert fatigue. | <5% target; tune in pilot; allow per-tenant calibration in Wave 3. | Eng |
+| 6 | Google Business API limits / changes; review monitoring breaks. | Polling with backoff; fallback to manual; clear "monitoring degraded" banner. | Eng |
+| 7 | LLM provider deprecates a model mid-quarter; quality regression. | Gateway abstraction; shadow comparison (P2-030); pinned model versions. | Eng |
+| 8 | Customer's phone number changes; B2B account lost; routing breaks. | Account-recognition is multi-signal (name, address, vocab) not just phone; flag low-confidence matches. | Eng |
+| 9 | Vulnerability triage misses a real medical emergency; reputational + legal risk. | Conservative threshold; vulnerability alone → high-priority booking + owner notify, not booking-as-normal. Document non-medical disclaimer. | Legal + Product |
+| 10 | Owner edits brand voice frequently mid-week; AI sounds inconsistent. | Brand-voice changes are explicit web actions, audit-logged, with a 15-min cool-down before propagation. | Product |
+
+---
+
+## 14. Glossary
+
+- **Account**: A customer record, optionally typed as residential,
+  commercial, or property_manager. Commercial accounts may have sub-
+  accounts (properties under management).
+- **Brand voice**: The locked tone, register, and lexical preferences
+  for a tenant's outbound communications.
+- **Confidence marker**: A typed flag indicating the AI is uncertain
+  about a specific element (part, price, urgency, account, voice).
+- **Digest**: The end-of-day SMS summary delivered between 6–9pm tenant
+  local.
+- **Proposal**: A typed, reviewable, human-approvable representation of
+  a proposed mutation (create customer, draft estimate, send invoice,
+  reschedule, etc.).
+- **Supervisor agent**: A cheaper second-pass classifier that reviews
+  primary AI outputs for missed urgency, pricing anomalies, brand-voice
+  drift, and account-routing errors.
+- **Vertical pack**: A bundle of HVAC- or plumbing-specific
+  terminology, taxonomy, templates, severity classifiers, and intake
+  skills, loaded per tenant.
+- **Vulnerability signal**: Age, weather, medical, or property-type
+  context that elevates urgency in triage.
+- **Wave**: A delivery phase (1–4) replacing v1's phase numbering
+  (P0–P19). See §7.
+
+---
+
+## 15. Document history
+
+| Version | Date | Author | Summary |
+|---------|------|--------|---------|
+| 1.0 | (pre-2026-05) | Product | Initial 8-phase execution catalog. |
+| 2.0 | 2026-05-17 | Product | Re-framed around the AI back office strategy. Added 11 new stories (SMS approval, supervisor agent, digest, review monitoring, dropped-call recovery, vulnerability triage, correction loop, brand voice, tech status, plus two guardrails). Deferred P6, P10-001, P12, P13, P14, P15–P19. Replaced P10-002 with the digest. Architecture updated. Success metrics re-baselined on owner hours saved. |
+
+**Next scheduled review**: After Wave 1 exit, before Wave 2 kick-off.
+
+**Change protocol**: PRD changes require a recorded owner-decision in
+`docs/decisions.md` and a paired update to `docs/strategy/day-in-the-
+life.md` if the change affects the customer experience.
