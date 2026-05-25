@@ -545,7 +545,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       // committed hold via isSlotFree; booking concurrency per tenant is low,
       // so the brief serialization is acceptable.
       const outcome = await runner.run(tenantId, async ({ lock }) => {
-        await lock('book');
+        await lock('portal-booking');
 
         const stillFree = await isSlotFree(finderDeps, {
           tenantId,
