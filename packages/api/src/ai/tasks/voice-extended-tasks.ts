@@ -332,6 +332,33 @@ export class SendInvoiceTaskHandler implements TaskHandler {
   }
 }
 
+// ───────────── send_estimate ─────────────
+//
+// Comms class — never auto-approves. Mirrors SendInvoiceTaskHandler:
+// the classifier only has a free-text reference at this point, so the
+// proposal carries estimateReference and flags estimateId as missing;
+// the operator resolves it in the review card before approval.
+export class SendEstimateTaskHandler implements TaskHandler {
+  readonly taskType = 'send_estimate' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {
+      channel: ee.sendChannel ?? 'email',
+    };
+    const missing: string[] = [];
+
+    if (ee.jobReference) payload.estimateReference = ee.jobReference;
+    else if (ee.customerName) payload.estimateReference = ee.customerName;
+    else missing.push('estimateId');
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
 // ───────────── record_payment ─────────────
 //
 // Money class — never auto-approves under any confidence.

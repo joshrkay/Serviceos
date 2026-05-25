@@ -150,6 +150,8 @@ function intentToProposalType(intent: string | undefined): ProposalType {
       return 'issue_invoice';
     case 'send_invoice':
       return 'send_invoice';
+    case 'send_estimate':
+      return 'send_estimate';
     case 'record_payment':
       return 'record_payment';
     case 'draft_estimate':

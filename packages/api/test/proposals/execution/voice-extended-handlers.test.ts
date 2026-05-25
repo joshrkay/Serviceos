@@ -20,8 +20,10 @@ import { Proposal, ProposalType } from '../../../src/proposals/proposal';
 import {
   AddNoteExecutionHandler,
   SendInvoiceExecutionHandler,
+  SendEstimateExecutionHandler,
   RecordPaymentExecutionHandler,
   NoopInvoiceDeliveryProvider,
+  NoopEstimateDeliveryProvider,
 } from '../../../src/proposals/execution/voice-extended-handlers';
 import { InMemoryNoteRepository } from '../../../src/notes/note';
 import {
@@ -353,6 +355,71 @@ describe('SendInvoiceExecutionHandler — InvoiceDeliveryProvider wire-up', () =
     const handler = new SendInvoiceExecutionHandler(failing);
     const proposal = fakeApproved('send_invoice', {
       invoiceId: validUuid,
+      channel: 'email',
+    });
+
+    const result = await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/provider down/);
+  });
+});
+
+describe('SendEstimateExecutionHandler — EstimateDeliveryProvider wire-up', () => {
+  it('dispatches via the provider when wired with a Noop default', async () => {
+    const provider = new NoopEstimateDeliveryProvider();
+    const handler = new SendEstimateExecutionHandler(provider);
+    const proposal = fakeApproved('send_estimate', {
+      estimateId: validUuid,
+      channel: 'sms',
+      recipient: '+15555550100',
+    });
+
+    const result = await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
+
+    expect(result.success).toBe(true);
+    expect(result.resultEntityId).toBeTruthy();
+    expect(provider.lastDispatch).toEqual({
+      tenantId: 't-1',
+      estimateId: validUuid,
+      channel: 'sms',
+      recipient: '+15555550100',
+      customMessage: undefined,
+    });
+  });
+
+  it('rejects when estimateId is missing (only estimateReference provided)', async () => {
+    const handler = new SendEstimateExecutionHandler(new NoopEstimateDeliveryProvider());
+    const proposal = fakeApproved('send_estimate', {
+      estimateReference: 'EST-0042',
+      channel: 'email',
+    });
+
+    const result = await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/estimateId/);
+  });
+
+  it('rejects when channel is invalid', async () => {
+    const handler = new SendEstimateExecutionHandler(new NoopEstimateDeliveryProvider());
+    const proposal = fakeApproved('send_estimate', {
+      estimateId: validUuid,
+      channel: 'fax',
+    });
+
+    const result = await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/channel/);
+  });
+
+  it('surfaces provider failures rather than swallowing them', async () => {
+    const failing = {
+      async send() {
+        throw new Error('provider down');
+      },
+    };
+    const handler = new SendEstimateExecutionHandler(failing);
+    const proposal = fakeApproved('send_estimate', {
+      estimateId: validUuid,
       channel: 'email',
     });
 

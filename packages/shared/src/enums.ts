@@ -163,6 +163,7 @@ export enum ProposalType {
   VOICE_CLARIFICATION = 'voice_clarification',
   ADD_NOTE = 'add_note',
   SEND_INVOICE = 'send_invoice',
+  SEND_ESTIMATE = 'send_estimate',
   RECORD_PAYMENT = 'record_payment',
   LOG_EXPENSE = 'log_expense',
   EMERGENCY_DISPATCH = 'emergency_dispatch',

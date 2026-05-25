@@ -177,6 +177,11 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['117_tech_status_today', '5f2224447036245f802ac7aeeb333fb46614670526fdc621285a4200d321a55a'],
   ['118_jobs_money_state', '2f7263cff926f33f21d8b01da9b01feb892c4f61ba09b8a1eafd404f455f8010'],
   ['119_view_token_lookup_functions', '0d4251c8391c2cdf6c1cb8120cf50e92c739e62db3a80cc8eaeb0b48579711a3'],
+  ['120_tenant_settings_ai_config', 'e81e1e5ccef2b65ce8412ea57ccbca4b319a2ca67d9846ebc1c0ba871943a3b1'],
+  ['121_estimate_revision_versioning', '9f1c9074e2f31c07b01e9a7f50989e89da5c198135017f8c31aa6906449d05c2'],
+  ['122_estimate_reminders', '5f6c29e7825508f8e4a1d62e889fc93d5dfca96af26e9d0a1f8ae613a56d0cd2'],
+  ['123_platform_deprovision_log', 'c05fefacd43c39abd95305589cc12404e46f2a3c2a85b556a7ecd15dae283e3a'],
+  ['124_tenant_settings_review_urls', '889419f461a2e292ff89c910528927715eee23435bf69e74c4fac832fe8ef3b2'],
 ];
 
 function hashMigration(value: string): string {

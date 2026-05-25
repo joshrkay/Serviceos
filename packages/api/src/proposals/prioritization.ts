@@ -21,6 +21,9 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   update_customer: 5,
   reassign_appointment: 1,
   reschedule_appointment: 1,
+  // Crew add/remove are dispatch-day work — same tier as reassignment.
+  add_crew_member: 1,
+  remove_crew_member: 1,
   cancel_appointment: 1,
   // Clarification cards surface ahead of everything else — they are
   // prompts for the operator, not queued work; stale clarifications
@@ -30,6 +33,7 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // screen-tap and usually have same-day relevance.
   record_payment: 1,
   send_invoice: 1,
+  send_estimate: 1,
   // Notes are low priority — they never gate other work.
   add_note: 5,
   // Expense logging is informational — captured after the fact, never

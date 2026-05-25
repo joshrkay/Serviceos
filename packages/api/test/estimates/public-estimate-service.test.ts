@@ -58,6 +58,7 @@ function makeEstimate(jobId: string, overrides: Partial<Estimate> = {}): Estimat
     },
     viewToken: 'a-very-long-and-unguessable-token-1234',
     sentAt: new Date(),
+    version: 1,
     createdBy: 'user-1',
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -283,6 +284,46 @@ describe('PublicEstimateService.approve', () => {
         acceptedByName: 'A',
       })
     ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+  });
+
+  it('surfaces version on the public view', async () => {
+    const est = await seedEstimate({ version: 3 });
+    const view = await h.service.getByToken(est.viewToken!);
+    expect(view.version).toBe(3);
+  });
+
+  it('rejects a stale accept when expectedVersion no longer matches', async () => {
+    const est = await seedEstimate({ version: 2 });
+    await expect(
+      h.service.approve({
+        token: est.viewToken!,
+        acceptedByName: 'Sarah J',
+        expectedVersion: 1,
+      })
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('accepts when expectedVersion matches the current version', async () => {
+    const est = await seedEstimate({ version: 2 });
+    const view = await h.service.approve({
+      token: est.viewToken!,
+      acceptedByName: 'Sarah J',
+      expectedVersion: 2,
+    });
+    expect(view.status).toBe('accepted');
+  });
+
+  it('requires expectedVersion once an estimate has been revised', async () => {
+    const est = await seedEstimate({ version: 2, lastRevisedAt: new Date() });
+    await expect(
+      h.service.approve({ token: est.viewToken!, acceptedByName: 'Sarah J' })
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('still accepts a never-revised (v1) estimate without expectedVersion', async () => {
+    const est = await seedEstimate({ version: 1 });
+    const view = await h.service.approve({ token: est.viewToken!, acceptedByName: 'Sarah J' });
+    expect(view.status).toBe('accepted');
   });
 });
 

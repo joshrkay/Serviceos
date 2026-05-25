@@ -149,6 +149,7 @@ import {
 } from './flags/feature-flags';
 import { PgFeatureFlagRepository } from './flags/pg-feature-flags';
 import { createFeatureFlagsRouter } from './routes/feature-flags';
+import { createAdminTenantsRouter } from './routes/admin-tenants';
 import { InMemoryTechnicianLocationPingRepository } from './telemetry/technician-location-ping';
 import {
   InMemoryTechnicianLocationAuthorizer,
@@ -156,6 +157,8 @@ import {
 } from './telemetry/technician-location-authz';
 import { InMemoryQueue, processMessage } from './queues/queue';
 import { createProvisionTwilioWorker, PROVISION_TWILIO_JOB_TYPE } from './workers/provision-twilio';
+import { createDeprovisionTenantWorker } from './workers/deprovision-tenant';
+import { createVerifyAiWorker } from './workers/verify-ai';
 import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
@@ -334,6 +337,7 @@ import {
 } from './proposals/execution/idempotency-lock';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { resolveInvoiceDeliveryProvider } from './proposals/execution/invoice-delivery-factory';
+import { resolveEstimateDeliveryProvider } from './proposals/execution/estimate-delivery-factory';
 import { InMemoryWorkingHoursRepository } from './availability/working-hours';
 import { InMemoryUnavailableBlockRepository } from './availability/unavailable-block';
 import { createTravelTimeProvider } from './scheduling/travel-time/factory';
@@ -357,6 +361,7 @@ import {
 import { TwilioDelayNotificationService } from './notifications/twilio-delay-notification-service';
 import { TransactionalCommsService } from './notifications/transactional-comms-service';
 import { runAppointmentReminderSweep } from './workers/appointment-reminder-worker';
+import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import { registerKeywordHandler } from './sms/inbound-dispatch';
@@ -1232,6 +1237,10 @@ export function createApp(): express.Express {
     nodeEnv: config.NODE_ENV,
     sendService,
   });
+  const estimateDeliveryProvider = resolveEstimateDeliveryProvider({
+    nodeEnv: config.NODE_ENV,
+    sendService,
+  });
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
     : new InMemoryDispatchAnalyticsRepository();
@@ -1296,9 +1305,12 @@ export function createApp(): express.Express {
     invoiceRepo,
     estimateRepo,
     settingsRepo,
+    docRevisionRepo: documentRevisionRepo,
+    editDeltaRepo: deltaRepo,
     noteRepo,
     paymentRepo,
     invoiceDeliveryProvider,
+    estimateDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
     schedulingNotifier: transactionalComms,
     transactionalComms,
@@ -1494,6 +1506,20 @@ export function createApp(): express.Express {
     workerRegistry.set(
       provisionTwilioWorker.type,
       provisionTwilioWorker as import('./queues/queue').WorkerHandler<unknown>
+    );
+
+    const deprovisionTenantWorker = createDeprovisionTenantWorker({ pool });
+    workerRegistry.set(
+      deprovisionTenantWorker.type,
+      deprovisionTenantWorker as import('./queues/queue').WorkerHandler<unknown>
+    );
+  }
+
+  if (pool && llmGateway) {
+    const verifyAiWorker = createVerifyAiWorker({ pool, gateway: llmGateway, auditRepo });
+    workerRegistry.set(
+      verifyAiWorker.type,
+      verifyAiWorker as import('./queues/queue').WorkerHandler<unknown>
     );
   }
 
@@ -2422,6 +2448,7 @@ export function createApp(): express.Express {
       sendService,
       { gateway: llmGateway, proposalRepo },
       { jobRepo, invoiceRepo },
+      { docRevisionRepo: documentRevisionRepo, editDeltaRepo: deltaRepo },
     ),
   );
   app.use(
@@ -2852,6 +2879,35 @@ export function createApp(): express.Express {
     }, 60 * 60_000);
   }
 
+  // Estimate-reminder worker — nudges customers on estimates sent but
+  // unviewed/unaccepted after 3 days (1 reminder, capped). Only runs when
+  // SendService is configured (it re-sends via the unified send path).
+  const estimateReminderLogger = createLogger({
+    service: 'estimate-reminder-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  if (sendService) {
+    setInterval(async () => {
+      try {
+        await runEstimateReminderSweep({
+          estimateRepo,
+          sendService,
+          auditRepo,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          logger: estimateReminderLogger,
+        });
+      } catch (err) {
+        estimateReminderLogger.error('Estimate-reminder sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }, 60 * 60_000);
+  }
+
   // P7-026 PR a: Google Business reviews polling. Every 15 minutes
   // we sweep every tenant with an active `google_business`
   // integration and persist new reviews idempotently. One tenant's
@@ -2998,6 +3054,12 @@ export function createApp(): express.Express {
     '/api/admin/feature-flags',
     createFeatureFlagsRouter(featureFlagRepo, featureFlagStore, {}, auditRepo),
   );
+
+  // Platform-admin tenant lifecycle (hard-delete / deprovision). Requires a
+  // DB pool; the queue is always present (Pg- or in-memory).
+  if (pool) {
+    app.use('/api/admin/tenants', createAdminTenantsRouter({ pool, queue }));
+  }
 
   // Wire the WS publish-side kill switches: every call to publish()
   // consults the feature flag store at runtime, so flipping

@@ -63,6 +63,25 @@ async function twilioGet<T>(
   return res.json() as Promise<T>;
 }
 
+async function twilioDelete(
+  url: string,
+  accountSid: string,
+  authToken: string
+): Promise<void> {
+  const res = await fetch(url, {
+    method: 'DELETE',
+    headers: {
+      Authorization: basicAuth(accountSid, authToken),
+      Accept: 'application/json',
+    },
+  });
+  // 404 → already released; treat as success so deprovision is idempotent.
+  if (!res.ok && res.status !== 404) {
+    const text = await res.text();
+    throw new Error(`Twilio DELETE ${url} → ${res.status}: ${text}`);
+  }
+}
+
 export interface TwilioSubaccount {
   sid: string;
   authToken: string;
@@ -177,6 +196,37 @@ export async function listSubaccountPhoneNumbers(
     authToken
   );
   return result.incoming_phone_numbers.map((n) => ({ sid: n.sid, phoneNumber: n.phone_number }));
+}
+
+// Releases a single phone number owned by a subaccount. Uses the
+// subaccount's own credentials. Idempotent (404 is swallowed).
+export async function releasePhoneNumber(
+  subaccountSid: string,
+  authToken: string,
+  phoneNumberSid: string
+): Promise<void> {
+  await twilioDelete(
+    `${TWILIO_BASE}/Accounts/${subaccountSid}/IncomingPhoneNumbers/${phoneNumberSid}.json`,
+    subaccountSid,
+    authToken
+  );
+}
+
+// Permanently closes a subaccount. Must be authenticated with the MASTER
+// credentials (a subaccount cannot close itself). Closing releases all of
+// the subaccount's phone numbers and messaging services. Irreversible after
+// ~30 days. Idempotent: closing an already-closed subaccount is a no-op POST.
+export async function closeSubaccount(
+  masterSid: string,
+  masterToken: string,
+  subaccountSid: string
+): Promise<void> {
+  await twilioPost(
+    `${TWILIO_BASE}/Accounts/${subaccountSid}.json`,
+    masterSid,
+    masterToken,
+    new URLSearchParams({ Status: 'closed' })
+  );
 }
 
 export type ProvisioningFailureCode =

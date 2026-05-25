@@ -3,9 +3,11 @@ import { ProposalType } from './proposal';
 import { ValidationError } from '../shared/errors';
 import { reassignAppointmentPayloadSchema } from './contracts/reassignment';
 import { rescheduleAppointmentPayloadSchema } from './contracts/reschedule';
+import { addCrewMemberPayloadSchema, removeCrewMemberPayloadSchema } from './contracts/crew';
 import { cancelAppointmentPayloadSchema } from './contracts/cancellation';
 import { addNotePayloadSchema } from './contracts/notes';
 import { sendInvoicePayloadSchema } from './contracts/send-invoice';
+import { sendEstimatePayloadSchema } from './contracts/send-estimate';
 import { recordPaymentPayloadSchema } from './contracts/record-payment';
 import { logExpensePayloadSchema } from './contracts/log-expense';
 import {
@@ -197,10 +199,13 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   issue_invoice: issueInvoicePayloadSchema,
   reassign_appointment: reassignAppointmentPayloadSchema,
   reschedule_appointment: rescheduleAppointmentPayloadSchema,
+  add_crew_member: addCrewMemberPayloadSchema,
+  remove_crew_member: removeCrewMemberPayloadSchema,
   cancel_appointment: cancelAppointmentPayloadSchema,
   voice_clarification: voiceClarificationPayloadSchema,
   add_note: addNotePayloadSchema,
   send_invoice: sendInvoicePayloadSchema,
+  send_estimate: sendEstimatePayloadSchema,
   record_payment: recordPaymentPayloadSchema,
   log_expense: logExpensePayloadSchema,
   emergency_dispatch: z.object({

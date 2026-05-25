@@ -42,13 +42,14 @@ describe('POST /api/onboarding/test-call/skip', () => {
     await closeSharedTestDb();
   });
 
-  it('sets onboarding_test_call_skipped_at and returns status with step 6 skipped', async () => {
+  it('sets onboarding_test_call_skipped_at and returns status with test_call skipped', async () => {
     const res = await request(app).post('/api/onboarding/test-call/skip').send({});
     expect(res.status).toBe(200);
     expect(res.body.steps).toBeDefined();
-    expect(res.body.steps.length).toBe(6);
-    expect(res.body.steps[5].id).toBe('test_call');
-    expect(res.body.steps[5].status).toBe('skipped');
+    expect(res.body.steps.length).toBe(7);
+    const testCallStep = res.body.steps.find((s: { id: string }) => s.id === 'test_call');
+    expect(testCallStep.id).toBe('test_call');
+    expect(testCallStep.status).toBe('skipped');
 
     // Verify DB column is set
     const dbRow = await pool.query(
