@@ -33,6 +33,9 @@ export type MatrixModule =
   | 'FLAG'
   | 'TIME'
   | 'SET'
+  | 'NOTE'
+  | 'CAT'
+  | 'CONV'
   | 'LEGACY';
 export type MatrixExpectation = 'pass' | 'partial' | 'fail' | 'na';
 
@@ -616,6 +619,36 @@ export const MATRIX: MatrixRow[] = [
     feature: 'Read + update tenant settings',
     passCriteria:
       'GET /api/settings returns the tenant settings; PUT /api/settings updates a field (e.g. businessName) and a subsequent GET reflects it',
+    expected: 'pass',
+  },
+
+  // ----- Notes -----
+  {
+    id: 'NOTE-01',
+    module: 'NOTE',
+    feature: 'Note CRUD on a job',
+    passCriteria:
+      'POST /api/notes creates a note on a job; GET lists it; PUT edits the content; DELETE removes it and the list/DB no longer contain it',
+    expected: 'pass',
+  },
+
+  // ----- Catalog / price book -----
+  {
+    id: 'CAT-01',
+    module: 'CAT',
+    feature: 'Catalog item CRUD',
+    passCriteria:
+      'POST /api/catalog/items creates an item; it appears in the list; PUT updates its price; DELETE archives/removes it from the active list',
+    expected: 'pass',
+  },
+
+  // ----- Conversations / messages -----
+  {
+    id: 'CONV-01',
+    module: 'CONV',
+    feature: 'Conversation + message thread',
+    passCriteria:
+      'POST /api/conversations creates a thread; POST /:id/messages appends a text message; GET /:id/messages returns it in order',
     expected: 'pass',
   },
 
