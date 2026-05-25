@@ -160,7 +160,8 @@ export function createTranscribeAudioFn(apiKey?: string): TranscribeAudioFn {
         : contentType.includes('mpeg') ? 'mp3'
         : 'webm';
       const fd = new FormData();
-      fd.append('file', new Blob([audioBuffer], { type: contentType }), `audio.${ext}`);
+      const audioBytes = new Uint8Array(audioBuffer.buffer, audioBuffer.byteOffset, audioBuffer.byteLength);
+      fd.append('file', new Blob([audioBytes], { type: contentType }), 'audio.' + ext);
       fd.append('model', 'whisper-1');
       if (options?.language) {
         fd.append('language', options.language);
