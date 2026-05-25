@@ -365,6 +365,18 @@ describe('POST /:token/appointments/:id/cancel', () => {
     expect(proposal?.payload.appointmentId).toBe(appt.id);
   });
 
+  it('refreshes the board so the change-requested badge appears live', async () => {
+    const h = await build();
+    const token = await mintToken(h.app, h.customer.id);
+    const appt = await seedOwnedAppointment(h, '2030-06-03T15:00:00Z', '2030-06-03T16:00:00Z');
+    const capture = captureBoardEvents('2030-06-03');
+    await request(h.app)
+      .post(`/api/public/portal/${token}/appointments/${appt.id}/cancel`)
+      .send({});
+    expect(capture.events.some((e) => e.type === 'board_updated' && e.date === '2030-06-03')).toBe(true);
+    capture.stop();
+  });
+
   it('refuses to cancel another customer\'s appointment with 404', async () => {
     const h = await build();
     const token = await mintToken(h.app, h.customer.id);

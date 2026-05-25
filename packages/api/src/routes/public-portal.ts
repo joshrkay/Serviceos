@@ -25,7 +25,7 @@ import { EstimateRepository } from '../estimates/estimate';
 import { InvoiceRepository, Invoice } from '../invoices/invoice';
 import { JobRepository, createJob } from '../jobs/job';
 import { AgreementRepository } from '../agreements/agreement';
-import { AppointmentRepository, createAppointment } from '../appointments/appointment';
+import { Appointment, AppointmentRepository, createAppointment } from '../appointments/appointment';
 import { AssignmentRepository } from '../appointments/assignment';
 import { LocationRepository } from '../locations/location';
 import { LeadRepository } from '../leads/lead';
@@ -122,6 +122,34 @@ async function resolveTenantTimezone(
   if (!deps.settingsRepo) return DEFAULT_BOOKING_TIMEZONE;
   const settings = await deps.settingsRepo.findByTenant(tenantId);
   return settings?.timezone || DEFAULT_BOOKING_TIMEZONE;
+}
+
+/**
+ * Write a 409 SLOT_TAKEN response with the next open slots in a 7-day window.
+ * Shared by the book and reschedule routes — both fail the same way when the
+ * requested slot was claimed between availability fetch and submission.
+ */
+async function respondSlotTaken(
+  deps: PublicPortalDeps,
+  res: Response,
+  args: { tenantId: string; slotStart: Date; slotEnd: Date; timezone: string; message: string },
+): Promise<void> {
+  const durationMin = Math.round((args.slotEnd.getTime() - args.slotStart.getTime()) / 60000);
+  const alternatives = await findBookableSlots(
+    { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo },
+    {
+      tenantId: args.tenantId,
+      fromDate: args.slotStart.toISOString().slice(0, 10),
+      toDate: new Date(args.slotStart.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+      timezone: args.timezone,
+      durationMin,
+    },
+  );
+  res.status(409).json({
+    error: 'SLOT_TAKEN',
+    message: args.message,
+    alternatives: alternatives.map((s) => ({ start: s.start.toISOString(), end: s.end.toISOString() })),
+  });
 }
 
 function ensurePortal(req: PortalRequest, res: Response): boolean {
@@ -507,25 +535,12 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         end: slotEnd,
       });
       if (!stillFree) {
-        const durationMin = Math.round((slotEnd.getTime() - slotStart.getTime()) / 60000);
-        const fromDate = slotStart.toISOString().slice(0, 10);
-        const toDate = new Date(slotStart.getTime() + 7 * 24 * 60 * 60 * 1000)
-          .toISOString()
-          .slice(0, 10);
-        const alternatives = await findBookableSlots(finderDeps, {
+        await respondSlotTaken(deps, res, {
           tenantId,
-          fromDate,
-          toDate,
+          slotStart,
+          slotEnd,
           timezone,
-          durationMin,
-        });
-        res.status(409).json({
-          error: 'SLOT_TAKEN',
           message: 'That time was just booked. Here are the next available slots.',
-          alternatives: alternatives.map((s) => ({
-            start: s.start.toISOString(),
-            end: s.end.toISOString(),
-          })),
         });
         return;
       }
@@ -647,6 +662,9 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         entityId: owned.id,
         metadata: { proposalId: persisted.id },
       });
+      // Surface the "change requested" badge live on any open board for the
+      // appointment's day, even though nothing has moved spatially yet.
+      notifyDispatchBoardChanged(tenantId, owned.scheduledStart);
 
       res.status(201).json({
         status: 'pending_confirmation',
@@ -689,18 +707,12 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       const finderDeps = { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo };
       const free = await isSlotFree(finderDeps, { tenantId, start: slotStart, end: slotEnd });
       if (!free) {
-        const durationMin = Math.round((slotEnd.getTime() - slotStart.getTime()) / 60000);
-        const alternatives = await findBookableSlots(finderDeps, {
+        await respondSlotTaken(deps, res, {
           tenantId,
-          fromDate: slotStart.toISOString().slice(0, 10),
-          toDate: new Date(slotStart.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+          slotStart,
+          slotEnd,
           timezone,
-          durationMin,
-        });
-        res.status(409).json({
-          error: 'SLOT_TAKEN',
           message: 'That time is no longer available. Here are other open times.',
-          alternatives: alternatives.map((s) => ({ start: s.start.toISOString(), end: s.end.toISOString() })),
         });
         return;
       }
@@ -727,6 +739,8 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         entityId: owned.id,
         metadata: { proposalId: persisted.id },
       });
+      // Surface the "change requested" badge live on the current day's board.
+      notifyDispatchBoardChanged(tenantId, owned.scheduledStart);
 
       res.status(201).json({
         status: 'pending_confirmation',
@@ -753,7 +767,7 @@ async function loadOwnedChangeableAppointment(
   customerId: string,
   appointmentId: string,
   res: Response,
-): Promise<{ id: string } | null> {
+): Promise<Appointment | null> {
   const appointment = await deps.appointmentRepo.findById(tenantId, appointmentId);
   if (!appointment) {
     res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
@@ -776,7 +790,7 @@ async function loadOwnedChangeableAppointment(
     });
     return null;
   }
-  return { id: appointment.id };
+  return appointment;
 }
 
 async function emitPortalAudit(

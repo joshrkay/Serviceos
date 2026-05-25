@@ -1,10 +1,12 @@
 import { Router, Request, Response } from 'express';
-import { getDispatchBoardData, BoardQueryDependencies } from './board-query';
+import { getDispatchBoardData, BoardQueryDependencies, PendingChangeKind } from './board-query';
 import { AppointmentRepository, listAppointmentsWithMeta } from '../appointments/appointment';
 import { AssignmentRepository } from '../appointments/assignment';
 import { JobRepository } from '../jobs/job';
 import { CustomerRepository } from '../customers/customer';
 import { LocationRepository } from '../locations/location';
+import { ProposalRepository } from '../proposals/proposal';
+import { resolvePendingChangeRequests } from './pending-changes';
 import { requireAuth, requireTenant } from '../middleware/auth';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { toErrorResponse } from '../shared/errors';
@@ -27,6 +29,7 @@ export function createDispatchRoutes(deps: {
   locationRepo?: LocationRepository;
   boardEventsDeps?: BoardEventsRouteDeps;
   enRouteCoordinator?: EnRouteEnqueuer;
+  proposalRepo?: ProposalRepository;
 }): Router {
   const router = Router();
 
@@ -46,10 +49,17 @@ export function createDispatchRoutes(deps: {
 
       const timezone = req.query.timezone as string | undefined;
 
+      const proposalRepo = deps.proposalRepo;
       const boardDeps: BoardQueryDependencies = {
         appointmentRepo: deps.appointmentRepo,
         assignmentRepo: deps.assignmentRepo,
         viewingUserId: authReq.auth?.userId,
+        ...(proposalRepo
+          ? {
+              getPendingChangeRequests: (appointmentIds: string[]) =>
+                resolvePendingChangeRequests(proposalRepo, tenantId, appointmentIds),
+            }
+          : {}),
       };
 
       const boardData = await getDispatchBoardData(tenantId, date, boardDeps, timezone);
