@@ -67,6 +67,7 @@ import {
 } from './full-app-voice-handlers';
 import { TimeEntryService } from '../../time-tracking/time-entry-service';
 import { FeedbackRequestRepository } from '../../feedback/feedback-request';
+import { DelayNotificationService } from '../../notifications/delay-notifications';
 import { LineItem } from '../../shared/billing-engine';
 
 export interface ExecutionContext {
@@ -238,6 +239,7 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     private readonly appointmentRepo?: AppointmentRepository,
     private readonly assignmentRepo?: AssignmentRepository,
     private readonly confirmationNotifier: SchedulingConfirmationNotifier = new NoopSchedulingConfirmationNotifier(),
+    private readonly auditRepo?: AuditRepository,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -307,7 +309,7 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
         technicianId: payload.technicianId,
         technicianRole: 'technician',
         assignedBy: context.executedBy,
-      }, this.assignmentRepo);
+      }, this.assignmentRepo, { appointmentRepo: this.appointmentRepo, auditRepo: this.auditRepo });
     }
 
     const channels: Array<'sms' | 'email'> = Array.isArray(payload.notificationChannels)
@@ -431,6 +433,7 @@ export function createExecutionHandlerRegistry(deps?: {
   // Wave-2 full-app voice handlers. All optional; absent → passthrough.
   timeEntryService?: TimeEntryService;
   feedbackRepo?: FeedbackRequestRepository;
+  delayNotificationService?: DelayNotificationService;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -453,13 +456,13 @@ export function createExecutionHandlerRegistry(deps?: {
     new CreateCustomerVoiceExecutionHandler(deps?.customerRepo, deps?.auditRepo),
     new UpdateCustomerExecutionHandler(deps?.customerRepo),
     new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo),
-    new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier),
+    new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier, deps?.auditRepo),
     new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
     new DraftEstimateExecutionHandler(deps?.estimateRepo, deps?.settingsRepo),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
-    new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps),
-    new AddCrewMemberExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps),
-    new RemoveCrewMemberExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo),
+    new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps, deps?.auditRepo),
+    new AddCrewMemberExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps, deps?.auditRepo),
+    new RemoveCrewMemberExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.auditRepo),
     new RescheduleAppointmentExecutionHandler(
       deps?.appointmentRepo,
       deps?.assignmentRepo,
@@ -494,7 +497,12 @@ export function createExecutionHandlerRegistry(deps?: {
     new MarkLeadLostExecutionHandler(deps?.leadRepo, deps?.auditRepo),
     new AddServiceLocationExecutionHandler(deps?.locationRepo, deps?.auditRepo),
     new LogTimeEntryExecutionHandler(deps?.timeEntryService),
-    new NotifyDelayExecutionHandler(),
+    new NotifyDelayExecutionHandler(
+      deps?.delayNotificationService,
+      deps?.appointmentRepo,
+      deps?.jobRepo,
+      deps?.customerRepo,
+    ),
     new RequestFeedbackExecutionHandler(deps?.feedbackRepo),
     // P7-026 PR c — review-response handler. Wired with optional deps;
     // see ReviewResponseExecutionHandler constructor for per-dep
