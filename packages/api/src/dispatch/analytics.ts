@@ -3,11 +3,15 @@ import { v4 as uuidv4 } from 'uuid';
 export type DispatchEventType =
   | 'assigned'
   | 'reassigned'
+  | 'crew_added'
+  | 'crew_removed'
   | 'rescheduled'
   | 'canceled'
   | 'conflict_detected'
   | 'delay_notice_sent'
-  | 'delay_notice_failed';
+  | 'delay_notice_failed'
+  | 'en_route_notice_sent'
+  | 'en_route_notice_failed';
 
 export interface DispatchMetric {
   id: string;

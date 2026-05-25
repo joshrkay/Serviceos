@@ -14,6 +14,7 @@ export type SubscriptionStatus =
 
 export type GateReason =
   | 'no_billing'
+  | 'not_live'
   | 'trial_cap_daily'
   | 'trial_cap_total'
   | 'trial_cap_concurrent';

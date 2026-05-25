@@ -76,6 +76,36 @@ describe('useMutation — basic behavior', () => {
     expect(headers['Content-Type']).toBe('application/json');
   });
 
+  it('forwards per-call headers (If-Match) to fetch', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: '1' }),
+    } as Response);
+
+    const { result } = renderHook(() => useMutation('PATCH', '/api/estimates/e1'));
+    await act(async () => {
+      await result.current.mutate({ x: 1 }, { headers: { 'If-Match': '3' } });
+    });
+
+    const init = fetchSpy.mock.calls[0]![1] as RequestInit;
+    const headers = init.headers as Record<string, string>;
+    expect(headers['If-Match']).toBe('3');
+  });
+
+  it('exposes the HTTP status on the thrown error (e.g. 409)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 409,
+    } as Response);
+
+    const { result } = renderHook(() => useMutation('PATCH', '/api/estimates/e1'));
+    await act(async () => {
+      await expect(
+        result.current.mutate({}, { headers: { 'If-Match': '1' } }),
+      ).rejects.toMatchObject({ status: 409 });
+    });
+  });
+
   it('returns parsed response on success', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,

@@ -268,6 +268,7 @@ function checkGlobalGuards(
             trigger: escalationReason,
             keyword: event.detail ?? null,
             source: event.source,
+            reasonHint: event.reasonHint ?? null,
           },
         },
         ttsPlay("I understand. Let me get a person on the line for you right away."),

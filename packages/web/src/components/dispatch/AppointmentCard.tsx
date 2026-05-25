@@ -6,6 +6,11 @@ export interface AppointmentEditingInfo {
   mode: 'viewing' | 'dragging';
 }
 
+export interface CoAssignee {
+  technicianId: string;
+  technicianName: string;
+}
+
 export interface AppointmentCardData {
   id: string;
   jobId: string;
@@ -24,6 +29,13 @@ export interface AppointmentCardData {
   /** Optimistic-concurrency token — server's appointment.updatedAt ISO string. */
   updatedAt?: string;
   editing?: AppointmentEditingInfo | null;
+  /** Non-primary (crew) technicians on this appointment. */
+  coAssignees?: CoAssignee[];
+  /**
+   * A customer-initiated cancel/reschedule is awaiting dispatcher
+   * confirmation. Drives the "change requested" badge.
+   */
+  pendingChange?: 'cancel' | 'reschedule';
 }
 
 export interface AppointmentCardProps {
@@ -46,6 +58,10 @@ export interface AppointmentCardProps {
   hasConflict?: boolean;
   /** Current Clerk user — hides own presence chip. */
   currentUserId?: string;
+  /** When provided, renders an "Add crew" affordance that opens the crew picker. */
+  onAddCrew?: (appointmentId: string) => void;
+  /** When provided, renders a remove control on each co-assignee badge. */
+  onRemoveCoAssignee?: (appointmentId: string, technicianId: string) => void;
 }
 
 function formatTime(iso: string): string {
@@ -76,7 +92,10 @@ export function AppointmentCard({
   onDragStart,
   hasConflict = false,
   currentUserId,
+  onAddCrew,
+  onRemoveCoAssignee,
 }: AppointmentCardProps) {
+  const coAssignees = appointment.coAssignees ?? [];
   const editing =
     appointment.editing &&
     appointment.editing.mode === 'dragging' &&
@@ -135,6 +154,21 @@ export function AppointmentCard({
             Conflict
           </span>
         )}
+        {appointment.pendingChange && (
+          <span
+            className="appointment-card__badge text-xs font-medium text-violet-800 bg-violet-100 px-1.5 py-0.5 rounded"
+            data-testid="appointment-pending-change-badge"
+            role="status"
+            aria-label={
+              appointment.pendingChange === 'cancel'
+                ? 'Cancellation requested by customer'
+                : 'Reschedule requested by customer'
+            }
+            title="Customer requested a change — awaiting your confirmation"
+          >
+            {appointment.pendingChange === 'cancel' ? 'Cancel requested' : 'Reschedule requested'}
+          </span>
+        )}
         <span
           className={`appointment-card__status ${getStatusClass(appointment.status)}`}
           data-testid="appointment-status"
@@ -167,6 +201,42 @@ export function AppointmentCard({
       {appointment.technicianName && (
         <div className="appointment-card__technician" data-testid="appointment-technician">
           {appointment.technicianName}
+        </div>
+      )}
+
+      {(coAssignees.length > 0 || onAddCrew) && (
+        <div className="appointment-card__crew flex flex-wrap items-center gap-1" data-testid="appointment-crew">
+          {coAssignees.map((c) => (
+            <span
+              key={c.technicianId}
+              className="appointment-card__crew-badge inline-flex items-center gap-1 text-xs text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded"
+              data-testid="appointment-coassignee-badge"
+            >
+              {c.technicianName}
+              {onRemoveCoAssignee && (
+                <button
+                  type="button"
+                  className="appointment-card__crew-remove text-slate-400 hover:text-red-600"
+                  data-testid="appointment-coassignee-remove"
+                  aria-label={`Remove ${c.technicianName} from crew`}
+                  onClick={() => onRemoveCoAssignee(appointment.id, c.technicianId)}
+                >
+                  ×
+                </button>
+              )}
+            </span>
+          ))}
+          {onAddCrew && (
+            <button
+              type="button"
+              className="appointment-card__crew-add text-xs text-blue-600 hover:text-blue-800"
+              data-testid="appointment-add-crew"
+              aria-label="Add crew member"
+              onClick={() => onAddCrew(appointment.id)}
+            >
+              + crew
+            </button>
+          )}
         </div>
       )}
 

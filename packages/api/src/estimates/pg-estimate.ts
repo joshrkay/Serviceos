@@ -10,7 +10,8 @@ import {
   DEFAULT_ESTIMATE_LIMIT,
   MAX_ESTIMATE_LIMIT,
 } from './estimate';
-import { LineItem, DocumentTotals } from '../shared/billing-engine';
+import { LineItem } from '../shared/billing-engine';
+import { mapLineItemRow, mapDocumentTotalsRow } from '../shared/document-row-mappers';
 
 export class PgEstimateRepository extends PgBaseRepository implements EstimateRepository {
   constructor(pool: Pool) {
@@ -74,12 +75,7 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
         [tenantId, jobId],
       );
 
-      return Promise.all(
-        rows.map(async (row) => {
-          const lineItems = await this.fetchLineItems(client, tenantId, row.id);
-          return this.mapRowToEstimate(row, lineItems);
-        }),
-      );
+      return this.mapRowsToEstimates(client, tenantId, rows);
     });
   }
 
@@ -116,6 +112,12 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
       paramIndex++;
     }
 
+    if (options?.sentBefore) {
+      conditions.push(`sent_at IS NOT NULL AND sent_at < $${paramIndex}`);
+      params.push(options.sentBefore);
+      paramIndex++;
+    }
+
     return { where: `WHERE ${conditions.join(' AND ')}`, params };
   }
 
@@ -142,12 +144,7 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
       queryParams = [...params, limit, offset];
     }
     const { rows } = await client.query(sql, queryParams);
-    return Promise.all(
-      rows.map(async (row) => {
-        const lineItems = await this.fetchLineItems(client, tenantId, row.id);
-        return this.mapRowToEstimate(row, lineItems);
-      }),
-    );
+    return this.mapRowsToEstimates(client, tenantId, rows);
   }
 
   async listWithMeta(
@@ -287,6 +284,22 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
         setClauses.push(`rejected_reason = $${paramIndex++}`);
         values.push(updates.rejectedReason);
       }
+      if (updates.version !== undefined) {
+        setClauses.push(`version = $${paramIndex++}`);
+        values.push(updates.version);
+      }
+      if (updates.lastRevisedAt !== undefined) {
+        setClauses.push(`last_revised_at = $${paramIndex++}`);
+        values.push(updates.lastRevisedAt);
+      }
+      if (updates.reminderCount !== undefined) {
+        setClauses.push(`reminder_count = $${paramIndex++}`);
+        values.push(updates.reminderCount);
+      }
+      if (updates.lastReminderAt !== undefined) {
+        setClauses.push(`last_reminder_at = $${paramIndex++}`);
+        values.push(updates.lastReminderAt);
+      }
 
       if (setClauses.length > 0) {
         values.push(id, tenantId);
@@ -351,16 +364,34 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
       [estimateId, tenantId],
     );
 
-    return rows.map((row) => ({
-      id: row.id,
-      description: row.description,
-      category: row.category,
-      quantity: Number(row.quantity),
-      unitPriceCents: Number(row.unit_price_cents),
-      totalCents: Number(row.total_cents),
-      sortOrder: Number(row.sort_order),
-      taxable: row.taxable,
-    }));
+    return rows.map((row) => mapLineItemRow(row));
+  }
+
+  /**
+   * Batch-load line items for many estimates in a single query, grouped by
+   * estimate_id. Avoids the N+1 that a per-estimate fetch incurs when mapping
+   * a list of estimate rows.
+   */
+  private async mapRowsToEstimates(
+    client: PoolClient,
+    tenantId: string,
+    rows: Record<string, any>[],
+  ): Promise<Estimate[]> {
+    if (rows.length === 0) return [];
+
+    const { rows: itemRows } = await client.query(
+      `SELECT * FROM estimate_line_items WHERE estimate_id = ANY($1) AND tenant_id = $2 ORDER BY sort_order`,
+      [rows.map((r) => r.id), tenantId],
+    );
+
+    const byEstimate = new Map<string, LineItem[]>();
+    for (const itemRow of itemRows) {
+      const list = byEstimate.get(itemRow.estimate_id) ?? [];
+      list.push(mapLineItemRow(itemRow));
+      byEstimate.set(itemRow.estimate_id, list);
+    }
+
+    return rows.map((row) => this.mapRowToEstimate(row, byEstimate.get(row.id) ?? []));
   }
 
   private async findByIdWithClient(
@@ -380,14 +411,7 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
   }
 
   private mapRowToEstimate(row: Record<string, any>, lineItems: LineItem[]): Estimate {
-    const totals: DocumentTotals = {
-      subtotalCents: Number(row.subtotal_cents),
-      taxableSubtotalCents: Number(row.taxable_subtotal_cents),
-      discountCents: Number(row.discount_cents),
-      taxRateBps: Number(row.tax_rate_bps),
-      taxCents: Number(row.tax_cents),
-      totalCents: Number(row.total_cents),
-    };
+    const totals = mapDocumentTotalsRow(row);
 
     return {
       id: row.id,
@@ -413,6 +437,10 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
       acceptedSignatureData: row.accepted_signature_data ?? undefined,
       rejectedAt: row.rejected_at ? new Date(row.rejected_at) : undefined,
       rejectedReason: row.rejected_reason ?? undefined,
+      version: row.version !== undefined && row.version !== null ? Number(row.version) : 1,
+      lastRevisedAt: row.last_revised_at ? new Date(row.last_revised_at) : undefined,
+      reminderCount: row.reminder_count !== undefined && row.reminder_count !== null ? Number(row.reminder_count) : 0,
+      lastReminderAt: row.last_reminder_at ? new Date(row.last_reminder_at) : undefined,
       createdBy: row.created_by,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),

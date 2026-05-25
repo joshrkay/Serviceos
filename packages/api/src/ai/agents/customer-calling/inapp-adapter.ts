@@ -44,6 +44,7 @@ import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
 import type { VoicePersona, VoicePersonaResolver } from '../../../settings/voice-persona-resolver';
 import type { RepairTemplate } from '../../../verticals/registry';
+import type { DroppedCallScheduler } from '../../../sms/recovery/scheduler';
 
 export interface InAppAdapterDeps {
   store: VoiceSessionStore;
@@ -112,6 +113,23 @@ export interface InAppAdapterDeps {
    * When absent, the FSM falls back to the generic "say that again" prompt.
    */
   repairTemplatesResolver?: (tenantId: string) => Promise<ReadonlyArray<RepairTemplate>>;
+  /**
+   * P8-015 — Dropped-call SMS recovery scheduler. When wired, the adapter
+   * fires it at the terminal hook (after `session.terminalOutcome` is set)
+   * for outcomes in {dropped, failed} so a caller who hung up before booking
+   * gets a brand-voice recovery SMS ~60s later. The scheduler itself
+   * persists a durable row (queue), so the call-teardown path stays fast and
+   * a restart never loses the pending recovery. Optional: absent in fixtures
+   * that don't exercise recovery. `schedule()` is swallow-on-error, so the
+   * adapter never has to guard the call.
+   */
+  droppedCallScheduler?: DroppedCallScheduler;
+  /**
+   * P8-015 — Resolves the caller's E.164 from a terminal session so recovery
+   * can be addressed. Optional: when absent (or when it returns undefined),
+   * recovery is silently skipped — there is no one to text.
+   */
+  callerPhoneResolver?: (session: VoiceSession) => string | undefined;
 }
 
 export interface StartSessionResult {
@@ -150,7 +168,7 @@ export function buildInappGreeting(persona?: VoicePersona | null): string {
  *    will be classified but reprompted by the FSM. Both adapters
  *    rely on this same FSM gate, so behavior is now consistent.
  */
-function classifierToFsmEvent(
+export function classifierToFsmEvent(
   intentType: string,
   confidence: number,
   entities: Record<string, unknown> | undefined
@@ -177,12 +195,13 @@ function summaryFor(intent: string | undefined, entities: Record<string, unknown
   return 'Voice clarification needed';
 }
 
-function intentToProposalType(intent: string | undefined): ProposalType {
+export function intentToProposalType(intent: string | undefined): ProposalType {
   switch (intent) {
     case 'create_invoice': return 'draft_invoice';
     case 'update_invoice': return 'update_invoice';
     case 'issue_invoice': return 'issue_invoice';
     case 'send_invoice': return 'send_invoice';
+    case 'send_estimate': return 'send_estimate';
     case 'record_payment': return 'record_payment';
     case 'draft_estimate': return 'draft_estimate';
     case 'update_estimate': return 'update_estimate';
@@ -194,6 +213,15 @@ function intentToProposalType(intent: string | undefined): ProposalType {
     case 'create_job': return 'create_job';
     case 'add_note': return 'add_note';
     case 'emergency_dispatch': return 'emergency_dispatch';
+    case 'update_customer': return 'update_customer';
+    case 'log_expense': return 'log_expense';
+    case 'convert_lead': return 'convert_lead';
+    case 'confirm_appointment': return 'confirm_appointment';
+    case 'mark_lead_lost': return 'mark_lead_lost';
+    case 'add_service_location': return 'add_service_location';
+    case 'log_time_entry': return 'log_time_entry';
+    case 'notify_delay': return 'notify_delay';
+    case 'request_feedback': return 'request_feedback';
     default: return 'voice_clarification';
   }
 }
@@ -202,7 +230,7 @@ function intentToProposalType(intent: string | undefined): ProposalType {
  * Map FSM escalation reasons to the strict EscalationReason union the
  * escalate-to-human skill accepts.
  */
-function toEscalationReason(reason: string | undefined): EscalationReason {
+export function toEscalationReason(reason: string | undefined): EscalationReason {
   switch (reason) {
     case 'caller_requested':
     case 'low_confidence':
@@ -573,6 +601,37 @@ export class InAppVoiceAdapter {
     session.terminalOutcome = outcome;
     session.terminalReason = endedReason;
     void this.persistSessionEnded(session, endedReason, outcome);
+    // P8-015 — arm a dropped-call recovery SMS. Detection (outcome ∈
+    // {dropped, failed}, voice channel, usable caller id) lives inside the
+    // scheduler; `schedule()` is swallow-on-error and persists a durable
+    // queue row, so this never blocks or breaks call teardown.
+    this.scheduleDroppedCallRecovery(session, outcome);
+  }
+
+  /**
+   * P8-015 — fire the recovery scheduler when wired. Resolves the caller's
+   * E.164 via the injected resolver; if either the scheduler or the resolver
+   * is absent (or there is no caller id), recovery is silently skipped.
+   */
+  private scheduleDroppedCallRecovery(
+    session: VoiceSession,
+    outcome: CallOutcome,
+  ): void {
+    const scheduler = this.deps.droppedCallScheduler;
+    if (!scheduler) return;
+    const callerE164 = this.deps.callerPhoneResolver?.(session);
+    if (!callerE164) return;
+    void scheduler
+      .schedule({
+        tenantId: session.tenantId,
+        voiceSessionId: session.id,
+        callerE164,
+        outcome,
+        channel: session.channel,
+      })
+      .catch(() => {
+        /* swallow — scheduler already logs; recovery is best-effort */
+      });
   }
 
   /**

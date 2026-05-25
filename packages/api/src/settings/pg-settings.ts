@@ -88,6 +88,26 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
       }
       return { ...DEFAULT_ESCALATION_SETTINGS, ...raw };
     })(),
+    // P4-015 — migration 110. JSONB column; pg returns the parsed object
+    // directly. Empty object means "not configured" — surface as undefined
+    // so the brand-voice composer falls back to its neutral default tone.
+    brandVoice: (() => {
+      const raw = row.brand_voice as Record<string, unknown> | null | undefined;
+      if (!raw || typeof raw !== 'object' || Object.keys(raw).length === 0) return undefined;
+      return raw as TenantSettings['brandVoice'];
+    })(),
+    // Migration 120. NULL → undefined to match the InMemory repo shape.
+    googleReviewUrl: (row.google_review_url as string | null) ?? undefined,
+    yelpReviewUrl: (row.yelp_review_url as string | null) ?? undefined,
+    // P11-002 — language stack. default_language / auto_detect_language
+    // are NOT NULL with column defaults, so a pre-migration row still
+    // reads 'en' / true.
+    defaultLanguage: (row.default_language as 'en' | 'es' | null) ?? 'en',
+    autoDetectLanguage: (row.auto_detect_language as boolean | null) ?? true,
+    ttsVoiceEn: (row.tts_voice_en as string | null) ?? undefined,
+    ttsVoiceEs: (row.tts_voice_es as string | null) ?? undefined,
+    spanishDispatcherUserIds:
+      (row.spanish_dispatcher_user_ids as string[] | null) ?? undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -223,6 +243,15 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         voiceAgentName: 'voice_agent_name',
         voiceGreeting: 'voice_greeting',
         escalationSettings: 'escalation_settings',
+        // Migration 120 — public review links.
+        googleReviewUrl: 'google_review_url',
+        yelpReviewUrl: 'yelp_review_url',
+        // P11-002 — language stack.
+        defaultLanguage: 'default_language',
+        autoDetectLanguage: 'auto_detect_language',
+        ttsVoiceEn: 'tts_voice_en',
+        ttsVoiceEs: 'tts_voice_es',
+        spanishDispatcherUserIds: 'spanish_dispatcher_user_ids',
         updatedAt: 'updated_at',
       };
 
@@ -251,6 +280,31 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
               ? JSON.stringify(v)
               : '{}',
           );
+          paramIndex++;
+          continue;
+        }
+        // P4-015 — brand_voice is JSONB; mirror the threshold/escalation
+        // pattern. Cleared (undefined / empty / null) writes '{}' so the
+        // column matches its DEFAULT and reads back as undefined.
+        if (key === 'brandVoice') {
+          setClauses.push(`brand_voice = $${paramIndex}::jsonb`);
+          const v = value as Record<string, unknown> | undefined | null;
+          params.push(
+            v && typeof v === 'object' && Object.keys(v).length > 0
+              ? JSON.stringify(v)
+              : '{}',
+          );
+          paramIndex++;
+          continue;
+        }
+        // P11-002 — spanish_dispatcher_user_ids is a native Postgres uuid[]
+        // column. Cast the param explicitly so node-pg's array serialization
+        // is interpreted as uuid[] regardless of placeholder context, and
+        // pass null (not '{}') to clear since the column is nullable.
+        if (key === 'spanishDispatcherUserIds') {
+          setClauses.push(`spanish_dispatcher_user_ids = $${paramIndex}::uuid[]`);
+          const v = value as string[] | undefined | null;
+          params.push(Array.isArray(v) ? v : null);
           paramIndex++;
           continue;
         }

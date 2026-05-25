@@ -11,6 +11,7 @@ import {
   NextCustomerSelector,
   createDelayNotificationWorker,
   renderDelayTemplateVariants,
+  renderEnRouteTemplate,
   selectDelayTemplate,
 } from '../../src/notifications/delay-notifications';
 import { InMemoryDispatchAnalyticsRepository } from '../../src/dispatch/analytics';
@@ -276,5 +277,161 @@ describe('delay notification flow', () => {
     const second = await queue.receive();
     expect(first?.idempotencyKey).toBe(`${nextAppt.id}:3`);
     expect(second).toBeNull();
+  });
+});
+
+describe('en-route notification flow', () => {
+  it('renders a neutral on-the-way message with ETA window', () => {
+    const message = renderEnRouteTemplate({
+      customerName: 'Alex',
+      technicianName: 'Taylor',
+      etaWindow: {
+        start: new Date('2026-04-20T18:00:00Z'),
+        end: new Date('2026-04-20T18:30:00Z'),
+        timezone: 'UTC',
+      },
+    });
+    expect(message).toContain('Taylor is on the way');
+    expect(message).toContain('Updated ETA window');
+    expect(message).not.toContain('late');
+    expect(message).not.toContain('behind');
+  });
+
+  it('targets the current appointment customer and enqueues an en_route notice', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const customerRepo = new InMemoryCustomerRepository();
+    const queue = new InMemoryQueue();
+    const stateRepo = new InMemoryDelayNoticeStateRepository();
+
+    const customer = await createCustomer({
+      tenantId,
+      firstName: 'Jordan',
+      lastName: 'Doe',
+      primaryPhone: '+15555550199',
+      preferredChannel: 'sms',
+      smsConsent: true,
+      createdBy: 'dispatcher',
+    }, customerRepo);
+    const job = await createJob({ tenantId, customerId: customer.id, locationId: 'loc-1', summary: 'Repair', createdBy: 'dispatcher' }, jobRepo);
+    const appt = await createAppointment({
+      tenantId,
+      jobId: job.id,
+      scheduledStart: new Date('2026-04-20T13:00:00Z'),
+      scheduledEnd: new Date('2026-04-20T14:00:00Z'),
+      timezone: 'UTC',
+      createdBy: 'dispatcher',
+    }, appointmentRepo);
+
+    const coordinator = new DelayNotificationCoordinator(
+      queue,
+      new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
+      stateRepo,
+    );
+
+    const key = await coordinator.enqueueEnRouteNotice({
+      tenantId,
+      appointmentId: appt.id,
+      technicianName: 'Taylor',
+    });
+    expect(key).toBe(`${appt.id}:en_route`);
+
+    const queued = await queue.receive<any>();
+    expect(queued?.payload.kind).toBe('en_route');
+    expect(queued?.payload.entityType).toBe('appointment_en_route');
+    expect(queued?.payload.channel).toBe('sms');
+    expect(queued?.payload.message).toContain('on the way');
+
+    // Re-tap is idempotent — no second job.
+    await coordinator.enqueueEnRouteNotice({ tenantId, appointmentId: appt.id });
+    expect(await queue.receive()).toBeNull();
+  });
+
+  it('falls back to in_app when the customer has no SMS consent and no email', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const customerRepo = new InMemoryCustomerRepository();
+    const queue = new InMemoryQueue();
+    const stateRepo = new InMemoryDelayNoticeStateRepository();
+
+    const customer = await createCustomer(
+      { tenantId, firstName: 'No', lastName: 'Contact', preferredChannel: 'sms', smsConsent: false, createdBy: 'dispatcher' },
+      customerRepo,
+    );
+    const job = await createJob({ tenantId, customerId: customer.id, locationId: 'loc-1', summary: 'Repair', createdBy: 'dispatcher' }, jobRepo);
+    const appt = await createAppointment(
+      { tenantId, jobId: job.id, scheduledStart: new Date('2026-04-20T13:00:00Z'), scheduledEnd: new Date('2026-04-20T14:00:00Z'), timezone: 'UTC', createdBy: 'dispatcher' },
+      appointmentRepo,
+    );
+
+    const coordinator = new DelayNotificationCoordinator(
+      queue,
+      new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
+      stateRepo,
+    );
+
+    const key = await coordinator.enqueueEnRouteNotice({ tenantId, appointmentId: appt.id });
+    expect(key).toBe(`${appt.id}:en_route`);
+    // No SMS/email job is queued — it routed to the in-app sink instead.
+    expect(await queue.receive()).toBeNull();
+    const state = await stateRepo.findByKey(`${appt.id}:en_route`);
+    expect(state?.status).toBe('fallback_in_app');
+    expect(state?.channel).toBe('in_app');
+  });
+
+  it('returns null for a completed appointment', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const customerRepo = new InMemoryCustomerRepository();
+    const queue = new InMemoryQueue();
+    const stateRepo = new InMemoryDelayNoticeStateRepository();
+
+    const customer = await createCustomer({ tenantId, firstName: 'C', lastName: 'Y', createdBy: 'dispatcher' }, customerRepo);
+    const job = await createJob({ tenantId, customerId: customer.id, locationId: 'loc-1', summary: 'Repair', createdBy: 'dispatcher' }, jobRepo);
+    const appt = await createAppointment(
+      { tenantId, jobId: job.id, scheduledStart: new Date('2026-04-20T13:00:00Z'), scheduledEnd: new Date('2026-04-20T14:00:00Z'), timezone: 'UTC', createdBy: 'dispatcher' },
+      appointmentRepo,
+    );
+    await appointmentRepo.update(tenantId, appt.id, { status: 'completed' });
+
+    const coordinator = new DelayNotificationCoordinator(
+      queue,
+      new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
+      stateRepo,
+    );
+    expect(await coordinator.enqueueEnRouteNotice({ tenantId, appointmentId: appt.id })).toBeNull();
+  });
+
+  it('returns null for a canceled appointment', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const customerRepo = new InMemoryCustomerRepository();
+    const queue = new InMemoryQueue();
+    const stateRepo = new InMemoryDelayNoticeStateRepository();
+
+    const customer = await createCustomer({ tenantId, firstName: 'C', lastName: 'X', createdBy: 'dispatcher' }, customerRepo);
+    const job = await createJob({ tenantId, customerId: customer.id, locationId: 'loc-1', summary: 'Repair', createdBy: 'dispatcher' }, jobRepo);
+    const appt = await createAppointment({
+      tenantId,
+      jobId: job.id,
+      scheduledStart: new Date('2026-04-20T13:00:00Z'),
+      scheduledEnd: new Date('2026-04-20T14:00:00Z'),
+      timezone: 'UTC',
+      createdBy: 'dispatcher',
+    }, appointmentRepo);
+    await appointmentRepo.update(tenantId, appt.id, { status: 'canceled' });
+
+    const coordinator = new DelayNotificationCoordinator(
+      queue,
+      new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
+      stateRepo,
+    );
+
+    const key = await coordinator.enqueueEnRouteNotice({ tenantId, appointmentId: appt.id });
+    expect(key).toBeNull();
   });
 });

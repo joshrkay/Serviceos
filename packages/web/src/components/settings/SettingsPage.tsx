@@ -4,7 +4,7 @@ import { useClerk } from '@clerk/clerk-react';
 import {
   ChevronRight, Building2, Users, Shield, Bell, Globe, Clock,
   CreditCard, Link, Zap, FileText, Sparkles, Copy, ExternalLink,
-  MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen, Star,
+  MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen, Star, Phone,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { QuickBooksModal } from './QuickBooksModal';
@@ -39,6 +39,7 @@ export function SettingsPage() {
   const [reminders, setReminders]   = useState(true);
   const [spanishMode, setSpanishMode] = useState(false);
   const [businessName, setBusinessName] = useState<string | null>(null);
+  const [voiceAgentLive, setVoiceAgentLive] = useState<boolean | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -50,6 +51,8 @@ export function SettingsPage() {
           autoApplyInternalUpdates?: boolean;
           autoSendAppointmentReminders?: boolean;
           businessName?: string;
+          googleReviewUrl?: string | null;
+          yelpReviewUrl?: string | null;
         };
         if (typeof data.autoApplyInternalUpdates === 'boolean') {
           setAiAuto(data.autoApplyInternalUpdates);
@@ -60,8 +63,22 @@ export function SettingsPage() {
         if (typeof data.businessName === 'string' && data.businessName.trim()) {
           setBusinessName(data.businessName.trim());
         }
+        if (typeof data.googleReviewUrl === 'string') {
+          setGoogleReviewUrl(data.googleReviewUrl);
+        }
+        if (typeof data.yelpReviewUrl === 'string') {
+          setYelpReviewUrl(data.yelpReviewUrl);
+        }
       } catch {
         /* network hiccup — defaults remain */
+      }
+      try {
+        const statusRes = await apiFetch('/api/onboarding/status');
+        if (cancelled || !statusRes.ok) return;
+        const status = (await statusRes.json()) as { voiceAgentLive?: boolean };
+        setVoiceAgentLive(status.voiceAgentLive ?? false);
+      } catch {
+        // Settings still usable when onboarding status unavailable.
       }
     })();
     (async () => {
@@ -215,7 +232,8 @@ export function SettingsPage() {
     setReviewsError('');
     try {
       const res = await apiFetch('/api/settings', {
-        method: 'PATCH',
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ googleReviewUrl, yelpReviewUrl }),
       });
       if (!res.ok) {
@@ -260,7 +278,7 @@ export function SettingsPage() {
       title: 'Business',
       items: [
         { icon: Building2, label: 'Business profile',    description: 'Name, phone, email, timezone',                   action: () => setBusinessProfileOpen(true) },
-        { icon: Globe,     label: 'Language & region',   description: 'English / Español · Voice + interface language', action: () => navigate('/settings/language') },
+        { icon: Globe,     label: 'Language & region',   description: 'English / Español · Voice + customer messages', action: () => navigate('/settings/language') },
         { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => setTerminologyOpen(true) },
         { icon: BookOpen,  label: 'Price book',          description: 'Services, parts & materials with set prices',          action: () => navigate('/settings/price-book') },
         { icon: Zap,       label: 'Vertical packs',      description: 'Activate HVAC, Plumbing, or other service verticals',  action: () => setVerticalPacksOpen(true) },
@@ -276,6 +294,30 @@ export function SettingsPage() {
     {
       title: 'AI & Automation',
       items: [
+        {
+          icon: Phone,
+          label: 'AI phone answering',
+          description:
+            voiceAgentLive === null
+              ? 'Loading…'
+              : voiceAgentLive
+                ? 'On — inbound calls use the AI assistant'
+                : 'Off — callers hear voicemail until you turn this on',
+          action: () => {
+            void (async () => {
+              if (voiceAgentLive === null) return;
+              const path = voiceAgentLive ? '/api/voice/pause' : '/api/voice/go-live';
+              const res = await apiFetch(path, { method: 'POST' });
+              if (!res.ok) {
+                toast.error('Could not update AI phone answering');
+                return;
+              }
+              const body = (await res.json()) as { voiceAgentLive: boolean };
+              setVoiceAgentLive(body.voiceAgentLive);
+              toast.success(body.voiceAgentLive ? 'AI phone answering is on' : 'AI phone answering is off');
+            })();
+          },
+        },
         { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => setAiRulesOpen(true) },
         { icon: Bell,     label: 'Reminders & follow-ups',          description: 'Auto-send thresholds and timing',             action: () => toast.info('Coming soon') },
         { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => navigate('/settings/templates') },
@@ -480,7 +522,7 @@ export function SettingsPage() {
             },
             {
               label: 'Spanish language mode',
-              description: 'Interface and customer communications in Español',
+              description: 'Customer messages & AI phone calls in Español',
               value: spanishMode, onChange: toggleSpanishMode,
             },
           ].map(({ label, description, value, onChange }) => (

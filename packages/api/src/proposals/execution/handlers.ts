@@ -6,12 +6,15 @@ import { IssueInvoiceExecutionHandler } from '../handlers/issue-invoice';
 import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
 import { RescheduleAppointmentExecutionHandler } from './reschedule-handler';
+import { AddCrewMemberExecutionHandler, RemoveCrewMemberExecutionHandler } from './crew-handler';
 import { CancelAppointmentExecutionHandler } from './cancellation-handler';
 import {
   AddNoteExecutionHandler,
   SendInvoiceExecutionHandler,
+  SendEstimateExecutionHandler,
   RecordPaymentExecutionHandler,
   InvoiceDeliveryProvider,
+  EstimateDeliveryProvider,
 } from './voice-extended-handlers';
 import { LogExpenseExecutionHandler } from './log-expense-handler';
 import {
@@ -35,6 +38,8 @@ import {
   CreateEstimateInput,
 } from '../../estimates/estimate';
 import { SettingsRepository, getNextEstimateNumber } from '../../settings/settings';
+import { DocumentRevisionRepository } from '../../ai/document-revision';
+import { EditDeltaRepository } from '../../estimates/edit-delta';
 import { DispatchAnalyticsRepository } from '../../dispatch/analytics';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
@@ -50,6 +55,18 @@ import {
   updateCustomer,
 } from '../../customers/customer';
 import { LocationRepository } from '../../locations/location';
+import { LeadRepository } from '../../leads/lead';
+import { ConvertLeadExecutionHandler } from './convert-lead-handler';
+import {
+  ConfirmAppointmentExecutionHandler,
+  MarkLeadLostExecutionHandler,
+  AddServiceLocationExecutionHandler,
+  LogTimeEntryExecutionHandler,
+  NotifyDelayExecutionHandler,
+  RequestFeedbackExecutionHandler,
+} from './full-app-voice-handlers';
+import { TimeEntryService } from '../../time-tracking/time-entry-service';
+import { FeedbackRequestRepository } from '../../feedback/feedback-request';
 import { LineItem } from '../../shared/billing-engine';
 
 export interface ExecutionContext {
@@ -388,11 +405,16 @@ export function createExecutionHandlerRegistry(deps?: {
   invoiceRepo?: InvoiceRepository;
   estimateRepo?: EstimateRepository;
   settingsRepo?: SettingsRepository;
+  // Estimate edit history — when wired, voice update_estimate snapshots a
+  // revision + edit delta, matching the authenticated edit path.
+  docRevisionRepo?: DocumentRevisionRepository;
+  editDeltaRepo?: EditDeltaRepository;
   schedulingNotifier?: SchedulingConfirmationNotifier;
   transactionalComms?: TransactionalCommsService;
   noteRepo?: NoteRepository;
   paymentRepo?: PaymentRepository;
   invoiceDeliveryProvider?: InvoiceDeliveryProvider;
+  estimateDeliveryProvider?: EstimateDeliveryProvider;
   analyticsRepo?: DispatchAnalyticsRepository;
   expenseRepo?: ExpenseRepository;
   auditRepo?: AuditRepository;
@@ -403,6 +425,12 @@ export function createExecutionHandlerRegistry(deps?: {
   serviceCreditRepo?: ServiceCreditRepository;
   googleReplyResolver?: GoogleBusinessReplyResolver;
   reviewPrivateMessageSender?: ReviewPrivateMessageSender;
+  // convert_lead / mark_lead_lost wiring. When absent the handler
+  // degrades to a passthrough so in-memory tests can omit it.
+  leadRepo?: LeadRepository;
+  // Wave-2 full-app voice handlers. All optional; absent → passthrough.
+  timeEntryService?: TimeEntryService;
+  feedbackRepo?: FeedbackRequestRepository;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -430,6 +458,8 @@ export function createExecutionHandlerRegistry(deps?: {
     new DraftEstimateExecutionHandler(deps?.estimateRepo, deps?.settingsRepo),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps),
+    new AddCrewMemberExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps),
+    new RemoveCrewMemberExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo),
     new RescheduleAppointmentExecutionHandler(
       deps?.appointmentRepo,
       deps?.assignmentRepo,
@@ -450,6 +480,7 @@ export function createExecutionHandlerRegistry(deps?: {
     // mutation path). Production wires the real deps in app.ts.
     new AddNoteExecutionHandler(deps?.noteRepo),
     new SendInvoiceExecutionHandler(deps?.invoiceDeliveryProvider),
+    new SendEstimateExecutionHandler(deps?.estimateDeliveryProvider),
     new RecordPaymentExecutionHandler(
       deps?.paymentRepo,
       deps?.invoiceRepo,
@@ -457,6 +488,13 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.transactionalComms,
     ),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
+    new ConvertLeadExecutionHandler(deps?.leadRepo, deps?.customerRepo, deps?.auditRepo),
+    new ConfirmAppointmentExecutionHandler(deps?.appointmentRepo),
+    new MarkLeadLostExecutionHandler(deps?.leadRepo, deps?.auditRepo),
+    new AddServiceLocationExecutionHandler(deps?.locationRepo, deps?.auditRepo),
+    new LogTimeEntryExecutionHandler(deps?.timeEntryService),
+    new NotifyDelayExecutionHandler(),
+    new RequestFeedbackExecutionHandler(deps?.feedbackRepo),
     // P7-026 PR c — review-response handler. Wired with optional deps;
     // see ReviewResponseExecutionHandler constructor for per-dep
     // degraded behavior. Action class 'comms' guarantees the proposal
@@ -478,7 +516,12 @@ export function createExecutionHandlerRegistry(deps?: {
     handlers.push(new IssueInvoiceExecutionHandler(deps.invoiceRepo, moneyStateDeps));
   }
   if (deps?.estimateRepo) {
-    handlers.push(new UpdateEstimateExecutionHandler(deps.estimateRepo));
+    handlers.push(new UpdateEstimateExecutionHandler(
+      deps.estimateRepo,
+      deps.auditRepo,
+      deps.docRevisionRepo,
+      deps.editDeltaRepo,
+    ));
   }
 
   const registry = new Map<ProposalType, ExecutionHandler>();

@@ -21,7 +21,7 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'record_payment' | 'log_expense' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal';
 
 export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -29,6 +29,7 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_job',
   'create_appointment',
   'create_booking',
+  'callback',
   'draft_estimate',
   'update_estimate',
   'draft_invoice',
@@ -36,12 +37,22 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'issue_invoice',
   'reassign_appointment',
   'reschedule_appointment',
+  'add_crew_member',
+  'remove_crew_member',
   'cancel_appointment',
   'voice_clarification',
   'add_note',
   'send_invoice',
+  'send_estimate',
   'record_payment',
   'log_expense',
+  'convert_lead',
+  'confirm_appointment',
+  'mark_lead_lost',
+  'add_service_location',
+  'log_time_entry',
+  'notify_delay',
+  'request_feedback',
   'emergency_dispatch',
   'onboarding_tenant_settings',
   'onboarding_service_category',
@@ -187,12 +198,21 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'create_job':
     case 'create_appointment':
     case 'create_booking':
+    // A callback request is a low-risk capture: it asks an operator to
+    // call the caller back (e.g. an after-hours booking). It carries no
+    // money and mutates nothing until the operator acts.
+    case 'callback':
     case 'draft_estimate':
     case 'update_estimate':
     case 'draft_invoice':
     case 'update_invoice':
     case 'reassign_appointment':
     case 'reschedule_appointment':
+    // Crew add/remove are dispatcher-initiated capture actions: they
+    // attach/detach a non-primary technician on an appointment. They
+    // mutate an assignment row, not money or customer comms.
+    case 'add_crew_member':
+    case 'remove_crew_member':
     case 'add_note':
     case 'onboarding_tenant_settings':
     case 'onboarding_service_category':
@@ -200,7 +220,26 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'onboarding_team_member':
     case 'onboarding_schedule':
     case 'log_expense':
+    // Converting a lead to a customer is a low-risk capture: it promotes
+    // an existing CRM record. It moves no money and is reversible (the
+    // customer can be re-archived), so it stays capture-class.
+    case 'convert_lead':
+    // Confirming an appointment, marking a lead lost, adding a service
+    // location, and clocking in time are all low-risk capture actions:
+    // they record an operator-stated fact, move no money, and are
+    // reversible.
+    case 'confirm_appointment':
+    case 'mark_lead_lost':
+    case 'add_service_location':
+    case 'log_time_entry':
       return 'capture';
+    // Delay notices and feedback requests are outbound customer-facing
+    // messages — comms-class so they never auto-approve regardless of
+    // trust tier. An operator always screen-taps before a customer is
+    // contacted.
+    case 'notify_delay':
+    case 'request_feedback':
+      return 'comms';
     case 'issue_invoice':
       return 'money';
     // voice_clarification is not a mutation — it is a user-visible
@@ -225,6 +264,10 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     // explicit approval. A mis-sent invoice is a real reputation
     // cost.
     case 'send_invoice':
+    // Sending an estimate is an outbound customer-facing message too —
+    // same 'comms' gate as send_invoice. Never auto-approves regardless
+    // of trust tier; an operator (or supervisor) must approve the send.
+    case 'send_estimate':
       return 'comms';
     // Review responses: public + private + service-credit are always
     // owner-approved (per-component). The auto-approve path is

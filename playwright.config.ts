@@ -84,8 +84,56 @@ export default defineConfig({
             name: 'qa-matrix',
             testDir: './e2e/qa-matrix',
             testIgnore: [],
-            testMatch: ['precheck.spec.ts', 'estimates.spec.ts', 'invoices.spec.ts', 'assistant.spec.ts'],
-            use: { ...devices['Desktop Chrome'] },
+            // testMatch order is for readability, NOT a guaranteed run order
+            // (under workers:1 Playwright may order files alphabetically). Specs
+            // are written to be self-contained — each seeds its own
+            // customer/location/job and provisions its own vertical — so no row
+            // depends on another having run first; precheck is a fail-fast gate
+            // but each row also validates its own prerequisites.
+            testMatch: [
+              'precheck.spec.ts',
+              'provisioning.spec.ts',
+              'customers.spec.ts',
+              'estimates.spec.ts',
+              'billing-journey.spec.ts',
+              'payments-edge.spec.ts',
+              'invoices.spec.ts',
+              'public-portal.spec.ts',
+              'proposals.spec.ts',
+              'reports.spec.ts',
+              'jobs.spec.ts',
+              'agreements.spec.ts',
+              'leads.spec.ts',
+              'invoices-lifecycle.spec.ts',
+              'customers-archive.spec.ts',
+              'feature-flags.spec.ts',
+              'time-entries.spec.ts',
+              'settings.spec.ts',
+              'notes.spec.ts',
+              'catalog.spec.ts',
+              'conversations.spec.ts',
+              'locations.spec.ts',
+              'estimate-revise.spec.ts',
+              'appointments-lifecycle.spec.ts',
+              'me.spec.ts',
+              'maintenance-contracts.spec.ts',
+              'golden-journey.spec.ts',
+              'scheduling.spec.ts',
+              'sms.spec.ts',
+              'voice-extras.spec.ts',
+              'isolation.spec.ts',
+              'assistant.spec.ts',
+            ],
+            // Browsers in the image (build 1194) can differ from the installed
+            // Playwright's expected build. QA_CHROMIUM_PATH lets a run point at
+            // an existing full-chromium binary (headless works without the
+            // separate headless-shell). No-op when unset.
+            use: {
+              ...devices['Desktop Chrome'],
+              ...(process.env.QA_CHROMIUM_PATH
+                ? { launchOptions: { executablePath: process.env.QA_CHROMIUM_PATH } }
+                : {}),
+            },
           },
         ]
       : []),

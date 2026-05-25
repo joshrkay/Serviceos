@@ -80,6 +80,7 @@ import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
 import { createVoiceGate } from './voice/voice-gate';
 import { checkAndFireUpgradeNudge } from './voice/check-upgrade-nudge';
+import { maybeAutoGoLiveOnInboundEnd } from './voice/go-live';
 import { createOnboardingRouter } from './routes/onboarding';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
@@ -148,6 +149,7 @@ import {
 } from './flags/feature-flags';
 import { PgFeatureFlagRepository } from './flags/pg-feature-flags';
 import { createFeatureFlagsRouter } from './routes/feature-flags';
+import { createAdminTenantsRouter } from './routes/admin-tenants';
 import { InMemoryTechnicianLocationPingRepository } from './telemetry/technician-location-ping';
 import {
   InMemoryTechnicianLocationAuthorizer,
@@ -155,6 +157,8 @@ import {
 } from './telemetry/technician-location-authz';
 import { InMemoryQueue, processMessage } from './queues/queue';
 import { createProvisionTwilioWorker, PROVISION_TWILIO_JOB_TYPE } from './workers/provision-twilio';
+import { createDeprovisionTenantWorker } from './workers/deprovision-tenant';
+import { createVerifyAiWorker } from './workers/verify-ai';
 import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
@@ -270,6 +274,10 @@ import {
 import { PgPortalSessionRepository } from './portal/pg-portal-session';
 import { createPortalRouter } from './routes/portal';
 import { createPublicPortalRouter } from './routes/public-portal';
+import {
+  PgTenantTransactionRunner,
+  InMemoryTransactionRunner,
+} from './db/tenant-transaction';
 import { createJob as createJobDomain } from './jobs/job';
 import { createInvoice as createInvoiceDomain } from './invoices/invoice';
 
@@ -333,6 +341,7 @@ import {
 } from './proposals/execution/idempotency-lock';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { resolveInvoiceDeliveryProvider } from './proposals/execution/invoice-delivery-factory';
+import { resolveEstimateDeliveryProvider } from './proposals/execution/estimate-delivery-factory';
 import { InMemoryWorkingHoursRepository } from './availability/working-hours';
 import { InMemoryUnavailableBlockRepository } from './availability/unavailable-block';
 import { createTravelTimeProvider } from './scheduling/travel-time/factory';
@@ -356,6 +365,7 @@ import {
 import { TwilioDelayNotificationService } from './notifications/twilio-delay-notification-service';
 import { TransactionalCommsService } from './notifications/transactional-comms-service';
 import { runAppointmentReminderSweep } from './workers/appointment-reminder-worker';
+import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import { registerKeywordHandler } from './sms/inbound-dispatch';
@@ -1231,6 +1241,10 @@ export function createApp(): express.Express {
     nodeEnv: config.NODE_ENV,
     sendService,
   });
+  const estimateDeliveryProvider = resolveEstimateDeliveryProvider({
+    nodeEnv: config.NODE_ENV,
+    sendService,
+  });
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
     : new InMemoryDispatchAnalyticsRepository();
@@ -1295,9 +1309,12 @@ export function createApp(): express.Express {
     invoiceRepo,
     estimateRepo,
     settingsRepo,
+    docRevisionRepo: documentRevisionRepo,
+    editDeltaRepo: deltaRepo,
     noteRepo,
     paymentRepo,
     invoiceDeliveryProvider,
+    estimateDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
     schedulingNotifier: transactionalComms,
     transactionalComms,
@@ -1480,6 +1497,7 @@ export function createApp(): express.Express {
     settingsRepo,
     feedbackRequestRepo,
     dispatcher: feedbackDispatcher,
+    dncRepo,
     publicBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
   });
   workerRegistry.set(
@@ -1492,6 +1510,20 @@ export function createApp(): express.Express {
     workerRegistry.set(
       provisionTwilioWorker.type,
       provisionTwilioWorker as import('./queues/queue').WorkerHandler<unknown>
+    );
+
+    const deprovisionTenantWorker = createDeprovisionTenantWorker({ pool });
+    workerRegistry.set(
+      deprovisionTenantWorker.type,
+      deprovisionTenantWorker as import('./queues/queue').WorkerHandler<unknown>
+    );
+  }
+
+  if (pool && llmGateway) {
+    const verifyAiWorker = createVerifyAiWorker({ pool, gateway: llmGateway, auditRepo });
+    workerRegistry.set(
+      verifyAiWorker.type,
+      verifyAiWorker as import('./queues/queue').WorkerHandler<unknown>
     );
   }
 
@@ -1638,6 +1670,13 @@ export function createApp(): express.Express {
       appointmentRepo,
       leadRepo,
       auditRepo,
+      assignmentRepo,
+      locationRepo,
+      proposalRepo,
+      settingsRepo,
+      transactionRunner: pool
+        ? new PgTenantTransactionRunner(pool)
+        : new InMemoryTransactionRunner(),
       paymentLinkProvider,
     }),
   );
@@ -1830,8 +1869,18 @@ export function createApp(): express.Express {
     // inbound call ends. Pool-gated (no-op when running in-memory).
     ...(pool
       ? {
-          onSessionEnded: async ({ tenantId }: { tenantId: string }) => {
+          onSessionEnded: async ({
+            tenantId,
+            channel,
+          }: {
+            tenantId: string;
+            channel: 'voice_inbound' | 'inapp_voice';
+          }) => {
             await checkAndFireUpgradeNudge({ pool }, tenantId);
+            await maybeAutoGoLiveOnInboundEnd(
+              { pool, auditRepo },
+              { tenantId, channel },
+            );
           },
         }
       : {}),
@@ -2141,17 +2190,15 @@ export function createApp(): express.Express {
       // that interface here using the `call_sentiment` task type so routing
       // config can target it separately from main call-flow completions.
       //
-      // NOTE: escalationSettings is per-tenant and must be resolved per-session.
-      // For now we pass undefined here — the feature is enabled only when
-      // the adapter dep is non-undefined, so wiring escalationSettings requires
-      // threading settingsRepo into a per-session init hook (deferred to
-      // Section 12 per-tenant resolution work, tracked in TODO below).
-      //
-      // TODO(S12): resolve escalationSettings per-tenant at session start by
-      // passing a factory/resolver into attachMediaStreamServer so each session
-      // can call `settingsRepo.findByTenantId(tenantId)` and surface the result.
+      // escalationSettings is per-tenant and resolved per-session: the
+      // `resolveEscalationSettings` resolver (passed into attachMediaStreamServer
+      // below) reads the tenant's current settings at session start, so the
+      // static `escalationSettings` dep is intentionally left unset.
       const sentimentClassifierDep = llmGateway
-        ? (input: Parameters<typeof classifyTurnSentiment>[0]) =>
+        ? (
+            input: Parameters<typeof classifyTurnSentiment>[0],
+            budget?: Partial<Parameters<typeof classifyTurnSentiment>[1]>,
+          ) =>
             classifyTurnSentiment(input, {
               llm: {
                 complete: async ({ prompt }: { prompt: string }) => {
@@ -2162,6 +2209,10 @@ export function createApp(): express.Express {
                   return { text: res.content };
                 },
               },
+              // Per-session cost-cap inputs threaded in by the adapter so the
+              // classifier's budget guard can skip the LLM call when the session
+              // is near its cost cap.
+              ...budget,
             })
         : undefined;
 
@@ -2220,6 +2271,10 @@ export function createApp(): express.Express {
               const settings = await settingsRepo.findByTenant(tenantId);
               return resolveEscalationSettings(settings);
             },
+            // F6c: deliver out-of-band frustration_detected effects (notify_oncall,
+            // audit) through the host processor — emitSideEffects only renders TTS.
+            deliverEscalationEffects: (session, effects, tenantId) =>
+              twilioAdapter.deliverOutOfBandEffects(session, effects, tenantId),
           },
         );
         return server;
@@ -2386,6 +2441,8 @@ export function createApp(): express.Express {
       jobRepo,
       customerRepo,
       locationRepo,
+      enRouteCoordinator: delayNotificationCoordinator,
+      proposalRepo,
       boardEventsDeps: {
         authUserIdFromRequest: async (req) =>
           (req as { auth?: { userId?: string } }).auth?.userId ?? null,
@@ -2404,6 +2461,7 @@ export function createApp(): express.Express {
       sendService,
       { gateway: llmGateway, proposalRepo },
       { jobRepo, invoiceRepo },
+      { docRevisionRepo: documentRevisionRepo, editDeltaRepo: deltaRepo },
     ),
   );
   app.use(
@@ -2634,7 +2692,10 @@ export function createApp(): express.Express {
     environment: process.env.NODE_ENV || 'development',
     level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
   });
-  app.use('/api/voice', createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger));
+  app.use(
+    '/api/voice',
+    createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger, pool ? { pool } : undefined),
+  );
   app.use('/api/onboarding', createOnboardingRouter({ settingsRepo, packActivationRepo, auditRepo, pool, billingService, queue }));
   app.use(
     '/api/technician-location',
@@ -2831,6 +2892,35 @@ export function createApp(): express.Express {
     }, 60 * 60_000);
   }
 
+  // Estimate-reminder worker — nudges customers on estimates sent but
+  // unviewed/unaccepted after 3 days (1 reminder, capped). Only runs when
+  // SendService is configured (it re-sends via the unified send path).
+  const estimateReminderLogger = createLogger({
+    service: 'estimate-reminder-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  if (sendService) {
+    setInterval(async () => {
+      try {
+        await runEstimateReminderSweep({
+          estimateRepo,
+          sendService,
+          auditRepo,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          logger: estimateReminderLogger,
+        });
+      } catch (err) {
+        estimateReminderLogger.error('Estimate-reminder sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }, 60 * 60_000);
+  }
+
   // P7-026 PR a: Google Business reviews polling. Every 15 minutes
   // we sweep every tenant with an active `google_business`
   // integration and persist new reviews idempotently. One tenant's
@@ -2977,6 +3067,12 @@ export function createApp(): express.Express {
     '/api/admin/feature-flags',
     createFeatureFlagsRouter(featureFlagRepo, featureFlagStore, {}, auditRepo),
   );
+
+  // Platform-admin tenant lifecycle (hard-delete / deprovision). Requires a
+  // DB pool; the queue is always present (Pg- or in-memory).
+  if (pool) {
+    app.use('/api/admin/tenants', createAdminTenantsRouter({ pool, queue }));
+  }
 
   // Wire the WS publish-side kill switches: every call to publish()
   // consults the feature flag store at runtime, so flipping

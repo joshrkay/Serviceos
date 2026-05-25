@@ -35,6 +35,22 @@ export function PortalDashboard({ token, customer }: Props) {
     loaded: false,
     error: null,
   });
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelMsg, setCancelMsg] = useState<string | null>(null);
+  const [cancelErr, setCancelErr] = useState<string | null>(null);
+
+  async function cancelAppointment(appointmentId: string) {
+    setCancelErr(null);
+    setCancelling(true);
+    try {
+      const res = await portalApi.cancelAppointment(token, appointmentId);
+      setCancelMsg(res.message);
+    } catch (err) {
+      setCancelErr((err as Error).message);
+    } finally {
+      setCancelling(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -112,7 +128,21 @@ export function PortalDashboard({ token, customer }: Props) {
       >
         {nextAppt
           ? `Status: ${nextAppt.status.replace(/_/g, ' ')}`
-          : 'Nothing scheduled. Use Request service to ask for a visit.'}
+          : 'Nothing scheduled. Use Book appointment to schedule a visit.'}
+        {nextAppt && !cancelMsg ? (
+          <div className="mt-3">
+            <button
+              type="button"
+              disabled={cancelling}
+              onClick={() => void cancelAppointment(nextAppt.id)}
+              className="text-sm text-rose-600 hover:underline disabled:opacity-50"
+            >
+              {cancelling ? 'Requesting…' : 'Cancel this appointment'}
+            </button>
+            {cancelErr ? <div className="mt-1 text-xs text-rose-600">{cancelErr}</div> : null}
+          </div>
+        ) : null}
+        {cancelMsg ? <div className="mt-3 text-sm text-emerald-700">{cancelMsg}</div> : null}
       </PortalCard>
 
       <div className="text-xs text-slate-400 pt-2">

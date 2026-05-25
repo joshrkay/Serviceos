@@ -30,7 +30,7 @@ export const PackPickInputSchema = z.object({
 });
 export type PackPickInput = z.infer<typeof PackPickInputSchema>;
 
-export const OnboardingStepIdSchema = z.enum(['signup', 'identity', 'pack', 'phone', 'billing', 'test_call']);
+export const OnboardingStepIdSchema = z.enum(['signup', 'identity', 'pack', 'phone', 'billing', 'ai_check', 'test_call']);
 export type OnboardingStepId = z.infer<typeof OnboardingStepIdSchema>;
 
 export const OnboardingStepStatusSchema = z.enum(['done', 'current', 'pending', 'error', 'skipped']);
@@ -45,9 +45,10 @@ export const OnboardingStepSchema = z.object({
 export type OnboardingStep = z.infer<typeof OnboardingStepSchema>;
 
 export const OnboardingStatusResponseSchema = z.object({
-  steps: z.array(OnboardingStepSchema).length(6),
+  steps: z.array(OnboardingStepSchema).length(7),
   currentStep: OnboardingStepIdSchema.nullable(),
   isComplete: z.boolean(),
+  voiceAgentLive: z.boolean(),
   /** ISO-8601 timestamp of the 30-minute upgrade nudge fire-event. Drives the in-app banner. */
   upgradePromptShownAt: z.string().datetime().optional(),
 });

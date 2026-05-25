@@ -5,6 +5,9 @@ import { JobRepository } from '../jobs/job';
 import { SettingsRepository } from '../settings/settings';
 import { createFeedbackRequest, FeedbackRequestRepository } from '../feedback/feedback-request';
 import { FeedbackDispatcher } from '../feedback/dispatcher';
+import { DncRepository, normalizePhone } from '../compliance/dnc';
+import { resolveCustomerLanguage } from '../i18n/resolve-language';
+import { tn } from '../notifications/i18n';
 
 export interface FeedbackSendPayload {
   tenantId: string;
@@ -17,9 +20,10 @@ export function createFeedbackSendWorker(deps: {
   settingsRepo: SettingsRepository;
   feedbackRequestRepo: FeedbackRequestRepository;
   dispatcher: FeedbackDispatcher;
+  dncRepo: DncRepository;
   publicBaseUrl: string;
 }): WorkerHandler<FeedbackSendPayload> {
-  const { jobRepo, customerRepo, settingsRepo, feedbackRequestRepo, dispatcher, publicBaseUrl } = deps;
+  const { jobRepo, customerRepo, settingsRepo, feedbackRequestRepo, dispatcher, dncRepo, publicBaseUrl } = deps;
 
   return {
     type: 'feedback_send',
@@ -44,13 +48,29 @@ export function createFeedbackSendWorker(deps: {
         return;
       }
 
+      // Consent + DNC gate (mirrors sendCustomerMessage). The feedback request
+      // is delivered only over SMS, so without consent there is no channel to
+      // send on — don't mint a request/token that can never be delivered.
+      if (customer.smsConsent !== true) {
+        logger.info('Skipping feedback request: customer has not consented to SMS', { tenantId, jobId, customerId: customer.id });
+        return;
+      }
+      if (await dncRepo.isOnDnc(tenantId, normalizePhone(customer.primaryPhone))) {
+        logger.info('Skipping feedback request: customer phone is on the DNC list', { tenantId, jobId, customerId: customer.id });
+        return;
+      }
+
       const request = createFeedbackRequest({ tenantId, jobId });
       const saved = await feedbackRequestRepo.create(request);
       const settings = await settingsRepo.findByTenant(tenantId);
       const businessName = settings?.businessName ?? 'our team';
       const normalizedBase = publicBaseUrl.replace(/\/$/, '');
       const url = `${normalizedBase}/public/feedback/${saved.token}`;
-      const text = `Thanks for choosing ${businessName}. We'd love your feedback: ${url}`;
+      const language = resolveCustomerLanguage({
+        customerPreferredLanguage: customer.preferredLanguage,
+        tenantDefaultLanguage: settings?.defaultLanguage,
+      });
+      const text = tn('sms.feedback.request', language, { business: businessName, url });
 
       await dispatcher.send({ to: customer.primaryPhone, body: text });
 

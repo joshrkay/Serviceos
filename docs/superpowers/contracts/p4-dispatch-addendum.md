@@ -20,14 +20,14 @@ P4-015 (brand-voice prompt + composer) is a Wave-C blocker for three downstream 
 ## P4-015 — Brand-voice prompt and composer
 
 **Wave:** 4-Wave-C0 (Wave-C blocker B1)
-**Migration number reserved:** none (uses existing `tenant_settings.brand_voice` JSONB from migration 090)
+**Migration number reserved:** `110_tenant_settings_brand_voice` — CORRECTION (post-dispatch): the original "migration 090" premise was **wrong**. Migration 090 is `090_tenant_settings_voice_persona` (voice agent name/greeting), not brand voice. The `brand_voice` JSONB column did NOT exist and was created in migration 110 during this story's dispatch.
 **Forbidden files:**
 - `packages/api/src/ai/gateway/**` (the composer routes via the gateway — do not modify the gateway itself)
 - `packages/api/src/ai/orchestration/**` (orchestration is unchanged)
 - `packages/api/src/ai/providers/**` (provider wiring is unchanged)
 - `packages/api/src/ai/skills/**` (existing skills are not touched in this story)
 - `packages/shared/**`
-- `packages/api/src/db/**` (no schema change — `tenant_settings.brand_voice` is already a JSONB column)
+- ~~`packages/api/src/db/**` (no schema change — `tenant_settings.brand_voice` is already a JSONB column)~~ — CORRECTION: the column did NOT exist. Migration `110_tenant_settings_brand_voice` plus the typed `BrandVoiceSettings` field and read/write wiring in `settings/settings.ts` + `settings/pg-settings.ts` were added to create it. These files were necessary deviations from the original (incorrect) forbidden list.
 
 **Allowed files (concrete list):**
 - `packages/api/src/ai/brand-voice/composer.ts` (new)
@@ -55,7 +55,7 @@ cd /home/user/Serviceos && \
 **Implementation hints:**
 1. Read `packages/api/src/ai/prompt-registry.ts` first — see how `PromptVersion` is shaped and how existing prompts register.
 2. Read `packages/api/src/ai/gateway/gateway.ts` to confirm the `run(promptVersionId, payload)` signature; use it as-is.
-3. The tenant-tone schema (already on `tenant_settings.brand_voice` JSONB) has fields like `formality: 'casual'|'professional'`, `pronoun: 'we'|'i'`, `vibe_words: string[]`. Read the existing migration 090 to see exactly what's there.
+3. The tenant-tone schema lives on the `tenant_settings.brand_voice` JSONB column (created in migration 110, NOT 090) with fields `formality: 'casual'|'professional'`, `pronoun: 'we'|'i'`, `vibe_words: string[]`, `business_name`. See the `BrandVoiceSettings` interface in `settings/settings.ts`.
 4. Intents register as `('brand_voice_v1', 'tech_reschedule_customer_sms')`, etc. Use a tagged-union approach so adding a new intent is one entry, not a copy-paste of the whole prompt.
 5. The smoke test mocks the gateway provider and asserts the composer threads `tone + intent + context` into the prompt and respects `maxChars`. Real-model golden tests are deferred.
 

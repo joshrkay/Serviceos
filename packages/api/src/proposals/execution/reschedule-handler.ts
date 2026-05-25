@@ -14,6 +14,7 @@ import { checkFeasibility } from '../../scheduling/feasibility';
 import { FeasibilityDependencies, FeasibilityIssue } from '../../scheduling/feasibility-types';
 import { TransactionalCommsService } from '../../notifications/transactional-comms-service';
 import { notifyDispatchBoardChanged } from '../../dispatch/board-notify';
+import { boardDateFromAppointment } from '../../dispatch/board-revision';
 
 export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'reschedule_appointment';
@@ -74,6 +75,32 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
       const freshness = checkSchedulingProposalFreshness(proposal, appointment);
       if (!freshness.fresh) {
         return { success: false, error: `Stale proposal: ${freshness.reasons.join('; ')}` };
+      }
+
+      // "No slot selected" guard. Tech-out proposals (P6-028) are created with
+      // `sourceContext.requiresSlotSelection` and the payload seeded with the
+      // appointment's CURRENT times, for the owner to edit to a real new slot.
+      // Approving one (e.g. via APPROVE ALL) WITHOUT editing would update
+      // nothing yet still fire a customer "we've rescheduled you" notification
+      // (notifyRescheduled below). Reject that so the owner must pick a time
+      // first. Scoped to flagged proposals so an ordinary reschedule
+      // re-executed with its already-applied times stays idempotent.
+      const requiresSlotSelection =
+        proposal.sourceContext?.requiresSlotSelection === true;
+      const hasArrivalWindowChange =
+        payload.newArrivalWindowStart != null ||
+        payload.newArrivalWindowEnd != null;
+      if (
+        requiresSlotSelection &&
+        !hasArrivalWindowChange &&
+        startDate.getTime() === appointment.scheduledStart.getTime() &&
+        endDate.getTime() === appointment.scheduledEnd.getTime()
+      ) {
+        return {
+          success: false,
+          error:
+            'Reschedule has no new time selected — pick a new slot before approving.',
+        };
       }
 
       // Conflict / feasibility check — delegate to the checkFeasibility composer
@@ -170,7 +197,16 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
         await this.transactionalComms.notifyRescheduled(context.tenantId, appointmentId);
       }
 
+      // Spatial board sync. When a reschedule crosses calendar days, BOTH
+      // boards must refresh: the new day (appointment appears) and the old
+      // day (appointment leaves). Notifying only the new day would leave a
+      // stale card on a dispatcher viewing the original day.
       notifyDispatchBoardChanged(context.tenantId, updated.scheduledStart);
+      const oldDate = boardDateFromAppointment(appointment.scheduledStart);
+      const newDate = boardDateFromAppointment(updated.scheduledStart);
+      if (oldDate !== newDate) {
+        notifyDispatchBoardChanged(context.tenantId, appointment.scheduledStart);
+      }
 
       return {
         success: true,

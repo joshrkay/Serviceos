@@ -69,6 +69,14 @@ P4-015 (brand voice), P2-002 (proposal contracts), P1-008 (tech assignment), P2-
 
 ## Migration reservations
 
+> **⚠️ STALE (2026-05-20) — this entire table is out of date. Re-baseline before dispatching Wave 1/2.**
+> Main has advanced well past `100`. Current state of the reserved range:
+> - `101`=`101_google_reviews`, `102`=`102_review_poll_state`, `103`=`103_service_credits`, `104`=`104_service_credits_review_fk`, `105`=`105_create_dispatch_analytics`, `106`=`106_tenant_settings_escalation_settings`, `107`=`107_portal_sessions_system_lookup_rls`, `108`=`108_tenant_settings_voice_agent_live` — **all TAKEN by unrelated work**.
+> - **`109`=`109_users_mobile_number`** (B4/P1-022, shipped Wave 0) and **`110`=`110_tenant_settings_brand_voice`** (P4-015 fix, shipped Wave 0) are now TAKEN.
+> - Next free key is **`111`**. Every story below that reserved 101–110 must be bumped: P0-036→111, P6-028→112/113, P8-015→114, P7-026→115/116/117, P8-016→118/119/120 (illustrative — the coordinator picks the next free numbers from `schema.ts` immediately before each dispatch, per the freeze-list rule).
+>
+> Original (now-incorrect) reservations preserved below for historical context:
+
 Refresh against `packages/api/src/db/schema.ts` before dispatching. Latest used key on main: `100_payments_refund_tracking` (verified). Reservations:
 
 | Migration key | Owner | Domain |
@@ -93,7 +101,7 @@ Refresh against `packages/api/src/db/schema.ts` before dispatching. Latest used 
 
 **Why:** P6-028, P7-026, P8-015 all draft customer-facing text. Today there is no locked brand-voice prompt — the prompt registry exists at `packages/api/src/ai/prompt-registry.ts` but has no `brand_voice` entry, and there are no golden examples. Without B1, three of the four stories ship with whatever the LLM defaults to per call.
 
-**Outcome:** `composeBrandVoiceMessage({tenantId, intent, context, maxChars})` returns `{text, promptVersionId}`. Tone JSONB lives on `tenant_settings` (already exists via migration 090). Defer the full golden-example dataset to a follow-up — V1 ships with the prompt registered and a smoke test that produces non-empty text for each intent.
+**Outcome:** `composeBrandVoiceMessage({tenantId, intent, context, maxChars})` returns `{text, promptVersionId}`. Tone JSONB lives on `tenant_settings.brand_voice` (CORRECTION: this did NOT already exist — migration 090 is `090_tenant_settings_voice_persona`. The `brand_voice` column was created in migration 110 during P4-015 dispatch). Defer the full golden-example dataset to a follow-up — V1 ships with the prompt registered and a smoke test that produces non-empty text for each intent.
 
 **Allowed files:** `packages/api/src/ai/brand-voice/**`, `packages/api/src/ai/prompt-registry.ts`. Verification: `npx vitest --grep "brand-voice"` covers prompt selection by intent and tenant-tone merge.
 

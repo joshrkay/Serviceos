@@ -24,6 +24,13 @@ export interface OnboardingFacts {
   testCallSkippedAt: Date | null;
   /** Timestamp of the one-time 30-minute upgrade prompt (when shown). null until trial usage crosses the threshold. */
   upgradePromptShownAt?: Date | null;
+  voiceAgentLiveAt: Date | null;
+  /** True once a model is configured for the tenant (ai_model is non-null). */
+  aiConfigPresent: boolean;
+  /** State of the onboarding AI self-check written by the verify_ai worker. */
+  aiVerificationStatus: 'pending' | 'running' | 'passed' | 'failed' | null;
+  /** Last verification error message (when status is 'failed'). */
+  aiVerificationError?: string | null;
 }
 
 const isIdentityDone = (i: OnboardingFacts['identity']): boolean =>
@@ -48,10 +55,11 @@ export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResp
     pack:      f.packActivated,
     phone:     f.twilioStatus === 'full_readiness',
     billing:   isBillingDone(f.subscription),
+    ai_check:  f.aiVerificationStatus === 'passed',
     test_call: isTestCallDone(f) || isTestCallSkipped(f),
   };
 
-  const order: OnboardingStepId[] = ['signup', 'identity', 'pack', 'phone', 'billing', 'test_call'];
+  const order: OnboardingStepId[] = ['signup', 'identity', 'pack', 'phone', 'billing', 'ai_check', 'test_call'];
   const firstNotDone = order.find((id) => !done[id]) ?? null;
 
   const phoneMetadata = f.twilioPhoneNumber ? { phoneNumber: f.twilioPhoneNumber } : undefined;
@@ -59,6 +67,24 @@ export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResp
   const steps = order.map((id): { id: OnboardingStepId; status: OnboardingStepStatus; blockers?: string[]; metadata?: Record<string, unknown> } => {
     if (id === 'phone' && f.twilioStatus === 'failed') {
       return { id, status: 'error', blockers: ['twilio_provisioning_failed'], ...(phoneMetadata ? { metadata: phoneMetadata } : {}) };
+    }
+    if (id === 'ai_check') {
+      if (f.aiVerificationStatus === 'passed') {
+        return { id, status: 'done' };
+      }
+      if (f.aiVerificationStatus === 'failed') {
+        const blocker = f.aiConfigPresent ? 'ai_verification_failed' : 'ai_config_missing';
+        return {
+          id,
+          status: 'error',
+          blockers: [blocker],
+          ...(f.aiVerificationError ? { metadata: { error: f.aiVerificationError } } : {}),
+        };
+      }
+      if (id === firstNotDone) {
+        return { id, status: 'current', metadata: { verifying: f.aiVerificationStatus === 'running' } };
+      }
+      return { id, status: 'pending' };
     }
     if (id === 'test_call' && isTestCallSkipped(f)) {
       return { id, status: 'skipped' };
@@ -76,6 +102,7 @@ export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResp
     steps,
     currentStep: firstNotDone,
     isComplete: firstNotDone === null,
+    voiceAgentLive: f.voiceAgentLiveAt != null,
     ...(f.upgradePromptShownAt
       ? { upgradePromptShownAt: f.upgradePromptShownAt.toISOString() }
       : {}),

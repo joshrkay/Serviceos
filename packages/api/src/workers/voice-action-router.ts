@@ -28,9 +28,19 @@ import {
   ReassignAppointmentTaskHandler,
   AddNoteTaskHandler,
   SendInvoiceTaskHandler,
+  SendEstimateTaskHandler,
   RecordPaymentTaskHandler,
   CreateJobVoiceTaskHandler,
   EmergencyDispatchTaskHandler,
+  UpdateCustomerTaskHandler,
+  LogExpenseTaskHandler,
+  ConvertLeadTaskHandler,
+  ConfirmAppointmentTaskHandler,
+  MarkLeadLostTaskHandler,
+  AddServiceLocationTaskHandler,
+  LogTimeEntryTaskHandler,
+  NotifyDelayTaskHandler,
+  RequestFeedbackTaskHandler,
 } from '../ai/tasks/voice-extended-tasks';
 import { instrument } from '../monitoring/instrumentation';
 
@@ -61,6 +71,13 @@ export interface VoiceActionRouterPayload {
   transcript: string;
   conversationId?: string;
   recordingId?: string;
+  /**
+   * Resolved caller identity (caller-ID match). Threaded onto the task
+   * context so handlers that need the caller's customer — create/cancel/
+   * reschedule appointment — attribute the proposal to the verified
+   * caller instead of asking the LLM to guess.
+   */
+  customerId?: string;
 }
 
 /**
@@ -146,8 +163,18 @@ const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, Pr
   reassign_appointment: 'reassign_appointment',
   add_note: 'add_note',
   send_invoice: 'send_invoice',
+  send_estimate: 'send_estimate',
   record_payment: 'record_payment',
   emergency_dispatch: 'emergency_dispatch',
+  update_customer: 'update_customer',
+  log_expense: 'log_expense',
+  convert_lead: 'convert_lead',
+  confirm_appointment: 'confirm_appointment',
+  mark_lead_lost: 'mark_lead_lost',
+  add_service_location: 'add_service_location',
+  log_time_entry: 'log_time_entry',
+  notify_delay: 'notify_delay',
+  request_feedback: 'request_feedback',
 };
 
 /**
@@ -241,13 +268,29 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo, deps.thresholdResolver));
   handlers.set('create_customer', new CreateCustomerTaskHandler());
   handlers.set('create_job', new CreateJobVoiceTaskHandler());
-  handlers.set('reschedule_appointment', new RescheduleAppointmentTaskHandler());
-  handlers.set('cancel_appointment', new CancelAppointmentTaskHandler());
+  handlers.set(
+    'reschedule_appointment',
+    new RescheduleAppointmentTaskHandler(deps.gateway, deps.appointmentRepo),
+  );
+  handlers.set(
+    'cancel_appointment',
+    new CancelAppointmentTaskHandler(deps.appointmentRepo),
+  );
   handlers.set('reassign_appointment', new ReassignAppointmentTaskHandler());
   handlers.set('add_note', new AddNoteTaskHandler());
   handlers.set('send_invoice', new SendInvoiceTaskHandler());
+  handlers.set('send_estimate', new SendEstimateTaskHandler());
   handlers.set('record_payment', new RecordPaymentTaskHandler());
   handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
+  handlers.set('update_customer', new UpdateCustomerTaskHandler());
+  handlers.set('log_expense', new LogExpenseTaskHandler());
+  handlers.set('convert_lead', new ConvertLeadTaskHandler());
+  handlers.set('confirm_appointment', new ConfirmAppointmentTaskHandler(deps.appointmentRepo));
+  handlers.set('mark_lead_lost', new MarkLeadLostTaskHandler());
+  handlers.set('add_service_location', new AddServiceLocationTaskHandler());
+  handlers.set('log_time_entry', new LogTimeEntryTaskHandler());
+  handlers.set('notify_delay', new NotifyDelayTaskHandler(deps.appointmentRepo));
+  handlers.set('request_feedback', new RequestFeedbackTaskHandler());
   return handlers;
 }
 
@@ -427,7 +470,7 @@ export function createVoiceActionRouterWorker(
       message: QueueMessage<VoiceActionRouterPayload>,
       logger: Logger
     ): Promise<void> => {
-      const { tenantId, userId, transcript, conversationId, recordingId } = message.payload;
+      const { tenantId, userId, transcript, conversationId, recordingId, customerId } = message.payload;
 
       const log = logger.child({ tenantId, recordingId, transcriptLen: transcript.length });
       log.info('voice-action-router: classifying transcript');
@@ -555,6 +598,7 @@ export function createVoiceActionRouterWorker(
           classification.intentType,
           classification.extractedEntities
         ),
+        ...(customerId ? { customerId } : {}),
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       };
 

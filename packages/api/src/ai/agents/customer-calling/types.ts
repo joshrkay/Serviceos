@@ -65,7 +65,12 @@ export type CallingAgentEvent =
   | { type: 'correction'; newTranscript: string }
   | { type: 'closed' }
   | { type: 'second_intent' }
-  | { type: 'frustration_detected'; source: 'keyword' | 'llm_sentiment'; detail?: string };
+  | {
+      type: 'frustration_detected';
+      source: 'keyword' | 'llm_sentiment';
+      detail?: string;
+      reasonHint?: string;
+    };
 
 // ─── Context ─────────────────────────────────────────────────────────────────
 

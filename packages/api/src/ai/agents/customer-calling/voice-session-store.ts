@@ -82,7 +82,7 @@ export type VoiceSessionEvent =
   /** VQ-003: session ended for one of the canonical reasons. */
   | {
       type: 'session_terminated';
-      cause: 'hangup' | 'cost_cap' | 'cap_exceeded' | 'completed';
+      cause: 'hangup' | 'cost_cap' | 'cap_exceeded' | 'compliance_blocked' | 'completed';
       ts: number;
     }
   /**
@@ -161,6 +161,20 @@ export interface VoiceSession {
   leadId?: string;
   /** Set when `identifyCaller` matched an existing customer. */
   customerId?: string;
+  /**
+   * P11-002 — resolved spoken language for this call ('en' | 'es').
+   * Set by the inbound adapter from the tenant default (and customer
+   * preference when known). Drives the greeting copy, `<Say>` Polly
+   * voice, and the `<Gather>` STT locale on every TwiML build.
+   */
+  language?: 'en' | 'es';
+  /**
+   * P11-002 — resolved per-tenant TTS voice override for the session
+   * language (settings.ttsVoiceEn/Es). When set, the `<Say voice>` uses
+   * it instead of the default Polly voice for `language`. undefined =
+   * use the default.
+   */
+  ttsVoice?: string;
   /** Set after `endSession()` to short-circuit further input. */
   ended: boolean;
   /**
