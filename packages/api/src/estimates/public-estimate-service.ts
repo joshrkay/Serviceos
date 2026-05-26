@@ -1,4 +1,5 @@
 import { Estimate, EstimateRepository, transitionEstimateStatus } from './estimate';
+import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
 import {
   calculateDocumentTotals,
   hasSelectableLineItems,
@@ -41,6 +42,8 @@ export interface PublicEstimateView {
     quantity: number;
     unitPriceCents: number;
     totalCents: number;
+    /** Whether this line is taxed — lets the client preview tax exactly. */
+    taxable: boolean;
     /** Non-null = one option in a mutually-exclusive tier group. */
     groupKey?: string;
     /** Label for the tier group. */
@@ -52,6 +55,8 @@ export interface PublicEstimateView {
   }>;
   /** True when the estimate has tier options or optional add-ons to choose. */
   hasSelectableItems: boolean;
+  /** Tax rate in basis points, so the client preview mirrors the server math. */
+  taxRateBps: number;
   totalCents: number;
   subtotalCents: number;
   taxCents: number;
@@ -169,6 +174,12 @@ export interface PublicEstimateServiceDeps {
    * Optional so older harnesses still build the service.
    */
   auditRepo?: AuditRepository;
+  /**
+   * When wired, transitions that change a job's money picture (the
+   * validity-expiry auto-transition) roll up the job money state so the
+   * pipeline reflects the lapsed quote. Optional so legacy harnesses build.
+   */
+  moneyStateDeps?: RefreshJobMoneyStateDeps;
 }
 
 const TERMINAL_STATUSES = new Set(['accepted', 'rejected', 'expired']);
@@ -298,21 +309,34 @@ export class PublicEstimateService {
     }
 
     const now = new Date();
-    const updated = await this.deps.estimateRepo.update(
-      estimate.tenantId,
-      estimate.id,
-      {
-        status: 'accepted',
-        totals: acceptedTotals,
-        acceptedSelection,
-        acceptedAt: now,
-        acceptedByName: trimmed,
-        acceptedByIp: input.ip,
-        acceptedUserAgent: input.userAgent,
-        acceptedSignatureData: input.signatureData,
-        updatedAt: now,
+    let updated: Estimate | null;
+    try {
+      updated = await this.deps.estimateRepo.update(
+        estimate.tenantId,
+        estimate.id,
+        {
+          status: 'accepted',
+          totals: acceptedTotals,
+          acceptedSelection,
+          acceptedAt: now,
+          acceptedByName: trimmed,
+          acceptedByIp: input.ip,
+          acceptedUserAgent: input.userAgent,
+          acceptedSignatureData: input.signatureData,
+          updatedAt: now,
+        }
+      );
+    } catch (err) {
+      // uq_estimates_accepted_per_job: another estimate on this job won the
+      // race to 'accepted'. Surface the same friendly message as the
+      // pre-check guard rather than a raw 500.
+      if ((err as { code?: string } | undefined)?.code === '23505') {
+        throw new ConflictError(
+          'Another estimate on this job has already been accepted. Please contact us — this estimate may no longer be current.',
+        );
       }
-    );
+      throw err;
+    }
     if (!updated) {
       throw new NotFoundError('Estimate', estimate.id);
     }
@@ -464,6 +488,7 @@ export class PublicEstimateService {
       estimate.id,
       'expired',
       this.deps.estimateRepo,
+      this.deps.moneyStateDeps,
     );
     throw new ConflictError('This estimate has expired and can no longer be actioned.');
   }
@@ -556,6 +581,7 @@ export class PublicEstimateService {
         quantity: li.quantity,
         unitPriceCents: li.unitPriceCents,
         totalCents: li.totalCents,
+        taxable: li.taxable,
         groupKey: li.groupKey,
         groupLabel: li.groupLabel,
         isOptional: li.isOptional,
@@ -565,6 +591,7 @@ export class PublicEstimateService {
       // items are already narrowed to the chosen set (above) and the total
       // reflects it, so the page shows a plain summary.
       hasSelectableItems: !acceptedSelection && hasSelectableLineItems(estimate.lineItems),
+      taxRateBps: estimate.totals.taxRateBps,
       totalCents: estimate.totals.totalCents,
       subtotalCents: estimate.totals.subtotalCents,
       taxCents: estimate.totals.taxCents,
