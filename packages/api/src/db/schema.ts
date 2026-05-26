@@ -3177,6 +3177,32 @@ export const MIGRATIONS = {
     -- change what the customer actually agreed to.
     ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_selection JSONB;
   `,
+
+  '129_estimates_one_accepted_per_job': `
+    -- At most one accepted estimate per job. The public approve flow has a
+    -- read-before-write guard for a friendly message, but that's racy; this
+    -- partial unique index is the atomic backstop so two simultaneous
+    -- approvals on the same job can't both land 'accepted' and both convert
+    -- to invoices. Soft-deleted rows are excluded.
+    -- Deploy safety: if data already has two accepted estimates on a job,
+    -- a UNIQUE index would fail the migration batch, so fall back to a plain
+    -- index + warning (app-level guard still applies).
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM estimates
+        WHERE status = 'accepted' AND deleted_at IS NULL
+        GROUP BY tenant_id, job_id HAVING COUNT(*) > 1
+      ) THEN
+        CREATE INDEX IF NOT EXISTS idx_estimates_accepted_per_job
+          ON estimates(tenant_id, job_id) WHERE status = 'accepted' AND deleted_at IS NULL;
+        RAISE WARNING 'Multiple accepted estimates exist on some jobs; created NON-unique index. Reconcile then add the unique index manually.';
+      ELSE
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_estimates_accepted_per_job
+          ON estimates(tenant_id, job_id) WHERE status = 'accepted' AND deleted_at IS NULL;
+      END IF;
+    END $$;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

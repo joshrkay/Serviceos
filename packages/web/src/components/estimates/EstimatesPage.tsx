@@ -42,6 +42,10 @@ interface ApiLineItem {
   totalCents: number;
   taxable?: boolean;
   sortOrder?: number;
+  groupKey?: string;
+  groupLabel?: string;
+  isOptional?: boolean;
+  isDefaultSelected?: boolean;
 }
 
 interface ApiCustomer {
@@ -78,25 +82,48 @@ interface ApiEstimate {
 /** Convert ApiLineItem to UI LineItem for the editor */
 function apiLineToUi(item: ApiLineItem): LineItem {
   return {
+    id: item.id,
     description: item.description,
     qty: item.quantity,
     rate: item.unitPriceCents / 100,
+    taxable: item.taxable,
+    // Preserve good-better-best metadata so an inline edit + save doesn't
+    // strip the tier/add-on structure the customer approves against.
+    groupKey: item.groupKey,
+    groupLabel: item.groupLabel,
+    isOptional: item.isOptional,
+    isDefaultSelected: item.isDefaultSelected,
   };
 }
 
 /** Convert UI LineItem back to ApiLineItem for saving */
 function uiLineToApi(item: LineItem, sortOrder: number): Partial<ApiLineItem> {
   return {
+    ...(item.id ? { id: item.id } : {}),
     description: item.description,
     quantity: item.qty,
     unitPriceCents: Math.round(item.rate * 100),
     totalCents: Math.round(item.qty * item.rate * 100),
     sortOrder,
-    taxable: false,
+    taxable: item.taxable ?? false,
+    groupKey: item.groupKey,
+    groupLabel: item.groupLabel,
+    isOptional: item.isOptional,
+    isDefaultSelected: item.isDefaultSelected,
   };
 }
 
-type LineItem = { description: string; qty: number; rate: number };
+type LineItem = {
+  id?: string;
+  description: string;
+  qty: number;
+  rate: number;
+  taxable?: boolean;
+  groupKey?: string;
+  groupLabel?: string;
+  isOptional?: boolean;
+  isDefaultSelected?: boolean;
+};
 
 // ─── AI suggestion types ──────────────────────────────────────────────────
 interface AISuggestion {
