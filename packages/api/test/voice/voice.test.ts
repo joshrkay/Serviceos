@@ -6,6 +6,10 @@ import {
 import { createTranscriptionWorker } from '../../src/workers/transcription';
 import { createLogger } from '../../src/logging/logger';
 import { QueueMessage } from '../../src/queues/queue';
+import { decrypt } from '../../src/integrations/crypto';
+
+// Blocker 12 — 64-hex (32-byte) AES-256 key for raw-transcript encryption tests.
+const RAW_TRANSCRIPT_KEY = 'a'.repeat(64);
 
 describe('P0-012 — Voice ingestion and transcription pipeline', () => {
   const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
@@ -240,6 +244,7 @@ describe('P0-012 — Voice ingestion and transcription pipeline', () => {
               return ['PEX Plumbing'];
             },
           },
+          rawTranscriptEncryptionKey: RAW_TRANSCRIPT_KEY,
         }
       );
 
@@ -259,10 +264,45 @@ describe('P0-012 — Voice ingestion and transcription pipeline', () => {
       expect(updated!.transcriptMetadata?.sanitization_version).toBe('v1');
       expect(updated!.transcriptMetadata?.canonical_transcript_field).toBe('transcript');
       expect(updated!.transcriptMetadata?.prompt_rehydration_policy).toBe('sanitized_only');
-      expect((updated!.transcriptMetadata?.raw_transcript_retention as any)?.ttl).toBe('P7D');
-      expect((updated!.transcriptMetadata?.raw_transcript_retention as any)?.accessRole).toBe('voice_transcript_raw_reader');
+      const retention = updated!.transcriptMetadata?.raw_transcript_retention as any;
+      expect(retention?.ttl).toBe('P7D');
+      expect(retention?.accessRole).toBe('voice_transcript_raw_reader');
+      // Blocker 12 — the retained raw transcript is AES-256-GCM encrypted, not
+      // base64 plaintext. The blob must decrypt back to the sanitized raw and
+      // must NOT be the old base64-of-plaintext form.
+      expect(retention?.encryption).toBe('aes-256-gcm');
+      expect(decrypt(retention.encryptedBlob, RAW_TRANSCRIPT_KEY)).toBe(raw);
+      expect(Buffer.from(retention.encryptedBlob, 'base64').toString('utf8')).not.toContain('picks plumbing');
       expect(updated!.transcriptMetadata?.correctionApplied).toBe(true);
       expect(updated!.transcriptMetadata?.glossaryTerms).toBe(1);
+    });
+
+    it('Blocker 12 — does NOT retain the raw transcript when no encryption key is configured', async () => {
+      const voiceRepo = new InMemoryVoiceRepository();
+      const recording = createVoiceRecording({ tenantId: 'tenant-1', fileId: 'file-nokey', createdBy: 'user-1' });
+      await voiceRepo.create(recording);
+      const worker = createTranscriptionWorker(
+        voiceRepo,
+        {
+          async transcribe() {
+            return { transcript: 'sensitive caller details', metadata: { provider: 'mock-whisper' } };
+          },
+        },
+        {}, // no rawTranscriptEncryptionKey
+      );
+      const msg: QueueMessage<any> = {
+        id: 'nokey',
+        type: 'transcription',
+        payload: { tenantId: 'tenant-1', recordingId: recording.id, audioUrl: 'x' },
+        attempts: 1,
+        maxAttempts: 3,
+        idempotencyKey: 'k-nokey',
+        createdAt: new Date().toISOString(),
+      };
+      await worker.handle(msg, logger);
+      const updated = await voiceRepo.findById('tenant-1', recording.id);
+      // No key → no raw retention at all (never store plaintext PII at rest).
+      expect(updated!.transcriptMetadata?.raw_transcript_retention).toBeNull();
     });
   });
 

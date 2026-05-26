@@ -2,6 +2,7 @@ import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { VoiceRepository, TranscriptionProvider } from '../voice/voice-service';
 import { LLMGateway } from '../ai/gateway/gateway';
+import { encrypt } from '../integrations/crypto';
 
 export interface TranscriptionJobPayload {
   tenantId: string;
@@ -56,8 +57,38 @@ export function sanitizeTranscript(raw: string): string {
   return collapsed.trim();
 }
 
-function encodeEncryptedRawTranscriptPlaceholder(raw: string): string {
-  return Buffer.from(raw, 'utf8').toString('base64');
+/**
+ * Blocker 12 — encrypt the retained RAW transcript at rest.
+ *
+ * Raw transcripts are call PII. Previously they were stored base64-encoded
+ * (reversible to plaintext) under a `pending-kms-integration` marker. We now
+ * encrypt them with AES-256-GCM using a key from `TRANSCRIPT_ENCRYPTION_KEY`
+ * (64-hex / 32 bytes), reusing the audited cipher in integrations/crypto.ts.
+ *
+ * Returns the retention object, or `null` when no key is configured — in
+ * which case we DO NOT retain the raw transcript at all rather than store
+ * plaintext. (The sanitized, operational transcript is stored separately in
+ * the canonical `transcript` field; only this raw-retention blob is sensitive
+ * enough to warrant encryption + a limited-access reader role.)
+ */
+function buildRawTranscriptRetention(
+  raw: string,
+  hexKey: string | undefined,
+): {
+  encryptedBlob: string;
+  encryption: string;
+  ttl: string;
+  accessRole: string;
+  auditLogRequired: boolean;
+} | null {
+  if (!hexKey) return null;
+  return {
+    encryptedBlob: encrypt(raw, hexKey),
+    encryption: 'aes-256-gcm',
+    ttl: 'P7D',
+    accessRole: 'voice_transcript_raw_reader',
+    auditLogRequired: true,
+  };
 }
 
 export interface CreateTranscriptionWorkerOptions {
@@ -85,6 +116,13 @@ export interface CreateTranscriptionWorkerOptions {
    * on the built-in trade vocabulary baked into the system prompt.
    */
   glossary?: TranscriptionGlossaryProvider;
+  /**
+   * Blocker 12 — AES-256-GCM key (64-hex) used to encrypt the retained raw
+   * transcript at rest. The app wires this from `TRANSCRIPT_ENCRYPTION_KEY`
+   * (falling back to `TENANT_ENCRYPTION_KEY`). When unset, the raw transcript
+   * is not retained (no plaintext PII at rest).
+   */
+  rawTranscriptEncryptionKey?: string;
 }
 
 /**
@@ -208,13 +246,10 @@ export function createTranscriptionWorker(
             canonical_transcript_field: 'transcript',
             prompt_rehydration_policy: 'sanitized_only',
             raw_transcript_retention: providerTranscript
-              ? {
-                  encryptedBlob: encodeEncryptedRawTranscriptPlaceholder(sanitizedProviderTranscript),
-                  encryption: 'pending-kms-integration',
-                  ttl: 'P7D',
-                  accessRole: 'voice_transcript_raw_reader',
-                  auditLogRequired: true,
-                }
+              ? buildRawTranscriptRetention(
+                  sanitizedProviderTranscript,
+                  options.rawTranscriptEncryptionKey ?? process.env.TRANSCRIPT_ENCRYPTION_KEY,
+                )
               : null,
           },
         });
