@@ -1156,6 +1156,13 @@ export function createApp(): express.Express {
           recordingId: event.recordingId,
         });
       },
+      // Blocker 12 — encrypt retained raw transcripts at rest. Prefer a
+      // dedicated TRANSCRIPT_ENCRYPTION_KEY but fall back to the
+      // already-provisioned TENANT_ENCRYPTION_KEY so encryption is active in
+      // prod without a new ops step. When neither is set the raw transcript
+      // is not retained (no plaintext PII at rest).
+      rawTranscriptEncryptionKey:
+        process.env.TRANSCRIPT_ENCRYPTION_KEY ?? process.env.TENANT_ENCRYPTION_KEY,
     }
   );
 
