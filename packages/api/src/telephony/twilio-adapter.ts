@@ -34,6 +34,12 @@ import { lookupAccountSummary } from '../ai/skills/lookup-account-summary';
 import { lookupCustomer } from '../ai/skills/lookup-customer';
 import { lookupEstimates } from '../ai/skills/lookup-estimates';
 import { lookupLeads } from '../ai/skills/lookup-leads';
+import { lookupRevenue } from '../ai/skills/lookup-revenue';
+import { lookupCatalog } from '../ai/skills/lookup-catalog';
+import { lookupAvailability } from '../ai/skills/lookup-availability';
+import type { AvailabilityFinder } from '../ai/tasks/availability-finder';
+import type { MoneyDashboardRepository } from '../reports/money-dashboard';
+import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { JobRepository } from '../jobs/job';
 import type { AppointmentRepository } from '../appointments/appointment';
 import type { InvoiceRepository } from '../invoices/invoice';
@@ -163,6 +169,11 @@ export interface TwilioAdapterDeps {
   /** VQ-006: read-only customer + estimate lookups. */
   customerRepo?: CustomerRepository;
   estimateRepo?: EstimateRepository;
+  /** Full-app voice coverage: owner-scoped revenue + catalog lookups. */
+  moneyDashboardRepo?: MoneyDashboardRepository;
+  catalogRepo?: CatalogItemRepository;
+  /** When wired, lookup_availability speaks the next open slots. */
+  availabilityFinder?: AvailabilityFinder;
   /** P11-001: when wired, every lookup invocation writes a row. */
   lookupEvents?: LookupEventService;
   /**
@@ -1602,6 +1613,62 @@ export class TwilioGatherAdapter {
             lookupExecutedEvent(intentType, Date.now() - startMs, true),
           );
           return result.summary;
+        }
+        case 'lookup_revenue': {
+          if (!this.deps.moneyDashboardRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupRevenue(
+            { tenantId, sessionId: session.id },
+            {
+              moneyDashboardRepo: this.deps.moneyDashboardRepo,
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_catalog': {
+          if (!this.deps.catalogRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupCatalog(
+            { tenantId, sessionId: session.id },
+            {
+              catalogRepo: this.deps.catalogRepo,
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_availability': {
+          if (!this.deps.availabilityFinder) {
+            return this.lookupNotWiredFallback();
+          }
+          const from = new Date();
+          const result = await lookupAvailability(
+            {
+              tenantId,
+              searchFrom: from,
+              searchTo: new Date(from.getTime() + 14 * 24 * 60 * 60 * 1000),
+              durationMs: 2 * 60 * 60 * 1000,
+            },
+            this.deps.availabilityFinder,
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
+          return result.status === 'unavailable'
+            ? this.lookupNotWiredFallback()
+            : result.message;
         }
         default:
           return this.lookupNotWiredFallback();

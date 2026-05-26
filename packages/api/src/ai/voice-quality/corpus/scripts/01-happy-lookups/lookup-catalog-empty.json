@@ -1,0 +1,49 @@
+{
+  "id": "lookup-catalog-empty",
+  "bucket": "01-happy-lookups",
+  "callerId": "+15555550503",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_01_lookup_catalog",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_01_catalog_owner",
+        "tenantId": "t_01_lookup_catalog",
+        "firstName": "Dana",
+        "lastName": "Dispatcher",
+        "displayName": "Dana Dispatcher",
+        "companyName": null,
+        "primaryPhone": "+15555550503",
+        "secondaryPhone": null,
+        "email": "dana.catalog@testhvac.example",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "What services do we have in our catalog?",
+      "expected": {
+        "intent": "lookup_catalog",
+        "spokenAnswerMatches": "Your service catalog is empty right now.",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": true
+}
