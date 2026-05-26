@@ -160,4 +160,35 @@ describe('computeMoneyDashboardSummary', () => {
       }),
     ).toThrow(/month must be/);
   });
+
+  it('buckets month-boundary payments by tenant timezone, not UTC', () => {
+    // Jan 31 5pm PST is Feb 1 01:00 UTC. Under UTC bucketing this payment
+    // wrongly lands in February; under tenant-tz bucketing it correctly
+    // lands in January. A payment at Feb 1 9am PST belongs in February.
+    const jan31_5pmPst = new Date('2026-02-01T01:00:00.000Z');
+    const feb1_9amPst = new Date('2026-02-01T17:00:00.000Z');
+    const payments = [
+      payment({ amountCents: 30000, receivedAt: jan31_5pmPst }),
+      payment({ amountCents: 20000, receivedAt: feb1_9amPst }),
+    ];
+
+    const january = computeMoneyDashboardSummary({
+      month: '2026-01', now: NOW, invoices: [], payments, expenses: [],
+      timezone: 'America/Los_Angeles',
+    });
+    expect(january.revenueCents).toBe(30000);
+
+    const february = computeMoneyDashboardSummary({
+      month: '2026-02', now: NOW, invoices: [], payments, expenses: [],
+      timezone: 'America/Los_Angeles',
+    });
+    expect(february.revenueCents).toBe(20000);
+
+    // Without a timezone (UTC default) both land in February — the bug the
+    // tenant-tz bucketing fixes.
+    const februaryUtc = computeMoneyDashboardSummary({
+      month: '2026-02', now: NOW, invoices: [], payments, expenses: [],
+    });
+    expect(februaryUtc.revenueCents).toBe(50000);
+  });
 });

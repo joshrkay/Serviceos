@@ -1898,6 +1898,7 @@ export function createApp(): express.Express {
     invoiceRepo,
     paymentRepo,
     expenseRepo,
+    settingsRepo,
   );
   const twilioAdapter = new TwilioGatherAdapter({
     store: voiceSessionStore,

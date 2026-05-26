@@ -1,6 +1,7 @@
 import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository } from '../invoices/payment';
 import { ExpenseRepository } from '../expenses/expense';
+import { SettingsRepository } from '../settings/settings';
 import {
   MoneyDashboardRepository,
   MoneyDashboardSummary,
@@ -30,10 +31,18 @@ export class PgMoneyDashboardRepository implements MoneyDashboardRepository {
     private readonly invoiceRepo: InvoiceRepository,
     private readonly paymentRepo: PaymentRepository,
     private readonly expenseRepo: ExpenseRepository,
+    // Resolves the tenant's IANA timezone so the month window buckets at
+    // tenant-local midnight (CLAUDE.md: times rendered in tenant tz).
+    // Optional so legacy harnesses without settings wired fall back to UTC.
+    private readonly settingsRepo?: SettingsRepository,
   ) {}
 
   async query(tenantId: string, month: string, now: Date): Promise<MoneyDashboardSummary> {
-    const { start, end, priorStart } = resolveMonthWindow(month);
+    const timezone =
+      (this.settingsRepo
+        ? (await this.settingsRepo.findByTenant(tenantId))?.timezone
+        : undefined) ?? 'UTC';
+    const { start, end, priorStart } = resolveMonthWindow(month, timezone);
     const [openInvoices, partiallyPaidInvoices, payments, expenses] = await Promise.all([
       this.invoiceRepo.findByTenant(tenantId, { status: 'open' }),
       this.invoiceRepo.findByTenant(tenantId, { status: 'partially_paid' }),
@@ -45,6 +54,6 @@ export class PgMoneyDashboardRepository implements MoneyDashboardRepository {
       this.expenseRepo.findByTenant(tenantId, { from: start, to: end }),
     ]);
     const invoices = [...openInvoices, ...partiallyPaidInvoices];
-    return computeMoneyDashboardSummary({ month, now, invoices, payments, expenses });
+    return computeMoneyDashboardSummary({ month, now, invoices, payments, expenses, timezone });
   }
 }

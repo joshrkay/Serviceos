@@ -20,32 +20,43 @@ Safe to scale past one dyno.
 
 ---
 
-## Money dashboard + tax export bucket by UTC, not tenant timezone
+## Money dashboard + tax export bucket by UTC, not tenant timezone — ⏳ DASHBOARD CLOSED; tax export remains
 
-`packages/api/src/reports/money-dashboard.ts:resolveMonthWindow`,
-`packages/web/src/components/reports/MoneyDashboardPage.tsx:monthRange`,
-and the tax-export `from`/`to` parser all use `Date.UTC` / `new Date('YYYY-MM-DD')`
-(UTC midnight). A California tenant whose accountant says "Q1 2026"
-expects PST midnight Jan 1 — UTC 08:00 Jan 1. A payment received 5pm PST
-on Jan 31 lands in the **February** export, not January. End-of-year
-boundary payments (Dec 31 11pm local time) can shift income across tax
-years.
+The month window math used `Date.UTC` / `new Date('YYYY-MM-DD')` (UTC
+midnight). A California tenant whose accountant says "Q1 2026" expects PST
+midnight Jan 1 — UTC 08:00 Jan 1. A payment received 5pm PST on Jan 31
+lands in the **February** bucket, not January. End-of-year boundary
+payments (Dec 31 11pm local time) can shift income across tax years.
 
 CLAUDE.md says "All times: stored UTC, **rendered in tenant timezone**"
-but the dashboard math violates the second half.
+but the bucketing math violated the second half.
 
-**Fix:** add `tenant.timezone` (IANA TZ like `America/Los_Angeles`) and
-bucket per-tenant. Touches `resolveMonthWindow`, `monthRange`,
-`tax-export` date parsing, and the tax-export response (the `date` column
-in each CSV row should be in tenant TZ). Use `Intl.DateTimeFormat` or
-`luxon` if it's already a dep.
+**Dashboard portion — CLOSED.** The "design call" the original note flagged
+is moot: `tenant_settings.timezone` (IANA TZ, NOT NULL DEFAULT
+`America/New_York`) already exists, so we bucket against it directly.
+`resolveMonthWindow(month, timezone)` and `computeMoneyDashboardSummary`
+now resolve each first-of-month to tenant-local midnight via
+`shared/timezone.ts:tzMidnight` (timezone defaults to `'UTC'`, so legacy
+callers are unaffected). `PgMoneyDashboardRepository` resolves the
+tenant's timezone from the `SettingsRepository` and threads it through;
+`app.ts` wires the existing `settingsRepo`. Covered by a new
+month-boundary test in `test/reports/money-dashboard.test.ts`.
+
+**Tax export portion — still open.** The `/tax-export` route still parses
+`from`/`to` as UTC (`new Date(fromRaw)`), renders the CSV `date` column
+via `.toISOString().slice(0,10)` (UTC day), and the web
+`MoneyDashboardPage.tsx:monthRange` builds the export range with
+`Date.UTC`. These are a separate endpoint/path from the dashboard.
+
+**Fix (follow-up):** parse the tax-export `from`/`to` as tenant-tz
+midnight (resolve tenant tz from settings in the route), render each CSV
+row `date` in tenant tz, and rebuild `monthRange` in the web client to
+match. Reuse `shared/timezone.ts:tzMidnight`.
 
 **Acceptable for now because:** beta tenants are US-only and Pacific time
-is dominant. Document the UTC bucketing in the dashboard UI ("Buckets
-reflect UTC days") so users aren't surprised at year-end.
+is dominant; the accountant export can be adjusted manually at year-end.
 
-**Effort:** ~2 hours CC + a design call on whether tenants pick TZ or we
-infer it from their address.
+**Effort:** ~1 hour CC for the remaining tax-export path.
 
 ---
 

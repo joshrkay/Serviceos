@@ -1,6 +1,7 @@
 import type { Invoice } from '../invoices/invoice';
 import type { Payment } from '../invoices/payment';
 import type { Expense } from '../expenses/expense';
+import { tzMidnight } from '../shared/timezone';
 
 /**
  * Money dashboard (§8) — a tenant-level rollup the owner sees at a
@@ -49,6 +50,14 @@ export interface MoneyDashboardInput {
   invoices: Invoice[];
   payments: Payment[];
   expenses: Expense[];
+  /**
+   * IANA timezone the tenant operates in (e.g. 'America/Los_Angeles').
+   * The month window is bucketed at tenant-local midnight so a payment
+   * received 5pm PST on Jan 31 lands in January — not February, which is
+   * where UTC bucketing would put it (UTC 01:00 Feb 1). Defaults to 'UTC'
+   * to preserve the legacy behavior for callers that don't supply it.
+   */
+  timezone?: string;
 }
 
 const MONTH_RE = /^(\d{4})-(\d{2})$/;
@@ -60,7 +69,7 @@ interface MonthWindow {
   priorEnd: Date;
 }
 
-export function resolveMonthWindow(month: string): MonthWindow {
+export function resolveMonthWindow(month: string, timezone: string = 'UTC'): MonthWindow {
   const match = MONTH_RE.exec(month);
   if (!match) throw new Error("month must be a 'YYYY-MM' string");
   const year = Number(match[1]);
@@ -68,9 +77,16 @@ export function resolveMonthWindow(month: string): MonthWindow {
   if (monthIndex < 0 || monthIndex > 11) {
     throw new Error("month must be a 'YYYY-MM' string with month 01-12");
   }
-  const start = new Date(Date.UTC(year, monthIndex, 1));
-  const end = new Date(Date.UTC(year, monthIndex + 1, 1));
-  const priorStart = new Date(Date.UTC(year, monthIndex - 1, 1));
+  // Resolve each first-of-month to the UTC instant of tenant-local midnight.
+  // Date.UTC normalizes the month index (12 → next Jan, -1 → prior Dec), and
+  // toISOString yields the 'YYYY-MM-01' string tzMidnight expects.
+  const firstOfMonth = (mIdx: number): Date => {
+    const ymd = new Date(Date.UTC(year, mIdx, 1)).toISOString().slice(0, 10);
+    return tzMidnight(ymd, timezone);
+  };
+  const start = firstOfMonth(monthIndex);
+  const end = firstOfMonth(monthIndex + 1);
+  const priorStart = firstOfMonth(monthIndex - 1);
   return { start, end, priorStart, priorEnd: start };
 }
 
@@ -80,7 +96,7 @@ function inWindow(d: Date, start: Date, end: Date): boolean {
 }
 
 export function computeMoneyDashboardSummary(input: MoneyDashboardInput): MoneyDashboardSummary {
-  const { start, end, priorStart, priorEnd } = resolveMonthWindow(input.month);
+  const { start, end, priorStart, priorEnd } = resolveMonthWindow(input.month, input.timezone);
 
   const completed = input.payments.filter((p) => p.status === 'completed');
 
