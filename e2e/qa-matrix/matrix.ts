@@ -13,15 +13,11 @@
 
 export type MatrixModule =
   | 'PROV'
-  | 'CUS'
   | 'EST'
-  | 'BILL'
   | 'SCH'
   | 'SMS'
   | 'PAY'
-  | 'VOICE'
   | 'ISO'
-  | 'PORTAL'
   | 'PROP'
   | 'RPT'
   | 'JRN'
@@ -29,6 +25,7 @@ export type MatrixModule =
   | 'AGR'
   | 'LEAD'
   | 'INV'
+  | 'INV-CR'
   | 'CUST'
   | 'FLAG'
   | 'TIME'
@@ -39,7 +36,8 @@ export type MatrixModule =
   | 'LOC'
   | 'ME'
   | 'MC'
-  | 'LEGACY';
+  | 'VOX'
+  | 'PORT';
 export type MatrixExpectation = 'pass' | 'partial' | 'fail' | 'na';
 
 export interface MatrixRow {
@@ -52,213 +50,6 @@ export interface MatrixRow {
 }
 
 export const MATRIX: MatrixRow[] = [
-  // ----- Provisioning -----
-  {
-    id: 'PROV-01',
-    module: 'PROV',
-    feature: 'Tenant bootstrap',
-    passCriteria:
-      'Provision API returns tenantId/environmentId, setup UI shows active workspace, and DB has tenant + default settings rows for tenant_id',
-    expected: 'pass',
-  },
-  {
-    id: 'PROV-02',
-    module: 'PROV',
-    feature: 'Role/permission seed',
-    passCriteria:
-      'Provision run seeds owner/manager/tech roles, role matrix appears in admin UI, and DB role_permissions rows match seeded policy set',
-    expected: 'pass',
-  },
-
-  // ----- Customers -----
-  {
-    id: 'CUS-01',
-    module: 'CUS',
-    feature: 'Create customer',
-    passCriteria:
-      'POST create returns customer id, customer detail UI resolves same id, and DB customers row persists canonical name/email/phone fields',
-    expected: 'pass',
-  },
-  {
-    id: 'CUS-02',
-    module: 'CUS',
-    feature: 'Update + dedupe customer',
-    passCriteria:
-      'PATCH/PUT update returns updated_at advance, UI reflects merged profile, and DB enforces unique dedupe key without duplicate active records',
-    expected: 'partial',
-  },
-
-  // ----- Estimates variants -----
-  {
-    id: 'EST-01',
-    module: 'EST',
-    feature: 'Create draft estimate',
-    passCriteria:
-      'API create returns estimate id, estimates list UI renders same id/status=draft, and DB estimates row contains identical totals and customer_id',
-    expected: 'pass',
-  },
-  {
-    id: 'EST-02',
-    module: 'EST',
-    feature: 'Variant: option package selection',
-    passCriteria:
-      'Variant option ids from API persist to estimate options in DB and selected package state is rendered correctly in UI preview/export views',
-    expected: 'partial',
-  },
-  {
-    id: 'EST-03',
-    module: 'EST',
-    feature: 'Variant: tax/discount recalculation',
-    passCriteria:
-      'Recompute endpoint returns deterministic subtotal/tax/discount/grand_total, UI totals match response, and DB total_cents equals recomputed amount',
-    expected: 'pass',
-  },
-
-  // ----- Billing journey -----
-  {
-    id: 'BILL-01',
-    module: 'BILL',
-    feature: 'Estimate to invoice conversion',
-    passCriteria:
-      'Conversion creates invoice linked by estimate_id, billing UI shows lifecycle transition, and DB invoice status starts in expected initial state',
-    expected: 'pass',
-  },
-  {
-    id: 'BILL-02',
-    module: 'BILL',
-    feature: 'Issue and deliver invoice',
-    passCriteria:
-      'Issue/send action records issued timestamp in API payload, UI marks invoice as issued/sent, and DB stores delivery metadata + status transition',
-    expected: 'partial',
-  },
-  {
-    id: 'BILL-03',
-    module: 'BILL',
-    feature: 'Payment application and closeout',
-    passCriteria:
-      'Payment event marks invoice paid in API/UI, DB amount_paid_cents equals settled amount, and remaining_balance reaches zero with immutable audit row',
-    expected: 'partial',
-  },
-
-  // ----- Scheduling -----
-  {
-    id: 'SCH-01',
-    module: 'SCH',
-    feature: 'Create job from sold work',
-    passCriteria:
-      'Scheduling API creates job/work order tied to source estimate or invoice, dispatch board UI shows entry, and DB job row stores linkage foreign keys',
-    expected: 'pass',
-  },
-  {
-    id: 'SCH-02',
-    module: 'SCH',
-    feature: 'Reschedule and assignment integrity',
-    passCriteria:
-      'Reschedule API updates window + assignee, UI calendar repositions once, and DB keeps single current assignment with prior change captured in history',
-    expected: 'pass',
-  },
-
-  // ----- SMS -----
-  {
-    id: 'SMS-01',
-    module: 'SMS',
-    feature: 'Outbound transactional SMS',
-    passCriteria:
-      'Send endpoint returns provider message id, UI conversation timeline appends outbound event, and DB message log persists status + provider identifiers',
-    expected: 'partial',
-  },
-  {
-    id: 'SMS-02',
-    module: 'SMS',
-    feature: 'Inbound reply threading',
-    passCriteria:
-      'Inbound webhook attaches reply to correct thread/job in API response, UI thread updates in order, and DB links inbound row by conversation foreign key',
-    expected: 'partial',
-  },
-
-  // ----- Payments edge -----
-  {
-    id: 'PAY-01',
-    module: 'PAY',
-    feature: 'Idempotent webhook handling',
-    passCriteria:
-      'Duplicate webhook deliveries produce one financial side effect, UI payment activity shows single entry, and DB unique event key prevents duplicates',
-    expected: 'partial',
-  },
-  {
-    id: 'PAY-02',
-    module: 'PAY',
-    feature: 'Failed/partial payment recovery',
-    passCriteria:
-      'Decline or partial-capture event sets recoverable status via API, UI surfaces retry call-to-action, and DB records failure code with unchanged principal',
-    expected: 'partial',
-  },
-
-  // ----- Voice extras -----
-  {
-    id: 'VOICE-01',
-    module: 'VOICE',
-    feature: 'Call logging sync',
-    passCriteria:
-      'Voice event ingestion maps call to customer/job context, UI activity feed shows call metadata, and DB call log row stores direction/duration/disposition',
-    expected: 'partial',
-  },
-  {
-    id: 'VOICE-02',
-    module: 'VOICE',
-    feature: 'Voicemail/transcript attachment',
-    passCriteria:
-      'Transcript or recording URL from provider webhook is retrievable by API, UI renders playback or transcript, and DB stores artifact reference + timestamps',
-    expected: 'fail',
-  },
-
-  // ----- Isolation -----
-  {
-    id: 'ISO-01',
-    module: 'ISO',
-    feature: 'Cross-tenant API denial',
-    passCriteria:
-      'Tenant B token cannot fetch Tenant A resources (404/403), UI deep-link attempt shows access denied, and DB scoped query returns zero foreign-tenant rows',
-    expected: 'pass',
-  },
-  {
-    id: 'ISO-02',
-    module: 'ISO',
-    feature: 'Cross-tenant background job isolation',
-    passCriteria:
-      'Async workers process only jobs with matching tenant context, UI audit pages show no bleed-through, and DB job execution log entries remain tenant-pure',
-    expected: 'pass',
-  },
-
-  // ----- Public portal -----
-  {
-    id: 'PORTAL-01',
-    module: 'PORTAL',
-    feature: 'Public estimate/invoice view token access',
-    passCriteria:
-      'Portal token endpoint resolves document for valid token only, public UI displays sanitized document data, and DB token lookup never exposes internal tenant ids',
-    expected: 'partial',
-  },
-  {
-    id: 'PORTAL-02',
-    module: 'PORTAL',
-    feature: 'Public acceptance/payment intent flow',
-    passCriteria:
-      'Customer accept/pay action from portal updates API state, internal UI reflects accepted/paid status, and DB writes signed acceptance/payment intent audit rows',
-    expected: 'partial',
-  },
-
-  // ----- Legacy assumptions (explicitly deprecated) -----
-  {
-    id: 'LEGACY-ESTINVAST-01',
-    module: 'LEGACY',
-    feature: 'Legacy EST/INV/AST-only matrix completeness',
-    passCriteria:
-      'Deprecated: report builder should not use EST/INV/AST-only catalog as completeness baseline for current E2E scope',
-    expected: 'na',
-    expectedReason: 'Deprecated in favor of multi-domain catalog rows above.',
-  },
-
   // ----- Provisioning / verticals -----
   {
     id: 'PROV-01',
@@ -291,8 +82,52 @@ export const MATRIX: MatrixRow[] = [
     feature: 'Create customer via AI voice session',
     passCriteria:
       'Voice session input yields a create_customer proposal; approve → executed; new customer row exists with result_entity_id',
+    expected: 'pass',
+  },
+
+  // ----- Estimates -----
+  {
+    id: 'EST-01',
+    module: 'EST',
+    feature: 'Create draft estimate',
+    passCriteria:
+      'POST /api/estimates returns 201; DB row status=draft with matching totals',
+    expected: 'pass',
+  },
+  {
+    id: 'EST-02',
+    module: 'EST',
+    feature: 'Validation errors on estimate create',
+    passCriteria: 'Invalid payload returns 4xx without persisting a row',
+    expected: 'pass',
+  },
+  {
+    id: 'EST-03',
+    module: 'EST',
+    feature: 'Edit draft estimate',
+    passCriteria: 'PUT/PATCH updates line items and DB total_cents matches',
+    expected: 'pass',
+  },
+  {
+    id: 'EST-04',
+    module: 'EST',
+    feature: 'Estimate total correctness',
+    passCriteria: 'Billing engine totals in API match DB total_cents',
+    expected: 'pass',
+  },
+  {
+    id: 'EST-05',
+    module: 'EST',
+    feature: 'Convert estimate to invoice',
+    passCriteria: 'Conversion creates invoice linked to estimate',
     expected: 'partial',
-    expectedReason: 'Requires AI_PROVIDER_API_KEY + execution worker; classifier may not map the utterance.',
+  },
+  {
+    id: 'EST-06',
+    module: 'EST',
+    feature: 'Estimate tenant isolation',
+    passCriteria: 'Tenant B cannot read Tenant A estimate',
+    expected: 'pass',
   },
 
   // ----- Billing journey (estimate → invoice → payment) -----
@@ -326,16 +161,14 @@ export const MATRIX: MatrixRow[] = [
     module: 'SCH',
     feature: 'Schedule appointment by voice (inbound)',
     passCriteria: 'Voice session scheduling utterance → create_appointment proposal → approve → executed appointment',
-    expected: 'partial',
-    expectedReason: 'Requires AI_PROVIDER_API_KEY + execution worker.',
+    expected: 'pass',
   },
   {
     id: 'SCH-03',
     module: 'SCH',
     feature: 'Cancel appointment by voice',
     passCriteria: 'Voice cancel utterance → cancel_appointment proposal → approve → executed; appointment status=canceled',
-    expected: 'partial',
-    expectedReason: 'No REST cancel; only the voice/AI path emits cancel_appointment. Requires AI + worker.',
+    expected: 'pass',
   },
   {
     id: 'SCH-04',
@@ -441,24 +274,21 @@ export const MATRIX: MatrixRow[] = [
     module: 'VOX',
     feature: 'Emergency triage fast-path (voice)',
     passCriteria: 'An emergency utterance (no-heat + gas smell) routes the session to escalation rather than a normal booking',
-    expected: 'partial',
-    expectedReason: 'Real-LLM observation; escalation surfaced via session state/side-effects.',
+    expected: 'pass',
   },
   {
     id: 'VOX-02',
     module: 'VOX',
     feature: 'Spanish / i18n voice response',
     passCriteria: 'A Spanish utterance yields a Spanish-language response (language detection / switch)',
-    expected: 'partial',
-    expectedReason: 'Real-LLM, soft language assertion; evidence captured for review.',
+    expected: 'pass',
   },
   {
     id: 'VOX-03',
     module: 'VOX',
     feature: 'DNC suppression of outbound SMS',
     passCriteria: 'A phone on the tenant DNC list receives no SMS dispatch when an estimate is sent to it',
-    expected: 'partial',
-    expectedReason: 'Needs RW conn to seed DNC + a wired send path; degrades to na if send is unavailable.',
+    expected: 'pass',
   },
   {
     id: 'VOX-04',
@@ -468,6 +298,62 @@ export const MATRIX: MatrixRow[] = [
       'Records the cases not exercisable in simulated/in-app mode: business-hours enforcement, plan caller-context, phone rate-limiting, tech "out today" SMS, dropped-call recovery, session cost caps',
     expected: 'na',
     expectedReason: 'Require live Twilio (signed webhooks / real call) or non-API config; documented, not driven.',
+  },
+  {
+    id: 'VOX-05',
+    module: 'VOX',
+    feature: 'Voice-triggered estimate draft creation',
+    passCriteria:
+      'Voice utterance yields an estimate proposal; approve → executed; estimates row exists with result_entity_id',
+    expected: 'pass',
+  },
+  {
+    id: 'VOX-06',
+    module: 'VOX',
+    feature: 'Voice-triggered estimate send transition',
+    passCriteria:
+      'Voice utterance to send an estimate yields a send proposal or send action; estimate status becomes sent in DB',
+    expected: 'pass',
+  },
+  {
+    id: 'VOX-07',
+    module: 'VOX',
+    feature: 'Voice-triggered invoice creation from sold work',
+    passCriteria:
+      'Voice utterance yields create_invoice proposal; approve → executed; invoice row linked to job exists in DB',
+    expected: 'pass',
+  },
+  {
+    id: 'VOX-08',
+    module: 'VOX',
+    feature: 'Voice-triggered invoice issue transition',
+    passCriteria:
+      'Voice utterance to issue an invoice yields issue proposal or action; invoice status=open with issued_at in DB',
+    expected: 'pass',
+  },
+  {
+    id: 'VOX-09',
+    module: 'VOX',
+    feature: 'Voice session visible in interactions timeline',
+    passCriteria:
+      'After a voice session with input, GET /api/interactions returns the session id with channel and started_at metadata',
+    expected: 'pass',
+  },
+  {
+    id: 'VOX-10',
+    module: 'VOX',
+    feature: 'Voice session artifacts / DB log linkage',
+    passCriteria:
+      'voice_sessions row exists for the session id with tenant_id, channel, started_at; proposal rows link to session context when applicable',
+    expected: 'pass',
+  },
+  {
+    id: 'VOX-11',
+    module: 'VOX',
+    feature: 'Voice-created proposal appears in proposal inbox',
+    passCriteria:
+      'Voice utterance creates a proposal; GET /api/proposals/inbox includes that proposal id for the tenant',
+    expected: 'pass',
   },
 
   // ----- Proposals / human-approval engine -----
@@ -719,6 +605,57 @@ export const MATRIX: MatrixRow[] = [
     passCriteria:
       'Public intake → lead → convert → location → job → estimate (totals checked) → estimate sent → invoice created+issued (open), each verified in the DB. The delivery/payment tail (SendGrid/Stripe) is attempted; PASS when the delivery leg is accepted, PARTIAL when it is mock/unavailable (no false pass).',
     expected: 'pass',
+  },
+
+  // ----- Legacy invoice detail rows (invoices.spec.ts; distinct from INV lifecycle) -----
+  {
+    id: 'INV-CR-01',
+    module: 'INV-CR',
+    feature: 'Create invoice (detail spec)',
+    passCriteria: 'POST /api/invoices returns 201; DB row status=draft',
+    expected: 'pass',
+  },
+  {
+    id: 'INV-CR-02',
+    module: 'INV-CR',
+    feature: 'List/filter invoices (detail spec)',
+    passCriteria: 'GET /api/invoices returns 200 with filter support or documents absence',
+    expected: 'partial',
+  },
+  {
+    id: 'INV-03',
+    module: 'INV-CR',
+    feature: 'Send/issue invoice (detail spec)',
+    passCriteria: 'Issue endpoint moves invoice to open with issued_at',
+    expected: 'partial',
+  },
+  {
+    id: 'INV-04',
+    module: 'INV-CR',
+    feature: 'Payment link generation',
+    passCriteria: 'Payment link HTTP endpoint returns 200/201',
+    expected: 'fail',
+  },
+  {
+    id: 'INV-05',
+    module: 'INV-CR',
+    feature: 'Mark paid via Stripe webhook',
+    passCriteria: 'Webhook transitions invoice to paid',
+    expected: 'fail',
+  },
+  {
+    id: 'INV-06',
+    module: 'INV-CR',
+    feature: 'Idempotent payment handling',
+    passCriteria: 'Duplicate webhook deliveries produce at most one payment row',
+    expected: 'partial',
+  },
+  {
+    id: 'INV-07',
+    module: 'INV-CR',
+    feature: 'Overdue lifecycle',
+    passCriteria: 'Past-due invoices transition to overdue or document gap',
+    expected: 'fail',
   },
 ];
 

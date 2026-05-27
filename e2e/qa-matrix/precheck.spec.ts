@@ -11,6 +11,7 @@ const REQUIRED_ENV = [
   'E2E_BASE_URL',
   'E2E_API_URL',
   'E2E_DB_URL_READONLY',
+  'E2E_DB_URL_READWRITE',
   'E2E_CLERK_HMAC_SECRET',
   'E2E_TENANT_A_ID',
   'E2E_TENANT_A_CUSTOMER_ID',
@@ -86,14 +87,13 @@ test('precheck — voice utterance generates proposal IDs (non-mock LLM path)', 
   const sessionId = created.id ?? created.sessionId;
   expect(sessionId, `Voice session create response did not include id/sessionId: ${JSON.stringify(created)}`).toBeTruthy();
 
-  const utter = await request.post(`${base}/api/voice/sessions/${sessionId}/utterances`, {
+  const utter = await request.post(`${base}/api/voice/sessions/${sessionId}/input`, {
     headers: { Authorization: `Bearer ${t.token}` },
     data: {
       text: `Create an estimate proposal for job ${t.jobId} with diagnostic labor line item for $125 total.`,
-      source: 'qa-precheck',
     },
   });
-  expect([200, 201], `Unexpected utterance status: ${utter.status()}`).toContain(utter.status());
+  expect(utter.status(), `Unexpected voice input status: ${utter.status()}`).toBe(200);
 
   const utterBody = (await utter.json()) as {
     proposalIds?: string[];
@@ -102,7 +102,7 @@ test('precheck — voice utterance generates proposal IDs (non-mock LLM path)', 
   const proposalIds = utterBody.proposalIds ?? utterBody.proposals?.map((p) => p.id) ?? [];
   expect(
     proposalIds.length,
-    `Expected utterance to return at least one proposal id (non-mock LLM signal). Body=${JSON.stringify(utterBody)}`
+    `Expected voice input to return at least one proposal id (non-mock LLM signal). Body=${JSON.stringify(utterBody)}`
   ).toBeGreaterThanOrEqual(1);
 });
 
