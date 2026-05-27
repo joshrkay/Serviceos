@@ -39,6 +39,7 @@ export type MatrixModule =
   | 'LOC'
   | 'ME'
   | 'MC'
+  | 'AST'
   | 'LEGACY';
 export type MatrixExpectation = 'pass' | 'partial' | 'fail' | 'na';
 
@@ -719,6 +720,70 @@ export const MATRIX: MatrixRow[] = [
     passCriteria:
       'Public intake → lead → convert → location → job → estimate (totals checked) → estimate sent → invoice created+issued (open), each verified in the DB. The delivery/payment tail (SendGrid/Stripe) is attempted; PASS when the delivery leg is accepted, PARTIAL when it is mock/unavailable (no false pass).',
     expected: 'pass',
+  },
+
+  // ----- Assistant (AST) — runs last; drives prior domain objects -----
+  {
+    id: 'AST-01',
+    module: 'AST',
+    feature: 'Create customer via assistant intent',
+    passCriteria:
+      'POST /api/assistant/chat surfaces a create_customer proposal (no auto-write) and no customer row is silently created in DB',
+    expected: 'fail',
+    expectedReason: 'Intent classifier returns a generic reply; no create_customer proposal type is exposed.',
+  },
+  {
+    id: 'AST-02',
+    module: 'AST',
+    feature: 'Create estimate via assistant',
+    passCriteria:
+      'Assistant chat returns an Estimate proposal for a drafting request referencing the tenant job',
+    expected: 'partial',
+    expectedReason: 'Without LLM provider creds the fallback path returns a narrative reply, not a structured Estimate proposal.',
+  },
+  {
+    id: 'AST-03',
+    module: 'AST',
+    feature: 'Revise estimate via assistant',
+    passCriteria:
+      'Assistant chat returns an Estimate revision proposal targeting the seeded draft estimate',
+    expected: 'partial',
+    expectedReason: 'No estimate-revision proposal surfaces via /api/assistant/chat.',
+  },
+  {
+    id: 'AST-04',
+    module: 'AST',
+    feature: 'Create/send invoice via assistant',
+    passCriteria:
+      'Assistant drafts an Invoice proposal and the invoice is issued (status=open with issued_at set)',
+    expected: 'partial',
+    expectedReason: 'No send_invoice proposal type; the issue/send step does not run from chat.',
+  },
+  {
+    id: 'AST-05',
+    module: 'AST',
+    feature: 'Payment status query via assistant',
+    passCriteria:
+      'Assistant answers an unpaid-invoice query with a summary consistent with DB ground truth',
+    expected: 'fail',
+    expectedReason: 'Intent classifier supports no query-type intents.',
+  },
+  {
+    id: 'AST-06',
+    module: 'AST',
+    feature: 'Failure handling + recovery',
+    passCriteria:
+      'Invalid assistant request returns 400/422 and creates no downstream estimate/invoice rows',
+    expected: 'pass',
+  },
+  {
+    id: 'AST-07',
+    module: 'AST',
+    feature: 'Multi-step orchestration (customer → estimate → invoice)',
+    passCriteria:
+      'A single assistant prompt chains customer→estimate→invoice with linked FK rows persisted in DB',
+    expected: 'fail',
+    expectedReason: 'No multi-step orchestration is wired in the assistant.',
   },
 ];
 
