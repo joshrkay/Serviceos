@@ -33,7 +33,9 @@ E2E_DB_URL_READWRITE=postgres://service-role@... \
 
 # Copy the printed `export ...` lines into your shell.
 
-# 2) Export the rest of the env (see below), then run the matrix:
+# 2) Put the rest of the env in .env.qa (copy .env.qa.example). It is
+#    auto-loaded when QA_MATRIX=1; any var already set in your shell wins.
+#    Then run the matrix:
 npm run e2e:qa-matrix
 
 # 3) Open the report:

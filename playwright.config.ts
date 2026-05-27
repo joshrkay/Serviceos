@@ -1,4 +1,6 @@
 import { defineConfig, devices } from '@playwright/test';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 /**
  * Playwright config for ServiceOS E2E tests.
@@ -9,6 +11,42 @@ import { defineConfig, devices } from '@playwright/test';
  *
  * See e2e/README.md for the full setup.
  */
+
+// qa-matrix only: auto-load .env.qa (gitignored) so operators don't have to
+// `source` it before `npm run e2e:qa-matrix`. Gap-fill only — any var already
+// set in the shell / CI environment wins, so this never clobbers CI. Empty
+// values (unfilled template lines) are ignored. Runs before the E2E_* reads
+// below so .env.qa can supply E2E_BASE_URL (which drives skipWebServer).
+if (process.env.QA_MATRIX === '1') {
+  const file = resolve(process.cwd(), '.env.qa');
+  if (existsSync(file)) {
+    let loaded = 0;
+    for (const rawLine of readFileSync(file, 'utf8').split('\n')) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const body = line.startsWith('export ') ? line.slice('export '.length).trimStart() : line;
+      const eq = body.indexOf('=');
+      if (eq <= 0) continue;
+      const key = body.slice(0, eq).trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || process.env[key] !== undefined) continue;
+      let value = body.slice(eq + 1).trim();
+      const quote = value[0];
+      if (quote === '"' || quote === "'") {
+        const end = value.indexOf(quote, 1);
+        value = end === -1 ? value.slice(1) : value.slice(1, end);
+      } else {
+        const comment = value.search(/\s#/);
+        if (comment !== -1) value = value.slice(0, comment).trim();
+      }
+      if (value === '') continue;
+      process.env[key] = value;
+      loaded++;
+    }
+    if (loaded > 0) {
+      console.log(`[qa-matrix] loaded ${loaded} var(s) from .env.qa (shell/CI values take precedence)`);
+    }
+  }
+}
 
 const isCI = !!process.env.CI;
 const baseURL = process.env.E2E_BASE_URL ?? 'http://localhost:5173';
