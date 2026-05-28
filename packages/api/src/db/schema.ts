@@ -3203,6 +3203,45 @@ export const MIGRATIONS = {
       END IF;
     END $$;
   `,
+
+  '130_force_rls_missing_tables': `
+    -- Blocker 3: FORCE row-level security on every tenant-scoped table whose
+    -- earlier migration only called ENABLE. Without FORCE, the table OWNER
+    -- (the role the app connects as on Railway) bypasses RLS, so an unscoped
+    -- query inside a connection that forgot setTenantContext could silently
+    -- leak across tenants. With FORCE the owner is subject to the same
+    -- policies as everyone else; if the GUC is missing, the policy predicate
+    -- evaluates to NULL and the row is filtered out.
+    --
+    -- Idempotent: FORCE ROW LEVEL SECURITY is a no-op when already set.
+    ALTER TABLE ai_runs FORCE ROW LEVEL SECURITY;
+    ALTER TABLE appointment_calendar_events FORCE ROW LEVEL SECURITY;
+    ALTER TABLE audit_events FORCE ROW LEVEL SECURITY;
+    ALTER TABLE call_summaries FORCE ROW LEVEL SECURITY;
+    ALTER TABLE conversations FORCE ROW LEVEL SECURITY;
+    ALTER TABLE dispatch_analytics FORCE ROW LEVEL SECURITY;
+    ALTER TABLE dropped_call_recoveries FORCE ROW LEVEL SECURITY;
+    ALTER TABLE estimate_templates FORCE ROW LEVEL SECURITY;
+    ALTER TABLE expenses FORCE ROW LEVEL SECURITY;
+    ALTER TABLE files FORCE ROW LEVEL SECURITY;
+    ALTER TABLE messages FORCE ROW LEVEL SECURITY;
+    ALTER TABLE pending_invitations FORCE ROW LEVEL SECURITY;
+    ALTER TABLE phone_rate_limits FORCE ROW LEVEL SECURITY;
+    ALTER TABLE portal_sessions FORCE ROW LEVEL SECURITY;
+    ALTER TABLE proposals FORCE ROW LEVEL SECURITY;
+    ALTER TABLE quality_metrics FORCE ROW LEVEL SECURITY;
+    ALTER TABLE service_bundles FORCE ROW LEVEL SECURITY;
+    ALTER TABLE tech_status_today FORCE ROW LEVEL SECURITY;
+    ALTER TABLE tech_unavailable_blocks FORCE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_dnc_list FORCE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_oncall_rotation FORCE ROW LEVEL SECURITY;
+    ALTER TABLE user_calendar_integrations FORCE ROW LEVEL SECURITY;
+    ALTER TABLE users FORCE ROW LEVEL SECURITY;
+    ALTER TABLE voice_recordings FORCE ROW LEVEL SECURITY;
+    ALTER TABLE voice_sessions FORCE ROW LEVEL SECURITY;
+    ALTER TABLE vulnerability_signals FORCE ROW LEVEL SECURITY;
+    ALTER TABLE wording_preferences FORCE ROW LEVEL SECURITY;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
@@ -3233,6 +3272,32 @@ export function getMigrationSQL(): string {
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * Produce the SQL that sets `app.current_tenant_id` for the current
+ * connection so RLS policies can scope queries to the tenant.
+ *
+ * **Callers must clear the GUC before returning the connection to the pool**
+ * — issue `RESET app.current_tenant_id` (or a wrapping transaction with
+ * `SET LOCAL` semantics) in the same `finally` that releases the client.
+ * Without that, the connection comes back to the pool with the previous
+ * tenant's context still set, and the next checkout silently bypasses RLS
+ * for any unscoped query until something else overwrites it. The wrappers
+ * in `pg-base.ts` enforce this; ad-hoc usages elsewhere (app.ts,
+ * voice-service.ts, provision-twilio.ts) do the same in their finally.
+ *
+ * Why plain `SET` and not `SET LOCAL`: `SET LOCAL` requires an enclosing
+ * transaction (it is silently dropped outside one), and a number of read
+ * paths intentionally run without `BEGIN/COMMIT`. Plain `SET` works in
+ * both shapes; the RESET-on-release pattern closes the leak window.
+ *
+ * Why interpolation is safe: the `UUID_REGEX` guard rejects anything other
+ * than `[0-9a-f-]{36}` before we build the string, so no attacker-controlled
+ * value ever reaches the SQL. PostgreSQL's `SET` syntax does not accept
+ * bind parameters; the equivalent `SELECT set_config(..., $1, false)`
+ * passes `(text, values)` to `client.query`, breaking the `(sql, params)`
+ * shape that the repo unit-test mocks expect. Keeping a SQL string
+ * preserves test compatibility while still closing the GUC-leak hole.
+ */
 export function setTenantContext(tenantId: string): string {
   if (!UUID_REGEX.test(tenantId)) {
     throw new Error('Invalid tenant ID format: must be a valid UUID');

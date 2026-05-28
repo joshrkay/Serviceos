@@ -1,6 +1,5 @@
 import { Pool, PoolClient, QueryResultRow } from 'pg';
 import { DatabaseClient, DatabaseConfig, QueryResult } from './connection';
-import { setTenantContext } from './schema';
 
 /**
  * Concrete Postgres implementation of DatabaseClient using node-postgres (pg).
@@ -44,11 +43,18 @@ export class PgDatabaseClient implements DatabaseClient {
   }
 
   /**
-   * Set the RLS tenant context for the current transaction.
-   * Must be called inside a transaction before any tenant-scoped queries.
+   * Deprecated. Setting tenant context via `pool.query()` acquires a
+   * fresh connection per call, so the GUC applies to a connection that
+   * is then released — the next query in this same logical operation
+   * may run on a different connection without tenant context. Use
+   * `withClient()` / `transaction()` to hold a connection and run
+   * `setTenantContext()` on it explicitly inside a transaction. Kept
+   * for the `DatabaseClient` interface contract; throws on use.
    */
-  async setTenantContext(tenantId: string): Promise<void> {
-    await this.pool.query(setTenantContext(tenantId));
+  async setTenantContext(_tenantId: string): Promise<void> {
+    throw new Error(
+      'PgDatabaseClient.setTenantContext is unsafe — acquire a client via withClient()/transaction() and run setTenantContext() on it inside a transaction instead.'
+    );
   }
 
   /**

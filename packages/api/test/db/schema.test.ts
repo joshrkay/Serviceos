@@ -87,4 +87,35 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
     expect(Object.keys(MIGRATIONS)).toContain('105_create_dispatch_analytics');
     expect(getMigrationSQL()).toContain('CREATE TABLE IF NOT EXISTS dispatch_analytics');
   });
+
+  it('Blocker 3 — every ENABLE-RLS table also FORCEs RLS', () => {
+    // Without FORCE, the table OWNER (the app's connection role) bypasses
+    // RLS, so any unscoped query inside a connection that forgot
+    // setTenantContext silently sees all tenants' rows. Migration 130 closed
+    // the gap; this guard catches future migrations that add ENABLE without
+    // its matching FORCE.
+    const sql = getMigrationSQL();
+    const enabled = new Set<string>();
+    const forced = new Set<string>();
+    for (const m of sql.matchAll(/ALTER TABLE\s+([a-z_][a-z0-9_]*)\s+ENABLE ROW LEVEL SECURITY/gi)) {
+      enabled.add(m[1]);
+    }
+    for (const m of sql.matchAll(/ALTER TABLE\s+([a-z_][a-z0-9_]*)\s+FORCE ROW LEVEL SECURITY/gi)) {
+      forced.add(m[1]);
+    }
+    const missing = [...enabled].filter((t) => !forced.has(t)).sort();
+    expect(missing, `tables with ENABLE but no FORCE RLS: ${missing.join(', ')}`).toEqual([]);
+  });
+
+  it('Blocker 3 — migration 130 is registered and covers the known gap', () => {
+    expect(Object.keys(MIGRATIONS)).toContain('130_force_rls_missing_tables');
+    const migration = MIGRATIONS['130_force_rls_missing_tables'];
+    const sample = [
+      'ai_runs', 'audit_events', 'conversations', 'files', 'messages',
+      'portal_sessions', 'proposals', 'users', 'voice_sessions', 'tenant_dnc_list',
+    ];
+    for (const table of sample) {
+      expect(migration).toContain(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
+    }
+  });
 });

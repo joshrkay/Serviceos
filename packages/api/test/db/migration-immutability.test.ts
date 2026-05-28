@@ -183,6 +183,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['127_estimate_line_item_options', 'b6c373ef8aa306b24a1ea4c12f17fd5432446c00c3f1bd761050ff4dc7185ea5'],
   ['128_estimates_accepted_selection', 'bd49424960f39937bd085b19263e7fc7d7372275ac76d5cd5f004a44c395ca71'],
   ['129_estimates_one_accepted_per_job', '1267fa8e2704f3ef25a3f4c9ff981eb63b18d98bc0a2ffa6252e5ebe7165f8bd'],
+  ['130_force_rls_missing_tables', '118b99fadd7df2d32568791a0976031e0893619e93e6c5ea199d937e28183c13'],
 ];
 
 function hashMigration(value: string): string {
