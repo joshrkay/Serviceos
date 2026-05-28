@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
 import { LanguageBadge } from '../../components/customers/LanguageBadge';
+import { formatCurrency } from '../../utils/currency';
 
 interface Lead {
   id: string;
@@ -173,7 +174,7 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
         <p className="text-sm text-slate-700">Source detail: {lead.sourceDetail ?? '—'}</p>
         <p className="text-sm text-slate-700">
           Est. value: {lead.estimatedValueCents !== undefined
-            ? `$${(lead.estimatedValueCents / 100).toFixed(2)}`
+            ? formatCurrency(lead.estimatedValueCents)
             : '—'}
         </p>
         <p className="text-sm text-slate-700">Assigned user: {lead.assignedUserId ?? '—'}</p>

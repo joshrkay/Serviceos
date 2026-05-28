@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router';
+import { formatCurrency as formatCents } from '../../utils/currency';
 import {
   ArrowLeft, Sparkles, Check, X, ChevronRight, RefreshCw,
   FileText, MessageSquare, Receipt, Briefcase, Users, Zap,
@@ -758,9 +759,6 @@ interface LiveSettingsResponse {
   activeVerticalPacks?: string[];
 }
 
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
-}
 
 export function LiveTemplateDetailModal({
   template,

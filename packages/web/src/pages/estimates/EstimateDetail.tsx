@@ -7,6 +7,7 @@ import {
   toLineItemPayload,
 } from '../../components/forms/LineItemEditor';
 import { apiFetch } from '../../utils/api-fetch';
+import { formatCurrency as formatCents } from '../../utils/currency';
 
 interface LineItem {
   id: string;
@@ -34,10 +35,6 @@ interface Estimate {
   createdAt: string;
   /** Optimistic-concurrency token sent back as If-Match on edits. */
   version?: number;
-}
-
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
 }
 
 interface EstimateDetailProps {
