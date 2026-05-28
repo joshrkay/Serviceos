@@ -3242,6 +3242,166 @@ export const MIGRATIONS = {
     ALTER TABLE vulnerability_signals FORCE ROW LEVEL SECURITY;
     ALTER TABLE wording_preferences FORCE ROW LEVEL SECURITY;
   `,
+
+  '131_appointment_assignments_no_double_booking': `
+    -- Blocker 7: prevent a technician from being assigned to two overlapping
+    -- appointments. The application-layer check in assignTechnician() is a
+    -- backstop but is subject to a TOCTOU race across concurrent requests
+    -- (two simultaneous assigns can both pass the existence check and both
+    -- INSERT). This migration adds the authoritative DB-level guard.
+    --
+    -- Design:
+    --
+    --  - The conflict is between (technician_id, time-range), but
+    --    appointment_assignments has technician_id while appointments
+    --    has scheduled_start/end. PostgreSQL EXCLUDE constraints can only
+    --    reference columns of the same row, so we denormalize the
+    --    appointment's scheduled_start/scheduled_end/status onto
+    --    appointment_assignments. The values are maintained by triggers
+    --    so application code does not have to know about them.
+    --  - A separate partial-unique index enforces at most one primary
+    --    technician per appointment (closes the second TOCTOU race in
+    --    assignTechnician's demote-then-create dance).
+    --  - btree_gist is required so the EXCLUDE constraint can mix equality
+    --    on UUID columns with range overlap on the time range in one GIST
+    --    index.
+
+    CREATE EXTENSION IF NOT EXISTS btree_gist;
+
+    -- Denormalized columns from appointments. Nullable initially so the
+    -- backfill below can run; promoted to NOT NULL once filled.
+    ALTER TABLE appointment_assignments
+      ADD COLUMN IF NOT EXISTS scheduled_start TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS scheduled_end TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS appointment_status TEXT;
+
+    UPDATE appointment_assignments aa
+       SET scheduled_start = a.scheduled_start,
+           scheduled_end = a.scheduled_end,
+           appointment_status = a.status
+      FROM appointments a
+     WHERE aa.appointment_id = a.id
+       AND aa.tenant_id = a.tenant_id
+       AND (aa.scheduled_start IS NULL OR aa.scheduled_end IS NULL OR aa.appointment_status IS NULL);
+
+    -- Any rows still missing values point at a deleted/missing appointment
+    -- — orphans that the FK should have prevented. Promote the columns to
+    -- NOT NULL only after confirming the backfill covered everything.
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM appointment_assignments
+         WHERE scheduled_start IS NULL OR scheduled_end IS NULL OR appointment_status IS NULL
+      ) THEN
+        RAISE WARNING 'appointment_assignments has rows with missing denormalized fields after backfill; leaving NULLable. Reconcile and re-deploy to enable NOT NULL.';
+      ELSE
+        ALTER TABLE appointment_assignments
+          ALTER COLUMN scheduled_start SET NOT NULL,
+          ALTER COLUMN scheduled_end SET NOT NULL,
+          ALTER COLUMN appointment_status SET NOT NULL;
+      END IF;
+    END $$;
+
+    -- Trigger 1 — fill denorm fields on INSERT (or when appointment_id
+    -- changes on UPDATE) by reading from the appointment row. Application
+    -- code does not need to supply scheduled_start/end/status.
+    CREATE OR REPLACE FUNCTION sync_assignment_appointment_fields()
+    RETURNS TRIGGER AS $$
+    DECLARE
+      appt_row RECORD;
+    BEGIN
+      SELECT scheduled_start, scheduled_end, status
+        INTO appt_row
+        FROM appointments
+       WHERE id = NEW.appointment_id AND tenant_id = NEW.tenant_id;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'Appointment % not found for tenant % when syncing assignment fields',
+          NEW.appointment_id, NEW.tenant_id;
+      END IF;
+      NEW.scheduled_start := appt_row.scheduled_start;
+      NEW.scheduled_end := appt_row.scheduled_end;
+      NEW.appointment_status := appt_row.status;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_assignment_sync_appointment_fields ON appointment_assignments;
+    CREATE TRIGGER trg_assignment_sync_appointment_fields
+      BEFORE INSERT OR UPDATE OF appointment_id ON appointment_assignments
+      FOR EACH ROW EXECUTE FUNCTION sync_assignment_appointment_fields();
+
+    -- Trigger 2 — propagate scheduled_start/end/status changes from
+    -- appointments down to every assignment that points at the row.
+    -- Rescheduling an appointment INTO a conflict will surface as an
+    -- exclusion_violation from this UPDATE, which is the correct outcome.
+    CREATE OR REPLACE FUNCTION sync_appointment_to_assignments()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF (NEW.scheduled_start IS DISTINCT FROM OLD.scheduled_start
+          OR NEW.scheduled_end IS DISTINCT FROM OLD.scheduled_end
+          OR NEW.status IS DISTINCT FROM OLD.status) THEN
+        UPDATE appointment_assignments
+           SET scheduled_start = NEW.scheduled_start,
+               scheduled_end = NEW.scheduled_end,
+               appointment_status = NEW.status
+         WHERE appointment_id = NEW.id AND tenant_id = NEW.tenant_id;
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_appointments_sync_to_assignments ON appointments;
+    CREATE TRIGGER trg_appointments_sync_to_assignments
+      AFTER UPDATE ON appointments
+      FOR EACH ROW EXECUTE FUNCTION sync_appointment_to_assignments();
+
+    -- EXCLUDE constraint — only added when no pre-existing overlaps remain.
+    -- If overlaps exist (legacy data), we WARN and skip; operators must
+    -- reconcile then re-deploy. We never silently downgrade to a weaker
+    -- check, because that would mask the bug we are closing.
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1
+          FROM appointment_assignments aa1
+          JOIN appointment_assignments aa2
+            ON aa2.tenant_id = aa1.tenant_id
+           AND aa2.technician_id = aa1.technician_id
+           AND aa2.id <> aa1.id
+         WHERE aa1.appointment_status IS NOT NULL
+           AND aa2.appointment_status IS NOT NULL
+           AND aa1.appointment_status NOT IN ('canceled', 'no_show')
+           AND aa2.appointment_status NOT IN ('canceled', 'no_show')
+           AND aa1.scheduled_start IS NOT NULL
+           AND aa1.scheduled_end IS NOT NULL
+           AND aa2.scheduled_start IS NOT NULL
+           AND aa2.scheduled_end IS NOT NULL
+           AND tstzrange(aa1.scheduled_start, aa1.scheduled_end)
+               && tstzrange(aa2.scheduled_start, aa2.scheduled_end)
+      ) THEN
+        RAISE WARNING 'Pre-existing overlapping technician assignments detected; skipping no_double_booking EXCLUDE constraint. Reconcile then re-deploy.';
+      ELSE
+        ALTER TABLE appointment_assignments
+          DROP CONSTRAINT IF EXISTS no_double_booking;
+        ALTER TABLE appointment_assignments
+          ADD CONSTRAINT no_double_booking
+          EXCLUDE USING gist (
+            tenant_id WITH =,
+            technician_id WITH =,
+            tstzrange(scheduled_start, scheduled_end) WITH &&
+          )
+          WHERE (appointment_status NOT IN ('canceled', 'no_show'));
+      END IF;
+    END $$;
+
+    -- Partial unique — closes the demote-then-create race in
+    -- assignTechnician. Without this, two concurrent primary assigns can
+    -- both pass the demote step and both INSERT is_primary = true.
+    DROP INDEX IF EXISTS uq_assignment_primary_per_appointment;
+    CREATE UNIQUE INDEX uq_assignment_primary_per_appointment
+      ON appointment_assignments (tenant_id, appointment_id)
+      WHERE is_primary;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

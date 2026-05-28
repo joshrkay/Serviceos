@@ -118,4 +118,31 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
       expect(migration).toContain(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
     }
   });
+
+  it('Blocker 7 — migration 131 installs the double-booking exclusion guard', () => {
+    expect(Object.keys(MIGRATIONS)).toContain('131_appointment_assignments_no_double_booking');
+    const migration = MIGRATIONS['131_appointment_assignments_no_double_booking'];
+    // Required pieces:
+    //  - btree_gist extension (needed for `=` on UUID inside a GIST index)
+    //  - denormalized scheduled_start/scheduled_end/status columns
+    //  - backfill from the appointments row
+    //  - sync triggers (assignment ← appointment, appointment → assignments)
+    //  - the EXCLUDE constraint itself, gated on no-pre-existing-conflicts
+    //  - partial unique index for at-most-one-primary-per-appointment
+    expect(migration).toContain('CREATE EXTENSION IF NOT EXISTS btree_gist');
+    expect(migration).toContain('ADD COLUMN IF NOT EXISTS scheduled_start TIMESTAMPTZ');
+    expect(migration).toContain('ADD COLUMN IF NOT EXISTS scheduled_end TIMESTAMPTZ');
+    expect(migration).toContain('ADD COLUMN IF NOT EXISTS appointment_status TEXT');
+    expect(migration).toContain('UPDATE appointment_assignments aa');
+    expect(migration).toContain('CREATE OR REPLACE FUNCTION sync_assignment_appointment_fields');
+    expect(migration).toContain('CREATE OR REPLACE FUNCTION sync_appointment_to_assignments');
+    expect(migration).toContain('trg_assignment_sync_appointment_fields');
+    expect(migration).toContain('trg_appointments_sync_to_assignments');
+    expect(migration).toContain('CONSTRAINT no_double_booking');
+    expect(migration).toContain('EXCLUDE USING gist');
+    expect(migration).toContain('tstzrange(scheduled_start, scheduled_end) WITH &&');
+    expect(migration).toContain("WHERE (appointment_status NOT IN ('canceled', 'no_show'))");
+    expect(migration).toContain('uq_assignment_primary_per_appointment');
+    expect(migration).toMatch(/WHERE is_primary/);
+  });
 });
