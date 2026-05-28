@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { validateAppointmentTimes, validateAppointmentUpdateInput } from './validation';
+import { assertValidAppointmentTransition } from './appointment-lifecycle';
 import { VALID_TIMEZONES } from '../settings/settings';
 import { toUtcDate } from './time';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
@@ -242,6 +243,15 @@ export async function updateAppointment(
   const validation = validateAppointmentUpdateInput(existing, input);
   if (validation.errors.length > 0) throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
 
+  // Status lifecycle enforcement. When a status is supplied AND differs
+  // from the persisted value, ensure the transition is in the allowed set
+  // (e.g. `completed` is terminal — nothing transitions out of it). The
+  // helper accepts self-transitions so proposal-execution dedup that
+  // replays the same status update isn't rejected as a 400.
+  if (input.status !== undefined) {
+    assertValidAppointmentTransition(existing.status, input.status);
+  }
+
   const normalizedTimes = normalizeAppointmentTimeUpdates(input);
   const updated = await repository.update(tenantId, id, {
     ...input,
@@ -260,6 +270,24 @@ export async function updateAppointment(
       metadata: { changes: Object.keys(input) },
     });
     await auditRepo.create(event);
+
+    // Emit a dedicated `appointment.status_changed` event when the status
+    // actually moved (skip on self-transition or when status wasn't in the
+    // patch). Downstream observers — dispatch dashboards, analytics —
+    // subscribe to the specific event type rather than scanning every
+    // generic `appointment.updated` payload.
+    if (input.status !== undefined && input.status !== existing.status) {
+      const statusEvent = createAuditEvent({
+        tenantId,
+        actorId,
+        actorRole: actorRole ?? 'unknown',
+        eventType: 'appointment.status_changed',
+        entityType: 'appointment',
+        entityId: id,
+        metadata: { from: existing.status, to: input.status },
+      });
+      await auditRepo.create(statusEvent);
+    }
   }
 
   return updated;
