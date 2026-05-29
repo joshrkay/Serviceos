@@ -4,6 +4,7 @@ import { ClerkProvider } from '@clerk/clerk-react';
 import { RouterProvider } from 'react-router';
 import { router } from './routes';
 import { AuthTokenBridge } from './components/auth/AuthTokenBridge';
+import { TenantTimezoneProvider } from './hooks/useTenantTimezone';
 import { getRuntimeConfigValue } from './lib/runtimeConfig';
 import './index.css';
 
@@ -24,7 +25,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       afterSignOutUrl="/login"
     >
       <AuthTokenBridge />
-      <RouterProvider router={router} />
+      <TenantTimezoneProvider>
+        <RouterProvider router={router} />
+      </TenantTimezoneProvider>
     </ClerkProvider>
   </React.StrictMode>
 );

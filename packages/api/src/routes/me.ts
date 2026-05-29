@@ -46,7 +46,19 @@ export interface MeTenantSettings {
     | 'queue_and_sms'
     | 'queue_only'
     | 'escalate_to_oncall';
+  /**
+   * IANA timezone identifier for the business (e.g. `America/New_York`).
+   * Stored on `tenant_settings.timezone` (default `America/New_York`,
+   * see migration 013). Surfaces here so the web client renders dates
+   * in the tenant's local time rather than the viewer's browser-local
+   * time. CLAUDE.md core pattern: "All times: stored UTC, rendered in
+   * tenant timezone".
+   */
+  timezone: string;
 }
+
+/** Safe default when tenant_settings is missing a timezone row. */
+export const DEFAULT_TENANT_TIMEZONE = 'America/New_York';
 
 /**
  * Persistence seam for the /api/me endpoints. Implementations talk to
@@ -117,6 +129,10 @@ export function createMeRouter(
           backup_supervisor_user_id: settings.backup_supervisor_user_id,
           unsupervised_proposal_routing:
             settings.unsupervised_proposal_routing,
+          // Business timezone so the web client can render UTC instants
+          // in the tenant's local time (appointments, invoice dates,
+          // dashboard buckets, etc.).
+          timezone: settings.timezone,
           integration_statuses: integrationStatuses.map((s) => ({
             provider: s.provider,
             status: s.status,
@@ -233,6 +249,7 @@ export class InMemoryUserModeService implements UserModeService {
       this.settings.get(tenantId) ?? {
         backup_supervisor_user_id: null,
         unsupervised_proposal_routing: 'queue_and_sms',
+        timezone: DEFAULT_TENANT_TIMEZONE,
       }
     );
   }
