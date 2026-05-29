@@ -1,4 +1,5 @@
 import React, { useCallback, useMemo } from 'react';
+import { formatCurrency as formatUSD } from '../../utils/currency';
 
 /**
  * Editable line item shape — what the editor renders/maintains internally.
@@ -95,10 +96,6 @@ export function totalCents(items: LineItemDraft[]): number {
     if (!Number.isFinite(qty) || !Number.isFinite(dollars)) return sum;
     return sum + Math.round(dollars * 100 * (qty < 0 ? 0 : qty));
   }, 0);
-}
-
-function formatUSD(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
 }
 
 const inputCls =

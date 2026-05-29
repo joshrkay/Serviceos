@@ -89,7 +89,7 @@ describe('InvoicesPage', () => {
 
   it('formats totalCents as dollars', () => {
     renderPage();
-    expect(screen.getAllByText('$1200.00').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('$1,200.00').length).toBeGreaterThan(0);
     expect(screen.getAllByText('$850.00').length).toBeGreaterThan(0);
   });
 
@@ -103,8 +103,8 @@ describe('InvoicesPage', () => {
 
   it('shows outstanding total', () => {
     renderPage();
-    // only open invoice: $1200.00 outstanding (may appear multiple times)
-    expect(screen.getAllByText('$1200.00').length).toBeGreaterThan(0);
+    // only open invoice: $1,200.00 outstanding (may appear multiple times)
+    expect(screen.getAllByText('$1,200.00').length).toBeGreaterThan(0);
   });
 
   it('shows total invoice count', () => {

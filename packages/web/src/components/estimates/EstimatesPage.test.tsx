@@ -83,10 +83,10 @@ describe('EstimatesPage', () => {
     expect(screen.getByText('EST-002')).toBeInTheDocument();
   });
 
-  it('formats totalCents as dollars', () => {
+  it('formats totalCents as dollars (with thousands separator)', () => {
     renderPage();
-    expect(screen.getByText('$1500.00')).toBeInTheDocument();
-    expect(screen.getByText('$2800.00')).toBeInTheDocument();
+    expect(screen.getByText('$1,500.00')).toBeInTheDocument();
+    expect(screen.getByText('$2,800.00')).toBeInTheDocument();
   });
 
   it('normalizes API statuses to UI labels', () => {

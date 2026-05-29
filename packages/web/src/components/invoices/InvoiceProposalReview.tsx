@@ -1,4 +1,5 @@
 import React from 'react';
+import { formatCurrency as formatCents } from '../../utils/currency';
 
 export interface InvoiceLineItem {
   description: string;
@@ -29,10 +30,6 @@ export interface InvoiceProposalReviewProps {
   onEdit?: (proposalId: string) => void;
   onApprove?: (proposalId: string) => void;
   onReject?: (proposalId: string) => void;
-}
-
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
 }
 
 function formatBps(bps: number): string {

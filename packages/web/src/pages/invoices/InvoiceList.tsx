@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ListPage, Column } from '../../components/ListPage';
 import { useListQuery } from '../../hooks/useListQuery';
 import { FilterConfig } from '../../components/FilterBar';
+import { formatCurrency as formatCents } from '../../utils/currency';
 
 interface Invoice {
   id: string;
@@ -10,10 +11,6 @@ interface Invoice {
   totalCents: number;
   amountDueCents: number;
   dueDate?: string;
-}
-
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
 }
 
 const filters: FilterConfig[] = [

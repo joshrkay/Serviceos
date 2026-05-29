@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import { Archive, Pencil, Upload, X } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
+import { formatCurrency } from '../../utils/currency';
 import { apiFetch } from '../../utils/api-fetch';
 
 interface PriceBookItem {
@@ -50,7 +51,7 @@ const DEFAULT_FORM_STATE: PriceBookFormState = {
 
 function formatPriceFromCents(value: number | undefined): string {
   if (!Number.isFinite(value)) return '$0.00';
-  return `$${((value ?? 0) / 100).toFixed(2)}`;
+  return formatCurrency(value ?? 0);
 }
 
 function parseCsvRecords(csvText: string): string[] {

@@ -1,4 +1,5 @@
 import React, { useState, useCallback } from 'react';
+import { formatCurrency as formatCents } from '../../utils/currency';
 
 export type PaymentMethod = 'cash' | 'check' | 'credit_card' | 'bank_transfer' | 'other';
 
@@ -15,10 +16,6 @@ export interface PaymentFormData {
   method: PaymentMethod;
   note: string;
   receivedDate: string;
-}
-
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
 }
 
 const PAYMENT_METHODS: { value: PaymentMethod; label: string }[] = [
