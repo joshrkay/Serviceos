@@ -3402,6 +3402,29 @@ export const MIGRATIONS = {
       ON appointment_assignments (tenant_id, appointment_id)
       WHERE is_primary;
   `,
+
+  '132_customer_consent_status': `
+    -- Blocker 11 (TCPA / DNC compliance for voice-on launch).
+    --
+    -- An outbound AI call to a US number requires either prior express
+    -- consent (autodialer / pre-recorded message) or a documented
+    -- business relationship under the TCPA Safe Harbor. We store the
+    -- per-customer consent decision so the outbound gate can refuse a
+    -- call when the customer hasn't opted in.
+    --
+    -- The DNC list (\`tenant_dnc_list\`, migration 052) is the
+    -- tenant-local opt-out registry; a number on that list overrides
+    -- any granted consent.
+    --
+    -- Default 'not_requested' so existing rows don't accidentally
+    -- become 'granted' (which would be the riskiest possible default).
+    ALTER TABLE customers
+      ADD COLUMN IF NOT EXISTS consent_status TEXT NOT NULL DEFAULT 'not_requested'
+        CHECK (consent_status IN ('not_requested', 'granted', 'revoked', 'expired')),
+      ADD COLUMN IF NOT EXISTS consent_recorded_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS consent_recorded_by TEXT,
+      ADD COLUMN IF NOT EXISTS consent_method TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

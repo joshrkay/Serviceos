@@ -185,6 +185,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['129_estimates_one_accepted_per_job', '1267fa8e2704f3ef25a3f4c9ff981eb63b18d98bc0a2ffa6252e5ebe7165f8bd'],
   ['130_force_rls_missing_tables', '118b99fadd7df2d32568791a0976031e0893619e93e6c5ea199d937e28183c13'],
   ['131_appointment_assignments_no_double_booking', '27484d3c8eef021201ccd827419b3cbbec8516c14868759543b0f16d7ba3f295'],
+  ['132_customer_consent_status', 'd4d2d0b5de1471a746cb9db7757630e27ef5a0f45e4fd61ad9c236645c49396d'],
 ];
 
 function hashMigration(value: string): string {
