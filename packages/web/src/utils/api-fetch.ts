@@ -155,7 +155,7 @@ export async function apiFetch(
 
   const response = await fetch(input, { ...init, headers });
 
-  if (response.status !== 401) return response;
+  if (response.status !== 401 || !getToken) return response;
 
   // 401 — single retry with a force-refreshed token before giving up.
   // Covers the normal token-expiry case without bouncing the user.
