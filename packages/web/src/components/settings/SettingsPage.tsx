@@ -22,6 +22,7 @@ import { PaymentMethodsSheet } from './PaymentMethodsSheet';
 import { VerticalPacksSheet } from './VerticalPacksSheet';
 import { CallRoutingSheet } from './CallRoutingSheet';
 import { OperatorHoursSheet } from './OperatorHoursSheet';
+import { DncListSheet } from './DncListSheet';
 import {
   fetchLanguageSettings,
   updateLanguageSettings,
@@ -148,6 +149,7 @@ export function SettingsPage() {
   const [paymentMethodsOpen, setPaymentMethodsOpen] = useState(false);
   const [verticalPacksOpen, setVerticalPacksOpen] = useState(false);
   const [callRoutingOpen, setCallRoutingOpen] = useState(false);
+  const [dncListOpen, setDncListOpen] = useState(false);
   const [operatorHoursOpen, setOperatorHoursOpen] = useState(false);
   // Tier 4 (Calendar sync — PR 1). Auto-open the sheet + toast when
   // the user lands back here from Google's OAuth redirect. The
@@ -323,6 +325,7 @@ export function SettingsPage() {
         { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => navigate('/settings/templates') },
         { icon: Clock,    label: 'Operator hours',                  description: 'Business hours for after-hours call routing', action: () => setOperatorHoursOpen(true) },
         { icon: Zap,      label: 'Call routing & handoff',          description: 'Channels, triggers, and after-hours behavior', action: () => setCallRoutingOpen(true) },
+        { icon: Zap,      label: 'Do-Not-Call list',                description: 'Numbers blocked from outbound calls (TCPA / DNC)', action: () => setDncListOpen(true) },
       ],
     },
     {
@@ -768,6 +771,10 @@ export function SettingsPage() {
       <OperatorHoursSheet
         open={operatorHoursOpen}
         onOpenChange={setOperatorHoursOpen}
+      />
+      <DncListSheet
+        open={dncListOpen}
+        onOpenChange={setDncListOpen}
       />
     </div>
   );

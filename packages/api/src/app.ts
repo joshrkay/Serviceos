@@ -73,6 +73,7 @@ import {
 } from './ai/supervisor-presence';
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
+import { createDncRouter } from './routes/dnc';
 import { createVerticalRouter } from './routes/verticals';
 import { createVerticalTrainingAssetsRouter } from './routes/vertical-training-assets';
 import { createTemplateRouter } from './routes/templates';
@@ -2848,6 +2849,7 @@ export function createApp(): express.Express {
   app.use('/api/me', createMeRouter(userModeService, auditRepo));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use('/api/conversations', createConversationRouter(conversationRepo, auditRepo));
+  app.use('/api/dnc', createDncRouter({ dncRepo, auditRepo }));
 
   app.use(
     '/api/settings',
