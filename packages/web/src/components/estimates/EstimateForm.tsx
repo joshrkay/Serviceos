@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Sparkles } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
+import { formatCurrency } from '../../utils/currency';
 import {
   LineItemEditor,
   LineItemDraft,
@@ -227,7 +228,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
   );
 
   const total = totalCents(form.items);
-  const totalDisplay = `$${(total / 100).toFixed(2)}`;
+  const totalDisplay = formatCurrency(total);
 
   return (
     <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-3xl mx-auto">

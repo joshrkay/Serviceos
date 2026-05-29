@@ -8,6 +8,7 @@ import { ListPage, Column } from '../../components/ListPage';
 import { useListQuery } from '../../hooks/useListQuery';
 import { FilterConfig } from '../../components/FilterBar';
 import type { Agreement } from '../../api/agreements';
+import { formatCurrency } from '../../utils/currency';
 
 const filters: FilterConfig[] = [
   {
@@ -42,7 +43,7 @@ export function AgreementList(): JSX.Element {
     {
       key: 'price',
       header: 'Price',
-      render: (a) => `$${(a.priceCents / 100).toFixed(2)}`,
+      render: (a) => formatCurrency(a.priceCents),
     },
     { key: 'cadence', header: 'Cadence', render: (a) => a.recurrenceRule },
     {

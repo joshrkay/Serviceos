@@ -13,6 +13,7 @@ import {
 import { loadStripe, Stripe } from '@stripe/stripe-js';
 import { useInvoiceStatus } from '../../hooks/useInvoiceStatus';
 import { getRuntimeConfigValue } from '../../lib/runtimeConfig';
+import { formatCurrencyAmount } from '../../utils/currency';
 
 // ─── API types ──────────────────────────────────────────────────────────────
 
@@ -52,9 +53,11 @@ interface PublicInvoiceView {
   depositCreditCents?: number;
 }
 
-function formatMoney(cents: number) {
-  return (cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
+// `$` is rendered by the surrounding JSX (`${formatMoney(...)}`), so the
+// helper returns the amount without a currency symbol. Delegates to the
+// canonical formatter in utils/currency so this page stays in lock-step
+// with `formatCurrency` / `centsToDisplay` (same separators, same cents).
+const formatMoney = formatCurrencyAmount;
 
 function formatDate(iso?: string) {
   if (!iso) return '';

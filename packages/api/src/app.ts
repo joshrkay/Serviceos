@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -560,6 +561,78 @@ export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0
   };
 }
 
+/**
+ * Result of the /metrics auth pre-check. `ok: true` means the route should
+ * render metrics; any other value is the HTTP response to send instead.
+ *
+ * Exported so a focused unit test can assert the auth contract without
+ * booting the full app (which requires Pg in prod/staging).
+ */
+export type MetricsAuthResult =
+  | { ok: true }
+  | { ok: false; status: number; body: Record<string, string>; headers?: Record<string, string> };
+
+/**
+ * Gate the /metrics endpoint behind a shared bearer token.
+ *
+ *  - `METRICS_TOKEN` unset + dev/test → unauthenticated scrape allowed
+ *    (so local Prometheus and ad-hoc curl keep working).
+ *  - `METRICS_TOKEN` unset + prod/staging → 503; refuse rather than
+ *    silently degrade to open access on a public hostname.
+ *  - `METRICS_TOKEN` set → require an `Authorization: Bearer <token>`
+ *    that matches under `crypto.timingSafeEqual`. Anything else → 401
+ *    with `WWW-Authenticate: Bearer`.
+ *
+ * Why a shared token (vs a real OIDC/JWT flow): the scraper is a service,
+ * not a user, and the value rotates with the deploy. A token in the
+ * Railway env + the matching value in the Prometheus scrape config is the
+ * smallest moving piece that still closes the public-enumeration hole.
+ */
+export function checkMetricsAuth(
+  authorizationHeader: string | undefined,
+  envToken: string | undefined,
+  nodeEnv: string | undefined,
+): MetricsAuthResult {
+  const isProdEnv =
+    nodeEnv === 'production' || nodeEnv === 'prod' || nodeEnv === 'staging';
+
+  if (!envToken) {
+    if (isProdEnv) {
+      return {
+        ok: false,
+        status: 503,
+        body: {
+          error: 'METRICS_AUTH_NOT_CONFIGURED',
+          message: 'METRICS_TOKEN must be set when NODE_ENV is prod/staging.',
+        },
+      };
+    }
+    return { ok: true };
+  }
+
+  const presented =
+    typeof authorizationHeader === 'string' && authorizationHeader.startsWith('Bearer ')
+      ? authorizationHeader.slice('Bearer '.length).trim()
+      : '';
+  const expectedBuf = Buffer.from(envToken, 'utf8');
+  const presentedBuf = Buffer.from(presented, 'utf8');
+  // crypto.timingSafeEqual throws when buffers differ in length, so we
+  // gate it on a same-length pre-check.
+  const tokenOk =
+    presentedBuf.length === expectedBuf.length &&
+    crypto.timingSafeEqual(presentedBuf, expectedBuf);
+
+  if (!tokenOk) {
+    return {
+      ok: false,
+      status: 401,
+      body: { error: 'UNAUTHORIZED', message: 'Invalid or missing bearer token.' },
+      headers: { 'WWW-Authenticate': 'Bearer realm="metrics"' },
+    };
+  }
+  return { ok: true };
+}
+
 export function createApp(): express.Express {
   // §11 H3: Initialize Sentry FIRST so any error thrown during startup
   // or in handler construction below is captured. initSentry() is a no-op
@@ -695,9 +768,23 @@ export function createApp(): express.Express {
     createAiHealthRouter(registry)(req, res, next);
   });
 
-  // Prometheus metrics. Mounted on the public surface deliberately —
-  // production should rely on network-level allowlist (ingress / VPC).
-  app.get('/metrics', async (_req, res) => {
+  // Prometheus metrics — gated by `checkMetricsAuth` (METRICS_TOKEN bearer).
+  // The endpoint exposes tenant ids, request volumes, and pool counts, so
+  // network-level allowlists alone are not enough on a public hostname.
+  app.get('/metrics', async (req, res) => {
+    const auth = checkMetricsAuth(
+      req.headers.authorization,
+      process.env.METRICS_TOKEN,
+      process.env.NODE_ENV,
+    );
+    if (!auth.ok) {
+      if (auth.headers) {
+        for (const [k, v] of Object.entries(auth.headers)) res.setHeader(k, v);
+      }
+      res.status(auth.status).json(auth.body);
+      return;
+    }
+
     try {
       const { renderMetrics } = await import('./monitoring/metrics');
       const { contentType, body } = await renderMetrics();
@@ -824,9 +911,14 @@ export function createApp(): express.Express {
           rows = result.rows;
           await client.query('COMMIT');
         } catch (err) {
-          await client.query('ROLLBACK');
+          try { await client.query('ROLLBACK'); } catch { /* best-effort */ }
           throw err;
         } finally {
+          // GUC leak fix: plain `SET app.current_tenant_id` persists past
+          // COMMIT/ROLLBACK on the underlying connection. Clear it before
+          // release so the next pool checkout doesn't inherit this
+          // tenant's context.
+          try { await client.query('RESET app.current_tenant_id'); } catch { /* ignore */ }
           client.release();
         }
         const row = rows[0];

@@ -109,8 +109,8 @@ describe('Thread 2 — EstimateList → /api/estimates → rendered rows', () =>
 
     render(<EstimateList />);
     await screen.findByText('EST-0007');
-    // centsToDisplay(150000) = '$1500.00'
-    expect(screen.getByText('$1500.00')).toBeInTheDocument();
+    // centsToDisplay(150000) = '$1,500.00' (with thousands separator)
+    expect(screen.getByText('$1,500.00')).toBeInTheDocument();
   });
 
   it('formats different cent amounts correctly', async () => {
