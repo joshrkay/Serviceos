@@ -60,6 +60,7 @@ import { createPaymentRouter } from './routes/payments';
 import { createNoteRouter } from './routes/notes';
 import {
   createMeRouter,
+  DEFAULT_TENANT_TIMEZONE,
   InMemoryUserModeService,
   type MeUserRecord,
   type MeTenantSettings,
@@ -2763,14 +2764,16 @@ export function createApp(): express.Express {
         async getTenantSettings(tenantId) {
           const r = await pool.query(
             `SELECT backup_supervisor_user_id,
-                    COALESCE(unsupervised_proposal_routing, 'queue_and_sms') AS unsupervised_proposal_routing
+                    COALESCE(unsupervised_proposal_routing, 'queue_and_sms') AS unsupervised_proposal_routing,
+                    COALESCE(timezone, $2) AS timezone
              FROM tenant_settings WHERE tenant_id = $1 LIMIT 1`,
-            [tenantId],
+            [tenantId, DEFAULT_TENANT_TIMEZONE],
           );
           if (r.rowCount === 0) {
             return {
               backup_supervisor_user_id: null,
               unsupervised_proposal_routing: 'queue_and_sms',
+              timezone: DEFAULT_TENANT_TIMEZONE,
             } as MeTenantSettings;
           }
           const row = r.rows[0] as Record<string, unknown>;
@@ -2780,6 +2783,7 @@ export function createApp(): express.Express {
               : null,
             unsupervised_proposal_routing:
               row.unsupervised_proposal_routing as MeTenantSettings['unsupervised_proposal_routing'],
+            timezone: String(row.timezone),
           };
         },
         async getTenantIntegrationStatuses(tenantId) {

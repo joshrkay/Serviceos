@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useApiClient } from '../../lib/apiClient';
 import { emitProposalsChanged } from '../../lib/proposal-events';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatInTenantTz } from '../../utils/formatInTenantTz';
 
 type Urgency = 'critical' | 'high' | 'normal' | 'low';
 
@@ -17,13 +19,18 @@ interface InboxProposalRow {
   reason?: string;
 }
 
-function holdExpiryLine(row: InboxProposalRow): string | null {
+function holdExpiryLine(row: InboxProposalRow, timezone: string): string | null {
   if (row.proposal.proposalType !== 'create_booking' || !row.proposal.expiresAt) {
     return null;
   }
   const at = new Date(row.proposal.expiresAt);
   if (Number.isNaN(at.getTime())) return null;
-  return `Hold expires ${at.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`;
+  return `Hold expires ${formatInTenantTz(at, timezone, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })}`;
 }
 
 interface InboxSummary {
@@ -49,6 +56,7 @@ const URGENCY_BADGE: Record<Urgency, { label: string; classes: string }> = {
 
 export function InboxPage() {
   const apiFetch = useApiClient();
+  const tz = useTenantTimezone();
   const [rows, setRows] = useState<InboxProposalRow[]>([]);
   const [summary, setSummary] = useState<InboxSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -138,8 +146,8 @@ export function InboxPage() {
                       <span className="text-xs text-slate-500">{row.proposal.proposalType}</span>
                     </div>
                     <p className="text-sm text-slate-900 font-medium truncate">{row.proposal.summary}</p>
-                    {holdExpiryLine(row) && (
-                      <p className="text-xs text-amber-700 mt-0.5">{holdExpiryLine(row)}</p>
+                    {holdExpiryLine(row, tz) && (
+                      <p className="text-xs text-amber-700 mt-0.5">{holdExpiryLine(row, tz)}</p>
                     )}
                     {row.reason && <p className="text-xs text-slate-500 mt-0.5">{row.reason}</p>}
                   </div>
