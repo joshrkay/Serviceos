@@ -17,6 +17,8 @@ import { StatusBadge } from '../shared/StatusBadge';
 import { TimeGivenBackCard } from './TimeGivenBackCard';
 import { MoneyLoopHomeCard } from './MoneyLoopHomeCard';
 import { ErrorState } from '../ErrorState';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatDateInTenantTz, formatTimeInTenantTz } from '../../utils/formatInTenantTz';
 
 // ─── API Types ────────────────────────────────────────────────────────────
 interface ApiJob {
@@ -78,14 +80,14 @@ function customerName(c?: ApiJob['customer']): string {
   return c.displayName || [c.firstName, c.lastName].filter(Boolean).join(' ') || 'Customer';
 }
 
-function formatTime(iso?: string): string | null {
+function formatTime(iso: string | undefined, timezone: string): string | null {
   if (!iso) return null;
-  return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  return formatTimeInTenantTz(iso, timezone);
 }
 
-function formatDate(iso?: string): string {
+function formatDate(iso: string | undefined, timezone: string): string {
   if (!iso) return '';
-  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return formatDateInTenantTz(iso, timezone);
 }
 
 function todayIso(): string {
@@ -153,6 +155,7 @@ function AttentionRow({
 
 // ─── Compact job row ──────────────────────────────────────────────────────
 function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
+  const tz = useTenantTimezone();
   const svc = SVC[job.serviceType ?? ''] ?? SVC.HVAC;
   const name = customerName(job.customer);
   const uiStatus = normalizeJobStatus(job.status);
@@ -160,7 +163,7 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
     ? [job.technician.firstName, job.technician.lastName].filter(Boolean).join(' ')
     : null;
   const techColor = job.technician?.color ?? '#94a3b8';
-  const scheduledTime = formatTime(job.scheduledStart);
+  const scheduledTime = formatTime(job.scheduledStart, tz);
   const moneyState = normalizeJobMoneyState(job.moneyState);
   const moneyLabel = moneyState ? JOB_MONEY_STATE_LABEL[moneyState] : null;
   const moneyBadgeClasses: Record<string, string> = {
@@ -256,6 +259,7 @@ function WeekStrip({ todayCount }: { todayCount: number }) {
 // ─── Main dashboard ───────────────────────────────────────────────────────
 export function HomePage() {
   const navigate   = useNavigate();
+  const tz         = useTenantTimezone();
   const [dismissed, setDismiss] = useState<Set<string>>(new Set());
 
   const today = todayIso();
@@ -293,7 +297,7 @@ export function HomePage() {
     ...pendingEsts.filter(e => !dismissed.has(`est-${e.id}`)).map(e => ({
       id: `est-${e.id}`, type: 'followup' as const,
       message: `${customerName(e.customer)} estimate not yet opened`,
-      sub: `${e.estimateNumber} · ${centsToDisplay(e.totalCents)}${e.sentAt ? ` · Sent ${formatDate(e.sentAt)}` : ''}`,
+      sub: `${e.estimateNumber} · ${centsToDisplay(e.totalCents)}${e.sentAt ? ` · Sent ${formatDate(e.sentAt, tz)}` : ''}`,
       action: 'Follow up', to: `/estimates/${e.id}`,
     })),
   ].filter(item => !dismissed.has(item.id));
@@ -525,7 +529,7 @@ export function HomePage() {
                         <div className="flex-1 min-w-0">
                           <p className="text-sm text-slate-800 truncate">{customerName(est.customer)}</p>
                           <p className="text-xs text-slate-400 mt-0.5">
-                            {est.estimateNumber}{est.sentAt ? ` · Sent ${formatDate(est.sentAt)}` : ''}
+                            {est.estimateNumber}{est.sentAt ? ` · Sent ${formatDate(est.sentAt, tz)}` : ''}
                           </p>
                         </div>
                         <div className="flex flex-col items-end gap-1 shrink-0">
