@@ -646,7 +646,11 @@ function ManualBuildInput({ svcType: initialSvc, onResult }: {
   // estimate's summary label). With an empty Price Book we fall back to the
   // bundled starter catalog keyed by service type — same fallback spirit as
   // the AI-suggest path's local generator.
-  const { data: apiCatalog, isLoading: catalogLoading } = useListQuery<ApiCatalogItem>('/api/catalog/items', { pageSize: 200 });
+  // This toggle list has no in-flow search/paging, so request the API's max
+  // page size (500, matching the CSV import cap) so larger Price Books are
+  // fully reachable here. The shared editor's CatalogPicker pages smaller
+  // because it has server-side search.
+  const { data: apiCatalog, isLoading: catalogLoading } = useListQuery<ApiCatalogItem>('/api/catalog/items', { pageSize: 500 });
   const realCatalog = Array.isArray(apiCatalog) ? apiCatalog.map(apiCatalogToCatalogItem) : [];
   // Don't fall back to the bundled starter catalog while the Price Book is
   // still loading — otherwise a tenant that *has* items could briefly tap
