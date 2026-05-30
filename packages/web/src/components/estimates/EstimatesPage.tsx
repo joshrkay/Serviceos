@@ -10,6 +10,8 @@ import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { apiFetch } from '../../utils/api-fetch';
 import { printEstimateDocument } from '../../lib/estimatePdf';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { NewEstimateFlow } from './NewEstimateFlow';
@@ -769,6 +771,7 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
 // ─── Estimate Detail ──────────────────────────────────────────────────────
 function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: () => void }) {
   const navigate = useNavigate();
+  const tz = useTenantTimezone();
   const { data: est, isLoading, error, refetch } = useDetailQuery<ApiEstimate>('/api/estimates', estimateId);
   const { mutate: updateEstimate } = useMutation<Record<string, unknown>, ApiEstimate>('PUT', `/api/estimates/${estimateId}`);
   const { mutate: transitionEstimate } = useMutation<{ status: string }, ApiEstimate>('POST', `/api/estimates/${estimateId}/transition`);
@@ -935,7 +938,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
     description: est.customerMessage ?? '',
     status,
     lineItems: uiLineItems,
-    createdDate: est.createdAt ? new Date(est.createdAt).toLocaleDateString() : '',
+    createdDate: est.createdAt ? formatDateInTenantTz(est.createdAt, tz) : '',
     sentDate: undefined as string | undefined,
     viewedDate: undefined as string | undefined,
     approvedDate: undefined as string | undefined,
@@ -1016,7 +1019,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                     {notes.map(n => (
                       <div key={n.id} className="px-4 py-3">
                         <p className="text-sm text-slate-700 leading-snug">{n.content}</p>
-                        <p className="text-xs text-slate-400 mt-1">{new Date(n.createdAt).toLocaleString()}</p>
+                        <p className="text-xs text-slate-400 mt-1">{formatDateTimeInTenantTz(n.createdAt, tz)}</p>
                       </div>
                     ))}
                   </div>
@@ -1253,6 +1256,7 @@ const TABS: { label: string; value: EstimateStatus | 'All' }[] = [
 
 export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {
   const navigate = useNavigate();
+  const tz = useTenantTimezone();
   const [tab,              setTab]           = useState<EstimateStatus | 'All'>('All');
   const [selected,         setSelected]      = useState<string | null>(defaultSelectedId ?? null);
   const [newEstimateOpen,  setNewEstimate]   = useState(false);
@@ -1386,7 +1390,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
                     {est.createdAt && (
                       <div className="flex items-center gap-3 mt-2">
                         <span className="flex items-center gap-1 text-xs text-slate-400">
-                          <Clock size={10} /> {new Date(est.createdAt).toLocaleDateString()}
+                          <Clock size={10} /> {formatDateInTenantTz(est.createdAt, tz)}
                         </span>
                       </div>
                     )}
