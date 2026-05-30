@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { Plus, Search } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
 import { formatCurrency } from '../../utils/currency';
@@ -21,6 +21,7 @@ export function CatalogPicker({ onPick }: CatalogPickerProps) {
   const [query, setQuery] = useState('');
   const [hasLoaded, setHasLoaded] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   // Only fetch while the popover is open. setSearch drives the server-side
   // `search` param; data comes back as { data: CatalogPickItem[] }.
@@ -60,6 +61,17 @@ export function CatalogPicker({ onPick }: CatalogPickerProps) {
     return () => document.removeEventListener('mousedown', onDocMouseDown);
   }, [open]);
 
+  // Escape closes the popover and returns focus to the trigger, so keyboard
+  // users aren't trapped having to tab out or reach for the mouse.
+  function handleKeyDown(event: KeyboardEvent) {
+    if (event.key === 'Escape' && open) {
+      event.stopPropagation();
+      setOpen(false);
+      setQuery('');
+      triggerRef.current?.focus();
+    }
+  }
+
   function handlePick(item: CatalogPickItem) {
     onPick(item);
     setOpen(false);
@@ -67,8 +79,9 @@ export function CatalogPicker({ onPick }: CatalogPickerProps) {
   }
 
   return (
-    <div ref={containerRef} className="relative inline-block">
+    <div ref={containerRef} className="relative inline-block" onKeyDown={handleKeyDown}>
       <button
+        ref={triggerRef}
         type="button"
         data-testid="catalog-picker-trigger"
         onClick={() => setOpen((value) => !value)}
