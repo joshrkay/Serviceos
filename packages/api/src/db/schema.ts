@@ -3425,6 +3425,34 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS consent_recorded_by TEXT,
       ADD COLUMN IF NOT EXISTS consent_method TEXT;
   `,
+
+  // Invoice-to-cash failure handling. A SETTLED payment can later FAIL:
+  // an ACH/bank debit returned for insufficient funds (NSF), or a card
+  // chargeback. Unlike a refund (D2-4, which keeps the row 'completed'
+  // and accumulates refunded_amount_cents), a REVERSAL flips the payment
+  // to 'failed' — so it drops out of gross-revenue math (the money
+  // dashboard sums only status='completed') — and REOPENS the linked
+  // invoice (paid -> open/partially_paid) so it re-enters collections.
+  // reversed_at/reversal_reason record when + why; reversePayment()
+  // flips 'completed' -> 'failed' atomically, guarded on
+  // `reversed_at IS NULL` so a duplicate webhook delivery is a no-op.
+  '133_payments_reversal_tracking': `
+    ALTER TABLE payments
+      ADD COLUMN IF NOT EXISTS reversed_at TIMESTAMPTZ NULL,
+      ADD COLUMN IF NOT EXISTS reversal_reason TEXT NULL;
+    CREATE INDEX IF NOT EXISTS idx_payments_reversed_at
+      ON payments(reversed_at) WHERE reversed_at IS NOT NULL;
+
+    -- Widen the payment_method CHECK to match the domain PaymentMethod
+    -- union the code actually writes. The original inline constraint
+    -- only allowed ('stripe','cash','check','other'), but the Stripe
+    -- checkout webhook records 'credit_card' and the async-settlement
+    -- (ACH) path records 'bank_transfer' — both previously violated the
+    -- CHECK. Explicit DROP + ADD mirrors proposals_status_check.
+    ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_payment_method_check;
+    ALTER TABLE payments ADD CONSTRAINT payments_payment_method_check
+      CHECK (payment_method IN ('stripe', 'cash', 'check', 'credit_card', 'bank_transfer', 'other'));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
