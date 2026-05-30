@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import {
-  Home, MessageSquare, Briefcase, Calendar, LayoutGrid,
+  Home, MessageSquare, Briefcase, Calendar,
   Users, FileText, Receipt, Settings, Zap, Bell, Layers, TrendingUp, LogOut,
   Wrench,
 } from 'lucide-react';
@@ -57,33 +57,35 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/settings',       label: 'Settings',  icon: Settings },
       ];
     case 'both':
+      // Supervisor + field-tech power view. Trimmed to the calm core
+      // (Assistant relabel; Dispatch/Inbox/Money dropped from the
+      // sidebar — all still reachable by URL and via the logo badge).
       return [
-        { to: '/assistant',      label: 'Sessions',     icon: MessageSquare },
+        { to: '/assistant',      label: 'Assistant',    icon: MessageSquare },
         { to: '/technician/day', label: 'Today',        icon: Wrench        },
         { to: '/jobs',           label: 'My jobs',      icon: Briefcase     },
         { to: '/schedule',       label: 'Schedule',     icon: Calendar      },
-        { to: '/dispatch',      label: 'Dispatch',     icon: LayoutGrid    },
         { to: '/customers',      label: 'Customers',    icon: Users         },
         { to: '/estimates',      label: 'Estimates',    icon: FileText      },
         { to: '/invoices',       label: 'Invoices',     icon: Receipt       },
-        { to: '/inbox',          label: 'Inbox',        icon: Bell          },
-        { to: '/reports/money',  label: 'Money',        icon: TrendingUp    },
         { to: '/settings',       label: 'Settings',     icon: Settings      },
       ];
     case 'supervisor':
     default:
+      // Mirrors the Figma reference's 10 desktop items exactly. Dispatch,
+      // Inbox, and Money intentionally live off the sidebar to keep the
+      // surface calm: Dispatch/Money are reachable by URL (and surfaced in
+      // Schedule/Home), and pending approvals stay one click away via the
+      // proposal badge on the Fieldly logo, which links to /inbox.
       return [
         { to: '/',              label: 'Home',         icon: Home          },
-        { to: '/assistant',     label: 'Sessions',     icon: MessageSquare },
+        { to: '/assistant',     label: 'Assistant',    icon: MessageSquare },
         { to: '/jobs',          label: 'Jobs',         icon: Briefcase     },
         { to: '/schedule',      label: 'Schedule',     icon: Calendar      },
-        { to: '/dispatch',      label: 'Dispatch',     icon: LayoutGrid    },
         { to: '/customers',     label: 'Customers',    icon: Users         },
         { to: '/leads',         label: 'Leads',        icon: TrendingUp    },
         { to: '/estimates',     label: 'Estimates',    icon: FileText      },
         { to: '/invoices',      label: 'Invoices',     icon: Receipt       },
-        { to: '/inbox',         label: 'Inbox',        icon: Bell          },
-        { to: '/reports/money', label: 'Money',        icon: TrendingUp    },
         { to: '/interactions',  label: 'Interactions', icon: Layers        },
         { to: '/settings',      label: 'Settings',     icon: Settings      },
       ];
@@ -110,12 +112,14 @@ function getBottomNav(mode: Mode): NavItem[] {
       ];
     case 'supervisor':
     default:
+      // Matches the Figma mobile bottom bar (6 items).
       return [
-        { to: '/',              label: 'Home',   icon: Home          },
-        { to: '/inbox',         label: 'Inbox',  icon: Bell          },
-        { to: '/reports/money', label: 'Money',  icon: TrendingUp    },
-        { to: '/invoices',      label: 'Bills',  icon: Receipt       },
-        { to: '/assistant',     label: 'AI',     icon: MessageSquare },
+        { to: '/',           label: 'Home',      icon: Home          },
+        { to: '/assistant',  label: 'AI',        icon: MessageSquare },
+        { to: '/jobs',       label: 'Jobs',      icon: Briefcase     },
+        { to: '/leads',      label: 'Leads',     icon: TrendingUp    },
+        { to: '/customers',  label: 'Customers', icon: Users         },
+        { to: '/invoices',   label: 'Invoices',  icon: Receipt       },
       ];
   }
 }
