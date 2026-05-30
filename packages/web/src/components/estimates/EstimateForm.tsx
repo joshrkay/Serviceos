@@ -338,6 +338,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
           items={form.items}
           onChange={(items) => setForm((p) => ({ ...p, items }))}
           enableOptions
+          enableCatalog
         />
         {total > 0 && (
           <div className="mt-3 flex justify-end">
