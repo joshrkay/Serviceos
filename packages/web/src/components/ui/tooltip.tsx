@@ -31,12 +31,32 @@ export function Tooltip({ content, side = 'top', children, className }: TooltipP
   const show = () => setOpen(true);
   const hide = () => setOpen(false);
 
+  // Compose with — never overwrite — the child's existing handlers and
+  // described-by relationship, so wrapping an already-interactive control
+  // (e.g. an input tied to helper text) keeps its original behavior.
+  const childProps = children.props as React.HTMLAttributes<HTMLElement>;
+  const describedBy =
+    [childProps['aria-describedby'], open ? id : null].filter(Boolean).join(' ') ||
+    undefined;
+
   const trigger = React.cloneElement(children, {
-    'aria-describedby': open ? id : undefined,
-    onMouseEnter: show,
-    onMouseLeave: hide,
-    onFocus: show,
-    onBlur: hide,
+    'aria-describedby': describedBy,
+    onMouseEnter: (e: React.MouseEvent<HTMLElement>) => {
+      childProps.onMouseEnter?.(e);
+      show();
+    },
+    onMouseLeave: (e: React.MouseEvent<HTMLElement>) => {
+      childProps.onMouseLeave?.(e);
+      hide();
+    },
+    onFocus: (e: React.FocusEvent<HTMLElement>) => {
+      childProps.onFocus?.(e);
+      show();
+    },
+    onBlur: (e: React.FocusEvent<HTMLElement>) => {
+      childProps.onBlur?.(e);
+      hide();
+    },
   } as React.HTMLAttributes<HTMLElement>);
 
   return (

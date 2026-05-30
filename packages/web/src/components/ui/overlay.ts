@@ -10,17 +10,35 @@ import React, { useEffect, useRef } from 'react';
  * keyboard and screen-reader users.
  */
 
-/** Locks body scroll while `active` is true, restoring the prior value. */
+// Track active scroll locks globally so overlapping overlays (e.g. a Sheet
+// plus a confirmation Modal) keep the body locked until the *last* one
+// closes. A naive per-instance restore would unlock the background while a
+// dialog is still open if the older overlay happened to close first.
+let scrollLockCount = 0;
+let savedBodyOverflow = '';
+
+/** Locks body scroll while `active` is true, restoring once all locks clear. */
 export function useScrollLock(active: boolean): void {
   useEffect(() => {
-    if (!active) return;
-    const { overflow } = document.body.style;
-    document.body.style.overflow = 'hidden';
+    if (!active || typeof document === 'undefined') return;
+    if (scrollLockCount === 0) {
+      savedBodyOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+    }
+    scrollLockCount += 1;
     return () => {
-      document.body.style.overflow = overflow;
+      scrollLockCount -= 1;
+      if (scrollLockCount === 0) {
+        document.body.style.overflow = savedBodyOverflow;
+      }
     };
   }, [active]);
 }
+
+// Stack of active focus traps. Only the trap on top should restore focus
+// when it closes — an older overlay closing beneath a newer dialog must not
+// yank focus to an element behind the still-open top dialog.
+const trapStack: symbol[] = [];
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), textarea:not([disabled]), ' +
@@ -40,11 +58,13 @@ export function useFocusTrap(
   onCloseRef.current = onClose;
 
   useEffect(() => {
-    if (!active) return;
+    if (!active || typeof document === 'undefined') return;
     const node = ref.current;
     if (!node) return;
 
     const previouslyFocused = document.activeElement as HTMLElement | null;
+    const token = Symbol('focus-trap');
+    trapStack.push(token);
 
     // Move focus into the overlay (first focusable, else the container).
     const focusables = node.querySelectorAll<HTMLElement>(FOCUSABLE);
@@ -65,7 +85,12 @@ export function useFocusTrap(
       const first = items[0];
       const last = items[items.length - 1];
       const activeEl = document.activeElement;
-      if (event.shiftKey && activeEl === first) {
+      // Wrap focus back inside if it's on the container itself or has
+      // somehow escaped the overlay, otherwise it can leak to the page.
+      if (!node!.contains(activeEl) || activeEl === node) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && activeEl === first) {
         event.preventDefault();
         last.focus();
       } else if (!event.shiftKey && activeEl === last) {
@@ -77,7 +102,12 @@ export function useFocusTrap(
     node.addEventListener('keydown', handleKeyDown);
     return () => {
       node.removeEventListener('keydown', handleKeyDown);
-      previouslyFocused?.focus?.();
+      // Only restore focus if this was the top-most trap; restoring from a
+      // trap beneath a newer dialog would pull focus behind it.
+      const wasTop = trapStack[trapStack.length - 1] === token;
+      const idx = trapStack.lastIndexOf(token);
+      if (idx !== -1) trapStack.splice(idx, 1);
+      if (wasTop) previouslyFocused?.focus?.();
     };
   }, [active, ref]);
 }

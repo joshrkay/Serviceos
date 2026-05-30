@@ -40,6 +40,28 @@ describe('Tabs', () => {
     expect(onChange).toHaveBeenCalledWith('chat');
   });
 
+  it('wires aria-controls to the matching panel id when ids are shared', () => {
+    function Harness() {
+      const [v, setV] = useState('chat');
+      return (
+        <>
+          <Tabs id="t1" items={items} value={v} onValueChange={setV} />
+          <TabPanel tabsId="t1" value="chat" activeValue={v}>
+            chat-panel
+          </TabPanel>
+        </>
+      );
+    }
+    render(<Harness />);
+    const selectedTab = screen.getByRole('tab', { name: 'Assistant' });
+    const controls = selectedTab.getAttribute('aria-controls');
+    const panel = screen.getByRole('tabpanel');
+    expect(controls).toBe('t1-panel-chat');
+    expect(panel).toHaveAttribute('id', 't1-panel-chat');
+    expect(panel).toHaveAttribute('aria-labelledby', 't1-tab-chat');
+    expect(selectedTab).toHaveAttribute('id', 't1-tab-chat');
+  });
+
   it('TabPanel only renders the active panel', () => {
     function Harness() {
       const [v, setV] = useState('chat');

@@ -11,7 +11,9 @@ describe('Progress', () => {
   it('reports value via aria and clamps width', () => {
     render(<Progress value={150} max={100} label="loading" />);
     const bar = screen.getByRole('progressbar', { name: 'loading' });
-    expect(bar).toHaveAttribute('aria-valuenow', '150');
+    // aria-valuenow is clamped to the rendered range so AT never sees an
+    // impossible state (value > max).
+    expect(bar).toHaveAttribute('aria-valuenow', '100');
     expect(bar).toHaveAttribute('aria-valuemax', '100');
     expect((bar.firstChild as HTMLElement).style.width).toBe('100%');
   });

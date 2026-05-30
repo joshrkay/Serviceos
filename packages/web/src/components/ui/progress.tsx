@@ -32,13 +32,17 @@ export function Progress({
   className,
   ...rest
 }: ProgressProps) {
-  const pct = max <= 0 ? 0 : Math.min(100, Math.max(0, (value / max) * 100));
+  const safeMax = max > 0 ? max : 0;
+  const clampedValue = safeMax === 0 ? 0 : Math.min(safeMax, Math.max(0, value));
+  const pct = safeMax === 0 ? 0 : (clampedValue / safeMax) * 100;
   return (
     <div
       role="progressbar"
       aria-valuemin={0}
-      aria-valuemax={max}
-      aria-valuenow={value}
+      aria-valuemax={safeMax}
+      // Report the clamped value so assistive tech never sees an
+      // impossible state (e.g. now=150 with max=100).
+      aria-valuenow={clampedValue}
       aria-label={label}
       className={cn('h-1.5 w-full overflow-hidden rounded-full bg-slate-100', className)}
       {...rest}

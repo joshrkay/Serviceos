@@ -38,6 +38,14 @@ export function Avatar({
   ...rest
 }: AvatarProps) {
   const [failed, setFailed] = useState(false);
+  // Reset the failure flag when the src changes, so a later valid URL
+  // (e.g. after an upload/profile refresh) isn't permanently pinned to
+  // initials by a transient earlier error.
+  const [prevSrc, setPrevSrc] = useState(src);
+  if (src !== prevSrc) {
+    setPrevSrc(src);
+    setFailed(false);
+  }
   const showImage = src && !failed;
   return (
     <span

@@ -18,6 +18,12 @@ export interface TabsProps {
   variant?: 'underline' | 'pill';
   className?: string;
   'aria-label'?: string;
+  /**
+   * Explicit base id for tab/panel ARIA wiring. Pass the same value to the
+   * paired `TabPanel`s (as `tabsId`) so `aria-controls`/`aria-labelledby`
+   * resolve to real elements. Defaults to an auto-generated id.
+   */
+  id?: string;
 }
 
 /**
@@ -33,8 +39,10 @@ export function Tabs({
   variant = 'underline',
   className,
   'aria-label': ariaLabel,
+  id,
 }: TabsProps) {
-  const baseId = useId();
+  const autoId = useId();
+  const baseId = id ?? autoId;
   const refs = useRef<Record<string, HTMLButtonElement | null>>({});
 
   function focusByIndex(index: number) {
@@ -135,19 +143,34 @@ export interface TabPanelProps extends React.HTMLAttributes<HTMLDivElement> {
   value: string;
   /** The currently selected tab value. */
   activeValue: string;
+  /**
+   * The parent `Tabs`' `id`. When provided, the panel renders the matching
+   * `id`/`aria-labelledby` so the tab's `aria-controls` resolves correctly.
+   */
+  tabsId?: string;
 }
 
 /** Panel paired with a `Tabs` item; renders only when active. */
 export function TabPanel({
   value,
   activeValue,
+  tabsId,
   className,
   children,
+  id,
+  'aria-labelledby': ariaLabelledby,
   ...rest
 }: TabPanelProps) {
   if (value !== activeValue) return null;
   return (
-    <div role="tabpanel" tabIndex={0} className={cn('outline-none', className)} {...rest}>
+    <div
+      role="tabpanel"
+      id={id ?? (tabsId ? `${tabsId}-panel-${value}` : undefined)}
+      aria-labelledby={ariaLabelledby ?? (tabsId ? `${tabsId}-tab-${value}` : undefined)}
+      tabIndex={0}
+      className={cn('outline-none', className)}
+      {...rest}
+    >
       {children}
     </div>
   );

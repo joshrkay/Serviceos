@@ -21,10 +21,10 @@ export interface StepperProps {
  * the current one is highlighted; later steps are muted.
  */
 export function Stepper({ steps, current, className }: StepperProps) {
-  const currentIndex = Math.max(
-    0,
-    steps.findIndex((s) => s.value === current),
-  );
+  // -1 when `current` isn't among the steps (flow not started / unknown);
+  // in that case nothing is marked complete or active rather than wrongly
+  // highlighting the first step.
+  const currentIndex = steps.findIndex((s) => s.value === current);
 
   return (
     <ol className={cn('flex items-center', className)}>

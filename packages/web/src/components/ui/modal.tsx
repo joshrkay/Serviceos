@@ -53,7 +53,8 @@ export function Modal({
   useScrollLock(open);
   useFocusTrap(panelRef, open, onClose);
 
-  if (!open) return null;
+  // Guard against SSR: createPortal needs a real document.body.
+  if (!open || typeof document === 'undefined') return null;
 
   return createPortal(
     <div
