@@ -1,5 +1,7 @@
 import React, { useCallback, useState } from 'react';
+import { toast } from 'sonner';
 import { apiFetch } from '../../utils/api-fetch';
+import { Button, Field, Input, Select, Textarea } from '../../components/ui';
 
 const SOURCES = [
   'web_form',
@@ -101,9 +103,12 @@ export function LeadCreate({ onCreated, onCancel }: LeadCreateProps) {
           throw new Error(json?.message ?? `HTTP ${res.status}`);
         }
         const created = await res.json();
+        toast.success('Lead created');
         onCreated?.(created.id);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to create lead');
+        const message = err instanceof Error ? err.message : 'Failed to create lead';
+        setError(message);
+        toast.error(message);
       } finally {
         setSubmitting(false);
       }
@@ -111,11 +116,9 @@ export function LeadCreate({ onCreated, onCancel }: LeadCreateProps) {
     [form, onCreated]
   );
 
-  const inputCls = 'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';
-
   return (
-    <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-2xl mx-auto">
-      <h1 className="text-lg text-slate-900 mb-4">New Lead</h1>
+    <form onSubmit={handleSubmit} className="mx-auto max-w-2xl p-4 md:p-6">
+      <h1 className="mb-4 text-slate-900">New Lead</h1>
 
       {error && (
         <div role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -123,105 +126,79 @@ export function LeadCreate({ onCreated, onCancel }: LeadCreateProps) {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <label className="text-xs text-slate-500">
-          First name
-          <input
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <Field label="First name">
+          <Input
             value={form.firstName}
             onChange={(e) => setField('firstName', e.target.value)}
-            className={inputCls}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Last name
-          <input
+        </Field>
+        <Field label="Last name">
+          <Input
             value={form.lastName}
             onChange={(e) => setField('lastName', e.target.value)}
-            className={inputCls}
           />
-        </label>
-        <label className="text-xs text-slate-500 md:col-span-2">
-          Company
-          <input
+        </Field>
+        <Field label="Company" className="md:col-span-2">
+          <Input
             value={form.companyName}
             onChange={(e) => setField('companyName', e.target.value)}
-            className={inputCls}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Phone
-          <input
+        </Field>
+        <Field label="Phone">
+          <Input
             value={form.primaryPhone}
             onChange={(e) => setField('primaryPhone', e.target.value)}
-            className={inputCls}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Email
-          <input
+        </Field>
+        <Field label="Email">
+          <Input
             type="email"
             value={form.email}
             onChange={(e) => setField('email', e.target.value)}
-            className={inputCls}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Source
-          <select
+        </Field>
+        <Field label="Source">
+          <Select
             value={form.source}
             onChange={(e) => setField('source', e.target.value as FormState['source'])}
-            className={inputCls}
           >
             {SOURCES.map((s) => (
               <option key={s} value={s}>{s}</option>
             ))}
-          </select>
-        </label>
-        <label className="text-xs text-slate-500">
-          Source detail
-          <input
+          </Select>
+        </Field>
+        <Field label="Source detail">
+          <Input
             value={form.sourceDetail}
             onChange={(e) => setField('sourceDetail', e.target.value)}
             placeholder="campaign or referrer"
-            className={inputCls}
           />
-        </label>
-        <label className="text-xs text-slate-500 md:col-span-2">
-          Estimated value (USD)
-          <input
+        </Field>
+        <Field label="Estimated value (USD)" className="md:col-span-2">
+          <Input
             value={form.estimatedValueDollars}
             onChange={(e) => setField('estimatedValueDollars', e.target.value)}
             inputMode="decimal"
             placeholder="0.00"
-            className={inputCls}
           />
-        </label>
-        <label className="text-xs text-slate-500 md:col-span-2">
-          Notes
-          <textarea
+        </Field>
+        <Field label="Notes" className="md:col-span-2">
+          <Textarea
             value={form.notes}
             onChange={(e) => setField('notes', e.target.value)}
             rows={4}
-            className={inputCls}
           />
-        </label>
+        </Field>
       </div>
 
       <div className="mt-4 flex gap-2">
-        <button
-          type="submit"
-          disabled={submitting}
-          className="rounded-lg bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800 disabled:opacity-50"
-        >
-          {submitting ? 'Creating...' : 'Create lead'}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="rounded-lg border border-slate-200 text-slate-700 text-sm px-4 py-2 hover:bg-slate-50"
-        >
+        <Button type="submit" loading={submitting}>
+          Create lead
+        </Button>
+        <Button type="button" variant="outline" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
       </div>
     </form>
   );

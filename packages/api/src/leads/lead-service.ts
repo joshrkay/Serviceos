@@ -138,6 +138,9 @@ export async function updateLead(
     ...(input.assignedUserId !== undefined
       ? { assignedUserId: input.assignedUserId ?? undefined }
       : {}),
+    ...(input.preferredLanguage !== undefined
+      ? { preferredLanguage: input.preferredLanguage ?? undefined }
+      : {}),
     updatedAt: new Date(),
   };
 
