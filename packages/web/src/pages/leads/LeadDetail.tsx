@@ -170,6 +170,7 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         toast.success('Language preference saved');
+        await refetch();
       } catch (err) {
         setLanguage(previous);
         toast.error(err instanceof Error ? err.message : 'Failed to save language');
@@ -177,7 +178,7 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
         setLanguageSaving(false);
       }
     },
-    [leadId, language],
+    [leadId, language, refetch],
   );
 
   if (isLoading && !lead)
