@@ -19,6 +19,7 @@ export interface CatalogPickerProps {
 export function CatalogPicker({ onPick }: CatalogPickerProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const [hasLoaded, setHasLoaded] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Only fetch while the popover is open. setSearch drives the server-side
@@ -27,6 +28,19 @@ export function CatalogPicker({ onPick }: CatalogPickerProps) {
     '/api/catalog/items',
     { pageSize: 20, enabled: open }
   );
+
+  // useListQuery returns whatever the API sends; guard against a non-array
+  // error payload so .map / .length can't throw.
+  const items = Array.isArray(data) ? data : [];
+
+  // Track whether a query has actually run since the popover opened, so the
+  // empty state doesn't flash before the first fetch settles.
+  useEffect(() => {
+    if (!open) setHasLoaded(false);
+  }, [open]);
+  useEffect(() => {
+    if (isLoading) setHasLoaded(true);
+  }, [isLoading]);
 
   // Debounce the input → server search (250ms).
   useEffect(() => {
@@ -85,12 +99,12 @@ export function CatalogPicker({ onPick }: CatalogPickerProps) {
             {!isLoading && error && (
               <p className="px-3 py-2 text-xs text-red-600">Couldn’t load the price book.</p>
             )}
-            {!isLoading && !error && data.length === 0 && (
+            {!isLoading && !error && hasLoaded && items.length === 0 && (
               <p className="px-3 py-2 text-xs text-slate-500">No matching items.</p>
             )}
             {!isLoading &&
               !error &&
-              data.map((item) => (
+              items.map((item) => (
                 <button
                   key={item.id}
                   type="button"

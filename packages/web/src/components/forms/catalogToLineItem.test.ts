@@ -6,15 +6,18 @@ describe('mapCatalogCategory', () => {
     expect(mapCatalogCategory('Labor')).toBe('labor');
     expect(mapCatalogCategory('Parts')).toBe('material');
     expect(mapCatalogCategory('Materials')).toBe('material');
+    expect(mapCatalogCategory('Equipment')).toBe('equipment');
   });
 
   it('is case-insensitive', () => {
     expect(mapCatalogCategory('labor')).toBe('labor');
     expect(mapCatalogCategory('MATERIALS')).toBe('material');
+    expect(mapCatalogCategory('equipment')).toBe('equipment');
   });
 
   it('returns undefined for unknown or missing categories', () => {
-    expect(mapCatalogCategory('Equipment')).toBeUndefined();
+    // undefined (not '') so the optional-enum line-item contract omits it.
+    expect(mapCatalogCategory('Other')).toBeUndefined();
     expect(mapCatalogCategory('')).toBeUndefined();
     expect(mapCatalogCategory(undefined)).toBeUndefined();
   });

@@ -142,7 +142,15 @@ export function LineItemEditor({
         <div className="flex items-center gap-2">
           {enableCatalog && (
             <CatalogPicker
-              onPick={(item) => onChange([...items, catalogItemToDraft(item)])}
+              onPick={(item) => {
+                const draft = catalogItemToDraft(item);
+                // On a fresh form `items` is a single blank draft; replace it
+                // rather than appending, so the picked row isn't trailed by an
+                // empty one that fails the "every row needs a description" check.
+                const soleEmpty =
+                  items.length === 1 && !items[0].description.trim();
+                onChange(soleEmpty ? [draft] : [...items, draft]);
+              }}
             />
           )}
           <button

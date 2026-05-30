@@ -17,10 +17,13 @@ export interface CatalogPickItem {
 }
 
 /**
- * Catalog categories are PascalCase ('Labor' | 'Parts' | 'Materials') while
- * estimate line items use a lowercase enum ('labor' | 'material' | ...). The
- * catalog has no equivalent for 'equipment'/'other', so unknown values map to
- * `undefined` (the editor's "uncategorised" state).
+ * Catalog categories are PascalCase ('Labor' | 'Parts' | 'Materials', and
+ * 'Equipment' in the bundled starter catalog) while estimate line items use a
+ * lowercase enum ('labor' | 'material' | 'equipment' | 'other'). Unknown
+ * values map to `undefined` — the editor's "uncategorised" state. We must NOT
+ * fall back to `''`: `category` is an *optional enum* in the line-item Zod
+ * contract, so `undefined` is omitted (valid) while `''` would fail enum
+ * validation on submit.
  */
 export function mapCatalogCategory(category?: string): LineItemDraft['category'] {
   switch ((category ?? '').toLowerCase()) {
@@ -30,6 +33,8 @@ export function mapCatalogCategory(category?: string): LineItemDraft['category']
     case 'material':
     case 'materials':
       return 'material';
+    case 'equipment':
+      return 'equipment';
     default:
       return undefined;
   }

@@ -646,9 +646,15 @@ function ManualBuildInput({ svcType: initialSvc, onResult }: {
   // estimate's summary label). With an empty Price Book we fall back to the
   // bundled starter catalog keyed by service type — same fallback spirit as
   // the AI-suggest path's local generator.
-  const { data: apiCatalog } = useListQuery<ApiCatalogItem>('/api/catalog/items', { pageSize: 200 });
-  const realCatalog = apiCatalog.map(apiCatalogToCatalogItem);
-  const catalog = realCatalog.length > 0 ? realCatalog : MANUAL_CATALOG[svcType];
+  const { data: apiCatalog, isLoading: catalogLoading } = useListQuery<ApiCatalogItem>('/api/catalog/items', { pageSize: 200 });
+  const realCatalog = Array.isArray(apiCatalog) ? apiCatalog.map(apiCatalogToCatalogItem) : [];
+  // Don't fall back to the bundled starter catalog while the Price Book is
+  // still loading — otherwise a tenant that *has* items could briefly tap
+  // hardcoded starter pricing before the real list lands. Only fall back once
+  // the fetch has settled and confirmed there are no items (covers empty + error).
+  const catalog = realCatalog.length > 0
+    ? realCatalog
+    : (catalogLoading ? [] : MANUAL_CATALOG[svcType]);
   const total   = selected.reduce((s, i) => s + i.qty * i.rate, 0);
 
   function toggleItem(item: CatalogItem) {
@@ -719,6 +725,9 @@ function ManualBuildInput({ svcType: initialSvc, onResult }: {
       <div>
         <p className="text-xs text-slate-500 mb-2">Tap items to add — prices pre-filled &amp; editable</p>
         <div className="flex flex-col gap-1.5">
+          {catalogLoading && catalog.length === 0 && (
+            <p className="text-xs text-slate-400">Loading your price book…</p>
+          )}
           {catalog.map(item => {
             const isSel = !!selected.find(s => s.id === item.id);
             return (
