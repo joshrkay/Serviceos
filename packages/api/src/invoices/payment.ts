@@ -59,6 +59,18 @@ export interface Payment {
   refundedAt: Date | null;
   /** Stripe `re_*` id of the most recent refund, or null. */
   lastRefundStripeId: string | null;
+  /**
+   * Invoice-to-cash failure handling — timestamp this payment was
+   * REVERSED, or null if it still stands. A reversal is distinct from a
+   * refund: it marks money that never truly settled (ACH/bank NSF return)
+   * or was clawed back (card chargeback). When set, `status` is flipped
+   * to 'failed' so the payment drops out of gross revenue, and the linked
+   * invoice has been reopened. Mutate ONLY via `reversePayment(...)` in
+   * `packages/api/src/payments/payment-service.ts`.
+   */
+  reversedAt: Date | null;
+  /** Why the payment was reversed (e.g. 'ach_return', 'dispute'), or null. */
+  reversalReason: string | null;
 }
 
 export interface RecordPaymentInput {
@@ -94,6 +106,19 @@ export interface IncrementRefundOptions {
   refundedAt: Date;
   /** Stripe `re_*` id of this refund (preserved if null/undefined). */
   stripeRefundId?: string | null;
+}
+
+/**
+ * Options for the atomic payment reversal. Used by `reversePaymentAtomic`
+ * to flip a `completed` payment to `failed` as a single compare-and-swap,
+ * so a redelivered NSF/chargeback webhook (or two concurrent deliveries)
+ * cannot reverse the same payment twice or double-decrement the invoice.
+ */
+export interface ReversePaymentOptions {
+  /** Timestamp to stamp onto `reversedAt`. */
+  reversedAt: Date;
+  /** Why the payment was reversed (e.g. 'ach_return', 'dispute'). */
+  reason: string;
 }
 
 export interface PaymentRepository {
@@ -140,6 +165,21 @@ export interface PaymentRepository {
     tenantId: string,
     id: string,
     opts: IncrementRefundOptions,
+  ): Promise<Payment | null>;
+  /**
+   * Invoice-to-cash failure handling — atomically flip a `completed`
+   * payment to `failed`, stamping `reversedAt`/`reversalReason`, but ONLY
+   * if it has not already been reversed. Returns the updated payment on
+   * success, or `null` when the row does not exist OR was already reversed
+   * / is not in 'completed' status (the guard lives in the WHERE clause,
+   * mirroring `incrementRefundAtomic`). This makes a duplicate NSF /
+   * chargeback webhook delivery a clean no-op rather than a double
+   * invoice-balance decrement.
+   */
+  reversePaymentAtomic(
+    tenantId: string,
+    id: string,
+    opts: ReversePaymentOptions,
   ): Promise<Payment | null>;
 }
 
@@ -197,6 +237,8 @@ export async function recordPayment(
     refundedAmountCents: 0,
     refundedAt: null,
     lastRefundStripeId: null,
+    reversedAt: null,
+    reversalReason: null,
   };
 
   await paymentRepo.create(payment);
@@ -377,6 +419,35 @@ export class InMemoryPaymentRepository implements PaymentRepository {
       refundedAmountCents: next,
       refundedAt: opts.refundedAt,
       lastRefundStripeId: opts.stripeRefundId ?? p.lastRefundStripeId ?? null,
+      updatedAt: new Date(),
+    };
+    this.payments.set(id, updated);
+    return { ...updated };
+  }
+
+  /**
+   * Mirror of the pg compare-and-swap reversal. Yields to the microtask
+   * queue once so two concurrent callers interleave under the in-memory
+   * repo (matching `incrementRefundAtomic`). The guard — only flip when
+   * `status === 'completed'` and not yet reversed — makes a second call
+   * a no-op, so a duplicate webhook can't double-reverse.
+   */
+  async reversePaymentAtomic(
+    tenantId: string,
+    id: string,
+    opts: ReversePaymentOptions,
+  ): Promise<Payment | null> {
+    await Promise.resolve();
+    const p = this.payments.get(id);
+    if (!p || p.tenantId !== tenantId) return null;
+    // `!= null` (loose) treats both null and a legacy `undefined` as
+    // "not yet reversed"; a Date blocks the second reversal.
+    if (p.status !== 'completed' || p.reversedAt != null) return null;
+    const updated: Payment = {
+      ...p,
+      status: 'failed',
+      reversedAt: opts.reversedAt,
+      reversalReason: opts.reason,
       updatedAt: new Date(),
     };
     this.payments.set(id, updated);

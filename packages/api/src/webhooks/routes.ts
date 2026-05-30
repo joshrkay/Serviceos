@@ -10,8 +10,8 @@ import { createLogger } from '../logging/logger';
 import { bootstrapTenant, TenantRepository } from '../auth/clerk';
 import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
-import { PaymentRepository, recordPayment, PaymentReceiptNotifier } from '../invoices/payment';
-import { recordRefund } from '../payments/payment-service';
+import { PaymentRepository, recordPayment, PaymentReceiptNotifier, PaymentMethod } from '../invoices/payment';
+import { recordRefund, reversePayment, recordFailedPaymentAttempt } from '../payments/payment-service';
 import { JobRepository } from '../jobs/job';
 import { deriveDepositStatus } from '../jobs/deposit-rule';
 import { PendingInvitationRepository } from '../users/pending-invitation';
@@ -34,6 +34,59 @@ import { dispatchInboundSms } from '../sms/inbound-dispatch';
 import { lookupDroppedCallSession } from '../telephony/dropped-call-session-bridge';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
+
+/**
+ * Best-effort mapping from a Stripe payment object to our domain
+ * PaymentMethod. Prefers the actual charged method
+ * (`charges.data[0].payment_method_details.type`), then the declared
+ * `payment_method_types`. ACH / bank-debit variants collapse to
+ * 'bank_transfer'; everything else defaults to 'credit_card'. The value is
+ * informational (balances don't depend on it), so an unknown shape falling
+ * back to 'credit_card' is harmless.
+ */
+function mapStripePaymentMethod(obj: {
+  payment_method_types?: unknown;
+  charges?: { data?: Array<{ payment_method_details?: { type?: string } | null } | null> };
+}): PaymentMethod {
+  const charged = obj.charges?.data?.[0]?.payment_method_details?.type;
+  const declared = Array.isArray(obj.payment_method_types)
+    ? obj.payment_method_types.filter((t): t is string => typeof t === 'string')
+    : [];
+  const candidates = [charged, ...declared].filter((t): t is string => typeof t === 'string');
+  if (
+    candidates.some(
+      (t) =>
+        t === 'us_bank_account' ||
+        t === 'ach_debit' ||
+        t === 'acss_debit' ||
+        t === 'ach_credit_transfer' ||
+        t === 'sepa_debit' ||
+        t.includes('bank'),
+    )
+  ) {
+    return 'bank_transfer';
+  }
+  return 'credit_card';
+}
+
+/**
+ * Assemble the §6 Time-to-Cash money-state deps when all the required
+ * repos are wired; otherwise undefined so recordPayment/reversePayment
+ * skip the rollup cleanly. Mirrors the inline shape the
+ * checkout.session.completed branch builds.
+ */
+function buildMoneyStateDeps(deps: WebhookRouterDeps): RefreshJobMoneyStateDeps | undefined {
+  if (deps.jobRepo && deps.estimateRepo && deps.invoiceRepo) {
+    return {
+      jobRepo: deps.jobRepo,
+      estimateRepo: deps.estimateRepo,
+      invoiceRepo: deps.invoiceRepo,
+      auditRepo: deps.auditRepo,
+      logger,
+    };
+  }
+  return undefined;
+}
 
 export interface WebhookRouterDeps {
   tenantRepo?: TenantRepository;
@@ -856,6 +909,172 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         }
       }
 
+      // Invoice-to-cash — async (ACH/bank) settlement success. The
+      // checkout.session.completed branch SKIPS sessions with
+      // payment_status != 'paid' (bank debits clear later), so for ACH
+      // THIS event is what finally marks the invoice paid. For CARD
+      // payments this event also fires, but checkout.session.completed
+      // already recorded the payment (stamping the PI id into
+      // provider_reference) — so we dedup on that completed row to avoid
+      // double-recording.
+      if (event.type === 'payment_intent.succeeded') {
+        const pi = event.data.object as {
+          id?: string;
+          amount?: number;
+          amount_received?: number;
+          metadata?: { tenant_id?: string; invoice_id?: string };
+          payment_method_types?: unknown;
+          charges?: { data?: Array<{ payment_method_details?: { type?: string } | null } | null> };
+        };
+
+        const tenantId = pi.metadata?.tenant_id;
+        const invoiceId = pi.metadata?.invoice_id;
+        const piId = pi.id;
+        const amountCents = pi.amount_received ?? pi.amount;
+
+        if (!tenantId || !invoiceId || !piId || !amountCents || amountCents <= 0) {
+          logger.info('payment_intent.succeeded missing invoice metadata — skipping', {
+            eventId: event.id, paymentIntentId: piId,
+          });
+          await webhookRepo.updateStatus(webhookEvent.id, 'processed');
+          return res.status(200).json({ received: true, skipped: true });
+        }
+
+        if (!deps.invoiceRepo || !deps.paymentRepo) {
+          logger.error('Invoice/payment repos not wired to Stripe webhook handler');
+          return res.status(500).json({ error: 'Payment processing not configured' });
+        }
+
+        const existing = await deps.paymentRepo.findByProviderReference(tenantId, piId);
+        if (existing && existing.status === 'completed') {
+          logger.info('payment_intent.succeeded already recorded — skipping', {
+            tenantId, invoiceId, paymentIntentId: piId,
+          });
+          await webhookRepo.updateStatus(webhookEvent.id, 'processed');
+          return res.status(200).json({ received: true, duplicate: true });
+        }
+
+        try {
+          await recordPayment(
+            {
+              tenantId,
+              invoiceId,
+              amountCents,
+              method: mapStripePaymentMethod(pi),
+              providerReference: piId,
+              processedBy: 'stripe_webhook',
+            },
+            deps.invoiceRepo,
+            deps.paymentRepo,
+            buildMoneyStateDeps(deps),
+            deps.paymentReceiptNotifier,
+            deps.auditRepo,
+            { actorRole: 'system', correlationId: piId },
+          );
+          logger.info('Invoice marked paid via payment_intent.succeeded (async settlement)', {
+            tenantId, invoiceId, amountCents, paymentIntentId: piId,
+          });
+        } catch (payErr) {
+          if (
+            payErr instanceof ValidationError &&
+            (payErr.message.includes('status') || payErr.message.includes('exceeds amount due'))
+          ) {
+            // Invoice already settled (e.g. checkout.session.completed used
+            // the 'stripe_checkout' provider_reference fallback so the dedup
+            // above missed) — idempotent success.
+            logger.info('Invoice already settled, ignoring payment_intent.succeeded', {
+              tenantId, invoiceId,
+            });
+          } else {
+            throw payErr;
+          }
+        }
+      }
+
+      // Invoice-to-cash — payment failure. Unifies two cases by whether
+      // money was previously recorded for this payment_intent:
+      //   (a) a COMPLETED payment exists -> POST-SETTLEMENT failure: an
+      //       ACH/bank debit RETURNED for insufficient funds (NSF) days
+      //       after it appeared to settle. Reverse it, reopening the
+      //       invoice so it re-enters collections.
+      //   (b) otherwise -> a plain DECLINE (no money ever captured):
+      //       record a 'failed' attempt for visibility; the invoice
+      //       balance is untouched (it was never paid).
+      if (event.type === 'payment_intent.payment_failed') {
+        const pi = event.data.object as {
+          id?: string;
+          amount?: number;
+          metadata?: { tenant_id?: string; invoice_id?: string };
+          payment_method_types?: unknown;
+          charges?: { data?: Array<{ payment_method_details?: { type?: string } | null } | null> };
+          last_payment_error?: { code?: string; message?: string; decline_code?: string };
+        };
+
+        const tenantId = pi.metadata?.tenant_id;
+        const invoiceId = pi.metadata?.invoice_id;
+        const piId = pi.id;
+
+        if (!tenantId || !invoiceId || !piId) {
+          logger.info('payment_intent.payment_failed missing invoice metadata — skipping', {
+            eventId: event.id, paymentIntentId: piId,
+          });
+          await webhookRepo.updateStatus(webhookEvent.id, 'processed');
+          return res.status(200).json({ received: true, skipped: true });
+        }
+
+        if (!deps.invoiceRepo || !deps.paymentRepo) {
+          logger.error('Invoice/payment repos not wired to Stripe webhook handler');
+          return res.status(500).json({ error: 'Payment processing not configured' });
+        }
+
+        const reasonText =
+          pi.last_payment_error?.decline_code ??
+          pi.last_payment_error?.code ??
+          pi.last_payment_error?.message;
+
+        const existing = await deps.paymentRepo.findByProviderReference(tenantId, piId);
+
+        if (existing && existing.status === 'completed') {
+          // Post-settlement failure (ACH return / NSF) — reverse it.
+          await reversePayment(
+            {
+              tenantId,
+              paymentId: existing.id,
+              reason: 'ach_return',
+              correlationId: piId,
+            },
+            deps.invoiceRepo,
+            deps.paymentRepo,
+            deps.auditRepo,
+            buildMoneyStateDeps(deps),
+          );
+          logger.warn('Settled payment reversed via payment_intent.payment_failed (ACH return/NSF)', {
+            tenantId, invoiceId, paymentId: existing.id, paymentIntentId: piId, reason: reasonText,
+          });
+        } else if (existing && existing.reversedAt) {
+          // Already reversed by a prior delivery — no-op.
+          logger.info('payment_intent.payment_failed for already-reversed payment — skipping', {
+            tenantId, invoiceId, paymentIntentId: piId,
+          });
+        } else {
+          await recordFailedPaymentAttempt(
+            {
+              tenantId,
+              invoiceId,
+              amountCents: pi.amount ?? 0,
+              method: mapStripePaymentMethod(pi),
+              providerReference: piId,
+              reason: reasonText,
+            },
+            deps.paymentRepo,
+            deps.auditRepo,
+          );
+          logger.info('Recorded failed payment attempt (declined)', {
+            tenantId, invoiceId, paymentIntentId: piId, reason: reasonText,
+          });
+        }
+      }
+
       // Tier 4 (Subscription — Fieldly billing). customer.subscription.*
       // events update the tenant's cached subscription status. Match
       // by stripe_customer_id (the BillingService persists it on
@@ -1248,6 +1467,68 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             throw refundErr;
           }
         }
+      }
+
+      // Invoice-to-cash — card chargeback. A dispute means the bank
+      // pulled the funds back, so the payment we recorded is gone:
+      // reverse it, reopening the invoice. Disputes don't carry our
+      // tenant/invoice metadata, so resolve the originating payment by
+      // the dispute's payment_intent (our provider_reference) via the
+      // cross-tenant lookup, exactly like charge.refund.updated.
+      if (event.type === 'charge.dispute.created') {
+        const dispute = event.data.object as {
+          id?: string;
+          amount?: number;
+          reason?: string;
+          payment_intent?: string | { id?: string };
+        };
+
+        if (!deps.invoiceRepo || !deps.paymentRepo) {
+          logger.error('Invoice/payment repos not wired to Stripe webhook handler');
+          return res.status(500).json({ error: 'Dispute processing not configured' });
+        }
+
+        const pi = dispute.payment_intent;
+        const piId =
+          typeof pi === 'string'
+            ? pi
+            : (typeof pi === 'object' && pi !== null && typeof pi.id === 'string')
+              ? pi.id
+              : undefined;
+
+        const payment = piId
+          ? await deps.paymentRepo.findByProviderReferenceCrossTenant(piId)
+          : null;
+
+        if (!payment) {
+          // Out-of-order delivery: the dispute can arrive before the
+          // payment row is written. Throw so the outer catch returns 500
+          // and Stripe retries (the event-id dedup makes retries idempotent).
+          logger.warn('charge.dispute.created cannot resolve payment — letting Stripe retry', {
+            eventId: event.id, disputeId: dispute.id,
+          });
+          throw new NotFoundError('Payment', dispute.id ?? 'unknown');
+        }
+
+        const result = await reversePayment(
+          {
+            tenantId: payment.tenantId,
+            paymentId: payment.id,
+            reason: 'dispute',
+            correlationId: dispute.id ?? piId,
+          },
+          deps.invoiceRepo,
+          deps.paymentRepo,
+          deps.auditRepo,
+          buildMoneyStateDeps(deps),
+        );
+        logger.warn('Payment reversed via charge.dispute.created (chargeback)', {
+          tenantId: payment.tenantId,
+          paymentId: payment.id,
+          disputeId: dispute.id,
+          disputeReason: dispute.reason,
+          reversed: result.reversed,
+        });
       }
 
       // Tier 4 (Payment methods — PR 1). account.updated events

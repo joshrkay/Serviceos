@@ -7,6 +7,7 @@ import {
   PaymentMethod,
   PaymentStatus,
   IncrementRefundOptions,
+  ReversePaymentOptions,
 } from './payment';
 
 export class PgPaymentRepository extends PgBaseRepository implements PaymentRepository {
@@ -21,8 +22,9 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
           id, tenant_id, invoice_id, amount_cents, status,
           payment_method, reference_number, notes,
           paid_at, created_by, created_at, updated_at,
-          refunded_amount_cents, refunded_at, last_refund_stripe_id
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+          refunded_amount_cents, refunded_at, last_refund_stripe_id,
+          reversed_at, reversal_reason
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
         [
           payment.id,
           payment.tenantId,
@@ -39,6 +41,8 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
           payment.refundedAmountCents ?? 0,
           payment.refundedAt ?? null,
           payment.lastRefundStripeId ?? null,
+          payment.reversedAt ?? null,
+          payment.reversalReason ?? null,
         ],
       );
 
@@ -200,6 +204,14 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
         setClauses.push(`last_refund_stripe_id = $${paramIndex++}`);
         values.push(updates.lastRefundStripeId);
       }
+      if (updates.reversedAt !== undefined) {
+        setClauses.push(`reversed_at = $${paramIndex++}`);
+        values.push(updates.reversedAt);
+      }
+      if (updates.reversalReason !== undefined) {
+        setClauses.push(`reversal_reason = $${paramIndex++}`);
+        values.push(updates.reversalReason);
+      }
 
       if (setClauses.length === 0) {
         return this.findById(tenantId, id);
@@ -255,6 +267,38 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
     });
   }
 
+  /**
+   * Atomic compare-and-swap reversal. A single UPDATE flips the payment
+   * to 'failed' only while it is still 'completed' and not yet reversed,
+   * so a redelivered NSF/chargeback webhook (or two concurrent
+   * deliveries) cannot reverse twice. `tenant_id` is in the WHERE for
+   * defense-in-depth alongside RLS. Returns `null` on 0 rows (not found,
+   * already reversed, or not 'completed').
+   */
+  async reversePaymentAtomic(
+    tenantId: string,
+    id: string,
+    opts: ReversePaymentOptions,
+  ): Promise<Payment | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const { rows } = await client.query(
+        `UPDATE payments
+         SET status = 'failed',
+             reversed_at = $3,
+             reversal_reason = $4,
+             updated_at = now()
+         WHERE tenant_id = $1
+           AND id = $2
+           AND status = 'completed'
+           AND reversed_at IS NULL
+         RETURNING *`,
+        [tenantId, id, opts.reversedAt, opts.reason],
+      );
+      if (rows.length === 0) return null;
+      return this.mapRowToPayment(rows[0]);
+    });
+  }
+
   private mapRowToPayment(row: Record<string, any>): Payment {
     return {
       id: row.id,
@@ -276,6 +320,9 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
       refundedAmountCents: row.refunded_amount_cents != null ? Number(row.refunded_amount_cents) : 0,
       refundedAt: row.refunded_at ? new Date(row.refunded_at) : null,
       lastRefundStripeId: row.last_refund_stripe_id ?? null,
+      // Reversal columns added in migration 133; older rows default to null.
+      reversedAt: row.reversed_at ? new Date(row.reversed_at) : null,
+      reversalReason: row.reversal_reason ?? null,
     };
   }
 }
