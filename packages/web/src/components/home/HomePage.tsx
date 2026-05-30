@@ -18,7 +18,11 @@ import { TimeGivenBackCard } from './TimeGivenBackCard';
 import { MoneyLoopHomeCard } from './MoneyLoopHomeCard';
 import { ErrorState } from '../ErrorState';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
-import { formatDateInTenantTz, formatTimeInTenantTz } from '../../utils/formatInTenantTz';
+import {
+  formatDateInTenantTz,
+  formatInTenantTz,
+  formatTimeInTenantTz,
+} from '../../utils/formatInTenantTz';
 
 // ─── API Types ────────────────────────────────────────────────────────────
 interface ApiJob {
@@ -94,14 +98,14 @@ function todayIso(): string {
   return new Date().toISOString().split('T')[0];
 }
 
-function buildWeek(): { day: string; date: string; isToday: boolean }[] {
+function buildWeek(timezone: string): { day: string; date: string; isToday: boolean }[] {
   const today = new Date();
   return Array.from({ length: 7 }, (_, i) => {
     const d = new Date(today);
     d.setDate(today.getDate() + i);
     return {
-      day: d.toLocaleDateString('en-US', { weekday: 'short' }),
-      date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+      day: formatInTenantTz(d, timezone, { weekday: 'short' }),
+      date: formatDateInTenantTz(d, timezone),
       isToday: i === 0,
     };
   });
@@ -223,7 +227,8 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
 
 // ─── This week strip ──────────────────────────────────────────────────────
 function WeekStrip({ todayCount }: { todayCount: number }) {
-  const WEEK = buildWeek();
+  const tz = useTenantTimezone();
+  const WEEK = buildWeek(tz);
   return (
     <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: 'none' }}>
       {WEEK.map((d, i) => {
@@ -316,7 +321,7 @@ export function HomePage() {
             <div>
               <h1 className="text-slate-900">Good morning, Mike ☀️</h1>
               <p className="text-sm text-slate-400 mt-0.5">
-                {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
+                {formatInTenantTz(new Date(), tz, { weekday: 'long', month: 'long', day: 'numeric' })}
               </p>
             </div>
             <button

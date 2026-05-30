@@ -17,10 +17,21 @@ export interface DncCheckResult {
   phone: string;
 }
 
+export interface DncEntry {
+  phone: string;
+  source: string;
+  createdAt: Date;
+}
+
 export interface DncRepository {
   isOnDnc(tenantId: string, normalizedPhone: string): Promise<boolean>;
   addToDnc(tenantId: string, normalizedPhone: string, source: string): Promise<void>;
   removeFromDnc(tenantId: string, normalizedPhone: string): Promise<void>;
+  /**
+   * Return every DNC entry for the tenant, newest first. Backs the
+   * Settings UI's list view.
+   */
+  list(tenantId: string): Promise<DncEntry[]>;
 }
 
 export class PgDncRepository extends PgBaseRepository implements DncRepository {
@@ -73,6 +84,22 @@ export class PgDncRepository extends PgBaseRepository implements DncRepository {
       );
     });
   }
+
+  async list(tenantId: string): Promise<DncEntry[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query<{ phone: string; source: string; created_at: string }>(
+        `SELECT phone, source, created_at FROM tenant_dnc_list
+         WHERE tenant_id = $1
+         ORDER BY created_at DESC`,
+        [tenantId]
+      );
+      return result.rows.map((r) => ({
+        phone: r.phone,
+        source: r.source,
+        createdAt: new Date(r.created_at),
+      }));
+    });
+  }
 }
 
 export class InMemoryDncRepository implements DncRepository {
@@ -106,5 +133,17 @@ export class InMemoryDncRepository implements DncRepository {
 
   async removeFromDnc(tenantId: string, normalizedPhone: string): Promise<void> {
     this.entries.get(tenantId)?.delete(normalizedPhone);
+  }
+
+  async list(tenantId: string): Promise<DncEntry[]> {
+    const set = this.entries.get(tenantId);
+    if (!set) return [];
+    // In-memory variant doesn't track source/createdAt; surface a
+    // reasonable shape for tests.
+    return Array.from(set).map((phone) => ({
+      phone,
+      source: 'manual',
+      createdAt: new Date(0),
+    }));
   }
 }

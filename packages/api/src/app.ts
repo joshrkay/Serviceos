@@ -73,6 +73,7 @@ import {
 } from './ai/supervisor-presence';
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
+import { createDncRouter } from './routes/dnc';
 import { createVerticalRouter } from './routes/verticals';
 import { createVerticalTrainingAssetsRouter } from './routes/vertical-training-assets';
 import { createTemplateRouter } from './routes/templates';
@@ -2708,6 +2709,17 @@ export function createApp(): express.Express {
       invoiceRepo,
       paymentRepo,
       timeGivenBackReporter,
+      // Look up the tenant tz so /money-dashboard buckets by local
+      // month boundaries. Without this the dashboard would default
+      // to America/New_York (matches tenant_settings.timezone's DB
+      // default) — close-enough for most US tenants but wrong for
+      // anyone on PST or other zones. Delegates to the existing
+      // settingsRepo so we don't add a second tenant_settings query
+      // path (and inherit its RLS / withTenant handling for free).
+      getTenantTimezone: async (tenantId: string) => {
+        const settings = await settingsRepo.findByTenant(tenantId);
+        return settings?.timezone ?? DEFAULT_TENANT_TIMEZONE;
+      },
     }),
   );
   app.use(
@@ -2837,6 +2849,7 @@ export function createApp(): express.Express {
   app.use('/api/me', createMeRouter(userModeService, auditRepo));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use('/api/conversations', createConversationRouter(conversationRepo, auditRepo));
+  app.use('/api/dnc', createDncRouter({ dncRepo, auditRepo }));
 
   app.use(
     '/api/settings',

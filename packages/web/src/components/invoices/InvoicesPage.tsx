@@ -13,6 +13,8 @@ import { useMutation } from '../../hooks/useMutation';
 import { normalizeInvoiceStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { apiFetch } from '../../utils/api-fetch';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 
 type InvoiceStatus = 'Draft' | 'Sent' | 'Unpaid' | 'Paid' | 'Overdue' | 'Canceled';
 
@@ -84,7 +86,7 @@ function apiLineToUi(item: ApiLineItem): LineItem {
 }
 
 /** Build an invoice-compat object for sub-components */
-function buildInvCompat(inv: ApiInvoice, uiStatus: InvoiceStatus) {
+function buildInvCompat(inv: ApiInvoice, uiStatus: InvoiceStatus, timezone: string) {
   const customerName = inv.customer
     ? (inv.customer.displayName || [inv.customer.firstName, inv.customer.lastName].filter(Boolean).join(' ') || 'Customer')
     : 'Customer';
@@ -97,7 +99,7 @@ function buildInvCompat(inv: ApiInvoice, uiStatus: InvoiceStatus) {
     status: uiStatus,
     lineItems: (inv.lineItems ?? []).map(apiLineToUi),
     dueDate: inv.dueDate,
-    sentDate: inv.issuedAt ? new Date(inv.issuedAt).toLocaleDateString() : undefined,
+    sentDate: inv.issuedAt ? formatDateInTenantTz(inv.issuedAt, timezone) : undefined,
     paidDate: undefined as string | undefined,
   };
 }
@@ -656,6 +658,7 @@ function OriginAttributionLine({ leadId }: { leadId: string }) {
 // ─── Invoice Detail ───────────────────────────────────────────────────────
 function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () => void }) {
   const navigate = useNavigate();
+  const tz = useTenantTimezone();
   const { data: inv, isLoading, error, refetch } = useDetailQuery<ApiInvoice>('/api/invoices', invoiceId);
 
   const [lineItems, setLineItems] = useState<LineItem[]>([]);
@@ -716,7 +719,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
 
   const apiStatus   = paid ? 'paid' : inv.status;
   const uiStatus    = normalizeInvoiceStatus(apiStatus) as InvoiceStatus;
-  const invCompat   = buildInvCompat(inv, uiStatus);
+  const invCompat   = buildInvCompat(inv, uiStatus, tz);
   const apiLineItems = inv.lineItems ?? [];
   const uiLineItems = lineItems.length > 0 ? lineItems : apiLineItems.map(apiLineToUi);
 
@@ -814,7 +817,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
                     {notes.map(n => (
                       <div key={n.id} className="px-4 py-3">
                         <p className="text-sm text-slate-700 leading-snug">{n.content}</p>
-                        <p className="text-xs text-slate-400 mt-1">{new Date(n.createdAt).toLocaleString()}</p>
+                        <p className="text-xs text-slate-400 mt-1">{formatDateTimeInTenantTz(n.createdAt, tz)}</p>
                       </div>
                     ))}
                   </div>
@@ -992,6 +995,7 @@ const INVOICE_LIST_REFRESH_MS = 30_000;
 
 export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {
   const navigate = useNavigate();
+  const tz = useTenantTimezone();
   const [tab,      setTab]      = useState<InvoiceStatus | 'All'>('All');
   const [selected, setSelected] = useState<string | null>(defaultSelectedId ?? null);
 
@@ -1174,7 +1178,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
                       )}
                       {inv.issuedAt && (
                         <span className="flex items-center gap-1 text-xs text-slate-400">
-                          <Send size={10} /> Sent {new Date(inv.issuedAt).toLocaleDateString()}
+                          <Send size={10} /> Sent {formatDateInTenantTz(inv.issuedAt, tz)}
                         </span>
                       )}
                       {status === 'Draft' && (

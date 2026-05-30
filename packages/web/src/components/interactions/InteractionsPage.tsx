@@ -8,6 +8,8 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { Phone, User, Clock, ChevronRight, RefreshCw, AlertCircle, MessageSquare } from 'lucide-react';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import {
   listInteractions,
   getInteraction,
@@ -80,6 +82,7 @@ function TranscriptDrawer({
   interactionId: string;
   onClose: () => void;
 }) {
+  const tz = useTenantTimezone();
   const [detail, setDetail] = useState<InteractionDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -108,7 +111,7 @@ function TranscriptDrawer({
             {detail && (
               <p className="text-xs text-slate-500 mt-0.5">
                 {detail.customer?.displayName ?? 'Unknown caller'} ·{' '}
-                {new Date(detail.startedAt).toLocaleString()}
+                {formatDateTimeInTenantTz(detail.startedAt, tz)}
               </p>
             )}
           </div>

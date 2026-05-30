@@ -26,6 +26,15 @@ export interface ReportsRouterDeps {
   paymentRepo?: PaymentRepository;
   /** §9 — backs GET /time-given-back. 503 when absent. */
   timeGivenBackReporter?: TimeGivenBackReporter;
+  /**
+   * Returns the tenant's IANA timezone string (e.g. `America/Los_Angeles`).
+   * Used to bucket the money dashboard by tenant-local month boundaries —
+   * without it, a payment received at 11 PM on the last day of the month
+   * (UTC) ends up in the next month's bucket for any non-UTC tenant.
+   * Optional; when absent the dashboard falls back to America/New_York
+   * (matches `tenant_settings.timezone`'s default).
+   */
+  getTenantTimezone?: (tenantId: string) => Promise<string>;
 }
 
 /** 'YYYY-MM' for the current UTC month. */
@@ -83,7 +92,24 @@ export function createReportsRouter(deps: ReportsRouterDeps): Router {
           res.status(400).json({ error: 'VALIDATION_ERROR', message: "`month` must be 'YYYY-MM'" });
           return;
         }
-        const summary = await deps.moneyDashboardRepo.query(req.auth!.tenantId, month, new Date());
+        // Resolve the tenant tz so month boundaries align with the
+        // operator's local calendar, not UTC. Falls back to undefined
+        // (→ the repo's own default) on lookup error to keep the
+        // dashboard responsive even if tenant_settings is unreachable.
+        let timezone: string | undefined;
+        if (deps.getTenantTimezone) {
+          try {
+            timezone = await deps.getTenantTimezone(req.auth!.tenantId);
+          } catch {
+            timezone = undefined;
+          }
+        }
+        const summary = await deps.moneyDashboardRepo.query(
+          req.auth!.tenantId,
+          month,
+          new Date(),
+          timezone,
+        );
         res.json({ data: summary });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);

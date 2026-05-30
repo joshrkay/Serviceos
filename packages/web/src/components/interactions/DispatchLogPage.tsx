@@ -10,6 +10,8 @@
 import { useState, useEffect } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 
 interface MessageDispatch {
   id: string;
@@ -43,6 +45,7 @@ const ENTITY_LABEL: Record<string, string> = {
 };
 
 export function DispatchLogPage() {
+  const tz = useTenantTimezone();
   const [dispatches, setDispatches] = useState<MessageDispatch[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -123,7 +126,7 @@ export function DispatchLogPage() {
                       <p className="text-xs text-slate-400 font-mono truncate">{d.providerMessageId}</p>
                     )}
                     <p className="text-xs text-slate-400">
-                      {new Date(d.sentAt).toLocaleString()} · {d.provider}
+                      {formatDateTimeInTenantTz(d.sentAt, tz)} · {d.provider}
                     </p>
                     {d.errorMessage && (
                       <p className="text-xs text-red-600 mt-1">{d.errorMessage}</p>
