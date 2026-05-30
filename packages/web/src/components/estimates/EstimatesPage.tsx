@@ -8,6 +8,8 @@ import {
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
+import { Spinner, EmptyState } from '../ui';
+import { ErrorState } from '../ErrorState';
 import { apiFetch } from '../../utils/api-fetch';
 import { printEstimateDocument } from '../../lib/estimatePdf';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
@@ -912,7 +914,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   if (isLoading) {
     return (
       <div className="h-full flex items-center justify-center">
-        <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+        <Spinner size="md" className="text-slate-900" label="Loading estimate" />
       </div>
     );
   }
@@ -1341,14 +1343,11 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
         {/* Loading / Error */}
         {isLoading && (
           <div className="flex items-center justify-center py-16">
-            <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+            <Spinner size="md" className="text-slate-900" label="Loading estimates" />
           </div>
         )}
         {error && (
-          <div className="flex flex-col items-center py-12 gap-2 text-center">
-            <p className="text-sm text-red-500">Failed to load estimates</p>
-            <button onClick={refetch} className="text-xs text-blue-500 hover:underline">Retry</button>
-          </div>
+          <ErrorState message="Failed to load estimates" onRetry={refetch} />
         )}
 
         {/* List */}
@@ -1400,7 +1399,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
               );
             })}
             {filtered.length === 0 && (
-              <p className="py-12 text-center text-sm text-slate-400">No estimates</p>
+              <EmptyState title="No estimates" />
             )}
           </div>
         )}
