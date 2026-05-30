@@ -292,6 +292,10 @@ export async function convertToCustomer(
       // Thread source attribution forward — the originating lead id is
       // how downstream jobs/invoices later resolve it (one join away).
       originatingLeadId: existing.id,
+      // Preserve the lead's spoken-language preference so customer-facing
+      // language resolution (which reads customer.preferredLanguage) doesn't
+      // fall back to the tenant default after conversion.
+      preferredLanguage: existing.preferredLanguage,
       createdBy: actorId,
       createdAt: now,
       updatedAt: now,

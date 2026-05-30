@@ -41,6 +41,10 @@ export function Field({
   const control = React.cloneElement(child, {
     id: controlId,
     invalid: Boolean(error) || (child.props.invalid as boolean | undefined),
+    // Forward `required` so the rendered control is actually marked required
+    // for screen readers (and native validation), not just visually with the
+    // asterisk. An explicit `required` on the child still wins.
+    required: (child.props.required as boolean | undefined) ?? required,
     'aria-describedby': describedBy,
   });
 
