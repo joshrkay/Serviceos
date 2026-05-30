@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Sparkles } from 'lucide-react';
+import { toast } from 'sonner';
 import { apiFetch } from '../../utils/api-fetch';
 import { formatCurrency } from '../../utils/currency';
 import {
@@ -10,6 +11,7 @@ import {
   totalCents,
 } from '../forms/LineItemEditor';
 import { useListQuery } from '../../hooks/useListQuery';
+import { Button, Field, Input, Select, Textarea } from '../../components/ui';
 
 export interface EstimateFormProps {
   onCreated?: (estimateId: string) => void;
@@ -54,8 +56,6 @@ interface State {
   taxRatePercent: string;
   items: LineItemDraft[];
 }
-
-const inputCls = 'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';
 
 const AI_SUGGESTIONS: Record<string, { description: string; qty: string; price: string }[]> = {
   HVAC: [
@@ -217,9 +217,12 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
           throw new Error((json as { message?: string })?.message ?? `HTTP ${res.status}`);
         }
         const created = await res.json() as { id: string };
+        toast.success('Estimate created');
         onCreated?.(created.id);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to create estimate');
+        const message = err instanceof Error ? err.message : 'Failed to create estimate';
+        setError(message);
+        toast.error(message);
       } finally {
         setSubmitting(false);
       }
@@ -232,7 +235,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
 
   return (
     <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-3xl mx-auto">
-      <h1 className="text-lg text-slate-900 mb-4">New Estimate</h1>
+      <h1 className="text-slate-900 mb-4">New Estimate</h1>
       {error && (
         <div
           role="alert"
@@ -261,12 +264,10 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {/* Job picker */}
-        <div className="md:col-span-2">
-          <label className="text-xs text-slate-500">Job *</label>
-          <select
+        <Field label="Job *" className="md:col-span-2">
+          <Select
             value={form.jobId}
             onChange={(e) => handleJobChange(e.target.value)}
-            className={inputCls}
             required
           >
             <option value="">— select a job —</option>
@@ -275,8 +276,8 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
                 {j.jobNumber} — {j.summary}
               </option>
             ))}
-          </select>
-        </div>
+          </Select>
+        </Field>
 
         {/* Customer & service location (auto-populated) */}
         {selectedJob && (
@@ -293,49 +294,45 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
           </div>
         )}
 
-        <label className="text-xs text-slate-500">
-          Valid until
-          <input
+        <Field label="Valid until">
+          <Input
             type="date"
             value={form.validUntil}
             onChange={(e) => setForm((p) => ({ ...p, validUntil: e.target.value }))}
-            className={inputCls}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Tax rate (%)
-          <input
+        </Field>
+        <Field label="Tax rate (%)">
+          <Input
             value={form.taxRatePercent}
             onChange={(e) => setForm((p) => ({ ...p, taxRatePercent: e.target.value }))}
             inputMode="decimal"
             placeholder="0"
-            className={inputCls}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Discount ($)
-          <input
+        </Field>
+        <Field label="Discount ($)">
+          <Input
             value={form.discountDollars}
             onChange={(e) => setForm((p) => ({ ...p, discountDollars: e.target.value }))}
             inputMode="decimal"
             placeholder="0.00"
-            className={inputCls}
           />
-        </label>
+        </Field>
       </div>
 
       <div className="mt-4">
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs text-slate-500 font-medium">Line items</span>
-          <button
+          <Button
             type="button"
+            size="sm"
             onClick={handleAiSuggest}
+            loading={aiLoading}
             disabled={aiLoading || aiUsed}
-            className="flex items-center gap-1.5 text-xs bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white rounded-lg px-3 py-1.5 transition-colors"
+            leftIcon={<Sparkles size={12} />}
+            className="bg-violet-600 hover:bg-violet-700"
           >
-            <Sparkles size={12} />
             {aiLoading ? 'Generating...' : aiUsed ? 'Suggestions added' : 'AI Suggestions'}
-          </button>
+          </Button>
         </div>
         <LineItemEditor
           items={form.items}
@@ -353,41 +350,29 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
       </div>
 
       <div className="grid grid-cols-1 gap-3 mt-4">
-        <label className="text-xs text-slate-500">
-          Customer message
-          <textarea
+        <Field label="Customer message">
+          <Textarea
             value={form.customerMessage}
             onChange={(e) => setForm((p) => ({ ...p, customerMessage: e.target.value }))}
             rows={3}
-            className={inputCls}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Internal notes
-          <textarea
+        </Field>
+        <Field label="Internal notes">
+          <Textarea
             value={form.internalNotes}
             onChange={(e) => setForm((p) => ({ ...p, internalNotes: e.target.value }))}
             rows={3}
-            className={inputCls}
           />
-        </label>
+        </Field>
       </div>
 
       <div className="mt-4 flex gap-2">
-        <button
-          type="submit"
-          disabled={submitting}
-          className="rounded-lg bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800 disabled:opacity-50"
-        >
-          {submitting ? 'Creating...' : 'Create estimate'}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="rounded-lg border border-slate-200 text-slate-700 text-sm px-4 py-2 hover:bg-slate-50"
-        >
+        <Button type="submit" loading={submitting}>
+          Create estimate
+        </Button>
+        <Button type="button" variant="outline" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
       </div>
     </form>
   );

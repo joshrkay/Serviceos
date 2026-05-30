@@ -35,6 +35,7 @@ import { MoneyDashboardPage } from './components/reports/MoneyDashboardPage';
 import { RevenueBySourcePage } from './components/reports/RevenueBySourcePage';
 import { InboxPage } from './components/inbox/InboxPage';
 import { PortalShell } from './pages/portal/PortalShell';
+import { Showcase } from './pages/design/Showcase';
 import { InvoiceCreate } from './pages/invoices/InvoiceCreate';
 import { EstimateCreate } from './pages/estimates/EstimateCreate';
 import { JobCreate } from './pages/jobs/JobCreate';
@@ -185,6 +186,7 @@ export const router = createBrowserRouter([
       { path: 'reports/money', Component: MoneyDashboardPage },
       { path: 'reports/revenue-by-source', Component: RevenueBySourcePage },
       { path: 'technician/day', Component: TechnicianDayPage },
+      { path: 'design',         Component: Showcase },
     ],
     }],
   },
