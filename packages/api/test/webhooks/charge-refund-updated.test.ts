@@ -51,6 +51,8 @@ function makePayment(over: Partial<Payment> = {}): Payment {
     refundedAmountCents: 0,
     refundedAt: null,
     lastRefundStripeId: null,
+    reversedAt: null,
+    reversalReason: null,
     ...over,
   };
 }
