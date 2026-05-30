@@ -1,10 +1,20 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router';
+import { MapPin } from 'lucide-react';
+import { toast } from 'sonner';
 import { DetailPage } from '../../components/DetailPage';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { CommunicationTimeline } from '../../components/customers/CommunicationTimeline';
 import { LanguageBadge } from '../../components/customers/LanguageBadge';
 import { apiFetch } from '../../utils/api-fetch';
+import {
+  Badge,
+  Button,
+  Field,
+  Input,
+  Select,
+  Textarea,
+} from '../../components/ui';
 
 interface Customer {
   id: string;
@@ -66,96 +76,150 @@ function formatLocation(location: ServiceLocation): string {
     location.city,
     location.state,
     location.postalCode,
-  ].filter(Boolean).join(', ');
+  ]
+    .filter(Boolean)
+    .join(', ');
 }
 
-export function CustomerDetail({ customerId, onBack, onEdit, onArchived }: CustomerDetailProps) {
-  const { data, isLoading, error, refetch } = useDetailQuery<Customer>('/api/customers', customerId);
+export function CustomerDetail({
+  customerId,
+  onBack,
+  onEdit,
+  onArchived,
+}: CustomerDetailProps) {
+  const { data, isLoading, error, refetch } = useDetailQuery<Customer>(
+    '/api/customers',
+    customerId,
+  );
   const [locations, setLocations] = useState<ServiceLocation[]>([]);
   const [locationsError, setLocationsError] = useState<string | null>(null);
   const [note, setNote] = useState('');
   const [noteError, setNoteError] = useState<string | null>(null);
   const [noteSaving, setNoteSaving] = useState(false);
-  const [locationForm, setLocationForm] = useState<LocationFormState>(emptyLocationForm);
+  const [language, setLanguage] = useState<string>('');
+  const [languageSaving, setLanguageSaving] = useState(false);
+  const [locationForm, setLocationForm] =
+    useState<LocationFormState>(emptyLocationForm);
   const [locationSaving, setLocationSaving] = useState(false);
 
   const loadLocations = useCallback(async () => {
     setLocationsError(null);
     try {
-      const res = await apiFetch(`/api/locations?customerId=${encodeURIComponent(customerId)}`);
+      const res = await apiFetch(
+        `/api/locations?customerId=${encodeURIComponent(customerId)}`,
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setLocations(await res.json());
     } catch (err) {
-      setLocationsError(err instanceof Error ? err.message : 'Failed to load locations');
+      setLocationsError(
+        err instanceof Error ? err.message : 'Failed to load locations',
+      );
     }
   }, [customerId]);
 
   useEffect(() => {
     if (!data) return;
     setNote(data.communicationNotes ?? '');
+    setLanguage(data.preferredLanguage ?? '');
     void loadLocations();
   }, [data, loadLocations]);
 
+  // Partial update — send only `communicationNotes` so we never clobber
+  // other fields with potentially stale local values.
   const handleSaveNote = useCallback(async () => {
     setNoteSaving(true);
     setNoteError(null);
     try {
       const res = await apiFetch(`/api/customers/${customerId}`, {
         method: 'PUT',
-        body: JSON.stringify({
-          firstName: data?.firstName,
-          lastName: data?.lastName,
-          companyName: data?.companyName,
-          primaryPhone: data?.primaryPhone,
-          secondaryPhone: data?.secondaryPhone,
-          email: data?.email,
-          preferredChannel: data?.preferredChannel,
-          communicationNotes: note.trim() || '',
-        }),
+        body: JSON.stringify({ communicationNotes: note.trim() || '' }),
       });
       if (!res.ok) {
         const json = await res.json().catch(() => ({}));
         throw new Error(json?.message ?? `HTTP ${res.status}`);
       }
+      toast.success('Customer note saved');
       await refetch();
     } catch (err) {
-      setNoteError(err instanceof Error ? err.message : 'Failed to save note');
+      const message =
+        err instanceof Error ? err.message : 'Failed to save note';
+      setNoteError(message);
+      toast.error(message);
     } finally {
       setNoteSaving(false);
     }
-  }, [customerId, data, note, refetch]);
+  }, [customerId, note, refetch]);
 
-  const handleAddLocation = useCallback(async (event: React.FormEvent) => {
-    event.preventDefault();
-    setLocationSaving(true);
-    setLocationsError(null);
-    try {
-      const res = await apiFetch('/api/locations', {
-        method: 'POST',
-        body: JSON.stringify({
-          customerId,
-          label: locationForm.label.trim() || undefined,
-          street1: locationForm.street1.trim(),
-          city: locationForm.city.trim(),
-          state: locationForm.state.trim(),
-          postalCode: locationForm.postalCode.trim(),
-        }),
-      });
-      if (!res.ok) {
-        const json = await res.json().catch(() => ({}));
-        throw new Error(json?.message ?? `HTTP ${res.status}`);
+  // P11-002: persist the spoken-language preference. Previously this
+  // control had a defaultValue but no handler, so selections were lost.
+  const handleLanguageChange = useCallback(
+    async (next: string) => {
+      const previous = language;
+      setLanguage(next);
+      setLanguageSaving(true);
+      try {
+        const res = await apiFetch(`/api/customers/${customerId}`, {
+          method: 'PUT',
+          body: JSON.stringify({ preferredLanguage: next || null }),
+        });
+        if (!res.ok) {
+          const json = await res.json().catch(() => ({}));
+          throw new Error(json?.message ?? `HTTP ${res.status}`);
+        }
+        toast.success('Language preference saved');
+        await refetch();
+      } catch (err) {
+        setLanguage(previous);
+        toast.error(
+          err instanceof Error ? err.message : 'Failed to save language',
+        );
+      } finally {
+        setLanguageSaving(false);
       }
-      setLocationForm(emptyLocationForm);
-      await loadLocations();
-    } catch (err) {
-      setLocationsError(err instanceof Error ? err.message : 'Failed to add location');
-    } finally {
-      setLocationSaving(false);
-    }
-  }, [customerId, loadLocations, locationForm]);
+    },
+    [customerId, language, refetch],
+  );
+
+  const handleAddLocation = useCallback(
+    async (event: React.FormEvent) => {
+      event.preventDefault();
+      setLocationSaving(true);
+      setLocationsError(null);
+      try {
+        const res = await apiFetch('/api/locations', {
+          method: 'POST',
+          body: JSON.stringify({
+            customerId,
+            label: locationForm.label.trim() || undefined,
+            street1: locationForm.street1.trim(),
+            city: locationForm.city.trim(),
+            state: locationForm.state.trim(),
+            postalCode: locationForm.postalCode.trim(),
+          }),
+        });
+        if (!res.ok) {
+          const json = await res.json().catch(() => ({}));
+          throw new Error(json?.message ?? `HTTP ${res.status}`);
+        }
+        setLocationForm(emptyLocationForm);
+        toast.success('Service location added');
+        await loadLocations();
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : 'Failed to add location';
+        setLocationsError(message);
+        toast.error(message);
+      } finally {
+        setLocationSaving(false);
+      }
+    },
+    [customerId, loadLocations, locationForm],
+  );
 
   const handleArchive = useCallback(async () => {
-    const res = await apiFetch(`/api/customers/${customerId}/archive`, { method: 'POST' });
+    const res = await apiFetch(`/api/customers/${customerId}/archive`, {
+      method: 'POST',
+    });
     if (res.ok) onArchived?.();
   }, [customerId, onArchived]);
 
@@ -182,137 +246,205 @@ export function CustomerDetail({ customerId, onBack, onEdit, onArchived }: Custo
       onRetry={refetch}
       actions={[
         { label: 'Edit', onClick: () => onEdit?.(), variant: 'primary' },
-        { label: data.isArchived ? 'Archived' : 'Archive', onClick: handleArchive, variant: 'danger' },
+        {
+          label: data.isArchived ? 'Archived' : 'Archive',
+          onClick: handleArchive,
+          variant: 'danger',
+          disabled: data.isArchived,
+        },
       ]}
       sections={[
         {
           title: 'Contact Information',
           content: (
-            <div>
-              <p>Email: {data.email || 'N/A'}</p>
-              <p>Phone: {data.primaryPhone || 'N/A'}</p>
-              <p>Secondary: {data.secondaryPhone || 'N/A'}</p>
-              <p>Preferred: {data.preferredChannel}</p>
-              {/* P11-002: surface the customer's spoken-language preference
-                  so dispatchers can route Spanish callers correctly. The
-                  badge renders nothing when no preference is set. */}
-              <p className="flex items-center gap-2">
-                <span>Language:</span>
-                <LanguageBadge language={data.preferredLanguage ?? null} />
-                <label className="ml-2 text-xs">
-                  <span className="sr-only">Edit preferred language</span>
-                  <select
+            <dl className="flex flex-col gap-2 text-sm">
+              <div className="flex justify-between gap-4">
+                <dt className="text-slate-400">Email</dt>
+                <dd className="text-slate-800">{data.email || '—'}</dd>
+              </div>
+              <div className="flex justify-between gap-4">
+                <dt className="text-slate-400">Phone</dt>
+                <dd className="text-slate-800">{data.primaryPhone || '—'}</dd>
+              </div>
+              <div className="flex justify-between gap-4">
+                <dt className="text-slate-400">Secondary</dt>
+                <dd className="text-slate-800">{data.secondaryPhone || '—'}</dd>
+              </div>
+              <div className="flex justify-between gap-4">
+                <dt className="text-slate-400">Preferred channel</dt>
+                <dd className="text-slate-800 capitalize">
+                  {data.preferredChannel}
+                </dd>
+              </div>
+              {/* P11-002: spoken-language preference, now persisted on change
+                  so dispatchers can route Spanish callers correctly. */}
+              <div className="flex items-center justify-between gap-4 pt-1">
+                <dt className="flex items-center gap-2 text-slate-400">
+                  Language
+                  <LanguageBadge
+                    language={(language || null) as 'en' | 'es' | null}
+                  />
+                </dt>
+                <dd className="w-32">
+                  <Select
                     aria-label="Preferred language"
-                    defaultValue={data.preferredLanguage ?? ''}
-                    className="rounded border px-1 py-0.5 text-xs"
+                    value={language}
+                    disabled={languageSaving}
+                    onChange={(e) => handleLanguageChange(e.target.value)}
                   >
                     <option value="">—</option>
                     <option value="en">English</option>
                     <option value="es">Español</option>
-                  </select>
-                </label>
-              </p>
-            </div>
+                  </Select>
+                </dd>
+              </div>
+            </dl>
           ),
         },
         {
           title: 'Customer Notes',
           content: (
-            <div>
+            <div className="flex flex-col gap-3">
               {note.trim() ? (
-                <p className="whitespace-pre-wrap">{note}</p>
+                <p className="whitespace-pre-wrap text-sm text-slate-700">
+                  {note}
+                </p>
               ) : (
-                <p className="text-sm text-slate-500">No customer notes yet.</p>
+                <p className="text-sm text-slate-400">No customer notes yet.</p>
               )}
-              <label className="mt-3 block text-xs text-slate-500">
-                Edit customer notes
-                <textarea
+              <Field label="Edit customer notes" error={noteError}>
+                <Textarea
                   aria-label="Customer notes"
                   value={note}
                   onChange={(event) => setNote(event.target.value)}
                   rows={3}
-                  className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
                 />
-              </label>
-              {noteError && <p role="alert" className="mt-2 text-sm text-red-600">{noteError}</p>}
-              <button
-                type="button"
-                onClick={handleSaveNote}
-                disabled={noteSaving}
-                className="mt-2 rounded-lg bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-50"
-              >
-                {noteSaving ? 'Saving...' : 'Save note'}
-              </button>
+              </Field>
+              <div>
+                <Button
+                  size="sm"
+                  loading={noteSaving}
+                  onClick={handleSaveNote}
+                >
+                  Save note
+                </Button>
+              </div>
             </div>
           ),
         },
         {
           title: 'Service Locations',
           content: (
-            <div>
-              {locationsError && <p role="alert" className="mb-2 text-sm text-red-600">{locationsError}</p>}
-              <div className="space-y-2">
+            <div className="flex flex-col gap-4">
+              {locationsError && (
+                <p role="alert" className="text-sm text-red-600">
+                  {locationsError}
+                </p>
+              )}
+              <div className="flex flex-col gap-2">
                 {locations.map((location) => (
-                  <div key={location.id} className="rounded-lg border border-slate-200 p-3">
+                  <div
+                    key={location.id}
+                    className="rounded-xl border border-slate-200 p-3"
+                  >
                     <div className="flex items-center gap-2">
-                      <p className="text-sm text-slate-900">{location.label || 'Service location'}</p>
+                      <MapPin size={13} className="shrink-0 text-slate-400" />
+                      <p className="text-sm text-slate-900">
+                        {location.label || 'Service location'}
+                      </p>
                       {location.isPrimary && (
-                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">Primary</span>
+                        <Badge variant="info">Primary</Badge>
                       )}
                     </div>
-                    <p className="text-sm text-slate-600">{formatLocation(location)}</p>
-                    {location.accessNotes && <p className="mt-1 text-xs text-amber-700">{location.accessNotes}</p>}
+                    <p className="mt-1 pl-5 text-sm text-slate-600">
+                      {formatLocation(location)}
+                    </p>
+                    {location.accessNotes && (
+                      <p className="mt-1 pl-5 text-xs text-amber-700">
+                        {location.accessNotes}
+                      </p>
+                    )}
                   </div>
                 ))}
-                {locations.length === 0 && <p className="text-sm text-slate-500">No service locations yet.</p>}
+                {locations.length === 0 && (
+                  <p className="text-sm text-slate-400">
+                    No service locations yet.
+                  </p>
+                )}
               </div>
-              <form onSubmit={handleAddLocation} className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2">
-                <input
-                  aria-label="Location label"
-                  placeholder="Label"
-                  value={locationForm.label}
-                  onChange={(event) => setLocationForm((prev) => ({ ...prev, label: event.target.value }))}
-                  className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                />
-                <input
-                  aria-label="Street address"
-                  placeholder="Street address"
-                  required
-                  value={locationForm.street1}
-                  onChange={(event) => setLocationForm((prev) => ({ ...prev, street1: event.target.value }))}
-                  className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                />
-                <input
-                  aria-label="City"
-                  placeholder="City"
-                  required
-                  value={locationForm.city}
-                  onChange={(event) => setLocationForm((prev) => ({ ...prev, city: event.target.value }))}
-                  className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                />
-                <input
-                  aria-label="State"
-                  placeholder="State"
-                  required
-                  value={locationForm.state}
-                  onChange={(event) => setLocationForm((prev) => ({ ...prev, state: event.target.value }))}
-                  className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                />
-                <input
-                  aria-label="Postal code"
-                  placeholder="Postal code"
-                  required
-                  value={locationForm.postalCode}
-                  onChange={(event) => setLocationForm((prev) => ({ ...prev, postalCode: event.target.value }))}
-                  className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                />
-                <button
-                  type="submit"
-                  disabled={locationSaving}
-                  className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-50"
-                >
-                  {locationSaving ? 'Saving...' : 'Add service location'}
-                </button>
+              <form
+                onSubmit={handleAddLocation}
+                className="grid grid-cols-1 gap-3 md:grid-cols-2"
+              >
+                <Field label="Label" className="md:col-span-2">
+                  <Input
+                    placeholder="e.g. Home, Office"
+                    value={locationForm.label}
+                    onChange={(event) =>
+                      setLocationForm((prev) => ({
+                        ...prev,
+                        label: event.target.value,
+                      }))
+                    }
+                  />
+                </Field>
+                <Field label="Street address" required className="md:col-span-2">
+                  <Input
+                    required
+                    value={locationForm.street1}
+                    onChange={(event) =>
+                      setLocationForm((prev) => ({
+                        ...prev,
+                        street1: event.target.value,
+                      }))
+                    }
+                  />
+                </Field>
+                <Field label="City" required>
+                  <Input
+                    required
+                    value={locationForm.city}
+                    onChange={(event) =>
+                      setLocationForm((prev) => ({
+                        ...prev,
+                        city: event.target.value,
+                      }))
+                    }
+                  />
+                </Field>
+                <Field label="State" required>
+                  <Input
+                    required
+                    value={locationForm.state}
+                    onChange={(event) =>
+                      setLocationForm((prev) => ({
+                        ...prev,
+                        state: event.target.value,
+                      }))
+                    }
+                  />
+                </Field>
+                <Field label="Postal code" required>
+                  <Input
+                    required
+                    value={locationForm.postalCode}
+                    onChange={(event) =>
+                      setLocationForm((prev) => ({
+                        ...prev,
+                        postalCode: event.target.value,
+                      }))
+                    }
+                  />
+                </Field>
+                <div className="flex items-end md:col-span-2">
+                  <Button
+                    type="submit"
+                    variant="outline"
+                    loading={locationSaving}
+                  >
+                    Add service location
+                  </Button>
+                </div>
               </form>
             </div>
           ),
@@ -324,7 +456,10 @@ export function CustomerDetail({ customerId, onBack, onEdit, onArchived }: Custo
               {data.originatingLeadId ? (
                 <p className="text-sm text-slate-700">
                   Converted from lead{' '}
-                  <Link to={`/leads/${data.originatingLeadId}`} className="text-blue-600 hover:underline">
+                  <Link
+                    to={`/leads/${data.originatingLeadId}`}
+                    className="text-blue-600 hover:underline"
+                  >
                     {data.originatingLeadId}
                   </Link>
                   .
