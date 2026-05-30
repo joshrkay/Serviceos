@@ -489,7 +489,31 @@ function ShellInner() {
               </div>
             )}
             <CameraButton variant="topbar" onOpen={() => setCameraOpen(true)} />
-            <Bell size={18} className="text-slate-500" />
+            {/* Mobile approvals entry point. The supervisor bottom bar
+                mirrors the Figma 6 (no Inbox) and the logo proposal badge
+                is desktop-only, so this Bell is the persistent mobile path
+                to the approval queue — with the live pending count. */}
+            <NavLink
+              to="/inbox"
+              aria-label={
+                pendingProposalCount > 0
+                  ? `${pendingProposalCount} pending proposal${pendingProposalCount === 1 ? '' : 's'} — open inbox`
+                  : 'Open approval inbox'
+              }
+              data-testid="mobile-inbox-bell"
+              className="relative flex items-center justify-center text-slate-500"
+            >
+              <Bell size={18} />
+              {pendingProposalCount > 0 && (
+                <span
+                  data-testid="mobile-inbox-badge"
+                  className="absolute -top-1.5 -right-1.5 flex size-3.5 min-w-3.5 items-center justify-center rounded-full bg-blue-600 px-0.5 text-white"
+                  style={{ fontSize: 9 }}
+                >
+                  {pendingProposalCount > 9 ? '9+' : pendingProposalCount}
+                </span>
+              )}
+            </NavLink>
             <NavLink to="/settings" className="relative flex items-center justify-center">
               <span className={`flex size-7 items-center justify-center rounded-full text-xs transition-all ${
                 location.pathname.startsWith('/settings')
