@@ -606,8 +606,13 @@ function VoiceInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
 const CATEGORY_COLOR: Record<string, string> = {
   Service:     'bg-blue-100 text-blue-700',
   Labor:       'bg-violet-100 text-violet-700',
+  // The live catalog API (CatalogCategory) returns plural 'Parts' / 'Materials';
+  // the bundled MANUAL_CATALOG uses the singular forms. Key on both so real
+  // Price Book items don't fall through to the default gray chip.
   Part:        'bg-amber-100 text-amber-700',
+  Parts:       'bg-amber-100 text-amber-700',
   Material:    'bg-green-100 text-green-700',
+  Materials:   'bg-green-100 text-green-700',
   Equipment:   'bg-slate-100 text-slate-600',
   'Parts+Labor':'bg-indigo-100 text-indigo-700',
 };
