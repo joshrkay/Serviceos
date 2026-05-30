@@ -612,6 +612,26 @@ const CATEGORY_COLOR: Record<string, string> = {
   'Parts+Labor':'bg-indigo-100 text-indigo-700',
 };
 
+// Shape of a catalog item from GET /api/catalog/items, mapped into the
+// wizard's CatalogItem so real Price Book entries render in the toggle list.
+interface ApiCatalogItem {
+  id: string;
+  name: string;
+  unitPriceCents: number;
+  unit?: string;
+  category?: string;
+}
+function apiCatalogToCatalogItem(it: ApiCatalogItem): CatalogItem {
+  return {
+    id: it.id,
+    name: it.name,
+    defaultRate: it.unitPriceCents / 100,
+    defaultQty: 1,
+    ...(it.unit ? { unit: it.unit } : {}),
+    category: it.category ?? 'Service',
+  };
+}
+
 function ManualBuildInput({ svcType: initialSvc, onResult }: {
   svcType?: ServiceType;
   onResult: (r: AIResult) => void;
@@ -621,7 +641,14 @@ function ManualBuildInput({ svcType: initialSvc, onResult }: {
   const [showCustom, setShowCustom] = useState(false);
   const [customDraft, setCustom] = useState({ desc: '', qty: '1', rate: '' });
 
-  const catalog = MANUAL_CATALOG[svcType];
+  // Prefer the tenant's real Price Book. Catalog items aren't service-typed,
+  // so when they exist we show them all (the service tabs still set the
+  // estimate's summary label). With an empty Price Book we fall back to the
+  // bundled starter catalog keyed by service type — same fallback spirit as
+  // the AI-suggest path's local generator.
+  const { data: apiCatalog } = useListQuery<ApiCatalogItem>('/api/catalog/items', { pageSize: 200 });
+  const realCatalog = apiCatalog.map(apiCatalogToCatalogItem);
+  const catalog = realCatalog.length > 0 ? realCatalog : MANUAL_CATALOG[svcType];
   const total   = selected.reduce((s, i) => s + i.qty * i.rate, 0);
 
   function toggleItem(item: CatalogItem) {

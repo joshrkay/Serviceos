@@ -1,5 +1,7 @@
 import React, { useCallback, useMemo } from 'react';
 import { formatCurrency as formatUSD } from '../../utils/currency';
+import { CatalogPicker } from './CatalogPicker';
+import { catalogItemToDraft } from './catalogToLineItem';
 
 /**
  * Editable line item shape — what the editor renders/maintains internally.
@@ -41,6 +43,8 @@ export interface LineItemEditorProps {
   onChange: (items: LineItemDraft[]) => void;
   /** Enable good-better-best authoring controls (estimates only). */
   enableOptions?: boolean;
+  /** Show an "Add from Price Book" picker that appends catalog items as rows. */
+  enableCatalog?: boolean;
 }
 
 /** Generate a stable client id for a new row (no UUID dep). */
@@ -101,7 +105,12 @@ export function totalCents(items: LineItemDraft[]): number {
 const inputCls =
   'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';
 
-export function LineItemEditor({ items, onChange, enableOptions = false }: LineItemEditorProps) {
+export function LineItemEditor({
+  items,
+  onChange,
+  enableOptions = false,
+  enableCatalog = false,
+}: LineItemEditorProps) {
   const update = useCallback(
     (index: number, patch: Partial<LineItemDraft>) => {
       const next = items.slice();
@@ -130,13 +139,20 @@ export function LineItemEditor({ items, onChange, enableOptions = false }: LineI
     <div data-testid="line-item-editor" className="space-y-2">
       <div className="flex items-center justify-between">
         <h2 className="text-sm text-slate-700">Line items</h2>
-        <button
-          type="button"
-          onClick={add}
-          className="text-xs rounded-md border border-slate-200 px-2 py-1 hover:bg-slate-50"
-        >
-          + Add row
-        </button>
+        <div className="flex items-center gap-2">
+          {enableCatalog && (
+            <CatalogPicker
+              onPick={(item) => onChange([...items, catalogItemToDraft(item)])}
+            />
+          )}
+          <button
+            type="button"
+            onClick={add}
+            className="text-xs rounded-md border border-slate-200 px-2 py-1 hover:bg-slate-50"
+          >
+            + Add row
+          </button>
+        </div>
       </div>
 
       {items.length === 0 && (
