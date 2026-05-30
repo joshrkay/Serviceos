@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Plus } from 'lucide-react';
 import { LeadStageColumn } from '../../components/leads/LeadStageColumn';
 import { LeadCardData } from '../../components/leads/LeadCard';
 import { apiFetch } from '../../utils/api-fetch';
+import { Button, Input, Spinner } from '../../components/ui';
 
 const STAGES: { key: string; label: string }[] = [
   { key: 'new', label: 'New' },
@@ -115,14 +117,10 @@ export function LeadList({ onSelectLead, onNewLead }: LeadListProps) {
   return (
     <div className="p-4 md:p-6">
       <div className="flex items-center justify-between mb-4">
-        <h1 className="text-lg text-slate-900">Lead Pipeline</h1>
-        <button
-          type="button"
-          onClick={onNewLead}
-          className="rounded-lg bg-slate-900 text-white text-sm px-3 py-2 hover:bg-slate-800"
-        >
+        <h1 className="text-slate-900">Lead Pipeline</h1>
+        <Button size="sm" onClick={onNewLead} leftIcon={<Plus size={14} />}>
           New Lead
-        </button>
+        </Button>
       </div>
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -153,12 +151,12 @@ export function LeadList({ onSelectLead, onNewLead }: LeadListProps) {
           </button>
         ))}
         <span className="text-xs text-slate-500 ml-3">Assignee:</span>
-        <input
+        <Input
           type="text"
           value={assigneeFilter ?? ''}
           onChange={(e) => setAssigneeFilter(e.target.value || null)}
           placeholder="user id"
-          className="text-xs rounded-lg border border-slate-200 px-2 py-1 w-40"
+          className="w-40 px-2.5 py-1.5 text-xs"
         />
       </div>
 
@@ -167,7 +165,11 @@ export function LeadList({ onSelectLead, onNewLead }: LeadListProps) {
           {error}
         </div>
       )}
-      {isLoading && <p className="text-sm text-slate-500 mb-3">Loading...</p>}
+      {isLoading && (
+        <p className="mb-3 flex items-center gap-2 text-sm text-slate-500">
+          <Spinner size="sm" className="text-slate-400" /> Loading…
+        </p>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-3">
         {STAGES.map((stage) => (

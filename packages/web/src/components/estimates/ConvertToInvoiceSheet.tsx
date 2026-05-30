@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { X, Check, Receipt } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import { type UiLineItem } from '../../lib/lineItems';
+import { Button } from '../ui';
 
 export interface ConvertToInvoiceInput {
   estimateId: string;
@@ -84,13 +85,16 @@ export function ConvertToInvoiceSheet({
               <p className="text-slate-900" style={{ fontSize: '1rem' }}>Create invoice</p>
               <p className="text-xs text-slate-400 mt-0.5">From approved {input.estimateNumber}</p>
             </div>
-            <button
+            <Button
               onClick={onClose}
               type="button"
-              className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100 transition-colors"
+              variant="ghost"
+              size="sm"
+              aria-label="Close"
+              className="size-7 rounded-full p-0"
             >
-              <X size={15} className="text-slate-500" />
-            </button>
+              <X size={15} />
+            </Button>
           </div>
 
           {done ? (
@@ -152,25 +156,18 @@ export function ConvertToInvoiceSheet({
 
               {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
 
-              <button
+              <Button
                 onClick={() => void convert()}
-                disabled={loading}
+                loading={loading}
                 type="button"
-                className={`w-full flex items-center justify-center gap-2 rounded-xl py-3.5 text-sm transition-all ${
-                  loading ? 'bg-slate-400 text-white' : 'bg-slate-900 text-white hover:bg-slate-700'
-                }`}
+                size="lg"
+                fullWidth
+                leftIcon={<Receipt size={14} />}
               >
-                {loading ? (
-                  <>
-                    <span className="size-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />{' '}
-                    Creating…
-                  </>
-                ) : (
-                  <>
-                    <Receipt size={14} /> Create invoice for ${total.toLocaleString()}
-                  </>
-                )}
-              </button>
+                {loading
+                  ? 'Creating…'
+                  : `Create invoice for $${total.toLocaleString()}`}
+              </Button>
             </>
           )}
         </div>
