@@ -3472,14 +3472,6 @@ export const MIGRATIONS = {
       WHERE idempotency_key IS NOT NULL;
   `,
 
-  // P20-002: configurable dunning cadence + late-fee policy per tenant, plus a
-  // per-(invoice, kind, step_key) idempotency ledger so the overdue sweep
-  // (workers/overdue-invoice-worker.ts, P20-003/004) sends each reminder and
-  // accrues each late fee exactly once. Mirrors the service_agreement_runs
-  // idempotency shape: a UNIQUE constraint is the source of truth; duplicate
-  // inserts raise 23505 and the worker treats them as "already done".
-  // step_key is a STABLE identity (not an array position), so editing the
-  // reminder cadence never resends or skips an already-sent reminder.
   '136_create_invoice_dunning': `
     CREATE TABLE IF NOT EXISTS invoice_dunning_configs (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -3527,6 +3519,45 @@ export const MIGRATIONS = {
     DROP POLICY IF EXISTS tenant_isolation_invoice_dunning_events ON invoice_dunning_events;
     CREATE POLICY tenant_isolation_invoice_dunning_events ON invoice_dunning_events
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // Persist per-technician working hours so the dispatch feasibility check
+  // and the inbound-AI availability search stop offering off-hours slots
+  // (e.g. 3am). One contiguous window per tech per weekday; split shifts
+  // are out of scope for this iteration. Times are tenant-local HH:mm
+  // strings interpreted in the appointment's timezone (the appointment
+  // instants themselves stay UTC). Replaces the in-memory-only stub.
+  '137_technician_working_hours': `
+    CREATE TABLE IF NOT EXISTS technician_working_hours (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      technician_id UUID NOT NULL REFERENCES users(id),
+      day_of_week SMALLINT NOT NULL CHECK (day_of_week BETWEEN 0 AND 6),
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT uq_working_hours_per_tech_day UNIQUE (tenant_id, technician_id, day_of_week)
+    );
+    CREATE INDEX IF NOT EXISTS idx_technician_working_hours_tech
+      ON technician_working_hours (tenant_id, technician_id);
+    ALTER TABLE technician_working_hours ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE technician_working_hours FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_technician_working_hours ON technician_working_hours;
+    CREATE POLICY tenant_isolation_technician_working_hours ON technician_working_hours
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // Hennessy — payment-link UX. The deposit Stripe Payment Link previously
+  // had no durable deadline: callers computed a 24h `expiresAt` that was
+  // never sent to Stripe or persisted, so links lived forever and the
+  // customer-facing page could not show an honest "pay by" date. Persist a
+  // real expiry alongside the link so the public estimate page can surface
+  // a deadline and the service can deactivate + re-mint an expired link.
+  '138_jobs_deposit_link_expiry': `
+    ALTER TABLE jobs
+      ADD COLUMN IF NOT EXISTS deposit_stripe_payment_link_expires_at TIMESTAMPTZ;
   `,
 };
 

@@ -190,6 +190,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['134_proposal_chains', 'edcfadb2580167f35be75ea42d258fa7d499088d28cca5bbfc8b84823aa9e2ad'],
   ['135_appointments_idempotency_key', 'ab65a6bf7b64221c2761b81e7c5d6f42b2e048b7fa7fcb52ab4adffe1c370aeb'],
   ['136_create_invoice_dunning', '085bab2c52bb030111b677d061d70019eded0a144aa99797ac1eff80bfb3149a'],
+  ['137_technician_working_hours', '9337884066ddee9644370bca78c50c7489a854a831ceec4e5cedfce8a707248d'],
+  ['138_jobs_deposit_link_expiry', '3a21eb0ed8a56280a2ddd0cd8510ade347e5c85efd9741a262e9d7ffdb8560fa'],
 ];
 
 function hashMigration(value: string): string {
