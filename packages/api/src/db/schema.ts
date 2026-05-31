@@ -3453,6 +3453,17 @@ export const MIGRATIONS = {
     ALTER TABLE payments ADD CONSTRAINT payments_payment_method_check
       CHECK (payment_method IN ('stripe', 'cash', 'check', 'credit_card', 'bank_transfer', 'other'));
   `,
+
+  // Multi-action chaining: a single voice utterance can decompose into
+  // an ordered chain of linked proposals where later members reference
+  // entities earlier members create. chain_id groups the siblings; the
+  // index supports the execution-time sibling lookup
+  // (PgProposalRepository.findByChain). Per-proposal chain metadata
+  // (chainIndex, chainRefs) rides on source_context (JSONB), no column.
+  '134_proposal_chains': `
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS chain_id UUID;
+    CREATE INDEX IF NOT EXISTS idx_proposals_chain ON proposals(tenant_id, chain_id);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

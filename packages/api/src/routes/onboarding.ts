@@ -453,14 +453,25 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           return;
         }
         const tenantId = req.auth!.tenantId;
-        await pool.query(
-          `UPDATE tenant_settings
-             SET ai_verification_status = 'pending',
-                 ai_verification_error = NULL,
-                 updated_at = now()
-           WHERE tenant_id = $1`,
-          [tenantId],
-        );
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+          await client.query(
+            `UPDATE tenant_settings
+               SET ai_verification_status = 'pending',
+                   ai_verification_error = NULL,
+                   updated_at = now()
+             WHERE tenant_id = $1`,
+            [tenantId],
+          );
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK').catch(() => {});
+          throw err;
+        } finally {
+          client.release();
+        }
         const payload: VerifyAiPayload = { tenantId };
         await queue.send(VERIFY_AI_JOB_TYPE, payload, `verify-ai-retry-${tenantId}`);
         await auditRepo.create(
