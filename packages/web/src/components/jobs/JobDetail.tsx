@@ -109,6 +109,8 @@ function buildCustomerCompat(api: ApiJobDetail['customer']): Customer | undefine
   };
 }
 import { StatusBadge } from '../shared/StatusBadge';
+import { Spinner, EmptyState } from '../ui';
+import { ErrorState } from '../ErrorState';
 import { ActivityTimeline } from './ActivityTimeline';
 import { AddEntrySheet } from './AddEntrySheet';
 import { MaterialsSheet } from './MaterialsSheet';
@@ -1075,18 +1077,34 @@ export function JobDetailView({ id }: { id: string }) {
   if (isLoading) {
     return (
       <div className="h-full flex items-center justify-center">
-        <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+        <Spinner size="md" className="text-slate-900" label="Loading job" />
       </div>
     );
   }
 
-  if (error || !job) {
+  if (error) {
     return (
       <div className="h-full overflow-y-auto pb-20 p-6">
         <button onClick={() => navigate('/jobs')} className="flex items-center gap-2 text-sm text-slate-500 mb-4">
           <ArrowLeft size={14} /> Back
         </button>
-        <p className="text-slate-400">{error ? 'Failed to load job.' : 'Job not found.'}</p>
+        <ErrorState message="Failed to load job." onRetry={refetchJob} />
+      </div>
+    );
+  }
+
+  if (!job) {
+    return (
+      <div className="h-full overflow-y-auto pb-20 p-6">
+        <button onClick={() => navigate('/jobs')} className="flex items-center gap-2 text-sm text-slate-500 mb-4">
+          <ArrowLeft size={14} /> Back
+        </button>
+        <EmptyState
+          title="Job not found."
+          description="This job may have been deleted, or you don't have access to it."
+          actionLabel="Back to jobs"
+          onAction={() => navigate('/jobs')}
+        />
       </div>
     );
   }
