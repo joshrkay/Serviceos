@@ -29,6 +29,7 @@ import { CreateAppointmentAITaskHandler } from '../ai/tasks/create-appointment-t
 import { SlotConflictChecker } from '../ai/tasks/slot-conflict-checker';
 import { AvailabilityFinder } from '../ai/tasks/availability-finder';
 import { AppointmentRepository } from '../appointments/appointment';
+import { JobRepository } from '../jobs/job';
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
 import { CreateCustomerTaskHandler, TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
@@ -142,6 +143,14 @@ export interface VoiceActionRouterDeps {
   >;
   /** When provided, the create_appointment handler produces held-slot bookings. */
   appointmentRepo?: AppointmentRepository;
+  /**
+   * When provided alongside `appointmentRepo`, the reschedule / cancel /
+   * confirm handlers scope appointment resolution to the verified caller's
+   * own appointments (appointment → job → customerId) instead of the
+   * tenant-wide single-active scan. Prevents a caller's "cancel my
+   * appointment" from resolving to a different customer's appointment.
+   */
+  jobRepo?: JobRepository;
   /**
    * §3B/3D/3E — vertical-aware prompt resolver. When wired, the classifier
    * sees the tenant's active pack terminology, intake-disambiguation
@@ -290,11 +299,11 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('create_job', new CreateJobVoiceTaskHandler());
   handlers.set(
     'reschedule_appointment',
-    new RescheduleAppointmentTaskHandler(deps.gateway, deps.appointmentRepo),
+    new RescheduleAppointmentTaskHandler(deps.gateway, deps.appointmentRepo, deps.jobRepo),
   );
   handlers.set(
     'cancel_appointment',
-    new CancelAppointmentTaskHandler(deps.appointmentRepo),
+    new CancelAppointmentTaskHandler(deps.appointmentRepo, deps.jobRepo),
   );
   handlers.set('reassign_appointment', new ReassignAppointmentTaskHandler());
   handlers.set('add_note', new AddNoteTaskHandler());
@@ -305,13 +314,63 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('update_customer', new UpdateCustomerTaskHandler());
   handlers.set('log_expense', new LogExpenseTaskHandler());
   handlers.set('convert_lead', new ConvertLeadTaskHandler());
-  handlers.set('confirm_appointment', new ConfirmAppointmentTaskHandler(deps.appointmentRepo));
+  handlers.set('confirm_appointment', new ConfirmAppointmentTaskHandler(deps.appointmentRepo, deps.jobRepo));
   handlers.set('mark_lead_lost', new MarkLeadLostTaskHandler());
   handlers.set('add_service_location', new AddServiceLocationTaskHandler());
   handlers.set('log_time_entry', new LogTimeEntryTaskHandler());
   handlers.set('notify_delay', new NotifyDelayTaskHandler(deps.appointmentRepo));
   handlers.set('request_feedback', new RequestFeedbackTaskHandler());
   return handlers;
+}
+
+/**
+ * Processing-level idempotency guard for at-least-once queue redelivery.
+ *
+ * The transcription worker enqueues each `voice_action_router` job with a
+ * deterministic idempotencyKey (`${tenantId}:${recordingId}:voice_action_router`),
+ * so the pg-queue dedups double *enqueues*. But a single message that is
+ * redelivered after a worker crash/timeout (the at-least-once contract)
+ * would otherwise re-run classification and create a SECOND proposal —
+ * and for the held-slot `create_appointment` path, a second tentative
+ * appointment hold (a real double-booking).
+ *
+ * We stamp `recordingId` onto every persisted proposal's `sourceContext`
+ * (clarification proposals already carry it; the task path is stamped in
+ * the worker before `create`). Before doing any work we look for an
+ * existing proposal with the same `recordingId` and skip if found — the
+ * same "look up by stable key, skip if already processed" contract used by
+ * `handleWebhookEvent` in webhooks/webhook-handler.ts.
+ *
+ * Returns the existing proposal id when this message has already been
+ * processed, otherwise undefined. No-ops (returns undefined) when no
+ * recordingId is present — the in-app voice path is synchronous and not
+ * subject to queue redelivery.
+ */
+async function findAlreadyProcessed(
+  proposalRepo: ProposalRepository,
+  tenantId: string,
+  recordingId: string | undefined,
+): Promise<string | undefined> {
+  if (!recordingId) return undefined;
+  const existing = await proposalRepo.findByTenant(tenantId);
+  const match = existing.find((p) => {
+    const sc = p.sourceContext as Record<string, unknown> | undefined;
+    return sc !== undefined && sc.recordingId === recordingId;
+  });
+  return match?.id;
+}
+
+/**
+ * Stamp the originating `recordingId` onto a proposal's sourceContext so a
+ * redelivered message can detect it was already processed. Returns the
+ * proposal unchanged when there's no recordingId.
+ */
+function stampRecordingId(proposal: Proposal, recordingId: string | undefined): Proposal {
+  if (!recordingId) return proposal;
+  return {
+    ...proposal,
+    sourceContext: { ...(proposal.sourceContext ?? {}), recordingId },
+  };
 }
 
 /**
@@ -641,7 +700,10 @@ async function processChain(
       chainRefs,
     });
 
-    await deps.proposalRepo.create(proposal);
+    // Stamp the originating recordingId (merged into the chain metadata
+    // sourceContext) so a redelivered message short-circuits in
+    // findAlreadyProcessed once any chain member is persisted.
+    await deps.proposalRepo.create(stampRecordingId(proposal, base.recordingId));
     producedProposal.set(segment.index, true);
     createdIds.push(proposal.id);
 
@@ -688,6 +750,23 @@ export function createVoiceActionRouterWorker(
       // surfaces that to the UI.
       if (!transcript || transcript.trim().length === 0) {
         log.info('voice-action-router: empty transcript, skipping');
+        return;
+      }
+
+      // Idempotency guard (at-least-once redelivery). If a proposal already
+      // exists for this recordingId we've processed this message before —
+      // skip BEFORE classification + any held-slot appointment creation so a
+      // redelivery can't double-book. No-op for the in-app path (no recordingId).
+      const alreadyProcessedId = await findAlreadyProcessed(
+        deps.proposalRepo,
+        tenantId,
+        recordingId,
+      );
+      if (alreadyProcessedId) {
+        log.info('voice-action-router: duplicate message skipped', {
+          recordingId,
+          existingProposalId: alreadyProcessedId,
+        });
         return;
       }
 
@@ -806,7 +885,7 @@ export function createVoiceActionRouterWorker(
       );
 
       if (outcome.kind === 'proposal') {
-        await deps.proposalRepo.create(outcome.proposal);
+        await deps.proposalRepo.create(stampRecordingId(outcome.proposal, recordingId));
         log.info('voice-action-router: proposal created from voice', {
           proposalId: outcome.proposal.id,
           proposalType: outcome.proposal.proposalType,

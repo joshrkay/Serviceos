@@ -405,13 +405,30 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
-    const tenantId = await Promise.resolve(deps.resolveTenantId({
-      to: body.To ?? '',
-      from: body.From ?? '',
-    }));
+    let tenantId: string | undefined;
+    try {
+      tenantId = await Promise.resolve(deps.resolveTenantId({
+        to: body.To ?? '',
+        from: body.From ?? '',
+      }));
+    } catch (err) {
+      // Transient infra failure (e.g. DB outage during tenant lookup).
+      // Respond 503 so Twilio retries the webhook rather than the caller
+      // losing their turn. Mirrors the /voice route's transient handling.
+      logger.error('telephony/gather: tenant lookup failed', {
+        sessionId,
+        callSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      res.status(503).type('text/plain').send('Service temporarily unavailable');
+      return;
+    }
     if (!tenantId) {
-      logger.error('telephony/gather: no tenant resolved', { sessionId });
-      res.status(500).type('text/plain').send('Tenant resolution failed');
+      // Terminal miss. Return 200 + graceful hangup TwiML so the caller
+      // hears an apology instead of dead air, and Twilio doesn't retry-storm
+      // a 5xx. (Previously returned a raw 500.)
+      logger.error('telephony/gather: no tenant resolved', { sessionId, callSid });
+      res.status(200).type('text/xml').send(technicalDifficultiesTwiml());
       return;
     }
 
@@ -472,13 +489,28 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
-    const tenantId = await Promise.resolve(deps.resolveTenantId({
-      to: body.To ?? '',
-      from: body.From ?? '',
-    }));
+    let tenantId: string | undefined;
+    try {
+      tenantId = await Promise.resolve(deps.resolveTenantId({
+        to: body.To ?? '',
+        from: body.From ?? '',
+      }));
+    } catch (err) {
+      // Transient infra failure — 503 so Twilio retries rather than
+      // dropping the dial leg. Mirrors /voice + /gather handling.
+      logger.error('telephony/dial-result: tenant lookup failed', {
+        sessionId,
+        callSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      res.status(503).type('text/plain').send('Service temporarily unavailable');
+      return;
+    }
     if (!tenantId) {
-      logger.error('telephony/dial-result: no tenant resolved', { sessionId });
-      res.status(500).type('text/plain').send('Tenant resolution failed');
+      // Terminal miss. 200 + graceful hangup TwiML instead of a raw 500
+      // (which would make Twilio retry and leave the caller in dead air).
+      logger.error('telephony/dial-result: no tenant resolved', { sessionId, callSid });
+      res.status(200).type('text/xml').send(technicalDifficultiesTwiml());
       return;
     }
 
@@ -634,6 +666,23 @@ function numberNotInServiceTwiml(): string {
     `<?xml version="1.0" encoding="UTF-8"?>` +
     `<Response>` +
     `<Say voice="Polly.Joanna">This number is not in service. Goodbye.</Say>` +
+    `<Hangup/>` +
+    `</Response>`
+  );
+}
+
+/**
+ * Graceful "technical difficulties" TwiML used when a mid-call webhook
+ * (/gather, /dial-result) can't resolve the tenant for a terminal reason.
+ * Returned with HTTP 200 so the caller hears an apology + clean hangup
+ * instead of dead air, and Twilio doesn't 5xx-retry-storm the webhook.
+ * Matches the inline copy the /voice + /gather catch blocks already emit.
+ */
+function technicalDifficultiesTwiml(): string {
+  return (
+    `<?xml version="1.0" encoding="UTF-8"?>` +
+    `<Response>` +
+    `<Say voice="Polly.Joanna">We're experiencing technical difficulties. Please try again later.</Say>` +
     `<Hangup/>` +
     `</Response>`
   );
