@@ -3638,6 +3638,19 @@ export function getMigrationSQL(): string {
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * True when `tenantId` is the canonical UUID shape that `setTenantContext`
+ * (and therefore every tenant-scoped DB path) accepts. Callers that take a
+ * tenant id from untrusted input — e.g. a public webhook URL param — should
+ * gate on this BEFORE doing any tenant-scoped work (resolver lookups, audit
+ * writes), otherwise the malformed id throws inside `setTenantContext` deeper
+ * in the call stack. Single source of truth so the guard can't drift from the
+ * throw it protects against.
+ */
+export function isValidTenantId(tenantId: string): boolean {
+  return UUID_REGEX.test(tenantId);
+}
+
+/**
  * Produce the SQL that sets `app.current_tenant_id` for the current
  * connection so RLS policies can scope queries to the tenant.
  *
