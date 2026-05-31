@@ -70,9 +70,8 @@ export class PgEntityResolver implements EntityResolver {
   ): Promise<EntityResolverResult> {
     const client = await this.pool.connect();
     try {
-      await client.query(
-        `SET app.current_tenant_id = '${tenantId}'`,
-      );
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
       const { rows } = await client.query<{
         id: string;
         name: string;
@@ -87,6 +86,7 @@ export class PgEntityResolver implements EntityResolver {
           LIMIT 5`,
         [tenantId, reference, SIMILARITY_PREFILTER],
       );
+      await client.query('COMMIT');
 
       const candidates: EntityCandidate[] = rows.map((row) => ({
         id: row.id,
@@ -97,6 +97,9 @@ export class PgEntityResolver implements EntityResolver {
       }));
 
       return this.toResult(candidates, reference);
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
     } finally {
       client.release();
     }
@@ -108,9 +111,8 @@ export class PgEntityResolver implements EntityResolver {
   ): Promise<EntityResolverResult> {
     const client = await this.pool.connect();
     try {
-      await client.query(
-        `SET app.current_tenant_id = '${tenantId}'`,
-      );
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
       const { rows } = await client.query<{
         id: string;
         title: string;
@@ -125,6 +127,7 @@ export class PgEntityResolver implements EntityResolver {
           LIMIT 5`,
         [tenantId, reference, SIMILARITY_PREFILTER],
       );
+      await client.query('COMMIT');
 
       const candidates: EntityCandidate[] = rows.map((row) => ({
         id: row.id,
@@ -135,6 +138,9 @@ export class PgEntityResolver implements EntityResolver {
       }));
 
       return this.toResult(candidates, reference);
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
     } finally {
       client.release();
     }
@@ -146,9 +152,8 @@ export class PgEntityResolver implements EntityResolver {
   ): Promise<EntityResolverResult> {
     const client = await this.pool.connect();
     try {
-      await client.query(
-        `SET app.current_tenant_id = '${tenantId}'`,
-      );
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
       const { rows } = await client.query<{
         id: string;
         invoice_number: string;
@@ -163,6 +168,7 @@ export class PgEntityResolver implements EntityResolver {
           LIMIT 5`,
         [tenantId, reference, SIMILARITY_PREFILTER],
       );
+      await client.query('COMMIT');
 
       const candidates: EntityCandidate[] = rows.map((row) => ({
         id: row.id,
@@ -173,6 +179,9 @@ export class PgEntityResolver implements EntityResolver {
       }));
 
       return this.toResult(candidates, reference);
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
     } finally {
       client.release();
     }
@@ -189,9 +198,8 @@ export class PgEntityResolver implements EntityResolver {
 
     const client = await this.pool.connect();
     try {
-      await client.query(
-        `SET app.current_tenant_id = '${tenantId}'`,
-      );
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
       const { rows } = await client.query<{
         id: string;
         scheduled_for: string;
@@ -206,6 +214,7 @@ export class PgEntityResolver implements EntityResolver {
           LIMIT 5`,
         [tenantId, parsed.start.toISOString(), parsed.end.toISOString()],
       );
+      await client.query('COMMIT');
 
       if (rows.length === 0) {
         return { kind: 'not_found', reference };
@@ -223,6 +232,9 @@ export class PgEntityResolver implements EntityResolver {
         return { kind: 'resolved', candidate: candidates[0] };
       }
       return { kind: 'ambiguous', candidates };
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
     } finally {
       client.release();
     }
