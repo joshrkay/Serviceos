@@ -55,4 +55,18 @@ describe('Modal', () => {
     );
     expect(screen.getByText('Save')).toBeInTheDocument();
   });
+
+  it('renders the description when there is no title and no close button', () => {
+    // Non-dismissible dialog: description must still render (and remain the
+    // target of aria-describedby) even though the header has no title/close.
+    render(
+      <Modal open onClose={() => {}} description="Processing payment…" showClose={false}>
+        body
+      </Modal>,
+    );
+    const desc = screen.getByText('Processing payment…');
+    expect(desc).toBeInTheDocument();
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveAttribute('aria-describedby', desc.id);
+  });
 });

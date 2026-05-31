@@ -71,7 +71,7 @@ export function Sheet({
           className,
         )}
       >
-        {(title || showClose) && (
+        {(title || description || showClose) && (
           <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 py-4">
             <div className="min-w-0">
               {title && (

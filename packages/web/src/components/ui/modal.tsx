@@ -80,7 +80,7 @@ export function Modal({
           className,
         )}
       >
-        {(title || showClose) && (
+        {(title || description || showClose) && (
           <div className="flex items-start justify-between gap-3 px-5 pt-5 pb-2">
             <div className="min-w-0">
               {title && (
