@@ -4,6 +4,7 @@ import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository, createProposal, CreateProposalInput, ProposalType, Proposal } from '../proposals/proposal';
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { ConflictError } from '../shared/errors';
+import { voiceProposalIdempotencyKey } from '../voice/voice-audit';
 import {
   classifyIntent,
   ExtractedEntities,
@@ -315,12 +316,13 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
  * and for the held-slot `create_appointment` path, a second tentative
  * appointment hold (a real double-booking).
  *
- * We stamp `recordingId` onto every persisted proposal's `sourceContext`
- * (clarification proposals already carry it; the task path is stamped in
- * the worker before `create`). Before doing any work we look for an
- * existing proposal with the same `recordingId` and skip if found — the
- * same "look up by stable key, skip if already processed" contract used by
- * `handleWebhookEvent` in webhooks/webhook-handler.ts.
+ * We stamp a deterministic `idempotencyKey` (voiceProposalIdempotencyKey)
+ * onto every persisted proposal; this pre-check looks one up by that SAME
+ * key and skips if found — a single anchor shared with the atomic ON CONFLICT
+ * guard (the "look up by stable key, skip if already processed" contract used
+ * by `handleWebhookEvent` in webhooks/webhook-handler.ts). `recordingId` is
+ * also kept on `sourceContext` for traceability, but dedup no longer depends
+ * on it, so the two fields can't drift out of lockstep.
  *
  * Returns the existing proposal id when this message has already been
  * processed, otherwise undefined. No-ops (returns undefined) when no
@@ -333,27 +335,25 @@ async function findAlreadyProcessed(
   recordingId: string | undefined,
 ): Promise<string | undefined> {
   if (!recordingId) return undefined;
+  const key = voiceProposalIdempotencyKey(recordingId);
   const existing = await proposalRepo.findByTenant(tenantId);
-  const match = existing.find((p) => {
-    const sc = p.sourceContext as Record<string, unknown> | undefined;
-    return sc !== undefined && sc.recordingId === recordingId;
-  });
+  const match = existing.find((p) => p.idempotencyKey === key);
   return match?.id;
 }
 
 /**
- * Stamp the originating `recordingId` onto a proposal's sourceContext (so a
- * redelivered message can detect it was already processed) AND derive a
- * deterministic `idempotencyKey` (so a *concurrent* redelivery is deduped
- * atomically by the proposals table's ON CONFLICT index). Returns the
- * proposal unchanged when there's no recordingId.
+ * Stamp the originating `recordingId` onto a proposal's sourceContext (for
+ * traceability) AND derive a deterministic `idempotencyKey` (so both the
+ * pre-check and a *concurrent* redelivery dedup atomically on one shared
+ * key via the proposals table's ON CONFLICT index). Returns the proposal
+ * unchanged when there's no recordingId.
  */
 function stampRecordingId(proposal: Proposal, recordingId: string | undefined): Proposal {
   if (!recordingId) return proposal;
   return {
     ...proposal,
     sourceContext: { ...(proposal.sourceContext ?? {}), recordingId },
-    idempotencyKey: proposal.idempotencyKey ?? `voice:${recordingId}`,
+    idempotencyKey: proposal.idempotencyKey ?? voiceProposalIdempotencyKey(recordingId),
   };
 }
 
@@ -364,6 +364,10 @@ function stampRecordingId(proposal: Proposal, recordingId: string | undefined): 
  * where two deliveries both pass the pre-check and race to create — the DB
  * (or in-memory) unique constraint lets exactly one win and the loser's
  * ConflictError is swallowed here instead of failing the message.
+ *
+ * Only swallowed for KEYED proposals: a ConflictError can only come from the
+ * idempotency-key constraint when a key is set, so guarding on it avoids
+ * masking any future unrelated uniqueness violation on a keyless proposal.
  */
 async function createDeduped(
   repo: ProposalRepository,
@@ -374,7 +378,7 @@ async function createDeduped(
   try {
     await repo.create(proposal);
   } catch (err) {
-    if (err instanceof ConflictError) {
+    if (err instanceof ConflictError && proposal.idempotencyKey) {
       log.info('voice-action-router: duplicate proposal create skipped (idempotency conflict)', {
         recordingId,
         idempotencyKey: proposal.idempotencyKey,
@@ -529,7 +533,7 @@ async function emitClarification(
     // Same deterministic key as the task path (stampRecordingId) so a
     // redelivered message dedups atomically regardless of which proposal
     // type it produced. One message → one proposal → one key.
-    ...(recordingId ? { idempotencyKey: `voice:${recordingId}` } : {}),
+    ...(recordingId ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) } : {}),
     ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
     createdBy: userId,
     // Deliberately NO sourceTrustTier. decideInitialStatus will land

@@ -915,7 +915,7 @@ describe('voice-action-router worker', () => {
     expect(byTenant).toHaveLength(1);
     // The proposal carries the deterministic idempotency key so a concurrent
     // redelivery (one that races past the pre-check) is deduped at the DB layer.
-    expect(byTenant[0].idempotencyKey).toBe('voice:rec-dedup-1');
+    expect(byTenant[0].idempotencyKey).toBe('voice-proposal:rec-dedup-1');
 
     const appts = await appointmentRepo.findByDateRange(
       't-1',

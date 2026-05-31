@@ -221,7 +221,13 @@ export async function createAppointment(
 
   const created = await repository.create(appointment);
 
-  if (auditRepo) {
+  // On an idempotency-key dedup hit the repo returns a pre-existing row
+  // (different id than the one we generated) without inserting — don't emit
+  // a second `appointment.created` audit event for an appointment we didn't
+  // actually create.
+  const wasDeduped = created.id !== appointment.id;
+
+  if (auditRepo && !wasDeduped) {
     const event = createAuditEvent({
       tenantId: input.tenantId,
       actorId: input.createdBy,
