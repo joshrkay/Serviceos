@@ -98,6 +98,7 @@ import { PgJobPhotoRepository } from './jobs/pg-job-photo';
 import { createDispatchRoutes } from './dispatch/routes';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
+import { createPublicBookingRouter } from './routes/public-booking';
 import { createReportsRouter } from './routes/reports';
 import { RepoBackedTimeGivenBackReporter } from './reports/time-given-back';
 import { createTimeEntriesRouter } from './routes/time-entries';
@@ -123,6 +124,11 @@ import { InMemoryAppointmentRepository } from './appointments/appointment';
 import { InMemoryAssignmentRepository } from './appointments/assignment';
 import { InMemoryEstimateRepository } from './estimates/estimate';
 import { InMemoryInvoiceRepository } from './invoices/invoice';
+import { InMemoryInvoiceScheduleRepository } from './invoices/invoice-schedule';
+import { PgInvoiceScheduleRepository } from './invoices/pg-invoice-schedule';
+import { InMemoryBatchInvoiceRunRepository } from './invoices/batch-invoice-run';
+import { PgBatchInvoiceRunRepository } from './invoices/pg-batch-invoice-run';
+import { runBatchInvoiceSweep } from './workers/batch-invoice-worker';
 import { InMemoryPaymentRepository } from './invoices/payment';
 import { createPaymentLinkProvider } from './payments/payment-link-provider';
 import { InMemoryNoteRepository } from './notes/note';
@@ -1004,6 +1010,8 @@ export function createApp(): express.Express {
   const skillMatcher           = new StubSkillMatcher();
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
   const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
+  const invoiceScheduleRepo = pool ? new PgInvoiceScheduleRepository(pool) : new InMemoryInvoiceScheduleRepository();
+  const batchInvoiceRunRepo = pool ? new PgBatchInvoiceRunRepository(pool) : new InMemoryBatchInvoiceRunRepository();
   const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
   const expenseRepo        = pool ? new PgExpenseRepository(pool)        : new InMemoryExpenseRepository();
   // P5-017: Resolve the payment-link provider via the factory so the mock
@@ -1432,6 +1440,8 @@ export function createApp(): express.Express {
     invoiceRepo,
     estimateRepo,
     settingsRepo,
+    scheduleRepo: invoiceScheduleRepo,
+    proposalRepo,
     docRevisionRepo: documentRevisionRepo,
     editDeltaRepo: deltaRepo,
     noteRepo,
@@ -1585,6 +1595,7 @@ export function createApp(): express.Express {
     estimateReminder: 590004,
     estimateExpiry: 590005,
     googleReviews: 590006,
+    batchInvoice: 590007,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -1865,6 +1876,38 @@ export function createApp(): express.Express {
         ? new PgTenantTransactionRunner(pool)
         : new InMemoryTransactionRunner(),
       paymentLinkProvider,
+    }),
+  );
+
+  // Public, token-less online booking — the prospect acquisition funnel
+  // (Jobber "Online Booking" parity). Mounted BEFORE the global /api Clerk
+  // auth: there is no session, the tenant is the UUID in the path (same as
+  // public-intake). A booking never auto-confirms — it creates a held
+  // appointment + `create_booking` proposal for the owner to approve.
+  app.use(
+    '/api/public/booking',
+    // Stricter than the global /api limiter: an unauthenticated write path that
+    // creates customers/jobs/appointments + holds calendar slots. Mirrors the
+    // /public/intake limiter (booking is heavier, so a touch tighter).
+    rateLimit({
+      windowMs: 60 * 1000,
+      max: 5,
+      standardHeaders: true,
+      legacyHeaders: false,
+    }),
+    createPublicBookingRouter({
+      tenantRepo: intakeTenantRepo,
+      customerRepo,
+      locationRepo,
+      jobRepo,
+      appointmentRepo,
+      proposalRepo,
+      auditRepo,
+      assignmentRepo,
+      settingsRepo,
+      transactionRunner: pool
+        ? new PgTenantTransactionRunner(pool)
+        : new InMemoryTransactionRunner(),
     }),
   );
 
@@ -2604,7 +2647,14 @@ export function createApp(): express.Express {
   );
   app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership, auditRepo));
-  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher, customerRepo, locationRepo));
+  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher, customerRepo, locationRepo, {
+    estimateRepo,
+    invoiceRepo,
+    proposalRepo,
+    settingsRepo,
+    auditRepo,
+    scheduleRepo: invoiceScheduleRepo,
+  }));
   app.use(
     '/api/jobs',
     createJobFilesRouter({
@@ -2870,7 +2920,13 @@ export function createApp(): express.Express {
 
   app.use('/api/me', createMeRouter(userModeService, auditRepo));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
-  app.use('/api/conversations', createConversationRouter(conversationRepo, auditRepo));
+  app.use(
+    '/api/conversations',
+    createConversationRouter(conversationRepo, auditRepo, {
+      gateway: llmGateway,
+      settingsRepo,
+    }),
+  );
   app.use('/api/dnc', createDncRouter({ dncRepo, auditRepo }));
 
   app.use(
@@ -3043,6 +3099,37 @@ export function createApp(): express.Express {
       });
     });
   }, 60_000));
+
+  // P21-003 — batch-invoice sweep. Daily-grained work; an hourly tick surfaces
+  // newly-completed jobs promptly. Opt-in per tenant (settings.batchInvoiceEnabled);
+  // in-memory dev returns no tenants so it no-ops locally.
+  const batchInvoiceLogger = createLogger({
+    service: 'batch-invoice-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.batchInvoice, async () => {
+      await runBatchInvoiceSweep({
+        jobRepo,
+        invoiceRepo,
+        estimateRepo,
+        proposalRepo,
+        settingsRepo,
+        runRepo: batchInvoiceRunRepo,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        auditRepo,
+        logger: batchInvoiceLogger,
+      });
+    }).catch((err) => {
+      batchInvoiceLogger.error('Batch-invoice sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 3_600_000));
 
   // §6 Time-to-Cash: overdue-invoice sweep. Hourly — invoice due dates
   // have day granularity, so an hourly check surfaces newly-overdue

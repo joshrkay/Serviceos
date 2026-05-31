@@ -21,7 +21,7 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal';
 
 export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -35,6 +35,8 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'draft_invoice',
   'update_invoice',
   'issue_invoice',
+  'create_invoice_schedule',
+  'batch_invoice',
   'reassign_appointment',
   'reschedule_appointment',
   'add_crew_member',
@@ -220,6 +222,13 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'update_estimate':
     case 'draft_invoice':
     case 'update_invoice':
+    // create_invoice_schedule sets up a milestone plan + drafts the first
+    // milestone invoice — no money moves and sending is a later step, so it
+    // is capture-class (stays in 'draft' until the owner approves).
+    case 'create_invoice_schedule':
+    // batch_invoice fans out N draft_invoice proposals on approval — it mints
+    // drafts, moves no money, and sends nothing, so it is capture-class too.
+    case 'batch_invoice':
     case 'reassign_appointment':
     case 'reschedule_appointment':
     // Crew add/remove are dispatcher-initiated capture actions: they

@@ -3521,12 +3521,6 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  // Persist per-technician working hours so the dispatch feasibility check
-  // and the inbound-AI availability search stop offering off-hours slots
-  // (e.g. 3am). One contiguous window per tech per weekday; split shifts
-  // are out of scope for this iteration. Times are tenant-local HH:mm
-  // strings interpreted in the appointment's timezone (the appointment
-  // instants themselves stay UTC). Replaces the in-memory-only stub.
   '137_technician_working_hours': `
     CREATE TABLE IF NOT EXISTS technician_working_hours (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -3549,15 +3543,69 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  // Hennessy — payment-link UX. The deposit Stripe Payment Link previously
-  // had no durable deadline: callers computed a 24h `expiresAt` that was
-  // never sent to Stripe or persisted, so links lived forever and the
-  // customer-facing page could not show an honest "pay by" date. Persist a
-  // real expiry alongside the link so the public estimate page can surface
-  // a deadline and the service can deactivate + re-mint an expired link.
-  '138_jobs_deposit_link_expiry': `
-    ALTER TABLE jobs
-      ADD COLUMN IF NOT EXISTS deposit_stripe_payment_link_expires_at TIMESTAMPTZ;
+  '138_tenant_settings_auto_invoice_on_completion': `
+    -- P20-001: opt-in toggle to auto-draft an invoice when a job is marked
+    -- complete. Off by default — owners opt in; the draft still routes
+    -- through the proposal/approval gate before anything is sent.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS auto_invoice_on_completion BOOLEAN NOT NULL DEFAULT false;
+  `,
+
+  '139_create_invoice_schedules': `
+    -- P21-001: progress / milestone billing. One schedule splits a job's total
+    -- into ordered milestones, each minted as its own invoice.
+    CREATE TABLE IF NOT EXISTS invoice_schedules (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      estimate_id UUID REFERENCES estimates(id),
+      total_amount_cents BIGINT NOT NULL,
+      -- ordered milestones, e.g.
+      -- [{"label":"Deposit","type":"percent","value":5000,"trigger":"on_accept"},
+      --  {"label":"Balance","type":"remainder","value":0,"trigger":"on_completion"}]
+      -- percent value is basis points (bps); flat is integer cents.
+      milestones JSONB NOT NULL DEFAULT '[]',
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_invoice_schedules_job
+      ON invoice_schedules(tenant_id, job_id);
+    ALTER TABLE invoice_schedules ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE invoice_schedules FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_invoice_schedules ON invoice_schedules;
+    CREATE POLICY tenant_isolation_invoice_schedules ON invoice_schedules
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    -- Link each minted milestone invoice back to its schedule + position.
+    ALTER TABLE invoices
+      ADD COLUMN IF NOT EXISTS schedule_id UUID REFERENCES invoice_schedules(id),
+      ADD COLUMN IF NOT EXISTS milestone_index INTEGER;
+  `,
+
+  '140_batch_invoicing': `
+    -- P21-003: batch-invoice sweep. Per (tenant, job, batch_date) dedup ledger
+    -- so a re-run never re-batches a job, plus a per-tenant opt-in toggle.
+    CREATE TABLE IF NOT EXISTS batch_invoice_runs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      -- Calendar date (YYYY-MM-DD) the batch ran.
+      batch_date TEXT NOT NULL,
+      proposal_id UUID REFERENCES proposals(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, job_id, batch_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_batch_invoice_runs_tenant
+      ON batch_invoice_runs(tenant_id);
+    ALTER TABLE batch_invoice_runs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE batch_invoice_runs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_batch_invoice_runs ON batch_invoice_runs;
+    CREATE POLICY tenant_isolation_batch_invoice_runs ON batch_invoice_runs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS batch_invoice_enabled BOOLEAN NOT NULL DEFAULT false;
   `,
 };
 

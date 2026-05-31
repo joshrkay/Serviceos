@@ -18,6 +18,7 @@ import { OnboardingShell } from './components/onboarding/v2/OnboardingShell';
 import { EstimateApprovalPage } from './components/customer/EstimateApprovalPage';
 import { InvoicePaymentPage } from './components/customer/InvoicePaymentPage';
 import { IntakeFormPage } from './components/customer/IntakeFormPage';
+import { BookingPage } from './components/customer/BookingPage';
 import { FeedbackPage } from './components/customer/FeedbackPage';
 import { InteractionsPage } from './components/interactions/InteractionsPage';
 import { DispatchLogPage } from './components/interactions/DispatchLogPage';
@@ -141,6 +142,7 @@ export const router = createBrowserRouter([
   { path: '/e/:id',      Component: EstimateApprovalPage, ErrorBoundary: RouteErrorElement },
   { path: '/pay/:id',    Component: InvoicePaymentPage,   ErrorBoundary: RouteErrorElement },
   { path: '/intake',     Component: IntakeFormPage,       ErrorBoundary: RouteErrorElement },
+  { path: '/book',       Component: BookingPage,          ErrorBoundary: RouteErrorElement },
   { path: '/public/feedback/:token', Component: FeedbackPage, ErrorBoundary: RouteErrorElement },
   { path: '/portal/:token',          Component: PortalShell,  ErrorBoundary: RouteErrorElement },
 

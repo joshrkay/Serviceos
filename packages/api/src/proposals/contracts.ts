@@ -10,6 +10,8 @@ import { sendInvoicePayloadSchema } from './contracts/send-invoice';
 import { sendEstimatePayloadSchema } from './contracts/send-estimate';
 import { recordPaymentPayloadSchema } from './contracts/record-payment';
 import { logExpensePayloadSchema } from './contracts/log-expense';
+import { createInvoiceSchedulePayloadSchema } from './contracts/create-invoice-schedule';
+import { batchInvoicePayloadSchema } from './contracts/batch-invoice';
 import {
   onboardingTenantSettingsPayloadSchema,
   onboardingServiceCategoryPayloadSchema,
@@ -319,6 +321,8 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   draft_invoice: draftInvoicePayloadSchema,
   update_invoice: updateInvoicePayloadSchema,
   issue_invoice: issueInvoicePayloadSchema,
+  create_invoice_schedule: createInvoiceSchedulePayloadSchema,
+  batch_invoice: batchInvoicePayloadSchema,
   reassign_appointment: reassignAppointmentPayloadSchema,
   reschedule_appointment: rescheduleAppointmentPayloadSchema,
   add_crew_member: addCrewMemberPayloadSchema,
