@@ -99,6 +99,40 @@ describe('resolveChainReferences', () => {
     }
   });
 
+  it('gates a dependent with a declared dependency but NO wired ref (unmapped type)', async () => {
+    const repo = new InMemoryProposalRepository();
+    // Parent not executed; child declares dependsOn[0] but has no chainRefs
+    // (e.g. its type/entityKind isn't in ENTITY_KIND_TO_PAYLOAD_PATH).
+    const parent = createProposal({
+      tenantId: TENANT,
+      proposalType: 'create_customer',
+      payload: { name: 'Jane' },
+      summary: 'parent',
+      createdBy: 'u1',
+    });
+    applyChainMetadata(parent, {
+      chainId: 'c1', chainIndex: 0, chainLength: 2, dependsOnChainIndices: [], chainRefs: [],
+    });
+    const child = createProposal({
+      tenantId: TENANT,
+      proposalType: 'add_note',
+      payload: { targetKind: 'customer', body: 'hi' },
+      summary: 'note',
+      createdBy: 'u1',
+    });
+    applyChainMetadata(child, {
+      chainId: 'c1', chainIndex: 1, chainLength: 2, dependsOnChainIndices: [0], chainRefs: [],
+    });
+    await repo.create(parent);
+    await repo.create(child);
+
+    // Even with no ref token, the ordering gate must block until the
+    // parent executes (was previously a 'noop' that let it run ahead).
+    const res = await resolveChainReferences(child, { proposalRepo: repo });
+    expect(res.status).toBe('blocked');
+    if (res.status === 'blocked') expect(res.reason).toBe('parent_pending');
+  });
+
   it('cascade-fails (not retries) when the parent executed but has no resultEntityId', async () => {
     const repo = new InMemoryProposalRepository();
     // Executed parent that produced no entity to reference — would

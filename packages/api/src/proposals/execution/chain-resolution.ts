@@ -33,7 +33,12 @@ export async function resolveChainReferences(
   deps: ChainResolutionDeps
 ): Promise<ChainResolution> {
   const meta = chainMetaFor(proposal);
-  if (!meta || meta.chainRefs.length === 0) {
+  // A proposal participates in the ordering gate if it has either ref
+  // tokens to substitute OR a declared dependency on an earlier member.
+  // The latter matters even with no wired ref: a dependent whose
+  // (type, entityKind) isn't in ENTITY_KIND_TO_PAYLOAD_PATH still must
+  // not execute ahead of the parent it declared a dependency on.
+  if (!meta || (meta.chainRefs.length === 0 && meta.dependsOnChainIndices.length === 0)) {
     return { status: 'noop' };
   }
 
@@ -42,6 +47,24 @@ export async function resolveChainReferences(
   for (const s of siblings) {
     const sMeta = chainMetaFor(s);
     if (sMeta) byIndex.set(sMeta.chainIndex, s);
+  }
+
+  // Ordering gate: every declared parent must have executed before this
+  // dependent runs, regardless of whether a payload field references it.
+  // This covers dependents with no wired ref token (unmapped type) that
+  // would otherwise execute immediately on approval.
+  for (const parentIndex of meta.dependsOnChainIndices) {
+    const parent = byIndex.get(parentIndex);
+    if (!parent) {
+      return { status: 'blocked', reason: 'parent_failed', parentId: '(missing)' };
+    }
+    if (parent.status === 'executed') continue;
+    if (parent.status === 'execution_failed' || parent.status === 'rejected' ||
+        parent.status === 'expired' || parent.status === 'undone') {
+      return { status: 'blocked', reason: 'parent_failed', parentId: parent.id };
+    }
+    // Not executed yet (draft / ready_for_review / approved / executing).
+    return { status: 'blocked', reason: 'parent_pending', parentId: parent.id };
   }
 
   // Work on a shallow copy so a blocked resolution never mutates the
@@ -54,32 +77,20 @@ export async function resolveChainReferences(
     // operator already resolved by hand at review time is left alone.
     if (!parseChainRefToken(current)) continue;
 
+    // The ordering loop above already guaranteed this parent executed;
+    // here we only need its resultEntityId to substitute.
     const parent = byIndex.get(ref.parentChainIndex);
-    if (!parent) {
-      // Parent missing entirely (e.g. it was a clarification, not a
-      // proposal). Treat as a permanent failure for this dependent.
-      return { status: 'blocked', reason: 'parent_failed', parentId: '(missing)' };
+    if (!parent || parent.status !== 'executed') {
+      // Defensive: a ref to a parent not covered by dependsOnChainIndices
+      // (shouldn't happen — the router derives refs from dependsOn) still
+      // gets gated rather than substituting an unresolved value.
+      return { status: 'blocked', reason: 'parent_pending', parentId: parent?.id ?? '(missing)' };
     }
-
-    if (parent.status === 'executed') {
-      if (parent.resultEntityId) {
-        payload[ref.payloadPath] = parent.resultEntityId;
-        continue;
-      }
-      // Executed but produced no entity to reference. The parent will
-      // never run again, so 'parent_pending' would retry forever — this
-      // is a permanent failure. Cascade-fail the dependent.
+    if (!parent.resultEntityId) {
+      // Executed but produced no entity to reference — permanent failure.
       return { status: 'blocked', reason: 'parent_failed', parentId: parent.id };
     }
-
-    if (parent.status === 'execution_failed' || parent.status === 'rejected' ||
-        parent.status === 'expired' || parent.status === 'undone') {
-      return { status: 'blocked', reason: 'parent_failed', parentId: parent.id };
-    }
-
-    // Parent exists but hasn't executed yet (draft / ready_for_review /
-    // approved / executing).
-    return { status: 'blocked', reason: 'parent_pending', parentId: parent.id };
+    payload[ref.payloadPath] = parent.resultEntityId;
   }
 
   return { status: 'resolved', payload };
