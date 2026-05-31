@@ -104,7 +104,11 @@ describe('InMemoryDunningEventRepository', () => {
         makeEvent({ kind: 'late_fee', stepKey: '3:sms', amountCents: 2500, channel: undefined }),
       ),
     ).resolves.toBeTruthy();
-    expect(await repo.findByInvoice(TENANT, 'inv-1')).toHaveLength(2);
+    const events = await repo.findByInvoice(TENANT, 'inv-1');
+    expect(events).toHaveLength(2);
+    const lateFee = events.find((e) => e.kind === 'late_fee');
+    expect(lateFee!.amountCents).toBe(2500);
+    expect(lateFee!.channel).toBeUndefined();
   });
 
   it('isolates events by tenant', async () => {
@@ -186,5 +190,36 @@ describe('selectDueReminderSteps', () => {
     // The already-sent 3-day SMS is NOT resent despite moving position; only
     // the new 1-day SMS and the 7-day email are due.
     expect(due.map((d) => d.stepKey)).toEqual(['1:sms', '7:email']);
+  });
+
+  it('collapses duplicate step definitions so a sweep cannot double-send', () => {
+    const dupes = makeConfig({
+      reminderSteps: [
+        { offsetDays: 3, channel: 'sms' },
+        { offsetDays: 3, channel: 'sms' }, // duplicate definition → same stepKey
+      ],
+    });
+    const due = selectDueReminderSteps(dupes, {
+      dueDate,
+      now: new Date('2026-01-09T00:00:00Z'), // 8 days past due
+      sentStepKeys: [],
+    });
+    expect(due.map((d) => d.stepKey)).toEqual(['3:sms']);
+  });
+
+  it('ignores negative or non-integer offsets (never fires before due)', () => {
+    const bad = makeConfig({
+      reminderSteps: [
+        { offsetDays: -1, channel: 'sms' },
+        { offsetDays: 2.5, channel: 'email' },
+        { offsetDays: 3, channel: 'sms' },
+      ],
+    });
+    const due = selectDueReminderSteps(bad, {
+      dueDate,
+      now: new Date('2026-01-09T00:00:00Z'),
+      sentStepKeys: [],
+    });
+    expect(due.map((d) => d.stepKey)).toEqual(['3:sms']);
   });
 });

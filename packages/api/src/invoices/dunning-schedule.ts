@@ -40,9 +40,21 @@ export function selectDueReminderSteps(
 
   const elapsed = daysPastDue(input.dueDate, input.now);
   const sent = new Set(input.sentStepKeys);
+  const seen = new Set<string>();
+  const due: DueReminder[] = [];
 
-  return config.reminderSteps
-    .map((step) => ({ stepKey: reminderStepKey(step), step }))
-    .filter(({ stepKey, step }) => !sent.has(stepKey) && elapsed >= step.offsetDays)
-    .sort((a, b) => a.step.offsetDays - b.step.offsetDays);
+  for (const step of config.reminderSteps) {
+    // Defense-in-depth until reminder cadences are validated at the write path:
+    // ignore non-integer or negative offsets (a dunning reminder must never fire
+    // before the invoice is overdue), and collapse duplicate step definitions so
+    // a single sweep can't double-send under one stable key.
+    if (!Number.isInteger(step.offsetDays) || step.offsetDays < 0) continue;
+    const stepKey = reminderStepKey(step);
+    if (sent.has(stepKey) || seen.has(stepKey)) continue;
+    if (elapsed < step.offsetDays) continue;
+    seen.add(stepKey);
+    due.push({ stepKey, step });
+  }
+
+  return due.sort((a, b) => a.step.offsetDays - b.step.offsetDays);
 }

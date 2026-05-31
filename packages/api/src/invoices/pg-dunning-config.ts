@@ -2,7 +2,7 @@
  * P20-002 — Pg-backed dunning config + event repositories.
  *
  * The DB UNIQUE (tenant_id) on invoice_dunning_configs and UNIQUE
- * (tenant_id, invoice_id, kind, step_index) on invoice_dunning_events are
+ * (tenant_id, invoice_id, kind, step_key) on invoice_dunning_events are
  * the source of truth. Event inserts that lose a race surface as code 23505
  * to the worker, which treats them as "another sweep already did this step".
  */
