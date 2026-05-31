@@ -8,6 +8,44 @@ memberships — delivered the AI/SMS way. We do **not** chase ServiceTitan's
 enterprise surface (multi-location dispatch ops, warehouse inventory,
 payroll, marketing automation); those are explicit anti-personas in the PRD.
 
+## ⚠️ Verification correction (2026-05-31)
+
+The first draft of this top-10 was derived from the May go-live audit docs.
+A line-by-line check against the actual source showed the codebase is **much
+more complete** than those docs implied. Verified status, so we build only
+real gaps:
+
+- **All launch blockers (Tier A #1) are resolved** in the current branch
+  (B1–B10 + B12 done; B11's outbound-consent gate is built + unit-tested but
+  correctly unwired because no outbound-calling path exists yet). The one
+  loose end — the greenwashed per-module coverage gate — is now **enforced**
+  in `pr-checks.yml` + `deploy.yml`.
+- **#3 Online booking — DONE (shipped this work):** `routes/public-booking.ts`
+  + `/book` page.
+- **#4 Tiered good/better/best estimates + deposit + e-approval — ALREADY
+  BUILT:** schema migrations 127/128/129 (`group_key`/`group_label`/
+  `is_optional`/`is_default_selected`, `accepted_selection`); authoring in
+  `web/.../forms/LineItemEditor.tsx`; customer selection + locked accept in
+  `estimates/public-estimate-service.ts:209-271`; deposit checkout at
+  `routes/public-estimates.ts` `/deposit-checkout`.
+- **#7 Tech "on my way" + ETA text — ALREADY BUILT:**
+  `notifications/delay-notifications.ts:134` ("on the way" + ETA), enqueued via
+  `dispatch/routes.ts:163` (`enRouteCoordinator`, wired `app.ts:2646`).
+- **#8 Proactive review requests — ALREADY BUILT:** `feedback-send` worker
+  (DNC-gated post-job SMS) + review-gating in `routes/public-feedback.ts:128`
+  (returns Google/Yelp URL on 4★+), `google_review_url` setting (migration
+  124), surfaced in `web/.../FeedbackPage.tsx:150`.
+
+**Genuine remaining gaps (verified):** customer **tips at checkout** (no
+`tip`/`gratuity` anywhere — small, time-to-cash); **consumer financing**
+handoff (Wisetack/Affirm — medium); **QuickBooks/accounting sync** (#10 — the
+long pole). ACH is already covered via Stripe `automatic_payment_methods` +
+`ach_return` reversal handling. Memberships (#6) and unified inbox (#9) need a
+depth re-audit before they can be called gaps.
+
+The original top-10 below is kept for context; treat the verification block
+above as authoritative.
+
 ## How to read this
 
 The codebase is already a **broad, mature FSM platform** (135 migrations;
