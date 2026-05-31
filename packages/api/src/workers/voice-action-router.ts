@@ -177,6 +177,13 @@ export interface VoiceActionRouterDeps {
     tenantId: string,
   ) => Promise<{ timezone?: string } | undefined>;
   /**
+   * Injectable clock for the scheduling handlers' relative-date resolution
+   * ("tomorrow", "next Tuesday"). Defaults to `new Date()` in production;
+   * the voice-quality corpus pins it so booking expectations are
+   * deterministic. Threaded onto TaskContext.now.
+   */
+  now?: () => Date;
+  /**
    * Multi-action chaining feature gate. When this resolves truthy for a
    * tenant, the router first runs `decomposeTranscript`; a multi-action
    * utterance produces an ORDERED chain of linked proposals instead of a
@@ -731,7 +738,7 @@ async function processSegment(
       classification.extractedEntities,
     ),
     timezone: scheduling?.timezone ?? DEFAULT_TENANT_TIMEZONE,
-    now: new Date(),
+    now: deps.now ? deps.now() : new Date(),
     ...(customerId ? { customerId } : {}),
     // Single-action only: lets the held-slot path key the appointment on
     // `voice-hold:<recordingId>` so a concurrent redelivery can't double-book.

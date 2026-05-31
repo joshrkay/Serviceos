@@ -205,6 +205,23 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
       payload.newDateTimeDescription = ee.newDateTimeDescription;
     }
 
+    // Preserve the ORIGINAL appointment's duration on reschedule: load the
+    // resolved appointment and carry its length so "move it to Tuesday at
+    // 2pm" keeps a 2-hour job 2 hours instead of collapsing to the 60-min
+    // default. Best-effort — a lookup miss falls back to the default.
+    let originalDurationMin: number | undefined;
+    if (typeof payload.appointmentId === 'string' && this.appointmentRepo) {
+      try {
+        const appt = await this.appointmentRepo.findById(context.tenantId, payload.appointmentId);
+        if (appt) {
+          const ms = toDate(appt.scheduledEnd).getTime() - toDate(appt.scheduledStart).getTime();
+          if (ms > 0) originalDurationMin = ms / 60000;
+        }
+      } catch {
+        // ignore — resolver default duration applies
+      }
+    }
+
     // HYBRID resolution (P0 fix): resolve the verbatim phrase
     // deterministically against the TENANT timezone + now — no LLM
     // timezone math, no hardcoded America/Los_Angeles. Ambiguous or
@@ -216,6 +233,7 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
       ? resolveDateTime(phrase, {
           timezone: context.timezone ?? DEFAULT_TENANT_TIMEZONE,
           now: context.now ?? new Date(),
+          ...(originalDurationMin ? { defaultDurationMin: originalDurationMin } : {}),
         })
       : undefined;
 
