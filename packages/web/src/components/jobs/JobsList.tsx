@@ -2,11 +2,13 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import {
   Search, Plus, ChevronRight, Camera, Clock,
-  AlertCircle, AlertTriangle, Zap, Mic,
+  AlertCircle, Mic,
 } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
 import { normalizeJobStatus } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
+import { Spinner, EmptyState } from '../ui';
+import { ErrorState } from '../ErrorState';
 import { NewJobFlow } from './NewJobFlow';
 
 type JobStatus = 'New' | 'Scheduled' | 'In Progress' | 'Completed' | 'Canceled';
@@ -153,14 +155,11 @@ export function JobsList() {
         {/* Loading / Error */}
         {isLoading && (
           <div className="flex items-center justify-center py-16">
-            <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+            <Spinner size="md" className="text-slate-900" label="Loading jobs" />
           </div>
         )}
         {error && (
-          <div className="flex flex-col items-center gap-3 py-16">
-            <p className="text-sm text-red-500">Failed to load jobs</p>
-            <button onClick={refetch} className="text-xs text-blue-500 hover:underline">Retry</button>
-          </div>
+          <ErrorState message="Failed to load jobs" onRetry={refetch} />
         )}
 
         {/* Job cards */}
@@ -257,12 +256,7 @@ export function JobsList() {
             })}
 
             {filtered.length === 0 && (
-              <div className="flex flex-col items-center gap-3 py-16">
-                <div className="size-12 rounded-full bg-slate-100 flex items-center justify-center">
-                  <Zap size={18} className="text-slate-300" />
-                </div>
-                <p className="text-sm text-slate-400">No jobs match your filter</p>
-              </div>
+              <EmptyState title="No jobs match your filter" />
             )}
           </div>
         )}

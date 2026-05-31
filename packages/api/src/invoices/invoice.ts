@@ -113,8 +113,14 @@ export interface InvoiceRepository {
 export const INVOICE_STATUS_TRANSITIONS: Record<InvoiceStatus, InvoiceStatus[]> = {
   draft: ['open', 'canceled'],
   open: ['partially_paid', 'paid', 'void'],
-  partially_paid: ['paid', 'void'],
-  paid: [],
+  // 'paid' and 'partially_paid' can REOPEN when a settled payment is
+  // reversed (ACH/bank NSF return or card chargeback — see
+  // reversePayment() in payments/payment-service.ts). The reversal
+  // recomputes the balance and drops the invoice back to 'partially_paid'
+  // (other payments remain) or 'open' (no payments left), so it re-enters
+  // normal collections. 'paid' is therefore no longer terminal.
+  partially_paid: ['open', 'paid', 'void'],
+  paid: ['open', 'partially_paid'],
   void: [],
   canceled: [],
 };

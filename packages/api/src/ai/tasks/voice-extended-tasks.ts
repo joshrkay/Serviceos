@@ -25,6 +25,7 @@ import {
 } from '../../proposals/proposal';
 import { ExtractedEntities } from '../orchestration/intent-classifier';
 import type { AppointmentRepository } from '../../appointments/appointment';
+import type { JobRepository } from '../../jobs/job';
 import type { LLMGateway } from '../gateway/gateway';
 import { isIsoDatetime } from './create-appointment-task';
 
@@ -37,32 +38,91 @@ function isCancelled(status: unknown): boolean {
   return status === 'canceled' || status === 'cancelled';
 }
 
+/** Coerce a Date | ISO-string | unknown scheduledStart into a Date. */
+function toDate(v: unknown): Date {
+  return v instanceof Date ? v : new Date(v as string);
+}
+
+/** Options for scoping appointment resolution to the verified caller. */
+interface ResolveActiveOpts {
+  /** Verified caller identity (caller-ID match). When present, resolution is scoped to this customer. */
+  customerId?: string;
+  /** Job repo used to map appointment → job → customerId for caller scoping. */
+  jobRepo?: JobRepository;
+  /** Test seam for "now"; defaults to the wall clock. */
+  now?: Date;
+}
+
 /**
  * Resolve the caller's active (non-cancelled) appointment id.
  *
  * The classifier only ever returns a natural-language reference
- * ("my Tuesday appointment"), never a UUID. Production resolves that
- * against the identified caller's upcoming appointments. We mirror
- * that here: scan the tenant's scheduled appointments and return the
- * single active one. Returns undefined when zero or more than one
- * candidate exists (ambiguous → leave for the review UI / escalation).
+ * ("my Tuesday appointment"), never a UUID. We resolve it against the
+ * caller's own upcoming appointments and return the single match.
+ * Returns undefined when zero or more than one candidate exists
+ * (ambiguous → leave for the review UI / escalation, never guess).
+ *
+ * Caller scoping (robustness fix): when a verified `customerId` AND a
+ * `jobRepo` are supplied, candidates are filtered to appointments whose
+ * job belongs to that customer (appointment → job → customerId, the same
+ * join the slot-conflict-checker uses). This prevents a live caller's
+ * "reschedule/cancel my appointment" from ever resolving to a *different*
+ * customer's appointment in a small tenant. When the caller identity or
+ * jobRepo is absent we cannot verify ownership, so we preserve the legacy
+ * tenant-wide single-active behavior (the operator in-app path, and tests
+ * that omit the wiring).
+ *
+ * Upcoming scoping: past appointments are preferred-out, but only when
+ * doing so still leaves at least one candidate — so fixtures with
+ * past-but-active appointments (and repos that don't store scheduledStart)
+ * keep resolving.
  */
 async function resolveActiveAppointmentId(
   repo: AppointmentRepository | undefined,
   tenantId: string,
+  opts?: ResolveActiveOpts,
 ): Promise<string | undefined> {
   if (!repo) return undefined;
   // Use listWithMeta (tenant-scoped, no date filter) rather than
   // findByDateRange: corpus fixtures store scheduledStart as ISO
   // strings, which breaks the repo's Date-based range comparison.
-  let all: Array<{ id: string; status: unknown }> = [];
+  let all: Array<{ id: string; status: unknown; jobId?: string; scheduledStart?: unknown }> = [];
   if (repo.listWithMeta) {
     const r = await repo.listWithMeta(tenantId);
     all = r.data;
   } else {
     all = await repo.findByDateRange(tenantId, new Date(0), new Date('9999-12-31T00:00:00.000Z'));
   }
-  const active = all.filter((a) => !isCancelled(a.status));
+  let active = all.filter((a) => !isCancelled(a.status));
+
+  // Prefer upcoming appointments, but only when that leaves candidates
+  // (keeps past-but-active fixtures + repos without scheduledStart working).
+  const now = opts?.now ?? new Date();
+  const upcoming = active.filter((a) => {
+    const t = toDate(a.scheduledStart).getTime();
+    return !Number.isNaN(t) && t >= now.getTime();
+  });
+  if (upcoming.length > 0) active = upcoming;
+
+  // Scope to the verified caller's own appointments when we can verify
+  // ownership. If ownership can't be confirmed for any candidate the set
+  // becomes empty → undefined → forced manual disambiguation (safe).
+  if (opts?.customerId && opts?.jobRepo) {
+    const jobRepo = opts.jobRepo;
+    const owned: typeof active = [];
+    for (const a of active) {
+      if (!a.jobId) continue;
+      try {
+        const job = await jobRepo.findById(tenantId, a.jobId);
+        if (job && job.customerId === opts.customerId) owned.push(a);
+      } catch {
+        // Ignore per-candidate lookup failures — a flaky job read should
+        // exclude that candidate, not crash the whole resolution.
+      }
+    }
+    active = owned;
+  }
+
   return active.length === 1 ? active[0].id : undefined;
 }
 
@@ -134,6 +194,7 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
   constructor(
     private readonly gateway?: LLMGateway,
     private readonly appointmentRepo?: AppointmentRepository,
+    private readonly jobRepo?: JobRepository,
   ) {}
 
   async handle(context: TaskContext): Promise<TaskResult> {
@@ -146,6 +207,7 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
     const resolvedId = await resolveActiveAppointmentId(
       this.appointmentRepo,
       context.tenantId,
+      { customerId: context.customerId, jobRepo: this.jobRepo },
     );
     if (resolvedId) {
       payload.appointmentId = resolvedId;
@@ -214,7 +276,10 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
 export class CancelAppointmentTaskHandler implements TaskHandler {
   readonly taskType = 'cancel_appointment' as const;
 
-  constructor(private readonly appointmentRepo?: AppointmentRepository) {}
+  constructor(
+    private readonly appointmentRepo?: AppointmentRepository,
+    private readonly jobRepo?: JobRepository,
+  ) {}
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
@@ -228,6 +293,7 @@ export class CancelAppointmentTaskHandler implements TaskHandler {
     const resolvedId = await resolveActiveAppointmentId(
       this.appointmentRepo,
       context.tenantId,
+      { customerId: context.customerId, jobRepo: this.jobRepo },
     );
     if (resolvedId) {
       payload.appointmentId = resolvedId;
@@ -518,14 +584,20 @@ export class ConvertLeadTaskHandler implements TaskHandler {
 export class ConfirmAppointmentTaskHandler implements TaskHandler {
   readonly taskType = 'confirm_appointment' as const;
 
-  constructor(private readonly appointmentRepo?: AppointmentRepository) {}
+  constructor(
+    private readonly appointmentRepo?: AppointmentRepository,
+    private readonly jobRepo?: JobRepository,
+  ) {}
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
-    const resolvedId = await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId);
+    const resolvedId = await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId, {
+      customerId: context.customerId,
+      jobRepo: this.jobRepo,
+    });
     if (resolvedId) {
       payload.appointmentId = resolvedId;
     } else if (ee.appointmentReference) {

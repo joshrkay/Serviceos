@@ -133,9 +133,16 @@ export class DefaultSlotConflictChecker implements SlotConflictChecker {
     // conflicts would block valid scheduling into windows that contain
     // only historical or canceled work (a real functional regression
     // caught in PR #201 review).
+    const now = Date.now();
     const overlapping = candidates.filter(
       (a) =>
         ACTIVE_APPOINTMENT_STATUSES.has(a.status) &&
+        // An expired tentative hold has already released its slot — treat
+        // it as free, mirroring availability-finder.ts. Without this an
+        // orphaned hold (e.g. a proposal that never persisted) would
+        // over-flag the slot as busy for ~its whole 24h window even though
+        // the booking is dead. A live hold still blocks.
+        !(a.holdPendingApproval && a.holdExpiryAt && a.holdExpiryAt.getTime() < now) &&
         overlaps(
           { start: a.scheduledStart, end: a.scheduledEnd },
           { start: windowStart, end: windowEnd }

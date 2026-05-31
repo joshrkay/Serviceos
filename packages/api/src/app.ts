@@ -1640,6 +1640,9 @@ export function createApp(): express.Express {
     availabilityFinder,
     thresholdResolver,
     appointmentRepo,
+    // Lets reschedule/cancel/confirm scope appointment resolution to the
+    // verified caller's own appointments (appointment → job → customerId).
+    jobRepo,
     // §3B/3D/3E — operator voice commands need the same vertical
     // terminology + intake-question disambiguation the customer-facing
     // adapters get. The shim is wired here because the real resolver

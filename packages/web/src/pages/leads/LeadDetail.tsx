@@ -169,8 +169,14 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
           body: JSON.stringify({ preferredLanguage: next || null }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        // Sync from the PATCH response rather than refetching: a refetch is a
+        // redundant round-trip, would clobber an unsaved note draft (it resets
+        // noteText), and on a failed GET would wrongly roll back the language
+        // and toast an error even though the PATCH already persisted.
+        const updated = await res.json();
+        setLead(updated);
+        setLanguage(updated.preferredLanguage ?? '');
         toast.success('Language preference saved');
-        await refetch();
       } catch (err) {
         setLanguage(previous);
         toast.error(err instanceof Error ? err.message : 'Failed to save language');
@@ -178,7 +184,7 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
         setLanguageSaving(false);
       }
     },
-    [leadId, language, refetch],
+    [leadId, language],
   );
 
   if (isLoading && !lead)

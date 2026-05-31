@@ -8,6 +8,8 @@ import {
 import type { ServiceType } from '../../data/mock-data';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useMutation } from '../../hooks/useMutation';
+import { Spinner, EmptyState } from '../ui';
+import { ErrorState } from '../ErrorState';
 import { NewEstimateFlow } from '../estimates/NewEstimateFlow';
 import { NewJobFlow } from '../jobs/NewJobFlow';
 
@@ -478,14 +480,11 @@ export function CustomersPage() {
         {/* list */}
         {isLoading && (
           <div className="flex items-center justify-center py-16">
-            <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+            <Spinner size="md" className="text-slate-900" label="Loading customers" />
           </div>
         )}
         {error && (
-          <div className="flex flex-col items-center py-12 gap-2 text-center">
-            <p className="text-sm text-red-500">Failed to load customers</p>
-            <button onClick={refetch} className="text-xs text-blue-500 hover:underline">Retry</button>
-          </div>
+          <ErrorState message="Failed to load customers" onRetry={refetch} />
         )}
         {!isLoading && !error && (
           <div className="flex flex-col gap-2.5 mt-4">
@@ -540,9 +539,7 @@ export function CustomersPage() {
             })}
 
             {filtered.length === 0 && (
-              <div className="flex flex-col items-center py-16 gap-2 text-center">
-                <p className="text-slate-400 text-sm">No customers found</p>
-              </div>
+              <EmptyState title="No customers found" />
             )}
           </div>
         )}
