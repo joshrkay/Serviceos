@@ -25,6 +25,7 @@ Agents may add new fields/schemas here, but must not rename or remove existing o
 | Entity create schemas | `packages/api/src/shared/contracts.ts` (`createCustomerSchema`, `createJobSchema`, etc.) | Adding a new optional field. Adding a new entity. |
 | Proposal payload schemas | `packages/api/src/proposals/contracts.ts` | Adding a new `ProposalType` discriminant + its payload. |
 | Voice / AI schemas | `packages/api/src/shared/contracts.ts` (voice, document revision, diff analysis) | Adding new optional metadata fields. |
+| Scheduling `SkillMatcher` seam | `packages/api/src/scheduling/skill-matcher.ts` | Adding a new method (e.g. SD-107 `evaluateMatch`). The existing `requiredSkillsForJob`/`skillsForTechnician` must not change; any new method must also be implemented on `StubSkillMatcher` **in the same commit** so concurrent feasibility consumers never see a broken build. |
 
 If a story needs a *breaking* change to one of these, it goes into Tier 3 below and gets a dedicated wave.
 
@@ -83,6 +84,18 @@ Each Wave 1A story owns one migration file. Reservations:
 (042 and 043 were taken pre-reservation by `feedback_requests` and `feedback_responses` from the existing branch; P0-019/P0-020 bumped to next free.)
 
 **Rule:** the wave coordinator picks the next available number from `packages/api/src/db/schema.ts` immediately before dispatching, and writes it into each story's "Allowed files" line. Numbers are not reserved in this doc indefinitely — refresh before each wave.
+
+### Scheduling & Dispatch "Make It Valuable" — Phases 1–2 (reserved 2026-05-31)
+
+Head at reservation time: `133_payments_reversal_tracking`. See `docs/superpowers/contracts/scheduling-dispatch-addendum.md`.
+
+| Story | Reserved migration number | Domain |
+|---|---|---|
+| SD-101 | 134_* | `technician_working_hours` (persist working hours) |
+| SD-102 | 135_*, 136_* | `business_blackout_periods`, `technician_daily_capacity` |
+| SD-105 | 137_* | `skills`, `technician_skills` (proficiency), `job_required_skills` |
+
+Refresh these against `schema.ts` immediately before dispatching Wave SD-1A — if main has advanced past 133, bump 134–137 and update the addendum.
 
 ## Re-checking the audit's contract claims
 
