@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useApiClient } from '../../lib/apiClient';
+import { Spinner } from '../ui';
+import { ErrorState } from '../ErrorState';
 
 interface MoneyDashboardSummary {
   month: string;
@@ -38,6 +40,8 @@ export function MoneyDashboardPage() {
   const [summary, setSummary] = useState<MoneyDashboardSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Bumped by the error-state Retry button to re-run the fetch effect.
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -58,7 +62,7 @@ export function MoneyDashboardPage() {
     return () => {
       cancelled = true;
     };
-  }, [month, apiFetch]);
+  }, [month, apiFetch, reloadKey]);
 
   async function downloadExport() {
     const { from, to } = monthRange(month);
@@ -110,8 +114,17 @@ export function MoneyDashboardPage() {
           </div>
         </div>
 
-        {isLoading && <p className="text-sm text-slate-500">Loading…</p>}
-        {error && <p className="text-sm text-red-600">{error}</p>}
+        {isLoading && (
+          <div className="flex items-center justify-center py-12">
+            <Spinner size="md" className="text-slate-900" label="Loading money dashboard" />
+          </div>
+        )}
+        {error && (
+          <ErrorState
+            message="Couldn't load the money dashboard."
+            onRetry={() => setReloadKey((k) => k + 1)}
+          />
+        )}
 
         {!isLoading && !error && summary && (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">

@@ -13,9 +13,17 @@
  * direct `paymentRepo.update(...)` calls would bypass the over-refund
  * guard and skip the `payment.refunded` audit event.
  */
-import { PaymentRepository, Payment } from '../invoices/payment';
+import { v4 as uuidv4 } from 'uuid';
+import { PaymentRepository, Payment, PaymentMethod } from '../invoices/payment';
+import {
+  Invoice,
+  InvoiceRepository,
+  InvoiceStatus,
+  isValidInvoiceTransition,
+} from '../invoices/invoice';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { NotFoundError, ValidationError } from '../shared/errors';
+import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 
 export interface RecordRefundInput {
   tenantId: string;
@@ -147,4 +155,252 @@ export async function recordRefund(
     refundCents: input.refundCents,
     totalRefundedCents,
   };
+}
+
+/**
+ * Invoice-to-cash failure handling — REVERSE a settled payment.
+ *
+ * A reversal is distinct from a refund. A refund is money we chose to
+ * send back (the original payment still settled). A reversal marks money
+ * that never truly cleared — an ACH/bank debit RETURNED for insufficient
+ * funds (NSF), or a card CHARGEBACK — so the cash we recorded is gone.
+ *
+ * Effects (all-or-nothing on the happy path):
+ *  - Flips the payment `completed -> failed` and stamps
+ *    `reversedAt`/`reversalReason`, atomically and idempotently (a
+ *    duplicate webhook delivery is a no-op). Flipping to 'failed' also
+ *    drops the payment out of gross-revenue math, which filters
+ *    `status === 'completed'`.
+ *  - REOPENS the invoice: decrements `amountPaidCents` by the reversed
+ *    amount, recomputes `amountDueCents`, and moves the status back to
+ *    'partially_paid' (other payments remain) or 'open' (none left) so it
+ *    re-enters normal collections. Invoices already in a terminal state
+ *    (void/canceled) are left untouched — the revenue drop from the
+ *    payment flip is the only correct effect there.
+ *  - Emits `payment.reversed` (+ `invoice.status_changed` when the
+ *    status moves) audit events.
+ *
+ * Error semantics mirror `recordRefund`: a missing payment row throws
+ * `NotFoundError` (retryable — Stripe delivery ordering can put the
+ * reversal event before the `checkout.session.completed` that creates the
+ * row), so the webhook returns 5xx and Stripe retries. An already-reversed
+ * / non-completed payment is a terminal no-op (`{ reversed: false }`).
+ */
+export interface ReversePaymentInput {
+  tenantId: string;
+  paymentId: string;
+  /** Why the payment was reversed (e.g. 'ach_return', 'dispute'). */
+  reason: string;
+  /** When the reversal occurred (defaults to now). */
+  reversedAt?: Date;
+  /** Audit actor id; defaults to 'system:stripe_webhook'. */
+  actorId?: string;
+  actorRole?: string;
+  /** Correlation id (e.g. Stripe payment_intent / dispute id) for tracing. */
+  correlationId?: string;
+}
+
+export interface ReversePaymentResult {
+  reversed: boolean;
+  payment: Payment;
+  invoice?: Invoice;
+}
+
+export async function reversePayment(
+  input: ReversePaymentInput,
+  invoiceRepo: InvoiceRepository,
+  paymentRepo: PaymentRepository,
+  auditRepo?: AuditRepository,
+  moneyStateDeps?: RefreshJobMoneyStateDeps,
+): Promise<ReversePaymentResult> {
+  if (!input.tenantId) throw new ValidationError('tenantId is required');
+  if (!input.paymentId) throw new ValidationError('paymentId is required');
+  if (!input.reason) throw new ValidationError('reason is required');
+
+  const reversedAt = input.reversedAt ?? new Date();
+  const actorId = input.actorId ?? 'system:stripe_webhook';
+  const actorRole = input.actorRole ?? 'system';
+
+  // Atomic, idempotent flip. `null` means: not found, already reversed,
+  // or not in 'completed' status (the guard lives in the WHERE clause).
+  const reversed = await paymentRepo.reversePaymentAtomic(input.tenantId, input.paymentId, {
+    reversedAt,
+    reason: input.reason,
+  });
+
+  if (!reversed) {
+    // Distinguish "row missing" (retryable — webhook ordering) from
+    // "already reversed / not completed" (terminal no-op), exactly like
+    // recordRefund's 0-row diagnostic read.
+    const existing = await paymentRepo.findById(input.tenantId, input.paymentId);
+    if (!existing) {
+      throw new NotFoundError('Payment', input.paymentId);
+    }
+    return { reversed: false, payment: existing };
+  }
+
+  // Recompute the invoice balance + status and reopen it.
+  const invoice = await invoiceRepo.findById(input.tenantId, reversed.invoiceId);
+  let updatedInvoice: Invoice | null = invoice;
+  let statusChanged = false;
+
+  if (invoice) {
+    const REOPENABLE: InvoiceStatus[] = ['open', 'partially_paid', 'paid'];
+    if (REOPENABLE.includes(invoice.status)) {
+      const newAmountPaid = Math.max(0, invoice.amountPaidCents - reversed.amountCents);
+      const newAmountDue = Math.max(0, invoice.totals.totalCents - newAmountPaid);
+      let newStatus: InvoiceStatus;
+      if (newAmountPaid <= 0) {
+        newStatus = 'open';
+      } else if (newAmountPaid >= invoice.totals.totalCents) {
+        newStatus = 'paid';
+      } else {
+        newStatus = 'partially_paid';
+      }
+
+      statusChanged = newStatus !== invoice.status;
+      if (statusChanged && !isValidInvoiceTransition(invoice.status, newStatus)) {
+        // Defensive — the transition map permits every case we generate
+        // here; a miss means the map drifted.
+        throw new ValidationError(
+          `Invalid invoice transition '${invoice.status}' -> '${newStatus}' on reversal`,
+        );
+      }
+
+      updatedInvoice = await invoiceRepo.update(input.tenantId, invoice.id, {
+        amountPaidCents: newAmountPaid,
+        amountDueCents: newAmountDue,
+        status: newStatus,
+        updatedAt: new Date(),
+      });
+    }
+    // else: void/canceled/draft — leave the invoice as-is. The payment
+    // status flip already removed it from revenue.
+  }
+
+  if (auditRepo) {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId: input.tenantId,
+        actorId,
+        actorRole,
+        eventType: 'payment.reversed',
+        entityType: 'payment',
+        entityId: input.paymentId,
+        correlationId: input.correlationId,
+        metadata: {
+          paymentId: input.paymentId,
+          invoiceId: reversed.invoiceId,
+          amountCents: reversed.amountCents,
+          reason: input.reason,
+          newInvoiceStatus: (updatedInvoice ?? invoice)?.status ?? null,
+        },
+      }),
+    );
+
+    if (statusChanged && updatedInvoice && invoice) {
+      await auditRepo.create(
+        createAuditEvent({
+          tenantId: input.tenantId,
+          actorId,
+          actorRole,
+          eventType: 'invoice.status_changed',
+          entityType: 'invoice',
+          entityId: invoice.id,
+          correlationId: input.correlationId,
+          metadata: {
+            oldStatus: invoice.status,
+            newStatus: updatedInvoice.status,
+            paymentId: input.paymentId,
+            reason: input.reason,
+          },
+        }),
+      );
+    }
+  }
+
+  // §6 Time-to-Cash rollup (best-effort — the payment + invoice writes
+  // already succeeded; a rollup failure must not bounce them).
+  if (updatedInvoice && moneyStateDeps) {
+    await refreshJobMoneyStateSafe(input.tenantId, updatedInvoice.jobId, actorId, moneyStateDeps);
+  }
+
+  return { reversed: true, payment: reversed, invoice: updatedInvoice ?? invoice ?? undefined };
+}
+
+/**
+ * Invoice-to-cash failure handling — record a FAILED payment attempt
+ * (e.g. a declined card) for visibility, WITHOUT touching the invoice
+ * balance. The row is written with `status: 'failed'`, so it is excluded
+ * from gross-revenue math and from "amount paid" — it exists purely so the
+ * declined attempt shows up in the payment history / audit timeline rather
+ * than vanishing. Use `reversePayment(...)` instead when a previously
+ * SETTLED payment fails (NSF/chargeback).
+ */
+export interface RecordFailedAttemptInput {
+  tenantId: string;
+  invoiceId: string;
+  amountCents: number;
+  method: PaymentMethod;
+  providerReference?: string;
+  /** Decline code / message from the provider, for the note + audit. */
+  reason?: string;
+  failedAt?: Date;
+  actorId?: string;
+  actorRole?: string;
+}
+
+export async function recordFailedPaymentAttempt(
+  input: RecordFailedAttemptInput,
+  paymentRepo: PaymentRepository,
+  auditRepo?: AuditRepository,
+): Promise<Payment> {
+  if (!input.tenantId) throw new ValidationError('tenantId is required');
+  if (!input.invoiceId) throw new ValidationError('invoiceId is required');
+
+  const now = input.failedAt ?? new Date();
+  const payment: Payment = {
+    id: uuidv4(),
+    tenantId: input.tenantId,
+    invoiceId: input.invoiceId,
+    amountCents: input.amountCents,
+    method: input.method,
+    status: 'failed',
+    providerReference: input.providerReference,
+    note: input.reason ? `Payment failed: ${input.reason}` : undefined,
+    receivedAt: now,
+    processedBy: input.actorId ?? 'system:stripe_webhook',
+    createdAt: now,
+    updatedAt: now,
+    refundedAmountCents: 0,
+    refundedAt: null,
+    lastRefundStripeId: null,
+    reversedAt: null,
+    reversalReason: null,
+  };
+
+  await paymentRepo.create(payment);
+
+  if (auditRepo) {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId: input.tenantId,
+        actorId: input.actorId ?? 'system:stripe_webhook',
+        actorRole: input.actorRole ?? 'system',
+        eventType: 'payment.failed',
+        entityType: 'invoice',
+        entityId: input.invoiceId,
+        correlationId: input.providerReference,
+        metadata: {
+          paymentId: payment.id,
+          amountCents: input.amountCents,
+          method: input.method,
+          providerReference: input.providerReference ?? null,
+          reason: input.reason ?? null,
+        },
+      }),
+    );
+  }
+
+  return payment;
 }

@@ -29,3 +29,23 @@ export { Badge } from './badge';
 export type { BadgeProps, BadgeVariant } from './badge';
 export { Skeleton, SkeletonText } from './skeleton';
 export type { SkeletonProps, SkeletonTextProps } from './skeleton';
+export { Modal } from './modal';
+export type { ModalProps, ModalSize } from './modal';
+export { Sheet } from './sheet';
+export type { SheetProps, SheetSide } from './sheet';
+export { Tabs, TabPanel } from './tabs';
+export type { TabsProps, TabItem, TabPanelProps } from './tabs';
+export { Stepper } from './stepper';
+export type { StepperProps, StepperStep } from './stepper';
+export { StatCard } from './stat-card';
+export type { StatCardProps, StatTone } from './stat-card';
+export { Avatar } from './avatar';
+export type { AvatarProps, AvatarSize } from './avatar';
+export { Tooltip } from './tooltip';
+export type { TooltipProps, TooltipSide } from './tooltip';
+export { Progress } from './progress';
+export type { ProgressProps } from './progress';
+// Re-exported from the top-level component so the calm "nothing here" /
+// "all clear" pattern is discoverable alongside the other primitives.
+export { EmptyState } from '../EmptyState';
+export type { EmptyStateProps } from '../EmptyState';

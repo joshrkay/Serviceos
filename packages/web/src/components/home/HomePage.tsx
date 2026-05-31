@@ -2,10 +2,11 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import {
   AlertCircle, Clock, ChevronRight, ArrowRight,
-  DollarSign, FileText, Send, Eye, Plus,
+  DollarSign, FileText, Send, Eye, Briefcase,
   CheckCircle2, Mic, TrendingUp, Bell,
 } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
+import { StatCard } from '../ui';
 import {
   normalizeJobStatus,
   normalizeEstimateStatus,
@@ -332,41 +333,53 @@ export function HomePage() {
             </button>
           </div>
 
-          {/* 3-stat pulse */}
+          {/* 3-stat pulse — calm StatCard tiles (tone tints only the icon
+              chip, per the design vision). Each tile is a button that
+              drills into the matching surface. */}
           <div className="grid grid-cols-3 gap-3 mt-4">
             <button
               type="button"
               onClick={() => navigate('/jobs')}
-              className="rounded-xl border px-3 py-2.5 text-left bg-blue-50 border-blue-100 hover:border-blue-200 transition-colors"
+              className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
             >
-              <p className="text-xs mb-0.5 text-blue-700">Active today</p>
-              <p className="text-sm text-blue-700">{activeCount} jobs</p>
+              <StatCard
+                className="h-full"
+                tone="info"
+                label="Active today"
+                value={activeCount}
+                hint="jobs"
+                icon={<Briefcase size={16} />}
+              />
             </button>
             <button
               type="button"
               onClick={() => navigate('/reports/money')}
               data-testid="home-stat-outstanding"
-              className="rounded-xl border px-3 py-2.5 text-left bg-amber-50 border-amber-100 hover:border-amber-200 transition-colors"
+              className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
             >
-              <p className="text-xs mb-0.5 text-amber-700">Outstanding</p>
-              <p className="text-sm text-amber-700">${totalOut.toLocaleString()}</p>
+              <StatCard
+                className="h-full"
+                tone="warning"
+                label="Outstanding"
+                value={`$${totalOut.toLocaleString()}`}
+                hint={`${unpaidInvs.length} unpaid`}
+                icon={<DollarSign size={16} />}
+              />
             </button>
             <button
               type="button"
               onClick={() => navigate(attentionItems.length > 0 ? '/invoices' : '/inbox')}
               data-testid="home-stat-attention"
-              className={`rounded-xl border px-3 py-2.5 text-left transition-colors ${
-                attentionItems.length > 0
-                  ? 'bg-red-50 border-red-100 hover:border-red-200'
-                  : 'bg-green-50 border-green-100 hover:border-green-200'
-              }`}
+              className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
             >
-              <p className={`text-xs mb-0.5 ${attentionItems.length > 0 ? 'text-red-600' : 'text-green-700'}`}>
-                Needs attention
-              </p>
-              <p className={`text-sm ${attentionItems.length > 0 ? 'text-red-600' : 'text-green-700'}`}>
-                {attentionItems.length} items
-              </p>
+              <StatCard
+                className="h-full"
+                tone={attentionItems.length > 0 ? 'danger' : 'success'}
+                label="Needs attention"
+                value={`${attentionItems.length} items`}
+                hint={attentionItems.length > 0 ? 'review now' : 'all clear'}
+                icon={attentionItems.length > 0 ? <AlertCircle size={16} /> : <CheckCircle2 size={16} />}
+              />
             </button>
           </div>
         </div>

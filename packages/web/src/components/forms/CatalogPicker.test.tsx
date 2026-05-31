@@ -52,4 +52,17 @@ describe('CatalogPicker', () => {
     expect(onPick).toHaveBeenCalledWith(mockItems[0]);
     expect(screen.queryByTestId('catalog-picker-popover')).not.toBeInTheDocument();
   });
+
+  it('closes on Escape and returns focus to the trigger', () => {
+    render(<CatalogPicker onPick={vi.fn()} />);
+
+    const trigger = screen.getByTestId('catalog-picker-trigger');
+    fireEvent.click(trigger);
+    expect(screen.getByTestId('catalog-picker-popover')).toBeInTheDocument();
+
+    fireEvent.keyDown(screen.getByLabelText('search-price-book'), { key: 'Escape' });
+
+    expect(screen.queryByTestId('catalog-picker-popover')).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
 });
