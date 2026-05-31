@@ -12,6 +12,8 @@ import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { normalizeInvoiceStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
+import { Spinner, EmptyState } from '../ui';
+import { ErrorState } from '../ErrorState';
 import { apiFetch } from '../../utils/api-fetch';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
@@ -1124,14 +1126,11 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
         {/* Loading / Error */}
         {isLoading && (
           <div className="flex items-center justify-center py-16">
-            <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+            <Spinner size="md" className="text-slate-900" label="Loading invoices" />
           </div>
         )}
         {error && (
-          <div className="flex flex-col items-center py-12 gap-2 text-center">
-            <p className="text-sm text-red-500">Failed to load invoices</p>
-            <button onClick={refetch} className="text-xs text-blue-500 hover:underline">Retry</button>
-          </div>
+          <ErrorState message="Failed to load invoices" onRetry={refetch} />
         )}
 
         {/* List */}
@@ -1191,7 +1190,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
               );
             })}
             {filtered.length === 0 && (
-              <p className="py-12 text-center text-sm text-slate-400">No invoices</p>
+              <EmptyState title="No invoices" />
             )}
           </div>
         )}

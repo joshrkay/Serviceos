@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 import {
-  X, Check, Send, Plus, Receipt,
+  X, Check, Send, Receipt,
   Phone, MessageSquare, Eye,
   MicOff, Mic, Volume2, PhoneOff,
 } from 'lucide-react';
 import { estimates, invoices, calcEstimateTotal, calcInvoiceTotal } from '../../data/mock-data';
 import { StatusBadge } from '../shared/StatusBadge';
+import { EmptyState } from '../ui';
 
 // ─── Sheet Overlay ───────────────────────────────────────────────
 export function SheetOverlay({
@@ -239,15 +240,12 @@ export function InvoiceSheet({ invoiceId, customerName, customerPhone, onClose }
           <p className="text-sm text-slate-900">Send Invoice</p>
           <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-slate-100"><X size={16} className="text-slate-400" /></button>
         </div>
-        <div className="flex flex-col items-center gap-3 py-8 text-center">
-          <span className="flex size-12 items-center justify-center rounded-full bg-slate-100">
-            <Receipt size={20} className="text-slate-400" />
-          </span>
-          <p className="text-sm text-slate-600">No invoice linked to this job yet.</p>
-          <button className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-4 py-2.5 text-sm hover:bg-slate-700 transition-colors">
-            <Plus size={14} /> Create invoice
-          </button>
-        </div>
+        <EmptyState
+          icon={<Receipt size={20} />}
+          title="No invoice linked to this job yet."
+          actionLabel="Create invoice"
+          onAction={() => {}}
+        />
       </SheetOverlay>
     );
   }
