@@ -1,7 +1,7 @@
 import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { LLMGateway } from '../ai/gateway/gateway';
-import { ProposalRepository, createProposal, CreateProposalInput, ProposalType, Proposal } from '../proposals/proposal';
+import { Proposal, ProposalRepository, createProposal, CreateProposalInput, ProposalType } from '../proposals/proposal';
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { ConflictError } from '../shared/errors';
 import { voiceProposalIdempotencyKey } from '../voice/voice-audit';
@@ -15,6 +15,16 @@ import {
   resolveReferences,
   ConversationReferent,
 } from '../ai/orchestration/reference-resolver';
+import {
+  decomposeTranscript,
+  TranscriptSegment,
+} from '../ai/orchestration/transcript-decomposer';
+import {
+  ChainRef,
+  applyChainMetadata,
+  payloadPathFor,
+} from '../proposals/chain';
+import { v4 as uuidv4 } from 'uuid';
 import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
 import { CreateAppointmentAITaskHandler } from '../ai/tasks/create-appointment-task';
@@ -154,6 +164,16 @@ export interface VoiceActionRouterDeps {
    * `buildVerticalPromptResolver(...)` from `verticals/resolve-active-pack.ts`.
    */
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
+  /**
+   * Multi-action chaining feature gate. When this resolves truthy for a
+   * tenant, the router first runs `decomposeTranscript`; a multi-action
+   * utterance produces an ORDERED chain of linked proposals instead of a
+   * single one. When absent or falsy, the router uses the existing
+   * single-intent path verbatim — `decomposeTranscript` is never called,
+   * so there is zero added cost or behavior change for tenants without
+   * the flag. Optional, like every other dep here.
+   */
+  multiActionEnabled?: (tenantId: string) => Promise<boolean>;
 }
 
 // P11-001: lookup_* intents are READ-ONLY and never produce a
@@ -342,13 +362,28 @@ async function findAlreadyProcessed(
 }
 
 /**
- * Stamp the originating `recordingId` onto a proposal's sourceContext (for
- * traceability) AND derive a deterministic `idempotencyKey` (so both the
- * pre-check and a *concurrent* redelivery dedup atomically on one shared
- * key via the proposals table's ON CONFLICT index). Returns the proposal
- * unchanged when there's no recordingId.
+ * Stamp the originating `recordingId` onto a proposal's sourceContext for
+ * traceability. Used on every persisted voice proposal (single-action AND
+ * chain members). Deliberately does NOT set an idempotencyKey: chain members
+ * share one recordingId but must each persist via `createMany`, so a shared
+ * key would collide. Returns the proposal unchanged when there's no recordingId.
  */
 function stampRecordingId(proposal: Proposal, recordingId: string | undefined): Proposal {
+  if (!recordingId) return proposal;
+  return {
+    ...proposal,
+    sourceContext: { ...(proposal.sourceContext ?? {}), recordingId },
+  };
+}
+
+/**
+ * Single-action stamp: sourceContext traceability PLUS a deterministic
+ * `idempotencyKey` (so the pre-check and a *concurrent* redelivery dedup
+ * atomically on one shared key via the proposals table's ON CONFLICT index).
+ * Only safe on the single-action path, where one recording yields exactly one
+ * proposal. Chains use the keyless `stampRecordingId` above.
+ */
+function stampSingleActionDedup(proposal: Proposal, recordingId: string | undefined): Proposal {
   if (!recordingId) return proposal;
   return {
     ...proposal,
@@ -474,6 +509,13 @@ async function emitClarification(
     classification: IntentClassification;
     conversationId?: string;
     recordingId?: string;
+    /**
+     * Dedup key for this clarification. Set only on the single-action path
+     * (one recording → one proposal). Left undefined for chain segments,
+     * where a recording can legitimately emit several clarifications that
+     * must not collide on one key.
+     */
+    idempotencyKey?: string;
   },
   log: Logger
 ): Promise<void> {
@@ -530,10 +572,10 @@ async function emitClarification(
       ...(conversationId ? { conversationId } : {}),
       ...(recordingId ? { recordingId } : {}),
     },
-    // Same deterministic key as the task path (stampRecordingId) so a
-    // redelivered message dedups atomically regardless of which proposal
-    // type it produced. One message → one proposal → one key.
-    ...(recordingId ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) } : {}),
+    // Same deterministic key as the single-action task path so a redelivered
+    // message dedups atomically regardless of which proposal type it produced.
+    // Only set on the single-action path (passed in); chains leave it undefined.
+    ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
     ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
     createdBy: userId,
     // Deliberately NO sourceTrustTier. decideInitialStatus will land
@@ -550,6 +592,233 @@ async function emitClarification(
     reason,
     confidence: classification.confidence,
     lowConfidenceIntent: classification.lowConfidenceIntent,
+  });
+}
+
+/**
+ * Per-segment parameters shared by the single-intent path and each
+ * iteration of the multi-action chain loop.
+ */
+interface SegmentParams {
+  tenantId: string;
+  userId: string;
+  segmentText: string;
+  conversationId?: string;
+  recordingId?: string;
+  customerId?: string;
+  verticalPromptSection?: string;
+  /**
+   * When true (single-action path only), thread `recordingId` into the task
+   * context — so the held-slot appointment is keyed `voice-hold:<recordingId>`
+   * — and stamp the clarification dedup key. Left false/undefined for chain
+   * segments, which share one recordingId across several proposals and so
+   * must not collide on these per-recording keys.
+   */
+  applyDedup?: boolean;
+}
+
+type SegmentOutcome =
+  | { kind: 'proposal'; proposal: Proposal; classification: IntentClassification }
+  // The classifier could not route this segment — a voice_clarification
+  // was emitted in its place (single path) or should be (chain path; see
+  // processChain). `classification` is returned so the caller can decide.
+  | { kind: 'clarified'; classification: IntentClassification }
+  // A real intent with no proposal mapping (lookup_* etc.) — nothing to
+  // do for this worker.
+  | { kind: 'skipped'; classification: IntentClassification };
+
+/**
+ * Classify a single (sub-)utterance and build its proposal WITHOUT
+ * persisting it. Mirrors the original single-intent body exactly so the
+ * flag-off path is unchanged; the chain loop reuses it per segment and
+ * stamps chain metadata before persisting.
+ *
+ * For an 'unknown' classification this emits a voice_clarification
+ * itself (clarifications are independent, terminal records) and returns
+ * `clarified` so the caller does not also persist a proposal.
+ */
+async function processSegment(
+  deps: VoiceActionRouterDeps,
+  handlers: Map<ProposalType, TaskHandler>,
+  params: SegmentParams,
+  log: Logger,
+): Promise<SegmentOutcome> {
+  const { tenantId, userId, segmentText, conversationId, recordingId, customerId } = params;
+
+  const classification = await classifyIntent(
+    segmentText,
+    { tenantId, ...(params.verticalPromptSection ? { verticalPromptSection: params.verticalPromptSection } : {}) },
+    deps.gateway,
+  );
+
+  if (classification.invalidEnumFields && classification.invalidEnumFields.length > 0) {
+    log.warn('voice-action-router: classifier returned invalid enum values', {
+      invalidEnumFields: classification.invalidEnumFields,
+      intentType: classification.intentType,
+    });
+  }
+
+  if (classification.intentType === 'unknown') {
+    await emitClarification(
+      deps,
+      {
+        tenantId,
+        userId,
+        transcript: segmentText,
+        classification,
+        conversationId,
+        recordingId,
+        // Single-action only: dedup a redelivered clarification atomically.
+        ...(params.applyDedup && recordingId
+          ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
+          : {}),
+      },
+      log,
+    );
+    return { kind: 'clarified', classification };
+  }
+
+  const proposalType = INTENT_TO_PROPOSAL_TYPE[classification.intentType];
+  const handler = proposalType ? handlers.get(proposalType) : undefined;
+  if (!handler) {
+    log.warn('voice-action-router: no handler for intent', {
+      intent: classification.intentType,
+      proposalType,
+    });
+    return { kind: 'skipped', classification };
+  }
+
+  const tenantThresholdOverride = deps.thresholdResolver
+    ? await deps.thresholdResolver(tenantId).catch(() => undefined)
+    : undefined;
+
+  const context: TaskContext = {
+    tenantId,
+    userId,
+    message: segmentText,
+    conversationId,
+    existingEntities: entitiesForProposal(
+      classification.intentType,
+      classification.extractedEntities,
+    ),
+    ...(customerId ? { customerId } : {}),
+    // Single-action only: lets the held-slot path key the appointment on
+    // `voice-hold:<recordingId>` so a concurrent redelivery can't double-book.
+    ...(params.applyDedup && recordingId ? { recordingId } : {}),
+    ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
+  };
+
+  const { proposal } = await handler.handle(context);
+  return { kind: 'proposal', proposal, classification };
+}
+
+/**
+ * Process a multi-action chain: classify each segment in order, link the
+ * resulting proposals with a shared chainId, rewrite dependent payload
+ * fields with symbolic reference tokens, and persist parents-first so a
+ * partial crash leaves resolvable parents behind.
+ *
+ * Per-segment clarification is preserved: a segment that fails to
+ * classify becomes a voice_clarification (tagged with the chain) and the
+ * chain proceeds. A later segment that depended on a clarified/ skipped
+ * segment is still created but left with its unresolved token in
+ * missingFields, so it surfaces in review as needing manual resolution
+ * rather than silently executing against a missing parent.
+ */
+async function processChain(
+  deps: VoiceActionRouterDeps,
+  handlers: Map<ProposalType, TaskHandler>,
+  segments: TranscriptSegment[],
+  base: Omit<SegmentParams, 'segmentText'>,
+  log: Logger,
+): Promise<void> {
+  const chainId = uuidv4();
+  const chainLength = segments.length;
+
+  // First pass: classify each segment and build its proposal (without
+  // persisting). Clarifications are emitted inline by processSegment as
+  // they happen — they are independent records, not chain members.
+  const built: { proposal: Proposal; chainIndex: number; refCount: number; type: string }[] = [];
+
+  for (const segment of segments) {
+    const outcome = await processSegment(
+      deps,
+      handlers,
+      { ...base, segmentText: segment.text },
+      log,
+    );
+
+    if (outcome.kind !== 'proposal') {
+      log.info('voice-action-router: chain segment did not produce a proposal', {
+        chainId,
+        chainIndex: segment.index,
+        outcome: outcome.kind,
+      });
+      continue;
+    }
+
+    const proposal = outcome.proposal;
+
+    // Build the dependency edges this segment can actually consume. The
+    // decomposer suggests (parentIndex, entityKind); we only wire an
+    // edge when this proposal type has a payload field for that kind.
+    const chainRefs: ChainRef[] = [];
+    if (segment.dependsOn.length > 0 && segment.dependencyEntityKind) {
+      for (const parentChainIndex of segment.dependsOn) {
+        const payloadPath = payloadPathFor(proposal.proposalType, segment.dependencyEntityKind);
+        if (!payloadPath) continue;
+        chainRefs.push({
+          payloadPath,
+          parentChainIndex,
+          entityKind: segment.dependencyEntityKind,
+        });
+      }
+    }
+
+    applyChainMetadata(proposal, {
+      chainId,
+      chainIndex: segment.index,
+      chainLength,
+      dependsOnChainIndices: segment.dependsOn,
+      chainRefs,
+    });
+
+    built.push({
+      // Stamp the originating recordingId (merged into the chain
+      // metadata sourceContext) so a redelivered message short-circuits
+      // in findAlreadyProcessed once the chain is persisted.
+      proposal: stampRecordingId(proposal, base.recordingId),
+      chainIndex: segment.index,
+      refCount: chainRefs.length,
+      type: proposal.proposalType,
+    });
+  }
+
+  if (built.length === 0) {
+    log.info('voice-action-router: chain produced no proposals', { chainId, chainLength });
+    return;
+  }
+
+  // Second pass: persist every chain member atomically. A partial
+  // failure must not leave orphaned members (e.g. a parent with no
+  // dependents, or dependents whose parent never landed), so all writes
+  // share one transaction.
+  await deps.proposalRepo.createMany(built.map((b) => b.proposal));
+
+  for (const b of built) {
+    log.info('voice-action-router: chain proposal created', {
+      chainId,
+      chainIndex: b.chainIndex,
+      proposalId: b.proposal.id,
+      proposalType: b.type,
+      refCount: b.refCount,
+    });
+  }
+
+  log.info('voice-action-router: chain complete', {
+    chainId,
+    chainLength,
+    createdCount: built.length,
   });
 }
 
@@ -643,95 +912,93 @@ export function createVoiceActionRouterWorker(
         }
       }
 
-      const classification = await classifyIntent(
-        effectiveTranscript,
-        { tenantId, ...(verticalPromptSection ? { verticalPromptSection } : {}) },
-        deps.gateway,
+      // Multi-action chaining (feature-flagged). When enabled AND the
+      // utterance decomposes into more than one action, route each
+      // segment through the existing single-intent pipeline and link the
+      // resulting proposals into a chain. Otherwise fall through to the
+      // unchanged single-intent path. `decomposeTranscript` is only
+      // called when the flag is on, so flag-off tenants pay nothing and
+      // behave exactly as before.
+      let chainEnabled = false;
+      if (deps.multiActionEnabled) {
+        try {
+          chainEnabled = await deps.multiActionEnabled(tenantId);
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          log.warn('voice-action-router: multiActionEnabled resolver failed, single-intent path', {
+            error: error.message,
+          });
+        }
+      }
+
+      if (chainEnabled) {
+        let decomposition;
+        try {
+          decomposition = await decomposeTranscript(
+            effectiveTranscript,
+            { tenantId },
+            deps.gateway,
+          );
+        } catch (err) {
+          // Decomposer failure is non-fatal — fall back to the single
+          // path rather than dropping the utterance.
+          const error = err instanceof Error ? err : new Error(String(err));
+          log.warn('voice-action-router: decomposeTranscript failed, single-intent path', {
+            error: error.message,
+          });
+          decomposition = undefined;
+        }
+
+        if (decomposition && decomposition.isMultiAction) {
+          await processChain(
+            deps,
+            handlers,
+            decomposition.segments,
+            {
+              tenantId,
+              userId,
+              conversationId,
+              recordingId,
+              customerId,
+              verticalPromptSection,
+            },
+            log,
+          );
+          return;
+        }
+      }
+
+      const outcome = await processSegment(
+        deps,
+        handlers,
+        {
+          tenantId,
+          userId,
+          segmentText: effectiveTranscript,
+          conversationId,
+          recordingId,
+          customerId,
+          verticalPromptSection,
+          // Single-action path: apply the per-recording dedup keys.
+          applyDedup: true,
+        },
+        log,
       );
 
-      // Surface enum-validation drift from the classifier so prompt
-      // regressions are debuggable. Dropped-value behavior (field
-      // left undefined on the extracted entities) is preserved —
-      // we just no longer do it silently.
-      if (classification.invalidEnumFields && classification.invalidEnumFields.length > 0) {
-        log.warn('voice-action-router: classifier returned invalid enum values', {
-          invalidEnumFields: classification.invalidEnumFields,
-          intentType: classification.intentType,
-        });
-      }
-
-      if (classification.intentType === 'unknown') {
-        // Emit a clarification proposal instead of dropping. The
-        // operator sees "I heard X but wasn't sure what to do",
-        // tries again or dismisses. Silent drops break the product
-        // promise that every utterance has a visible outcome.
-        await emitClarification(
-          deps,
-          {
-            tenantId,
-            userId,
-            transcript: effectiveTranscript,
-            classification,
-            conversationId,
-            recordingId,
-          },
-          log
+      if (outcome.kind === 'proposal') {
+        await createDeduped(
+          deps.proposalRepo,
+          stampSingleActionDedup(outcome.proposal, recordingId),
+          recordingId,
+          log,
         );
-        return;
-      }
-
-      const proposalType = INTENT_TO_PROPOSAL_TYPE[classification.intentType];
-      const handler = proposalType ? handlers.get(proposalType) : undefined;
-      if (!handler) {
-        // P11-001: lookup_* intents have no proposal mapping (read-only,
-        // routed to skill family by the FSM adapter). They're not a
-        // worker concern — bail without warning.
-        log.warn('voice-action-router: no handler for intent', {
-          intent: classification.intentType,
-          proposalType,
+        log.info('voice-action-router: proposal created from voice', {
+          proposalId: outcome.proposal.id,
+          proposalType: outcome.proposal.proposalType,
+          classifierConfidence: outcome.classification.confidence,
+          proposalConfidence: outcome.proposal.confidenceScore,
         });
-        return;
       }
-
-      // PR B — resolve the tenant's auto-approve threshold override
-      // ONCE per request and place it on the task context. Each
-      // handler picks it up and threads it through its
-      // CreateProposalInput. Best-effort: a resolver hiccup degrades
-      // to the locked product defaults rather than blocking the call.
-      const tenantThresholdOverride = deps.thresholdResolver
-        ? await deps.thresholdResolver(tenantId).catch(() => undefined)
-        : undefined;
-
-      const context: TaskContext = {
-        tenantId,
-        userId,
-        // Task handlers see the REWRITTEN transcript so proposals
-        // that reach review carry the resolved entity names, not the
-        // original pronouns.
-        message: effectiveTranscript,
-        conversationId,
-        existingEntities: entitiesForProposal(
-          classification.intentType,
-          classification.extractedEntities
-        ),
-        ...(customerId ? { customerId } : {}),
-        ...(recordingId ? { recordingId } : {}),
-        ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
-      };
-
-      const { proposal } = await handler.handle(context);
-      // Stamp recordingId + idempotencyKey so a redelivered message sees this
-      // proposal and short-circuits in findAlreadyProcessed above, and so a
-      // concurrent redelivery is deduped atomically at the DB layer.
-      // Clarification proposals already carry recordingId via emitClarification.
-      await createDeduped(deps.proposalRepo, stampRecordingId(proposal, recordingId), recordingId, log);
-
-      log.info('voice-action-router: proposal created from voice', {
-        proposalId: proposal.id,
-        proposalType: proposal.proposalType,
-        classifierConfidence: classification.confidence,
-        proposalConfidence: proposal.confidenceScore,
-      });
     },
     {
       path: 'voice-action-router',

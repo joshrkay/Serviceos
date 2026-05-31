@@ -68,9 +68,15 @@ describe('P2-003 — Proposal lifecycle transitions', () => {
     expect(result.status).toBe('draft');
   });
 
-  it('validation — rejects draft to approved (skip)', () => {
+  it('allows draft to approved (operator approves a draft directly from the inbox)', () => {
+    // Voice proposals are created in 'draft'; the inbox surfaces them and
+    // approves in place. approveProposal still guards on missingFields,
+    // so a half-extracted payload can't be approved — that gate lives in
+    // actions.ts, not the transition table.
     const proposal = makeProposal({ status: 'draft' });
-    expect(() => transitionProposal(proposal, 'approved', 'user-1')).toThrow(ConflictError);
+    expect(canTransition('draft', 'approved')).toBe(true);
+    expect(() => transitionProposal(proposal, 'approved', 'user-1')).not.toThrow();
+    expect(canTransition('draft', 'rejected')).toBe(true);
   });
 
   it('validation — rejects expired to any transition', () => {
