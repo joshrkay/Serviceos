@@ -51,8 +51,7 @@ These 8 stories deliver the **persistence foundation** (Phase 1) and the **skill
 
 **Automated checks:**
 ```bash
-cd packages/api && npx tsc --project tsconfig.build.json --noEmit
-cd packages/api && npm test -- --run -t "SD-101|PgWorkingHours"
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit && npm test -- --run -t "SD-101|PgWorkingHours"
 ```
 
 **Required tests:**
@@ -79,8 +78,7 @@ cd packages/api && npm test -- --run -t "SD-101|PgWorkingHours"
 
 **Automated checks:**
 ```bash
-cd packages/api && npx tsc --project tsconfig.build.json --noEmit
-cd packages/api && npm test -- --run -t "SD-102|Blackout|DailyCapacity"
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit && npm test -- --run -t "SD-102|Blackout|DailyCapacity"
 ```
 
 **Required tests:**
@@ -106,8 +104,7 @@ cd packages/api && npm test -- --run -t "SD-102|Blackout|DailyCapacity"
 
 **Automated checks:**
 ```bash
-cd packages/api && npx tsc --project tsconfig.build.json --noEmit
-cd packages/api && npm test -- --run -t "SD-103|availability-routes"
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit && npm test -- --run -t "SD-103|availability-routes"
 ```
 
 **Required tests:**
@@ -135,8 +132,7 @@ cd packages/api && npm test -- --run -t "SD-103|availability-routes"
 
 **Automated checks:**
 ```bash
-cd packages/api && npx tsc --project tsconfig.build.json --noEmit
-cd packages/api && npm test -- --run -t "SD-104|feasibility-blackout"
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit && npm test -- --run -t "SD-104|feasibility-blackout"
 ```
 
 **Required tests:**
@@ -164,8 +160,7 @@ Repo methods (per entity): `create`/`upsert`, `findByTenant`, `findByTechnician`
 
 **Automated checks:**
 ```bash
-cd packages/api && npx tsc --project tsconfig.build.json --noEmit
-cd packages/api && npm test -- --run -t "SD-105|Skill"
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit && npm test -- --run -t "SD-105|Skill"
 ```
 
 **Required tests:**
@@ -192,8 +187,7 @@ cd packages/api && npm test -- --run -t "SD-105|Skill"
 
 **Automated checks:**
 ```bash
-cd packages/api && npx tsc --project tsconfig.build.json --noEmit
-cd packages/api && npm test -- --run -t "SD-106|skills-routes"
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit && npm test -- --run -t "SD-106|skills-routes"
 ```
 
 **Required tests:**
@@ -219,8 +213,7 @@ cd packages/api && npm test -- --run -t "SD-106|skills-routes"
 
 **Automated checks:**
 ```bash
-cd packages/api && npx tsc --project tsconfig.build.json --noEmit
-cd packages/api && npm test -- --run -t "SD-107|RealSkillMatcher|feasibility"
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit && npm test -- --run -t "SD-107|RealSkillMatcher|feasibility"
 ```
 
 **Required tests:**
