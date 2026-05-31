@@ -1,6 +1,6 @@
 # Jobs & Invoicing — Competitive Parity Roadmap (AI-First Idiom)
 
-*Audit + roadmap. Companion to `day-in-the-life.md` and `roadmap-audit.md`. Schema verified to migration 134.*
+*Audit + roadmap. Companion to `day-in-the-life.md` and `roadmap-audit.md`. Schema verified to migration 136.*
 
 ## Why this exists
 

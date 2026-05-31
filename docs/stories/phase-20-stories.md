@@ -14,7 +14,7 @@ A job flips to `completed` → the owner gets one SMS proposal and the invoice g
 | Story | Title | Size | Status |
 |---|---|---|---|
 | P20-001 | Auto-draft invoice on job completion | M | Not started |
-| P20-002 | Dunning cadence + late-fee config (data model) | S | **Landed** (migration 134 + repos) |
+| P20-002 | Dunning cadence + late-fee config (data model) | S | **Landed** (migration 136 + repos) |
 | P20-003 | Multi-step reminder cadence in the overdue sweep | M | Partially landed (pure selection `dunning-schedule.ts` done; worker wiring pending) |
 | P20-004 | Late-fee accrual | S | Partially landed (pure calc `late-fee.ts` done; worker accrual + proposal pending) |
 | P21-001 | Invoice schedule / milestone linkage (data model) | S | Not started |
@@ -35,7 +35,7 @@ A job flips to `completed` → the owner gets one SMS proposal and the invoice g
 
 ### P20-002 — Dunning cadence + late-fee config (data model)  ✅ LANDED
 **Status:** Landed in this slice.
-**Files:** `packages/api/src/db/schema.ts` (migration `134_create_invoice_dunning`), `packages/api/src/invoices/dunning-config.ts` (entities + in-memory repos), `packages/api/src/invoices/pg-dunning-config.ts` (Pg repos), `packages/api/test/invoices/dunning-config.test.ts`.
+**Files:** `packages/api/src/db/schema.ts` (migration `136_create_invoice_dunning`), `packages/api/src/invoices/dunning-config.ts` (entities + in-memory repos), `packages/api/src/invoices/pg-dunning-config.ts` (Pg repos), `packages/api/test/invoices/dunning-config.test.ts`.
 **What shipped:** Two RLS tables — `invoice_dunning_configs` (one per tenant: ordered `reminder_steps` JSONB; `late_fee_type none|flat|percent`, value in cents/bps, grace days, optional cap) and `invoice_dunning_events` (`(tenant, invoice, kind, step_key) UNIQUE` idempotency ledger). The dedup `step_key` is a **stable identity** — reminders use `'<offsetDays>:<channel>'` (via `reminderStepKey`), late fees use a period key (`LATE_FEE_ONE_TIME_KEY` for one-time) — so editing/reordering the cadence never resends or skips. Repos mirror the `service_agreement_runs` pattern (in-memory raises `23505` on duplicate). `defaultDunningConfig()` returns a UUID-id, single-3-day-SMS fallback.
 **Follow-up (not yet landed):** thin Settings → "Payment reminders" config screen; wiring the repos into `app.ts` (happens with P20-003).
 **Verification (passing):** `cd packages/api && npx tsc --project tsconfig.build.json --noEmit && npx vitest run test/invoices/dunning-config.test.ts`

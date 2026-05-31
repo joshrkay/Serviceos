@@ -3454,6 +3454,24 @@ export const MIGRATIONS = {
       CHECK (payment_method IN ('stripe', 'cash', 'check', 'credit_card', 'bank_transfer', 'other'));
   `,
 
+  '134_proposal_chains': `
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS chain_id UUID;
+    CREATE INDEX IF NOT EXISTS idx_proposals_chain ON proposals(tenant_id, chain_id);
+  `,
+
+  // Idempotency key for AI-placed tentative holds. A redelivered voice
+  // message (at-least-once queue) must not create a second appointment hold
+  // for the same recording. The held-slot path stamps a deterministic key
+  // (`voice-hold:<recordingId>`); the partial unique index dedups concurrent
+  // re-inserts while leaving ordinary (keyless) appointments unaffected.
+  '135_appointments_idempotency_key': `
+    ALTER TABLE appointments
+      ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_appointments_idempotency
+      ON appointments(tenant_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+  `,
+
   // P20-002: configurable dunning cadence + late-fee policy per tenant, plus a
   // per-(invoice, kind, step_key) idempotency ledger so the overdue sweep
   // (workers/overdue-invoice-worker.ts, P20-003/004) sends each reminder and
@@ -3462,7 +3480,7 @@ export const MIGRATIONS = {
   // inserts raise 23505 and the worker treats them as "already done".
   // step_key is a STABLE identity (not an array position), so editing the
   // reminder cadence never resends or skips an already-sent reminder.
-  '134_create_invoice_dunning': `
+  '136_create_invoice_dunning': `
     CREATE TABLE IF NOT EXISTS invoice_dunning_configs (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id),
