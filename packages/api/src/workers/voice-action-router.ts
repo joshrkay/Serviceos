@@ -3,6 +3,8 @@ import { Logger } from '../logging/logger';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { Proposal, ProposalRepository, createProposal, CreateProposalInput, ProposalType } from '../proposals/proposal';
 import { assertValidProposalPayload } from '../proposals/contracts';
+import { ConflictError } from '../shared/errors';
+import { voiceProposalIdempotencyKey } from '../voice/voice-audit';
 import {
   classifyIntent,
   ExtractedEntities,
@@ -318,7 +320,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('mark_lead_lost', new MarkLeadLostTaskHandler());
   handlers.set('add_service_location', new AddServiceLocationTaskHandler());
   handlers.set('log_time_entry', new LogTimeEntryTaskHandler());
-  handlers.set('notify_delay', new NotifyDelayTaskHandler(deps.appointmentRepo));
+  handlers.set('notify_delay', new NotifyDelayTaskHandler(deps.appointmentRepo, deps.jobRepo));
   handlers.set('request_feedback', new RequestFeedbackTaskHandler());
   return handlers;
 }
@@ -334,12 +336,19 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
  * and for the held-slot `create_appointment` path, a second tentative
  * appointment hold (a real double-booking).
  *
- * We stamp `recordingId` onto every persisted proposal's `sourceContext`
- * (clarification proposals already carry it; the task path is stamped in
- * the worker before `create`). Before doing any work we look for an
- * existing proposal with the same `recordingId` and skip if found — the
- * same "look up by stable key, skip if already processed" contract used by
- * `handleWebhookEvent` in webhooks/webhook-handler.ts.
+ * Matches on EITHER anchor a prior delivery may have left behind:
+ *   - single-action proposals carry the deterministic `idempotencyKey`
+ *     (voiceProposalIdempotencyKey) — also the anchor for the atomic
+ *     ON CONFLICT guard that covers the concurrent race;
+ *   - chain members are persisted keyless (one recording → many proposals,
+ *     so they can't share one key) but each carries `recordingId` on
+ *     `sourceContext`. Matching that anchor too means a sequential chain
+ *     redelivery (the common at-least-once case) is still suppressed here.
+ *
+ * Concurrent CHAIN redelivery (two workers past this check at once) has no
+ * atomic backstop — keyless members can't collide on the unique index — so
+ * it can still double-create. That window is narrow (needs >visibility-timeout
+ * processing) and matches the pre-existing chain behavior; see PR follow-ups.
  *
  * Returns the existing proposal id when this message has already been
  * processed, otherwise undefined. No-ops (returns undefined) when no
@@ -352,18 +361,22 @@ async function findAlreadyProcessed(
   recordingId: string | undefined,
 ): Promise<string | undefined> {
   if (!recordingId) return undefined;
+  const key = voiceProposalIdempotencyKey(recordingId);
   const existing = await proposalRepo.findByTenant(tenantId);
   const match = existing.find((p) => {
+    if (p.idempotencyKey === key) return true; // single-action atomic key
     const sc = p.sourceContext as Record<string, unknown> | undefined;
-    return sc !== undefined && sc.recordingId === recordingId;
+    return sc?.recordingId === recordingId; // chain members (keyless)
   });
   return match?.id;
 }
 
 /**
- * Stamp the originating `recordingId` onto a proposal's sourceContext so a
- * redelivered message can detect it was already processed. Returns the
- * proposal unchanged when there's no recordingId.
+ * Stamp the originating `recordingId` onto a proposal's sourceContext for
+ * traceability. Used on every persisted voice proposal (single-action AND
+ * chain members). Deliberately does NOT set an idempotencyKey: chain members
+ * share one recordingId but must each persist via `createMany`, so a shared
+ * key would collide. Returns the proposal unchanged when there's no recordingId.
  */
 function stampRecordingId(proposal: Proposal, recordingId: string | undefined): Proposal {
   if (!recordingId) return proposal;
@@ -371,6 +384,54 @@ function stampRecordingId(proposal: Proposal, recordingId: string | undefined): 
     ...proposal,
     sourceContext: { ...(proposal.sourceContext ?? {}), recordingId },
   };
+}
+
+/**
+ * Single-action stamp: sourceContext traceability PLUS a deterministic
+ * `idempotencyKey` (so the pre-check and a *concurrent* redelivery dedup
+ * atomically on one shared key via the proposals table's ON CONFLICT index).
+ * Only safe on the single-action path, where one recording yields exactly one
+ * proposal. Chains use the keyless `stampRecordingId` above.
+ */
+function stampSingleActionDedup(proposal: Proposal, recordingId: string | undefined): Proposal {
+  if (!recordingId) return proposal;
+  return {
+    ...proposal,
+    sourceContext: { ...(proposal.sourceContext ?? {}), recordingId },
+    idempotencyKey: proposal.idempotencyKey ?? voiceProposalIdempotencyKey(recordingId),
+  };
+}
+
+/**
+ * Persist a proposal, treating an idempotency-key conflict as a successful
+ * dedup rather than an error. The pre-check (findAlreadyProcessed) catches
+ * the common sequential-redelivery case; this catches the concurrent case
+ * where two deliveries both pass the pre-check and race to create — the DB
+ * (or in-memory) unique constraint lets exactly one win and the loser's
+ * ConflictError is swallowed here instead of failing the message.
+ *
+ * Only swallowed for KEYED proposals: a ConflictError can only come from the
+ * idempotency-key constraint when a key is set, so guarding on it avoids
+ * masking any future unrelated uniqueness violation on a keyless proposal.
+ */
+async function createDeduped(
+  repo: ProposalRepository,
+  proposal: Proposal,
+  recordingId: string | undefined,
+  log: Logger,
+): Promise<void> {
+  try {
+    await repo.create(proposal);
+  } catch (err) {
+    if (err instanceof ConflictError && proposal.idempotencyKey) {
+      log.info('voice-action-router: duplicate proposal create skipped (idempotency conflict)', {
+        recordingId,
+        idempotencyKey: proposal.idempotencyKey,
+      });
+      return;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -458,6 +519,13 @@ async function emitClarification(
     classification: IntentClassification;
     conversationId?: string;
     recordingId?: string;
+    /**
+     * Dedup key for this clarification. Set only on the single-action path
+     * (one recording → one proposal). Left undefined for chain segments,
+     * where a recording can legitimately emit several clarifications that
+     * must not collide on one key.
+     */
+    idempotencyKey?: string;
   },
   log: Logger
 ): Promise<void> {
@@ -514,6 +582,10 @@ async function emitClarification(
       ...(conversationId ? { conversationId } : {}),
       ...(recordingId ? { recordingId } : {}),
     },
+    // Same deterministic key as the single-action task path so a redelivered
+    // message dedups atomically regardless of which proposal type it produced.
+    // Only set on the single-action path (passed in); chains leave it undefined.
+    ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
     ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
     createdBy: userId,
     // Deliberately NO sourceTrustTier. decideInitialStatus will land
@@ -523,7 +595,7 @@ async function emitClarification(
     // `expired`.
   });
 
-  await deps.proposalRepo.create(proposal);
+  await createDeduped(deps.proposalRepo, proposal, recordingId, log);
 
   log.info('voice-action-router: clarification proposal emitted', {
     proposalId: proposal.id,
@@ -545,6 +617,14 @@ interface SegmentParams {
   recordingId?: string;
   customerId?: string;
   verticalPromptSection?: string;
+  /**
+   * When true (single-action path only), thread `recordingId` into the task
+   * context — so the held-slot appointment is keyed `voice-hold:<recordingId>`
+   * — and stamp the clarification dedup key. Left false/undefined for chain
+   * segments, which share one recordingId across several proposals and so
+   * must not collide on these per-recording keys.
+   */
+  applyDedup?: boolean;
 }
 
 type SegmentOutcome =
@@ -591,7 +671,18 @@ async function processSegment(
   if (classification.intentType === 'unknown') {
     await emitClarification(
       deps,
-      { tenantId, userId, transcript: segmentText, classification, conversationId, recordingId },
+      {
+        tenantId,
+        userId,
+        transcript: segmentText,
+        classification,
+        conversationId,
+        recordingId,
+        // Single-action only: dedup a redelivered clarification atomically.
+        ...(params.applyDedup && recordingId
+          ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
+          : {}),
+      },
       log,
     );
     return { kind: 'clarified', classification };
@@ -621,6 +712,9 @@ async function processSegment(
       classification.extractedEntities,
     ),
     ...(customerId ? { customerId } : {}),
+    // Single-action only: lets the held-slot path key the appointment on
+    // `voice-hold:<recordingId>` so a concurrent redelivery can't double-book.
+    ...(params.applyDedup && recordingId ? { recordingId } : {}),
     ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
   };
 
@@ -700,9 +794,11 @@ async function processChain(
     });
 
     built.push({
-      // Stamp the originating recordingId (merged into the chain
-      // metadata sourceContext) so a redelivered message short-circuits
-      // in findAlreadyProcessed once the chain is persisted.
+      // Stamp the originating recordingId onto sourceContext (alongside the
+      // chain metadata) — keyless, since chain members can't share one
+      // idempotencyKey. findAlreadyProcessed matches this recordingId so a
+      // SEQUENTIAL chain redelivery short-circuits once the chain is
+      // persisted. (Concurrent chain redelivery has no atomic backstop.)
       proposal: stampRecordingId(proposal, base.recordingId),
       chainIndex: segment.index,
       refCount: chainRefs.length,
@@ -895,12 +991,19 @@ export function createVoiceActionRouterWorker(
           recordingId,
           customerId,
           verticalPromptSection,
+          // Single-action path: apply the per-recording dedup keys.
+          applyDedup: true,
         },
         log,
       );
 
       if (outcome.kind === 'proposal') {
-        await deps.proposalRepo.create(stampRecordingId(outcome.proposal, recordingId));
+        await createDeduped(
+          deps.proposalRepo,
+          stampSingleActionDedup(outcome.proposal, recordingId),
+          recordingId,
+          log,
+        );
         log.info('voice-action-router: proposal created from voice', {
           proposalId: outcome.proposal.id,
           proposalType: outcome.proposal.proposalType,

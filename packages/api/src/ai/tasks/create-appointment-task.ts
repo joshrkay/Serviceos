@@ -5,6 +5,7 @@ import { assessConfidence } from '../guardrails/confidence';
 import { SlotConflictChecker, SlotConflictResult } from './slot-conflict-checker';
 import { AvailabilityFinder, OpenSlot } from './availability-finder';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
+import { voiceHoldIdempotencyKey } from '../../voice/voice-audit';
 
 /**
  * LLM-backed CreateAppointmentTaskHandler.
@@ -311,6 +312,12 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
             createdBy: context.userId,
             holdPendingApproval: true,
             holdExpiryAt,
+            // Deterministic per-recording key: a redelivered voice message
+            // returns the existing hold instead of inserting a second one
+            // (closes the concurrent-redelivery double-booking window).
+            ...(context.recordingId
+              ? { idempotencyKey: voiceHoldIdempotencyKey(context.recordingId) }
+              : {}),
           },
           repo,
         );
