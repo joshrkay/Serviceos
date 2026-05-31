@@ -17,7 +17,7 @@ A job flips to `completed` → the owner gets one SMS proposal and the invoice g
 | P20-002 | Dunning cadence + late-fee config (data model) | S | **Landed** (migration 136 + repos) |
 | P20-003 | Multi-step reminder cadence in the overdue sweep | M | Partially landed (pure selection `dunning-schedule.ts` done; worker wiring pending) |
 | P20-004 | Late-fee accrual | S | Partially landed (pure calc `late-fee.ts` done; worker accrual + proposal pending) |
-| P21-001 | Invoice schedule / milestone linkage (data model) | S | Not started |
+| P21-001 | Invoice schedule / milestone linkage (data model) | S | **Landed** (mig. 138 + `invoice-schedule.ts` `splitMilestones` + repos + `invoices.schedule_id/milestone_index`) |
 | P21-002 | `create_invoice_schedule` proposal type | M | Not started |
 | P21-003 | "Requires invoicing" queue + batch-generate sweep | M | Not started |
 
@@ -65,7 +65,7 @@ A job flips to `completed` → the owner gets one SMS proposal and the invoice g
 ---
 
 ### P21-001 — Invoice schedule / milestone linkage (data model)
-**Status:** Not started
+**Status:** Landed. `invoice_schedules` table (mig. 138, RLS) + `invoices.schedule_id`/`milestone_index`. `invoices/invoice-schedule.ts` owns the entity, `validateMilestones` (exactly one `remainder`; percents 0–10000 bps; non-negative flat cents — mirrors the P21-002 Zod rule), and the pure `splitMilestones(totalCents, milestones)` (percent=bps, flat=cents, the single `remainder` absorbs rounding so Σ === total). `pg-invoice-schedule.ts` mirrors the dunning repo (RLS via `withTenant`). **Not yet wired into app.ts** — the `PgInvoiceScheduleRepository` is consumed by P21-002 (`create_invoice_schedule` proposal).
 **Allowed files:** `packages/api/src/invoices/invoice-schedule.ts` (+ `pg-invoice-schedule.ts`), `packages/api/src/db/schema.ts` (migration — discover next number), `packages/api/src/invoices/invoice.ts` (optional `scheduleId`/`milestoneIndex`), tests.
 **Build prompt:** `invoice_schedules(job_id, estimate_id, total_amount_cents, milestones JSONB)` + `invoices.schedule_id`, `invoices.milestone_index`. Pure `splitMilestones(totalCents, milestones[])` guarantees Σ == total (a `remainder` milestone absorbs rounding). RLS standard.
 **Reuse:** deposit-on-job concept; `applyDepositCreditToInvoice` as the deposit→balance credit path; `billing-engine` rounding.

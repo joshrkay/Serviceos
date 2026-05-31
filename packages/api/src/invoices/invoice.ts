@@ -40,6 +40,10 @@ export interface Invoice {
   stripePaymentLinkUrl?: string;
   /** Inherits from `job.originatingLeadId` at creation; preserves source attribution. */
   originatingLeadId?: string;
+  /** P21-001 — set when this invoice is a milestone of an invoice_schedules row. */
+  scheduleId?: string;
+  /** P21-001 — 0-based position of this invoice within its schedule's milestones. */
+  milestoneIndex?: number;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;

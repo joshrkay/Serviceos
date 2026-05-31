@@ -426,6 +426,11 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       stripePaymentLinkId: row.stripe_payment_link_id ?? undefined,
       stripePaymentLinkUrl: row.stripe_payment_link_url ?? undefined,
       originatingLeadId: row.originating_lead_id ?? undefined,
+      scheduleId: row.schedule_id ?? undefined,
+      milestoneIndex:
+        row.milestone_index !== undefined && row.milestone_index !== null
+          ? Number(row.milestone_index)
+          : undefined,
       createdBy: row.created_by,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),
