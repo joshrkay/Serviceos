@@ -40,6 +40,22 @@ export interface Appointment {
   updatedAt: Date;
 }
 
+/**
+ * A tentative AI-placed hold has released its slot once its expiry passes —
+ * the scheduling read paths (availability-finder, slot-conflict-checker)
+ * treat such an appointment as free rather than as occupying the slot.
+ * A live hold (expiry in the future) and any non-hold appointment still
+ * occupy their slot. Shared so all readers apply identical semantics.
+ */
+export function isExpiredHold(
+  appt: Pick<Appointment, 'holdPendingApproval' | 'holdExpiryAt'>,
+  now: number,
+): boolean {
+  return Boolean(
+    appt.holdPendingApproval && appt.holdExpiryAt && appt.holdExpiryAt.getTime() < now,
+  );
+}
+
 export interface CreateAppointmentInput {
   tenantId: string;
   jobId: string;

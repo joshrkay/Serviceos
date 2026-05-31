@@ -298,7 +298,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('mark_lead_lost', new MarkLeadLostTaskHandler());
   handlers.set('add_service_location', new AddServiceLocationTaskHandler());
   handlers.set('log_time_entry', new LogTimeEntryTaskHandler());
-  handlers.set('notify_delay', new NotifyDelayTaskHandler(deps.appointmentRepo));
+  handlers.set('notify_delay', new NotifyDelayTaskHandler(deps.appointmentRepo, deps.jobRepo));
   handlers.set('request_feedback', new RequestFeedbackTaskHandler());
   return handlers;
 }
