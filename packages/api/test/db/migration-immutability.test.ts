@@ -187,6 +187,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['131_appointment_assignments_no_double_booking', '27484d3c8eef021201ccd827419b3cbbec8516c14868759543b0f16d7ba3f295'],
   ['132_customer_consent_status', 'd4d2d0b5de1471a746cb9db7757630e27ef5a0f45e4fd61ad9c236645c49396d'],
   ['133_payments_reversal_tracking', '9e4be3033b999501b6faa258b4475d58452f322f797751b57f203529668f6afb'],
+  ['134_create_invoice_dunning', '8bcef6818a52e640d2332b05f796638a0d908786423dbb81f6b530759c1f1fda'],
 ];
 
 function hashMigration(value: string): string {

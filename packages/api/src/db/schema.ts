@@ -3453,6 +3453,57 @@ export const MIGRATIONS = {
     ALTER TABLE payments ADD CONSTRAINT payments_payment_method_check
       CHECK (payment_method IN ('stripe', 'cash', 'check', 'credit_card', 'bank_transfer', 'other'));
   `,
+
+  // P20-002: configurable dunning cadence + late-fee policy per tenant, plus a
+  // per-(invoice, kind, step) idempotency ledger so the overdue sweep
+  // (workers/overdue-invoice-worker.ts, P20-003/004) sends each reminder and
+  // accrues each late fee exactly once. Mirrors the service_agreement_runs
+  // idempotency shape: a UNIQUE constraint is the source of truth; duplicate
+  // inserts raise 23505 and the worker treats them as "already done".
+  '134_create_invoice_dunning': `
+    CREATE TABLE IF NOT EXISTS invoice_dunning_configs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      -- ordered cadence, e.g.
+      -- [{"offsetDays":3,"channel":"sms"},{"offsetDays":7,"channel":"email"}]
+      reminder_steps JSONB NOT NULL DEFAULT '[]',
+      late_fee_type TEXT NOT NULL DEFAULT 'none'
+        CHECK (late_fee_type IN ('none','flat','percent')),
+      -- flat: amount in integer cents; percent: basis points (bps) of amount_due
+      late_fee_value_cents BIGINT NOT NULL DEFAULT 0,
+      late_fee_grace_days INTEGER NOT NULL DEFAULT 0,
+      late_fee_max_cents BIGINT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_dunning_configs_tenant ON invoice_dunning_configs(tenant_id);
+    ALTER TABLE invoice_dunning_configs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE invoice_dunning_configs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_invoice_dunning_configs ON invoice_dunning_configs;
+    CREATE POLICY tenant_isolation_invoice_dunning_configs ON invoice_dunning_configs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS invoice_dunning_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      invoice_id UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK (kind IN ('reminder','late_fee')),
+      step_index INTEGER NOT NULL,
+      amount_cents BIGINT,
+      channel TEXT,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, invoice_id, kind, step_index)
+    );
+    CREATE INDEX IF NOT EXISTS idx_dunning_events_tenant ON invoice_dunning_events(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_dunning_events_invoice ON invoice_dunning_events(tenant_id, invoice_id);
+    ALTER TABLE invoice_dunning_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE invoice_dunning_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_invoice_dunning_events ON invoice_dunning_events;
+    CREATE POLICY tenant_isolation_invoice_dunning_events ON invoice_dunning_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
