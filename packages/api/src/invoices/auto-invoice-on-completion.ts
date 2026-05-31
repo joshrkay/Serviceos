@@ -81,6 +81,10 @@ export async function maybeAutoInvoiceOnCompletion(
     jobId: job.id,
     ...(accepted ? { estimateId: accepted.id } : {}),
     lineItems,
+    // Carry the accepted estimate's discount + tax forward so approving the
+    // draft bills the amount the customer accepted (the draft_invoice handler
+    // recomputes totals from these, mirroring convertEstimateToInvoice).
+    ...(accepted ? { discountCents: accepted.totals.discountCents, taxRateBps: accepted.totals.taxRateBps } : {}),
   };
 
   // Be a good citizen: run the AI-safety payload gate before createProposal.

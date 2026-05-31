@@ -10,11 +10,7 @@ import {
   buildInvoiceSchedule,
   splitMilestones,
 } from '../../invoices/invoice-schedule';
-import {
-  buildLineItem,
-  calculateDocumentTotals,
-  resolveSelectedLineItems,
-} from '../../shared/billing-engine';
+import { buildLineItem } from '../../shared/billing-engine';
 
 /**
  * P21-002 — Deterministic execution for create_invoice_schedule proposals.
@@ -73,8 +69,10 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
       if (totalCents === undefined && estimateId && this.estimateRepo) {
         const estimate = await this.estimateRepo.findById(context.tenantId, estimateId);
         if (estimate) {
-          const billed = resolveSelectedLineItems(estimate.lineItems, estimate.acceptedSelection);
-          totalCents = calculateDocumentTotals(billed, 0, 0).totalCents;
+          // Use the accepted estimate's persisted totals (tax + discount + the
+          // accepted good/better/best selection already applied) so milestones
+          // are allocated from the amount the customer actually accepted.
+          totalCents = estimate.totals.totalCents;
         }
       }
       if (totalCents === undefined) {
@@ -98,21 +96,25 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
       });
       await this.scheduleRepo.create(schedule);
 
-      // Draft the first milestone invoice, linked to the schedule.
-      const first = allocations[0];
-      await createInvoiceWithNextNumber(
-        {
-          tenantId: context.tenantId,
-          jobId: payload.jobId,
-          estimateId,
-          lineItems: [buildLineItem(uuidv4(), first.label, 1, first.amountCents, 0, true)],
-          createdBy: context.executedBy,
-          scheduleId: schedule.id,
-          milestoneIndex: first.index,
-        },
-        this.invoiceRepo,
-        this.settingsRepo,
-      );
+      // Draft only the `on_accept` milestone now (e.g. the deposit). Milestones
+      // triggered on_completion/manual are minted later by their trigger — not
+      // up front — so a completion/manual plan never bills early.
+      const onAccept = allocations.find((a) => a.trigger === 'on_accept');
+      if (onAccept) {
+        await createInvoiceWithNextNumber(
+          {
+            tenantId: context.tenantId,
+            jobId: payload.jobId,
+            estimateId,
+            lineItems: [buildLineItem(uuidv4(), onAccept.label, 1, onAccept.amountCents, 0, true)],
+            createdBy: context.executedBy,
+            scheduleId: schedule.id,
+            milestoneIndex: onAccept.index,
+          },
+          this.invoiceRepo,
+          this.settingsRepo,
+        );
+      }
 
       return { success: true, resultEntityId: schedule.id };
     } catch (err) {

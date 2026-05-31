@@ -75,20 +75,18 @@ export async function runBatchInvoiceSweep(
       const candidates = await findJobsRequiringInvoicing(tenantId, deps);
       if (candidates.length === 0) continue;
 
-      // Reserve a dedup row per job before including it; jobs already batched
-      // today (23505) are skipped so a re-run doesn't double-draft.
+      // Exclude jobs already batched today (read-only — the sweep is leader-
+      // gated so there's no competing writer). Reserving the dedup rows is
+      // deferred until AFTER the proposal is persisted, so a transient failure
+      // here never suppresses a job's batching for the rest of the day.
       const fresh: InvoicingCandidate[] = [];
       for (const candidate of candidates) {
-        try {
-          await deps.runRepo.create(buildBatchInvoiceRun(tenantId, candidate.jobId, batchDate));
-          fresh.push(candidate);
-        } catch (err) {
-          if ((err as { code?: string }).code === '23505') {
-            skipped += 1;
-            continue;
-          }
-          throw err;
+        const already = await deps.runRepo.findByJobAndDate(tenantId, candidate.jobId, batchDate);
+        if (already) {
+          skipped += 1;
+          continue;
         }
+        fresh.push(candidate);
       }
       if (fresh.length === 0) continue;
 
@@ -114,6 +112,17 @@ export async function runBatchInvoiceSweep(
       await deps.proposalRepo.create(proposal);
       proposals += 1;
       jobsBatched += fresh.length;
+
+      // Now that the proposal exists, reserve a dedup row per job (tagged with
+      // the proposal id). A row that loses a race surfaces as 23505 and is
+      // treated as already-batched.
+      for (const candidate of fresh) {
+        try {
+          await deps.runRepo.create(buildBatchInvoiceRun(tenantId, candidate.jobId, batchDate, proposal.id));
+        } catch (err) {
+          if ((err as { code?: string }).code !== '23505') throw err;
+        }
+      }
 
       if (deps.auditRepo) {
         await deps.auditRepo.create(

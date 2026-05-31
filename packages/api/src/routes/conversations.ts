@@ -119,6 +119,7 @@ export function createConversationRouter(
           .map((m) => ({ senderRole: m.senderRole, content: m.content ?? '' })),
         brandVoice: settings?.brandVoice,
         businessName: settings?.businessName,
+        tenantId,
       });
 
       res.status(200).json({ draft });

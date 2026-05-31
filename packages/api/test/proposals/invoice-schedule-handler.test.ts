@@ -141,6 +141,49 @@ describe('P21-002 — create_invoice_schedule', () => {
       expect(invoices[0].totals.totalCents).toBe(20000); // 50% of 40000
     });
 
+    it('derives the total from the estimate persisted totals (tax included)', async () => {
+      const jobId = uuidv4();
+      const est = await createEstimate(
+        {
+          tenantId: TENANT,
+          jobId,
+          estimateNumber: 'EST-1',
+          lineItems: [buildLineItem('i1', 'Repair', 1, 40000, 0, true)],
+          taxRateBps: 1000, // 10% → total 44000
+          createdBy: 'u1',
+        },
+        estimateRepo,
+      );
+      await estimateRepo.update(TENANT, est.id, { status: 'accepted' });
+
+      await handler.execute(
+        makeProposal({ jobId, estimateId: est.id, milestones: milestones5050 }),
+        { tenantId: TENANT, executedBy: 'u1' },
+      );
+      const invoices = await invoiceRepo.findByJob(TENANT, jobId);
+      // 50% of the TAXED total (44000), not the raw line sum (40000).
+      expect(invoices[0].totals.totalCents).toBe(22000);
+    });
+
+    it('does not mint an invoice up front when no milestone is on_accept', async () => {
+      const jobId = uuidv4();
+      const result = await handler.execute(
+        makeProposal({
+          jobId,
+          totalAmountCents: 20000,
+          milestones: [
+            { label: 'Progress', type: 'percent', value: 5000, trigger: 'on_completion' },
+            { label: 'Final', type: 'remainder', value: 0, trigger: 'on_completion' },
+          ],
+        }),
+        { tenantId: TENANT, executedBy: 'u1' },
+      );
+      expect(result.success).toBe(true);
+      // Schedule is written, but nothing bills until a trigger fires.
+      expect(await scheduleRepo.findByJob(TENANT, jobId)).toHaveLength(1);
+      expect(await invoiceRepo.findByJob(TENANT, jobId)).toHaveLength(0);
+    });
+
     it('errors when no total can be determined', async () => {
       const result = await handler.execute(
         makeProposal({ jobId: uuidv4(), milestones: milestones5050 }),

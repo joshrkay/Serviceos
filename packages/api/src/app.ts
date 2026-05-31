@@ -1867,6 +1867,15 @@ export function createApp(): express.Express {
   // appointment + `create_booking` proposal for the owner to approve.
   app.use(
     '/api/public/booking',
+    // Stricter than the global /api limiter: an unauthenticated write path that
+    // creates customers/jobs/appointments + holds calendar slots. Mirrors the
+    // /public/intake limiter (booking is heavier, so a touch tighter).
+    rateLimit({
+      windowMs: 60 * 1000,
+      max: 5,
+      standardHeaders: true,
+      legacyHeaders: false,
+    }),
     createPublicBookingRouter({
       tenantRepo: intakeTenantRepo,
       customerRepo,

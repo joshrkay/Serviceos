@@ -40,6 +40,12 @@ import {
   TenantTransactionRunner,
   InMemoryTransactionRunner,
 } from '../db/tenant-transaction';
+import { createLogger } from '../logging/logger';
+
+const bookingLogger = createLogger({
+  service: 'public-booking-route',
+  environment: process.env.NODE_ENV || 'development',
+});
 
 export interface PublicBookingDeps {
   tenantRepo: TenantRepository;
@@ -210,6 +216,14 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
         res.status(400).json({ error: 'VALIDATION_ERROR', message: 'slotEnd must be after slotStart' });
         return;
       }
+      // Bound the duration so a crafted request can't hold a multi-day window
+      // (isSlotFree only checks for conflicts, not sane length). Matches the
+      // availability finder's 15–480 minute slot constraints.
+      const durationMin = (slotEnd.getTime() - slotStart.getTime()) / 60000;
+      if (durationMin < 15 || durationMin > 480) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Booking duration must be between 15 and 480 minutes' });
+        return;
+      }
       if (slotStart.getTime() < Date.now()) {
         res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Cannot book a slot in the past' });
         return;
@@ -229,7 +243,11 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
       // because overlapping windows with different starts would take different
       // locks and both pass isSlotFree. (Same reasoning as the portal flow.)
       const outcome = await runner.run(tenantId, async ({ lock }) => {
-        await lock('public-booking');
+        // Shared key with the portal booking flow (public-portal.ts) so a
+        // public prospect and an existing customer can't both pass isSlotFree
+        // for overlapping windows on the same tenant calendar. The lock is
+        // already per-tenant (the runner namespaces by tenantId).
+        await lock('self-service-booking');
 
         const stillFree = await isSlotFree(finderDeps, {
           tenantId,
@@ -347,8 +365,16 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
       }
 
       // The tentative hold should appear on any open dispatch board for that
-      // day immediately, flagged pending approval.
-      notifyDispatchBoardChanged(tenantId, outcome.held.scheduledStart);
+      // day immediately, flagged pending approval. Best-effort: a broadcast
+      // failure must not 500 a booking that already committed.
+      try {
+        notifyDispatchBoardChanged(tenantId, outcome.held.scheduledStart);
+      } catch (broadcastErr) {
+        bookingLogger.error('dispatch-board broadcast failed after booking', {
+          tenantId,
+          error: broadcastErr instanceof Error ? broadcastErr.message : String(broadcastErr),
+        });
+      }
 
       res.status(201).json({
         status: 'pending_confirmation',

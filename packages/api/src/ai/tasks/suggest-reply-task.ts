@@ -25,6 +25,8 @@ export interface SuggestReplyInput {
   messages: SuggestReplyMessage[];
   brandVoice?: BrandVoiceSettings | null;
   businessName?: string;
+  /** Tenant that owns the conversation; routes AI-run logging/quota correctly. */
+  tenantId?: string;
   /** Soft character cap for the draft (SMS-friendly default). */
   maxChars?: number;
 }
@@ -87,6 +89,7 @@ export class SuggestReplyTask {
 
     const response = await this.gateway.complete({
       taskType: this.taskType,
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
       messages: [
         { role: 'system', content: buildSystemPrompt(input) },
         {

@@ -199,6 +199,17 @@ describe('public-booking route', () => {
       expect(res.status).toBe(400);
     });
 
+    it('rejects an out-of-bounds booking duration (multi-day hold)', async () => {
+      const slot = await firstSlot();
+      // Same valid start, but an end 3 days later — would hold the calendar.
+      const longEnd = new Date(new Date(slot.start).getTime() + 3 * 24 * 3_600_000).toISOString();
+      const res = await request(app)
+        .post(`/api/public/booking/${tenantId}`)
+        .send(validBooking(slot.start, longEnd));
+      expect(res.status).toBe(400);
+      expect(res.body.message).toMatch(/duration/i);
+    });
+
     it('rejects a payload missing both phone and email', async () => {
       const slot = await firstSlot();
       const body = validBooking(slot.start, slot.end) as Record<string, unknown>;

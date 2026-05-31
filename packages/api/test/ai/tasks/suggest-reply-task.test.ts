@@ -34,6 +34,16 @@ describe('SuggestReplyTask', () => {
     expect(user).toContain('Shop: Sorry to hear that');
   });
 
+  it('passes the tenantId to the gateway for correct AI-run logging/quota', async () => {
+    const { gateway, provider } = createMockLLMGateway('draft');
+    const task = new SuggestReplyTask(gateway);
+    await task.suggest({
+      messages: [{ senderRole: 'customer', content: 'Hi' }],
+      tenantId: 'tenant-abc',
+    });
+    expect(provider.getCalls()[0].tenantId).toBe('tenant-abc');
+  });
+
   it('strips wrapping quotes the model sometimes adds', async () => {
     const { gateway } = createMockLLMGateway('"We can be there Thursday at 9am."');
     const task = new SuggestReplyTask(gateway);

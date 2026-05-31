@@ -279,7 +279,7 @@ export function BookingPage() {
               )}
             </div>
 
-            {[
+            {([
               { key: 'name', label: 'Full name *', placeholder: 'Your name', type: 'text' },
               { key: 'phone', label: 'Phone *', placeholder: '(555) 000-0000', type: 'tel' },
               { key: 'email', label: 'Email', placeholder: 'you@email.com', type: 'email' },
@@ -287,12 +287,12 @@ export function BookingPage() {
               { key: 'city', label: 'City *', placeholder: 'City', type: 'text' },
               { key: 'state', label: 'State *', placeholder: 'State', type: 'text' },
               { key: 'postalCode', label: 'ZIP *', placeholder: 'ZIP', type: 'text' },
-            ].map(({ key, label, placeholder, type }) => (
+            ] as const).map(({ key, label, placeholder, type }) => (
               <div key={key}>
                 <label className="text-xs text-slate-500 mb-1.5 block">{label}</label>
                 <input
                   data-testid={`booking-field-${key}`}
-                  value={details[key as keyof Details]}
+                  value={details[key]}
                   onChange={(e) => update({ [key]: e.target.value })}
                   placeholder={placeholder}
                   type={type}

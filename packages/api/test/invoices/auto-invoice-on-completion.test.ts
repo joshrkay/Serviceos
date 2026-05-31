@@ -136,6 +136,30 @@ describe('maybeAutoInvoiceOnCompletion', () => {
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
   });
 
+  it('carries the accepted estimate discount + tax into the draft payload', async () => {
+    await settingsRepo.create(makeSettings(true));
+    const job = makeJob();
+    const est = await createEstimate(
+      {
+        tenantId: TENANT,
+        jobId: job.id,
+        estimateNumber: 'EST-1',
+        lineItems: [buildLineItem('i1', 'Repair', 1, 20000, 0, true)],
+        discountCents: 500,
+        taxRateBps: 1000,
+        createdBy: 'u1',
+      },
+      estimateRepo,
+    );
+    await estimateRepo.update(TENANT, est.id, { status: 'accepted' });
+
+    const proposal = await maybeAutoInvoiceOnCompletion(deps(), job);
+    const payload = proposal!.payload as { discountCents: number; taxRateBps: number };
+    // So approving the draft bills the accepted amount, not 0 discount / 0 tax.
+    expect(payload.discountCents).toBe(500);
+    expect(payload.taxRateBps).toBe(1000);
+  });
+
   it('no-ops when there is no accepted estimate / nothing to bill', async () => {
     await settingsRepo.create(makeSettings(true));
     const job = makeJob({ moneyState: 'no_estimate' });
