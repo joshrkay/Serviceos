@@ -394,11 +394,10 @@ import { InMemoryWebhookEventRepository } from './webhooks/in-memory-webhook-eve
 // Composition-root helpers extracted into ./bootstrap. Imported for local use
 // inside createApp() AND re-exported so existing tests that import them from
 // '../../src/app' keep working. (A bare `export { X } from './m'` re-export
-// does NOT bind X into local scope, so the import is required separately.)
+// does NOT bind X into local scope, so a local import is required too.)
 import { buildHelmetOptions } from './bootstrap/helmet-options';
-import { checkMetricsAuth } from './bootstrap/metrics-auth';
-export { buildHelmetOptions } from './bootstrap/helmet-options';
-export { checkMetricsAuth, type MetricsAuthResult } from './bootstrap/metrics-auth';
+import { checkMetricsAuth, type MetricsAuthResult } from './bootstrap/metrics-auth';
+export { buildHelmetOptions, checkMetricsAuth, type MetricsAuthResult };
 
 export function createApp(): express.Express {
   // §11 H3: Initialize Sentry FIRST so any error thrown during startup
