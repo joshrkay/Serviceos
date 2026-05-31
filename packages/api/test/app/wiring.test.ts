@@ -1,11 +1,16 @@
 /**
  * P0-023 — app-wiring static-source assertion.
  *
- * Loads packages/api/src/app.ts as text and asserts that each of the six
+ * Loads the composition-root source as text and asserts that each of the six
  * Wave 1A entities is wired through the standard `pool ? Pg : InMemory`
  * ternary. We deliberately do not boot the app — booting requires Pg in
  * staging/prod (and a stubbed pool in dev). A source-level check is
  * cheaper, faster, and immune to future side effects in createApp().
+ *
+ * The pure repository constructions were extracted out of createApp() into
+ * `src/bootstrap/repositories.ts` (buildRepositories(pool)), so the ternary
+ * assertions read that module; the pool-gating / shutdown / leader-election
+ * assertions still read app.ts where that wiring lives.
  *
  * If a regression renames either the Pg or InMemory class, or accidentally
  * drops the ternary (e.g. by re-introducing a bare `new InMemoryX()`), this
@@ -18,6 +23,10 @@ import { resolve } from 'path';
 
 describe('P0-023 — app-wiring (pool ternary coverage)', () => {
   const src = readFileSync(resolve(__dirname, '../../src/app.ts'), 'utf8');
+  const repoSrc = readFileSync(
+    resolve(__dirname, '../../src/bootstrap/repositories.ts'),
+    'utf8',
+  );
 
   it.each([
     ['Assignment', 'PgAssignmentRepository', 'InMemoryAssignmentRepository'],
@@ -27,13 +36,13 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     ['DispatchAnalytics', 'PgDispatchAnalyticsRepository', 'InMemoryDispatchAnalyticsRepository'],
     ['DelayNoticeState', 'PgDelayNoticeStateRepository', 'InMemoryDelayNoticeStateRepository'],
   ])('%s repo wired through pool ternary', (_label, pgClass, inMemoryClass) => {
-    expect(src).toContain(pgClass);
-    expect(src).toContain(inMemoryClass);
+    expect(repoSrc).toContain(pgClass);
+    expect(repoSrc).toContain(inMemoryClass);
     const ternaryPattern = new RegExp(
       `pool\\s*\\?\\s*new\\s+${pgClass}[\\s\\S]*?:\\s*new\\s+${inMemoryClass}`,
       'm',
     );
-    expect(src).toMatch(ternaryPattern);
+    expect(repoSrc).toMatch(ternaryPattern);
   });
 
   it('graceful shutdown registers SIGTERM/SIGINT pool drain', () => {

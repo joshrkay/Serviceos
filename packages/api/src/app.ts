@@ -405,6 +405,15 @@ import { InMemoryWebhookEventRepository } from './webhooks/in-memory-webhook-eve
 import { buildHelmetOptions } from './bootstrap/helmet-options';
 import { checkMetricsAuth, type MetricsAuthResult } from './bootstrap/metrics-auth';
 export { buildHelmetOptions, checkMetricsAuth, type MetricsAuthResult };
+// The 75 "pure" repository constructions (Pg-backed when a Pool is present,
+// in-memory fallback otherwise) were extracted from createApp() into this
+// builder. They are destructured below, so call sites and shared-instance
+// identity (e.g. webhookAuditRepo / webhookEventRepo / jobRepo deliberately
+// shared with the webhook router) are unchanged. The 5 services
+// (billingService, connectService, integrationResolver,
+// googleReviewsCredResolver, userModeService) are NOT in the set and remain
+// inline below.
+import { buildRepositories } from './bootstrap/repositories';
 
 export function createApp(): express.Express {
   // §11 H3: Initialize Sentry FIRST so any error thrown during startup
@@ -582,27 +591,91 @@ export function createApp(): express.Express {
   // path and the dev-auth-bypass middleware end up with disjoint
   // tenant maps and customers created on one side don't resolve on
   // the other.
-  const tenantRepo = pool
-    ? new PgTenantRepository(pool)
-    : new DevInMemoryTenantRepository();
-  const webhookSettingsRepo = pool
-    ? new PgSettingsRepository(pool)
-    : new InMemorySettingsRepository();
+  const {
+    tenantRepo,
+    webhookSettingsRepo,
+    webhookInvoiceRepo,
+    webhookEstimateRepo,
+    webhookPaymentRepo,
+    jobRepo,
+    pendingInvitationRepo,
+    queue,
+    webhookAuditRepo,
+    webhookEventRepo,
+    webhookRepo,
+    dncRepo,
+    customerRepo,
+    leadRepo,
+    locationRepo,
+    timelineRepo,
+    appointmentRepo,
+    assignmentRepo,
+    workingHoursRepo,
+    estimateRepo,
+    invoiceRepo,
+    invoiceScheduleRepo,
+    batchInvoiceRunRepo,
+    paymentRepo,
+    expenseRepo,
+    noteRepo,
+    conversationRepo,
+    settingsRepo,
+    lookupEventRepo,
+    agreementRepo,
+    templateRepo,
+    bundleRepo,
+    qualityMetricsRepo,
+    voiceRepo,
+    voiceSessionRepo,
+    technicianLocationPingRepo,
+    technicianLocationAuthorizer,
+    approvalRepo,
+    deltaRepo,
+    packActivationRepo,
+    trainingAssetRepo,
+    privacyAuditRepo,
+    fileRepo,
+    jobFileRepo,
+    jobPhotoRepo,
+    catalogRepo,
+    feedbackRequestRepo,
+    feedbackResponseRepo,
+    portalSessionRepo,
+    agreementRunRepo,
+    timeEntryRepo,
+    canonicalPackRegistry,
+    aiRunRepo,
+    knowledgeChunkRepo,
+    proposalExecutionRepo,
+    retrievalEvalRunRepo,
+    callTranscriptTurnRepo,
+    dispatchRepo,
+    documentRevisionRepo,
+    diffAnalysisRepo,
+    dispatchAnalyticsRepo,
+    googleReviewsReviewRepo,
+    googleReviewsPollStateRepo,
+    serviceCreditRepo,
+    proposalIdempotencyLock,
+    delayNoticeStateRepo,
+    calendarIntegrationRepo,
+    oauthStateRepo,
+    appointmentCalendarEventRepo,
+    sharedOnCallRepo,
+    phoneNumberRepo,
+    userRepo,
+    revenueBySourceRepo,
+    googleReviewsCustomerLoader,
+    featureFlagRepo,
+  } = buildRepositories(pool);
   // Constructed early so the Stripe webhook handler can record payments.
-  const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
-  const webhookEstimateRepo = pool ? new PgEstimateRepository(pool) : new InMemoryEstimateRepository();
-  const webhookPaymentRepo = pool ? new PgPaymentRepository(pool) : new InMemoryPaymentRepository();
   // Tier 4 (Deposit rules — PR 3b). Hoisted up so the Stripe webhook
   // and the rest of the app share a single instance — InMemory repos
   // are stateful, so two separate `new InMemoryJobRepository()` calls
   // would diverge in tests.
-  const jobRepo            = pool ? new PgJobRepository(pool)            : new InMemoryJobRepository();
   // Tier 4 (Team members — PR 3). Same hoist for pending invitations
   // — the Clerk webhook reads them on user.created and the /api/users
   // routes write them. Single shared InMemory in tests.
-  const pendingInvitationRepo = pool
-    ? new PgPendingInvitationRepository(pool)
-    : new InMemoryPendingInvitationRepository();
   // Tier 4 (Subscription — Fieldly billing). Hoisted up so the Stripe
   // webhook can update the cached subscription status when
   // customer.subscription.* events arrive. Single instance shared
@@ -631,20 +704,15 @@ export function createApp(): express.Express {
     : undefined;
   // Queue constructed here (before webhook router) so new-tenant webhooks can
   // enqueue provisioning jobs synchronously during the request.
-  const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
-  const webhookAuditRepo = pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository();
-  const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
   // Blocker 1 — durable idempotency store for the Stripe/Clerk dedup path
   // (handleWebhookEvent). Postgres-backed in real deploys; left undefined
   // without a pool (tests/dev) so createWebhookRouter falls back to its
   // in-memory map. createWebhookRouter throws if this is missing in prod.
-  const webhookRepo = pool ? new PgWebhookRepository(pool) : undefined;
 
   // §7 Phase 1 — DNC repository + STOP/START keyword handler registration.
   // The inbound-SMS dispatcher routes any matching first-token to these
   // handlers, which mutate tenant_dnc_list. Suppression at outbound-send
   // time is layered on top in send-service / appointment-confirmation-notifier.
-  const dncRepo = pool ? new PgDncRepository(pool) : new InMemoryDncRepository();
   registerKeywordHandler(buildStopKeywordHandler({ dncRepo }), { overwrite: true });
   registerKeywordHandler(buildStartKeywordHandler({ dncRepo }), { overwrite: true });
 
@@ -690,30 +758,17 @@ export function createApp(): express.Express {
     app.use('/storage-dev', createDevStorageRouter());
   }
 
-  const customerRepo       = pool ? new PgCustomerRepository(pool)       : new InMemoryCustomerRepository();
-  const leadRepo           = pool ? new PgLeadRepository(pool)           : new InMemoryLeadRepository();
-  const locationRepo       = pool ? new PgLocationRepository(pool)       : new InMemoryLocationRepository();
   // jobRepo is hoisted earlier so the Stripe webhook + everything else
   // share a single InMemory instance during tests.
-  const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
-  const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository();
-  const assignmentRepo     = pool ? new PgAssignmentRepository(pool)     : new InMemoryAssignmentRepository();
   // Working hours are now Pg-backed in production (migration 137 added
   // technician_working_hours), so the dispatch feasibility composer and the
   // inbound-AI availability search enforce real working-hours rows instead of
   // treating missing rows as no-conflict. The unavailable-block repo stays
   // InMemory for now — wiring its Pg variant (table from migration 116) is a
   // separate, out-of-scope change. InMemory variants stay for tests / no-pool.
-  const workingHoursRepo       = pool ? new PgWorkingHoursRepository(pool)     : new InMemoryWorkingHoursRepository();
   const unavailableBlockRepo   = new InMemoryUnavailableBlockRepository();
   const travelTimeProvider     = createTravelTimeProvider(process.env);
   const skillMatcher           = new StubSkillMatcher();
-  const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
-  const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
-  const invoiceScheduleRepo = pool ? new PgInvoiceScheduleRepository(pool) : new InMemoryInvoiceScheduleRepository();
-  const batchInvoiceRunRepo = pool ? new PgBatchInvoiceRunRepository(pool) : new InMemoryBatchInvoiceRunRepository();
-  const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
-  const expenseRepo        = pool ? new PgExpenseRepository(pool)        : new InMemoryExpenseRepository();
   // P5-017: Resolve the payment-link provider via the factory so the mock
   // is hard-blocked in production. The factory throws at boot if
   // STRIPE_SECRET_KEY (or STRIPE_API_KEY) is missing while NODE_ENV=production,
@@ -723,9 +778,6 @@ export function createApp(): express.Express {
   // wired into routes/workers in a follow-up. The factory call itself is
   // load-bearing — it asserts the production guard at boot time.
   void paymentLinkProvider;
-  const noteRepo           = pool ? new PgNoteRepository(pool)           : new InMemoryNoteRepository();
-  const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
-  const settingsRepo       = pool ? new PgSettingsRepository(pool)       : new InMemorySettingsRepository();
   // PR B (Tier 4 / AI approval rules) — shared per-tenant
   // auto-approve threshold resolver. One cached instance for all
   // entry points (twilio adapter, inapp adapter, voice-action-router
@@ -754,33 +806,11 @@ export function createApp(): express.Express {
   // P11-001: voice lookup-skill audit log. The skills write one row
   // per invocation through `LookupEventService` and the Twilio adapter
   // pulls it from the deps bundle. InMemory in dev/test, Pg in prod.
-  const lookupEventRepo    = pool ? new PgLookupEventRepository(pool)    : new InMemoryLookupEventRepository();
   const lookupEventService = new LookupEventService(lookupEventRepo);
   // P11-001: hoisted so the Twilio lookup-skill family can read agreements.
   // The richer agreement-service wiring (agreementRunRepo, generators,
   // etc.) still happens further below — this declaration is purely so
   // the read-only lookup branch has access.
-  const agreementRepo      = pool ? new PgAgreementRepository(pool)      : new InMemoryAgreementRepository();
-  const templateRepo       = pool ? new PgEstimateTemplateRepository(pool) : new InMemoryEstimateTemplateRepository();
-  const bundleRepo         = pool ? new PgServiceBundleRepository(pool)  : new InMemoryServiceBundleRepository();
-  const qualityMetricsRepo = pool ? new PgQualityMetricsRepository(pool) : new InMemoryQualityMetricsRepository();
-  const voiceRepo          = pool ? new PgVoiceRepository(pool)          : new InMemoryVoiceRepository();
-  const voiceSessionRepo   = pool ? new PgVoiceSessionRepository(pool)   : new InMemoryVoiceSessionRepository();
-  const technicianLocationPingRepo = pool
-    ? new PgTechnicianLocationPingRepository(pool)
-    : new InMemoryTechnicianLocationPingRepository();
-  const technicianLocationAuthorizer = pool
-    ? new PgTechnicianLocationAuthorizer(pool)
-    : new InMemoryTechnicianLocationAuthorizer();
-  const approvalRepo       = pool ? new PgApprovalRepository(pool)       : new InMemoryApprovalRepository();
-  const deltaRepo          = pool ? new PgEditDeltaRepository(pool)      : new InMemoryEditDeltaRepository();
-  const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
-  const trainingAssetRepo = pool
-    ? new PgTrainingAssetRepository(pool)
-    : new InMemoryTrainingAssetRepository();
-  const privacyAuditRepo = pool
-    ? new PgPrivacyAuditRepository(pool)
-    : new InMemoryPrivacyAuditRepository();
   // Holder set later once the vertical prompt resolver is built (it
   // depends on canonicalPackRegistry, which is created further down).
   // Lifecycle mutations call this to drop the cached prompt section
@@ -811,34 +841,18 @@ export function createApp(): express.Express {
     redaction: new TrainingAssetRedactionService(),
     invalidatePromptCache: (tenantId) => invalidateVerticalPromptCache?.(tenantId),
   });
-  const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
-  const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
-  const jobPhotoRepo       = pool ? new PgJobPhotoRepository(pool)       : new InMemoryJobPhotoRepository();
-  const catalogRepo        = pool ? new PgCatalogItemRepository(pool)    : new InMemoryCatalogItemRepository();
-  const feedbackRequestRepo = pool ? new PgFeedbackRequestRepository(pool) : new InMemoryFeedbackRequestRepository();
-  const feedbackResponseRepo = pool ? new PgFeedbackResponseRepository(pool) : new InMemoryFeedbackResponseRepository();
   // P10-001: portal session repo (single signed token per customer for the
   // self-service portal). Wired here so both the authed creation route and
   // the public token-resolver router share one instance.
-  const portalSessionRepo: PortalSessionRepository = pool
-    ? new PgPortalSessionRepository(pool)
-    : new InMemoryPortalSessionRepository();
   // Agreement-runs are also surfaced on the public portal (read-only).
   // Hoisted here so the public portal router (mounted before Clerk auth)
   // can reference it. `agreementRepo` is already declared above (hoisted
   // for the P11-001 voice lookup-skill family).
-  const agreementRunRepo = pool
-    ? new PgAgreementRunRepository(pool)
-    : new InMemoryAgreementRunRepository();
-  const timeEntryRepo      = pool ? new PgTimeEntryRepository(pool)       : new InMemoryTimeEntryRepository();
 
   const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
     process.env as NodeJS.ProcessEnv
   );
 
-  const canonicalPackRegistry = pool
-    ? new PgVerticalPackRegistry(pool)
-    : new InMemoryCanonicalVerticalPackRegistry();
   seedCanonicalVerticalPacks(canonicalPackRegistry);
 
   // Synchronous transcription function — used by POST /api/voice/transcribe.
@@ -848,7 +862,6 @@ export function createApp(): express.Express {
   const transcriptionProvider = createWhisperTranscriptionProvider(process.env);
   // AI-run repository — tracks every LLM call lifecycle (pending → running → completed/failed).
   // Pg-backed in production; InMemory when DATABASE_URL is unset (dev/test).
-  const aiRunRepo = pool ? new PgAiRunRepository(pool) : new InMemoryAiRunRepository();
 
   // P2-030 — shadow comparison store.
   // PgShadowComparisonStore when DATABASE_URL + SHADOW_LLM_ENABLED=true;
@@ -878,18 +891,6 @@ export function createApp(): express.Express {
   // proposal-correction-worker. All Pg-backed in production with
   // tenant-scoped RLS via PgBaseRepository.withTenant; InMemory in
   // dev/test so the app boots without DATABASE_URL.
-  const knowledgeChunkRepo = pool
-    ? new PgKnowledgeChunkRepository(pool)
-    : new InMemoryKnowledgeChunkRepository();
-  const proposalExecutionRepo = pool
-    ? new PgProposalExecutionRepository(pool)
-    : new InMemoryProposalExecutionRepository();
-  const retrievalEvalRunRepo = pool
-    ? new PgRetrievalEvalRunRepository(pool)
-    : new InMemoryRetrievalEvalRunRepository();
-  const callTranscriptTurnRepo = pool
-    ? new PgCallTranscriptTurnRepository(pool)
-    : new InMemoryCallTranscriptTurnRepository();
 
   const feedbackDispatcher =
     process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM_NUMBER
@@ -905,7 +906,6 @@ export function createApp(): express.Express {
   // the env vars, falls back to InMemoryDeliveryProvider so the app
   // boots in dev without delivery credentials. Send routes return
   // 503 when sendService is undefined.
-  const dispatchRepo = pool ? new PgDispatchRepository(pool) : new InMemoryDispatchRepository();
   const messageDelivery: MessageDeliveryProvider | null =
     process.env.TWILIO_ACCOUNT_SID &&
     process.env.TWILIO_AUTH_TOKEN &&
@@ -1023,12 +1023,6 @@ export function createApp(): express.Express {
   // persists a structured field-level delta. P0-023 graduates the revision
   // store and the analysis store onto Postgres when DATABASE_URL is set —
   // dev still uses the in-memory variants so tests boot without a DB.
-  const documentRevisionRepo = pool
-    ? new PgDocumentRevisionRepository(pool)
-    : new InMemoryDocumentRevisionRepository();
-  const diffAnalysisRepo = pool
-    ? new PgDiffAnalysisRepository(pool)
-    : new InMemoryDiffAnalysisRepository();
   const diffAnalysisWorker = createDiffAnalysisWorker(
     documentRevisionRepo,
     diffAnalysisRepo
@@ -1071,9 +1065,6 @@ export function createApp(): express.Express {
     nodeEnv: config.NODE_ENV,
     sendService,
   });
-  const dispatchAnalyticsRepo = pool
-    ? new PgDispatchAnalyticsRepository(pool)
-    : new InMemoryDispatchAnalyticsRepository();
   const transactionalComms = messageDelivery
     ? new TransactionalCommsService({
         delivery: messageDelivery,
@@ -1105,14 +1096,9 @@ export function createApp(): express.Express {
   // wired" guards. Hoisted ahead of the createExecutionHandlerRegistry
   // call (the polling worker, registered later, reuses these
   // instances).
-  const googleReviewsReviewRepo = pool ? new PgReviewRepository(pool) : null;
-  const googleReviewsPollStateRepo = pool
-    ? new PgReviewPollStateRepository(pool)
-    : null;
   const googleReviewsCredResolver = pool
     ? createCredentialResolver({ pool })
     : null;
-  const serviceCreditRepo = pool ? new PgServiceCreditRepository(pool) : undefined;
   const googleReplyResolver =
     googleReviewsReviewRepo && googleReviewsCredResolver
       ? new PgGoogleBusinessReplyResolver(
@@ -1167,9 +1153,6 @@ export function createApp(): express.Express {
   });
   // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
   // default to `proposal-run:{tenant}:{id}` when callers omit one.
-  const proposalIdempotencyLock = pool
-    ? new PgIdempotencyLockProvider(pool)
-    : new NoOpIdempotencyLockProvider();
   const proposalIdempotencyGuard = new IdempotencyGuard(
     proposalExecutionRepo,
     proposalRepo,
@@ -1250,9 +1233,6 @@ export function createApp(): express.Express {
   // construction during the gap between 4a-2 and 4b landing.
   void retrieveAdapter;
 
-  const delayNoticeStateRepo = pool
-    ? new PgDelayNoticeStateRepository(pool)
-    : new InMemoryDelayNoticeStateRepository();
   const delayNotificationCoordinator = new DelayNotificationCoordinator(
     queue,
     new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
@@ -1637,18 +1617,9 @@ export function createApp(): express.Express {
   // consent flow AND exchanging the callback code; without them the
   // /connect route returns ValidationError. Callback URL must match
   // the one registered in the Google Cloud OAuth console.
-  const calendarIntegrationRepo = pool
-    ? new PgCalendarIntegrationRepository(pool)
-    : new InMemoryCalendarIntegrationRepository();
-  const oauthStateRepo = pool
-    ? new PgOAuthStateRepository(pool)
-    : new InMemoryOAuthStateRepository();
   // Tier 4 (Calendar sync — PR 2). Sync service exposed on the
   // auth'd router as POST /google/test-push so operators can verify
   // their connection before relying on it for real appointments.
-  const appointmentCalendarEventRepo = pool
-    ? new PgAppointmentCalendarEventRepository(pool)
-    : new InMemoryAppointmentCalendarEventRepository();
   const googleApiUrl =
     process.env.PUBLIC_API_URL ?? process.env.APP_PUBLIC_URL ?? 'http://localhost:3000';
   const googleConfig =
@@ -1702,7 +1673,6 @@ export function createApp(): express.Express {
   // OnCall repo is created here so both the telephony adapter (notify_oncall
   // side effect) and the in-app adapter (escalation) share a single
   // implementation. The in-app block below reuses this same instance.
-  const sharedOnCallRepo = pool ? new PgOnCallRepository(pool) : new InMemoryOnCallRepository();
   // §3B + §3D: shared vertical-prompt resolver injected into both
   // calling-agent adapters so per-tenant equipment terminology AND
   // intake-question disambiguation reach the classifier.
@@ -1903,7 +1873,6 @@ export function createApp(): express.Express {
   // `/dial-result`, which already run inside an established call; the
   // /voice handler consults this repo first and only falls through to
   // the env-var seam in dev (with a loud WARN).
-  const phoneNumberRepo = pool ? new PgPhoneNumberRepository(pool) : undefined;
 
   app.use(
     '/api/telephony',
@@ -2433,7 +2402,6 @@ export function createApp(): express.Express {
   // best-effort: missing CLERK_SECRET_KEY just persists the local
   // intent; the operator can still re-send via dashboard and the
   // webhook still attaches the invitee on accept (lookup is by email).
-  const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
   app.use(
     '/api/users',
     createUsersRouter(
@@ -2464,9 +2432,6 @@ export function createApp(): express.Express {
   app.use('/api/billing', createBillingRouter({ billingService, connectService, auditRepo }));
 
   // Tenant-scoped reporting (revenue by lead source / UTM, money dashboard, tax export).
-  const revenueBySourceRepo = pool
-    ? new PgRevenueBySourceRepository(pool)
-    : new InMemoryRevenueBySourceRepository();
   const timeGivenBackReporter = new RepoBackedTimeGivenBackReporter(
     proposalRepo,
     settingsRepo,
@@ -2965,7 +2930,6 @@ export function createApp(): express.Express {
   // immediately produce a draft review_response_proposal. When any are
   // missing, we log a one-shot warning so ops can see "ingestion only,
   // no proposals being created" without grepping the per-tick logs.
-  const googleReviewsCustomerLoader = pool ? new PgCustomerLoader(pool) : null;
   const googleReviewsBrandVoiceLoader = new NoopBrandVoiceLoader();
   const googleReviewsProposalEmission =
     serviceCreditRepo && googleReviewsCustomerLoader
@@ -3068,9 +3032,6 @@ export function createApp(): express.Express {
     }),
   );
 
-  const featureFlagRepo: FeatureFlagRepository = pool
-    ? new PgFeatureFlagRepository(pool)
-    : new InMemoryFeatureFlagRepository();
   const featureFlagStore = new InMemoryFeatureFlagStore();
   // Hydration is fire-and-forget on boot — the store starts empty and is
   // refilled from the repo asynchronously. isFeatureEnabled returns false
