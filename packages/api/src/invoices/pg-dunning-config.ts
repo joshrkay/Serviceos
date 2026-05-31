@@ -49,7 +49,7 @@ function mapEvent(row: Record<string, unknown>): DunningEvent {
     tenantId: row.tenant_id as string,
     invoiceId: row.invoice_id as string,
     kind: row.kind as DunningEventKind,
-    stepIndex: Number(row.step_index),
+    stepKey: row.step_key as string,
     amountCents:
       row.amount_cents === null || row.amount_cents === undefined
         ? undefined
@@ -124,7 +124,7 @@ export class PgDunningEventRepository
     return this.withTenant(event.tenantId, async (client) => {
       const result = await client.query(
         `INSERT INTO invoice_dunning_events (
-          id, tenant_id, invoice_id, kind, step_index, amount_cents, channel, sent_at
+          id, tenant_id, invoice_id, kind, step_key, amount_cents, channel, sent_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING *`,
         [
@@ -132,7 +132,7 @@ export class PgDunningEventRepository
           event.tenantId,
           event.invoiceId,
           event.kind,
-          event.stepIndex,
+          event.stepKey,
           event.amountCents ?? null,
           event.channel ?? null,
           event.sentAt,

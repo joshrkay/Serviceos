@@ -38,7 +38,7 @@ function makeEvent(overrides: Partial<DunningEvent> = {}): DunningEvent {
     tenantId: TENANT,
     invoiceId: 'inv-1',
     kind: 'reminder',
-    stepIndex: 0,
+    stepKey: '3:sms',
     channel: 'sms',
     sentAt: new Date('2026-01-04T00:00:00Z'),
     ...overrides,
@@ -87,20 +87,22 @@ describe('InMemoryDunningEventRepository', () => {
     const events = await repo.findByInvoice(TENANT, 'inv-1');
     expect(events).toHaveLength(1);
     expect(events[0].kind).toBe('reminder');
-    expect(events[0].stepIndex).toBe(0);
+    expect(events[0].stepKey).toBe('3:sms');
   });
 
   it('rejects a duplicate (invoice, kind, step) with a 23505 code', async () => {
-    await repo.create(makeEvent({ kind: 'reminder', stepIndex: 1 }));
+    await repo.create(makeEvent({ kind: 'reminder', stepKey: '7:email' }));
     await expect(
-      repo.create(makeEvent({ kind: 'reminder', stepIndex: 1 })),
+      repo.create(makeEvent({ kind: 'reminder', stepKey: '7:email' })),
     ).rejects.toMatchObject({ code: '23505' });
   });
 
-  it('allows the same step index for a different kind', async () => {
-    await repo.create(makeEvent({ kind: 'reminder', stepIndex: 0 }));
+  it('allows the same step key for a different kind', async () => {
+    await repo.create(makeEvent({ kind: 'reminder', stepKey: '3:sms' }));
     await expect(
-      repo.create(makeEvent({ kind: 'late_fee', stepIndex: 0, amountCents: 2500 })),
+      repo.create(
+        makeEvent({ kind: 'late_fee', stepKey: '3:sms', amountCents: 2500, channel: undefined }),
+      ),
     ).resolves.toBeTruthy();
     expect(await repo.findByInvoice(TENANT, 'inv-1')).toHaveLength(2);
   });
@@ -117,6 +119,10 @@ describe('defaultDunningConfig', () => {
     expect(cfg.enabled).toBe(true);
     expect(cfg.reminderSteps).toEqual([{ offsetDays: 3, channel: 'sms' }]);
     expect(cfg.lateFeeType).toBe('none');
+    // id must be a real UUID so it can be persisted via PgDunningConfigRepository.upsert
+    expect(cfg.id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
   });
 });
 
@@ -127,18 +133,18 @@ describe('selectDueReminderSteps', () => {
     const due = selectDueReminderSteps(makeConfig(), {
       dueDate,
       now: new Date('2026-01-02T00:00:00Z'), // 1 day past due
-      sentStepIndexes: [],
+      sentStepKeys: [],
     });
     expect(due).toHaveLength(0);
   });
 
-  it('returns all elapsed, unsent steps ordered by index', () => {
+  it('returns all elapsed, unsent steps ordered by offsetDays', () => {
     const due = selectDueReminderSteps(makeConfig(), {
       dueDate,
-      now: new Date('2026-01-09T00:00:00Z'), // 8 days past due → steps 0 (3d) and 1 (7d)
-      sentStepIndexes: [],
+      now: new Date('2026-01-09T00:00:00Z'), // 8 days past due → 3d and 7d steps
+      sentStepKeys: [],
     });
-    expect(due.map((d) => d.stepIndex)).toEqual([0, 1]);
+    expect(due.map((d) => d.stepKey)).toEqual(['3:sms', '7:email']);
     expect(due[0].step.channel).toBe('sms');
     expect(due[1].step.channel).toBe('email');
   });
@@ -147,17 +153,38 @@ describe('selectDueReminderSteps', () => {
     const due = selectDueReminderSteps(makeConfig(), {
       dueDate,
       now: new Date('2026-01-09T00:00:00Z'),
-      sentStepIndexes: [0],
+      sentStepKeys: ['3:sms'],
     });
-    expect(due.map((d) => d.stepIndex)).toEqual([1]);
+    expect(due.map((d) => d.stepKey)).toEqual(['7:email']);
   });
 
   it('returns nothing when dunning is disabled', () => {
     const due = selectDueReminderSteps(makeConfig({ enabled: false }), {
       dueDate,
       now: new Date('2026-02-01T00:00:00Z'),
-      sentStepIndexes: [],
+      sentStepKeys: [],
     });
     expect(due).toHaveLength(0);
+  });
+
+  it('keys reminders by definition so editing the cadence does not resend (P20-002 fix)', () => {
+    // The 3-day SMS was already sent (recorded under its stable key '3:sms').
+    // A new 1-day SMS is then prepended, shifting the 3-day step to index 1.
+    const reordered = makeConfig({
+      reminderSteps: [
+        { offsetDays: 1, channel: 'sms' },
+        { offsetDays: 3, channel: 'sms' },
+        { offsetDays: 7, channel: 'email' },
+        { offsetDays: 14, channel: 'sms' },
+      ],
+    });
+    const due = selectDueReminderSteps(reordered, {
+      dueDate,
+      now: new Date('2026-01-09T00:00:00Z'), // 8 days past due
+      sentStepKeys: ['3:sms'],
+    });
+    // The already-sent 3-day SMS is NOT resent despite moving position; only
+    // the new 1-day SMS and the 7-day email are due.
+    expect(due.map((d) => d.stepKey)).toEqual(['1:sms', '7:email']);
   });
 });

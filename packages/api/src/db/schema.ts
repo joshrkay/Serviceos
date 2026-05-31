@@ -3455,11 +3455,13 @@ export const MIGRATIONS = {
   `,
 
   // P20-002: configurable dunning cadence + late-fee policy per tenant, plus a
-  // per-(invoice, kind, step) idempotency ledger so the overdue sweep
+  // per-(invoice, kind, step_key) idempotency ledger so the overdue sweep
   // (workers/overdue-invoice-worker.ts, P20-003/004) sends each reminder and
   // accrues each late fee exactly once. Mirrors the service_agreement_runs
   // idempotency shape: a UNIQUE constraint is the source of truth; duplicate
   // inserts raise 23505 and the worker treats them as "already done".
+  // step_key is a STABLE identity (not an array position), so editing the
+  // reminder cadence never resends or skips an already-sent reminder.
   '134_create_invoice_dunning': `
     CREATE TABLE IF NOT EXISTS invoice_dunning_configs (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -3478,7 +3480,7 @@ export const MIGRATIONS = {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (tenant_id)
     );
-    CREATE INDEX IF NOT EXISTS idx_dunning_configs_tenant ON invoice_dunning_configs(tenant_id);
+    -- (No separate tenant index: UNIQUE (tenant_id) already backs lookups.)
     ALTER TABLE invoice_dunning_configs ENABLE ROW LEVEL SECURITY;
     ALTER TABLE invoice_dunning_configs FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_invoice_dunning_configs ON invoice_dunning_configs;
@@ -3490,14 +3492,18 @@ export const MIGRATIONS = {
       tenant_id UUID NOT NULL REFERENCES tenants(id),
       invoice_id UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
       kind TEXT NOT NULL CHECK (kind IN ('reminder','late_fee')),
-      step_index INTEGER NOT NULL,
+      -- Stable per-step idempotency key (survives cadence edits): reminders use
+      -- '<offsetDays>:<channel>'; late fees use the accrual-period key supplied
+      -- by the worker (one-time fees use 'initial').
+      step_key TEXT NOT NULL,
       amount_cents BIGINT,
       channel TEXT,
       sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (tenant_id, invoice_id, kind, step_index)
+      UNIQUE (tenant_id, invoice_id, kind, step_key)
     );
+    -- (No separate (tenant_id, invoice_id) index: the composite UNIQUE above
+    --  leads with those columns and already serves per-invoice lookups.)
     CREATE INDEX IF NOT EXISTS idx_dunning_events_tenant ON invoice_dunning_events(tenant_id);
-    CREATE INDEX IF NOT EXISTS idx_dunning_events_invoice ON invoice_dunning_events(tenant_id, invoice_id);
     ALTER TABLE invoice_dunning_events ENABLE ROW LEVEL SECURITY;
     ALTER TABLE invoice_dunning_events FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_invoice_dunning_events ON invoice_dunning_events;

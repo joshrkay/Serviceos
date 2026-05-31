@@ -8,25 +8,29 @@
  * via the transactional-comms service, then records a dunning event per step
  * so a later sweep won't resend it.
  */
-import { DunningConfig, ReminderStep } from './dunning-config';
+import { DunningConfig, ReminderStep, reminderStepKey } from './dunning-config';
 import { daysPastDue } from './late-fee';
 
 export interface ReminderSelectionInput {
   dueDate: Date;
   now: Date;
-  /** Step indexes already sent (from invoice_dunning_events). */
-  sentStepIndexes: number[];
+  /** Stable step keys already sent (from invoice_dunning_events.step_key). */
+  sentStepKeys: string[];
 }
 
 export interface DueReminder {
-  stepIndex: number;
+  /** Stable idempotency key for the step (see reminderStepKey). */
+  stepKey: string;
   step: ReminderStep;
 }
 
 /**
  * Returns the reminder steps whose `offsetDays` have elapsed since the due
- * date and which have not already been sent, ordered by step index. Returns
- * an empty list when dunning is disabled or nothing is due yet.
+ * date and which have not already been sent, ordered chronologically by
+ * `offsetDays`. Each step is identified by a stable key derived from its
+ * definition (not its array position), so editing the cadence never resends
+ * or skips a reminder. Returns an empty list when dunning is disabled or
+ * nothing is due yet.
  */
 export function selectDueReminderSteps(
   config: DunningConfig,
@@ -35,10 +39,10 @@ export function selectDueReminderSteps(
   if (!config.enabled) return [];
 
   const elapsed = daysPastDue(input.dueDate, input.now);
-  const sent = new Set(input.sentStepIndexes);
+  const sent = new Set(input.sentStepKeys);
 
   return config.reminderSteps
-    .map((step, stepIndex) => ({ stepIndex, step }))
-    .filter(({ stepIndex, step }) => !sent.has(stepIndex) && elapsed >= step.offsetDays)
-    .sort((a, b) => a.stepIndex - b.stepIndex);
+    .map((step) => ({ stepKey: reminderStepKey(step), step }))
+    .filter(({ stepKey, step }) => !sent.has(stepKey) && elapsed >= step.offsetDays)
+    .sort((a, b) => a.step.offsetDays - b.step.offsetDays);
 }

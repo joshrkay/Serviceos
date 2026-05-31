@@ -11,10 +11,11 @@
  *
  *  - DunningEvent: an idempotency ledger. One row per (invoice, kind, step)
  *    the worker has acted on. The DB enforces UNIQUE
- *    (tenant_id, invoice_id, kind, step_index); the in-memory repo mirrors
+ *    (tenant_id, invoice_id, kind, step_key); the in-memory repo mirrors
  *    the rule and raises a 23505-coded error so callers branch identically
  *    in tests and production — exactly like service_agreement_runs.
  */
+import { v4 as uuidv4 } from 'uuid';
 
 export type DunningChannel = 'sms' | 'email';
 export type LateFeeType = 'none' | 'flat' | 'percent';
@@ -32,7 +33,7 @@ export interface DunningConfig {
   id: string;
   tenantId: string;
   enabled: boolean;
-  /** Ordered reminder cadence. Step index = position in this array. */
+  /** Ordered reminder cadence. Each step's identity is its (offsetDays, channel), not its position. */
   reminderSteps: ReminderStep[];
   lateFeeType: LateFeeType;
   /** flat: integer cents; percent: basis points of amount due. */
@@ -50,8 +51,13 @@ export interface DunningEvent {
   tenantId: string;
   invoiceId: string;
   kind: DunningEventKind;
-  /** Reminder: index into reminderSteps. Late fee: the accrual period index. */
-  stepIndex: number;
+  /**
+   * Stable idempotency key for this step, unique per (invoice, kind). Reminders
+   * use `reminderStepKey(step)` (`'<offsetDays>:<channel>'`) so the key survives
+   * cadence reordering/edits; late fees use the accrual-period key supplied by
+   * the worker (one-time fees use `LATE_FEE_ONE_TIME_KEY`).
+   */
+  stepKey: string;
   /** For late_fee events: the fee amount applied, in cents. */
   amountCents?: number;
   /** For reminder events: the channel it was sent on. */
@@ -60,13 +66,28 @@ export interface DunningEvent {
 }
 
 /**
+ * Stable idempotency key for a reminder step, derived from its definition
+ * (offset + channel) rather than its array position — so editing or reordering
+ * the cadence never resends or skips an already-sent reminder.
+ */
+export function reminderStepKey(step: ReminderStep): string {
+  return `${step.offsetDays}:${step.channel}`;
+}
+
+/**
+ * Period key for a one-time late fee (one accrual per invoice). A future
+ * recurring-late-fee policy passes a period bucket instead (e.g. '2026-02').
+ */
+export const LATE_FEE_ONE_TIME_KEY = 'initial';
+
+/**
  * A tenant with no configured cadence gets this conservative default: a
  * single 3-day SMS nudge and no late fee. The overdue sweep falls back to
  * it so dunning is never silently off for an overdue invoice.
  */
 export function defaultDunningConfig(tenantId: string, now: Date = new Date()): DunningConfig {
   return {
-    id: `default-${tenantId}`,
+    id: uuidv4(),
     tenantId,
     enabled: true,
     reminderSteps: [{ offsetDays: 3, channel: 'sms' }],
@@ -88,7 +109,7 @@ export interface DunningConfigRepository {
 export interface DunningEventRepository {
   /**
    * Insert a ledger row. Throws an error with `code === '23505'` when a row
-   * already exists for (tenantId, invoiceId, kind, stepIndex), so callers
+   * already exists for (tenantId, invoiceId, kind, stepKey), so callers
    * can treat the race as a no-op exactly like service_agreement_runs.
    */
   create(event: DunningEvent): Promise<DunningEvent>;
@@ -122,23 +143,28 @@ export class InMemoryDunningEventRepository implements DunningEventRepository {
         existing.tenantId === event.tenantId &&
         existing.invoiceId === event.invoiceId &&
         existing.kind === event.kind &&
-        existing.stepIndex === event.stepIndex
+        existing.stepKey === event.stepKey
       ) {
         const err: Error & { code?: string } = new Error(
-          `duplicate dunning event ${event.kind}#${event.stepIndex} for invoice ${event.invoiceId}`,
+          `duplicate dunning event ${event.kind}:${event.stepKey} for invoice ${event.invoiceId}`,
         );
         err.code = '23505'; // PG unique_violation
         throw err;
       }
     }
-    this.rows.set(event.id, { ...event });
-    return { ...event };
+    this.rows.set(event.id, this.clone(event));
+    return this.clone(event);
   }
 
   async findByInvoice(tenantId: string, invoiceId: string): Promise<DunningEvent[]> {
     return Array.from(this.rows.values())
       .filter((r) => r.tenantId === tenantId && r.invoiceId === invoiceId)
       .sort((a, b) => a.sentAt.getTime() - b.sentAt.getTime())
-      .map((r) => ({ ...r }));
+      .map((r) => this.clone(r));
+  }
+
+  /** Deep-copy including the sentAt Date so stored state can't be mutated via a returned reference. */
+  private clone(e: DunningEvent): DunningEvent {
+    return { ...e, sentAt: new Date(e.sentAt) };
   }
 }
