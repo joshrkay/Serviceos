@@ -3472,13 +3472,62 @@ export const MIGRATIONS = {
       WHERE idempotency_key IS NOT NULL;
   `,
 
+  '136_create_invoice_dunning': `
+    CREATE TABLE IF NOT EXISTS invoice_dunning_configs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      -- ordered cadence, e.g.
+      -- [{"offsetDays":3,"channel":"sms"},{"offsetDays":7,"channel":"email"}]
+      reminder_steps JSONB NOT NULL DEFAULT '[]',
+      late_fee_type TEXT NOT NULL DEFAULT 'none'
+        CHECK (late_fee_type IN ('none','flat','percent')),
+      -- flat: amount in integer cents; percent: basis points (bps) of amount_due
+      late_fee_value_cents BIGINT NOT NULL DEFAULT 0,
+      late_fee_grace_days INTEGER NOT NULL DEFAULT 0,
+      late_fee_max_cents BIGINT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id)
+    );
+    -- (No separate tenant index: UNIQUE (tenant_id) already backs lookups.)
+    ALTER TABLE invoice_dunning_configs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE invoice_dunning_configs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_invoice_dunning_configs ON invoice_dunning_configs;
+    CREATE POLICY tenant_isolation_invoice_dunning_configs ON invoice_dunning_configs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS invoice_dunning_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      invoice_id UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK (kind IN ('reminder','late_fee')),
+      -- Stable per-step idempotency key (survives cadence edits): reminders use
+      -- '<offsetDays>:<channel>'; late fees use the accrual-period key supplied
+      -- by the worker (one-time fees use 'initial').
+      step_key TEXT NOT NULL,
+      amount_cents BIGINT,
+      channel TEXT,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, invoice_id, kind, step_key)
+    );
+    -- (No separate (tenant_id, invoice_id) index: the composite UNIQUE above
+    --  leads with those columns and already serves per-invoice lookups.)
+    CREATE INDEX IF NOT EXISTS idx_dunning_events_tenant ON invoice_dunning_events(tenant_id);
+    ALTER TABLE invoice_dunning_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE invoice_dunning_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_invoice_dunning_events ON invoice_dunning_events;
+    CREATE POLICY tenant_isolation_invoice_dunning_events ON invoice_dunning_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
   // Persist per-technician working hours so the dispatch feasibility check
   // and the inbound-AI availability search stop offering off-hours slots
   // (e.g. 3am). One contiguous window per tech per weekday; split shifts
   // are out of scope for this iteration. Times are tenant-local HH:mm
   // strings interpreted in the appointment's timezone (the appointment
   // instants themselves stay UTC). Replaces the in-memory-only stub.
-  '136_technician_working_hours': `
+  '137_technician_working_hours': `
     CREATE TABLE IF NOT EXISTS technician_working_hours (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id),

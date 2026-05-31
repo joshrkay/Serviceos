@@ -189,8 +189,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['133_payments_reversal_tracking', '9e4be3033b999501b6faa258b4475d58452f322f797751b57f203529668f6afb'],
   ['134_proposal_chains', 'edcfadb2580167f35be75ea42d258fa7d499088d28cca5bbfc8b84823aa9e2ad'],
   ['135_appointments_idempotency_key', 'ab65a6bf7b64221c2761b81e7c5d6f42b2e048b7fa7fcb52ab4adffe1c370aeb'],
-  ['136_technician_working_hours', '9337884066ddee9644370bca78c50c7489a854a831ceec4e5cedfce8a707248d'],
   ['136_create_invoice_dunning', '085bab2c52bb030111b677d061d70019eded0a144aa99797ac1eff80bfb3149a'],
+  ['137_technician_working_hours', '9337884066ddee9644370bca78c50c7489a854a831ceec4e5cedfce8a707248d'],
 ];
 
 function hashMigration(value: string): string {
