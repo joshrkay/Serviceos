@@ -87,15 +87,15 @@ Each Wave 1A story owns one migration file. Reservations:
 
 ### Scheduling & Dispatch "Make It Valuable" — Phases 1–2 (reserved 2026-05-31)
 
-Head at reservation time: `135_appointments_idempotency_key`. See `docs/superpowers/contracts/scheduling-dispatch-addendum.md`.
+Head at reservation time: `137_appointment_reschedule_audit`. See `docs/superpowers/contracts/scheduling-dispatch-addendum.md`.
 
 | Story | Reserved migration number | Domain |
 |---|---|---|
-| SD-101 | 136_* | `technician_working_hours` (persist working hours) |
-| SD-102 | 137_*, 138_* | `business_blackout_periods`, `technician_daily_capacity` |
-| SD-105 | 139_* | `skills`, `technician_skills` (proficiency), `job_required_skills` |
+| SD-101 | 138_* | `technician_working_hours` (persist working hours) |
+| SD-102 | 139_*, 140_* | `business_blackout_periods`, `technician_daily_capacity` |
+| SD-105 | 141_* | `skills`, `technician_skills` (proficiency), `job_required_skills` |
 
-Refresh these against `schema.ts` immediately before dispatching Wave SD-1A — if main has advanced past 135, bump 136–139 and update the addendum.
+Refresh these against `schema.ts` immediately before dispatching Wave SD-1A — if main has advanced past 137, bump 138–141 and update the addendum.
 
 ## Re-checking the audit's contract claims
 

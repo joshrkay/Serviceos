@@ -25,7 +25,7 @@
 | **5** | Communication completion (T-2h reminder; two-way CONFIRM/RESCHEDULE SMS; per-tenant config) | Goal-level |
 | **6** | Edge cases (recurring/PM, multi-day, formal crews, priority bump, preferred-tech, OT/callback) | Goal-level |
 
-**Migrations reserved (head = `135_appointments_idempotency_key`):** `136` working-hours · `137` blackout · `138` capacity · `139` skills model. See `freeze-list.md`.
+**Migrations reserved (head = `137_appointment_reschedule_audit`):** `138` working-hours · `139` blackout · `140` capacity · `141` skills model. See `freeze-list.md`.
 
 **Locked decisions (from product owner):** Phase-1 anchor = skills foundation; skill depth = **tags + proficiency levels** (below-level/missing = *warning*; licensing/hard-blocking = fast-follow); re-optimization = both proactive + on-demand (on-demand first); this iteration delivers **plan + stories**, not feature code.
 
@@ -36,11 +36,11 @@
 ### New (api)
 | File | Responsibility |
 |---|---|
-| `packages/api/src/availability/pg-working-hours.ts` | Pg-backed `WorkingHoursRepository` (migration 136). |
-| `packages/api/src/availability/blackout-period.ts` + `pg-blackout-period.ts` | Business blackout entity + repos (migration 137). |
-| `packages/api/src/availability/daily-capacity.ts` + `pg-daily-capacity.ts` | Per-tech daily capacity (migration 138). |
+| `packages/api/src/availability/pg-working-hours.ts` | Pg-backed `WorkingHoursRepository` (migration 138). |
+| `packages/api/src/availability/blackout-period.ts` + `pg-blackout-period.ts` | Business blackout entity + repos (migration 139). |
+| `packages/api/src/availability/daily-capacity.ts` + `pg-daily-capacity.ts` | Per-tech daily capacity (migration 140). |
 | `packages/api/src/availability/routes.ts` | `createAvailabilityRouter` — working-hours/blackout/capacity mgmt API. |
-| `packages/api/src/skills/{skill,technician-skill,job-required-skill}.ts` (+ `pg-*`) | Skills model entities + repos (migration 139). |
+| `packages/api/src/skills/{skill,technician-skill,job-required-skill}.ts` (+ `pg-*`) | Skills model entities + repos (migration 141). |
 | `packages/api/src/skills/routes.ts` | `createSkillsRouter` — skills/tech-skill/job-required-skill mgmt API. |
 | `packages/api/src/scheduling/real-skill-matcher.ts` | `RealSkillMatcher` (replaces stub). |
 | `packages/api/test/{availability,skills,scheduling}/**` | Tests mirroring src. |
@@ -48,7 +48,7 @@
 ### Modified (api)
 | File | Change |
 |---|---|
-| `packages/api/src/db/schema.ts` | Add `MIGRATIONS` keys `136_`…`139_`. |
+| `packages/api/src/db/schema.ts` | Add `MIGRATIONS` keys `138_`…`141_`. |
 | `packages/api/src/scheduling/skill-matcher.ts` | Additive: add `evaluateMatch` + `SkillGap`; update `StubSkillMatcher`. |
 | `packages/api/src/scheduling/feasibility.ts` | `skillMatchIssues()` → use `evaluateMatch`, carry per-gap `severity`. |
 | `packages/api/src/auth/rbac.ts` | Additive: `skills:view`/`skills:manage` on `owner`/`dispatcher`. |
@@ -70,14 +70,14 @@
 
 # Phase 1 — Availability persistence
 
-## Task 1.1 — `PgWorkingHoursRepository` + migration 136 (SD-101)
+## Task 1.1 — `PgWorkingHoursRepository` + migration 138 (SD-101)
 
 **Files:** create `packages/api/src/availability/pg-working-hours.ts`, `packages/api/test/availability/pg-working-hours.test.ts`; modify `packages/api/src/db/schema.ts`.
 
-- [ ] **Step 1: Add migration `136_technician_working_hours`** to the `MIGRATIONS` object in `db/schema.ts` (mirror `116_tech_unavailable_blocks`):
+- [ ] **Step 1: Add migration `138_technician_working_hours`** to the `MIGRATIONS` object in `db/schema.ts` (mirror `116_tech_unavailable_blocks`):
 
 ```sql
-'136_technician_working_hours': `
+'138_technician_working_hours': `
   CREATE TABLE IF NOT EXISTS technician_working_hours (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES tenants(id),
@@ -117,17 +117,17 @@ interface WorkingHoursRepository {
 
 - [ ] **Step 4: Run tests — PASS.** `cd packages/api && npx vitest run test/availability/pg-working-hours.test.ts`
 - [ ] **Step 5: Build gate.** `cd packages/api && npx tsc --project tsconfig.build.json --noEmit`
-- [ ] **Step 6: Commit** — `feat(availability): persist technician working hours (migration 136)`
+- [ ] **Step 6: Commit** — `feat(availability): persist technician working hours (migration 138)`
 
-## Task 1.2 — Blackout + capacity entities + migrations 137/138 (SD-102)
+## Task 1.2 — Blackout + capacity entities + migrations 139/140 (SD-102)
 
 **Files:** create `availability/{blackout-period,pg-blackout-period,daily-capacity,pg-daily-capacity}.ts` + tests; modify `db/schema.ts`.
 
-- [ ] **Step 1: Migrations** — `137_business_blackout_periods` and `138_technician_daily_capacity` (DDL in SD-102 story body; both `ENABLE`/`FORCE RLS` + `tenant_isolation_*`).
+- [ ] **Step 1: Migrations** — `139_business_blackout_periods` and `140_technician_daily_capacity` (DDL in SD-102 story body; both `ENABLE`/`FORCE RLS` + `tenant_isolation_*`).
 - [ ] **Step 2: Failing tests** — blackout `findOverlapping` (strict `start < $end AND end > $start`, abutting≠overlap); capacity `upsert` idempotent on PK; tenant isolation; validation (end>start, day 0–6).
 - [ ] **Step 3: Implement** following the `unavailable-block.ts` + `pg-unavailable-block.ts` pattern (interface + Zod `validate*Input` + factory + InMemory + Pg). `tenantId`-first; nullable capacity = unlimited.
 - [ ] **Step 4–5: Tests PASS + build gate.**
-- [ ] **Step 6: Commit** — `feat(availability): add blackout periods and per-tech daily capacity (migrations 137-138)`
+- [ ] **Step 6: Commit** — `feat(availability): add blackout periods and per-tech daily capacity (migrations 139-140)`
 
 ## Task 1.3 — Availability management API + persist wiring (SD-103)
 
@@ -156,15 +156,15 @@ Optional, low-risk. Add optional `blackoutRepo?` to `FeasibilityDependencies` (c
 
 # Phase 2 — Skills + levels + real matcher
 
-## Task 2.1 — Skills data model + migration 139 (SD-105)
+## Task 2.1 — Skills data model + migration 141 (SD-105)
 
 **Files:** create `skills/{skill,technician-skill,job-required-skill}.ts` (+ `pg-*`) + tests; modify `db/schema.ts`.
 
-- [ ] **Step 1: Migration `139_skills_model`** — `skills`, `technician_skills` (`proficiency SMALLINT CHECK 1..3`), `job_required_skills` (`min_proficiency`, `is_required`). All `ENABLE`/`FORCE RLS` + `tenant_isolation_*`. DDL in SD-105 story body. **No** licensing columns (fast-follow).
+- [ ] **Step 1: Migration `141_skills_model`** — `skills`, `technician_skills` (`proficiency SMALLINT CHECK 1..3`), `job_required_skills` (`min_proficiency`, `is_required`). All `ENABLE`/`FORCE RLS` + `tenant_isolation_*`. DDL in SD-105 story body. **No** licensing columns (fast-follow).
 - [ ] **Step 2: Failing tests** — UNIQUE(name); proficiency CHECK rejects 0/4; job required-skill findByJob; tenant isolation.
 - [ ] **Step 3: Implement** three entities following the `unavailable-block.ts` pattern (interface + Zod + factory + InMemory + Pg, `tenantId`-first, `withTenant` + explicit predicate).
 - [ ] **Step 4–5: Tests PASS + build gate.**
-- [ ] **Step 6: Commit** — `feat(skills): skills + proficiency + job-required-skill model (migration 139)`
+- [ ] **Step 6: Commit** — `feat(skills): skills + proficiency + job-required-skill model (migration 141)`
 
 ## Task 2.2 — Skills management API (SD-106)
 
@@ -259,7 +259,7 @@ Chokepoints that MUST serialize (shared files): `app.ts`, `feasibility.ts`/`feas
 
 | Wave | Stories | Mode | Notes |
 |---|---|---|---|
-| **SD-1A** | SD-101, SD-102, SD-105 | parallel (3 agents) | Disjoint new files; migrations 136 / 137-138 / 139. |
+| **SD-1A** | SD-101, SD-102, SD-105 | parallel (3 agents) | Disjoint new files; migrations 138 / 139-140 / 141. |
 | **SD-1B** | SD-103 → SD-106 → SD-107 | serial (each merges before next) | All touch `app.ts`; SD-107 also touches `feasibility.ts`. |
 | **SD-1C** | SD-108 | single | Board surfacing (needs SD-107). |
 | *(defer)* | SD-104 | single, after SD-103 | Optional blackout→feasibility. |
@@ -269,4 +269,4 @@ Chokepoints that MUST serialize (shared files): `app.ts`, `feasibility.ts`/`feas
 - **Per task:** `cd packages/api && npx tsc --project tsconfig.build.json --noEmit && npx vitest run <task test>` (web tasks, from repo root: `npm test --workspace=packages/web -- --run -t <id>`).
 - **Phase 1 done-when:** working hours survive a server restart (pg test); availability warnings fire against real data on the board.
 - **Phase 2 done-when:** a job tagged with a skill the assigned tech lacks (or is under-level for) shows a **warning** chip on the board and in the live drag preview; `RealSkillMatcher` + feasibility tests prove a below-proficiency gap lands in `warnings` and the seam supports a future `blocking` with no caller change.
-- **Migration safety:** confirm `136`–`139` are still free in `db/schema.ts` immediately before dispatching SD-1A (refresh `freeze-list.md` if main advanced).
+- **Migration safety:** confirm `138`–`141` are still free in `db/schema.ts` immediately before dispatching SD-1A (refresh `freeze-list.md` if main advanced).
