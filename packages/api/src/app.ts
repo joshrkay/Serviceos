@@ -391,8 +391,12 @@ import type { TenantIntegrationStatus } from './integrations/status-machine';
 // (createApp() throws if DATABASE_URL is missing in those environments).
 import { InMemoryWebhookEventRepository } from './webhooks/in-memory-webhook-event';
 
-// Composition-root helpers extracted into ./bootstrap. Re-exported here so
-// existing tests that import them from '../../src/app' keep working.
+// Composition-root helpers extracted into ./bootstrap. Imported for local use
+// inside createApp() AND re-exported so existing tests that import them from
+// '../../src/app' keep working. (A bare `export { X } from './m'` re-export
+// does NOT bind X into local scope, so the import is required separately.)
+import { buildHelmetOptions } from './bootstrap/helmet-options';
+import { checkMetricsAuth } from './bootstrap/metrics-auth';
 export { buildHelmetOptions } from './bootstrap/helmet-options';
 export { checkMetricsAuth, type MetricsAuthResult } from './bootstrap/metrics-auth';
 
