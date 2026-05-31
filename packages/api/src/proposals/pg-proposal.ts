@@ -34,6 +34,7 @@ function mapRow(row: Record<string, unknown>): Proposal {
       row.execution_retry_count != null ? Number(row.execution_retry_count) : undefined,
     undoneAt: row.undone_at ? new Date(row.undone_at as string) : undefined,
     undoneBy: (row.undone_by as string) ?? undefined,
+    chainId: (row.chain_id as string) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -68,6 +69,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
           target_entity_type, target_entity_id, result_entity_id,
           rejection_reason, rejection_details, idempotency_key, expires_at,
           approved_at, executed_at, executed_by, undone_at, undone_by,
+          chain_id,
           created_by, created_at, updated_at
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7,
@@ -75,7 +77,8 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
           $13, $14, $15,
           $16, $17, $18, $19,
           $20, $21, $22, $23, $24,
-          $25, $26, $27
+          $25,
+          $26, $27, $28
         ) ${conflictClause} RETURNING *`,
         [
           proposal.id ?? uuidv4(),
@@ -102,6 +105,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
           proposal.executedBy ?? null,
           proposal.undoneAt ?? null,
           proposal.undoneBy ?? null,
+          proposal.chainId ?? null,
           proposal.createdBy,
           createdAt,
           updatedAt,
@@ -154,6 +158,18 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       const result = await client.query(
         'SELECT * FROM proposals WHERE tenant_id = $1 AND ai_run_id = $2 ORDER BY created_at DESC',
         [tenantId, aiRunId]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
+  async findByChain(tenantId: string, chainId: string): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM proposals
+         WHERE tenant_id = $1 AND chain_id = $2
+         ORDER BY (source_context->>'chainIndex')::int ASC NULLS LAST, created_at ASC`,
+        [tenantId, chainId]
       );
       return result.rows.map(mapRow);
     });

@@ -5,6 +5,7 @@ import { IdempotencyGuard, withResolvedIdempotencyKey } from './idempotency';
 import { ProposalType } from '../proposal';
 import { AppError } from '../../shared/errors';
 import { ProposalExecutionRepository } from '../proposal-execution';
+import { resolveChainReferences } from './chain-resolution';
 
 /**
  * Fired after a proposal completes execution (success or failure).
@@ -104,9 +105,43 @@ export class ProposalExecutor {
       );
     }
 
+    // Multi-action chaining: resolve any symbolic reference tokens
+    // (`$ref:chain[0].customerId`) against the resultEntityId of the
+    // sibling this proposal depends on. `noop` for non-chained
+    // proposals → behavior is unchanged.
+    let executableProposal = proposal;
+    const chainResolution = await resolveChainReferences(proposal, {
+      proposalRepo: this.proposalRepo,
+    });
+    if (chainResolution.status === 'resolved') {
+      executableProposal = { ...proposal, payload: chainResolution.payload };
+    } else if (chainResolution.status === 'blocked') {
+      if (chainResolution.reason === 'parent_pending') {
+        // The dependency hasn't executed yet. Surface a retryable error
+        // — the execution sweep catches it per-proposal and re-attempts
+        // on the next tick, after the parent has executed. This is the
+        // ordering guarantee for chains; it does not depend on claim
+        // order.
+        throw new AppError(
+          'CHAIN_PARENT_PENDING',
+          `Proposal depends on chain sibling '${chainResolution.parentId}' which has not executed yet. Retrying.`,
+          409
+        );
+      }
+      // parent_failed → cascade-fail this dependent. No infinite retry.
+      const failed = transitionProposal(proposal, 'execution_failed', context.executedBy);
+      await this.proposalRepo.updateStatus(failed.tenantId, failed.id, failed.status, {
+        rejectionDetails: `Blocked by failed chain dependency '${chainResolution.parentId}'`,
+      });
+      return {
+        proposal: failed,
+        result: { success: false, error: 'chain_dependency_failed' },
+      };
+    }
+
     // Idempotency gate (§11 H1). Keys default to `proposal-run:{tenant}:{id}`
     // when callers omit `idempotencyKey`, so every execution is lockable.
-    const keyedProposal = withResolvedIdempotencyKey(proposal);
+    const keyedProposal = withResolvedIdempotencyKey(executableProposal);
     let executionId: string | undefined;
     let executionRecordedInGuard = false;
     const outcome = await this.idempotency.checkAndExecute(keyedProposal, async () => {
