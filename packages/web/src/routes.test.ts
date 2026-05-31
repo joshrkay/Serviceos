@@ -33,7 +33,7 @@ describe('router', () => {
 
   it('public customer-facing routes use RouteErrorElement specifically', () => {
     const topLevel = router.routes as RouteObject[];
-    const publicPaths = ['/e/:id', '/pay/:id', '/intake', '/public/feedback/:token', '/portal/:token'];
+    const publicPaths = ['/e/:id', '/pay/:id', '/intake', '/book', '/public/feedback/:token', '/portal/:token'];
     for (const path of publicPaths) {
       const route = topLevel.find((r) => r.path === path);
       expect(route, `expected top-level route ${path}`).toBeDefined();

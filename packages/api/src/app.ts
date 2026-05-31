@@ -98,6 +98,7 @@ import { PgJobPhotoRepository } from './jobs/pg-job-photo';
 import { createDispatchRoutes } from './dispatch/routes';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
+import { createPublicBookingRouter } from './routes/public-booking';
 import { createReportsRouter } from './routes/reports';
 import { RepoBackedTimeGivenBackReporter } from './reports/time-given-back';
 import { createTimeEntriesRouter } from './routes/time-entries';
@@ -1846,6 +1847,29 @@ export function createApp(): express.Express {
         ? new PgTenantTransactionRunner(pool)
         : new InMemoryTransactionRunner(),
       paymentLinkProvider,
+    }),
+  );
+
+  // Public, token-less online booking — the prospect acquisition funnel
+  // (Jobber "Online Booking" parity). Mounted BEFORE the global /api Clerk
+  // auth: there is no session, the tenant is the UUID in the path (same as
+  // public-intake). A booking never auto-confirms — it creates a held
+  // appointment + `create_booking` proposal for the owner to approve.
+  app.use(
+    '/api/public/booking',
+    createPublicBookingRouter({
+      tenantRepo: intakeTenantRepo,
+      customerRepo,
+      locationRepo,
+      jobRepo,
+      appointmentRepo,
+      proposalRepo,
+      auditRepo,
+      assignmentRepo,
+      settingsRepo,
+      transactionRunner: pool
+        ? new PgTenantTransactionRunner(pool)
+        : new InMemoryTransactionRunner(),
     }),
   );
 
