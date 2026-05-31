@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { estimates, invoices, calcEstimateTotal, calcInvoiceTotal } from '../../data/mock-data';
 import { StatusBadge } from '../shared/StatusBadge';
+import { EmptyState } from '../ui';
 
 // ─── Sheet Overlay ───────────────────────────────────────────────
 export function SheetOverlay({
