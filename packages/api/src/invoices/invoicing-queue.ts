@@ -25,6 +25,9 @@ export interface InvoicingCandidate {
   customerId: string;
   estimateId?: string;
   lineItems: LineItem[];
+  /** Carried from the accepted estimate so the billed amount matches it. */
+  discountCents: number;
+  taxRateBps: number;
   amountCents: number;
 }
 
@@ -67,12 +70,19 @@ export async function findJobsRequiringInvoicing(
       : [];
     if (lineItems.length === 0) continue;
 
+    // Carry the accepted estimate's discount + tax so the batch summary total
+    // and the fanned-out draft invoices match what the customer accepted.
+    const discountCents = accepted?.totals.discountCents ?? 0;
+    const taxRateBps = accepted?.totals.taxRateBps ?? 0;
+
     candidates.push({
       jobId: job.id,
       customerId: job.customerId,
       estimateId: accepted?.id,
       lineItems,
-      amountCents: calculateDocumentTotals(lineItems, 0, 0).totalCents,
+      discountCents,
+      taxRateBps,
+      amountCents: calculateDocumentTotals(lineItems, discountCents, taxRateBps).totalCents,
     });
   }
 

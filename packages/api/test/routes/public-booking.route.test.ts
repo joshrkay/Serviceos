@@ -210,6 +210,16 @@ describe('public-booking route', () => {
       expect(res.body.message).toMatch(/duration/i);
     });
 
+    it('rejects a slot outside business hours (e.g. 02:00) the UI would never offer', async () => {
+      // Valid duration + future, but 02:00–03:00 UTC is before the 08:00 open.
+      const day = isoDate(2);
+      const res = await request(app)
+        .post(`/api/public/booking/${tenantId}`)
+        .send(validBooking(`${day}T02:00:00.000Z`, `${day}T03:00:00.000Z`));
+      expect(res.status).toBe(400);
+      expect(res.body.message).toMatch(/booking hours/i);
+    });
+
     it('rejects a payload missing both phone and email', async () => {
       const slot = await firstSlot();
       const body = validBooking(slot.start, slot.end) as Record<string, unknown>;

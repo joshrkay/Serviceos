@@ -71,6 +71,15 @@ describe('P21-003 — batch_invoice', () => {
       expect(drafts.map((d) => (d.payload as { jobId: string }).jobId).sort()).toEqual(jobs.map((j) => j.jobId).sort());
     });
 
+    it('preserves estimate discount + tax in each fanned-out draft', async () => {
+      const job = { ...batchJob(), discountCents: 500, taxRateBps: 1000 };
+      await handler.execute(makeProposal([job]), { tenantId: TENANT, executedBy: 'u1' });
+      const draft = (await proposalRepo.findByTenant(TENANT)).find((p) => p.proposalType === 'draft_invoice')!;
+      const payload = draft.payload as { discountCents: number; taxRateBps: number };
+      expect(payload.discountCents).toBe(500);
+      expect(payload.taxRateBps).toBe(1000);
+    });
+
     it('errors on an empty job list', async () => {
       const result = await handler.execute(makeProposal([]), { tenantId: TENANT, executedBy: 'u1' });
       expect(result.success).toBe(false);

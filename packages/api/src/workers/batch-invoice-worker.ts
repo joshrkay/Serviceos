@@ -102,6 +102,8 @@ export async function runBatchInvoiceSweep(
             customerId: c.customerId,
             ...(c.estimateId ? { estimateId: c.estimateId } : {}),
             amountCents: c.amountCents,
+            discountCents: c.discountCents,
+            taxRateBps: c.taxRateBps,
             lineItems: c.lineItems,
           })),
         },

@@ -64,6 +64,29 @@ describe('findJobsRequiringInvoicing', () => {
     expect(candidates[0].lineItems).toHaveLength(1);
   });
 
+  it('carries the accepted estimate discount + tax into the candidate amount', async () => {
+    const job = await jobRepo.create(makeJob());
+    const est = await createEstimate(
+      {
+        tenantId: TENANT,
+        jobId: job.id,
+        estimateNumber: 'EST-1',
+        lineItems: [buildLineItem('i1', 'Repair', 1, 20000, 0, true)],
+        discountCents: 500,
+        taxRateBps: 1000, // 10%
+        createdBy: 'u1',
+      },
+      estimateRepo,
+    );
+    await estimateRepo.update(TENANT, est.id, { status: 'accepted' });
+
+    const [candidate] = await findJobsRequiringInvoicing(TENANT, deps());
+    expect(candidate.discountCents).toBe(500);
+    expect(candidate.taxRateBps).toBe(1000);
+    // (20000 - 500) * 1.10 = 21450, not the raw 20000.
+    expect(candidate.amountCents).toBe(21450);
+  });
+
   it('excludes a job that already has a live invoice', async () => {
     const job = await jobRepo.create(makeJob());
     await seedAcceptedEstimate(job.id, [buildLineItem('i1', 'Repair', 1, 20000, 0, true)]);

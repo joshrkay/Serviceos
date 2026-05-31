@@ -11,6 +11,8 @@ interface BatchJob {
   jobId: string;
   customerId: string;
   estimateId?: string;
+  discountCents?: number;
+  taxRateBps?: number;
   lineItems: Array<Record<string, unknown>>;
 }
 
@@ -61,6 +63,10 @@ export class BatchInvoiceExecutionHandler implements ExecutionHandler {
             jobId: job.jobId,
             ...(job.estimateId ? { estimateId: job.estimateId } : {}),
             lineItems,
+            // Preserve the accepted estimate's discount + tax so the draft bills
+            // the accepted amount (the handler recomputes totals from these).
+            ...(typeof job.discountCents === 'number' ? { discountCents: job.discountCents } : {}),
+            ...(typeof job.taxRateBps === 'number' ? { taxRateBps: job.taxRateBps } : {}),
           },
           summary: 'Draft invoice (batch)',
           explanation: 'Generated from an approved batch-invoice proposal. Approve to create the invoice.',

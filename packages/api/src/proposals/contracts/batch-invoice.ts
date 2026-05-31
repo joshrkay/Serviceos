@@ -18,6 +18,8 @@ const batchJobSchema = z
     customerId: z.string().uuid(),
     estimateId: z.string().uuid().optional(),
     amountCents: z.number().int().min(0),
+    discountCents: z.number().int().min(0).optional(),
+    taxRateBps: z.number().int().min(0).max(10000).optional(),
     lineItems: z.array(z.record(z.unknown())).min(1),
   })
   .passthrough();

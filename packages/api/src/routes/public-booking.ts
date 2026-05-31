@@ -34,7 +34,7 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { SettingsRepository } from '../settings/settings';
 import { ProposalRepository, createProposal } from '../proposals/proposal';
 import { TenantRepository } from '../auth/clerk';
-import { findBookableSlots, isSlotFree } from '../scheduling/booking-availability';
+import { findBookableSlots, isSlotFree, DEFAULT_BUSINESS_HOURS } from '../scheduling/booking-availability';
 import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
 import {
   TenantTransactionRunner,
@@ -46,6 +46,40 @@ const bookingLogger = createLogger({
   service: 'public-booking-route',
   environment: process.env.NODE_ENV || 'development',
 });
+
+/** Local wall-clock minutes-of-day + calendar date for an instant in `tz`. */
+function localMinutesOfDay(d: Date, tz: string): { minutes: number; ymd: string } {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '00';
+  let hour = parseInt(get('hour'), 10);
+  if (hour === 24) hour = 0; // some engines render midnight as 24:00
+  return {
+    minutes: hour * 60 + parseInt(get('minute'), 10),
+    ymd: `${get('year')}-${get('month')}-${get('day')}`,
+  };
+}
+
+/**
+ * True when [start, end) falls inside the tenant's business hours on a single
+ * local day. Uses DEFAULT_BUSINESS_HOURS — the same config findBookableSlots
+ * uses for this flow — so the POST can only book what GET would offer.
+ */
+function isWithinBusinessHours(start: Date, end: Date, tz: string): boolean {
+  const s = localMinutesOfDay(start, tz);
+  const e = localMinutesOfDay(end, tz);
+  if (s.ymd !== e.ymd) return false; // must not span local days
+  const openMin = DEFAULT_BUSINESS_HOURS.openHour * 60;
+  const closeMin = DEFAULT_BUSINESS_HOURS.closeHour * 60;
+  return s.minutes >= openMin && e.minutes <= closeMin && s.minutes < e.minutes;
+}
 
 export interface PublicBookingDeps {
   tenantRepo: TenantRepository;
@@ -230,6 +264,20 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
       }
 
       const timezone = await resolveTenantTimezone(deps, tenantId);
+
+      // Re-validate the submitted window against the SAME business hours used to
+      // generate availability, in the tenant timezone. A caller can POST any
+      // future slot bypassing the UI; without this an out-of-hours request
+      // (e.g. 02:00) would still create a held appointment that GET
+      // /availability would never have offered.
+      if (!isWithinBusinessHours(slotStart, slotEnd, timezone)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'Selected time is outside booking hours',
+        });
+        return;
+      }
+
       const createdBy = PUBLIC_BOOKING_ACTOR_ROLE;
       const finderDeps = {
         appointmentRepo: deps.appointmentRepo,
