@@ -913,6 +913,9 @@ describe('voice-action-router worker', () => {
 
     const byTenant = await proposalRepo.findByTenant('t-1');
     expect(byTenant).toHaveLength(1);
+    // The proposal carries the deterministic idempotency key so a concurrent
+    // redelivery (one that races past the pre-check) is deduped at the DB layer.
+    expect(byTenant[0].idempotencyKey).toBe('voice-proposal:rec-dedup-1');
 
     const appts = await appointmentRepo.findByDateRange(
       't-1',
@@ -920,5 +923,53 @@ describe('voice-action-router worker', () => {
       new Date('2100-01-01T00:00:00Z'),
     );
     expect(appts).toHaveLength(1);
+    // The held appointment carries its own key so a concurrent redelivery
+    // returns the existing hold instead of inserting a second one.
+    expect(appts[0].idempotencyKey).toBe('voice-hold:rec-dedup-1');
+  });
+
+  it('concurrent redelivery past the pre-check is deduped by the idempotency key (no throw, one proposal)', async () => {
+    // Simulate the race: both deliveries see an EMPTY proposal store at
+    // pre-check time (a proposalRepo whose findByTenant always reports empty
+    // until the underlying create has happened), so both pass findAlreadyProcessed
+    // and both reach create — the second must be swallowed as a dedup, not throw.
+    const real = new InMemoryProposalRepository();
+    const racingRepo = {
+      create: (p: Proposal) => real.create(p),
+      findByTenant: async () => [] as Proposal[], // always "nothing processed yet"
+    } as unknown as InMemoryProposalRepository;
+
+    const classifierResponse = JSON.stringify({
+      intentType: 'create_appointment',
+      confidence: 0.9,
+      extractedEntities: { customerName: 'Mrs Lee' },
+    } satisfies IntentClassification);
+    const appointmentResponse = JSON.stringify({
+      customerName: 'Mrs Lee',
+      scheduledStart: '2026-04-21T21:00:00Z',
+      scheduledEnd: '2026-04-21T22:00:00Z',
+      confidence_score: 0.9,
+    });
+    // Two full classify+extract passes (both deliveries run end-to-end).
+    const gateway = gatewayReturning([
+      classifierResponse,
+      appointmentResponse,
+      classifierResponse,
+      appointmentResponse,
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo: racingRepo });
+    const payload = {
+      tenantId: 't-1',
+      userId: 'u-1',
+      transcript: 'Schedule a follow-up with Mrs Lee next Tuesday at 2pm',
+      recordingId: 'rec-race-1',
+    };
+
+    await worker.handle(msg(payload), silentLogger());
+    // Second delivery races past the (empty) pre-check and must NOT throw.
+    await expect(worker.handle(msg(payload), silentLogger())).resolves.toBeUndefined();
+
+    // Exactly one proposal actually persisted despite two create attempts.
+    expect(await real.findByTenant('t-1')).toHaveLength(1);
   });
 });

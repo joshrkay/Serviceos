@@ -32,6 +32,17 @@ export class InMemoryAppointmentRepository implements AppointmentRepository {
   private appointments: Map<string, Appointment> = new Map();
 
   async create(appointment: Appointment): Promise<Appointment> {
+    // Idempotency: a redelivered write with the same key returns the
+    // existing appointment instead of inserting a duplicate (mirrors the
+    // Pg partial-unique-index ON CONFLICT behavior).
+    if (appointment.idempotencyKey) {
+      const existing = Array.from(this.appointments.values()).find(
+        (a) =>
+          a.tenantId === appointment.tenantId &&
+          a.idempotencyKey === appointment.idempotencyKey,
+      );
+      if (existing) return { ...existing };
+    }
     this.appointments.set(appointment.id, { ...appointment });
     return { ...appointment };
   }

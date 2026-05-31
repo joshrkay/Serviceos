@@ -248,6 +248,25 @@ export function voiceCommandIdempotencyKey(recordingId: string): string {
   return `voice:${recordingId}`;
 }
 
+/**
+ * Idempotency key for the PROPOSAL a voice recording produces. Distinct
+ * prefix from voiceCommandIdempotencyKey (`voice:`) so the proposals table
+ * and the voice-command-run table never share a key string, even though
+ * both are derived from the same recordingId.
+ */
+export function voiceProposalIdempotencyKey(recordingId: string): string {
+  return `voice-proposal:${recordingId}`;
+}
+
+/**
+ * Idempotency key for the tentative APPOINTMENT HOLD a voice booking places.
+ * Distinct prefix again so a redelivered recording dedups the hold and the
+ * proposal independently without their keys colliding.
+ */
+export function voiceHoldIdempotencyKey(recordingId: string): string {
+  return `voice-hold:${recordingId}`;
+}
+
 export class InMemoryVoiceAuditRepository implements VoiceAuditRepository {
   private attempts = new Map<string, VoiceTranscriptionAttempt>();
   private transcriptVersions = new Map<string, VoiceTranscriptVersion>();
