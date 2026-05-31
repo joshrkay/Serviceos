@@ -9,6 +9,17 @@ import { useEffect, useState } from 'react';
 import { PortalAgreement, formatPortalCents, portalApi } from '../../api/portal';
 import { PortalCard } from '../../components/portal/PortalCard';
 
+// Reused across rows (avoids constructing a formatter per agreement).
+const instantDateFmt = new Intl.DateTimeFormat(undefined);
+// `startsOn`/`endsOn` are date-only (YYYY-MM-DD). Format them in UTC so a
+// customer west of UTC doesn't see the calendar date shifted a day earlier.
+const calendarDateFmt = new Intl.DateTimeFormat(undefined, { timeZone: 'UTC' });
+
+/** Format a `YYYY-MM-DD` date-only string without a timezone shift. */
+function formatDateOnly(value: string): string {
+  return calendarDateFmt.format(new Date(`${value}T00:00:00Z`));
+}
+
 export function PortalAgreementList({ token }: { token: string }) {
   const [agreements, setAgreements] = useState<PortalAgreement[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -57,10 +68,10 @@ export function PortalAgreementList({ token }: { token: string }) {
             <div className="text-sm text-slate-700">{a.description}</div>
           ) : null}
           <div className="mt-2 text-xs text-slate-500">
-            Next service {new Date(a.nextRunAt).toLocaleDateString()}
+            Next service {instantDateFmt.format(new Date(a.nextRunAt))}
             {' · '}
-            {new Date(a.startsOn).toLocaleDateString()} →{' '}
-            {a.endsOn ? new Date(a.endsOn).toLocaleDateString() : 'ongoing'}
+            {formatDateOnly(a.startsOn)} →{' '}
+            {a.endsOn ? formatDateOnly(a.endsOn) : 'ongoing'}
           </div>
         </PortalCard>
       ))}

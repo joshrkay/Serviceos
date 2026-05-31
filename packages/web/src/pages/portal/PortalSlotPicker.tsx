@@ -21,16 +21,29 @@ function toDateInput(date: Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
+// Cache formatters by timezone so the slot grid doesn't build a new
+// Intl.DateTimeFormat for every slot it renders.
+const slotFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function slotFormatter(timezone: string): Intl.DateTimeFormat {
+  const key = timezone || 'local';
+  let formatter = slotFormatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(undefined, {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZone: timezone || undefined,
+    });
+    slotFormatters.set(key, formatter);
+  }
+  return formatter;
+}
+
 export function formatSlot(slot: PortalSlot, timezone: string): string {
-  const start = new Date(slot.start);
-  return start.toLocaleString(undefined, {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    timeZone: timezone || undefined,
-  });
+  return slotFormatter(timezone).format(new Date(slot.start));
 }
 
 /**
