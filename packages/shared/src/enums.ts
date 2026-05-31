@@ -157,6 +157,7 @@ export enum ProposalType {
   DRAFT_INVOICE = 'draft_invoice',
   UPDATE_INVOICE = 'update_invoice',
   ISSUE_INVOICE = 'issue_invoice',
+  CREATE_INVOICE_SCHEDULE = 'create_invoice_schedule',
   REASSIGN_APPOINTMENT = 'reassign_appointment',
   RESCHEDULE_APPOINTMENT = 'reschedule_appointment',
   CANCEL_APPOINTMENT = 'cancel_appointment',

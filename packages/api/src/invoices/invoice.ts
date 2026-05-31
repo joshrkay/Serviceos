@@ -60,6 +60,9 @@ export interface CreateInvoiceInput {
   customerMessage?: string;
   /** Optional override; routes auto-populate from job when omitted. */
   originatingLeadId?: string;
+  /** P21-001/002 — link a minted milestone invoice to its schedule + position. */
+  scheduleId?: string;
+  milestoneIndex?: number;
   createdBy: string;
 }
 
@@ -185,6 +188,8 @@ export async function createInvoice(
     amountDueCents: totals.totalCents,
     customerMessage: input.customerMessage,
     originatingLeadId: input.originatingLeadId,
+    scheduleId: input.scheduleId,
+    milestoneIndex: input.milestoneIndex,
     createdBy: input.createdBy,
     createdAt: new Date(),
     updatedAt: new Date(),

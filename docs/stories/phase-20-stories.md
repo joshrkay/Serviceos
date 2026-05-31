@@ -18,7 +18,7 @@ A job flips to `completed` → the owner gets one SMS proposal and the invoice g
 | P20-003 | Multi-step reminder cadence in the overdue sweep | M | Partially landed (pure selection `dunning-schedule.ts` done; worker wiring pending) |
 | P20-004 | Late-fee accrual | S | Partially landed (pure calc `late-fee.ts` done; worker accrual + proposal pending) |
 | P21-001 | Invoice schedule / milestone linkage (data model) | S | **Landed** (mig. 138 + `invoice-schedule.ts` `splitMilestones` + repos + `invoices.schedule_id/milestone_index`) |
-| P21-002 | `create_invoice_schedule` proposal type | M | Not started |
+| P21-002 | `create_invoice_schedule` proposal type | M | **Landed** (three-place ritual + `invoice-schedule-handler.ts`; mints first milestone invoice) |
 | P21-003 | "Requires invoicing" queue + batch-generate sweep | M | Not started |
 
 ---
@@ -75,7 +75,7 @@ A job flips to `completed` → the owner gets one SMS proposal and the invoice g
 ---
 
 ### P21-002 — `create_invoice_schedule` proposal type
-**Status:** Not started
+**Status:** Landed. Three-place ritual done: `CREATE_INVOICE_SCHEDULE` enum (`packages/shared`), `create_invoice_schedule` added to the `proposal.ts` union + `PROPOSAL_TYPES` + `actionClassForProposalType` (capture) + `prioritization.ts`, and `contracts/create-invoice-schedule.ts` registered in `PROPOSAL_TYPE_SCHEMAS` (Zod: exactly one `remainder`, percent ≤ 10000 bps). `execution/invoice-schedule-handler.ts` writes the `invoice_schedules` row (total from payload or derived from the estimate via `splitMilestones`) then drafts the first milestone invoice linked by `schedule_id`/`milestone_index` (threaded through `createInvoiceWithNextNumber`); registered in the handler registry + app.ts with an `InvoiceScheduleRepository`. **Follow-up (P20-001/P21-003):** mint later milestones on the completion hook + `on_accept` check.
 **Allowed files:** `packages/api/src/proposals/proposal.ts` (union + classify `capture`), `packages/shared/src/enums.ts` (`CREATE_INVOICE_SCHEDULE`), `packages/api/src/proposals/contracts/create-invoice-schedule.ts` (+ register in `PROPOSAL_TYPE_SCHEMAS`), `packages/api/src/proposals/execution/invoice-schedule-handler.ts`, tests.
 **Build prompt:** Payload `{ jobId, estimateId?, milestones:[{label, type:'percent'|'flat'|'remainder', value, trigger:'on_accept'|'on_completion'|'manual'}] }`, Zod-validated (percent ≤ 10000 bps; exactly one `remainder`). Execution writes `invoice_schedules` then drafts the first milestone via the existing invoice-create path; later milestones minted by the completion hook (P20-001) + an `on_accept` check. **Follow the three-place ritual exactly** (omitting the switch arm is a compile error).
 **Reuse:** `proposals/execution/executor.ts`, `invoice-execution-handler.ts`; `splitMilestones`.
