@@ -102,7 +102,7 @@ describe('applyChainMetadata', () => {
     expect(p.status).toBe('approved');
   });
 
-  it('writes ref tokens, marks missing fields, and forces a dependent to draft', () => {
+  it('writes ref tokens and forces a dependent to draft without marking missing fields', () => {
     const p = makeProposal({ status: 'approved', approvedAt: new Date() });
     applyChainMetadata(p, {
       chainId: 'c',
@@ -113,7 +113,10 @@ describe('applyChainMetadata', () => {
     });
     expect(p.payload.customerId).toBe('$ref:chain[0].customerId');
     const ctx = p.sourceContext as Record<string, unknown>;
-    expect(ctx.missingFields).toContain('customerId');
+    // Chain refs resolve at execution time, so they are NOT operator-
+    // facing missing fields — leaving them out keeps the dependent
+    // approvable from the inbox.
+    expect(ctx.missingFields).toBeUndefined();
     // Dependent with unresolved refs can never race ahead of its parent.
     expect(p.status).toBe('draft');
     expect(p.approvedAt).toBeUndefined();

@@ -2,7 +2,12 @@ import { Proposal, ProposalStatus } from './proposal';
 import { ConflictError } from '../shared/errors';
 
 const VALID_TRANSITIONS: Record<ProposalStatus, ProposalStatus[]> = {
-  draft: ['ready_for_review'],
+  // A draft can be promoted to ready_for_review, or acted on directly:
+  // the operator inbox surfaces drafts (voice proposals are created in
+  // 'draft') and approves/rejects them in place. approveProposal still
+  // refuses a draft with unfilled missingFields, so a half-extracted
+  // payload can't be approved straight from 'draft'.
+  draft: ['ready_for_review', 'approved', 'rejected', 'expired'],
   ready_for_review: ['approved', 'rejected', 'expired'],
   // Decision 9 undo window: approved proposals can transition to
   // 'undone' within UNDO_WINDOW_MS. After the window passes, the

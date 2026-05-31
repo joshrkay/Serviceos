@@ -112,18 +112,19 @@ describe('P2-035 — POST /api/proposals/approve-batch', () => {
     const { app, proposalRepo } = buildApp('owner');
     const ok = await seedReady(proposalRepo, 1);
 
-    // draft (not ready_for_review)
-    const draft = createProposal(baseInput);
-    await proposalRepo.create(draft);
+    // Terminal status — not approvable (a plain draft now IS approvable
+    // directly from the inbox, so use an executed row for this case).
+    const executed = createProposal(baseInput);
+    await proposalRepo.create({ ...executed, status: 'executed' });
 
     const res = await request(app)
       .post('/api/proposals/approve-batch')
-      .send({ proposalIds: [ok, draft.id] });
+      .send({ proposalIds: [ok, executed.id] });
 
     expect(res.status).toBe(200);
     expect(res.body.approved).toEqual([ok]);
     expect(res.body.failed).toHaveLength(1);
-    expect(res.body.failed[0].id).toBe(draft.id);
+    expect(res.body.failed[0].id).toBe(executed.id);
     expect(res.body.failed[0].reason).toBeTruthy();
   });
 });

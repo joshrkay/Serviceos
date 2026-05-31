@@ -193,15 +193,17 @@ export function payloadPathFor(
  *     the execution handler reads (e.g. payload.customerId =
  *     '$ref:chain[0].customerId'), and
  *   - records the edge in sourceContext.chainRefs (structured, so the
- *     resolver never scans the payload), and
- *   - adds the payload field to sourceContext.missingFields so the
- *     proposal is treated as incomplete (forced to 'draft', shown as
- *     needs-resolution in review) until the parent executes.
+ *     resolver never scans the payload).
  *
- * When the segment has unresolved refs the proposal is forced to
- * 'draft' (and approvedAt cleared) so an otherwise-auto-approvable
- * dependent can never race ahead of its parent. The parent itself
- * (refs empty) keeps whatever status createProposal decided.
+ * A chain-ref field is deliberately NOT added to `missingFields`: it is
+ * filled automatically at execution time from the parent, so the
+ * operator has nothing to resolve. Treating it as a missing field would
+ * (a) block the operator from approving the dependent and (b) leave it
+ * stuck in 'draft' with no path forward. Instead the dependent is forced
+ * to 'draft' directly so it can't auto-approve/execute ahead of its
+ * parent; the execution-time resolution gate is the actual ordering
+ * guarantee. The parent itself (refs empty) keeps whatever status
+ * createProposal decided.
  */
 export function applyChainMetadata(
   proposal: Proposal,
@@ -216,16 +218,12 @@ export function applyChainMetadata(
   proposal.chainId = meta.chainId;
 
   const existingCtx = (proposal.sourceContext as Record<string, unknown> | undefined) ?? {};
-  const existingMissing = Array.isArray(existingCtx.missingFields)
-    ? (existingCtx.missingFields as unknown[]).filter((s): s is string => typeof s === 'string')
-    : [];
 
-  // Write ref tokens into the dependent payload fields + collect the
-  // paths so they show as missing until resolution.
-  const missing = new Set(existingMissing);
+  // Write ref tokens into the dependent payload fields. These resolve to
+  // the parent's resultEntityId at execution time — they are not operator
+  // gaps, so they are intentionally kept out of missingFields.
   for (const ref of meta.chainRefs) {
     proposal.payload[ref.payloadPath] = buildChainRefToken(ref.parentChainIndex, ref.entityKind);
-    missing.add(ref.payloadPath);
   }
 
   proposal.sourceContext = {
@@ -235,11 +233,12 @@ export function applyChainMetadata(
     chainLength: meta.chainLength,
     dependsOnChainIndices: meta.dependsOnChainIndices,
     chainRefs: meta.chainRefs,
-    ...(missing.size > 0 ? { missingFields: Array.from(missing) } : {}),
   };
 
   // A dependent with unresolved refs must wait for operator approval +
   // its parent's execution — never auto-approve ahead of the parent.
+  // Forcing 'draft' here (rather than via missingFields) keeps it
+  // approvable by the operator while still blocking auto-execution.
   if (meta.chainRefs.length > 0) {
     proposal.status = 'draft';
     proposal.approvedAt = undefined;

@@ -651,10 +651,10 @@ async function processChain(
   const chainId = uuidv4();
   const chainLength = segments.length;
 
-  // Tracks, per chain index, whether that segment produced a real
-  // proposal (so dependents can decide whether their ref will resolve).
-  const producedProposal = new Map<number, boolean>();
-  const createdIds: string[] = [];
+  // First pass: classify each segment and build its proposal (without
+  // persisting). Clarifications are emitted inline by processSegment as
+  // they happen — they are independent records, not chain members.
+  const built: { proposal: Proposal; chainIndex: number; refCount: number; type: string }[] = [];
 
   for (const segment of segments) {
     const outcome = await processSegment(
@@ -665,7 +665,6 @@ async function processChain(
     );
 
     if (outcome.kind !== 'proposal') {
-      producedProposal.set(segment.index, false);
       log.info('voice-action-router: chain segment did not produce a proposal', {
         chainId,
         chainIndex: segment.index,
@@ -700,26 +699,42 @@ async function processChain(
       chainRefs,
     });
 
-    // Stamp the originating recordingId (merged into the chain metadata
-    // sourceContext) so a redelivered message short-circuits in
-    // findAlreadyProcessed once any chain member is persisted.
-    await deps.proposalRepo.create(stampRecordingId(proposal, base.recordingId));
-    producedProposal.set(segment.index, true);
-    createdIds.push(proposal.id);
+    built.push({
+      // Stamp the originating recordingId (merged into the chain
+      // metadata sourceContext) so a redelivered message short-circuits
+      // in findAlreadyProcessed once the chain is persisted.
+      proposal: stampRecordingId(proposal, base.recordingId),
+      chainIndex: segment.index,
+      refCount: chainRefs.length,
+      type: proposal.proposalType,
+    });
+  }
 
+  if (built.length === 0) {
+    log.info('voice-action-router: chain produced no proposals', { chainId, chainLength });
+    return;
+  }
+
+  // Second pass: persist every chain member atomically. A partial
+  // failure must not leave orphaned members (e.g. a parent with no
+  // dependents, or dependents whose parent never landed), so all writes
+  // share one transaction.
+  await deps.proposalRepo.createMany(built.map((b) => b.proposal));
+
+  for (const b of built) {
     log.info('voice-action-router: chain proposal created', {
       chainId,
-      chainIndex: segment.index,
-      proposalId: proposal.id,
-      proposalType: proposal.proposalType,
-      refCount: chainRefs.length,
+      chainIndex: b.chainIndex,
+      proposalId: b.proposal.id,
+      proposalType: b.type,
+      refCount: b.refCount,
     });
   }
 
   log.info('voice-action-router: chain complete', {
     chainId,
     chainLength,
-    createdCount: createdIds.length,
+    createdCount: built.length,
   });
 }
 

@@ -108,6 +108,13 @@ export function parseDecompositionJson(content: string): TranscriptSegment[] | n
   if (!Array.isArray(rawSegments)) return null;
 
   const segments: TranscriptSegment[] = [];
+  // Maps the LLM's original segment index → the index we actually assign
+  // after dropping malformed/empty segments. Dependency edges reference
+  // the ORIGINAL indices, so we translate through this map; without it a
+  // skipped earlier segment (or a 1-based-indexing model) would silently
+  // break every downstream `dependsOn`.
+  const oldToNewIndex = new Map<number, number>();
+
   for (let i = 0; i < rawSegments.length; i++) {
     const raw = rawSegments[i];
     if (typeof raw !== 'object' || raw === null) continue;
@@ -116,16 +123,24 @@ export function parseDecompositionJson(content: string): TranscriptSegment[] | n
     if (text.length === 0) continue;
 
     // Re-derive index from array position so a model that mislabels or
-    // reorders indices can't corrupt the dependency graph.
+    // reorders indices can't corrupt the dependency graph. Record the
+    // mapping from the model's claimed index (falling back to array
+    // position) so dependency edges below can be translated.
     const index = segments.length;
+    const rawIndex =
+      typeof obj.index === 'number' && Number.isInteger(obj.index) ? obj.index : i;
+    oldToNewIndex.set(rawIndex, index);
 
     const rawDeps = Array.isArray(obj.dependsOn) ? obj.dependsOn : [];
     const dependsOn = Array.from(
       new Set(
         rawDeps
           .filter((n): n is number => typeof n === 'number' && Number.isInteger(n))
-          // Strictly backward only — drops self refs and forward refs.
-          .filter((n) => n >= 0 && n < index)
+          // Translate the original index to our re-derived one.
+          .map((n) => oldToNewIndex.get(n))
+          // Strictly backward only — drops self refs, forward refs, and
+          // any edge whose target segment was dropped.
+          .filter((n): n is number => n !== undefined && n >= 0 && n < index)
       )
     ).sort((a, b) => a - b);
 

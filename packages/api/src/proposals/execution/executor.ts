@@ -117,11 +117,21 @@ export class ProposalExecutor {
       executableProposal = { ...proposal, payload: chainResolution.payload };
     } else if (chainResolution.status === 'blocked') {
       if (chainResolution.reason === 'parent_pending') {
-        // The dependency hasn't executed yet. Surface a retryable error
-        // — the execution sweep catches it per-proposal and re-attempts
-        // on the next tick, after the parent has executed. This is the
-        // ordering guarantee for chains; it does not depend on claim
-        // order.
+        // The dependency hasn't executed yet. The sweep claimed this row
+        // (status -> 'executing') before calling us; if we just threw, it
+        // would sit in 'executing' until resetStaleExecuting runs (~10
+        // min) because findReadyForExecution only sees 'approved'. Return
+        // it to 'approved' first so the very next sweep tick re-attempts
+        // it — once the parent has executed. This is the ordering
+        // guarantee for chains; it does not depend on claim order.
+        if (proposal.status === 'executing') {
+          await this.proposalRepo.updateStatus(
+            proposal.tenantId,
+            proposal.id,
+            'approved',
+            { approvedAt: proposal.approvedAt },
+          );
+        }
         throw new AppError(
           'CHAIN_PARENT_PENDING',
           `Proposal depends on chain sibling '${chainResolution.parentId}' which has not executed yet. Retrying.`,

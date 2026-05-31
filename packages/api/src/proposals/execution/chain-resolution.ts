@@ -61,9 +61,15 @@ export async function resolveChainReferences(
       return { status: 'blocked', reason: 'parent_failed', parentId: '(missing)' };
     }
 
-    if (parent.status === 'executed' && parent.resultEntityId) {
-      payload[ref.payloadPath] = parent.resultEntityId;
-      continue;
+    if (parent.status === 'executed') {
+      if (parent.resultEntityId) {
+        payload[ref.payloadPath] = parent.resultEntityId;
+        continue;
+      }
+      // Executed but produced no entity to reference. The parent will
+      // never run again, so 'parent_pending' would retry forever — this
+      // is a permanent failure. Cascade-fail the dependent.
+      return { status: 'blocked', reason: 'parent_failed', parentId: parent.id };
     }
 
     if (parent.status === 'execution_failed' || parent.status === 'rejected' ||
@@ -72,7 +78,7 @@ export async function resolveChainReferences(
     }
 
     // Parent exists but hasn't executed yet (draft / ready_for_review /
-    // approved / executing, or executed without a resultEntityId).
+    // approved / executing).
     return { status: 'blocked', reason: 'parent_pending', parentId: parent.id };
   }
 

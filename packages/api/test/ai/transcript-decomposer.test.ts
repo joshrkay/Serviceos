@@ -66,6 +66,38 @@ describe('parseDecompositionJson', () => {
     expect(segments).toHaveLength(1);
     expect(segments![0].text).toBe('real action');
   });
+
+  it('remaps dependency edges through original→new index when a segment is dropped', () => {
+    // The LLM emits 3 segments; the middle one (original index 1) is
+    // empty and dropped. Segment at original index 2 depends on 0 and
+    // should still point at the surviving customer segment (new index 0).
+    const segments = parseDecompositionJson(
+      JSON.stringify({
+        segments: [
+          { index: 0, text: 'create customer Jane', dependsOn: [] },
+          { index: 1, text: '   ', dependsOn: [] },
+          { index: 2, text: 'send Jane an estimate', dependsOn: [0], dependencyEntityKind: 'customerId' },
+        ],
+      })
+    );
+    expect(segments).toHaveLength(2);
+    expect(segments![1].dependsOn).toEqual([0]);
+    expect(segments![1].dependencyEntityKind).toBe('customerId');
+  });
+
+  it('translates 1-based LLM indices to 0-based', () => {
+    const segments = parseDecompositionJson(
+      JSON.stringify({
+        segments: [
+          { index: 1, text: 'create customer Jane', dependsOn: [] },
+          { index: 2, text: 'book Jane', dependsOn: [1], dependencyEntityKind: 'jobId' },
+        ],
+      })
+    );
+    expect(segments).toHaveLength(2);
+    // original index 1 → new 0, so the edge resolves to 0.
+    expect(segments![1].dependsOn).toEqual([0]);
+  });
 });
 
 describe('decomposeTranscript', () => {

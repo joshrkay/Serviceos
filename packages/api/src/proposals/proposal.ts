@@ -385,6 +385,13 @@ export function decideInitialStatus(input: {
 
 export interface ProposalRepository {
   create(proposal: Proposal): Promise<Proposal>;
+  /**
+   * Persist several proposals atomically (single transaction). Used by
+   * the voice chain builder so a partial failure mid-chain never leaves
+   * orphaned members in the DB — either every member of the chain is
+   * written or none is. All proposals MUST share the same tenantId.
+   */
+  createMany(proposals: Proposal[]): Promise<Proposal[]>;
   findById(tenantId: string, id: string): Promise<Proposal | null>;
   findByTenant(tenantId: string): Promise<Proposal[]>;
   findByStatus(tenantId: string, status: ProposalStatus): Promise<Proposal[]>;
@@ -526,6 +533,36 @@ export class InMemoryProposalRepository implements ProposalRepository {
     }
     this.proposals.set(proposal.id, { ...proposal });
     return { ...proposal };
+  }
+
+  async createMany(proposals: Proposal[]): Promise<Proposal[]> {
+    // Atomic semantics: validate every member first (idempotency
+    // collisions — both against the store AND within the batch, which
+    // the pg unique index would catch), then commit them all. A throw
+    // before the commit loop leaves the store untouched, matching the pg
+    // single-transaction behavior.
+    const seenKeys = new Set<string>();
+    for (const proposal of proposals) {
+      if (!proposal.idempotencyKey) continue;
+      const dedupeKey = `${proposal.tenantId}:${proposal.idempotencyKey}`;
+      const collides =
+        seenKeys.has(dedupeKey) ||
+        Array.from(this.proposals.values()).some(
+          (p) => p.tenantId === proposal.tenantId && p.idempotencyKey === proposal.idempotencyKey
+        );
+      if (collides) {
+        throw new ConflictError(
+          `Proposal with idempotency key '${proposal.idempotencyKey}' already exists for this tenant`
+        );
+      }
+      seenKeys.add(dedupeKey);
+    }
+    const created: Proposal[] = [];
+    for (const proposal of proposals) {
+      this.proposals.set(proposal.id, { ...proposal });
+      created.push({ ...proposal });
+    }
+    return created;
   }
 
   async findById(tenantId: string, id: string): Promise<Proposal | null> {

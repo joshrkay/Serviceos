@@ -96,4 +96,22 @@ describe('resolveChainReferences', () => {
       expect(res.reason).toBe('parent_failed');
     }
   });
+
+  it('cascade-fails (not retries) when the parent executed but has no resultEntityId', async () => {
+    const repo = new InMemoryProposalRepository();
+    // Executed parent that produced no entity to reference — would
+    // otherwise loop forever on parent_pending.
+    const parent = makeChained(0, 'c1', 2, [], { status: 'executed', resultEntityId: undefined });
+    const child = makeChained(1, 'c1', 2, [
+      { payloadPath: 'customerId', parentChainIndex: 0, entityKind: 'customerId' },
+    ]);
+    await repo.create(parent);
+    await repo.create(child);
+
+    const res = await resolveChainReferences(child, { proposalRepo: repo });
+    expect(res.status).toBe('blocked');
+    if (res.status === 'blocked') {
+      expect(res.reason).toBe('parent_failed');
+    }
+  });
 });

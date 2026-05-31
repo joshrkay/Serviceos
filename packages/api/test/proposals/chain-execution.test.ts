@@ -109,6 +109,28 @@ describe('multi-action chain — execution-time resolution', () => {
     expect(childResult.proposal.status).toBe('executed');
   });
 
+  it('resets a claimed-but-pending dependent back to approved before the retryable throw', async () => {
+    const { repo, executor } = await setup();
+    const { parent, child } = buildChain();
+    await repo.create(approve(parent));
+    await repo.create(approve(child));
+
+    // Simulate the sweep claiming the dependent first: status -> executing.
+    const claimed = await repo.claimForExecution(child.id, 'worker-1');
+    expect(claimed?.status).toBe('executing');
+
+    // Executor blocks (parent not executed) and throws the retryable error.
+    await expect(executor.execute(claimed!, context)).rejects.toMatchObject({
+      code: 'CHAIN_PARENT_PENDING',
+    });
+
+    // Crucially, the row is returned to 'approved' so the next sweep tick
+    // (findReadyForExecution sees only 'approved') re-attempts it — rather
+    // than languishing in 'executing' until resetStaleExecuting.
+    const after = await repo.findById('tenant-1', child.id);
+    expect(after?.status).toBe('approved');
+  });
+
   it('cascade-fails the dependent when the parent failed', async () => {
     const { repo, executor } = await setup();
     const { parent, child } = buildChain();
