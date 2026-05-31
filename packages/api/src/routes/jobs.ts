@@ -27,6 +27,8 @@ import {
   maybeAutoInvoiceOnCompletion,
   AutoInvoiceOnCompletionDeps,
 } from '../invoices/auto-invoice-on-completion';
+import { mintCompletionMilestones } from '../invoices/schedule-completion';
+import { InvoiceScheduleRepository } from '../invoices/invoice-schedule';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -43,8 +45,11 @@ export function createJobRouter(
   feedbackDispatcher: FeedbackDispatcher,
   customerRepo?: CustomerRepository,
   locationRepo?: LocationRepository,
-  /** P20-001 — when present, completing a job may auto-draft an invoice. */
-  autoInvoiceDeps?: AutoInvoiceOnCompletionDeps,
+  /**
+   * P20-001 — when present, completing a job may auto-draft an invoice.
+   * `scheduleRepo` (P21) additionally mints on_completion schedule milestones.
+   */
+  autoInvoiceDeps?: AutoInvoiceOnCompletionDeps & { scheduleRepo?: InvoiceScheduleRepository },
 ): Router {
   const router = Router();
   // Dispatcher is intentionally passed through router wiring so this API
@@ -289,6 +294,29 @@ export function createJobRouter(
                 tenantId: req.auth!.tenantId,
                 jobId: req.params.id,
                 error: autoErr instanceof Error ? autoErr.message : String(autoErr),
+              });
+            }
+          }
+
+          // P21 — mint on_completion milestones for any invoice schedule on this
+          // job (e.g. the balance of a deposit/balance plan). Best-effort, same
+          // as above; an approved schedule needs no re-approval to bill its plan.
+          if (autoInvoiceDeps?.scheduleRepo) {
+            try {
+              await mintCompletionMilestones(
+                {
+                  scheduleRepo: autoInvoiceDeps.scheduleRepo,
+                  invoiceRepo: autoInvoiceDeps.invoiceRepo,
+                  settingsRepo: autoInvoiceDeps.settingsRepo,
+                  auditRepo: autoInvoiceDeps.auditRepo,
+                },
+                result.job,
+              );
+            } catch (milestoneErr) {
+              logger.error('schedule completion milestone minting failed', {
+                tenantId: req.auth!.tenantId,
+                jobId: req.params.id,
+                error: milestoneErr instanceof Error ? milestoneErr.message : String(milestoneErr),
               });
             }
           }

@@ -2634,6 +2634,7 @@ export function createApp(): express.Express {
     proposalRepo,
     settingsRepo,
     auditRepo,
+    scheduleRepo: invoiceScheduleRepo,
   }));
   app.use(
     '/api/jobs',
