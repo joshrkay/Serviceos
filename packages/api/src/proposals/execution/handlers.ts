@@ -269,6 +269,12 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
 
     const timezone = typeof payload.timezone === 'string' ? payload.timezone : 'UTC';
 
+    // Optional customer-facing arrival window (e.g. "we'll be there 8–12").
+    const arrivalWindowStart =
+      typeof payload.arrivalWindowStart === 'string' ? new Date(payload.arrivalWindowStart) : undefined;
+    const arrivalWindowEnd =
+      typeof payload.arrivalWindowEnd === 'string' ? new Date(payload.arrivalWindowEnd) : undefined;
+
     if (this.assignmentRepo && payload.technicianId && typeof payload.technicianId === 'string') {
       const techAssignments = await this.assignmentRepo.findByTechnician(context.tenantId, payload.technicianId);
       const techAppointments = await Promise.all(
@@ -300,6 +306,9 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
       jobId: payload.jobId,
       scheduledStart,
       scheduledEnd,
+      ...(arrivalWindowStart && arrivalWindowEnd && !isNaN(arrivalWindowStart.getTime()) && !isNaN(arrivalWindowEnd.getTime())
+        ? { arrivalWindowStart, arrivalWindowEnd }
+        : {}),
       timezone,
       notes: typeof payload.notes === 'string' ? payload.notes : undefined,
       createdBy: context.executedBy,

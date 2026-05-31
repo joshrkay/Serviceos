@@ -3472,14 +3472,6 @@ export const MIGRATIONS = {
       WHERE idempotency_key IS NOT NULL;
   `,
 
-  // P20-002: configurable dunning cadence + late-fee policy per tenant, plus a
-  // per-(invoice, kind, step_key) idempotency ledger so the overdue sweep
-  // (workers/overdue-invoice-worker.ts, P20-003/004) sends each reminder and
-  // accrues each late fee exactly once. Mirrors the service_agreement_runs
-  // idempotency shape: a UNIQUE constraint is the source of truth; duplicate
-  // inserts raise 23505 and the worker treats them as "already done".
-  // step_key is a STABLE identity (not an array position), so editing the
-  // reminder cadence never resends or skips an already-sent reminder.
   '136_create_invoice_dunning': `
     CREATE TABLE IF NOT EXISTS invoice_dunning_configs (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
