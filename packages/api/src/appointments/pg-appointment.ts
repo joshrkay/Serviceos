@@ -26,6 +26,7 @@ function mapRow(row: Record<string, unknown>): Appointment {
     status: row.status as Appointment['status'],
     holdPendingApproval: (row.hold_pending_approval as boolean) ?? false,
     holdExpiryAt: row.hold_expiry_at ? new Date(row.hold_expiry_at as string) : undefined,
+    idempotencyKey: (row.idempotency_key as string) ?? undefined,
     notes: (row.notes as string) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
@@ -44,9 +45,10 @@ export class PgAppointmentRepository extends PgBaseRepository implements Appoint
         `INSERT INTO appointments (
           id, tenant_id, job_id, scheduled_start, scheduled_end,
           arrival_window_start, arrival_window_end, timezone, status,
-          hold_pending_approval, hold_expiry_at,
+          hold_pending_approval, hold_expiry_at, idempotency_key,
           notes, created_by, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
         RETURNING *`,
         [
           appointment.id,
@@ -60,12 +62,25 @@ export class PgAppointmentRepository extends PgBaseRepository implements Appoint
           appointment.status,
           appointment.holdPendingApproval ?? false,
           appointment.holdExpiryAt ?? null,
+          appointment.idempotencyKey ?? null,
           appointment.notes ?? null,
           appointment.createdBy,
           appointment.createdAt,
           appointment.updatedAt,
         ]
       );
+      if (result.rows.length === 0) {
+        // ON CONFLICT DO NOTHING returned no row — a concurrent delivery of
+        // the same idempotency key already inserted the hold. Return the
+        // existing appointment so the caller references one consistent row.
+        const existing = await client.query(
+          'SELECT * FROM appointments WHERE tenant_id = $1 AND idempotency_key = $2',
+          [appointment.tenantId, appointment.idempotencyKey]
+        );
+        if (existing.rows.length > 0) return mapRow(existing.rows[0]);
+        // Defensive: conflict reported but no row found (should not happen).
+        throw new Error('Appointment insert conflicted but no existing row was found');
+      }
       return mapRow(result.rows[0]);
     });
   }
