@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-router';
 import { InMemoryProposalRepository, Proposal } from '../../src/proposals/proposal';
+import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { IntentClassification } from '../../src/ai/orchestration/intent-classifier';
 import type { QueueMessage } from '../../src/queues/queue';
@@ -869,5 +870,55 @@ describe('voice-action-router worker', () => {
     const byTenant = await proposalRepo.findByTenant('t-1');
     expect(byTenant).toHaveLength(1);
     expect(byTenant[0].proposalType).toBe('draft_invoice');
+  });
+
+  it('is idempotent on queue redelivery: the same recordingId never double-books', async () => {
+    // The queue is at-least-once. A message redelivered after a worker
+    // crash/timeout must NOT create a second proposal — and for the
+    // held-slot create_appointment path, must NOT place a second
+    // tentative appointment hold (a real double-booking).
+    const appointmentResponse = JSON.stringify({
+      customerName: 'Mrs Lee',
+      jobId: '33333333-3333-3333-3333-333333333333',
+      scheduledStart: '2026-04-21T21:00:00Z',
+      scheduledEnd: '2026-04-21T22:00:00Z',
+      confidence_score: 0.9,
+    });
+    const classifierResponse = JSON.stringify({
+      intentType: 'create_appointment',
+      confidence: 0.9,
+      extractedEntities: { customerName: 'Mrs Lee' },
+    } satisfies IntentClassification);
+    // Enough responses for two full passes; if dedup works the second
+    // delivery short-circuits before any LLM call and these go unused.
+    const gateway = gatewayReturning([
+      classifierResponse,
+      appointmentResponse,
+      classifierResponse,
+      appointmentResponse,
+    ]);
+    const appointmentRepo = new InMemoryAppointmentRepository();
+
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, appointmentRepo });
+
+    const payload = {
+      tenantId: 't-1',
+      userId: 'u-1',
+      transcript: 'Schedule a follow-up with Mrs Lee next Tuesday at 2pm',
+      recordingId: 'rec-dedup-1',
+    };
+
+    await worker.handle(msg(payload), silentLogger());
+    await worker.handle(msg(payload), silentLogger());
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+
+    const appts = await appointmentRepo.findByDateRange(
+      't-1',
+      new Date('2000-01-01T00:00:00Z'),
+      new Date('2100-01-01T00:00:00Z'),
+    );
+    expect(appts).toHaveLength(1);
   });
 });
