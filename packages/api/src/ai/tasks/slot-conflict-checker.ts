@@ -2,6 +2,7 @@ import {
   Appointment,
   AppointmentRepository,
   AppointmentStatus,
+  isExpiredHold,
 } from '../../appointments/appointment';
 import { AssignmentRepository } from '../../appointments/assignment';
 import { JobRepository } from '../../jobs/job';
@@ -138,11 +139,11 @@ export class DefaultSlotConflictChecker implements SlotConflictChecker {
       (a) =>
         ACTIVE_APPOINTMENT_STATUSES.has(a.status) &&
         // An expired tentative hold has already released its slot — treat
-        // it as free, mirroring availability-finder.ts. Without this an
+        // it as free, mirroring availability-finder. Without this an
         // orphaned hold (e.g. a proposal that never persisted) would
         // over-flag the slot as busy for ~its whole 24h window even though
         // the booking is dead. A live hold still blocks.
-        !(a.holdPendingApproval && a.holdExpiryAt && a.holdExpiryAt.getTime() < now) &&
+        !isExpiredHold(a, now) &&
         overlaps(
           { start: a.scheduledStart, end: a.scheduledEnd },
           { start: windowStart, end: windowEnd }

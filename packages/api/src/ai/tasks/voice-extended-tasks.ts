@@ -95,18 +95,13 @@ async function resolveActiveAppointmentId(
   }
   let active = all.filter((a) => !isCancelled(a.status));
 
-  // Prefer upcoming appointments, but only when that leaves candidates
-  // (keeps past-but-active fixtures + repos without scheduledStart working).
-  const now = opts?.now ?? new Date();
-  const upcoming = active.filter((a) => {
-    const t = toDate(a.scheduledStart).getTime();
-    return !Number.isNaN(t) && t >= now.getTime();
-  });
-  if (upcoming.length > 0) active = upcoming;
-
-  // Scope to the verified caller's own appointments when we can verify
-  // ownership. If ownership can't be confirmed for any candidate the set
-  // becomes empty → undefined → forced manual disambiguation (safe).
+  // Scope to the verified caller's own appointments FIRST (when we can
+  // verify ownership), THEN prefer upcoming within that owned set. Order
+  // matters: scoping before the upcoming filter ensures a caller whose
+  // only appointment is in the past still resolves even if a *different*
+  // customer has an upcoming one, and never widens resolution on the
+  // unscoped operator path (which keeps the legacy single-active-tenant
+  // behavior untouched — no auto-pick when >1 active exists).
   if (opts?.customerId && opts?.jobRepo) {
     const jobRepo = opts.jobRepo;
     const owned: typeof active = [];
@@ -121,6 +116,16 @@ async function resolveActiveAppointmentId(
       }
     }
     active = owned;
+
+    // Prefer the caller's upcoming appointments, but only when that leaves
+    // candidates (keeps past-but-active appointments + repos without
+    // scheduledStart resolvable).
+    const now = opts.now ?? new Date();
+    const upcoming = active.filter((a) => {
+      const t = toDate(a.scheduledStart).getTime();
+      return !Number.isNaN(t) && t >= now.getTime();
+    });
+    if (upcoming.length > 0) active = upcoming;
   }
 
   return active.length === 1 ? active[0].id : undefined;
@@ -699,14 +704,23 @@ export class LogTimeEntryTaskHandler implements TaskHandler {
 export class NotifyDelayTaskHandler implements TaskHandler {
   readonly taskType = 'notify_delay' as const;
 
-  constructor(private readonly appointmentRepo?: AppointmentRepository) {}
+  constructor(
+    private readonly appointmentRepo?: AppointmentRepository,
+    private readonly jobRepo?: JobRepository,
+  ) {}
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
-    const resolvedId = await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId);
+    // Scope to the caller's own appointment — notify_delay emits a comms
+    // proposal that texts the customer, so resolving to a *different*
+    // customer's appointment would message the wrong person.
+    const resolvedId = await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId, {
+      customerId: context.customerId,
+      jobRepo: this.jobRepo,
+    });
     if (resolvedId) {
       payload.appointmentId = resolvedId;
     } else if (ee.appointmentReference) {
