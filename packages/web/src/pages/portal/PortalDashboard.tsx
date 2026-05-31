@@ -13,6 +13,7 @@ import {
   portalApi,
 } from '../../api/portal';
 import { PortalCard } from '../../components/portal/PortalCard';
+import { PortalSlotPicker } from './PortalSlotPicker';
 
 interface Props {
   token: string;
@@ -38,6 +39,8 @@ export function PortalDashboard({ token, customer }: Props) {
   const [cancelling, setCancelling] = useState(false);
   const [cancelMsg, setCancelMsg] = useState<string | null>(null);
   const [cancelErr, setCancelErr] = useState<string | null>(null);
+  const [showReschedule, setShowReschedule] = useState(false);
+  const [rescheduleMsg, setRescheduleMsg] = useState<string | null>(null);
 
   async function cancelAppointment(appointmentId: string) {
     setCancelErr(null);
@@ -50,6 +53,17 @@ export function PortalDashboard({ token, customer }: Props) {
     } finally {
       setCancelling(false);
     }
+  }
+
+  async function rescheduleAppointment(
+    appointmentId: string,
+    slot: { start: string; end: string },
+  ) {
+    const res = await portalApi.rescheduleAppointment(token, appointmentId, {
+      slotStart: slot.start,
+      slotEnd: slot.end,
+    });
+    setRescheduleMsg(res.message);
   }
 
   useEffect(() => {
@@ -129,20 +143,52 @@ export function PortalDashboard({ token, customer }: Props) {
         {nextAppt
           ? `Status: ${nextAppt.status.replace(/_/g, ' ')}`
           : 'Nothing scheduled. Use Book appointment to schedule a visit.'}
-        {nextAppt && !cancelMsg ? (
-          <div className="mt-3">
-            <button
-              type="button"
-              disabled={cancelling}
-              onClick={() => void cancelAppointment(nextAppt.id)}
-              className="text-sm text-rose-600 hover:underline disabled:opacity-50"
-            >
-              {cancelling ? 'Requesting…' : 'Cancel this appointment'}
-            </button>
-            {cancelErr ? <div className="mt-1 text-xs text-rose-600">{cancelErr}</div> : null}
+        {nextAppt && !cancelMsg && !rescheduleMsg ? (
+          <div className="mt-3 space-y-3">
+            {showReschedule ? (
+              <div className="space-y-3">
+                <div className="text-sm font-medium text-slate-700">
+                  Pick a new time
+                </div>
+                <PortalSlotPicker
+                  token={token}
+                  confirmLabel="Request {time}"
+                  onConfirm={(slot) => rescheduleAppointment(nextAppt.id, slot)}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowReschedule(false)}
+                  className="text-sm text-slate-500 hover:underline"
+                >
+                  Never mind
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-4">
+                <button
+                  type="button"
+                  onClick={() => setShowReschedule(true)}
+                  className="text-sm text-slate-700 hover:underline"
+                >
+                  Reschedule
+                </button>
+                <button
+                  type="button"
+                  disabled={cancelling}
+                  onClick={() => void cancelAppointment(nextAppt.id)}
+                  className="text-sm text-rose-600 hover:underline disabled:opacity-50"
+                >
+                  {cancelling ? 'Requesting…' : 'Cancel this appointment'}
+                </button>
+              </div>
+            )}
+            {cancelErr ? <div className="text-xs text-rose-600">{cancelErr}</div> : null}
           </div>
         ) : null}
         {cancelMsg ? <div className="mt-3 text-sm text-emerald-700">{cancelMsg}</div> : null}
+        {rescheduleMsg ? (
+          <div className="mt-3 text-sm text-emerald-700">{rescheduleMsg}</div>
+        ) : null}
       </PortalCard>
 
       <div className="text-xs text-slate-400 pt-2">
