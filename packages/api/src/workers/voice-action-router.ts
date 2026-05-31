@@ -336,13 +336,19 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
  * and for the held-slot `create_appointment` path, a second tentative
  * appointment hold (a real double-booking).
  *
- * We stamp a deterministic `idempotencyKey` (voiceProposalIdempotencyKey)
- * onto every persisted proposal; this pre-check looks one up by that SAME
- * key and skips if found — a single anchor shared with the atomic ON CONFLICT
- * guard (the "look up by stable key, skip if already processed" contract used
- * by `handleWebhookEvent` in webhooks/webhook-handler.ts). `recordingId` is
- * also kept on `sourceContext` for traceability, but dedup no longer depends
- * on it, so the two fields can't drift out of lockstep.
+ * Matches on EITHER anchor a prior delivery may have left behind:
+ *   - single-action proposals carry the deterministic `idempotencyKey`
+ *     (voiceProposalIdempotencyKey) — also the anchor for the atomic
+ *     ON CONFLICT guard that covers the concurrent race;
+ *   - chain members are persisted keyless (one recording → many proposals,
+ *     so they can't share one key) but each carries `recordingId` on
+ *     `sourceContext`. Matching that anchor too means a sequential chain
+ *     redelivery (the common at-least-once case) is still suppressed here.
+ *
+ * Concurrent CHAIN redelivery (two workers past this check at once) has no
+ * atomic backstop — keyless members can't collide on the unique index — so
+ * it can still double-create. That window is narrow (needs >visibility-timeout
+ * processing) and matches the pre-existing chain behavior; see PR follow-ups.
  *
  * Returns the existing proposal id when this message has already been
  * processed, otherwise undefined. No-ops (returns undefined) when no
@@ -357,7 +363,11 @@ async function findAlreadyProcessed(
   if (!recordingId) return undefined;
   const key = voiceProposalIdempotencyKey(recordingId);
   const existing = await proposalRepo.findByTenant(tenantId);
-  const match = existing.find((p) => p.idempotencyKey === key);
+  const match = existing.find((p) => {
+    if (p.idempotencyKey === key) return true; // single-action atomic key
+    const sc = p.sourceContext as Record<string, unknown> | undefined;
+    return sc?.recordingId === recordingId; // chain members (keyless)
+  });
   return match?.id;
 }
 
@@ -784,9 +794,11 @@ async function processChain(
     });
 
     built.push({
-      // Stamp the originating recordingId (merged into the chain
-      // metadata sourceContext) so a redelivered message short-circuits
-      // in findAlreadyProcessed once the chain is persisted.
+      // Stamp the originating recordingId onto sourceContext (alongside the
+      // chain metadata) — keyless, since chain members can't share one
+      // idempotencyKey. findAlreadyProcessed matches this recordingId so a
+      // SEQUENTIAL chain redelivery short-circuits once the chain is
+      // persisted. (Concurrent chain redelivery has no atomic backstop.)
       proposal: stampRecordingId(proposal, base.recordingId),
       chainIndex: segment.index,
       refCount: chainRefs.length,
