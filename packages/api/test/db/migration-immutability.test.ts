@@ -192,6 +192,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['136_create_invoice_dunning', '085bab2c52bb030111b677d061d70019eded0a144aa99797ac1eff80bfb3149a'],
   ['137_tenant_settings_auto_invoice_on_completion', '022db9a74cf4fab10dd8c23b6fabcbbf6edb36a7629adff7e39e5f05292e85f2'],
   ['138_create_invoice_schedules', '01debb27ace85e2ac1df38317894cce7b35fd54a20431fe526d12246fda696d9'],
+  ['139_batch_invoicing', '63f7146c5a2b08ed910edff1f1f9136955d79474e796801239abb1ff96430fdc'],
 ];
 
 function hashMigration(value: string): string {

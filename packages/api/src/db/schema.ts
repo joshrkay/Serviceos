@@ -3568,6 +3568,31 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS schedule_id UUID REFERENCES invoice_schedules(id),
       ADD COLUMN IF NOT EXISTS milestone_index INTEGER;
   `,
+
+  '139_batch_invoicing': `
+    -- P21-003: batch-invoice sweep. Per (tenant, job, batch_date) dedup ledger
+    -- so a re-run never re-batches a job, plus a per-tenant opt-in toggle.
+    CREATE TABLE IF NOT EXISTS batch_invoice_runs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      -- Calendar date (YYYY-MM-DD) the batch ran.
+      batch_date TEXT NOT NULL,
+      proposal_id UUID REFERENCES proposals(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, job_id, batch_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_batch_invoice_runs_tenant
+      ON batch_invoice_runs(tenant_id);
+    ALTER TABLE batch_invoice_runs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE batch_invoice_runs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_batch_invoice_runs ON batch_invoice_runs;
+    CREATE POLICY tenant_isolation_batch_invoice_runs ON batch_invoice_runs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS batch_invoice_enabled BOOLEAN NOT NULL DEFAULT false;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

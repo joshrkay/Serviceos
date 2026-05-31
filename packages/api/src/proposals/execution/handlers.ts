@@ -1,8 +1,9 @@
 import { v4 as uuidv4 } from 'uuid';
-import { Proposal, ProposalType } from '../proposal';
+import { Proposal, ProposalType, ProposalRepository } from '../proposal';
 import { CreateInvoiceExecutionHandler } from './invoice-execution-handler';
 import { CreateInvoiceScheduleExecutionHandler } from './invoice-schedule-handler';
 import { InvoiceScheduleRepository } from '../../invoices/invoice-schedule';
+import { BatchInvoiceExecutionHandler } from './batch-invoice-handler';
 import { UpdateInvoiceExecutionHandler } from './update-invoice-handler';
 import { IssueInvoiceExecutionHandler } from '../handlers/issue-invoice';
 import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
@@ -411,6 +412,8 @@ export function createExecutionHandlerRegistry(deps?: {
   settingsRepo?: SettingsRepository;
   // P21-002 — create_invoice_schedule. Absent → handler degrades to passthrough.
   scheduleRepo?: InvoiceScheduleRepository;
+  // P21-003 — batch_invoice fans out draft_invoice proposals via this repo.
+  proposalRepo?: ProposalRepository;
   // Estimate edit history — when wired, voice update_estimate snapshots a
   // revision + edit delta, matching the authenticated edit path.
   docRevisionRepo?: DocumentRevisionRepository;
@@ -465,6 +468,7 @@ export function createExecutionHandlerRegistry(deps?: {
     new DraftEstimateExecutionHandler(deps?.estimateRepo, deps?.settingsRepo),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
     new CreateInvoiceScheduleExecutionHandler(deps?.scheduleRepo, deps?.invoiceRepo, deps?.settingsRepo, deps?.estimateRepo),
+    new BatchInvoiceExecutionHandler(deps?.proposalRepo),
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps, deps?.auditRepo),
     new AddCrewMemberExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps, deps?.auditRepo),
     new RemoveCrewMemberExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.auditRepo),

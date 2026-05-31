@@ -19,7 +19,7 @@ A job flips to `completed` → the owner gets one SMS proposal and the invoice g
 | P20-004 | Late-fee accrual | S | Partially landed (pure calc `late-fee.ts` done; worker accrual + proposal pending) |
 | P21-001 | Invoice schedule / milestone linkage (data model) | S | **Landed** (mig. 138 + `invoice-schedule.ts` `splitMilestones` + repos + `invoices.schedule_id/milestone_index`) |
 | P21-002 | `create_invoice_schedule` proposal type | M | **Landed** (three-place ritual + `invoice-schedule-handler.ts`; mints first milestone invoice) |
-| P21-003 | "Requires invoicing" queue + batch-generate sweep | M | Not started |
+| P21-003 | "Requires invoicing" queue + batch-generate sweep | M | **Landed** (queue + `batch_invoice` type + sweep + dedup; mig. 139). Web list = follow-up |
 
 ---
 
@@ -85,7 +85,7 @@ A job flips to `completed` → the owner gets one SMS proposal and the invoice g
 ---
 
 ### P21-003 — "Requires invoicing" queue + batch-generate sweep
-**Status:** Not started
+**Status:** Landed (backend). `invoices/invoicing-queue.ts findJobsRequiringInvoicing` (completed + eligible money-state + no live invoice + billable). `batch_invoice` proposal type via the three-place ritual (capture) + `contracts/batch-invoice.ts`. `invoices/batch-invoice-run.ts` (+ pg) is the `(tenant, job, batch_date)` dedup ledger (23505). `workers/batch-invoice-worker.ts runBatchInvoiceSweep` is opt-in (`settings.batchInvoiceEnabled`, mig. 139), reserves a run per job then emits ONE `batch_invoice` proposal; `execution/batch-invoice-handler.ts` fans out N `draft_invoice` proposals on approval. Wired in app.ts (`SWEEP_LOCK.batchInvoice = 590007`, hourly, leader-gated). **Follow-up:** thin read-only "Requires invoicing" web list (the queue fn is ready to expose).
 **Allowed files:** `packages/api/src/invoices/invoicing-queue.ts`, `packages/api/src/workers/batch-invoice-worker.ts`, `packages/api/src/invoices/batch-invoice-run.ts`, `packages/api/src/db/schema.ts` (`batch_invoice_runs`, `(tenant, job_id, batch_date) UNIQUE`), `packages/api/src/app.ts` (register; **add `SWEEP_LOCK.batchInvoice: 590007`**), tests.
 **Build prompt:** Query completed jobs with no open invoice + `money_state ∈ {estimate_accepted, no_estimate}`. Opt-in per tenant, **proposal-first**: emit one `batch_invoice` proposal summarizing N candidate jobs + total; on approval fan out N `draft_invoice` proposals. `batch_invoice_runs` dedups so re-runs don't double-draft. Thin read-only "Requires invoicing" web list. Clone `workers/recurring-agreements-worker.ts` loop shape + `service_agreement_runs` idempotency.
 **Reuse:** `recurring-agreements-worker.ts`; `agreements/agreement-run.ts`; `runAsLeader`. New `batch_invoice` proposal type via the three-place ritual.

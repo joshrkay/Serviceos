@@ -13,6 +13,8 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   issue_invoice: 1,
   // Setting up a milestone billing plan is invoicing work — same tier.
   create_invoice_schedule: 1,
+  // Morning batch-invoice nudge — invoicing work, surfaces alongside the rest.
+  batch_invoice: 1,
   update_estimate: 1,
   create_appointment: 2,
   create_booking: 2,
