@@ -141,6 +141,7 @@ interface WorkingHoursRepository {
 const workingHoursRepo = pool ? new PgWorkingHoursRepository(pool) : new InMemoryWorkingHoursRepository();
 const blackoutRepo     = pool ? new PgBlackoutPeriodRepository(pool) : new InMemoryBlackoutPeriodRepository();
 const capacityRepo     = pool ? new PgDailyCapacityRepository(pool) : new InMemoryDailyCapacityRepository();
+const unavailableBlockRepo = pool ? new PgUnavailableBlockRepository(pool) : new InMemoryUnavailableBlockRepository(); // flip the existing hardcoded InMemory at app.ts ~999
 app.use('/api/availability', createAvailabilityRouter({ workingHoursRepo, blackoutRepo, capacityRepo, auditRepo }));
 ```
 
@@ -235,6 +236,7 @@ The existing `partition()` (routes by `issue.severity`) and `checkFeasibility`'s
 
 - [ ] **Step 1:** Optional `skillBadges?` on `BoardAppointment`, populated via an optional `getAppointmentSkillStatus?` dep (mirror `getPendingChangeRequests` — no behavior change when unset).
 - [ ] **Step 2:** Render amber chips on `AppointmentCard`; ensure the drag preview's existing `useFeasibilityPreview` skill warnings surface in `ConflictDisplay`/drop coloring (no new write).
+- [ ] **Step 2.5: Wire the dep in production** — add `getAppointmentSkillStatus` to the `boardDeps` object in `packages/api/src/dispatch/routes.ts` (next to `getPendingChangeRequests`), sourced from the `RealSkillMatcher` threaded via `app.ts`; without this `GET /api/dispatch/board` never emits `skillBadges`.
 - [ ] **Step 3: Tests + build gate. Commit** — `feat(dispatch): surface skill match badges on the board`
 
 ---

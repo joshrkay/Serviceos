@@ -76,7 +76,7 @@ cd /home/user/Serviceos && \
 **Allowed files (concrete):**
 - `packages/api/src/availability/routes.ts` (new)
 - `packages/api/test/availability/routes.test.ts` (new)
-- `packages/api/src/app.ts` (working-hours/blackout/capacity repo wiring + `/api/availability` mount **only**)
+- `packages/api/src/app.ts` (working-hours/blackout/capacity **+ existing unavailable-block** repo wiring + `/api/availability` mount **only**)
 
 **Forbidden files:**
 - any `pg-*.ts` (built by SD-101/SD-102)
@@ -196,9 +196,10 @@ cd /home/user/Serviceos && \
 **Allowed files (concrete):**
 - `packages/api/src/dispatch/board-query.ts` (optional `skillBadges` + optional dep)
 - `packages/api/test/dispatch/board-query.test.ts`
+- `packages/api/src/dispatch/routes.ts` (wire `getAppointmentSkillStatus` into `boardDeps`), `packages/api/src/app.ts` (pass the skill-status provider into the dispatch router deps — one line)
 - `packages/web/src/pages/dispatch/DispatchBoard.tsx`, `packages/web/src/components/dispatch/**`, `packages/web/src/types/dispatch.ts`
 
-**Forbidden files:** `packages/api/src/scheduling/**`; `packages/api/src/app.ts`.
+**Forbidden files:** `packages/api/src/scheduling/**` (consume SD-107's matcher; don't change it). `app.ts` edits limited to passing the skill-status provider into the dispatch router deps.
 
 **Verification gate:**
 ```bash
