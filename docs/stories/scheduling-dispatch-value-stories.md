@@ -73,7 +73,7 @@ cd packages/api && npm test -- --run -t "SD-101|PgWorkingHours"
 
 **Allowed files:** `packages/api/src/availability/blackout-period.ts`, `packages/api/src/availability/pg-blackout-period.ts`, `packages/api/src/availability/daily-capacity.ts`, `packages/api/src/availability/pg-daily-capacity.ts`, `packages/api/test/availability/blackout-period.test.ts`, `packages/api/test/availability/daily-capacity.test.ts`, `packages/api/src/db/schema.ts` (migrations `135_*`, `136_*`)
 
-**Build prompt:** Add two new availability entities following the exact shape of `unavailable-block.ts` + `pg-unavailable-block.ts` (interface + Zod `validate*Input` + `create*` factory + `InMemory*` + `Pg*`, `tenantId`-first methods, `withTenant` + explicit predicate). (1) **Business blackout periods** — tenant-wide unavailability (holidays, maintenance windows): `business_blackout_periods (id, tenant_id, start_time TIMESTAMPTZ, end_time TIMESTAMPTZ, reason TEXT, created_by UUID REFERENCES users(id), created_at, CHECK end_time > start_time)`, migration `135_business_blackout_periods`. Repo methods: `create`, `findByTenant(tenantId)`, `findOverlapping(tenantId, start, end)`, `delete(tenantId, id)`. (2) **Per-tech daily capacity**: `technician_daily_capacity (tenant_id, technician_id, day_of_week SMALLINT 0–6, max_appointments SMALLINT NULL, max_work_minutes INTEGER NULL, PRIMARY KEY (tenant_id, technician_id, day_of_week))`, migration `136_technician_daily_capacity`. Repo methods: `upsert`, `findByTechnician(tenantId, technicianId)`, `findByTechnicianAndDay(tenantId, technicianId, day)`. Both migrations include `ENABLE`/`FORCE ROW LEVEL SECURITY` + `tenant_isolation_*` policy. Nullable capacity = unlimited.
+**Build prompt:** Add two new availability entities following the exact shape of `unavailable-block.ts` + `pg-unavailable-block.ts` (interface + Zod `validate*Input` + `create*` factory + `InMemory*` + `Pg*`, `tenantId`-first methods, `withTenant` + explicit predicate). (1) **Business blackout periods** — tenant-wide unavailability (holidays, maintenance windows): `business_blackout_periods (id, tenant_id, start_time TIMESTAMPTZ, end_time TIMESTAMPTZ, reason TEXT, created_by TEXT NOT NULL, created_at, CHECK end_time > start_time)`, migration `135_business_blackout_periods`. Repo methods: `create`, `findByTenant(tenantId)`, `findOverlapping(tenantId, start, end)`, `delete(tenantId, id)`. (2) **Per-tech daily capacity**: `technician_daily_capacity (tenant_id, technician_id, day_of_week SMALLINT 0–6, max_appointments SMALLINT NULL, max_work_minutes INTEGER NULL, PRIMARY KEY (tenant_id, technician_id, day_of_week))`, migration `136_technician_daily_capacity`. Repo methods: `upsert`, `findByTechnician(tenantId, technicianId)`, `findByTechnicianAndDay(tenantId, technicianId, day)`. Both migrations include `ENABLE`/`FORCE ROW LEVEL SECURITY` + `tenant_isolation_*` policy. Nullable capacity = unlimited.
 
 **Review prompt:** Verify both follow repository-conventions (tenantId first, async, `T | null` single reads, `T[]` multi reads). Verify RLS on both tables. Verify `findOverlapping` uses `start < $end AND end > $start` (strict). Verify capacity nullable columns mean "unlimited" (documented). No wiring into `app.ts` in this story.
 
@@ -155,7 +155,7 @@ cd packages/api && npm test -- --run -t "SD-104|feasibility-blackout"
 **Build prompt:** Create the skills model as three entities, each following the `unavailable-block.ts` pattern (interface + Zod + factory + InMemory + Pg, `tenantId`-first, `withTenant` + explicit predicate). Migration `137_skills_model` adds four-or-fewer tables (all with `ENABLE`/`FORCE ROW LEVEL SECURITY` + `tenant_isolation_*`):
 - `skills (id, tenant_id, name TEXT, category TEXT, created_at, UNIQUE(tenant_id, name))`
 - `technician_skills (id, tenant_id, technician_id REFERENCES users(id), skill_id REFERENCES skills(id), proficiency SMALLINT NOT NULL DEFAULT 1 CHECK (proficiency BETWEEN 1 AND 3), created_at, UNIQUE(tenant_id, technician_id, skill_id))` — proficiency 1=apprentice, 2=journeyman, 3=master.
-- `job_required_skills (id, tenant_id, job_id REFERENCES jobs(id), skill_id REFERENCES skills(id), min_proficiency SMALLINT NOT NULL DEFAULT 1, is_required BOOLEAN NOT NULL DEFAULT true, UNIQUE(tenant_id, job_id, skill_id))`.
+- `job_required_skills (id, tenant_id, job_id REFERENCES jobs(id), skill_id REFERENCES skills(id), min_proficiency SMALLINT NOT NULL DEFAULT 1 CHECK (min_proficiency BETWEEN 1 AND 3), is_required BOOLEAN NOT NULL DEFAULT true, UNIQUE(tenant_id, job_id, skill_id))`.
 
 Repo methods (per entity): `create`/`upsert`, `findByTenant`, `findByTechnician`/`findByJob`, `delete`. **Do NOT** add licensing/cert/expiry columns or `job_type_required_skills` — those are documented fast-follows. **Do NOT** wire into `app.ts` or touch `feasibility.ts`/`skill-matcher.ts` (SD-107 owns the seam).
 
@@ -170,7 +170,8 @@ cd packages/api && npm test -- --run -t "SD-105|Skill"
 **Required tests:**
 - [ ] Skill create + UNIQUE(tenant, name) rejects duplicate name
 - [ ] Technician skill upsert with proficiency; findByTechnician returns it
-- [ ] proficiency CHECK rejects 0 and 4
+- [ ] proficiency CHECK rejects 0 and 4 (technician_skills)
+- [ ] min_proficiency CHECK rejects 0 and 4 (job_required_skills)
 - [ ] Job required-skill create + findByJob
 - [ ] Tenant isolation across all three tables
 
@@ -246,7 +247,7 @@ cd packages/api && npm test -- --run -t "SD-107|RealSkillMatcher|feasibility"
 **Automated checks:**
 ```bash
 cd packages/api && npx tsc --project tsconfig.build.json --noEmit
-npm test --workspace=packages/web -- --run --grep "SD-108|skillBadge"
+npm test --workspace=packages/web -- --run -t "SD-108|skillBadge"
 ```
 
 **Required tests:**

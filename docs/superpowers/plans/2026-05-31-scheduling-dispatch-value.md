@@ -264,7 +264,7 @@ Chokepoints that MUST serialize (shared files): `app.ts`, `feasibility.ts`/`feas
 
 ## Verification
 
-- **Per task:** `cd packages/api && npx tsc --project tsconfig.build.json --noEmit && npx vitest run <task test>` (web tasks: `npm test --workspace=packages/web -- --run --grep <id>`).
+- **Per task:** `cd packages/api && npx tsc --project tsconfig.build.json --noEmit && npx vitest run <task test>` (web tasks: `npm test --workspace=packages/web -- --run -t <id>`).
 - **Phase 1 done-when:** working hours survive a server restart (pg test); availability warnings fire against real data on the board.
 - **Phase 2 done-when:** a job tagged with a skill the assigned tech lacks (or is under-level for) shows a **warning** chip on the board and in the live drag preview; `RealSkillMatcher` + feasibility tests prove a below-proficiency gap lands in `warnings` and the seam supports a future `blocking` with no caller change.
 - **Migration safety:** confirm `134`–`137` are still free in `db/schema.ts` immediately before dispatching SD-1A (refresh `freeze-list.md` if main advanced).

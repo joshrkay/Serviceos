@@ -204,7 +204,7 @@ cd /home/user/Serviceos && \
 ```bash
 cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
-  npm test --workspace=packages/web -- --run --grep "SD-108|skillBadge"
+  npm test --workspace=packages/web -- --run -t "SD-108|skillBadge"
 ```
 **Pre-flight:** SD-107 merged.
 **Risk note:** keep the `board-query.ts` dep **optional** (mirror `getPendingChangeRequests`) so the board is unchanged when the dep is unset — no behavior regression for tenants without skills configured.
