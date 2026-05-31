@@ -46,12 +46,15 @@ const PAST_GRACE_MS = 5 * 60 * 1000;
  * window and carry the whole window as the customer-facing arrival window
  * (the home-services standard).
  */
+// Only unambiguous service dayparts. "night"/"tonight" are deliberately
+// excluded: they're too ambiguous to book without mis-stating the time
+// (chrono reads "night" as ~8pm, not the 5pm an evening window implies), so
+// they fall through to a clarification. "noon" is omitted because chrono
+// already resolves it to a certain 12:00 (the exact-time path handles it).
 const DAYPARTS: Record<string, { startHour: number; endHour: number }> = {
   morning: { startHour: 8, endHour: 12 },
   afternoon: { startHour: 12, endHour: 17 },
   evening: { startHour: 17, endHour: 20 },
-  night: { startHour: 17, endHour: 20 },
-  noon: { startHour: 12, endHour: 13 },
 };
 
 export interface ResolveDateTimeOptions {

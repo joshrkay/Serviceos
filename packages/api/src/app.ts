@@ -349,7 +349,6 @@ import { resolveEstimateDeliveryProvider } from './proposals/execution/estimate-
 import { InMemoryWorkingHoursRepository } from './availability/working-hours';
 import { PgWorkingHoursRepository } from './availability/pg-working-hours';
 import { InMemoryUnavailableBlockRepository } from './availability/unavailable-block';
-import { PgUnavailableBlockRepository } from './availability/pg-unavailable-block';
 import { createTravelTimeProvider } from './scheduling/travel-time/factory';
 import { StubSkillMatcher } from './scheduling/skill-matcher';
 import { createSchedulingRouter } from './scheduling/routes';
@@ -993,13 +992,14 @@ export function createApp(): express.Express {
   const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
   const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository();
   const assignmentRepo     = pool ? new PgAssignmentRepository(pool)     : new InMemoryAssignmentRepository();
-  // Availability repos are now Pg-backed in production (migration 134 added
-  // technician_working_hours; tech_unavailable_blocks landed in 116), so the
-  // dispatch feasibility composer and the inbound-AI availability search see
-  // real working-hours / unavailable-block rows instead of always treating
-  // missing rows as no-conflict. InMemory variants stay for tests / no-pool.
+  // Working hours are now Pg-backed in production (migration 136 added
+  // technician_working_hours), so the dispatch feasibility composer and the
+  // inbound-AI availability search enforce real working-hours rows instead of
+  // treating missing rows as no-conflict. The unavailable-block repo stays
+  // InMemory for now — wiring its Pg variant (table from migration 116) is a
+  // separate, out-of-scope change. InMemory variants stay for tests / no-pool.
   const workingHoursRepo       = pool ? new PgWorkingHoursRepository(pool)     : new InMemoryWorkingHoursRepository();
-  const unavailableBlockRepo   = pool ? new PgUnavailableBlockRepository(pool) : new InMemoryUnavailableBlockRepository();
+  const unavailableBlockRepo   = new InMemoryUnavailableBlockRepository();
   const travelTimeProvider     = createTravelTimeProvider(process.env);
   const skillMatcher           = new StubSkillMatcher();
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
@@ -1027,11 +1027,17 @@ export function createApp(): express.Express {
   // Per-tenant scheduling context (IANA timezone) for the voice booking
   // path. Delegates to settingsRepo (same RLS / withTenant path) so spoken
   // times ("next Tuesday at 2pm") resolve against the TENANT's zone instead
-  // of a hardcoded one. Best-effort: the router falls back to the product
-  // default timezone when this returns undefined.
+  // of a hardcoded one. A 60s cache mirrors thresholdResolver/voicePersona
+  // so a multi-segment chain doesn't re-query settings per segment. Best-
+  // effort: the router falls back to the product default when undefined.
+  const schedulingTzCache = new Map<string, { timezone?: string; expiresAt: number }>();
   const tenantSchedulingResolver = async (tenantId: string) => {
+    const hit = schedulingTzCache.get(tenantId);
+    if (hit && hit.expiresAt > Date.now()) return { timezone: hit.timezone };
     const settings = await settingsRepo.findByTenant(tenantId);
-    return { timezone: settings?.timezone };
+    const timezone = settings?.timezone;
+    schedulingTzCache.set(tenantId, { timezone, expiresAt: Date.now() + 60_000 });
+    return { timezone };
   };
   // B1 — per-tenant voice persona. 60-second LRU cache; shared by
   // both the Twilio and in-app adapters.
