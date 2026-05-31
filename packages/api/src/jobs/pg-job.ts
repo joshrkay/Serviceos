@@ -36,6 +36,10 @@ function mapRow(row: Record<string, unknown>): Job {
       (row.deposit_stripe_payment_link_id as string | null) ?? undefined,
     depositStripePaymentLinkUrl:
       (row.deposit_stripe_payment_link_url as string | null) ?? undefined,
+    // Hennessy — payment-link UX. Migration 138.
+    depositStripePaymentLinkExpiresAt: row.deposit_stripe_payment_link_expires_at
+      ? new Date(row.deposit_stripe_payment_link_expires_at as string)
+      : undefined,
     // Tier 4 (Deposit rules — PR 3c). Migration 081.
     depositCreditedToInvoiceId:
       (row.deposit_credited_to_invoice_id as string | null) ?? undefined,
@@ -221,6 +225,8 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
         // Tier 4 (Deposit rules — PR 3b). Migration 080.
         depositStripePaymentLinkId: 'deposit_stripe_payment_link_id',
         depositStripePaymentLinkUrl: 'deposit_stripe_payment_link_url',
+        // Hennessy — payment-link UX. Migration 138.
+        depositStripePaymentLinkExpiresAt: 'deposit_stripe_payment_link_expires_at',
         // Tier 4 (Deposit rules — PR 3c). Migration 081.
         depositCreditedToInvoiceId: 'deposit_credited_to_invoice_id',
         // §6 Time-to-Cash. Migration 095.

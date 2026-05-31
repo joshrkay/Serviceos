@@ -3548,6 +3548,17 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_technician_working_hours ON technician_working_hours
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // Hennessy — payment-link UX. The deposit Stripe Payment Link previously
+  // had no durable deadline: callers computed a 24h `expiresAt` that was
+  // never sent to Stripe or persisted, so links lived forever and the
+  // customer-facing page could not show an honest "pay by" date. Persist a
+  // real expiry alongside the link so the public estimate page can surface
+  // a deadline and the service can deactivate + re-mint an expired link.
+  '138_jobs_deposit_link_expiry': `
+    ALTER TABLE jobs
+      ADD COLUMN IF NOT EXISTS deposit_stripe_payment_link_expires_at TIMESTAMPTZ;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
