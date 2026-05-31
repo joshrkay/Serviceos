@@ -1,4 +1,5 @@
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { InboxProposalRow, Urgency, URGENCY_BADGE, URGENCY_RANK } from './inbox-types';
 
 /**
  * ProposalChainCard — renders a multi-action chain (several proposals
@@ -13,46 +14,19 @@ import { useTenantTimezone } from '../../hooks/useTenantTimezone';
  * spoken.
  */
 
-type Urgency = 'critical' | 'high' | 'normal' | 'low';
-
-export interface ChainRow {
-  proposal: {
-    id: string;
-    proposalType: string;
-    summary: string;
-    status: string;
-    createdAt: string;
-    expiresAt?: string;
-    chainId?: string;
-    sourceContext?: Record<string, unknown>;
-  };
-  urgency: Urgency;
-  reason?: string;
-}
-
-const URGENCY_BADGE: Record<Urgency, { label: string; classes: string }> = {
-  critical: { label: 'Critical', classes: 'bg-red-100 text-red-800 border-red-200' },
-  high: { label: 'High', classes: 'bg-amber-100 text-amber-800 border-amber-200' },
-  normal: { label: 'Normal', classes: 'bg-slate-100 text-slate-700 border-slate-200' },
-  low: { label: 'Low', classes: 'bg-slate-50 text-slate-500 border-slate-200' },
-};
-
-function chainIndexOf(row: ChainRow): number {
+function chainIndexOf(row: InboxProposalRow): number {
   const idx = row.proposal.sourceContext?.chainIndex;
   return typeof idx === 'number' ? idx : 0;
 }
 
-function dependsOnIndices(row: ChainRow): number[] {
+function dependsOnIndices(row: InboxProposalRow): number[] {
   const deps = row.proposal.sourceContext?.dependsOnChainIndices;
   if (!Array.isArray(deps)) return [];
   return deps.filter((n): n is number => typeof n === 'number');
 }
 
-/** Highest urgency in the chain drives the group badge. */
-const URGENCY_RANK: Record<Urgency, number> = { critical: 0, high: 1, normal: 2, low: 3 };
-
 export interface ProposalChainCardProps {
-  rows: ChainRow[];
+  rows: InboxProposalRow[];
   onApproveChain: (ids: string[]) => void | Promise<void>;
   onRejectChain: (ids: string[]) => void | Promise<void>;
 }

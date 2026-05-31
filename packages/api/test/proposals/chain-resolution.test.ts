@@ -15,7 +15,9 @@ function makeChained(
   const p = createProposal({
     tenantId: TENANT,
     proposalType: index === 0 ? 'create_customer' : 'draft_estimate',
-    payload: index === 0 ? { name: 'Jane' } : { customerId: 'placeholder', lineItems: [] },
+    // Dependent leaves customerId empty so applyChainMetadata wires the
+    // ref token (a concrete value would correctly win over the token).
+    payload: index === 0 ? { name: 'Jane' } : { customerId: '', lineItems: [] },
     summary: `segment ${index}`,
     createdBy: 'u1',
   });

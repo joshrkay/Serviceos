@@ -449,19 +449,30 @@ function clarificationExplanation(classification: IntentClassification): string 
   }
 }
 
-async function emitClarification(
-  deps: VoiceActionRouterDeps,
-  input: {
-    tenantId: string;
-    userId: string;
-    transcript: string;
-    classification: IntentClassification;
-    conversationId?: string;
-    recordingId?: string;
-  },
-  log: Logger
-): Promise<void> {
-  const { tenantId, userId, transcript, classification, conversationId, recordingId } = input;
+/**
+ * Build (but do not persist) a voice_clarification proposal. Shared by
+ * the immediate single-intent path (emitClarification) and the chain
+ * path, which persists the clarification atomically alongside its chain
+ * members rather than via a separate, non-rolled-back create().
+ */
+function buildClarification(input: {
+  tenantId: string;
+  userId: string;
+  transcript: string;
+  classification: IntentClassification;
+  conversationId?: string;
+  recordingId?: string;
+  tenantThresholdOverride?: Partial<Record<'supervisor' | 'tech' | 'both', number>>;
+}): Proposal {
+  const {
+    tenantId,
+    userId,
+    transcript,
+    classification,
+    conversationId,
+    recordingId,
+    tenantThresholdOverride,
+  } = input;
   const reason = classification.unknownReason ?? 'unknown_intent';
 
   const suggestedIntents: string[] = [];
@@ -473,8 +484,7 @@ async function emitClarification(
   // user-controlled transcript, so it's semi-untrusted. Truncate to
   // bound DB growth and strip control characters so it can't carry
   // terminal escapes or log-injection payloads into downstream
-  // consumers. The full raw reasoning is still available in the
-  // structured info log emitted below for debugging.
+  // consumers.
   const sanitizedReasoning = classification.reasoning
     ? sanitizeReasoning(classification.reasoning)
     : undefined;
@@ -491,17 +501,13 @@ async function emitClarification(
     ...(conversationId ? { conversationId } : {}),
   };
 
-  const tenantThresholdOverride = deps.thresholdResolver
-    ? await deps.thresholdResolver(tenantId).catch(() => undefined)
-    : undefined;
-
   // P2-002 AI-safety gate. The clarification payload is built
   // by-construction above, but the validator pins the contract so a
   // future edit that drops `transcript` or `reason` trips here
   // instead of writing a malformed proposal to storage.
   assertValidProposalPayload('voice_clarification', payload);
 
-  const proposal = createProposal({
+  return createProposal({
     tenantId,
     proposalType: 'voice_clarification',
     payload,
@@ -522,14 +528,33 @@ async function emitClarification(
     // terminal transitions are `rejected` (operator dismissed) or
     // `expired`.
   });
+}
+
+async function emitClarification(
+  deps: VoiceActionRouterDeps,
+  input: {
+    tenantId: string;
+    userId: string;
+    transcript: string;
+    classification: IntentClassification;
+    conversationId?: string;
+    recordingId?: string;
+  },
+  log: Logger
+): Promise<void> {
+  const tenantThresholdOverride = deps.thresholdResolver
+    ? await deps.thresholdResolver(input.tenantId).catch(() => undefined)
+    : undefined;
+
+  const proposal = buildClarification({ ...input, tenantThresholdOverride });
 
   await deps.proposalRepo.create(proposal);
 
   log.info('voice-action-router: clarification proposal emitted', {
     proposalId: proposal.id,
-    reason,
-    confidence: classification.confidence,
-    lowConfidenceIntent: classification.lowConfidenceIntent,
+    reason: input.classification.unknownReason ?? 'unknown_intent',
+    confidence: input.classification.confidence,
+    lowConfidenceIntent: input.classification.lowConfidenceIntent,
   });
 }
 
@@ -552,7 +577,10 @@ type SegmentOutcome =
   // The classifier could not route this segment — a voice_clarification
   // was emitted in its place (single path) or should be (chain path; see
   // processChain). `classification` is returned so the caller can decide.
-  | { kind: 'clarified'; classification: IntentClassification }
+  // In the chain path (`deferClarification`), the built-but-unpersisted
+  // clarification proposal is returned so the caller can persist it in the
+  // same atomic batch as the chain members.
+  | { kind: 'clarified'; classification: IntentClassification; clarification?: Proposal }
   // A real intent with no proposal mapping (lookup_* etc.) — nothing to
   // do for this worker.
   | { kind: 'skipped'; classification: IntentClassification };
@@ -563,15 +591,20 @@ type SegmentOutcome =
  * flag-off path is unchanged; the chain loop reuses it per segment and
  * stamps chain metadata before persisting.
  *
- * For an 'unknown' classification this emits a voice_clarification
- * itself (clarifications are independent, terminal records) and returns
- * `clarified` so the caller does not also persist a proposal.
+ * For an 'unknown' classification this emits a voice_clarification. On the
+ * single-intent path it persists immediately. In the chain path the caller
+ * passes `deferClarification: true` so the clarification is BUILT but not
+ * persisted, and returned for the caller to write in the same atomic batch
+ * as the chain members — otherwise a clarification committed before a
+ * failed `createMany` would, on redelivery, short-circuit
+ * findAlreadyProcessed and permanently lose the chain.
  */
 async function processSegment(
   deps: VoiceActionRouterDeps,
   handlers: Map<ProposalType, TaskHandler>,
   params: SegmentParams,
   log: Logger,
+  deferClarification = false,
 ): Promise<SegmentOutcome> {
   const { tenantId, userId, segmentText, conversationId, recordingId, customerId } = params;
 
@@ -589,6 +622,20 @@ async function processSegment(
   }
 
   if (classification.intentType === 'unknown') {
+    if (deferClarification) {
+      const clarification = buildClarification({
+        tenantId,
+        userId,
+        transcript: segmentText,
+        classification,
+        conversationId,
+        recordingId,
+        tenantThresholdOverride: deps.thresholdResolver
+          ? await deps.thresholdResolver(tenantId).catch(() => undefined)
+          : undefined,
+      });
+      return { kind: 'clarified', classification, clarification };
+    }
     await emitClarification(
       deps,
       { tenantId, userId, transcript: segmentText, classification, conversationId, recordingId },
@@ -635,11 +682,11 @@ async function processSegment(
  * partial crash leaves resolvable parents behind.
  *
  * Per-segment clarification is preserved: a segment that fails to
- * classify becomes a voice_clarification (tagged with the chain) and the
- * chain proceeds. A later segment that depended on a clarified/ skipped
- * segment is still created but left with its unresolved token in
- * missingFields, so it surfaces in review as needing manual resolution
- * rather than silently executing against a missing parent.
+ * classify becomes a voice_clarification (built here, persisted in the
+ * same atomic batch as the chain). A later segment that depended on a
+ * clarified/skipped segment is still created with its ref token; at
+ * execution the resolver finds no parent and cascade-fails that one
+ * dependent (its siblings are unaffected).
  */
 async function processChain(
   deps: VoiceActionRouterDeps,
@@ -652,9 +699,13 @@ async function processChain(
   const chainLength = segments.length;
 
   // First pass: classify each segment and build its proposal (without
-  // persisting). Clarifications are emitted inline by processSegment as
-  // they happen — they are independent records, not chain members.
+  // persisting). Clarifications for unroutable segments are BUILT (not
+  // persisted) and collected here so they land in the same atomic
+  // createMany as the chain members — a clarification committed before a
+  // failed createMany would, on redelivery, short-circuit
+  // findAlreadyProcessed and permanently lose the chain.
   const built: { proposal: Proposal; chainIndex: number; refCount: number; type: string }[] = [];
+  const clarifications: Proposal[] = [];
 
   for (const segment of segments) {
     const outcome = await processSegment(
@@ -662,9 +713,13 @@ async function processChain(
       handlers,
       { ...base, segmentText: segment.text },
       log,
+      /* deferClarification */ true,
     );
 
     if (outcome.kind !== 'proposal') {
+      if (outcome.kind === 'clarified' && outcome.clarification) {
+        clarifications.push(stampRecordingId(outcome.clarification, base.recordingId));
+      }
       log.info('voice-action-router: chain segment did not produce a proposal', {
         chainId,
         chainIndex: segment.index,
@@ -711,15 +766,29 @@ async function processChain(
   }
 
   if (built.length === 0) {
-    log.info('voice-action-router: chain produced no proposals', { chainId, chainLength });
+    // No chain members were produced. Any clarifications still need to be
+    // persisted so the operator sees an outcome for the utterance; write
+    // them atomically (also satisfies redelivery dedup).
+    if (clarifications.length > 0) {
+      await deps.proposalRepo.createMany(clarifications);
+    }
+    log.info('voice-action-router: chain produced no proposals', {
+      chainId,
+      chainLength,
+      clarificationCount: clarifications.length,
+    });
     return;
   }
 
-  // Second pass: persist every chain member atomically. A partial
-  // failure must not leave orphaned members (e.g. a parent with no
-  // dependents, or dependents whose parent never landed), so all writes
-  // share one transaction.
-  await deps.proposalRepo.createMany(built.map((b) => b.proposal));
+  // Second pass: persist every chain member AND any clarifications
+  // atomically. A partial failure must not leave orphaned members (e.g. a
+  // parent with no dependents, or a committed clarification that blocks
+  // redelivery while the chain rolled back), so all writes share one
+  // transaction.
+  await deps.proposalRepo.createMany([
+    ...built.map((b) => b.proposal),
+    ...clarifications,
+  ]);
 
   for (const b of built) {
     log.info('voice-action-router: chain proposal created', {

@@ -108,6 +108,35 @@ describe('InboxPage — multi-action chains', () => {
     );
   });
 
+  it('restores failed members and surfaces an error on partial approve-batch failure', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          chainProposal('p-cust', 'create_customer', 'Create customer Jane Doe', 0, []),
+          chainProposal('p-job', 'create_job', 'Open a job for Jane', 1, [0]),
+        ],
+        summary: { totalCount: 2, criticalCount: 0, highCount: 0, normalCount: 2, lowCount: 0, truncated: false },
+      }),
+    );
+    // approve-batch returns HTTP 200 but with one member failed.
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({ approved: ['p-cust'], failed: [{ id: 'p-job', reason: 'VALIDATION_ERROR' }] }),
+    );
+
+    render(<InboxPage />);
+    await waitFor(() => screen.getByTestId('inbox-chain'));
+
+    fireEvent.click(screen.getByRole('button', { name: /approve all/i }));
+
+    // The failed member is restored to the inbox and an error is shown;
+    // the chain card reappears (now containing only the restored member).
+    await waitFor(() => {
+      expect(screen.getByText(/couldn't approve 1 of 2/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText('Open a job for Jane')).toBeInTheDocument();
+    expect(screen.queryByText('Create customer Jane Doe')).not.toBeInTheDocument();
+  });
+
   it('renders standalone proposals as normal rows alongside chains', async () => {
     apiFetch.mockResolvedValueOnce(
       jsonResponse({

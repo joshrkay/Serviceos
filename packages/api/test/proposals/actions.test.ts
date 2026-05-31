@@ -140,6 +140,32 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     ).rejects.toThrow(ValidationError);
   });
 
+  it('allows editing a chained dependent whose customerId still holds a $ref token', async () => {
+    const repo = makeRepo();
+    // A draft_estimate dependent whose customerId is an unresolved chain
+    // ref (resolved at execution). The token would fail z.string().uuid()
+    // if naively re-validated; editProposal must validate around it.
+    const proposal = createProposal({
+      tenantId,
+      proposalType: 'draft_estimate',
+      payload: {
+        customerId: '$ref:chain[0].customerId',
+        lineItems: [{ description: 'Repair', quantity: 1, unitPrice: 100 }],
+      },
+      summary: 'Estimate for new customer',
+      createdBy: actorId,
+    });
+    await repo.create(proposal);
+
+    const { proposal: updated } = await editProposal(
+      repo, tenantId, proposal.id, actorId, 'owner',
+      { lineItems: [{ description: 'Repair', quantity: 2, unitPrice: 100 }] },
+    );
+    // Edit succeeds and the ref token is preserved (not clobbered).
+    expect(updated.payload.customerId).toBe('$ref:chain[0].customerId');
+    expect((updated.payload.lineItems as unknown[]).length).toBe(1);
+  });
+
   it('validation — cannot edit executed proposal', async () => {
     const repo = makeRepo();
     const proposal = await createReadyProposal(repo);

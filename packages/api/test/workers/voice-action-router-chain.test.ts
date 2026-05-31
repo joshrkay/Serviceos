@@ -129,4 +129,55 @@ describe('voice-action-router — multi-action chaining', () => {
     expect(job!.status).toBe('draft');
     expect(estimate!.status).toBe('draft');
   });
+
+  it('persists a mid-chain clarification atomically with the chain (rolls back together)', async () => {
+    const { gateway, provider } = createMockLLMGateway();
+    const decomposition = JSON.stringify({
+      segments: [
+        { index: 0, text: 'create a customer named Jane Doe', dependsOn: [] },
+        { index: 1, text: 'mumble mumble', dependsOn: [] },
+      ],
+    });
+    const classifications = [
+      JSON.stringify({ intentType: 'create_customer', confidence: 0.95, extractedEntities: { displayName: 'Jane Doe' } }),
+      JSON.stringify({ intentType: 'unknown', confidence: 0.1 }),
+    ];
+    let classifyCall = 0;
+    vi.spyOn(provider, 'complete').mockImplementation(async (req) => {
+      let content = '{}';
+      if (req.taskType === 'decompose_transcript') content = decomposition;
+      else if (req.taskType === 'classify_intent') {
+        content = classifications[Math.min(classifyCall++, classifications.length - 1)];
+      }
+      return { content, model: 'mock', provider: 'mock', tokenUsage: { input: 10, output: 10, total: 20 }, latencyMs: 1 };
+    });
+
+    // Force the atomic write to fail and assert nothing (not even the
+    // clarification) was committed — the pre-fix bug committed the
+    // clarification separately, blocking redelivery.
+    const repo = new InMemoryProposalRepository();
+    const createManySpy = vi
+      .spyOn(repo, 'createMany')
+      .mockRejectedValueOnce(new Error('db down'));
+
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo: repo,
+      multiActionEnabled: async () => true,
+    });
+
+    await expect(
+      worker.handle(makeMessage('create a customer named Jane Doe and mumble'), silentLogger()),
+    ).rejects.toThrow();
+
+    expect(createManySpy).toHaveBeenCalledTimes(1);
+    // The single createMany call carried BOTH the customer member and the
+    // clarification — i.e. the clarification was not committed separately.
+    const batch = createManySpy.mock.calls[0][0];
+    expect(batch.map((p) => p.proposalType).sort()).toEqual(
+      ['create_customer', 'voice_clarification'].sort(),
+    );
+    // Nothing persisted (the rejected batch rolled back).
+    expect(await repo.findByTenant('tenant-1')).toHaveLength(0);
+  });
 });

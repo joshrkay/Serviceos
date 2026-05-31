@@ -1,6 +1,7 @@
 import { Proposal, ProposalRepository, missingFieldsFor } from './proposal';
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from './lifecycle';
 import { validateProposalPayload } from './contracts';
+import { payloadForValidation } from './chain';
 import { Role, hasPermission } from '../auth/rbac';
 import { AppError, ForbiddenError, ValidationError, NotFoundError } from '../shared/errors';
 import { AppointmentRepository, updateAppointment } from '../appointments/appointment';
@@ -288,7 +289,14 @@ export async function editProposal(
 
   const updatedPayload = { ...proposal.payload, ...edits };
 
-  const validation = validateProposalPayload(proposal.proposalType, updatedPayload);
+  // Validate around any unresolved chain-ref token: it lives in a
+  // uuid-typed field but is a by-construction value the executor resolves
+  // from the parent, not something the operator edits. Without this, any
+  // edit to a chained dependent would fail z.string().uuid() on the token.
+  const validation = validateProposalPayload(
+    proposal.proposalType,
+    payloadForValidation(updatedPayload),
+  );
   if (!validation.valid) {
     throw new ValidationError('Invalid payload after edit', { errors: validation.errors });
   }

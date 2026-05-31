@@ -3,27 +3,8 @@ import { useApiClient } from '../../lib/apiClient';
 import { emitProposalsChanged } from '../../lib/proposal-events';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatInTenantTz } from '../../utils/formatInTenantTz';
-import { ProposalChainCard, ChainRow } from './ProposalChainCard';
-
-type Urgency = 'critical' | 'high' | 'normal' | 'low';
-
-interface InboxProposalRow {
-  proposal: {
-    id: string;
-    proposalType: string;
-    summary: string;
-    status: string;
-    createdAt: string;
-    expiresAt?: string;
-    // Multi-action chaining: present on proposals decomposed from one
-    // utterance. The inbox serializes the full proposal, so these ride
-    // through without an API change.
-    chainId?: string;
-    sourceContext?: Record<string, unknown>;
-  };
-  urgency: Urgency;
-  reason?: string;
-}
+import { ProposalChainCard } from './ProposalChainCard';
+import { InboxProposalRow, URGENCY_BADGE } from './inbox-types';
 
 /**
  * A feed item is either a standalone proposal or a chain of linked
@@ -32,38 +13,37 @@ interface InboxProposalRow {
  */
 type FeedItem =
   | { kind: 'single'; row: InboxProposalRow }
-  | { kind: 'chain'; chainId: string; rows: InboxProposalRow[]; sortKey: number };
+  | { kind: 'chain'; chainId: string; rows: InboxProposalRow[] };
 
 /**
  * Group inbox rows into feed items: rows sharing a `chainId` collapse
- * into one chain item, preserving the server's urgency order via the
- * first-seen index as the chain's sort key. Standalone rows pass through
- * untouched, so the flag-off / single-action experience is unchanged.
+ * into one chain item, preserving the server's urgency order via
+ * first-seen insertion order. Standalone rows pass through untouched, so
+ * the flag-off / single-action experience is unchanged.
  */
 function groupIntoFeed(rows: InboxProposalRow[]): FeedItem[] {
   const items: FeedItem[] = [];
-  const chainItemByid = new Map<string, Extract<FeedItem, { kind: 'chain' }>>();
+  const chainItemById = new Map<string, Extract<FeedItem, { kind: 'chain' }>>();
 
-  rows.forEach((row, index) => {
+  for (const row of rows) {
     const chainId = row.proposal.chainId;
     if (!chainId) {
       items.push({ kind: 'single', row });
-      return;
+      continue;
     }
-    const existing = chainItemByid.get(chainId);
+    const existing = chainItemById.get(chainId);
     if (existing) {
       existing.rows.push(row);
-      return;
+      continue;
     }
     const chainItem: Extract<FeedItem, { kind: 'chain' }> = {
       kind: 'chain',
       chainId,
       rows: [row],
-      sortKey: index,
     };
-    chainItemByid.set(chainId, chainItem);
+    chainItemById.set(chainId, chainItem);
     items.push(chainItem);
-  });
+  }
 
   return items;
 }
@@ -95,13 +75,6 @@ interface InboxResponse {
   data: InboxProposalRow[];
   summary: InboxSummary;
 }
-
-const URGENCY_BADGE: Record<Urgency, { label: string; classes: string }> = {
-  critical: { label: 'Critical', classes: 'bg-red-100 text-red-800 border-red-200' },
-  high: { label: 'High', classes: 'bg-amber-100 text-amber-800 border-amber-200' },
-  normal: { label: 'Normal', classes: 'bg-slate-100 text-slate-700 border-slate-200' },
-  low: { label: 'Low', classes: 'bg-slate-50 text-slate-500 border-slate-200' },
-};
 
 export function InboxPage() {
   const apiFetch = useApiClient();
@@ -165,6 +138,24 @@ export function InboxPage() {
         body: JSON.stringify({ proposalIds: ids }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // approve-batch returns 200 even on PARTIAL failure, with a
+      // `failed: [{ id, reason }]` array. A naive res.ok check would
+      // silently drop the un-approved members from the UI. Restore any
+      // member that failed and surface the reason instead.
+      const body = (await res.json().catch(() => null)) as
+        | { approved?: string[]; failed?: { id: string; reason: string }[] }
+        | null;
+      const failed = body?.failed ?? [];
+      if (failed.length > 0) {
+        const failedIds = new Set(failed.map((f) => f.id));
+        const toRestore = removed.filter((r) => failedIds.has(r.proposal.id));
+        if (toRestore.length > 0) setRows((prev) => [...toRestore, ...prev]);
+        setError(
+          `Couldn't approve ${failed.length} of ${ids.length} linked actions: ${failed
+            .map((f) => f.reason)
+            .join('; ')}`,
+        );
+      }
       emitProposalsChanged();
     } catch (err) {
       if (removed.length > 0) setRows((prev) => [...removed, ...prev]);
@@ -222,7 +213,7 @@ export function InboxPage() {
               return (
                 <ProposalChainCard
                   key={`chain-${item.chainId}`}
-                  rows={item.rows as ChainRow[]}
+                  rows={item.rows}
                   onApproveChain={approveChain}
                   onRejectChain={rejectChain}
                 />

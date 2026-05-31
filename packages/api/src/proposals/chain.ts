@@ -109,6 +109,37 @@ export function isChainRefToken(value: unknown): boolean {
   return parseChainRefToken(value) !== null;
 }
 
+// A syntactically-valid placeholder UUID used only to satisfy Zod
+// uuid() validation for a payload field still holding an unresolved
+// chain-ref token. It is never persisted — see
+// payloadForValidation — the real token is kept on the proposal and
+// substituted with the parent's resultEntityId at execution time.
+const CHAIN_REF_PLACEHOLDER_UUID = '00000000-0000-4000-8000-000000000000';
+
+/**
+ * Produce a copy of a payload safe to run through the Zod contract for
+ * validation, substituting any unresolved chain-ref token with a
+ * placeholder UUID. The chain-ref fields target uuid-typed contract
+ * fields (customerId, jobId, …); the literal `$ref:chain[..]` token
+ * would fail `z.string().uuid()`, so editing a chained dependent (which
+ * re-validates the merged payload) would spuriously throw. The token is
+ * a by-construction value the executor resolves — it is not the
+ * operator's concern — so we validate around it. Non-chained payloads
+ * pass through unchanged (no allocation when there is nothing to swap).
+ */
+export function payloadForValidation(
+  payload: Record<string, unknown>
+): Record<string, unknown> {
+  let copy: Record<string, unknown> | undefined;
+  for (const [key, value] of Object.entries(payload)) {
+    if (isChainRefToken(value)) {
+      copy = copy ?? { ...payload };
+      copy[key] = CHAIN_REF_PLACEHOLDER_UUID;
+    }
+  }
+  return copy ?? payload;
+}
+
 /**
  * Typed accessor for the chain metadata stashed on `sourceContext`.
  * Mirrors `missingFieldsFor` — keeps the JSONB read in one place with
@@ -168,7 +199,12 @@ export const ENTITY_KIND_TO_PAYLOAD_PATH: Partial<
   draft_estimate: { customerId: 'customerId', jobId: 'jobId' },
   draft_invoice: { customerId: 'customerId', jobId: 'jobId', estimateId: 'estimateId' },
   add_service_location: { customerId: 'customerId' },
-  add_note: { customerId: 'customerId', jobId: 'jobId' },
+  // NOTE: add_note is intentionally absent. Its contract has no
+  // customerId/jobId field — it targets a record via targetKind +
+  // targetId/targetReference (contracts/notes.ts). Writing a chain-ref
+  // token into a non-existent payload field would silently attach the
+  // note to nothing. A chained note therefore degrades to a standalone
+  // note the operator resolves at review (targetReference/missingFields).
 };
 
 /**
@@ -222,8 +258,18 @@ export function applyChainMetadata(
   // Write ref tokens into the dependent payload fields. These resolve to
   // the parent's resultEntityId at execution time — they are not operator
   // gaps, so they are intentionally kept out of missingFields.
+  //
+  // Only overwrite a field the handler left empty: if the handler already
+  // extracted a concrete value (e.g. an explicit "invoice for job #4821"),
+  // that real value wins over a symbolic ref to a sibling.
+  const wiredRefs: ChainRef[] = [];
   for (const ref of meta.chainRefs) {
+    const current = proposal.payload[ref.payloadPath];
+    if (current !== undefined && current !== null && current !== '') {
+      continue;
+    }
     proposal.payload[ref.payloadPath] = buildChainRefToken(ref.parentChainIndex, ref.entityKind);
+    wiredRefs.push(ref);
   }
 
   proposal.sourceContext = {
@@ -232,14 +278,21 @@ export function applyChainMetadata(
     chainIndex: meta.chainIndex,
     chainLength: meta.chainLength,
     dependsOnChainIndices: meta.dependsOnChainIndices,
-    chainRefs: meta.chainRefs,
+    // Persist only the edges we actually wired — a ref we skipped (the
+    // handler already had a concrete value) must NOT be resolved at
+    // execution time, or it would clobber that value.
+    chainRefs: wiredRefs,
   };
 
-  // A dependent with unresolved refs must wait for operator approval +
-  // its parent's execution — never auto-approve ahead of the parent.
-  // Forcing 'draft' here (rather than via missingFields) keeps it
-  // approvable by the operator while still blocking auto-execution.
-  if (meta.chainRefs.length > 0) {
+  // Any proposal that depends on an earlier chain member must wait for
+  // operator approval + its parent's execution — it can never auto-approve
+  // or execute ahead of its parent. We force 'draft' whenever this segment
+  // declares a dependency (dependsOnChainIndices non-empty), NOT only when
+  // a ref token was wired: a dependent whose (type, entityKind) isn't in
+  // ENTITY_KIND_TO_PAYLOAD_PATH still must not race ahead. Forcing 'draft'
+  // here (rather than via missingFields) keeps it approvable by the operator
+  // while still blocking auto-execution.
+  if (meta.dependsOnChainIndices.length > 0) {
     proposal.status = 'draft';
     proposal.approvedAt = undefined;
   }

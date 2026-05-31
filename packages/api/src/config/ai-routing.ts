@@ -31,6 +31,10 @@ export const DEFAULT_AI_ROUTING_CONFIG: AIRoutingConfig = {
   taskTierMapping: {
     // Lightweight
     'intent_classification': 'lightweight',
+    'classify_intent': 'lightweight',
+    // Splitting a multi-action utterance into ordered segments is a cheap,
+    // deterministic segmentation task — same tier as intent classification.
+    'decompose_transcript': 'lightweight',
     'entity_extraction': 'lightweight',
     'transcript_normalization': 'lightweight',
     // Standard

@@ -47,7 +47,7 @@ describe('multi-action chain — execution-time resolution', () => {
     const child = createProposal({
       tenantId: 'tenant-1',
       proposalType: 'create_job',
-      payload: { title: 'Furnace tune-up', customerId: 'placeholder' },
+      payload: { title: 'Furnace tune-up', customerId: '' },
       summary: 'open a job for Jane',
       createdBy: 'user-1',
     });
