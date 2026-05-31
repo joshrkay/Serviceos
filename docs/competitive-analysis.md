@@ -40,8 +40,22 @@ real gaps:
 `tip`/`gratuity` anywhere — small, time-to-cash); **consumer financing**
 handoff (Wisetack/Affirm — medium); **QuickBooks/accounting sync** (#10 — the
 long pole). ACH is already covered via Stripe `automatic_payment_methods` +
-`ach_return` reversal handling. Memberships (#6) and unified inbox (#9) need a
-depth re-audit before they can be called gaps.
+`ach_return` reversal handling.
+
+Re-audit verdicts (2026-05-31):
+- **#6 Memberships — PARTIAL.** The `Agreement` model + `recurring-agreements-worker`
+  handle recurrence → invoice/job generation, but the membership-engine depth is
+  genuinely missing: **no auto-renew, no member pricing applied to
+  estimates/invoices, no priority-booking flag, no recurring auto-charge of a
+  saved card (`off_session`).** Real gap, but a multi-part build touching
+  billing/estimates/invoices/booking.
+- **#9 Unified inbox — DATA done; AI assist was missing → now SHIPPED (this work).**
+  `customers/timeline.ts` already aggregates cross-channel history and
+  `ConversationThread` renders threads, but there were **no AI-suggested replies**.
+  Added `ai/tasks/suggest-reply-task.ts` + `POST /api/conversations/:id/suggest-reply`
+  (brand-voiced draft, owner edits & sends — never auto-sent) and a "✨ Suggest
+  reply" composer action. A dedicated cross-channel triage *inbox surface* (vs the
+  current approval-queue "InboxPage") remains a follow-up.
 
 The original top-10 below is kept for context; treat the verification block
 above as authoritative.

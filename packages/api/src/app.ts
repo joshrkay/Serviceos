@@ -2875,7 +2875,13 @@ export function createApp(): express.Express {
 
   app.use('/api/me', createMeRouter(userModeService, auditRepo));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
-  app.use('/api/conversations', createConversationRouter(conversationRepo, auditRepo));
+  app.use(
+    '/api/conversations',
+    createConversationRouter(conversationRepo, auditRepo, {
+      gateway: llmGateway,
+      settingsRepo,
+    }),
+  );
   app.use('/api/dnc', createDncRouter({ dncRepo, auditRepo }));
 
   app.use(

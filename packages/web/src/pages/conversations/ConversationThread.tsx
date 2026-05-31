@@ -16,6 +16,8 @@ export interface ConversationThreadProps {
   renderClarification?: (message: Message) => React.ReactNode;
   renderProposal?: (message: Message) => React.ReactNode;
   disabled?: boolean;
+  /** When provided, the composer shows an AI "Suggest reply" action. */
+  onSuggestReply?: () => Promise<string>;
 }
 
 export function ConversationThread({
@@ -26,6 +28,7 @@ export function ConversationThread({
   renderClarification,
   renderProposal,
   disabled = false,
+  onSuggestReply,
 }: ConversationThreadProps) {
   const sortedMessages = [...messages].sort(
     (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
@@ -72,7 +75,7 @@ export function ConversationThread({
       <div className="conversation-messages" data-testid="conversation-messages">
         {sortedMessages.map(renderMessage)}
       </div>
-      <MessageInput onSend={onSendMessage} disabled={disabled} />
+      <MessageInput onSend={onSendMessage} disabled={disabled} onSuggestReply={onSuggestReply} />
     </div>
   );
 }
