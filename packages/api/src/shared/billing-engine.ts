@@ -43,6 +43,17 @@ export function calculateLineItemTotal(quantity: number, unitPriceCents: number)
   return Math.round(quantity * unitPriceCents);
 }
 
+/**
+ * Apply a basis-points rate to an integer-cents amount, rounded to the
+ * nearest cent. 10000 bps = 100%. This is the single home for
+ * percentage-of-money math (tax lines, deposit rules, discounts) so the
+ * rounding convention can never drift between call sites — see CLAUDE.md
+ * "Use the shared billing engine for all financial calculations."
+ */
+export function applyBps(amountCents: number, bps: number): number {
+  return Math.round((amountCents * bps) / 10000);
+}
+
 export function calculateDocumentTotals(
   lineItems: LineItem[],
   discountCents: number,
@@ -55,7 +66,7 @@ export function calculateDocumentTotals(
 
   // Apply discount to taxable amount before computing tax
   const effectiveTaxableAmount = Math.max(0, taxableSubtotalCents - discountCents);
-  const taxCents = Math.round((effectiveTaxableAmount * taxRateBps) / 10000);
+  const taxCents = applyBps(effectiveTaxableAmount, taxRateBps);
   const totalCents = subtotalCents - discountCents + taxCents;
 
   return {

@@ -449,7 +449,7 @@ describe('voice-action-router worker', () => {
     expect(p.cancellationType).toBe('other');
   });
 
-  it('routes reschedule_appointment and marks ISO times as missing when only a description is given', async () => {
+  it('routes reschedule_appointment, resolves the spoken new time, and holds only on the appointment id', async () => {
     const gateway = gatewayReturning([
       JSON.stringify({
         intentType: 'reschedule_appointment',
@@ -475,13 +475,20 @@ describe('voice-action-router worker', () => {
     expect(byTenant).toHaveLength(1);
     const p = byTenant[0];
     expect(p.proposalType).toBe('reschedule_appointment');
+    // Still draft: we resolved the new TIME, but with no appointmentRepo
+    // wired the concrete appointment id is unknown, so it holds for review.
     expect(p.status).toBe('draft');
-    expect(p.sourceContext?.missingFields).toEqual(
-      expect.arrayContaining(['newScheduledStart', 'newScheduledEnd'])
-    );
+    const missing = p.sourceContext?.missingFields as string[];
+    expect(missing).toContain('appointmentId');
+    // The spoken time is now resolved deterministically — no longer missing.
+    expect(missing).not.toContain('newScheduledStart');
+    expect(missing).not.toContain('newScheduledEnd');
     const payload = p.payload as Record<string, unknown>;
     expect(payload.appointmentReference).toBe('the Miller job');
     expect(payload.newDateTimeDescription).toBe('Thursday at 2pm');
+    // Resolved to a concrete UTC instant.
+    expect(typeof payload.newScheduledStart).toBe('string');
+    expect(Number.isNaN(Date.parse(payload.newScheduledStart as string))).toBe(false);
   });
 
   it('routes cancel_appointment and stays in draft even at high confidence (irreversible class)', async () => {

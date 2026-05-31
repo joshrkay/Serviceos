@@ -1,9 +1,9 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   ChevronLeft, ChevronRight, Plus, Clock, User, AlertTriangle,
-  Bell, CheckCircle, X, MapPin, Briefcase,
+  Bell, CheckCircle, X, MapPin, Briefcase, LayoutGrid,
 } from 'lucide-react';
-import { useNavigate } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
@@ -387,12 +387,22 @@ export function SchedulePage() {
             </p>
           )}
         </div>
-        <button
-          onClick={() => setShowNew(v => !v)}
-          className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors"
-        >
-          <Plus size={14} /> New appointment
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Dispatch Board lives off the sidebar (calm-nav decision), so the
+              Schedule header is its primary in-app entry point. */}
+          <Link
+            to="/dispatch"
+            className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
+          >
+            <LayoutGrid size={14} /> Dispatch board
+          </Link>
+          <button
+            onClick={() => setShowNew(v => !v)}
+            className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors"
+          >
+            <Plus size={14} /> New appointment
+          </button>
+        </div>
       </div>
 
       {/* Week nav */}

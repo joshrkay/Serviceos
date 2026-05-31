@@ -691,6 +691,86 @@ describe('PublicEstimateService — Tier 4 deposit (PR 3b: before_approval gate 
     expect(stripeFetch).toHaveBeenCalledTimes(1); // second call hits the cache
   });
 
+  it('returns and persists a deposit-link expiry (Hennessy)', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'percentage',
+      depositPercentageBps: 2500,
+      depositTimingPolicy: 'before_approval',
+    });
+    const est = await seedEstimateWithTotal(100000);
+    const stripeFetch = vi.fn(async () =>
+      jsonOk({ id: 'plink_exp', url: 'https://checkout.stripe.com/c/plink_exp' }),
+    );
+    const service = new PublicEstimateService({
+      estimateRepo: h.estimate,
+      customerRepo: h.customer,
+      jobRepo: h.job,
+      settingsRepo: h.settings,
+      stripeConfig: { apiKey: 'sk_test_xxx' },
+      stripeFetch: stripeFetch as unknown as typeof fetch,
+    });
+
+    const result = await service.getOrCreateDepositCheckoutUrl(est.viewToken!);
+    // The link now carries a concrete, future deadline...
+    expect(result.expiresAt).toBeTruthy();
+    expect(new Date(result.expiresAt!).getTime()).toBeGreaterThan(Date.now());
+    // ...and it's persisted so the public view can surface it.
+    const job = (await h.job.findByTenant(TENANT))[0];
+    expect(job.depositStripePaymentLinkExpiresAt).toBeInstanceOf(Date);
+  });
+
+  it('deactivates and re-mints an expired deposit link (Hennessy)', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'fixed',
+      depositFixedCents: 50000,
+      depositTimingPolicy: 'before_approval',
+    });
+    const est = await seedEstimateWithTotal(100000);
+
+    let mintCount = 0;
+    const stripeFetch = vi.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.endsWith('/payment_links')) {
+        mintCount += 1;
+        return jsonOk({
+          id: `plink_${mintCount}`,
+          url: `https://checkout.stripe.com/c/plink_${mintCount}`,
+        });
+      }
+      // Deactivation: POST /payment_links/:id
+      return jsonOk({ id: u.split('/').pop(), active: false });
+    });
+    const service = new PublicEstimateService({
+      estimateRepo: h.estimate,
+      customerRepo: h.customer,
+      jobRepo: h.job,
+      settingsRepo: h.settings,
+      stripeConfig: { apiKey: 'sk_test_xxx' },
+      stripeFetch: stripeFetch as unknown as typeof fetch,
+    });
+
+    const first = await service.getOrCreateDepositCheckoutUrl(est.viewToken!);
+    expect(first.url).toContain('plink_1');
+
+    // Force the stored link past its deadline.
+    const job = (await h.job.findByTenant(TENANT))[0];
+    await h.job.update(TENANT, job.id, {
+      depositStripePaymentLinkExpiresAt: new Date(Date.now() - 60_000),
+    });
+
+    const second = await service.getOrCreateDepositCheckoutUrl(est.viewToken!);
+    // A fresh link was minted...
+    expect(second.url).toContain('plink_2');
+    // ...the stale one was deactivated...
+    const deactivated = stripeFetch.mock.calls.some(
+      (c) => String(c[0]).endsWith('/payment_links/plink_1'),
+    );
+    expect(deactivated).toBe(true);
+    // ...and the job now points at the replacement.
+    const updated = (await h.job.findByTenant(TENANT))[0];
+    expect(updated.depositStripePaymentLinkId).toBe('plink_2');
+  });
+
   it('rejects mint when no deposit is required', async () => {
     const est = await seedEstimateWithTotal(100000);
     const stripeFetch = vi.fn(async () => jsonOk({ id: 'x', url: 'x' }));

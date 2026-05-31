@@ -15,6 +15,22 @@ import { printEstimateDocument } from '../../lib/estimatePdf';
 const fmtUsd = (n: number): string =>
   n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+/** Whole days from now until `iso` (negative once past). null when unparseable. */
+function daysUntil(iso?: string): number | null {
+  if (!iso) return null;
+  const then = new Date(iso).getTime();
+  if (isNaN(then)) return null;
+  return Math.ceil((then - Date.now()) / (24 * 60 * 60 * 1000));
+}
+
+/** Human "May 14, 2026" from an ISO string; '' when unparseable. */
+function fmtFriendlyDate(iso?: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 interface PublicEstimateView {
   id: string;
   estimateNumber: string;
@@ -80,6 +96,12 @@ interface PublicEstimateView {
    * absent or expired.
    */
   depositCheckoutUrl?: string;
+  /**
+   * Hennessy — payment-link UX. ISO deadline for the deposit checkout
+   * link. Surfaced as a "pay by" hint; the server re-mints the link once
+   * this passes so the customer never lands on a dead URL.
+   */
+  depositCheckoutExpiresAt?: string;
 }
 
 // ─── Signature canvas ─────────────────────────────────────────────────────
@@ -724,6 +746,10 @@ export function EstimateApprovalPage() {
   const total           = (hasSelectable ? previewTotalCents : apiView.totalCents) / 100;
   const isExpired       = apiView.isExpired;
   const isAlreadyDeclined = apiView.status === 'rejected';
+  // Days until the quote's price is no longer guaranteed. Drives the
+  // validity urgency banner (Hennessy). Null when the quote carries no
+  // validUntil — we say nothing rather than imply a deadline.
+  const validUntilDays  = daysUntil(apiView.validUntil);
 
   if (accepted) return (
     <SuccessScreen
@@ -788,6 +814,33 @@ export function EstimateApprovalPage() {
             <div className="mb-5 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3">
               <p className="text-sm text-amber-900">This estimate has expired.</p>
               <p className="text-xs text-amber-700 mt-0.5">Please contact the business for an updated quote.</p>
+            </div>
+          )}
+
+          {/* Hennessy — payment-link UX. Tell the customer, up front, how
+              long this price is held so the deadline drives action instead
+              of surprising them at accept-time. Only while the quote is
+              still live and actionable; escalates from neutral to amber as
+              the window closes. */}
+          {!isExpired && !isAlreadyDeclined && apiView.isActionable !== false && validUntilDays !== null && (
+            <div
+              data-testid="estimate-validity-banner"
+              className={`mb-5 flex items-center gap-2.5 rounded-xl border px-4 py-3 ${
+                validUntilDays <= 3
+                  ? 'bg-amber-50 border-amber-200 text-amber-900'
+                  : 'bg-slate-50 border-slate-200 text-slate-700'
+              }`}
+            >
+              <Clock size={15} className={validUntilDays <= 3 ? 'text-amber-500 shrink-0' : 'text-slate-400 shrink-0'} />
+              <p className="text-sm">
+                {validUntilDays <= 0
+                  ? 'This price expires today.'
+                  : validUntilDays === 1
+                  ? 'This price is held until tomorrow — 1 day left.'
+                  : validUntilDays <= 14
+                  ? `This price is held until ${fmtFriendlyDate(apiView.validUntil)} — ${validUntilDays} days left.`
+                  : `This price is held until ${fmtFriendlyDate(apiView.validUntil)}.`}
+              </p>
             </div>
           )}
           {isAlreadyDeclined && (
@@ -983,7 +1036,11 @@ export function EstimateApprovalPage() {
             return (
               <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-5 pb-safe pt-3">
                 <div className="max-w-lg mx-auto">
-                  <PayDepositButton token={id} initialUrl={apiView?.depositCheckoutUrl} />
+                  <PayDepositButton
+                    token={id}
+                    initialUrl={apiView?.depositCheckoutUrl}
+                    expiresAt={apiView?.depositCheckoutExpiresAt}
+                  />
                   {id && (
                     <DeclineButton
                       token={id}
@@ -1052,12 +1109,15 @@ export function EstimateApprovalPage() {
 // and redirects the customer there. After payment Stripe redirects
 // back to the page and the webhook will have credited the deposit so
 // the page swaps in the regular Accept CTA on next load.
-function PayDepositButton({ token, initialUrl }: {
+function PayDepositButton({ token, initialUrl, expiresAt }: {
   token: string;
   initialUrl?: string;
+  /** ISO deadline after which this checkout link is re-minted server-side. */
+  expiresAt?: string;
 }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const depositDays = daysUntil(expiresAt);
 
   async function go() {
     setSubmitting(true);
@@ -1098,6 +1158,13 @@ function PayDepositButton({ token, initialUrl }: {
       {error && (
         <p className="text-center text-xs text-red-600 mt-2" role="alert">
           {error}
+        </p>
+      )}
+      {!error && expiresAt && depositDays !== null && depositDays > 0 && (
+        <p className="text-center text-xs text-slate-400 mt-2">
+          {depositDays === 1
+            ? 'Pay by tomorrow to hold your spot'
+            : `Pay by ${fmtFriendlyDate(expiresAt)} to hold your spot`}
         </p>
       )}
     </>

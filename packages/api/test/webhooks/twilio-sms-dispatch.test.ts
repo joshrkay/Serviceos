@@ -33,6 +33,12 @@ import type { AppConfig } from '../../src/shared/config';
 
 const cfg = {} as AppConfig;
 
+// The recordTwilio handler now rejects a non-UUID :tenantId up front (a
+// malformed id would otherwise throw in setTenantContext on the prod audit
+// path). This suite exercises dispatch wiring, not id format, so it uses a
+// well-formed tenant id.
+const TENANT_ID = '11111111-1111-1111-1111-111111111111';
+
 function buildApp(opts: {
   webhookEventRepo: { recordReceipt: ReturnType<typeof vi.fn>; markProcessed: ReturnType<typeof vi.fn> };
   auditRepo?: InMemoryAuditRepository;
@@ -44,7 +50,7 @@ function buildApp(opts: {
     '/webhooks',
     createWebhookRouter(cfg, {
       integrationResolver: async () => ({
-        tenantId: 't1',
+        tenantId: TENANT_ID,
         provider: 'twilio',
         subaccountSid: 'AC-real',
         authTokenPrimary: 'token',
@@ -93,7 +99,7 @@ describe('P2-034 — Twilio SMS webhook → keyword dispatcher integration', () 
 
     const app = buildApp({ webhookEventRepo: repo as any });
     const res = await request(app)
-      .post('/webhooks/twilio/sms/t1')
+      .post(`/webhooks/twilio/sms/${TENANT_ID}`)
       .set('x-twilio-signature', 'ok')
       .send('AccountSid=AC-real&MessageSid=SM-1&From=%2B15551234567&Body=OUT');
 
@@ -112,7 +118,7 @@ describe('P2-034 — Twilio SMS webhook → keyword dispatcher integration', () 
     const app = buildApp({ webhookEventRepo: repo as any });
 
     const res = await request(app)
-      .post('/webhooks/twilio/sms/t1')
+      .post(`/webhooks/twilio/sms/${TENANT_ID}`)
       .set('x-twilio-signature', 'ok')
       .send('AccountSid=AC-real&MessageSid=SM-dup&From=%2B15551234567&Body=OUT');
 
@@ -133,7 +139,7 @@ describe('P2-034 — Twilio SMS webhook → keyword dispatcher integration', () 
     const app = buildApp({ webhookEventRepo: eventRepoOk(), auditRepo: audit });
 
     const res = await request(app)
-      .post('/webhooks/twilio/sms/t1')
+      .post(`/webhooks/twilio/sms/${TENANT_ID}`)
       .set('x-twilio-signature', 'ok')
       .send('AccountSid=AC-real&MessageSid=SM-err&From=%2B15550000001&Body=BOOM');
 
@@ -144,7 +150,7 @@ describe('P2-034 — Twilio SMS webhook → keyword dispatcher integration', () 
     expect(dispatchEvent).toBeDefined();
     expect(dispatchEvent!.metadata?.reason).toBe('handler_error');
     // Cross-tenant isolation: audit carries only tenantId + fromE164
-    expect(dispatchEvent!.tenantId).toBe('t1');
+    expect(dispatchEvent!.tenantId).toBe(TENANT_ID);
   });
 
   it('audits unmatched messages and returns 200', async () => {
@@ -153,7 +159,7 @@ describe('P2-034 — Twilio SMS webhook → keyword dispatcher integration', () 
     const app = buildApp({ webhookEventRepo: eventRepoOk(), auditRepo: audit });
 
     const res = await request(app)
-      .post('/webhooks/twilio/sms/t1')
+      .post(`/webhooks/twilio/sms/${TENANT_ID}`)
       .set('x-twilio-signature', 'ok')
       .send('AccountSid=AC-real&MessageSid=SM-unk&From=%2B15550000002&Body=HELLO');
 
@@ -170,13 +176,13 @@ describe('P2-034 — Twilio SMS webhook → keyword dispatcher integration', () 
     const app = buildApp({ webhookEventRepo: eventRepoOk() });
 
     const voice = await request(app)
-      .post('/webhooks/twilio/voice/t1')
+      .post(`/webhooks/twilio/voice/${TENANT_ID}`)
       .set('x-twilio-signature', 'ok')
       .send('AccountSid=AC-real&CallSid=CA-1&Body=OUT');
     expect(voice.status).toBe(200);
 
     const status = await request(app)
-      .post('/webhooks/twilio/status/t1')
+      .post(`/webhooks/twilio/status/${TENANT_ID}`)
       .set('x-twilio-signature', 'ok')
       .send('AccountSid=AC-real&MessageSid=SM-2&Body=OUT');
     expect(status.status).toBe(200);
