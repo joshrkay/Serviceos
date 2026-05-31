@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { TrendingUp, BarChart3 } from 'lucide-react';
 import { useApiClient } from '../../lib/apiClient';
+import { Spinner, EmptyState } from '../ui';
+import { ErrorState } from '../ErrorState';
 
 /**
  * Revenue-by-source attribution report.
@@ -48,6 +50,8 @@ export function RevenueBySourcePage() {
   const [rows, setRows] = useState<RevenueRow[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Bumped by the error-state Retry button to re-run the fetch effect.
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,7 +75,7 @@ export function RevenueBySourcePage() {
     return () => {
       cancelled = true;
     };
-  }, [from, to, apiFetch]);
+  }, [from, to, apiFetch, reloadKey]);
 
   const totalPaid = rows.reduce((sum, r) => sum + r.paidCents, 0);
   const totalLeads = rows.reduce((sum, r) => sum + r.leadCount, 0);
@@ -146,22 +150,27 @@ export function RevenueBySourcePage() {
             <tbody>
               {isLoading && (
                 <tr>
-                  <td colSpan={7} className="text-center py-8 text-sm text-slate-400">
-                    Loading…
+                  <td colSpan={7} className="py-8">
+                    <div className="flex items-center justify-center">
+                      <Spinner size="md" className="text-slate-900" label="Loading revenue report" />
+                    </div>
                   </td>
                 </tr>
               )}
               {!isLoading && error && (
                 <tr>
-                  <td colSpan={7} className="text-center py-8 text-sm text-red-500">
-                    {error}
+                  <td colSpan={7}>
+                    <ErrorState
+                      message="Couldn't load the revenue report."
+                      onRetry={() => setReloadKey((k) => k + 1)}
+                    />
                   </td>
                 </tr>
               )}
               {!isLoading && !error && rows.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="text-center py-8 text-sm text-slate-400">
-                    No attributed revenue in this period.
+                  <td colSpan={7}>
+                    <EmptyState title="No attributed revenue in this period." />
                   </td>
                 </tr>
               )}

@@ -29,12 +29,12 @@ function pendingResponse() {
 // Endpoint returns { data: summary }.
 const summary = {
   month: '2026-05',
-  revenueCents: 150000,
+  revenueCents: 150000, // $1,500
   priorMonthRevenueCents: 100000,
-  revenueTrendCents: 50000,
-  expensesCents: 30000,
-  outstandingCents: 50000,
-  overdueCents: 25000,
+  revenueTrendCents: 50000, // $500
+  expensesCents: 30000, // $300
+  outstandingCents: 50000, // $500
+  overdueCents: 25000, // $250
 };
 
 beforeEach(() => {
@@ -51,10 +51,10 @@ describe('MoneyDashboardPage', () => {
   it('renders the summary tiles from the API response', async () => {
     mockFetch.mockResolvedValue(jsonResponse({ data: summary }));
     render(<MoneyDashboardPage />);
-    // Local formatCents uses maximumFractionDigits: 0 → no cents shown.
+    // Local formatCents divides by 100 and uses maximumFractionDigits: 0.
     expect(await screen.findByText('$1,500')).toBeInTheDocument(); // revenue
-    expect(screen.getByText('$50,000')).toBeInTheDocument(); // outstanding
-    expect(screen.getByText('$25,000')).toBeInTheDocument(); // overdue
+    expect(screen.getByText('$300')).toBeInTheDocument(); // expenses
+    expect(screen.getByText('$250')).toBeInTheDocument(); // overdue
   });
 
   it('shows the error state with a retry affordance when the request fails', async () => {
