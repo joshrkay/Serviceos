@@ -18,7 +18,7 @@ beforeEach(() => {
 
 describe('InteractionsPage', () => {
   it('shows the empty state when there are no interactions', async () => {
-    mockList.mockResolvedValue({ data: [], total: 0 });
+    mockList.mockResolvedValue({ data: [], total: 0, limit: 20, offset: 0 });
     render(<InteractionsPage />);
     expect(await screen.findByText('No completed calls yet')).toBeInTheDocument();
   });
@@ -48,6 +48,8 @@ describe('InteractionsPage', () => {
         },
       ],
       total: 1,
+      limit: 20,
+      offset: 0,
     });
     render(<InteractionsPage />);
     expect(await screen.findByText('Alice Smith')).toBeInTheDocument();
@@ -55,7 +57,7 @@ describe('InteractionsPage', () => {
   });
 
   it('queries the interactions list on mount', async () => {
-    mockList.mockResolvedValue({ data: [], total: 0 });
+    mockList.mockResolvedValue({ data: [], total: 0, limit: 20, offset: 0 });
     render(<InteractionsPage />);
     await waitFor(() => expect(mockList).toHaveBeenCalled());
     expect(mockList).toHaveBeenCalledWith(

@@ -7,7 +7,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { Phone, User, Clock, ChevronRight, RefreshCw, MessageSquare } from 'lucide-react';
+import { Phone, User, Clock, ChevronRight, RefreshCw, AlertCircle, MessageSquare } from 'lucide-react';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import { Spinner, EmptyState } from '../ui';
