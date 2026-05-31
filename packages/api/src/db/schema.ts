@@ -3521,7 +3521,29 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  '137_tenant_settings_auto_invoice_on_completion': `
+  '137_technician_working_hours': `
+    CREATE TABLE IF NOT EXISTS technician_working_hours (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      technician_id UUID NOT NULL REFERENCES users(id),
+      day_of_week SMALLINT NOT NULL CHECK (day_of_week BETWEEN 0 AND 6),
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT uq_working_hours_per_tech_day UNIQUE (tenant_id, technician_id, day_of_week)
+    );
+    CREATE INDEX IF NOT EXISTS idx_technician_working_hours_tech
+      ON technician_working_hours (tenant_id, technician_id);
+    ALTER TABLE technician_working_hours ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE technician_working_hours FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_technician_working_hours ON technician_working_hours;
+    CREATE POLICY tenant_isolation_technician_working_hours ON technician_working_hours
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '138_tenant_settings_auto_invoice_on_completion': `
     -- P20-001: opt-in toggle to auto-draft an invoice when a job is marked
     -- complete. Off by default — owners opt in; the draft still routes
     -- through the proposal/approval gate before anything is sent.
@@ -3529,7 +3551,7 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS auto_invoice_on_completion BOOLEAN NOT NULL DEFAULT false;
   `,
 
-  '138_create_invoice_schedules': `
+  '139_create_invoice_schedules': `
     -- P21-001: progress / milestone billing. One schedule splits a job's total
     -- into ordered milestones, each minted as its own invoice.
     CREATE TABLE IF NOT EXISTS invoice_schedules (
@@ -3561,7 +3583,7 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS milestone_index INTEGER;
   `,
 
-  '139_batch_invoicing': `
+  '140_batch_invoicing': `
     -- P21-003: batch-invoice sweep. Per (tenant, job, batch_date) dedup ledger
     -- so a re-run never re-batches a job, plus a per-tenant opt-in toggle.
     CREATE TABLE IF NOT EXISTS batch_invoice_runs (
