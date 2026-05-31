@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -10,6 +9,7 @@ import { toErrorResponse } from './shared/errors';
 import { createPool } from './db/pool';
 import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
+import { createIntegrationResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
@@ -391,157 +391,10 @@ import type { TenantIntegrationStatus } from './integrations/status-machine';
 // (createApp() throws if DATABASE_URL is missing in those environments).
 import { InMemoryWebhookEventRepository } from './webhooks/in-memory-webhook-event';
 
-/**
- * D1-3 — helmet options factory.
- *
- * Exported separately from `createApp()` so the middleware test can assert
- * header behaviour without booting the full app (which would require a real
- * Pg pool and a full set of production secrets when NODE_ENV=production).
- *
- * Production behaviour:
- *   - CSP whitelists the production frontend's external deps: Clerk
- *     (auth UI + JS), Stripe Elements, Twilio Voice JS SDK, Sentry browser
- *     SDK.
- *   - HSTS = 1 year, includeSubDomains, preload=false (preload list
- *     submission must be a deliberate human action).
- *   - X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy
- *     no-referrer.
- *   - crossOriginEmbedderPolicy is DISABLED because COEP=require-corp breaks
- *     Stripe Elements (cross-origin frames without CORP headers).
- *
- * Dev/test behaviour:
- *   - CSP disabled so Vite HMR / local tooling keep working. Other helmet
- *     defaults (nosniff, HSTS, frame deny, no-referrer) still apply.
- */
-export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0] {
-  return {
-    contentSecurityPolicy: isProd
-      ? {
-          directives: {
-            defaultSrc: ["'self'"],
-            scriptSrc: [
-              "'self'",
-              'https://js.stripe.com',
-              'https://*.clerk.com',
-              'https://*.clerk.accounts.dev',
-              'https://clerk.com',
-              'https://sdk.twilio.com',
-              'https://media.twiliocdn.com',
-            ],
-            styleSrc: [
-              "'self'",
-              "'unsafe-inline'",
-              'https://*.clerk.com',
-              'https://clerk.com',
-            ],
-            imgSrc: ["'self'", 'data:', 'https:', 'blob:'],
-            connectSrc: [
-              "'self'",
-              'https://api.stripe.com',
-              'https://*.clerk.com',
-              'https://clerk.com',
-              'https://*.clerk.accounts.dev',
-              'wss://*.twilio.com',
-              'https://*.twilio.com',
-              'https://*.ingest.sentry.io',
-              'https://*.ingest.us.sentry.io',
-            ],
-            frameSrc: [
-              "'self'",
-              'https://js.stripe.com',
-              'https://hooks.stripe.com',
-              'https://*.clerk.com',
-            ],
-            workerSrc: ["'self'", 'blob:'],
-            objectSrc: ["'none'"],
-            baseUri: ["'self'"],
-            frameAncestors: ["'none'"],
-          },
-        }
-      : false,
-    strictTransportSecurity: {
-      maxAge: 60 * 60 * 24 * 365,
-      includeSubDomains: true,
-      preload: false,
-    },
-    noSniff: true,
-    xFrameOptions: { action: 'deny' },
-    referrerPolicy: { policy: 'no-referrer' },
-    crossOriginEmbedderPolicy: false,
-  };
-}
-
-/**
- * Result of the /metrics auth pre-check. `ok: true` means the route should
- * render metrics; any other value is the HTTP response to send instead.
- *
- * Exported so a focused unit test can assert the auth contract without
- * booting the full app (which requires Pg in prod/staging).
- */
-export type MetricsAuthResult =
-  | { ok: true }
-  | { ok: false; status: number; body: Record<string, string>; headers?: Record<string, string> };
-
-/**
- * Gate the /metrics endpoint behind a shared bearer token.
- *
- *  - `METRICS_TOKEN` unset + dev/test → unauthenticated scrape allowed
- *    (so local Prometheus and ad-hoc curl keep working).
- *  - `METRICS_TOKEN` unset + prod/staging → 503; refuse rather than
- *    silently degrade to open access on a public hostname.
- *  - `METRICS_TOKEN` set → require an `Authorization: Bearer <token>`
- *    that matches under `crypto.timingSafeEqual`. Anything else → 401
- *    with `WWW-Authenticate: Bearer`.
- *
- * Why a shared token (vs a real OIDC/JWT flow): the scraper is a service,
- * not a user, and the value rotates with the deploy. A token in the
- * Railway env + the matching value in the Prometheus scrape config is the
- * smallest moving piece that still closes the public-enumeration hole.
- */
-export function checkMetricsAuth(
-  authorizationHeader: string | undefined,
-  envToken: string | undefined,
-  nodeEnv: string | undefined,
-): MetricsAuthResult {
-  const isProdEnv =
-    nodeEnv === 'production' || nodeEnv === 'prod' || nodeEnv === 'staging';
-
-  if (!envToken) {
-    if (isProdEnv) {
-      return {
-        ok: false,
-        status: 503,
-        body: {
-          error: 'METRICS_AUTH_NOT_CONFIGURED',
-          message: 'METRICS_TOKEN must be set when NODE_ENV is prod/staging.',
-        },
-      };
-    }
-    return { ok: true };
-  }
-
-  const presented =
-    typeof authorizationHeader === 'string' && authorizationHeader.startsWith('Bearer ')
-      ? authorizationHeader.slice('Bearer '.length).trim()
-      : '';
-  const expectedBuf = Buffer.from(envToken, 'utf8');
-  const presentedBuf = Buffer.from(presented, 'utf8');
-  // crypto.timingSafeEqual throws when buffers differ in length, so we
-  // gate it on a same-length pre-check.
-  const tokenOk =
-    presentedBuf.length === expectedBuf.length &&
-    crypto.timingSafeEqual(presentedBuf, expectedBuf);
-
-  if (!tokenOk) {
-    return {
-      ok: false,
-      status: 401,
-      body: { error: 'UNAUTHORIZED', message: 'Invalid or missing bearer token.' },
-      headers: { 'WWW-Authenticate': 'Bearer realm="metrics"' },
-    };
-  }
-  return { ok: true };
-}
+// Composition-root helpers extracted into ./bootstrap. Re-exported here so
+// existing tests that import them from '../../src/app' keep working.
+export { buildHelmetOptions } from './bootstrap/helmet-options';
+export { checkMetricsAuth, type MetricsAuthResult } from './bootstrap/metrics-auth';
 
 export function createApp(): express.Express {
   // §11 H3: Initialize Sentry FIRST so any error thrown during startup
@@ -788,71 +641,7 @@ export function createApp(): express.Express {
   // Resolves per-tenant integration credentials for inbound webhook signature
   // verification. Returns null when no row exists or the integration provider
   // doesn't match — recordTwilio / recordSendGrid then 403 with audit.
-  const integrationResolver = pool
-    ? async (tenantId: string, provider: 'twilio' | 'sendgrid') => {
-        const { decrypt } = await import('./integrations/crypto');
-        const { setTenantContext } = await import('./db/schema');
-        const encKey = process.env.TENANT_ENCRYPTION_KEY;
-
-        // tenant_integrations is FORCE RLS — must set app.current_tenant_id
-        // GUC on a dedicated client/transaction. Webhook handlers run outside
-        // withTenantTransaction so we open one here.
-        const client = await pool.connect();
-        let rows: Array<{
-          subaccount_sid: string | null;
-          auth_token_primary_enc: string | null;
-          auth_token_secondary_enc: string | null;
-          provider_data: Record<string, unknown>;
-        }> = [];
-        try {
-          await client.query('BEGIN');
-          await client.query(setTenantContext(tenantId));
-          const result = await client.query<{
-            subaccount_sid: string | null;
-            auth_token_primary_enc: string | null;
-            auth_token_secondary_enc: string | null;
-            provider_data: Record<string, unknown>;
-          }>(
-            `SELECT subaccount_sid, auth_token_primary_enc, auth_token_secondary_enc, provider_data
-             FROM tenant_integrations
-             WHERE tenant_id = $1 AND provider = $2`,
-            [tenantId, provider]
-          );
-          rows = result.rows;
-          await client.query('COMMIT');
-        } catch (err) {
-          try { await client.query('ROLLBACK'); } catch { /* best-effort */ }
-          throw err;
-        } finally {
-          // GUC leak fix: plain `SET app.current_tenant_id` persists past
-          // COMMIT/ROLLBACK on the underlying connection. Clear it before
-          // release so the next pool checkout doesn't inherit this
-          // tenant's context.
-          try { await client.query('RESET app.current_tenant_id'); } catch { /* ignore */ }
-          client.release();
-        }
-        const row = rows[0];
-        if (!row) return null;
-        // Decryption is only needed for Twilio auth tokens. SendGrid integrations
-        // store a public verification key (not encrypted) in provider_data, so
-        // the resolver shouldn't 403 valid SendGrid webhooks just because
-        // TENANT_ENCRYPTION_KEY isn't configured.
-        const canDecrypt = Boolean(encKey);
-        if (provider === 'twilio' && !canDecrypt) return null;
-        return {
-          tenantId,
-          provider,
-          subaccountSid: row.subaccount_sid ?? undefined,
-          authTokenPrimary: row.auth_token_primary_enc && canDecrypt
-            ? decrypt(row.auth_token_primary_enc, encKey!)
-            : undefined,
-          authTokenSecondary: row.auth_token_secondary_enc && canDecrypt
-            ? decrypt(row.auth_token_secondary_enc, encKey!)
-            : undefined,
-          sendgridPublicKeyPem: (row.provider_data?.sendgridPublicKeyPem as string | undefined),
-        };
-      }
-    : undefined;
+  const integrationResolver = pool ? createIntegrationResolver(pool) : undefined;
 
   const webhookRouterDeps: import('./webhooks/routes').WebhookRouterDeps = {
     tenantRepo,
