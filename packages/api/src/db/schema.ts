@@ -3453,6 +3453,34 @@ export const MIGRATIONS = {
     ALTER TABLE payments ADD CONSTRAINT payments_payment_method_check
       CHECK (payment_method IN ('stripe', 'cash', 'check', 'credit_card', 'bank_transfer', 'other'));
   `,
+
+  // Persist per-technician working hours so the dispatch feasibility check
+  // and the inbound-AI availability search stop offering off-hours slots
+  // (e.g. 3am). One contiguous window per tech per weekday; split shifts
+  // are out of scope for this iteration. Times are tenant-local HH:mm
+  // strings interpreted in the appointment's timezone (the appointment
+  // instants themselves stay UTC). Replaces the in-memory-only stub.
+  '134_technician_working_hours': `
+    CREATE TABLE IF NOT EXISTS technician_working_hours (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      technician_id UUID NOT NULL REFERENCES users(id),
+      day_of_week SMALLINT NOT NULL CHECK (day_of_week BETWEEN 0 AND 6),
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT uq_working_hours_per_tech_day UNIQUE (tenant_id, technician_id, day_of_week)
+    );
+    CREATE INDEX IF NOT EXISTS idx_technician_working_hours_tech
+      ON technician_working_hours (tenant_id, technician_id);
+    ALTER TABLE technician_working_hours ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE technician_working_hours FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_technician_working_hours ON technician_working_hours;
+    CREATE POLICY tenant_isolation_technician_working_hours ON technician_working_hours
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

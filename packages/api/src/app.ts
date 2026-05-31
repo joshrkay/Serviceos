@@ -347,7 +347,9 @@ import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { resolveInvoiceDeliveryProvider } from './proposals/execution/invoice-delivery-factory';
 import { resolveEstimateDeliveryProvider } from './proposals/execution/estimate-delivery-factory';
 import { InMemoryWorkingHoursRepository } from './availability/working-hours';
+import { PgWorkingHoursRepository } from './availability/pg-working-hours';
 import { InMemoryUnavailableBlockRepository } from './availability/unavailable-block';
+import { PgUnavailableBlockRepository } from './availability/pg-unavailable-block';
 import { createTravelTimeProvider } from './scheduling/travel-time/factory';
 import { StubSkillMatcher } from './scheduling/skill-matcher';
 import { createSchedulingRouter } from './scheduling/routes';
@@ -991,12 +993,13 @@ export function createApp(): express.Express {
   const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
   const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository();
   const assignmentRepo     = pool ? new PgAssignmentRepository(pool)     : new InMemoryAssignmentRepository();
-  // Availability repos and skill matcher have no Pg variants yet — the
-  // dispatch feasibility composer treats missing rows as no-conflict, so
-  // running InMemory in production is degraded-but-safe (working-hours and
-  // unavailable-block warnings simply won't fire until Pg variants land).
-  const workingHoursRepo       = new InMemoryWorkingHoursRepository();
-  const unavailableBlockRepo   = new InMemoryUnavailableBlockRepository();
+  // Availability repos are now Pg-backed in production (migration 134 added
+  // technician_working_hours; tech_unavailable_blocks landed in 116), so the
+  // dispatch feasibility composer and the inbound-AI availability search see
+  // real working-hours / unavailable-block rows instead of always treating
+  // missing rows as no-conflict. InMemory variants stay for tests / no-pool.
+  const workingHoursRepo       = pool ? new PgWorkingHoursRepository(pool)     : new InMemoryWorkingHoursRepository();
+  const unavailableBlockRepo   = pool ? new PgUnavailableBlockRepository(pool) : new InMemoryUnavailableBlockRepository();
   const travelTimeProvider     = createTravelTimeProvider(process.env);
   const skillMatcher           = new StubSkillMatcher();
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
