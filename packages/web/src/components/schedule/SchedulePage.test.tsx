@@ -132,6 +132,12 @@ describe('SchedulePage', () => {
     expect(await screen.findByText('Drain cleaning')).toBeInTheDocument();
   });
 
+  it('exposes a Dispatch board entry point linking to /dispatch', async () => {
+    renderPage();
+    const link = await screen.findByRole('link', { name: /dispatch board/i });
+    expect(link).toHaveAttribute('href', '/dispatch');
+  });
+
   it('shows appointment count after load', async () => {
     renderPage();
     expect(await screen.findByText('2 appointments')).toBeInTheDocument();
