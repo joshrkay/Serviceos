@@ -3453,6 +3453,19 @@ export const MIGRATIONS = {
     ALTER TABLE payments ADD CONSTRAINT payments_payment_method_check
       CHECK (payment_method IN ('stripe', 'cash', 'check', 'credit_card', 'bank_transfer', 'other'));
   `,
+
+  // Idempotency key for AI-placed tentative holds. A redelivered voice
+  // message (at-least-once queue) must not create a second appointment hold
+  // for the same recording. The held-slot path stamps a deterministic key
+  // (`voice-hold:<recordingId>`); the partial unique index dedups concurrent
+  // re-inserts while leaving ordinary (keyless) appointments unaffected.
+  '134_appointments_idempotency_key': `
+    ALTER TABLE appointments
+      ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_appointments_idempotency
+      ON appointments(tenant_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

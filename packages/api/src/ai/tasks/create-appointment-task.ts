@@ -311,6 +311,12 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
             createdBy: context.userId,
             holdPendingApproval: true,
             holdExpiryAt,
+            // Deterministic per-recording key: a redelivered voice message
+            // returns the existing hold instead of inserting a second one
+            // (closes the concurrent-redelivery double-booking window).
+            ...(context.recordingId
+              ? { idempotencyKey: `voice-hold:${context.recordingId}` }
+              : {}),
           },
           repo,
         );

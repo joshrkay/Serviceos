@@ -3,6 +3,7 @@ import { Logger } from '../logging/logger';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository, createProposal, CreateProposalInput, ProposalType, Proposal } from '../proposals/proposal';
 import { assertValidProposalPayload } from '../proposals/contracts';
+import { ConflictError } from '../shared/errors';
 import {
   classifyIntent,
   ExtractedEntities,
@@ -341,8 +342,10 @@ async function findAlreadyProcessed(
 }
 
 /**
- * Stamp the originating `recordingId` onto a proposal's sourceContext so a
- * redelivered message can detect it was already processed. Returns the
+ * Stamp the originating `recordingId` onto a proposal's sourceContext (so a
+ * redelivered message can detect it was already processed) AND derive a
+ * deterministic `idempotencyKey` (so a *concurrent* redelivery is deduped
+ * atomically by the proposals table's ON CONFLICT index). Returns the
  * proposal unchanged when there's no recordingId.
  */
 function stampRecordingId(proposal: Proposal, recordingId: string | undefined): Proposal {
@@ -350,7 +353,36 @@ function stampRecordingId(proposal: Proposal, recordingId: string | undefined): 
   return {
     ...proposal,
     sourceContext: { ...(proposal.sourceContext ?? {}), recordingId },
+    idempotencyKey: proposal.idempotencyKey ?? `voice:${recordingId}`,
   };
+}
+
+/**
+ * Persist a proposal, treating an idempotency-key conflict as a successful
+ * dedup rather than an error. The pre-check (findAlreadyProcessed) catches
+ * the common sequential-redelivery case; this catches the concurrent case
+ * where two deliveries both pass the pre-check and race to create — the DB
+ * (or in-memory) unique constraint lets exactly one win and the loser's
+ * ConflictError is swallowed here instead of failing the message.
+ */
+async function createDeduped(
+  repo: ProposalRepository,
+  proposal: Proposal,
+  recordingId: string | undefined,
+  log: Logger,
+): Promise<void> {
+  try {
+    await repo.create(proposal);
+  } catch (err) {
+    if (err instanceof ConflictError) {
+      log.info('voice-action-router: duplicate proposal create skipped (idempotency conflict)', {
+        recordingId,
+        idempotencyKey: proposal.idempotencyKey,
+      });
+      return;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -494,6 +526,10 @@ async function emitClarification(
       ...(conversationId ? { conversationId } : {}),
       ...(recordingId ? { recordingId } : {}),
     },
+    // Same deterministic key as the task path (stampRecordingId) so a
+    // redelivered message dedups atomically regardless of which proposal
+    // type it produced. One message → one proposal → one key.
+    ...(recordingId ? { idempotencyKey: `voice:${recordingId}` } : {}),
     ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
     createdBy: userId,
     // Deliberately NO sourceTrustTier. decideInitialStatus will land
@@ -503,7 +539,7 @@ async function emitClarification(
     // `expired`.
   });
 
-  await deps.proposalRepo.create(proposal);
+  await createDeduped(deps.proposalRepo, proposal, recordingId, log);
 
   log.info('voice-action-router: clarification proposal emitted', {
     proposalId: proposal.id,
@@ -675,14 +711,16 @@ export function createVoiceActionRouterWorker(
           classification.extractedEntities
         ),
         ...(customerId ? { customerId } : {}),
+        ...(recordingId ? { recordingId } : {}),
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       };
 
       const { proposal } = await handler.handle(context);
-      // Stamp recordingId so a redelivered message sees this proposal and
-      // short-circuits in findAlreadyProcessed above. Clarification proposals
-      // already carry recordingId via emitClarification's sourceContext.
-      await deps.proposalRepo.create(stampRecordingId(proposal, recordingId));
+      // Stamp recordingId + idempotencyKey so a redelivered message sees this
+      // proposal and short-circuits in findAlreadyProcessed above, and so a
+      // concurrent redelivery is deduped atomically at the DB layer.
+      // Clarification proposals already carry recordingId via emitClarification.
+      await createDeduped(deps.proposalRepo, stampRecordingId(proposal, recordingId), recordingId, log);
 
       log.info('voice-action-router: proposal created from voice', {
         proposalId: proposal.id,

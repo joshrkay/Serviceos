@@ -34,6 +34,13 @@ export interface Appointment {
   holdPendingApproval: boolean;
   /** When the tentative hold auto-releases if not approved (set when holdPendingApproval is true). */
   holdExpiryAt?: Date;
+  /**
+   * Optional dedup key for at-least-once write paths (e.g. a redelivered
+   * voice message). Unique per tenant via a partial index; when set, a
+   * second create with the same key returns the existing appointment
+   * instead of inserting a duplicate.
+   */
+  idempotencyKey?: string;
   notes?: string;
   createdBy: string;
   createdAt: Date;
@@ -74,6 +81,8 @@ export interface CreateAppointmentInput {
   holdPendingApproval?: boolean;
   /** When the tentative hold auto-releases. Set when holdPendingApproval is true. */
   holdExpiryAt?: Date;
+  /** Optional dedup key for at-least-once writes; see Appointment.idempotencyKey. */
+  idempotencyKey?: string;
   createdBy: string;
 }
 
@@ -198,6 +207,7 @@ export async function createAppointment(
     status: 'scheduled',
     holdPendingApproval: input.holdPendingApproval ?? false,
     holdExpiryAt: input.holdExpiryAt,
+    idempotencyKey: input.idempotencyKey,
     notes: input.notes,
     createdBy: input.createdBy,
     createdAt: new Date(),
