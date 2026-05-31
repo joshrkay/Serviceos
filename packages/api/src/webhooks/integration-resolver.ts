@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { isValidTenantId } from '../db/schema';
 import type { WebhookRouterDeps } from './routes';
 
 /**
@@ -7,23 +8,18 @@ import type { WebhookRouterDeps } from './routes';
  */
 export type IntegrationResolver = NonNullable<WebhookRouterDeps['integrationResolver']>;
 
-// Matches the guard in db/schema.ts:setTenantContext. The `tenantId` reaching
-// this resolver comes straight from a public webhook URL param
-// (/webhooks/twilio/:tenantId, /webhooks/sendgrid/:tenantId), so a malformed
-// value would otherwise throw inside setTenantContext after we'd already
-// acquired a pool client — surfacing as a hung request + logged rejection
-// rather than a clean rejection. Validate up front and return null so the
-// caller's existing `!integration` branch answers 403 Forbidden.
-const TENANT_ID_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /**
  * Pg-backed implementation of the per-tenant inbound-webhook credential
  * resolver. Extracted from app.ts (composition-root decomposition).
  *
  * Resolves per-tenant integration credentials for inbound webhook signature
  * verification. Returns null when the tenant id is malformed, no row exists,
- * or the integration provider doesn't match — recordTwilio / recordSendGrid
- * then 403 with audit.
+ * or the integration provider doesn't match.
+ *
+ * The webhook route handlers gate `tenantId` on `isValidTenantId` up front, so
+ * the malformed-id check here is defense-in-depth (this is an exported,
+ * independently-callable function): without it a non-UUID would acquire a pool
+ * client and only then throw inside setTenantContext.
  *
  * `tenant_integrations` is FORCE RLS, and webhook handlers run OUTSIDE
  * `withTenantTransaction`, so this opens its own dedicated client/transaction
@@ -34,7 +30,7 @@ export function createIntegrationResolver(pool: Pool): IntegrationResolver {
   return async (tenantId, provider) => {
     // Reject malformed tenant ids before touching the pool so a bad URL param
     // can't reach setTenantContext's throw on a checked-out client.
-    if (!TENANT_ID_UUID.test(tenantId)) return null;
+    if (!isValidTenantId(tenantId)) return null;
     const { decrypt } = await import('../integrations/crypto');
     const { setTenantContext } = await import('../db/schema');
     const encKey = process.env.TENANT_ENCRYPTION_KEY;

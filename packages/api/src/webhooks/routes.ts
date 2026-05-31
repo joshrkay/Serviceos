@@ -7,6 +7,7 @@ import {
   WebhookRepository,
 } from './webhook-handler';
 import { createLogger } from '../logging/logger';
+import { isValidTenantId } from '../db/schema';
 import { bootstrapTenant, TenantRepository } from '../auth/clerk';
 import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
@@ -1601,6 +1602,14 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
   };
   const recordTwilio = async (kind: string, req: Request, res: Response) => {
     const tenantId = req.params.tenantId;
+    // `tenantId` comes from the public URL. Reject a malformed id here, before
+    // any tenant-scoped work — both the resolver AND the rejectBound audit
+    // write go through setTenantContext, which throws on a non-UUID. Returning
+    // 403 directly (no audit row) keeps that throw out of the void-dispatched
+    // handler, where it would surface as an unhandled rejection.
+    if (!isValidTenantId(tenantId)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
     const integration = await deps.integrationResolver?.(tenantId, 'twilio');
     if (!integration || integration.provider !== 'twilio' || integration.tenantId !== tenantId) {
       await rejectBound(tenantId, 'tenant_mismatch', { kind });
@@ -1714,6 +1723,11 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
 
   router.post('/sendgrid/:tenantId', async (req: Request, res: Response) => {
     const tenantId = req.params.tenantId;
+    // See recordTwilio: gate the public tenant id before any tenant-scoped
+    // work so a malformed UUID can't throw inside setTenantContext.
+    if (!isValidTenantId(tenantId)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
     const integration = await deps.integrationResolver?.(tenantId, 'sendgrid');
     if (!integration || integration.provider !== 'sendgrid' || integration.tenantId !== tenantId) {
       await rejectBound(tenantId, 'tenant_mismatch', { kind: 'sendgrid' });
