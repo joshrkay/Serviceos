@@ -47,13 +47,33 @@ export const createJobPayloadSchema = z.object({
   priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
 });
 
-export const createAppointmentPayloadSchema = z.object({
-  jobId: z.string().uuid(),
-  scheduledStart: z.string().min(1),
-  scheduledEnd: z.string().min(1),
-  technicianId: z.string().uuid().optional(),
-  notes: z.string().optional(),
-});
+export const createAppointmentPayloadSchema = z
+  .object({
+    jobId: z.string().uuid(),
+    scheduledStart: z.string().min(1),
+    scheduledEnd: z.string().min(1),
+    technicianId: z.string().uuid().optional(),
+    notes: z.string().optional(),
+    // IANA tenant timezone the times should render in (UTC instants are
+    // stored; this is display/context only). Set by the AI booking path.
+    timezone: z.string().optional(),
+    // Optional customer-facing arrival window (home-services standard).
+    arrivalWindowStart: z.string().optional(),
+    arrivalWindowEnd: z.string().optional(),
+    // Carried from the voice path for the dispatcher review card; not all
+    // are persisted directly on the appointment.
+    customerId: z.string().optional(),
+    customerName: z.string().optional(),
+    summary: z.string().optional(),
+  })
+  .refine(
+    (v) => {
+      const s = Date.parse(v.scheduledStart);
+      const e = Date.parse(v.scheduledEnd);
+      return !Number.isNaN(s) && !Number.isNaN(e) && e > s;
+    },
+    { message: 'scheduledEnd must be a valid datetime after scheduledStart' },
+  );
 
 export const createBookingPayloadSchema = z.object({
   appointmentId: z.string().uuid(),

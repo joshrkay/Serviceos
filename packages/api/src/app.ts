@@ -1021,6 +1021,15 @@ export function createApp(): express.Express {
   // worker) so settings hits the DB at most once per tenant per TTL
   // window across the whole process.
   const thresholdResolver = createThresholdResolver(settingsRepo);
+  // Per-tenant scheduling context (IANA timezone) for the voice booking
+  // path. Delegates to settingsRepo (same RLS / withTenant path) so spoken
+  // times ("next Tuesday at 2pm") resolve against the TENANT's zone instead
+  // of a hardcoded one. Best-effort: the router falls back to the product
+  // default timezone when this returns undefined.
+  const tenantSchedulingResolver = async (tenantId: string) => {
+    const settings = await settingsRepo.findByTenant(tenantId);
+    return { timezone: settings?.timezone };
+  };
   // B1 — per-tenant voice persona. 60-second LRU cache; shared by
   // both the Twilio and in-app adapters.
   const voicePersonaResolver = createVoicePersonaResolver(settingsRepo);
@@ -1639,6 +1648,7 @@ export function createApp(): express.Express {
     slotConflictChecker,
     availabilityFinder,
     thresholdResolver,
+    tenantSchedulingResolver,
     appointmentRepo,
     // Lets reschedule/cancel/confirm scope appointment resolution to the
     // verified caller's own appointments (appointment → job → customerId).

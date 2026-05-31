@@ -16,6 +16,7 @@ import {
 import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
 import { CreateAppointmentAITaskHandler } from '../ai/tasks/create-appointment-task';
+import { DEFAULT_TENANT_TIMEZONE } from '../ai/scheduling/resolve-datetime';
 import { SlotConflictChecker } from '../ai/tasks/slot-conflict-checker';
 import { AvailabilityFinder } from '../ai/tasks/availability-finder';
 import { AppointmentRepository } from '../appointments/appointment';
@@ -152,6 +153,17 @@ export interface VoiceActionRouterDeps {
    * `buildVerticalPromptResolver(...)` from `verticals/resolve-active-pack.ts`.
    */
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
+  /**
+   * Resolves the tenant's scheduling context (IANA timezone) once per
+   * request from tenant_settings, mirroring `thresholdResolver`. Threaded
+   * onto the TaskContext so the create/reschedule appointment handlers
+   * translate spoken times against the TENANT's timezone instead of a
+   * hardcoded zone. Best-effort: a resolver hiccup degrades to the product
+   * default timezone rather than blocking the call.
+   */
+  tenantSchedulingResolver?: (
+    tenantId: string,
+  ) => Promise<{ timezone?: string } | undefined>;
 }
 
 // P11-001: lookup_* intents are READ-ONLY and never produce a
@@ -662,6 +674,12 @@ export function createVoiceActionRouterWorker(
         ? await deps.thresholdResolver(tenantId).catch(() => undefined)
         : undefined;
 
+      // Resolve the tenant's timezone ONCE per request (best-effort) so the
+      // scheduling handlers translate spoken times against the right zone.
+      const scheduling = deps.tenantSchedulingResolver
+        ? await deps.tenantSchedulingResolver(tenantId).catch(() => undefined)
+        : undefined;
+
       const context: TaskContext = {
         tenantId,
         userId,
@@ -674,6 +692,8 @@ export function createVoiceActionRouterWorker(
           classification.intentType,
           classification.extractedEntities
         ),
+        timezone: scheduling?.timezone ?? DEFAULT_TENANT_TIMEZONE,
+        now: new Date(),
         ...(customerId ? { customerId } : {}),
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       };

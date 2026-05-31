@@ -33,6 +33,17 @@ function summaryFor(proposal: Proposal): string {
   return head;
 }
 
+/**
+ * Less-aggressive trim for appointment read-backs. The scheduling handlers
+ * put the RESOLVED date/time (and arrival window) into the summary so the
+ * caller/operator hears exactly what will be booked — the industry
+ * safeguard against silently mis-booked times — so we must not truncate
+ * the time away. ~160 chars keeps the spoken line under ~12s.
+ */
+function appointmentSummaryFor(proposal: Proposal): string {
+  return proposal.summary.length > 160 ? `${proposal.summary.slice(0, 157)}…` : proposal.summary;
+}
+
 function cueFor(proposal: Proposal): string {
   return isVoiceApprovable(proposal.proposalType)
     ? 'Say approve or cancel.'
@@ -50,7 +61,11 @@ export function buildReadbackScript(proposal: Proposal): string {
     case 'update_estimate':
       return `Estimate update: ${summaryFor(proposal)}. ${cueFor(proposal)}`;
     case 'create_appointment':
-      return `Scheduled an appointment: ${summaryFor(proposal)}. ${cueFor(proposal)}`;
+      // Speak the RESOLVED time (carried on the summary), not the transcript.
+      return `Scheduled: ${appointmentSummaryFor(proposal)}. ${cueFor(proposal)}`;
+    case 'create_booking':
+      // Held-slot booking — same resolved-time summary as create_appointment.
+      return `Holding this slot: ${appointmentSummaryFor(proposal)}. ${cueFor(proposal)}`;
     case 'reschedule_appointment':
       return `Rescheduling: ${summaryFor(proposal)}. ${cueFor(proposal)}`;
     case 'cancel_appointment':

@@ -5,6 +5,13 @@ import { assessConfidence } from '../guardrails/confidence';
 import { SlotConflictChecker, SlotConflictResult } from './slot-conflict-checker';
 import { AvailabilityFinder, OpenSlot } from './availability-finder';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
+import {
+  resolveDateTime,
+  formatForReadback,
+  formatTimeForReadback,
+  DEFAULT_TENANT_TIMEZONE,
+  ResolveDateTimeFailureReason,
+} from '../scheduling/resolve-datetime';
 
 /**
  * LLM-backed CreateAppointmentTaskHandler.
@@ -12,41 +19,46 @@ import { AppointmentRepository, createAppointment } from '../../appointments/app
  * Exists alongside the minimal CreateAppointmentTaskHandler in
  * `task-handlers.ts`. That one is for programmatic callers that already
  * have structured date/time fields. This one is for voice transcripts
- * where the operator says "next Tuesday at 2pm" and the LLM has to
- * turn that into an ISO datetime.
+ * where the caller says "next Tuesday at 2pm".
  *
- * Produces the same proposal type (`create_appointment`) so the
- * downstream CreateAppointmentExecutionHandler doesn't care which
- * task handler built the payload.
+ * HYBRID date resolution (P0 correctness fix). The LLM ONLY extracts the
+ * verbatim date/time phrase plus ancillary fields — it does NO timezone or
+ * calendar math. `resolveDateTime` then deterministically translates that
+ * phrase into a UTC window using the TENANT's timezone (threaded on the
+ * context, no longer hardcoded to America/Los_Angeles) and the current
+ * instant. Ambiguous phrases ("sometime Tuesday") and invalid results
+ * (past times, inverted ranges) become a `voice_clarification` instead of
+ * a silently mis-booked appointment.
  *
- * P0-035: when a SlotConflictChecker is provided, the task calls it
- * BEFORE producing the proposal. On a conflict, the task swaps the
+ * Produces the same proposal type (`create_appointment`) so the downstream
+ * CreateAppointmentExecutionHandler doesn't care which task handler built
+ * the payload.
+ *
+ * P0-035: when a SlotConflictChecker is provided, the task calls it BEFORE
+ * producing the proposal. On a conflict, the task swaps the
  * `create_appointment` proposal for a `voice_clarification` so the
- * dispatcher is asked to pick another time / technician (with the
- * conflicting appointment id surfaced for context) instead of
- * approving an already-broken appointment.
+ * dispatcher is asked to pick another time / technician.
  */
 
-const APPOINTMENT_SYSTEM_PROMPT = `You are an appointment scheduling assistant for a field service operating system.
-Given a voice transcript from a field service operator, extract the appointment details.
+const APPOINTMENT_SYSTEM_PROMPT = `You extract appointment details from a field service voice transcript.
 
 Return valid JSON with this shape (no prose, no markdown fences):
 {
+  "dateTimePhrase": "<the date/time phrase EXACTLY as spoken, e.g. 'next Tuesday at 2pm' or 'tomorrow morning'>",
   "customerName": "<string, optional>",
   "customerId": "<uuid, optional — only if explicitly known>",
   "jobId": "<uuid, optional — only if explicitly known>",
-  "scheduledStart": "<ISO 8601 datetime, e.g. 2026-04-21T21:00:00Z>",
-  "scheduledEnd": "<ISO 8601 datetime>",
-  "summary": "<one-line description of the appointment>",
+  "summary": "<one-line description of the work requested>",
+  "durationMinutes": <integer, optional — estimated job length if stated or clearly implied by the service>,
   "confidence_score": <number between 0 and 1>
 }
 
 Rules:
-- Always return ISO 8601 UTC datetimes for scheduledStart and scheduledEnd.
-- If the transcript says "next Tuesday at 2pm" assume the tenant's local
-  timezone is America/Los_Angeles unless told otherwise, then convert to UTC.
-- If no explicit end time is given, default the appointment to 1 hour.
-- If the date is ambiguous, set confidence_score below 0.7.
+- Copy the date/time phrase VERBATIM into dateTimePhrase. Do NOT convert it to a
+  date, do NOT compute a timezone, do NOT output an ISO timestamp. Downstream
+  code resolves the actual time against the tenant's timezone.
+- If the transcript mentions no date or time at all, set dateTimePhrase to "".
+- durationMinutes is a hint only (e.g. a quick diagnostic ~60, a furnace install ~240).
 - Never invent a customerId or jobId.`;
 
 const ISO_DATETIME_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
@@ -67,22 +79,103 @@ function tryParseJson(content: string): Record<string, unknown> | null {
   }
 }
 
+/** Extract the non-date fields the LLM returned into a proposal payload. */
 function buildPayload(parsed: Record<string, unknown> | null): Record<string, unknown> {
   if (!parsed) return {};
   const payload: Record<string, unknown> = {};
-
   if (typeof parsed.customerName === 'string') payload.customerName = parsed.customerName;
   if (typeof parsed.customerId === 'string') payload.customerId = parsed.customerId;
   if (typeof parsed.jobId === 'string') payload.jobId = parsed.jobId;
   if (typeof parsed.summary === 'string') payload.summary = parsed.summary;
   if (typeof parsed.technicianId === 'string') payload.technicianId = parsed.technicianId;
-
-  // Strict ISO validation — refuse garbage dates rather than hand
-  // them to the execution handler where they'd blow up at execute time.
-  if (isIsoDatetime(parsed.scheduledStart)) payload.scheduledStart = parsed.scheduledStart;
-  if (isIsoDatetime(parsed.scheduledEnd)) payload.scheduledEnd = parsed.scheduledEnd;
-
   return payload;
+}
+
+/** Pull the verbatim date/time phrase from the LLM output or the classifier entities. */
+function extractDateTimePhrase(
+  parsed: Record<string, unknown> | null,
+  context: TaskContext,
+): string {
+  if (parsed && typeof parsed.dateTimePhrase === 'string' && parsed.dateTimePhrase.trim()) {
+    return parsed.dateTimePhrase.trim();
+  }
+  const ee = context.existingEntities;
+  if (ee && typeof ee.dateTimeDescription === 'string' && ee.dateTimeDescription.trim()) {
+    return ee.dateTimeDescription.trim();
+  }
+  // Last resort: let the resolver try the whole utterance.
+  return context.message ?? '';
+}
+
+function durationHint(parsed: Record<string, unknown> | null): number | undefined {
+  if (parsed && typeof parsed.durationMinutes === 'number' && parsed.durationMinutes > 0) {
+    return parsed.durationMinutes;
+  }
+  return undefined;
+}
+
+/**
+ * Build a human-readable appointment summary in the tenant timezone. This
+ * is what the dispatcher review card shows AND what the TTS read-back
+ * speaks — so the operator/caller hears the RESOLVED time, not the raw
+ * transcript (the industry safeguard against mis-bookings).
+ */
+function buildResolvedSummary(
+  work: string | undefined,
+  startUtc: string,
+  timezone: string,
+  arrival?: { startUtc: string; endUtc: string },
+): string {
+  const when = formatForReadback(startUtc, timezone);
+  const window = arrival
+    ? ` (arrival window ${formatTimeForReadback(arrival.startUtc, timezone)}–${formatTimeForReadback(arrival.endUtc, timezone)})`
+    : '';
+  const what = work && work.trim() ? `${work.trim()} — ` : 'Appointment — ';
+  return `${what}${when}${window}`;
+}
+
+const CLARIFICATION_MESSAGES: Record<ResolveDateTimeFailureReason, string> = {
+  empty: "I didn't catch a day or time for the appointment. When would you like to be scheduled?",
+  unparseable: "I couldn't make out the day and time. Could you say the date and time again?",
+  ambiguous_no_time: 'What time of day works for that date — morning, afternoon, or a specific time?',
+  in_past: 'That time has already passed. What upcoming day and time would you like?',
+  inverted: 'The end time was before the start time. Could you give the start time and how long it should take?',
+  implausible: "I couldn't pin down a valid time. Could you say the date and time again?",
+};
+
+/**
+ * Emit a clarification when the spoken time can't be resolved. Reuses the
+ * Tier-1-LOCKED voice_clarification 'missing_entities' reason (the operator
+ * must supply a usable time before anything is booked).
+ */
+function buildTimeClarificationProposal(
+  context: TaskContext,
+  reason: ResolveDateTimeFailureReason,
+  phrase: string,
+): Proposal {
+  const explanation = CLARIFICATION_MESSAGES[reason];
+  const sourceContext: Record<string, unknown> = {
+    source: 'voice',
+    transcript: context.message,
+    reason: `unresolved_datetime:${reason}`,
+    ...(phrase ? { phrase } : {}),
+    ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+  };
+  const payload: Record<string, unknown> = {
+    transcript: context.message,
+    reason: 'missing_entities',
+    ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+  };
+  return createProposal({
+    tenantId: context.tenantId,
+    proposalType: 'voice_clarification',
+    payload,
+    summary: explanation,
+    explanation,
+    sourceContext,
+    createdBy: context.userId,
+    // A clarification is never auto-approved — no sourceTrustTier.
+  });
 }
 
 function buildClarificationProposal(
@@ -205,6 +298,9 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
   }
 
   async handle(context: TaskContext): Promise<TaskResult> {
+    const timezone = context.timezone ?? DEFAULT_TENANT_TIMEZONE;
+    const now = context.now ?? new Date();
+
     const llmResponse = await this.gateway.complete({
       taskType: 'create_appointment',
       messages: [
@@ -217,6 +313,31 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
     const parsed = tryParseJson(llmResponse.content);
     const payload = buildPayload(parsed);
 
+    // HYBRID resolution: the LLM only extracted the verbatim phrase; we
+    // resolve it deterministically against the tenant timezone + now.
+    const phrase = extractDateTimePhrase(parsed, context);
+    const resolved = resolveDateTime(phrase, {
+      timezone,
+      now,
+      defaultDurationMin: durationHint(parsed),
+    });
+
+    if (!resolved.ok) {
+      // Couldn't pin down a valid time — ask rather than mis-book.
+      return {
+        proposal: buildTimeClarificationProposal(context, resolved.reason, phrase),
+        taskType: 'voice_clarification',
+      };
+    }
+
+    payload.scheduledStart = resolved.startUtc;
+    payload.scheduledEnd = resolved.endUtc;
+    payload.timezone = resolved.timezone;
+    if (resolved.arrivalWindowStartUtc && resolved.arrivalWindowEndUtc) {
+      payload.arrivalWindowStart = resolved.arrivalWindowStartUtc;
+      payload.arrivalWindowEnd = resolved.arrivalWindowEndUtc;
+    }
+
     // The LLM is instructed never to invent a customerId; the caller's
     // identity is resolved upstream (caller-ID match) and threaded on
     // the context. Prefer it over anything the model produced so the
@@ -226,18 +347,29 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
     const confidenceInput = parsed ?? {};
     const confidence = assessConfidence(confidenceInput);
 
+    // The dispatcher card / TTS read-back must show the RESOLVED time, not
+    // the raw transcript, so the human approving it can catch a misparse.
+    const arrival =
+      resolved.arrivalWindowStartUtc && resolved.arrivalWindowEndUtc
+        ? { startUtc: resolved.arrivalWindowStartUtc, endUtc: resolved.arrivalWindowEndUtc }
+        : undefined;
+    const summary = buildResolvedSummary(
+      typeof payload.summary === 'string' ? payload.summary : undefined,
+      resolved.startUtc,
+      resolved.timezone,
+      arrival,
+    );
+
     // P0-035: pre-check slot availability if the checker is wired AND
     // we have enough payload to ask the question. We need a customerId
-    // and both ISO timestamps. If any of those are missing, fall back
-    // to the original create_appointment behavior — the proposal will
-    // still go to dispatcher review, who will catch the issue.
+    // and both ISO timestamps.
     const checker = this.slotConflictChecker;
     const customerId = typeof payload.customerId === 'string' ? payload.customerId : undefined;
-    const scheduledStart = typeof payload.scheduledStart === 'string' ? payload.scheduledStart : undefined;
-    const scheduledEnd = typeof payload.scheduledEnd === 'string' ? payload.scheduledEnd : undefined;
+    const scheduledStart = resolved.startUtc;
+    const scheduledEnd = resolved.endUtc;
     const technicianId = typeof payload.technicianId === 'string' ? payload.technicianId : undefined;
 
-    if (checker && customerId && scheduledStart && scheduledEnd) {
+    if (checker && customerId) {
       const result = await checker.check({
         tenantId: context.tenantId,
         windowStart: new Date(scheduledStart),
@@ -249,11 +381,7 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       if (!result.ok) {
         // Per-tech filter is only safe when the conflict is the tech
         // being busy. For `customer_busy`, the conflicting appointment
-        // is with a DIFFERENT tech — passing `technicianId` would let
-        // the finder filter that appointment out and re-suggest the
-        // very slot the customer is double-booked on. For
-        // `could_not_verify`, drop the tech filter defensively (we
-        // don't know what the underlying problem was).
+        // is with a DIFFERENT tech.
         const altTechId =
           result.conflict === 'technician_busy' ? technicianId : undefined;
         const alternatives = await this.findAlternatives(
@@ -271,7 +399,7 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       tenantId: context.tenantId,
       proposalType: this.taskType,
       payload,
-      summary: context.message,
+      summary,
       confidenceScore: confidence.score,
       confidenceFactors: confidence.factors,
       sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
@@ -288,15 +416,9 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
     // Held-slot booking path: when an appointmentRepo is wired AND the
     // LLM produced a complete booking (jobId + both timestamps), place
     // a tentative hold on the calendar up front and emit a
-    // `create_booking` proposal that references it. The slot is
-    // reserved immediately; approving the proposal confirms it,
-    // rejecting it releases it. Without a repo, or with an incomplete
-    // booking, fall through to the legacy create_appointment proposal.
+    // `create_booking` proposal that references it.
     const repo = this.appointmentRepo;
-    if (repo && typeof payload.jobId === 'string' && scheduledStart && scheduledEnd) {
-      // Compute the hold expiry ONCE so the appointment's holdExpiryAt and
-      // the proposal's expiresAt agree exactly (previously each used its own
-      // Date.now(), drifting by however long createAppointment took).
+    if (repo && typeof payload.jobId === 'string') {
       const holdExpiryAt = new Date(Date.now() + HOLD_WINDOW_MS);
       let held;
       try {
@@ -306,7 +428,14 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
             jobId: payload.jobId,
             scheduledStart: new Date(scheduledStart),
             scheduledEnd: new Date(scheduledEnd),
-            timezone: 'UTC',
+            // FIX: persist the tenant's real display timezone, not 'UTC'.
+            timezone: resolved.timezone,
+            ...(arrival
+              ? {
+                  arrivalWindowStart: new Date(arrival.startUtc),
+                  arrivalWindowEnd: new Date(arrival.endUtc),
+                }
+              : {}),
             notes: typeof payload.summary === 'string' ? payload.summary : undefined,
             createdBy: context.userId,
             holdPendingApproval: true,
@@ -323,7 +452,7 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
         tenantId: context.tenantId,
         proposalType: 'create_booking',
         payload: { appointmentId: held.id },
-        summary: context.message,
+        summary,
         confidenceScore: confidence.score,
         confidenceFactors: confidence.factors,
         sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
@@ -351,11 +480,7 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
 
   /**
    * Look up alternative open slots when the proposed time conflicts.
-   * Failure-open: any error returns `undefined`, and the clarification
-   * proposal falls back to the no-alternatives wording. Search window
-   * spans from the conflicted slot's start through the end of the next
-   * day, which covers same-day reschedules and "first thing tomorrow"
-   * without scanning the full calendar.
+   * Failure-open: any error returns `undefined`.
    */
   private async findAlternatives(
     tenantId: string,

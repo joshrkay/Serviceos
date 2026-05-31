@@ -20,6 +20,20 @@ export interface TaskContext {
    * proposals fall through to DEFAULT_AUTO_APPROVE_THRESHOLDS.
    */
   tenantThresholdOverride?: Partial<Record<'supervisor' | 'tech' | 'both', number>>;
+  /**
+   * Tenant IANA timezone (e.g. "America/New_York"), resolved once per
+   * request by the entry-point from tenant_settings. Scheduling handlers
+   * use it to translate spoken times ("next Tuesday at 2pm") into the
+   * correct UTC instant. When undefined, handlers fall back to the product
+   * default (DEFAULT_TENANT_TIMEZONE) — NEVER a hardcoded zone.
+   */
+  timezone?: string;
+  /**
+   * Reference instant for resolving relative phrases ("tomorrow",
+   * "next Tuesday"). Set by the entry-point to request time; defaults to
+   * `new Date()` at point of use. Injectable so scheduling is testable.
+   */
+  now?: Date;
 }
 
 export interface TaskResult {
