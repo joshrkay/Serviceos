@@ -62,14 +62,8 @@ Rules:
 - durationMinutes is a hint only (e.g. a quick diagnostic ~60, a furnace install ~240).
 - Never invent a customerId or jobId.`;
 
-const ISO_DATETIME_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
-
 /** A tentative hold survives 24h before the availability finder treats it as free. */
 const HOLD_WINDOW_MS = 24 * 60 * 60 * 1000;
-
-function isIsoDatetime(v: unknown): v is string {
-  return typeof v === 'string' && ISO_DATETIME_REGEX.test(v);
-}
 
 function tryParseJson(content: string): Record<string, unknown> | null {
   try {
@@ -523,4 +517,4 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
   }
 }
 
-export { APPOINTMENT_SYSTEM_PROMPT, isIsoDatetime, buildPayload };
+export { APPOINTMENT_SYSTEM_PROMPT, buildPayload };

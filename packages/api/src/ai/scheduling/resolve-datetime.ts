@@ -131,6 +131,25 @@ function wallToUtc(
 }
 
 /**
+ * Resolve the hour for a parsed component, biasing a bare hour to service
+ * hours. When the caller gives no am/pm ("come at 5"), chrono leaves the
+ * meridiem uncertain and tends to pick the literal hour (5 → 5am). For a
+ * field-service call that almost always means the afternoon, so an uncertain
+ * meridiem at hours 1–7 is biased to PM. Hours 8–12 stay as spoken (a bare
+ * "8" is morning, "12" is noon), and an explicit am/pm is always honored.
+ */
+function resolveServiceHour(component: {
+  get: (u: 'hour') => number | null;
+  isCertain: (u: 'meridiem') => boolean;
+}): number {
+  const hour = component.get('hour') ?? 0;
+  if (!component.isCertain('meridiem') && hour >= 1 && hour <= 7) {
+    return hour + 12;
+  }
+  return hour;
+}
+
+/**
  * Resolve a natural-language date/time phrase to a concrete UTC window.
  * Pure and deterministic given `phrase` + `now` + `timezone` — safe to
  * unit-test across DST boundaries and tenant timezones.
@@ -194,7 +213,7 @@ export function resolveDateTime(
         year: day.year,
         month: day.month,
         day: day.dayOfMonth,
-        hour: start.get('hour') ?? 0,
+        hour: resolveServiceHour(start),
         minute: start.get('minute') ?? 0,
       },
       timezone,
@@ -205,7 +224,7 @@ export function resolveDateTime(
           year: r.end.get('year') ?? day.year,
           month: r.end.get('month') ?? day.month,
           day: r.end.get('day') ?? day.dayOfMonth,
-          hour: r.end.get('hour') ?? 0,
+          hour: resolveServiceHour(r.end),
           minute: r.end.get('minute') ?? 0,
         },
         timezone,

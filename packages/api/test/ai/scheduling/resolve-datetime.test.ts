@@ -93,6 +93,30 @@ describe('resolveDateTime', () => {
     }
   });
 
+  it('biases a bare 1–7 hour to PM (service hours) — "tomorrow at 5" → 5pm not 5am', () => {
+    const r = resolveDateTime('tomorrow at 5', { timezone: 'America/New_York', now: NOW });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.startUtc).toBe('2026-06-02T21:00:00.000Z'); // 5pm EDT, not 5am (09:00Z)
+    }
+  });
+
+  it('leaves a bare 8–12 hour as spoken (morning) — "tomorrow at 8" → 8am', () => {
+    const r = resolveDateTime('tomorrow at 8', { timezone: 'America/New_York', now: NOW });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.startUtc).toBe('2026-06-02T12:00:00.000Z'); // 8am EDT
+    }
+  });
+
+  it('honors an explicit am/pm over the bias — "tomorrow at 5am" stays 5am', () => {
+    const r = resolveDateTime('tomorrow at 5am', { timezone: 'America/New_York', now: NOW });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.startUtc).toBe('2026-06-02T09:00:00.000Z'); // 5am EDT
+    }
+  });
+
   it('renders a tenant-local read-back string', () => {
     const s = formatForReadback('2026-06-02T18:00:00.000Z', 'America/New_York');
     expect(s).toContain('2:00');

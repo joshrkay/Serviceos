@@ -73,6 +73,18 @@ export const createAppointmentPayloadSchema = z
       return !Number.isNaN(s) && !Number.isNaN(e) && e > s;
     },
     { message: 'scheduledEnd must be a valid datetime after scheduledStart' },
+  )
+  .refine(
+    (v) => {
+      // Arrival window is optional, but if both ends are present (e.g. a
+      // dispatcher edit) they must be valid and ordered — never "12pm–8am".
+      if (v.arrivalWindowStart == null && v.arrivalWindowEnd == null) return true;
+      if (v.arrivalWindowStart == null || v.arrivalWindowEnd == null) return false;
+      const s = Date.parse(v.arrivalWindowStart);
+      const e = Date.parse(v.arrivalWindowEnd);
+      return !Number.isNaN(s) && !Number.isNaN(e) && e > s;
+    },
+    { message: 'arrivalWindowEnd must be a valid datetime after arrivalWindowStart' },
   );
 
 export const createBookingPayloadSchema = z.object({
