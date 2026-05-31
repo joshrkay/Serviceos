@@ -151,6 +151,128 @@ describe('Portal — PortalDashboard (P10-001)', () => {
     );
   });
 
+  it('swaps in alternative slots when the reschedule slot is already taken', async () => {
+    const timezone = 'America/New_York';
+    const slot = { start: '2026-07-01T15:00:00.000Z', end: '2026-07-01T16:00:00.000Z' };
+    const alternative = { start: '2026-07-02T18:00:00.000Z', end: '2026-07-02T19:00:00.000Z' };
+    const appointment = {
+      id: 'appt-1',
+      jobId: 'job-1',
+      status: 'scheduled',
+      scheduledStart: '2026-06-15T15:00:00.000Z',
+      scheduledEnd: '2026-06-15T16:00:00.000Z',
+      arrivalWindowStart: null,
+      arrivalWindowEnd: null,
+      timezone,
+    };
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/reschedule')) {
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          json: async () => ({
+            error: 'SLOT_TAKEN',
+            message: 'That time is no longer available. Here are other open times.',
+            alternatives: [alternative],
+          }),
+        } as unknown as Response);
+      }
+      if (url.includes('/availability')) {
+        return Promise.resolve(jsonResponse({ timezone, durationMin: 60, slots: [slot] }));
+      }
+      if (url.includes('/invoices')) return Promise.resolve(jsonResponse({ invoices: [] }));
+      if (url.includes('/estimates')) return Promise.resolve(jsonResponse({ estimates: [] }));
+      if (url.includes('/appointments')) {
+        return Promise.resolve(jsonResponse({ appointments: [appointment] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<PortalDashboard token="tok-1" customer={customer} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Reschedule' })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Reschedule' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Find times' }));
+
+    const slotLabel = formatSlot(slot, timezone);
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: slotLabel })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: slotLabel }));
+    fireEvent.click(screen.getByRole('button', { name: `Request ${slotLabel}` }));
+
+    // The conflict message shows and the grid is replaced with the alternative.
+    const altLabel = formatSlot(alternative, timezone);
+    await waitFor(() => {
+      expect(screen.getByText(/no longer available/)).toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: altLabel })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: slotLabel })).not.toBeInTheDocument();
+  });
+
+  it('keeps the slot grid and shows the message for a non-race 409 (TOO_LATE)', async () => {
+    const timezone = 'America/New_York';
+    const slot = { start: '2026-07-01T15:00:00.000Z', end: '2026-07-01T16:00:00.000Z' };
+    const appointment = {
+      id: 'appt-1',
+      jobId: 'job-1',
+      status: 'scheduled',
+      scheduledStart: '2026-06-15T15:00:00.000Z',
+      scheduledEnd: '2026-06-15T16:00:00.000Z',
+      arrivalWindowStart: null,
+      arrivalWindowEnd: null,
+      timezone,
+    };
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/reschedule')) {
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          json: async () => ({
+            error: 'TOO_LATE',
+            message: 'This appointment is too soon to change online. Please call us.',
+          }),
+        } as unknown as Response);
+      }
+      if (url.includes('/availability')) {
+        return Promise.resolve(jsonResponse({ timezone, durationMin: 60, slots: [slot] }));
+      }
+      if (url.includes('/invoices')) return Promise.resolve(jsonResponse({ invoices: [] }));
+      if (url.includes('/estimates')) return Promise.resolve(jsonResponse({ estimates: [] }));
+      if (url.includes('/appointments')) {
+        return Promise.resolve(jsonResponse({ appointments: [appointment] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<PortalDashboard token="tok-1" customer={customer} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Reschedule' })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Reschedule' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Find times' }));
+
+    const slotLabel = formatSlot(slot, timezone);
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: slotLabel })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: slotLabel }));
+    fireEvent.click(screen.getByRole('button', { name: `Request ${slotLabel}` }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/too soon to change online/)).toBeInTheDocument();
+    });
+    // The grid is preserved (not blanked to "No open times").
+    expect(screen.getByRole('button', { name: slotLabel })).toBeInTheDocument();
+  });
+
   it('shows an error state when the API fails', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
