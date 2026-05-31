@@ -294,6 +294,10 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
     // booking, fall through to the legacy create_appointment proposal.
     const repo = this.appointmentRepo;
     if (repo && typeof payload.jobId === 'string' && scheduledStart && scheduledEnd) {
+      // Compute the hold expiry ONCE so the appointment's holdExpiryAt and
+      // the proposal's expiresAt agree exactly (previously each used its own
+      // Date.now(), drifting by however long createAppointment took).
+      const holdExpiryAt = new Date(Date.now() + HOLD_WINDOW_MS);
       let held;
       try {
         held = await createAppointment(
@@ -306,7 +310,7 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
             notes: typeof payload.summary === 'string' ? payload.summary : undefined,
             createdBy: context.userId,
             holdPendingApproval: true,
-            holdExpiryAt: new Date(Date.now() + HOLD_WINDOW_MS),
+            holdExpiryAt,
           },
           repo,
         );
@@ -315,7 +319,6 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
         // create_appointment proposal rather than failing the call.
         return { proposal: createProposal(input), taskType: this.taskType };
       }
-      const holdExpiryAt = new Date(Date.now() + HOLD_WINDOW_MS);
       const bookingInput: CreateProposalInput = {
         tenantId: context.tenantId,
         proposalType: 'create_booking',
