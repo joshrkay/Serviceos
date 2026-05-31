@@ -7,9 +7,11 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { Phone, User, Clock, ChevronRight, RefreshCw, AlertCircle, MessageSquare } from 'lucide-react';
+import { Phone, User, Clock, ChevronRight, RefreshCw, MessageSquare } from 'lucide-react';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
+import { Spinner, EmptyState } from '../ui';
+import { ErrorState } from '../ErrorState';
 import {
   listInteractions,
   getInteraction,
@@ -126,9 +128,8 @@ function TranscriptDrawer({
 
         <div className="flex-1 overflow-y-auto p-5">
           {loading && (
-            <div className="flex items-center justify-center py-12 text-slate-400 text-sm">
-              <RefreshCw size={16} className="animate-spin mr-2" />
-              Loading transcript…
+            <div className="flex items-center justify-center py-12">
+              <Spinner size="md" className="text-slate-900" label="Loading transcript" />
             </div>
           )}
 
@@ -263,18 +264,20 @@ export function InteractionsPage() {
       </div>
 
       {error && (
-        <div className="flex items-center gap-2 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700 mb-4">
-          <AlertCircle size={15} />
-          {error}
+        <div className="mb-4">
+          <ErrorState
+            message="Couldn't load interactions."
+            onRetry={() => void fetchPage(offset)}
+          />
         </div>
       )}
 
       {!loading && interactions.length === 0 && !error && (
-        <div className="text-center py-16 text-slate-400">
-          <Phone size={32} className="mx-auto mb-3 opacity-40" />
-          <p className="text-sm">No completed calls yet.</p>
-          <p className="text-xs mt-1">Calls will appear here after they end.</p>
-        </div>
+        <EmptyState
+          icon={<Phone size={20} />}
+          title="No completed calls yet"
+          description="Calls will appear here after they end."
+        />
       )}
 
       {interactions.length > 0 && (
