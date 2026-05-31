@@ -30,14 +30,21 @@ interface MockRow {
   score?: number;
 }
 
-function makeMockPool(rowsByCallIndex: Array<MockRow[] | undefined>) {
+function makeMockPool(rowsBySlot: Array<MockRow[] | undefined>) {
   const calls: CapturedCall[] = [];
   let releaseCount = 0;
+
+  // Each resolve() runs in a transaction: BEGIN → set_config(tenant) →
+  // business SELECT → COMMIT (ROLLBACK on error). Slot 0 is the canned result
+  // for the RLS-context statements (always empty); slot 1 holds the business
+  // rows returned by the single data query.
+  const isContextStatement = (sql: string) =>
+    /^\s*(BEGIN|COMMIT|ROLLBACK|SET\b)/i.test(sql) || /set_config/i.test(sql);
 
   const client: Partial<PoolClient> = {
     query: vi.fn(async (sql: string, params?: unknown[]) => {
       calls.push({ sql, params: params ?? [] });
-      const rows = rowsByCallIndex[calls.length - 1] ?? [];
+      const rows = (isContextStatement(sql) ? rowsBySlot[0] : rowsBySlot[1]) ?? [];
       return {
         rows,
         rowCount: rows.length,
@@ -455,8 +462,9 @@ describe('PgEntityResolver — connection management', () => {
     const errorClient: Partial<PoolClient> = {
       query: vi
         .fn()
-        .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // SET tenant context
-        .mockRejectedValueOnce(new Error('pg connection lost')),
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // BEGIN
+        .mockRejectedValueOnce(new Error('pg connection lost')) // set_config → throws
+        .mockResolvedValue({ rows: [], rowCount: 0 }), // ROLLBACK (cleanup)
       release: vi.fn(),
     };
     const pool: Partial<Pool> = {
