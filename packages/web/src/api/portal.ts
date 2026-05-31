@@ -166,11 +166,17 @@ async function postSlotAction<T>(
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify(body),
   });
-  const payload = await res.json().catch(() => ({} as Record<string, unknown>));
   if (res.ok) {
-    return { ok: true, ...(payload as T) };
+    // A 2xx must carry the success payload — let a malformed body throw rather
+    // than silently returning an object missing T's fields.
+    const payload = (await res.json()) as T;
+    return { ok: true, ...payload };
   }
-  if (res.status === 409) {
+  const payload = await res.json().catch(() => ({} as Record<string, unknown>));
+  // Only an availability race (SLOT_TAKEN) should swap in alternatives. Other
+  // 409s (e.g. NOT_CHANGEABLE, TOO_LATE) are real failures — fall through to
+  // the error message so we don't wrongly blank the slot grid.
+  if (res.status === 409 && payload.error === 'SLOT_TAKEN') {
     return {
       ok: false,
       slotTaken: true,
