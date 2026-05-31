@@ -3,6 +3,7 @@ import { useApiClient } from '../../lib/apiClient';
 import { emitProposalsChanged } from '../../lib/proposal-events';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatInTenantTz } from '../../utils/formatInTenantTz';
+import { ProposalChainCard, ChainRow } from './ProposalChainCard';
 
 type Urgency = 'critical' | 'high' | 'normal' | 'low';
 
@@ -14,9 +15,57 @@ interface InboxProposalRow {
     status: string;
     createdAt: string;
     expiresAt?: string;
+    // Multi-action chaining: present on proposals decomposed from one
+    // utterance. The inbox serializes the full proposal, so these ride
+    // through without an API change.
+    chainId?: string;
+    sourceContext?: Record<string, unknown>;
   };
   urgency: Urgency;
   reason?: string;
+}
+
+/**
+ * A feed item is either a standalone proposal or a chain of linked
+ * proposals (sharing a chainId). Chains render as one grouped card so a
+ * multi-action voice request is approved together, in order.
+ */
+type FeedItem =
+  | { kind: 'single'; row: InboxProposalRow }
+  | { kind: 'chain'; chainId: string; rows: InboxProposalRow[]; sortKey: number };
+
+/**
+ * Group inbox rows into feed items: rows sharing a `chainId` collapse
+ * into one chain item, preserving the server's urgency order via the
+ * first-seen index as the chain's sort key. Standalone rows pass through
+ * untouched, so the flag-off / single-action experience is unchanged.
+ */
+function groupIntoFeed(rows: InboxProposalRow[]): FeedItem[] {
+  const items: FeedItem[] = [];
+  const chainItemByid = new Map<string, Extract<FeedItem, { kind: 'chain' }>>();
+
+  rows.forEach((row, index) => {
+    const chainId = row.proposal.chainId;
+    if (!chainId) {
+      items.push({ kind: 'single', row });
+      return;
+    }
+    const existing = chainItemByid.get(chainId);
+    if (existing) {
+      existing.rows.push(row);
+      return;
+    }
+    const chainItem: Extract<FeedItem, { kind: 'chain' }> = {
+      kind: 'chain',
+      chainId,
+      rows: [row],
+      sortKey: index,
+    };
+    chainItemByid.set(chainId, chainItem);
+    items.push(chainItem);
+  });
+
+  return items;
 }
 
 function holdExpiryLine(row: InboxProposalRow, timezone: string): string | null {
@@ -99,6 +148,45 @@ export function InboxPage() {
     }
   }
 
+  /**
+   * Approve a whole chain in one tap via the batch-approve endpoint.
+   * Optimistically removes every member; restores them on failure. The
+   * backend executes them in dependency order (a dependent can't run
+   * until its parent has), so a single batch approval is safe.
+   */
+  async function approveChain(ids: string[]): Promise<void> {
+    const idSet = new Set(ids);
+    const removed = rows.filter((r) => idSet.has(r.proposal.id));
+    setRows((prev) => prev.filter((r) => !idSet.has(r.proposal.id)));
+    try {
+      const res = await apiFetch('/api/proposals/approve-batch', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ proposalIds: ids }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      emitProposalsChanged();
+    } catch (err) {
+      if (removed.length > 0) setRows((prev) => [...removed, ...prev]);
+      setError(err instanceof Error ? err.message : 'Approve all failed');
+    }
+  }
+
+  /**
+   * Reject every member of a chain. There is no batch-reject endpoint —
+   * a chain that shouldn't proceed is rejected member-by-member. Done
+   * sequentially so a mid-chain failure surfaces and the rest are still
+   * attempted.
+   */
+  async function rejectChain(ids: string[]): Promise<void> {
+    for (const id of ids) {
+      // eslint-disable-next-line no-await-in-loop
+      await actOnProposal(id, 'reject');
+    }
+  }
+
+  const feed = groupIntoFeed(rows);
+
   return (
     <div className="h-full overflow-y-auto">
       <div className="max-w-4xl mx-auto px-4 md:px-6 py-6 md:py-8">
@@ -129,7 +217,18 @@ export function InboxPage() {
         )}
 
         <ul className="space-y-2">
-          {rows.map((row) => {
+          {feed.map((item) => {
+            if (item.kind === 'chain') {
+              return (
+                <ProposalChainCard
+                  key={`chain-${item.chainId}`}
+                  rows={item.rows as ChainRow[]}
+                  onApproveChain={approveChain}
+                  onRejectChain={rejectChain}
+                />
+              );
+            }
+            const { row } = item;
             const badge = URGENCY_BADGE[row.urgency];
             return (
               <li

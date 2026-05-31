@@ -106,6 +106,14 @@ export interface Proposal {
    */
   undoneAt?: Date;
   undoneBy?: string;
+  /**
+   * Multi-action chaining. Shared by every proposal decomposed from the
+   * same voice utterance. Denormalized into its own indexed column (in
+   * addition to `sourceContext.chainId`) so the execution-time chain
+   * resolver can look up siblings without scanning JSONB. Undefined for
+   * single-action proposals — they behave exactly as before.
+   */
+  chainId?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -126,6 +134,12 @@ export interface CreateProposalInput {
   targetEntityId?: string;
   idempotencyKey?: string;
   expiresAt?: Date;
+  /**
+   * Multi-action chaining — links this proposal to its sibling
+   * proposals decomposed from the same utterance. Optional: omitting it
+   * yields a standalone (single-action) proposal exactly as before.
+   */
+  chainId?: string;
   createdBy: string;
   /**
    * Trust tier of the agent that produced this proposal. When set,
@@ -371,10 +385,24 @@ export function decideInitialStatus(input: {
 
 export interface ProposalRepository {
   create(proposal: Proposal): Promise<Proposal>;
+  /**
+   * Persist several proposals atomically (single transaction). Used by
+   * the voice chain builder so a partial failure mid-chain never leaves
+   * orphaned members in the DB — either every member of the chain is
+   * written or none is. All proposals MUST share the same tenantId.
+   */
+  createMany(proposals: Proposal[]): Promise<Proposal[]>;
   findById(tenantId: string, id: string): Promise<Proposal | null>;
   findByTenant(tenantId: string): Promise<Proposal[]>;
   findByStatus(tenantId: string, status: ProposalStatus): Promise<Proposal[]>;
   findByAiRun(tenantId: string, aiRunId: string): Promise<Proposal[]>;
+  /**
+   * Multi-action chaining — fetch every proposal sharing a chainId,
+   * ordered by chainIndex. Used by the execution-time chain resolver to
+   * read a dependency's resultEntityId, and by the inbox to group a
+   * chain into one card.
+   */
+  findByChain(tenantId: string, chainId: string): Promise<Proposal[]>;
   updateStatus(
     tenantId: string,
     id: string,
@@ -481,6 +509,7 @@ export function createProposal(input: CreateProposalInput): Proposal {
     targetEntityId: input.targetEntityId,
     idempotencyKey: input.idempotencyKey,
     expiresAt: input.expiresAt,
+    chainId: input.chainId,
     approvedAt,
     createdBy: input.createdBy,
     createdAt: now,
@@ -506,6 +535,36 @@ export class InMemoryProposalRepository implements ProposalRepository {
     return { ...proposal };
   }
 
+  async createMany(proposals: Proposal[]): Promise<Proposal[]> {
+    // Atomic semantics: validate every member first (idempotency
+    // collisions — both against the store AND within the batch, which
+    // the pg unique index would catch), then commit them all. A throw
+    // before the commit loop leaves the store untouched, matching the pg
+    // single-transaction behavior.
+    const seenKeys = new Set<string>();
+    for (const proposal of proposals) {
+      if (!proposal.idempotencyKey) continue;
+      const dedupeKey = `${proposal.tenantId}:${proposal.idempotencyKey}`;
+      const collides =
+        seenKeys.has(dedupeKey) ||
+        Array.from(this.proposals.values()).some(
+          (p) => p.tenantId === proposal.tenantId && p.idempotencyKey === proposal.idempotencyKey
+        );
+      if (collides) {
+        throw new ConflictError(
+          `Proposal with idempotency key '${proposal.idempotencyKey}' already exists for this tenant`
+        );
+      }
+      seenKeys.add(dedupeKey);
+    }
+    const created: Proposal[] = [];
+    for (const proposal of proposals) {
+      this.proposals.set(proposal.id, { ...proposal });
+      created.push({ ...proposal });
+    }
+    return created;
+  }
+
   async findById(tenantId: string, id: string): Promise<Proposal | null> {
     const proposal = this.proposals.get(id);
     if (!proposal || proposal.tenantId !== tenantId) return null;
@@ -528,6 +587,17 @@ export class InMemoryProposalRepository implements ProposalRepository {
     return Array.from(this.proposals.values())
       .filter((p) => p.tenantId === tenantId && p.aiRunId === aiRunId)
       .map((p) => ({ ...p }));
+  }
+
+  async findByChain(tenantId: string, chainId: string): Promise<Proposal[]> {
+    return Array.from(this.proposals.values())
+      .filter((p) => p.tenantId === tenantId && p.chainId === chainId)
+      .map((p) => ({ ...p }))
+      .sort((a, b) => {
+        const ai = (a.sourceContext?.chainIndex as number | undefined) ?? 0;
+        const bi = (b.sourceContext?.chainIndex as number | undefined) ?? 0;
+        return ai - bi;
+      });
   }
 
   async updateStatus(

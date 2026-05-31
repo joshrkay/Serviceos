@@ -57,16 +57,32 @@ describe('GET /api/proposals/inbox', () => {
     });
   });
 
-  it('excludes proposals not in ready_for_review', async () => {
+  it('surfaces draft proposals (voice proposals are created in draft)', async () => {
     const { app, proposalRepo } = buildApp();
     const draft = createProposal({
       tenantId: 'tenant-i1',
       proposalType: 'add_note',
       payload: {},
-      summary: 'Draft — should not surface',
+      summary: 'Draft — awaiting operator approval',
       createdBy: 'user-i1',
     });
     await proposalRepo.create(draft);
+    const res = await request(app).get('/api/proposals/inbox');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].proposal.summary).toBe('Draft — awaiting operator approval');
+  });
+
+  it('excludes proposals in terminal/closed statuses', async () => {
+    const { app, proposalRepo } = buildApp();
+    const executed = createProposal({
+      tenantId: 'tenant-i1',
+      proposalType: 'add_note',
+      payload: {},
+      summary: 'Already executed — should not surface',
+      createdBy: 'user-i1',
+    });
+    await proposalRepo.create({ ...executed, status: 'executed' });
     const res = await request(app).get('/api/proposals/inbox');
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(0);

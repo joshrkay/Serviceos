@@ -60,17 +60,19 @@ describe('P2-035 — approveProposalsBatch', () => {
     const good1 = await seedReady(repo, { summary: 'good1' });
     const good2 = await seedReady(repo, { summary: 'good2' });
 
-    // A draft proposal cannot be approved — left in 'draft' on purpose.
-    const draft = createProposal({ ...baseInput, summary: 'draft-only' });
-    await repo.create(draft);
+    // An already-executed proposal cannot be approved (terminal status) —
+    // a draft is now directly approvable, so we use a terminal-status row
+    // to exercise the partial-failure path.
+    const executed = createProposal({ ...baseInput, summary: 'already-executed' });
+    await repo.create({ ...executed, status: 'executed' });
 
     const result = await approveProposalsBatch(
-      repo, tenantId, [good1, draft.id, good2], actorId, 'owner', audit,
+      repo, tenantId, [good1, executed.id, good2], actorId, 'owner', audit,
     );
 
     expect(result.approved.sort()).toEqual([good1, good2].sort());
     expect(result.failed).toHaveLength(1);
-    expect(result.failed[0].id).toBe(draft.id);
+    expect(result.failed[0].id).toBe(executed.id);
     expect(result.failed[0].reason).toBeTruthy();
     expect(audit.getAll().filter((e) => e.eventType === 'proposal.approved')).toHaveLength(2);
   });
