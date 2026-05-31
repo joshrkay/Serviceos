@@ -240,7 +240,7 @@ cd packages/api && npx tsc --project tsconfig.build.json --noEmit && npm test --
 
 **Automated checks:**
 ```bash
-cd packages/api && npx tsc --project tsconfig.build.json --noEmit
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit && npm test -- --run -t "SD-108|board-query"
 cd ../web && npm test -- --run -t "SD-108|skillBadge"
 ```
 
