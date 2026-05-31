@@ -66,6 +66,21 @@ function formatDate(iso?: string) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+// Hennessy — payment-link UX. A short "due in N days" phrase so the
+// customer reads urgency at a glance instead of decoding a bare date.
+// Returns '' when there's no parseable date or it's already past (the
+// overdue banner owns that case).
+function dueInPhrase(iso?: string): string {
+  if (!iso) return '';
+  const then = new Date(iso).getTime();
+  if (isNaN(then)) return '';
+  const days = Math.ceil((then - Date.now()) / (24 * 60 * 60 * 1000));
+  if (days < 0) return '';
+  if (days === 0) return 'due today';
+  if (days === 1) return 'due tomorrow';
+  return `due in ${days} days`;
+}
+
 // ─── Stripe loader ─────────────────────────────────────────────────────────
 //
 // Resolved once at module load. When the publishable key is missing (dev
@@ -516,7 +531,16 @@ export function InvoicePaymentPage() {
         </h1>
         {inv.dueDate && (
           <p className={`text-sm mb-5 ${isOverdue ? 'text-red-500' : 'text-slate-500'}`}>
-            {isOverdue ? 'Was due' : 'Due'} {formatDate(inv.dueDate)}
+            {isOverdue ? (
+              <>Was due {formatDate(inv.dueDate)}</>
+            ) : (
+              <>
+                Due {formatDate(inv.dueDate)}
+                {dueInPhrase(inv.dueDate) && (
+                  <span className="text-slate-400"> · {dueInPhrase(inv.dueDate)}</span>
+                )}
+              </>
+            )}
           </p>
         )}
 

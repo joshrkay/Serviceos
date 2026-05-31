@@ -13,18 +13,18 @@ A job flips to `completed` → the owner gets one SMS proposal and the invoice g
 
 | Story | Title | Size | Status |
 |---|---|---|---|
-| P20-001 | Auto-draft invoice on job completion | M | Not started |
+| P20-001 | Auto-draft invoice on job completion | M | **Landed** (toggle mig. 137 + `auto-invoice-on-completion.ts` + completion-hook wiring) |
 | P20-002 | Dunning cadence + late-fee config (data model) | S | **Landed** (migration 136 + repos) |
 | P20-003 | Multi-step reminder cadence in the overdue sweep | M | Partially landed (pure selection `dunning-schedule.ts` done; worker wiring pending) |
 | P20-004 | Late-fee accrual | S | Partially landed (pure calc `late-fee.ts` done; worker accrual + proposal pending) |
-| P21-001 | Invoice schedule / milestone linkage (data model) | S | Not started |
-| P21-002 | `create_invoice_schedule` proposal type | M | Not started |
-| P21-003 | "Requires invoicing" queue + batch-generate sweep | M | Not started |
+| P21-001 | Invoice schedule / milestone linkage (data model) | S | **Landed** (mig. 138 + `invoice-schedule.ts` `splitMilestones` + repos + `invoices.schedule_id/milestone_index`) |
+| P21-002 | `create_invoice_schedule` proposal type | M | **Landed** (three-place ritual + `invoice-schedule-handler.ts`; mints first milestone invoice) |
+| P21-003 | "Requires invoicing" queue + batch-generate sweep | M | **Landed** (queue + `batch_invoice` type + sweep + dedup; mig. 139). Web list = follow-up |
 
 ---
 
 ### P20-001 — Auto-draft invoice on job completion
-**Status:** Not started
+**Status:** Landed. Toggle `tenant_settings.auto_invoice_on_completion` (migration 137, opt-in, off by default; settable via the settings API). `invoices/auto-invoice-on-completion.ts maybeAutoInvoiceOnCompletion` builds line items from the accepted estimate's billed selection (`resolveSelectedLineItems`) and raises a `draft_invoice` proposal (validated via `validateProposalPayload`); wired best-effort into the job-completion endpoint alongside `feedback_send`. Idempotent (no-op when already invoiced / ineligible money-state / nothing to bill). **Follow-up:** apply `applyDepositCreditToInvoice` at draft_invoice execution (deposit credit happens on the resulting invoice, not at proposal time); thin Settings toggle UI.
 **Allowed files:** `packages/api/src/jobs/job-lifecycle.ts` (emit a hook on `in_progress→completed`), `packages/api/src/invoices/auto-invoice-on-completion.ts` (new), `packages/api/src/jobs/pg-job-lifecycle.ts` (call inside the transition), `packages/api/test/invoices/auto-invoice-on-completion.test.ts` (new), `packages/api/src/db/schema.ts` (only if a `tenant_settings` toggle column is needed).
 **Build prompt:** On the `completed` transition, if the job has no open/paid invoice and `money_state ∈ {estimate_accepted, no_estimate}`, build line items from the accepted estimate (or job catalog lines) via `shared/billing-engine.ts calculateDocumentTotals`, then create a `draft_invoice` proposal through the existing proposal path (trust gate + audit apply). If a deposit exists, call `invoices/deposit-credit.ts applyDepositCreditToInvoice` on the resulting draft. Gate behind a `tenant_settings.auto_invoice_on_completion` toggle (reuse the quick-toggles JSONB). No new proposal type — `draft_invoice` already exists; chain a `send_invoice` (comms, one-tap).
 **Reuse:** `draftInvoicePayloadSchema` (`proposals/contracts.ts`), `invoices/convert-estimate.ts`, `invoices/deposit-credit.ts`, `jobs/job-money-state.ts`.
@@ -65,7 +65,7 @@ A job flips to `completed` → the owner gets one SMS proposal and the invoice g
 ---
 
 ### P21-001 — Invoice schedule / milestone linkage (data model)
-**Status:** Not started
+**Status:** Landed. `invoice_schedules` table (mig. 138, RLS) + `invoices.schedule_id`/`milestone_index`. `invoices/invoice-schedule.ts` owns the entity, `validateMilestones` (exactly one `remainder`; percents 0–10000 bps; non-negative flat cents — mirrors the P21-002 Zod rule), and the pure `splitMilestones(totalCents, milestones)` (percent=bps, flat=cents, the single `remainder` absorbs rounding so Σ === total). `pg-invoice-schedule.ts` mirrors the dunning repo (RLS via `withTenant`). **Not yet wired into app.ts** — the `PgInvoiceScheduleRepository` is consumed by P21-002 (`create_invoice_schedule` proposal).
 **Allowed files:** `packages/api/src/invoices/invoice-schedule.ts` (+ `pg-invoice-schedule.ts`), `packages/api/src/db/schema.ts` (migration — discover next number), `packages/api/src/invoices/invoice.ts` (optional `scheduleId`/`milestoneIndex`), tests.
 **Build prompt:** `invoice_schedules(job_id, estimate_id, total_amount_cents, milestones JSONB)` + `invoices.schedule_id`, `invoices.milestone_index`. Pure `splitMilestones(totalCents, milestones[])` guarantees Σ == total (a `remainder` milestone absorbs rounding). RLS standard.
 **Reuse:** deposit-on-job concept; `applyDepositCreditToInvoice` as the deposit→balance credit path; `billing-engine` rounding.
@@ -75,7 +75,7 @@ A job flips to `completed` → the owner gets one SMS proposal and the invoice g
 ---
 
 ### P21-002 — `create_invoice_schedule` proposal type
-**Status:** Not started
+**Status:** Landed. Three-place ritual done: `CREATE_INVOICE_SCHEDULE` enum (`packages/shared`), `create_invoice_schedule` added to the `proposal.ts` union + `PROPOSAL_TYPES` + `actionClassForProposalType` (capture) + `prioritization.ts`, and `contracts/create-invoice-schedule.ts` registered in `PROPOSAL_TYPE_SCHEMAS` (Zod: exactly one `remainder`, percent ≤ 10000 bps). `execution/invoice-schedule-handler.ts` writes the `invoice_schedules` row (total from payload or derived from the estimate via `splitMilestones`) then drafts the first milestone invoice linked by `schedule_id`/`milestone_index` (threaded through `createInvoiceWithNextNumber`); registered in the handler registry + app.ts with an `InvoiceScheduleRepository`. **Done:** later milestones now mint on job completion — `invoices/schedule-completion.ts mintCompletionMilestones` drafts each `on_completion` milestone (idempotent via `schedule_id`+`milestone_index`), wired into the job-completion path next to auto-invoice. So a deposit/balance plan auto-bills the balance.
 **Allowed files:** `packages/api/src/proposals/proposal.ts` (union + classify `capture`), `packages/shared/src/enums.ts` (`CREATE_INVOICE_SCHEDULE`), `packages/api/src/proposals/contracts/create-invoice-schedule.ts` (+ register in `PROPOSAL_TYPE_SCHEMAS`), `packages/api/src/proposals/execution/invoice-schedule-handler.ts`, tests.
 **Build prompt:** Payload `{ jobId, estimateId?, milestones:[{label, type:'percent'|'flat'|'remainder', value, trigger:'on_accept'|'on_completion'|'manual'}] }`, Zod-validated (percent ≤ 10000 bps; exactly one `remainder`). Execution writes `invoice_schedules` then drafts the first milestone via the existing invoice-create path; later milestones minted by the completion hook (P20-001) + an `on_accept` check. **Follow the three-place ritual exactly** (omitting the switch arm is a compile error).
 **Reuse:** `proposals/execution/executor.ts`, `invoice-execution-handler.ts`; `splitMilestones`.
@@ -85,7 +85,7 @@ A job flips to `completed` → the owner gets one SMS proposal and the invoice g
 ---
 
 ### P21-003 — "Requires invoicing" queue + batch-generate sweep
-**Status:** Not started
+**Status:** Landed (backend). `invoices/invoicing-queue.ts findJobsRequiringInvoicing` (completed + eligible money-state + no live invoice + billable). `batch_invoice` proposal type via the three-place ritual (capture) + `contracts/batch-invoice.ts`. `invoices/batch-invoice-run.ts` (+ pg) is the `(tenant, job, batch_date)` dedup ledger (23505). `workers/batch-invoice-worker.ts runBatchInvoiceSweep` is opt-in (`settings.batchInvoiceEnabled`, mig. 139), reserves a run per job then emits ONE `batch_invoice` proposal; `execution/batch-invoice-handler.ts` fans out N `draft_invoice` proposals on approval. Wired in app.ts (`SWEEP_LOCK.batchInvoice = 590007`, hourly, leader-gated). **Follow-up:** thin read-only "Requires invoicing" web list (the queue fn is ready to expose).
 **Allowed files:** `packages/api/src/invoices/invoicing-queue.ts`, `packages/api/src/workers/batch-invoice-worker.ts`, `packages/api/src/invoices/batch-invoice-run.ts`, `packages/api/src/db/schema.ts` (`batch_invoice_runs`, `(tenant, job_id, batch_date) UNIQUE`), `packages/api/src/app.ts` (register; **add `SWEEP_LOCK.batchInvoice: 590007`**), tests.
 **Build prompt:** Query completed jobs with no open invoice + `money_state ∈ {estimate_accepted, no_estimate}`. Opt-in per tenant, **proposal-first**: emit one `batch_invoice` proposal summarizing N candidate jobs + total; on approval fan out N `draft_invoice` proposals. `batch_invoice_runs` dedups so re-runs don't double-draft. Thin read-only "Requires invoicing" web list. Clone `workers/recurring-agreements-worker.ts` loop shape + `service_agreement_runs` idempotency.
 **Reuse:** `recurring-agreements-worker.ts`; `agreements/agreement-run.ts`; `runAsLeader`. New `batch_invoice` proposal type via the three-place ritual.
