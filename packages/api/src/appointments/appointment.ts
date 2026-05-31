@@ -34,10 +34,33 @@ export interface Appointment {
   holdPendingApproval: boolean;
   /** When the tentative hold auto-releases if not approved (set when holdPendingApproval is true). */
   holdExpiryAt?: Date;
+  /**
+   * Optional dedup key for at-least-once write paths (e.g. a redelivered
+   * voice message). Unique per tenant via a partial index; when set, a
+   * second create with the same key returns the existing appointment
+   * instead of inserting a duplicate.
+   */
+  idempotencyKey?: string;
   notes?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/**
+ * A tentative AI-placed hold has released its slot once its expiry passes —
+ * the scheduling read paths (availability-finder, slot-conflict-checker)
+ * treat such an appointment as free rather than as occupying the slot.
+ * A live hold (expiry in the future) and any non-hold appointment still
+ * occupy their slot. Shared so all readers apply identical semantics.
+ */
+export function isExpiredHold(
+  appt: Pick<Appointment, 'holdPendingApproval' | 'holdExpiryAt'>,
+  now: number,
+): boolean {
+  return Boolean(
+    appt.holdPendingApproval && appt.holdExpiryAt && appt.holdExpiryAt.getTime() < now,
+  );
 }
 
 export interface CreateAppointmentInput {
@@ -58,6 +81,8 @@ export interface CreateAppointmentInput {
   holdPendingApproval?: boolean;
   /** When the tentative hold auto-releases. Set when holdPendingApproval is true. */
   holdExpiryAt?: Date;
+  /** Optional dedup key for at-least-once writes; see Appointment.idempotencyKey. */
+  idempotencyKey?: string;
   createdBy: string;
 }
 
@@ -182,6 +207,7 @@ export async function createAppointment(
     status: 'scheduled',
     holdPendingApproval: input.holdPendingApproval ?? false,
     holdExpiryAt: input.holdExpiryAt,
+    idempotencyKey: input.idempotencyKey,
     notes: input.notes,
     createdBy: input.createdBy,
     createdAt: new Date(),
@@ -195,7 +221,13 @@ export async function createAppointment(
 
   const created = await repository.create(appointment);
 
-  if (auditRepo) {
+  // On an idempotency-key dedup hit the repo returns a pre-existing row
+  // (different id than the one we generated) without inserting — don't emit
+  // a second `appointment.created` audit event for an appointment we didn't
+  // actually create.
+  const wasDeduped = created.id !== appointment.id;
+
+  if (auditRepo && !wasDeduped) {
     const event = createAuditEvent({
       tenantId: input.tenantId,
       actorId: input.createdBy,

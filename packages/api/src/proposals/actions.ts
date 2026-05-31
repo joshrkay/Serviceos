@@ -1,4 +1,4 @@
-import { Proposal, ProposalRepository } from './proposal';
+import { Proposal, ProposalRepository, missingFieldsFor } from './proposal';
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from './lifecycle';
 import { validateProposalPayload } from './contracts';
 import { Role, hasPermission } from '../auth/rbac';
@@ -79,6 +79,21 @@ export async function approveProposal(
   const proposal = await proposalRepo.findById(tenantId, proposalId);
   if (!proposal) {
     throw new NotFoundError('Proposal', proposalId);
+  }
+
+  // A proposal with unfilled required fields can't be approved — the
+  // operator must resolve the gaps (via editProposal) first. This guard
+  // matters now that drafts are directly approvable from the inbox:
+  // without it a half-extracted voice payload could be approved straight
+  // from 'draft'. Chain-ref fields are intentionally NOT in missingFields
+  // (they resolve at execution time), so a chained dependent stays
+  // approvable.
+  const missing = missingFieldsFor(proposal);
+  if (missing.length > 0) {
+    throw new ValidationError(
+      `Cannot approve proposal with unfilled required fields: ${missing.join(', ')}`,
+      { missingFields: missing },
+    );
   }
 
   const transitioned = transitionProposal(proposal, 'approved', actorId);
