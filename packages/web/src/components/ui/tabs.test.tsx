@@ -18,6 +18,15 @@ describe('Tabs', () => {
     expect(tabs[1]).toHaveAttribute('tabindex', '-1');
   });
 
+  it('omits aria-controls when no explicit id is given (no panel to point at)', () => {
+    render(<Tabs items={items} value="chat" onValueChange={() => {}} />);
+    // Without a shared id, a paired TabPanel cannot render the matching panel
+    // element, so the tab must not advertise a dangling aria-controls.
+    for (const tab of screen.getAllByRole('tab')) {
+      expect(tab).not.toHaveAttribute('aria-controls');
+    }
+  });
+
   it('renders a badge', () => {
     render(<Tabs items={items} value="chat" onValueChange={() => {}} />);
     expect(screen.getByText('2')).toBeInTheDocument();

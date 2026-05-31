@@ -43,6 +43,12 @@ export function Tabs({
 }: TabsProps) {
   const autoId = useId();
   const baseId = id ?? autoId;
+  // Only wire `aria-controls` when the caller passed an explicit `id`: that's
+  // the sole case where a paired `TabPanel` (given the same value as `tabsId`)
+  // can render the matching `${baseId}-panel-*` element. With the auto id the
+  // caller can't know it, so emitting aria-controls would point assistive tech
+  // at a non-existent panel.
+  const panelsLinked = id != null;
   const refs = useRef<Record<string, HTMLButtonElement | null>>({});
 
   function focusByIndex(index: number) {
@@ -94,7 +100,7 @@ export function Tabs({
             role="tab"
             type="button"
             aria-selected={selected}
-            aria-controls={`${baseId}-panel-${item.value}`}
+            aria-controls={panelsLinked ? `${baseId}-panel-${item.value}` : undefined}
             tabIndex={selected ? 0 : -1}
             disabled={item.disabled}
             onClick={() => onValueChange(item.value)}
