@@ -76,6 +76,27 @@ export class InMemoryWorkingHoursRepository implements WorkingHoursRepository {
   private hours: Map<string, TechnicianWorkingHours> = new Map();
 
   async create(hours: TechnicianWorkingHours): Promise<TechnicianWorkingHours> {
+    // Mirror the Pg repo's upsert on (tenant, technician, dayOfWeek): a second
+    // create for the same tech/day replaces the prior window (keeping the
+    // existing row's id) rather than leaving two rows the Pg unique
+    // constraint would reject — so the two impls stay substitutable.
+    const existing = Array.from(this.hours.values()).find(
+      (h) =>
+        h.tenantId === hours.tenantId &&
+        h.technicianId === hours.technicianId &&
+        h.dayOfWeek === hours.dayOfWeek,
+    );
+    if (existing) {
+      const updated: TechnicianWorkingHours = {
+        ...existing,
+        startTime: hours.startTime,
+        endTime: hours.endTime,
+        isActive: hours.isActive,
+        updatedAt: hours.updatedAt,
+      };
+      this.hours.set(existing.id, updated);
+      return { ...updated };
+    }
     this.hours.set(hours.id, { ...hours });
     return { ...hours };
   }

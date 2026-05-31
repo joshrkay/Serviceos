@@ -40,6 +40,10 @@ export interface Invoice {
   stripePaymentLinkUrl?: string;
   /** Inherits from `job.originatingLeadId` at creation; preserves source attribution. */
   originatingLeadId?: string;
+  /** P21-001 — set when this invoice is a milestone of an invoice_schedules row. */
+  scheduleId?: string;
+  /** P21-001 — 0-based position of this invoice within its schedule's milestones. */
+  milestoneIndex?: number;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -56,6 +60,9 @@ export interface CreateInvoiceInput {
   customerMessage?: string;
   /** Optional override; routes auto-populate from job when omitted. */
   originatingLeadId?: string;
+  /** P21-001/002 — link a minted milestone invoice to its schedule + position. */
+  scheduleId?: string;
+  milestoneIndex?: number;
   createdBy: string;
 }
 
@@ -181,6 +188,8 @@ export async function createInvoice(
     amountDueCents: totals.totalCents,
     customerMessage: input.customerMessage,
     originatingLeadId: input.originatingLeadId,
+    scheduleId: input.scheduleId,
+    milestoneIndex: input.milestoneIndex,
     createdBy: input.createdBy,
     createdAt: new Date(),
     updatedAt: new Date(),

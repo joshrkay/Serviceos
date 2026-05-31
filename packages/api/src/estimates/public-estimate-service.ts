@@ -27,6 +27,15 @@ import { publicActorFromToken } from '../feedback/feedback-response';
  * estimate, then emit an audit event the dispatcher can react to.
  */
 
+/**
+ * Hennessy — payment-link UX. Default lifetime for a freshly minted
+ * deposit checkout link when the estimate carries no `validUntil`. We
+ * prefer the estimate's own validity window when present (a deposit
+ * can't sensibly outlive the quote it secures), and fall back to this
+ * so a quote with no expiry still gets a concrete, honest deadline.
+ */
+const DEFAULT_DEPOSIT_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 export interface PublicEstimateView {
   id: string;
   estimateNumber: string;
@@ -112,6 +121,14 @@ export interface PublicEstimateView {
    * deep-link to it; minting goes through `getOrCreateDepositCheckoutUrl`.
    */
   depositCheckoutUrl?: string;
+  /**
+   * Hennessy — payment-link UX. ISO deadline after which the deposit
+   * checkout link is treated as stale (deactivated + re-minted on the
+   * next tap). Surfaced so the signing page can show an honest "pay by"
+   * date instead of implying the link lives forever. Null when no link
+   * has been minted, or a legacy link predates the expiry column.
+   */
+  depositCheckoutExpiresAt?: string;
 }
 
 export interface ApproveEstimateInput {
@@ -615,6 +632,8 @@ export class PublicEstimateService {
       depositStatus: computedStatus,
       depositTimingPolicy: policy,
       depositCheckoutUrl: job?.depositStripePaymentLinkUrl ?? undefined,
+      depositCheckoutExpiresAt:
+        job?.depositStripePaymentLinkExpiresAt?.toISOString() ?? undefined,
     };
   }
 
@@ -630,7 +649,9 @@ export class PublicEstimateService {
    *     credit `depositPaidCents` on the job using
    *     `metadata.deposit_for_job_id`.
    */
-  async getOrCreateDepositCheckoutUrl(token: string): Promise<{ url: string }> {
+  async getOrCreateDepositCheckoutUrl(
+    token: string,
+  ): Promise<{ url: string; expiresAt: string | null }> {
     const estimate = await this.lookupByToken(token);
     if (this.isExpired(estimate)) {
       throw new ConflictError('Estimate link has expired');
@@ -664,14 +685,28 @@ export class PublicEstimateService {
     }
     const remaining = required - paid;
 
-    // Idempotent return: if a link exists, hand it back. The amount it
-    // was minted for can't change without surfacing through this same
-    // path (which deactivates the old link below if the rule moved),
-    // so a repeated tap just reuses the existing URL.
-    if (job.depositStripePaymentLinkUrl) {
-      // Lock the required amount onto the job if it isn't already
-      // persisted (before_approval first-mint path) so the webhook
-      // can credit deterministically.
+    const fetchFn = this.deps.stripeFetch ?? fetch;
+
+    // A persisted link is reusable only while it's inside its expiry
+    // window. Stripe Payment Links have no native expiry, so we own the
+    // clock (Hennessy): once past `depositStripePaymentLinkExpiresAt` the
+    // link is stale — deactivate it and fall through to mint a fresh one
+    // so the customer never lands on a link we've told them has expired.
+    // Legacy links with no recorded expiry are treated as still valid
+    // (they predate the column; deactivating them would dead-link a
+    // customer mid-flow).
+    const existingUrl = job.depositStripePaymentLinkUrl;
+    const existingExpiry = job.depositStripePaymentLinkExpiresAt;
+    const existingLinkLive =
+      !!existingUrl &&
+      (!existingExpiry || existingExpiry.getTime() > Date.now());
+
+    if (existingUrl && existingLinkLive) {
+      // Idempotent return: hand back the live link. The amount it was
+      // minted for can't change without surfacing through this same path,
+      // so a repeated tap just reuses the existing URL. Lock the required
+      // amount onto the job if it isn't already persisted (before_approval
+      // first-mint path) so the webhook can credit deterministically.
       if ((job.depositRequiredCents ?? 0) === 0) {
         await this.deps.jobRepo.update(job.tenantId, job.id, {
           depositRequiredCents: required,
@@ -680,7 +715,28 @@ export class PublicEstimateService {
           updatedAt: new Date(),
         });
       }
-      return { url: job.depositStripePaymentLinkUrl };
+      return {
+        url: existingUrl,
+        expiresAt: existingExpiry ? existingExpiry.toISOString() : null,
+      };
+    }
+
+    if (existingUrl && job.depositStripePaymentLinkId && !existingLinkLive) {
+      // Expired link: deactivate before minting a replacement so we don't
+      // leave a live charge vector the customer could still reach via an
+      // old email. Best-effort — a Stripe hiccup here must not block the
+      // customer from getting a fresh, payable link.
+      await fetchFn(
+        `https://api.stripe.com/v1/payment_links/${job.depositStripePaymentLinkId}`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${this.deps.stripeConfig.apiKey}`,
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: new URLSearchParams({ active: 'false' }),
+        },
+      ).catch(() => undefined);
     }
 
     const customer = await this.deps.customerRepo.findById(
@@ -691,7 +747,6 @@ export class PublicEstimateService {
       customer ? ` — ${customer.displayName}` : ''
     }`;
 
-    const fetchFn = this.deps.stripeFetch ?? fetch;
     const res = await fetchFn('https://api.stripe.com/v1/payment_links', {
       method: 'POST',
       headers: {
@@ -717,10 +772,20 @@ export class PublicEstimateService {
       throw new Error('Stripe API returned incomplete payment link (missing id or url)');
     }
 
-    // Persist required + paid + link in a single update so a webhook
-    // delivery that arrives while we're still here finds a coherent
-    // job row. If the persist fails, deactivate the freshly-minted
-    // link so it isn't an orphaned charge vector.
+    // Own the deadline the link claims. Prefer the estimate's own
+    // validity window (a deposit can't sensibly outlive the quote it
+    // secures), and fall back to a default TTL when the quote has no
+    // expiry. This is the value surfaced to the customer as "pay by",
+    // and the value the reuse check above enforces on the next tap.
+    const expiresAt =
+      estimate.validUntil && estimate.validUntil.getTime() > Date.now()
+        ? estimate.validUntil
+        : new Date(Date.now() + DEFAULT_DEPOSIT_LINK_TTL_MS);
+
+    // Persist required + paid + link + expiry in a single update so a
+    // webhook delivery that arrives while we're still here finds a
+    // coherent job row. If the persist fails, deactivate the freshly-
+    // minted link so it isn't an orphaned charge vector.
     try {
       await this.deps.jobRepo.update(job.tenantId, job.id, {
         depositRequiredCents: required,
@@ -728,6 +793,7 @@ export class PublicEstimateService {
         depositStatus: deriveDepositStatus(required, paid),
         depositStripePaymentLinkId: data.id,
         depositStripePaymentLinkUrl: data.url,
+        depositStripePaymentLinkExpiresAt: expiresAt,
         updatedAt: new Date(),
       });
     } catch (dbErr) {
@@ -743,6 +809,6 @@ export class PublicEstimateService {
       throw new Error(`Failed to persist deposit Stripe link ${data.id}: ${msg}`);
     }
 
-    return { url: data.url };
+    return { url: data.url, expiresAt: expiresAt.toISOString() };
   }
 }

@@ -545,7 +545,10 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       // committed hold via isSlotFree; booking concurrency per tenant is low,
       // so the brief serialization is acceptable.
       const outcome = await runner.run(tenantId, async ({ lock }) => {
-        await lock('portal-booking');
+        // Shared key with the public booking flow (public-booking.ts) so the
+        // two self-service surfaces serialize against each other for the same
+        // tenant calendar and can't both pass isSlotFree for overlapping slots.
+        await lock('self-service-booking');
 
         const stillFree = await isSlotFree(finderDeps, {
           tenantId,

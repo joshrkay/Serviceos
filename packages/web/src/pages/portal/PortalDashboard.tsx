@@ -9,11 +9,12 @@ import {
   PortalCustomer,
   PortalEstimate,
   PortalInvoice,
+  PortalSlot,
   formatPortalCents,
   portalApi,
 } from '../../api/portal';
 import { PortalCard } from '../../components/portal/PortalCard';
-import { PortalSlotPicker } from './PortalSlotPicker';
+import { PortalSlotPicker, SlotPickerOutcome } from './PortalSlotPicker';
 
 interface Props {
   token: string;
@@ -57,13 +58,22 @@ export function PortalDashboard({ token, customer }: Props) {
 
   async function rescheduleAppointment(
     appointmentId: string,
-    slot: { start: string; end: string },
-  ) {
+    slot: PortalSlot,
+  ): Promise<SlotPickerOutcome | void> {
     const res = await portalApi.rescheduleAppointment(token, appointmentId, {
       slotStart: slot.start,
       slotEnd: slot.end,
     });
-    setRescheduleMsg(res.message);
+    if (res.ok) {
+      setRescheduleMsg(res.message);
+      return;
+    }
+    // Lost the slot between search and submit — swap in the alternatives the
+    // server returned, matching the booking flow.
+    if (res.slotTaken) {
+      return { message: res.message, replaceSlots: res.alternatives };
+    }
+    return { message: res.message };
   }
 
   useEffect(() => {
