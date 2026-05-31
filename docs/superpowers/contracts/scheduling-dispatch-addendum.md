@@ -15,18 +15,18 @@ For every story, the agent prompt should include: the full story body, this adde
 
 **Why SD-1B serializes:** SD-103, SD-106, and SD-107 all edit `packages/api/src/app.ts` (wiring), and SD-107 also edits `feasibility.ts` — the runbook's "two agents collide on a shared file" hazard. Within SD-1B, order is SD-103 → SD-106 → SD-107 (SD-106/SD-107 both depend on SD-105 from SD-1A; SD-107 is last because it touches the locked feasibility seam).
 
-**Migration reservations (refresh against `db/schema.ts` head before dispatch):** SD-101 = `134`; SD-102 = `135` + `136`; SD-105 = `137`. Current head: `133_payments_reversal_tracking`.
+**Migration reservations (refresh against `db/schema.ts` head before dispatch):** SD-101 = `136`; SD-102 = `137` + `138`; SD-105 = `139`. Current head: `135_appointments_idempotency_key`.
 
 ---
 
 ## SD-101 — Persist technician working hours
 
-**Wave:** SD-1A · **Migration reserved:** `134_technician_working_hours`
+**Wave:** SD-1A · **Migration reserved:** `136_technician_working_hours`
 
 **Allowed files (concrete):**
 - `packages/api/src/availability/pg-working-hours.ts` (new)
 - `packages/api/test/availability/pg-working-hours.test.ts` (new)
-- `packages/api/src/db/schema.ts` (add key `134_*` only)
+- `packages/api/src/db/schema.ts` (add key `136_*` only)
 
 **Forbidden files:**
 - `packages/api/src/availability/working-hours.ts` (the interface + InMemory contract is locked — implement, don't change)
@@ -40,18 +40,18 @@ cd /home/user/Serviceos && \
   npm test --workspace=packages/api -- --run -t "SD-101|PgWorkingHours" && \
   git diff --name-only origin/HEAD... | grep -vE "^(packages/api/src/availability/pg-working-hours\.ts|packages/api/src/db/schema\.ts|packages/api/test/availability/)" | (! grep . )
 ```
-**Pre-flight:** clean tree; `tsc` green on branch; migration `134` free in `schema.ts`.
+**Pre-flight:** clean tree; `tsc` green on branch; migration `136` free in `schema.ts`.
 
 ---
 
 ## SD-102 — Blackout periods + per-tech daily capacity
 
-**Wave:** SD-1A · **Migration reserved:** `135_business_blackout_periods`, `136_technician_daily_capacity`
+**Wave:** SD-1A · **Migration reserved:** `137_business_blackout_periods`, `138_technician_daily_capacity`
 
 **Allowed files (concrete):**
 - `packages/api/src/availability/{blackout-period,pg-blackout-period,daily-capacity,pg-daily-capacity}.ts` (new)
 - `packages/api/test/availability/{blackout-period,daily-capacity}.test.ts` (new)
-- `packages/api/src/db/schema.ts` (add keys `135_*`, `136_*`)
+- `packages/api/src/db/schema.ts` (add keys `137_*`, `138_*`)
 
 **Forbidden files:**
 - `packages/api/src/app.ts` (SD-103 wires these)
@@ -65,7 +65,7 @@ cd /home/user/Serviceos && \
   npm test --workspace=packages/api -- --run -t "SD-102|Blackout|DailyCapacity" && \
   git diff --name-only origin/HEAD... | grep -vE "^(packages/api/src/availability/(blackout-period|pg-blackout-period|daily-capacity|pg-daily-capacity)\.ts|packages/api/src/db/schema\.ts|packages/api/test/availability/)" | (! grep . )
 ```
-**Pre-flight:** clean tree; `tsc` green; migrations `135`/`136` free.
+**Pre-flight:** clean tree; `tsc` green; migrations `137`/`138` free.
 
 ---
 
@@ -116,12 +116,12 @@ cd /home/user/Serviceos && \
 
 ## SD-105 — Skills data model
 
-**Wave:** SD-1A · **Migration reserved:** `137_skills_model`
+**Wave:** SD-1A · **Migration reserved:** `139_skills_model`
 
 **Allowed files (concrete):**
 - `packages/api/src/skills/{skill,pg-skill,technician-skill,pg-technician-skill,job-required-skill,pg-job-required-skill}.ts` (new)
 - `packages/api/test/skills/**` (new)
-- `packages/api/src/db/schema.ts` (add key `137_*`)
+- `packages/api/src/db/schema.ts` (add key `139_*`)
 
 **Forbidden files:**
 - `packages/api/src/scheduling/**` (SD-107 owns the matcher seam)

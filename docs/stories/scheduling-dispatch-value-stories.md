@@ -24,11 +24,11 @@ These 8 stories deliver the **persistence foundation** (Phase 1) and the **skill
 
 | ID | Title | Size | Layer | AI Build | Human Review | Dependencies |
 |----|-------|------|-------|----------|--------------|-------------|
-| SD-101 | Persist technician working hours (PG repo + migration 134) | S | Availability / Data | High | Moderate | — |
-| SD-102 | Business blackout periods + per-tech daily capacity (repos + migrations 135–136) | S | Availability / Data | High | Moderate | — |
+| SD-101 | Persist technician working hours (PG repo + migration 136) | S | Availability / Data | High | Moderate | — |
+| SD-102 | Business blackout periods + per-tech daily capacity (repos + migrations 137–138) | S | Availability / Data | High | Moderate | — |
 | SD-103 | Availability management API + persist wiring | M | Availability / API | Medium | Moderate | SD-101, SD-102 |
 | SD-104 | *(DEFER)* Blackout periods feed feasibility warnings | S | Scheduling | High | Light | SD-102 |
-| SD-105 | Skills data model — skills, technician_skills (proficiency), job_required_skills (migration 137) | M | Skills / Data | High | Moderate | — |
+| SD-105 | Skills data model — skills, technician_skills (proficiency), job_required_skills (migration 139) | M | Skills / Data | High | Moderate | — |
 | SD-106 | Skills management API (+ `skills:*` permissions) | M | Skills / API | Medium | Moderate | SD-105 |
 | SD-107 | `RealSkillMatcher` + feasibility severity-as-data (keystone wiring) | M | Scheduling | Medium | Heavy | SD-105 |
 | SD-108 | Surface skill match/badges on the dispatch board | S | Dispatch UI | High | Moderate | SD-107 |
@@ -37,15 +37,15 @@ These 8 stories deliver the **persistence foundation** (Phase 1) and the **skill
 
 ## Story Specifications
 
-### SD-101 — Persist technician working hours (PG repo + migration 134)
+### SD-101 — Persist technician working hours (PG repo + migration 136)
 
 > **Size:** S | **Layer:** Availability / Data | **AI Build:** High | **Human Review:** Moderate
 
 **Dependencies:** none
 
-**Allowed files:** `packages/api/src/availability/pg-working-hours.ts`, `packages/api/test/availability/pg-working-hours.test.ts`, `packages/api/src/db/schema.ts` (migration `134_*` only)
+**Allowed files:** `packages/api/src/availability/pg-working-hours.ts`, `packages/api/test/availability/pg-working-hours.test.ts`, `packages/api/src/db/schema.ts` (migration `136_*` only)
 
-**Build prompt:** Working hours currently live only in `InMemoryWorkingHoursRepository` (`packages/api/src/availability/working-hours.ts`), so availability warnings never fire in production. Add a Postgres-backed `PgWorkingHoursRepository` that satisfies the **existing** `WorkingHoursRepository` interface unchanged (`create`, `findByTechnician`, `findByTechnicianAndDay`, `update`, `delete`). Mirror the template at `packages/api/src/availability/pg-unavailable-block.ts`: `extends PgBaseRepository`, every query inside `withTenant(tenantId, …)`, an explicit `tenant_id = $1` predicate (defense-in-depth alongside RLS), a `mapRow` helper, never concatenate `tenantId` into SQL, never call `pool.connect()` directly. Add migration `134_technician_working_hours` to the `MIGRATIONS` object in `db/schema.ts` mirroring `116_tech_unavailable_blocks` (tenant_id FK, `ENABLE`/`FORCE ROW LEVEL SECURITY`, `DROP POLICY IF EXISTS` + `CREATE POLICY tenant_isolation_technician_working_hours`). Columns: `id`, `tenant_id`, `technician_id`, `day_of_week SMALLINT 0–6`, `start_time TEXT` (`HH:mm`), `end_time TEXT`, `is_active BOOLEAN`, `created_at`, `updated_at`, plus `UNIQUE (tenant_id, technician_id, day_of_week)` (the repo's `findByTechnicianAndDay` assumes ≤1 row/day — single window for v1). `start_time`/`end_time` map as TEXT, not Date.
+**Build prompt:** Working hours currently live only in `InMemoryWorkingHoursRepository` (`packages/api/src/availability/working-hours.ts`), so availability warnings never fire in production. Add a Postgres-backed `PgWorkingHoursRepository` that satisfies the **existing** `WorkingHoursRepository` interface unchanged (`create`, `findByTechnician`, `findByTechnicianAndDay`, `update`, `delete`). Mirror the template at `packages/api/src/availability/pg-unavailable-block.ts`: `extends PgBaseRepository`, every query inside `withTenant(tenantId, …)`, an explicit `tenant_id = $1` predicate (defense-in-depth alongside RLS), a `mapRow` helper, never concatenate `tenantId` into SQL, never call `pool.connect()` directly. Add migration `136_technician_working_hours` to the `MIGRATIONS` object in `db/schema.ts` mirroring `116_tech_unavailable_blocks` (tenant_id FK, `ENABLE`/`FORCE ROW LEVEL SECURITY`, `DROP POLICY IF EXISTS` + `CREATE POLICY tenant_isolation_technician_working_hours`). Columns: `id`, `tenant_id`, `technician_id`, `day_of_week SMALLINT 0–6`, `start_time TEXT` (`HH:mm`), `end_time TEXT`, `is_active BOOLEAN`, `created_at`, `updated_at`, plus `UNIQUE (tenant_id, technician_id, day_of_week)` (the repo's `findByTechnicianAndDay` assumes ≤1 row/day — single window for v1). `start_time`/`end_time` map as TEXT, not Date.
 
 **Review prompt:** Verify the interface is satisfied with zero signature changes (InMemory contract is locked). Verify every query is tenant-scoped both by RLS GUC and explicit predicate. Verify the migration is idempotent (`IF NOT EXISTS` + `DROP/CREATE POLICY`) so the whole-string runner replays on boot. Verify the `UNIQUE` constraint matches the single-window assumption. Confirm `start_time`/`end_time` are stored/returned as `HH:mm` strings.
 
@@ -65,15 +65,15 @@ cd packages/api && npm test -- --run -t "SD-101|PgWorkingHours"
 
 ---
 
-### SD-102 — Business blackout periods + per-tech daily capacity (repos + migrations 135–136)
+### SD-102 — Business blackout periods + per-tech daily capacity (repos + migrations 137–138)
 
 > **Size:** S | **Layer:** Availability / Data | **AI Build:** High | **Human Review:** Moderate
 
 **Dependencies:** none
 
-**Allowed files:** `packages/api/src/availability/blackout-period.ts`, `packages/api/src/availability/pg-blackout-period.ts`, `packages/api/src/availability/daily-capacity.ts`, `packages/api/src/availability/pg-daily-capacity.ts`, `packages/api/test/availability/blackout-period.test.ts`, `packages/api/test/availability/daily-capacity.test.ts`, `packages/api/src/db/schema.ts` (migrations `135_*`, `136_*`)
+**Allowed files:** `packages/api/src/availability/blackout-period.ts`, `packages/api/src/availability/pg-blackout-period.ts`, `packages/api/src/availability/daily-capacity.ts`, `packages/api/src/availability/pg-daily-capacity.ts`, `packages/api/test/availability/blackout-period.test.ts`, `packages/api/test/availability/daily-capacity.test.ts`, `packages/api/src/db/schema.ts` (migrations `137_*`, `138_*`)
 
-**Build prompt:** Add two new availability entities following the exact shape of `unavailable-block.ts` + `pg-unavailable-block.ts` (interface + Zod `validate*Input` + `create*` factory + `InMemory*` + `Pg*`, `tenantId`-first methods, `withTenant` + explicit predicate). (1) **Business blackout periods** — tenant-wide unavailability (holidays, maintenance windows): `business_blackout_periods (id, tenant_id, start_time TIMESTAMPTZ, end_time TIMESTAMPTZ, reason TEXT, created_by TEXT NOT NULL, created_at, CHECK end_time > start_time)`, migration `135_business_blackout_periods`. Repo methods: `create`, `findByTenant(tenantId)`, `findOverlapping(tenantId, start, end)`, `delete(tenantId, id)`. (2) **Per-tech daily capacity**: `technician_daily_capacity (tenant_id, technician_id, day_of_week SMALLINT 0–6, max_appointments SMALLINT NULL, max_work_minutes INTEGER NULL, PRIMARY KEY (tenant_id, technician_id, day_of_week))`, migration `136_technician_daily_capacity`. Repo methods: `upsert`, `findByTechnician(tenantId, technicianId)`, `findByTechnicianAndDay(tenantId, technicianId, day)`. Both migrations include `ENABLE`/`FORCE ROW LEVEL SECURITY` + `tenant_isolation_*` policy. Nullable capacity = unlimited.
+**Build prompt:** Add two new availability entities following the exact shape of `unavailable-block.ts` + `pg-unavailable-block.ts` (interface + Zod `validate*Input` + `create*` factory + `InMemory*` + `Pg*`, `tenantId`-first methods, `withTenant` + explicit predicate). (1) **Business blackout periods** — tenant-wide unavailability (holidays, maintenance windows): `business_blackout_periods (id, tenant_id, start_time TIMESTAMPTZ, end_time TIMESTAMPTZ, reason TEXT, created_by TEXT NOT NULL, created_at, CHECK end_time > start_time)`, migration `137_business_blackout_periods`. Repo methods: `create`, `findByTenant(tenantId)`, `findOverlapping(tenantId, start, end)`, `delete(tenantId, id)`. (2) **Per-tech daily capacity**: `technician_daily_capacity (tenant_id, technician_id, day_of_week SMALLINT 0–6, max_appointments SMALLINT NULL, max_work_minutes INTEGER NULL, PRIMARY KEY (tenant_id, technician_id, day_of_week))`, migration `138_technician_daily_capacity`. Repo methods: `upsert`, `findByTechnician(tenantId, technicianId)`, `findByTechnicianAndDay(tenantId, technicianId, day)`. Both migrations include `ENABLE`/`FORCE ROW LEVEL SECURITY` + `tenant_isolation_*` policy. Nullable capacity = unlimited.
 
 **Review prompt:** Verify both follow repository-conventions (tenantId first, async, `T | null` single reads, `T[]` multi reads). Verify RLS on both tables. Verify `findOverlapping` uses `start < $end AND end > $start` (strict). Verify capacity nullable columns mean "unlimited" (documented). No wiring into `app.ts` in this story.
 
@@ -144,15 +144,15 @@ cd packages/api && npm test -- --run -t "SD-104|feasibility-blackout"
 
 ---
 
-### SD-105 — Skills data model (migration 137)
+### SD-105 — Skills data model (migration 139)
 
 > **Size:** M | **Layer:** Skills / Data | **AI Build:** High | **Human Review:** Moderate
 
 **Dependencies:** none
 
-**Allowed files:** `packages/api/src/skills/skill.ts`, `packages/api/src/skills/pg-skill.ts`, `packages/api/src/skills/technician-skill.ts`, `packages/api/src/skills/pg-technician-skill.ts`, `packages/api/src/skills/job-required-skill.ts`, `packages/api/src/skills/pg-job-required-skill.ts`, `packages/api/test/skills/**`, `packages/api/src/db/schema.ts` (migration `137_*`)
+**Allowed files:** `packages/api/src/skills/skill.ts`, `packages/api/src/skills/pg-skill.ts`, `packages/api/src/skills/technician-skill.ts`, `packages/api/src/skills/pg-technician-skill.ts`, `packages/api/src/skills/job-required-skill.ts`, `packages/api/src/skills/pg-job-required-skill.ts`, `packages/api/test/skills/**`, `packages/api/src/db/schema.ts` (migration `139_*`)
 
-**Build prompt:** Create the skills model as three entities, each following the `unavailable-block.ts` pattern (interface + Zod + factory + InMemory + Pg, `tenantId`-first, `withTenant` + explicit predicate). Migration `137_skills_model` adds four-or-fewer tables (all with `ENABLE`/`FORCE ROW LEVEL SECURITY` + `tenant_isolation_*`):
+**Build prompt:** Create the skills model as three entities, each following the `unavailable-block.ts` pattern (interface + Zod + factory + InMemory + Pg, `tenantId`-first, `withTenant` + explicit predicate). Migration `139_skills_model` adds four-or-fewer tables (all with `ENABLE`/`FORCE ROW LEVEL SECURITY` + `tenant_isolation_*`):
 - `skills (id, tenant_id, name TEXT, category TEXT, created_at, UNIQUE(tenant_id, name))`
 - `technician_skills (id, tenant_id, technician_id REFERENCES users(id), skill_id REFERENCES skills(id), proficiency SMALLINT NOT NULL DEFAULT 1 CHECK (proficiency BETWEEN 1 AND 3), created_at, UNIQUE(tenant_id, technician_id, skill_id))` — proficiency 1=apprentice, 2=journeyman, 3=master.
 - `job_required_skills (id, tenant_id, job_id REFERENCES jobs(id), skill_id REFERENCES skills(id), min_proficiency SMALLINT NOT NULL DEFAULT 1 CHECK (min_proficiency BETWEEN 1 AND 3), is_required BOOLEAN NOT NULL DEFAULT true, UNIQUE(tenant_id, job_id, skill_id))`.
@@ -247,7 +247,7 @@ cd packages/api && npm test -- --run -t "SD-107|RealSkillMatcher|feasibility"
 **Automated checks:**
 ```bash
 cd packages/api && npx tsc --project tsconfig.build.json --noEmit
-npm test --workspace=packages/web -- --run -t "SD-108|skillBadge"
+cd ../web && npm test -- --run -t "SD-108|skillBadge"
 ```
 
 **Required tests:**
