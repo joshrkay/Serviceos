@@ -3528,6 +3528,14 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_invoice_dunning_events ON invoice_dunning_events
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '137_tenant_settings_auto_invoice_on_completion': `
+    -- P20-001: opt-in toggle to auto-draft an invoice when a job is marked
+    -- complete. Off by default — owners opt in; the draft still routes
+    -- through the proposal/approval gate before anything is sent.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS auto_invoice_on_completion BOOLEAN NOT NULL DEFAULT false;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

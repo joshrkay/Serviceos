@@ -13,7 +13,7 @@ A job flips to `completed` → the owner gets one SMS proposal and the invoice g
 
 | Story | Title | Size | Status |
 |---|---|---|---|
-| P20-001 | Auto-draft invoice on job completion | M | Not started |
+| P20-001 | Auto-draft invoice on job completion | M | **Landed** (toggle mig. 137 + `auto-invoice-on-completion.ts` + completion-hook wiring) |
 | P20-002 | Dunning cadence + late-fee config (data model) | S | **Landed** (migration 136 + repos) |
 | P20-003 | Multi-step reminder cadence in the overdue sweep | M | Partially landed (pure selection `dunning-schedule.ts` done; worker wiring pending) |
 | P20-004 | Late-fee accrual | S | Partially landed (pure calc `late-fee.ts` done; worker accrual + proposal pending) |
@@ -24,7 +24,7 @@ A job flips to `completed` → the owner gets one SMS proposal and the invoice g
 ---
 
 ### P20-001 — Auto-draft invoice on job completion
-**Status:** Not started
+**Status:** Landed. Toggle `tenant_settings.auto_invoice_on_completion` (migration 137, opt-in, off by default; settable via the settings API). `invoices/auto-invoice-on-completion.ts maybeAutoInvoiceOnCompletion` builds line items from the accepted estimate's billed selection (`resolveSelectedLineItems`) and raises a `draft_invoice` proposal (validated via `validateProposalPayload`); wired best-effort into the job-completion endpoint alongside `feedback_send`. Idempotent (no-op when already invoiced / ineligible money-state / nothing to bill). **Follow-up:** apply `applyDepositCreditToInvoice` at draft_invoice execution (deposit credit happens on the resulting invoice, not at proposal time); thin Settings toggle UI.
 **Allowed files:** `packages/api/src/jobs/job-lifecycle.ts` (emit a hook on `in_progress→completed`), `packages/api/src/invoices/auto-invoice-on-completion.ts` (new), `packages/api/src/jobs/pg-job-lifecycle.ts` (call inside the transition), `packages/api/test/invoices/auto-invoice-on-completion.test.ts` (new), `packages/api/src/db/schema.ts` (only if a `tenant_settings` toggle column is needed).
 **Build prompt:** On the `completed` transition, if the job has no open/paid invoice and `money_state ∈ {estimate_accepted, no_estimate}`, build line items from the accepted estimate (or job catalog lines) via `shared/billing-engine.ts calculateDocumentTotals`, then create a `draft_invoice` proposal through the existing proposal path (trust gate + audit apply). If a deposit exists, call `invoices/deposit-credit.ts applyDepositCreditToInvoice` on the resulting draft. Gate behind a `tenant_settings.auto_invoice_on_completion` toggle (reuse the quick-toggles JSONB). No new proposal type — `draft_invoice` already exists; chain a `send_invoice` (comms, one-tap).
 **Reuse:** `draftInvoicePayloadSchema` (`proposals/contracts.ts`), `invoices/convert-estimate.ts`, `invoices/deposit-credit.ts`, `jobs/job-money-state.ts`.

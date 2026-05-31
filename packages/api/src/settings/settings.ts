@@ -128,6 +128,11 @@ export interface TenantSettings {
    */
   autoSendAppointmentReminders?: boolean;
   /**
+   * P20-001 — when true, completing a job auto-drafts an invoice (as a
+   * proposal the owner approves to send). Default false (opt-in).
+   */
+  autoInvoiceOnCompletion?: boolean;
+  /**
    * Tier 4 (AI approval rules) — per-mode override of the proposal
    * auto-approve threshold. Consumed by
    * `proposals/auto-approve.ts:resolveAutoApproveThreshold` via the
@@ -258,6 +263,8 @@ export interface UpdateSettingsInput {
   autoApplyInternalUpdates?: boolean;
   /** Tier 4 — auto-text customers ~2h before scheduled appointments. */
   autoSendAppointmentReminders?: boolean;
+  /** P20-001 — auto-draft an invoice (as a proposal) on job completion. */
+  autoInvoiceOnCompletion?: boolean;
   /** Tier 4 — per-mode override of the proposal auto-approve threshold. */
   autoApproveThreshold?: Partial<Record<'supervisor' | 'tech' | 'both', number>>;
   /** Tier 4 (Deposit rules) — see TenantSettings doc for correlation rules. */
