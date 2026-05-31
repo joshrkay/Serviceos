@@ -129,4 +129,65 @@ describe('voice-action-router — multi-action chaining', () => {
     expect(job!.status).toBe('draft');
     expect(estimate!.status).toBe('draft');
   });
+
+  it('persists chain members keyless and dedups a sequential redelivery (by recordingId)', async () => {
+    const { gateway, provider } = createMockLLMGateway();
+    const decomposition = JSON.stringify({
+      segments: [
+        { index: 0, text: 'create a customer named Jane Doe', dependsOn: [] },
+        { index: 1, text: 'open a job for Jane', dependsOn: [0], dependencyEntityKind: 'customerId' },
+      ],
+    });
+    const classifications = [
+      JSON.stringify({ intentType: 'create_customer', confidence: 0.95, extractedEntities: { displayName: 'Jane Doe' } }),
+      JSON.stringify({ intentType: 'create_job', confidence: 0.9, extractedEntities: { jobTitle: 'Service' } }),
+    ];
+    let classifyCall = 0;
+    const spy = vi.spyOn(provider, 'complete').mockImplementation(async (req) => {
+      let content = '{}';
+      if (req.taskType === 'decompose_transcript') content = decomposition;
+      else if (req.taskType === 'classify_intent') {
+        content = classifications[Math.min(classifyCall++, classifications.length - 1)];
+      }
+      return { content, model: 'mock', provider: 'mock', tokenUsage: { input: 10, output: 10, total: 20 }, latencyMs: 1 };
+    });
+
+    const repo = new InMemoryProposalRepository();
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo: repo, multiActionEnabled: async () => true });
+
+    const msg: QueueMessage<VoiceActionRouterPayload> = {
+      id: 'msg-chain-redeliver',
+      type: 'voice_action_router',
+      payload: {
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+        transcript: 'create a customer named Jane Doe and open a job for her',
+        conversationId: 'conv-1',
+        recordingId: 'rec-chain-1',
+      },
+      attempts: 0,
+      enqueuedAt: new Date(),
+    };
+
+    await worker.handle(msg, silentLogger());
+
+    const afterFirst = await repo.findByTenant('tenant-1');
+    expect(afterFirst.length).toBe(2);
+    // Chain members must be keyless — they share one recordingId and persist
+    // via createMany, so a shared idempotencyKey would collide on the unique index.
+    expect(afterFirst.every((p) => p.idempotencyKey === undefined)).toBe(true);
+    // ...but each carries recordingId on sourceContext so the pre-check can find them.
+    expect(afterFirst.every((p) => (p.sourceContext as Record<string, unknown>)?.recordingId === 'rec-chain-1')).toBe(true);
+
+    const decomposeCallsAfterFirst = spy.mock.calls.filter(([req]) => req.taskType === 'decompose_transcript').length;
+
+    // At-least-once redelivery of the SAME recording must short-circuit in
+    // findAlreadyProcessed (no second chain, no re-decomposition).
+    await worker.handle(msg, silentLogger());
+
+    const afterSecond = await repo.findByTenant('tenant-1');
+    expect(afterSecond.length).toBe(2);
+    const decomposeCallsAfterSecond = spy.mock.calls.filter(([req]) => req.taskType === 'decompose_transcript').length;
+    expect(decomposeCallsAfterSecond).toBe(decomposeCallsAfterFirst); // skipped before decompose
+  });
 });
