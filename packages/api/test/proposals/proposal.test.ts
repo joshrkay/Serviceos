@@ -127,6 +127,25 @@ describe('P2-001 — Proposal entity and core schema', () => {
     expect(patched).toBeNull();
   });
 
+  it('createMany persists every member and is atomic on idempotency conflict', async () => {
+    const repo = new InMemoryProposalRepository();
+    // Chain members carry no idempotency key (they dedupe by recordingId
+    // at the worker layer), so use undefined here.
+    const a = createProposal({ ...validInput, idempotencyKey: undefined, summary: 'chain-a' });
+    const b = createProposal({ ...validInput, idempotencyKey: undefined, summary: 'chain-b' });
+    const created = await repo.createMany([a, b]);
+    expect(created).toHaveLength(2);
+    expect(await repo.findByTenant(validInput.tenantId)).toHaveLength(2);
+
+    // A batch with a duplicate idempotency key rejects without persisting
+    // any member (validated before the commit loop).
+    const repo2 = new InMemoryProposalRepository();
+    const c = createProposal({ ...validInput, idempotencyKey: 'dup', summary: 'c' });
+    const d = createProposal({ ...validInput, idempotencyKey: 'dup', summary: 'd' });
+    await expect(repo2.createMany([c, d])).rejects.toThrow();
+    expect(await repo2.findByTenant(validInput.tenantId)).toHaveLength(0);
+  });
+
   it('idempotency — duplicate key within tenant throws ConflictError', async () => {
     const repo = new InMemoryProposalRepository();
     const proposal1 = createProposal(validInput);

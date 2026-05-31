@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { MIGRATIONS } from '../../src/db/schema';
 
-describe('Migration 134 — technician_working_hours', () => {
-  const sql = MIGRATIONS['134_technician_working_hours'];
+describe('Migration 136 — technician_working_hours', () => {
+  const sql = MIGRATIONS['136_technician_working_hours'];
 
   it('is registered in MIGRATIONS', () => {
     expect(sql).toBeDefined();

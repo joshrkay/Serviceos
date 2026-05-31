@@ -3454,13 +3454,37 @@ export const MIGRATIONS = {
       CHECK (payment_method IN ('stripe', 'cash', 'check', 'credit_card', 'bank_transfer', 'other'));
   `,
 
+  // Multi-action chaining: a single voice utterance can decompose into
+  // an ordered chain of linked proposals where later members reference
+  // entities earlier members create. chain_id groups the siblings; the
+  // index supports the execution-time sibling lookup
+  // (PgProposalRepository.findByChain). Per-proposal chain metadata
+  // (chainIndex, chainRefs) rides on source_context (JSONB), no column.
+  '134_proposal_chains': `
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS chain_id UUID;
+    CREATE INDEX IF NOT EXISTS idx_proposals_chain ON proposals(tenant_id, chain_id);
+  `,
+
+  // Idempotency key for AI-placed tentative holds. A redelivered voice
+  // message (at-least-once queue) must not create a second appointment hold
+  // for the same recording. The held-slot path stamps a deterministic key
+  // (`voice-hold:<recordingId>`); the partial unique index dedups concurrent
+  // re-inserts while leaving ordinary (keyless) appointments unaffected.
+  '135_appointments_idempotency_key': `
+    ALTER TABLE appointments
+      ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_appointments_idempotency
+      ON appointments(tenant_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+  `,
+
   // Persist per-technician working hours so the dispatch feasibility check
   // and the inbound-AI availability search stop offering off-hours slots
   // (e.g. 3am). One contiguous window per tech per weekday; split shifts
   // are out of scope for this iteration. Times are tenant-local HH:mm
   // strings interpreted in the appointment's timezone (the appointment
   // instants themselves stay UTC). Replaces the in-memory-only stub.
-  '134_technician_working_hours': `
+  '136_technician_working_hours': `
     CREATE TABLE IF NOT EXISTS technician_working_hours (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id),

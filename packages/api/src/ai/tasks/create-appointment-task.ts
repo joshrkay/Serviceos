@@ -12,6 +12,7 @@ import {
   DEFAULT_TENANT_TIMEZONE,
   ResolveDateTimeFailureReason,
 } from '../scheduling/resolve-datetime';
+import { voiceHoldIdempotencyKey } from '../../voice/voice-audit';
 
 /**
  * LLM-backed CreateAppointmentTaskHandler.
@@ -440,6 +441,12 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
             createdBy: context.userId,
             holdPendingApproval: true,
             holdExpiryAt,
+            // Deterministic per-recording key: a redelivered voice message
+            // returns the existing hold instead of inserting a second one
+            // (closes the concurrent-redelivery double-booking window).
+            ...(context.recordingId
+              ? { idempotencyKey: voiceHoldIdempotencyKey(context.recordingId) }
+              : {}),
           },
           repo,
         );

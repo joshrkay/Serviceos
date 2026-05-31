@@ -14,6 +14,13 @@ export interface TaskContext {
    */
   customerId?: string;
   /**
+   * Originating voice recording id, when this task came from the
+   * transcription → voice_action_router queue path. Used to derive a
+   * deterministic idempotency key for at-least-once writes (e.g. the
+   * held-slot appointment) so a redelivered message can't double-book.
+   */
+  recordingId?: string;
+  /**
    * Tier 4 / PR B — per-tenant auto-approve threshold override
    * resolved by the entry-point (voice-action-router) and threaded
    * onto each task's CreateProposalInput. Optional: when undefined,
