@@ -266,6 +266,29 @@ describe('P21-002 — create_invoice_schedule', () => {
       expect(invoices[0].totals.totalCents).toBe(10000); // still 50% of 20000
     });
 
+    it('rejects schedule reuse when only the estimateId differs (same total + milestones)', async () => {
+      const jobId = uuidv4();
+      // First schedule tied to estimate A.
+      const first = await handler.execute(
+        makeProposal({ jobId, estimateId: 'estimate-a', totalAmountCents: 20000, milestones: milestones5050 }),
+        { tenantId: TENANT, executedBy: 'u1' },
+      );
+      expect(first.success).toBe(true);
+
+      // A revised proposal for estimate B with the SAME total + milestones must
+      // not reuse estimate A's schedule (mixed provenance) — it is rejected.
+      const second = await handler.execute(
+        makeProposal(
+          { jobId, estimateId: 'estimate-b', totalAmountCents: 20000, milestones: milestones5050 },
+          { id: 'p2' },
+        ),
+        { tenantId: TENANT, executedBy: 'u1' },
+      );
+      expect(second.success).toBe(false);
+      expect(second.error).toMatch(/different invoice schedule/i);
+      expect(await scheduleRepo.findByJob(TENANT, jobId)).toHaveLength(1);
+    });
+
     it('does not mint an invoice up front when no milestone is on_accept', async () => {
       const jobId = uuidv4();
       const result = await handler.execute(

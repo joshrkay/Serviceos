@@ -17,6 +17,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Invoice, InvoiceRepository, createInvoiceWithNextNumber } from './invoice';
 import { InvoiceScheduleRepository, splitMilestones } from './invoice-schedule';
 import { SettingsRepository } from '../settings/settings';
+import { withRequestSavepoint } from '../middleware/tenant-context';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { buildLineItem } from '../shared/billing-engine';
 import { Job } from '../jobs/job';
@@ -69,18 +70,26 @@ export async function mintCompletionMilestones(
 
       let invoice: Invoice;
       try {
-        invoice = await createInvoiceWithNextNumber(
-          {
-            tenantId: job.tenantId,
-            jobId: job.id,
-            estimateId: schedule.estimateId,
-            lineItems: [buildLineItem(uuidv4(), alloc.label, 1, alloc.amountCents, 0, true)],
-            createdBy: COMPLETION_ACTOR,
-            scheduleId: schedule.id,
-            milestoneIndex: alloc.index,
-          },
-          deps.invoiceRepo,
-          deps.settingsRepo,
+        // SAVEPOINT-wrap the INSERT: this runs inside the request transaction on
+        // the job-completion path (POST /api/jobs/:id/transition), so a 23505
+        // would abort the WHOLE request transaction — rolling back the job-status
+        // transition itself at COMMIT — even though we mean to catch it and skip.
+        // The savepoint confines the rollback to this insert. (No-op off the
+        // request path, e.g. background workers, where each write self-transacts.)
+        invoice = await withRequestSavepoint(() =>
+          createInvoiceWithNextNumber(
+            {
+              tenantId: job.tenantId,
+              jobId: job.id,
+              estimateId: schedule.estimateId,
+              lineItems: [buildLineItem(uuidv4(), alloc.label, 1, alloc.amountCents, 0, true)],
+              createdBy: COMPLETION_ACTOR,
+              scheduleId: schedule.id,
+              milestoneIndex: alloc.index,
+            },
+            deps.invoiceRepo,
+            deps.settingsRepo,
+          ),
         );
       } catch (err) {
         // A concurrent / retried completion already minted this exact

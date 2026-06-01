@@ -133,8 +133,13 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
         // a true retry succeed.)
         if (
           schedule.totalAmountCents !== totalCents ||
+          schedule.estimateId !== estimateId ||
           !milestonesMatch(schedule.milestones, milestones)
         ) {
+          // estimateId included: a revised proposal for a DIFFERENT estimate with
+          // the same total + milestones must not graft estimate-B invoices onto a
+          // schedule still tied to estimate A (mixed provenance for the on_accept
+          // drafts vs. the persisted schedule + later completion invoices).
           return { success: false, error: 'Job already has a different invoice schedule' };
         }
       } else {
