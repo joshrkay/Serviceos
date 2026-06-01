@@ -15,10 +15,11 @@ import { buildLineItem } from '../../shared/billing-engine';
 /**
  * P21-002 — Deterministic execution for create_invoice_schedule proposals.
  *
- * Writes the `invoice_schedules` row, then drafts the FIRST milestone invoice
- * (linked back via schedule_id + milestone_index) through the existing
- * invoice-create path. Later milestones are minted by the completion hook
- * (P20-001) and an on_accept check — not here.
+ * Writes the `invoice_schedules` row, then drafts an invoice for EVERY
+ * `on_accept` milestone (linked back via schedule_id + milestone_index) through
+ * the existing invoice-create path. Milestones triggered on_completion are
+ * minted later by the completion hook (P20-001); `manual` ones await an
+ * explicit action — neither is drafted here.
  *
  * The schedule total comes from the payload's `totalAmountCents` when present,
  * otherwise it is derived from the referenced estimate's billed selection.
@@ -111,34 +112,51 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
         await this.scheduleRepo.create(schedule);
       }
 
-      // Draft only the `on_accept` milestone now (e.g. the deposit). Milestones
-      // triggered on_completion/manual are minted later by their trigger — not
-      // up front — so a completion/manual plan never bills early. Guard the
-      // draft with an existence check so a retry (schedule already present)
-      // doesn't mint the deposit twice.
-      const onAccept = allocations.find((a) => a.trigger === 'on_accept');
-      if (onAccept) {
+      // Draft EVERY `on_accept` milestone now (e.g. a deposit plus any other
+      // up-front charge like a permit fee). Milestones triggered
+      // on_completion/manual are minted later by their own trigger — not up
+      // front. Each draft is guarded by an existence check (so a retry with the
+      // schedule already present never double-mints) and a 23505 catch (so a
+      // concurrent execution racing the same milestone is treated as already
+      // drafted rather than failing the whole proposal).
+      const onAcceptAllocations = allocations.filter((a) => a.trigger === 'on_accept');
+      if (onAcceptAllocations.length > 0) {
         const jobInvoices = await this.invoiceRepo.findByJob(
           context.tenantId,
           payload.jobId,
         );
-        const alreadyDrafted = jobInvoices.some(
-          (inv) => inv.scheduleId === schedule.id && inv.milestoneIndex === onAccept.index,
+        const drafted = new Set(
+          jobInvoices
+            .filter((inv) => inv.scheduleId === schedule.id && inv.milestoneIndex !== undefined)
+            .map((inv) => inv.milestoneIndex),
         );
-        if (!alreadyDrafted) {
-          await createInvoiceWithNextNumber(
-            {
-              tenantId: context.tenantId,
-              jobId: payload.jobId,
-              estimateId,
-              lineItems: [buildLineItem(uuidv4(), onAccept.label, 1, onAccept.amountCents, 0, true)],
-              createdBy: context.executedBy,
-              scheduleId: schedule.id,
-              milestoneIndex: onAccept.index,
-            },
-            this.invoiceRepo,
-            this.settingsRepo,
-          );
+        for (const onAccept of onAcceptAllocations) {
+          if (onAccept.amountCents <= 0) continue; // never draft a $0 invoice
+          if (drafted.has(onAccept.index)) continue;
+          try {
+            await createInvoiceWithNextNumber(
+              {
+                tenantId: context.tenantId,
+                jobId: payload.jobId,
+                estimateId,
+                lineItems: [buildLineItem(uuidv4(), onAccept.label, 1, onAccept.amountCents, 0, true)],
+                createdBy: context.executedBy,
+                scheduleId: schedule.id,
+                milestoneIndex: onAccept.index,
+              },
+              this.invoiceRepo,
+              this.settingsRepo,
+            );
+          } catch (err) {
+            // Partial unique index (schedule_id, milestone_index) rejected a
+            // concurrent/retried mint of this milestone — already drafted.
+            if ((err as { code?: string }).code === '23505') {
+              drafted.add(onAccept.index);
+              continue;
+            }
+            throw err;
+          }
+          drafted.add(onAccept.index);
         }
       }
 

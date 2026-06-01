@@ -165,6 +165,58 @@ describe('P21-002 — create_invoice_schedule', () => {
       expect(invoices[0].totals.totalCents).toBe(22000);
     });
 
+    it('drafts EVERY on_accept milestone up front, not just the first', async () => {
+      // Deposit + permit fee are both due on accept; the balance on completion.
+      const jobId = uuidv4();
+      const result = await handler.execute(
+        makeProposal({
+          jobId,
+          totalAmountCents: 100000,
+          milestones: [
+            { label: 'Deposit', type: 'percent', value: 3000, trigger: 'on_accept' }, // 30000
+            { label: 'Permit fee', type: 'flat', value: 15000, trigger: 'on_accept' }, // 15000
+            { label: 'Balance', type: 'remainder', value: 0, trigger: 'on_completion' },
+          ],
+        }),
+        { tenantId: TENANT, executedBy: 'u1' },
+      );
+      expect(result.success).toBe(true);
+
+      const invoices = await invoiceRepo.findByJob(TENANT, jobId);
+      // Both on_accept milestones drafted (indexes 0 and 1); the on_completion
+      // remainder (index 2) is NOT minted here.
+      expect(invoices).toHaveLength(2);
+      const byIndex = new Map(invoices.map((inv) => [inv.milestoneIndex, inv.totals.totalCents]));
+      expect(byIndex.get(0)).toBe(30000);
+      expect(byIndex.get(1)).toBe(15000);
+      expect(byIndex.has(2)).toBe(false);
+    });
+
+    it('re-execution after a partial mint drafts only the missing on_accept milestone', async () => {
+      // Simulate a prior run that minted milestone 0 but not 1 (e.g. crashed
+      // mid-loop, no resultEntityId persisted), then retry.
+      const jobId = uuidv4();
+      const payload = {
+        jobId,
+        totalAmountCents: 100000,
+        milestones: [
+          { label: 'Deposit', type: 'percent', value: 3000, trigger: 'on_accept' },
+          { label: 'Permit fee', type: 'flat', value: 15000, trigger: 'on_accept' },
+          { label: 'Balance', type: 'remainder', value: 0, trigger: 'on_completion' },
+        ],
+      };
+      // First run mints both; delete milestone 1 to mimic a partial prior run.
+      await handler.execute(makeProposal(payload), { tenantId: TENANT, executedBy: 'u1' });
+      const after = await invoiceRepo.findByJob(TENANT, jobId);
+      expect(after).toHaveLength(2);
+
+      // Re-run: schedule already exists, both milestones already drafted — no dups.
+      const rerun = await handler.execute(makeProposal(payload), { tenantId: TENANT, executedBy: 'u1' });
+      expect(rerun.success).toBe(true);
+      expect(await invoiceRepo.findByJob(TENANT, jobId)).toHaveLength(2);
+      expect(await scheduleRepo.findByJob(TENANT, jobId)).toHaveLength(1);
+    });
+
     it('does not mint an invoice up front when no milestone is on_accept', async () => {
       const jobId = uuidv4();
       const result = await handler.execute(
