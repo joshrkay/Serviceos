@@ -194,6 +194,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['138_tenant_settings_auto_invoice_on_completion', '022db9a74cf4fab10dd8c23b6fabcbbf6edb36a7629adff7e39e5f05292e85f2'],
   ['139_create_invoice_schedules', '01debb27ace85e2ac1df38317894cce7b35fd54a20431fe526d12246fda696d9'],
   ['140_batch_invoicing', '63f7146c5a2b08ed910edff1f1f9136955d79474e796801239abb1ff96430fdc'],
+  ['141_milestone_billing_safeguards', 'ad03d4f81bd0c9807d7621daba90508a3622e4d03057df2919e714a1d3a03400'],
 ];
 
 function hashMigration(value: string): string {

@@ -86,34 +86,60 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
       // guarantees the allocations sum to the total.
       const allocations = splitMilestones(totalCents, milestones);
 
-      const schedule = buildInvoiceSchedule({
-        tenantId: context.tenantId,
-        jobId: payload.jobId,
-        estimateId,
-        totalAmountCents: totalCents,
-        milestones,
-        createdBy: context.executedBy,
-      });
-      await this.scheduleRepo.create(schedule);
+      // Idempotency backstop. A prior execution may have written the schedule
+      // row but then failed before/while drafting the deposit invoice,
+      // returning {success:false} with no resultEntityId — which leaves the
+      // proposal retryable. Reuse the existing schedule for this job instead of
+      // minting a SECOND one: two schedules make the completion hook (which
+      // dedups on schedule_id) bill the on_completion balance TWICE. The
+      // uniq_invoice_schedules_job index is the hard DB backstop; this read
+      // keeps the retry from even attempting the duplicate insert.
+      const existingForJob = await this.scheduleRepo.findByJob(
+        context.tenantId,
+        payload.jobId,
+      );
+      let schedule = existingForJob[0];
+      if (!schedule) {
+        schedule = buildInvoiceSchedule({
+          tenantId: context.tenantId,
+          jobId: payload.jobId,
+          estimateId,
+          totalAmountCents: totalCents,
+          milestones,
+          createdBy: context.executedBy,
+        });
+        await this.scheduleRepo.create(schedule);
+      }
 
       // Draft only the `on_accept` milestone now (e.g. the deposit). Milestones
       // triggered on_completion/manual are minted later by their trigger — not
-      // up front — so a completion/manual plan never bills early.
+      // up front — so a completion/manual plan never bills early. Guard the
+      // draft with an existence check so a retry (schedule already present)
+      // doesn't mint the deposit twice.
       const onAccept = allocations.find((a) => a.trigger === 'on_accept');
       if (onAccept) {
-        await createInvoiceWithNextNumber(
-          {
-            tenantId: context.tenantId,
-            jobId: payload.jobId,
-            estimateId,
-            lineItems: [buildLineItem(uuidv4(), onAccept.label, 1, onAccept.amountCents, 0, true)],
-            createdBy: context.executedBy,
-            scheduleId: schedule.id,
-            milestoneIndex: onAccept.index,
-          },
-          this.invoiceRepo,
-          this.settingsRepo,
+        const jobInvoices = await this.invoiceRepo.findByJob(
+          context.tenantId,
+          payload.jobId,
         );
+        const alreadyDrafted = jobInvoices.some(
+          (inv) => inv.scheduleId === schedule.id && inv.milestoneIndex === onAccept.index,
+        );
+        if (!alreadyDrafted) {
+          await createInvoiceWithNextNumber(
+            {
+              tenantId: context.tenantId,
+              jobId: payload.jobId,
+              estimateId,
+              lineItems: [buildLineItem(uuidv4(), onAccept.label, 1, onAccept.amountCents, 0, true)],
+              createdBy: context.executedBy,
+              scheduleId: schedule.id,
+              milestoneIndex: onAccept.index,
+            },
+            this.invoiceRepo,
+            this.settingsRepo,
+          );
+        }
       }
 
       return { success: true, resultEntityId: schedule.id };

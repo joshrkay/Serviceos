@@ -3607,6 +3607,36 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS batch_invoice_enabled BOOLEAN NOT NULL DEFAULT false;
   `,
+
+  '141_milestone_billing_safeguards': `
+    -- P0 launch hardening for milestone (schedule) billing.
+    --
+    -- (1) One billing schedule per job. A create_invoice_schedule execution
+    --     that wrote the schedule row but then failed before drafting the
+    --     deposit left the proposal retryable with no resultEntityId; the retry
+    --     minted a SECOND schedule (fresh uuid). The completion hook dedups on
+    --     schedule_id, so two schedules billed the on_completion balance TWICE.
+    --     This unique index makes a duplicate schedule impossible at the DB.
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_invoice_schedules_job
+      ON invoice_schedules(tenant_id, job_id);
+
+    -- (2) One invoice per (schedule, milestone). The completion hook decided
+    --     "already minted" from an application read with no DB backstop and no
+    --     lock, so two concurrent / retried "mark complete" requests could both
+    --     mint the same balance invoice. Partial — non-milestone invoices carry
+    --     NULL schedule_id and must not collide.
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_invoices_schedule_milestone
+      ON invoices(schedule_id, milestone_index)
+      WHERE schedule_id IS NOT NULL;
+
+    -- (3) Fleet-wide opt-in / kill switch for on-completion milestone minting.
+    --     Mirrors auto_invoice_on_completion + batch_invoice_enabled (opt-in,
+    --     default false) so milestone billing — which writes real invoices
+    --     directly — is never silently active fleet-wide and can be halted in
+    --     an incident without deleting schedules.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS milestone_billing_enabled BOOLEAN NOT NULL DEFAULT false;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

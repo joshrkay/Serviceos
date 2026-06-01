@@ -50,6 +50,9 @@ function makeSettings(): TenantSettings {
     nextEstimateNumber: 1,
     nextInvoiceNumber: 1,
     defaultPaymentTermDays: 30,
+    // Milestone billing is opt-in (P0 launch hardening): these tests exercise
+    // the minting path, so they enable it. The gate itself is covered below.
+    milestoneBillingEnabled: true,
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -126,6 +129,19 @@ describe('mintCompletionMilestones', () => {
   it('no-ops for a job with no invoice schedule', async () => {
     const job = makeJob();
     expect(await mintCompletionMilestones(deps(), job)).toHaveLength(0);
+  });
+
+  it('does not mint when milestone billing is not opted in (kill switch)', async () => {
+    // Disable the opt-in toggle; an approved schedule with a billable
+    // on_completion balance must NOT mint.
+    await settingsRepo.update(TENANT, { milestoneBillingEnabled: false });
+    const job = makeJob();
+    await seedScheduleWithDeposit(job);
+
+    const created = await mintCompletionMilestones(deps(), job);
+    expect(created).toHaveLength(0);
+    // Only the pre-existing deposit invoice remains — no balance minted.
+    expect(await invoiceRepo.findByJob(TENANT, job.id)).toHaveLength(1);
   });
 
   it('does not mint manual milestones on completion', async () => {
