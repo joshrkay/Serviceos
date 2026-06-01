@@ -66,6 +66,9 @@ Rules:
 /** A tentative hold survives 24h before the availability finder treats it as free. */
 const HOLD_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+/** RFC-4122 UUID matcher — validates the LLM-extracted jobId before any DB read. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function tryParseJson(content: string): Record<string, unknown> | null {
   try {
     const p = JSON.parse(content);
@@ -430,11 +433,19 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       // the verified caller — otherwise an injected/guessed id could place a
       // hold on another customer's job and pollute their calendar for the 24h
       // hold window. Mirrors the appointment→job→customer ownership check the
-      // reschedule/cancel handlers already perform. Only enforced when the
-      // caller is identified (context.customerId) and a jobRepo is wired; on a
-      // mismatch we degrade to the approval-gated create_appointment proposal
-      // rather than writing the hold.
-      if (this.jobRepo && context.customerId) {
+      // reschedule/cancel handlers already perform.
+      //
+      // When a jobRepo is wired we CAN verify ownership, so we MUST: the held
+      // write only proceeds for an identified caller (context.customerId) whose
+      // jobId is a well-formed UUID that resolves to a job they own. An
+      // unidentified caller, a malformed id, or someone else's job degrades to
+      // the approval-gated create_appointment proposal rather than writing a
+      // hold against an unverified job. (No jobRepo → cannot check → the legacy
+      // held path is unchanged.)
+      if (this.jobRepo) {
+        if (!UUID_RE.test(payload.jobId) || !context.customerId) {
+          return { proposal: createProposal(input), taskType: this.taskType };
+        }
         const ownedJob = await this.jobRepo
           .findById(context.tenantId, payload.jobId)
           .catch(() => null);

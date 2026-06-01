@@ -13,6 +13,23 @@ import {
 import { buildLineItem } from '../../shared/billing-engine';
 
 /**
+ * True when two milestone lists are field-for-field identical (order included).
+ * Distinguishes a genuine retry of a create_invoice_schedule proposal (safe to
+ * reuse the existing schedule) from a different/revised plan for a job that
+ * already has a schedule (must be rejected, not grafted onto the old row).
+ */
+function milestonesMatch(a: InvoiceMilestone[], b: InvoiceMilestone[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every(
+    (m, i) =>
+      m.label === b[i].label &&
+      m.type === b[i].type &&
+      m.value === b[i].value &&
+      m.trigger === b[i].trigger,
+  );
+}
+
+/**
  * P21-002 — Deterministic execution for create_invoice_schedule proposals.
  *
  * Writes the `invoice_schedules` row, then drafts an invoice for EVERY
@@ -100,7 +117,27 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
         payload.jobId,
       );
       let schedule = existingForJob[0];
-      if (!schedule) {
+      if (schedule) {
+        // A schedule already exists for this job. Only a genuine RETRY of THIS
+        // proposal may reuse it — i.e. the existing row has the same total and
+        // milestones this payload would produce. A DIFFERENT/revised schedule
+        // proposal for a job that already has one must NOT be grafted onto the
+        // existing schedule_id: the on_accept invoices below would be drafted
+        // with this payload's amounts/indexes while the stored milestones stay
+        // the old ones, desyncing them and making the completion hook bill the
+        // wrong on_completion balance. Reject it instead — one schedule per job
+        // is enforced by uniq_invoice_schedules_job, and a revised plan needs an
+        // explicit replace flow, not a second create proposal. (Before the
+        // idempotency backstop this case was already rejected by the unique
+        // index's 23505 on insert; this keeps that guarantee while still letting
+        // a true retry succeed.)
+        if (
+          schedule.totalAmountCents !== totalCents ||
+          !milestonesMatch(schedule.milestones, milestones)
+        ) {
+          return { success: false, error: 'Job already has a different invoice schedule' };
+        }
+      } else {
         schedule = buildInvoiceSchedule({
           tenantId: context.tenantId,
           jobId: payload.jobId,
@@ -150,7 +187,7 @@ export class CreateInvoiceScheduleExecutionHandler implements ExecutionHandler {
           } catch (err) {
             // Partial unique index (schedule_id, milestone_index) rejected a
             // concurrent/retried mint of this milestone — already drafted.
-            if ((err as { code?: string }).code === '23505') {
+            if (err && typeof err === 'object' && (err as { code?: string }).code === '23505') {
               drafted.add(onAccept.index);
               continue;
             }

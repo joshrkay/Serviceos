@@ -255,6 +255,11 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     } else {
       payload = req.body as Record<string, unknown>;
     }
+    // A literal `null` (or any non-object) is valid JSON that parses without
+    // throwing but would crash on the property access below — reject it.
+    if (!payload || typeof payload !== 'object') {
+      return res.status(400).json({ error: 'Invalid or missing payload' });
+    }
     const eventType = payload.type as string;
 
     // Declared outside the try so the catch can mark this row 'failed'

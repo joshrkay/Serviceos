@@ -89,7 +89,7 @@ export async function mintCompletionMilestones(
         // 23505 before any invoice number is allocated. Treat it as already
         // minted and move on — the other run owns the invoice. Any other error
         // is a real failure and must propagate.
-        if ((err as { code?: string }).code === '23505') {
+        if (err && typeof err === 'object' && (err as { code?: string }).code === '23505') {
           minted.add(key);
           continue;
         }

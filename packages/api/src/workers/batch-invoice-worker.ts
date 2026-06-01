@@ -92,7 +92,7 @@ export async function runBatchInvoiceSweep(
           await deps.runRepo.create(buildBatchInvoiceRun(tenantId, candidate.jobId, batchDate));
           reserved.push(candidate);
         } catch (err) {
-          if ((err as { code?: string }).code === '23505') {
+          if (err && typeof err === 'object' && (err as { code?: string }).code === '23505') {
             skipped += 1; // already batched today
             continue;
           }
