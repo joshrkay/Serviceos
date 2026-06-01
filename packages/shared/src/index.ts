@@ -9,6 +9,8 @@ export * from './contracts/proposal.js';
 export * from './contracts/status.js';
 export * from './contracts/job.js';
 export * from './contracts/customer.js';
+export * from './contracts/money.js';
+export * from './contracts/estimate.js';
 export * from './contracts/messages.js';
 export * from './contracts/vulnerability-signal.js';
 export * from './contracts/tech-status-event.js';
