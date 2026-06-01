@@ -443,14 +443,25 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       // hold against an unverified job. (No jobRepo → cannot check → the legacy
       // held path is unchanged.)
       if (this.jobRepo) {
+        // Fallback for every case where we cannot positively attribute the
+        // LLM-supplied jobId to the verified caller. It MUST NOT auto-execute:
+        // `input` carries sourceTrustTier:'autonomous', so for a supervised,
+        // high-confidence tenant the create_appointment would auto-approve and
+        // CreateAppointmentExecutionHandler (which only checks jobId is a
+        // string) would book against the unverified job. Dropping the trust
+        // tier lands it in 'draft' so a human reviews the booking first.
+        const reviewGatedFallback = (): TaskResult => ({
+          proposal: createProposal({ ...input, sourceTrustTier: undefined }),
+          taskType: this.taskType,
+        });
         if (!UUID_RE.test(payload.jobId) || !context.customerId) {
-          return { proposal: createProposal(input), taskType: this.taskType };
+          return reviewGatedFallback();
         }
         const ownedJob = await this.jobRepo
           .findById(context.tenantId, payload.jobId)
           .catch(() => null);
         if (!ownedJob || ownedJob.customerId !== context.customerId) {
-          return { proposal: createProposal(input), taskType: this.taskType };
+          return reviewGatedFallback();
         }
       }
       const holdExpiryAt = new Date(Date.now() + HOLD_WINDOW_MS);

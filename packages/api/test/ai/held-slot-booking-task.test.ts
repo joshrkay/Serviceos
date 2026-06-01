@@ -110,6 +110,10 @@ function contextFor(customerId?: string): TaskContext {
     tenantId: tenantA,
     userId: 'agent-1',
     message: 'Book the Johnson AC repair next Tuesday at 2pm',
+    // supervisorPresent + the fixture's 0.9 confidence are auto-approve
+    // favorable, so a degraded fallback that (wrongly) kept the autonomous
+    // trust tier would land in 'approved' — the regression these tests guard.
+    supervisorPresent: true,
     ...(customerId ? { customerId } : {}),
   } as TaskContext;
 }
@@ -152,11 +156,14 @@ describe('CreateAppointmentAITaskHandler — held-slot ownership (jobRepo wired)
 
     const result = await handler.handle(contextFor('cust-1'));
 
-    // No hold is written against a job the caller does not own.
+    // No hold is written against a job the caller does not own, and the
+    // fallback is review-gated ('draft') — never auto-approved against the
+    // unverified job.
     expect(result.proposal.proposalType).toBe('create_appointment');
+    expect(result.proposal.status).toBe('draft');
   });
 
-  it('degrades to create_appointment for an unidentified caller (no customerId)', async () => {
+  it('degrades to a review-gated create_appointment for an unidentified caller (no customerId)', async () => {
     const handler = new CreateAppointmentAITaskHandler(
       fakeGateway({ ...completeBooking, jobId: validJobId }),
       undefined,
@@ -168,9 +175,10 @@ describe('CreateAppointmentAITaskHandler — held-slot ownership (jobRepo wired)
     const result = await handler.handle(contextFor(undefined));
 
     expect(result.proposal.proposalType).toBe('create_appointment');
+    expect(result.proposal.status).toBe('draft');
   });
 
-  it('degrades to create_appointment when the LLM jobId is not a valid UUID', async () => {
+  it('degrades to a review-gated create_appointment when the LLM jobId is not a valid UUID', async () => {
     const handler = new CreateAppointmentAITaskHandler(
       fakeGateway({ ...completeBooking, jobId: 'not-a-uuid' }),
       undefined,
@@ -182,5 +190,6 @@ describe('CreateAppointmentAITaskHandler — held-slot ownership (jobRepo wired)
     const result = await handler.handle(contextFor('cust-1'));
 
     expect(result.proposal.proposalType).toBe('create_appointment');
+    expect(result.proposal.status).toBe('draft');
   });
 });
