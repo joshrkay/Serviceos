@@ -25,8 +25,11 @@ export enum PreferredChannel {
 }
 
 // ── Jobs ──
+// Values mirror the jobs `status` CHECK in packages/api/src/db/schema.ts
+// (DEFAULT 'new'). Kept in lockstep with jobStatusSchema in
+// ./contracts/status.ts; status.test.ts fails CI on drift.
 export enum JobStatus {
-  CREATED = 'created',
+  NEW = 'new',
   SCHEDULED = 'scheduled',
   IN_PROGRESS = 'in_progress',
   COMPLETED = 'completed',
@@ -47,9 +50,13 @@ export enum JobSource {
 }
 
 // ── Appointments ──
+// Values mirror the appointments `status` CHECK in
+// packages/api/src/db/schema.ts. The field/UI "en route" concept is a tech
+// workflow state (see web TechJobView), not a persisted appointment status.
+// Kept in lockstep with appointmentStatusSchema in ./contracts/status.ts.
 export enum AppointmentStatus {
   SCHEDULED = 'scheduled',
-  EN_ROUTE = 'en_route',
+  CONFIRMED = 'confirmed',
   IN_PROGRESS = 'in_progress',
   COMPLETED = 'completed',
   CANCELED = 'canceled',
@@ -122,6 +129,9 @@ export enum DiscountType {
 }
 
 // ── Proposals ──
+// Values mirror the proposals `status` CHECK in packages/api/src/db/schema.ts
+// (latest migration adds 'undone'). Kept in lockstep with proposalStatusSchema
+// in ./contracts/status.ts; status.test.ts fails CI on drift.
 export enum ProposalStatus {
   DRAFT = 'draft',
   READY_FOR_REVIEW = 'ready_for_review',
@@ -131,6 +141,7 @@ export enum ProposalStatus {
   EXPIRED = 'expired',
   EXECUTED = 'executed',
   EXECUTION_FAILED = 'execution_failed',
+  UNDONE = 'undone',
 }
 
 // Mirrors the ProposalType union in
