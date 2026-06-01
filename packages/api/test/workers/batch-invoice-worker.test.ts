@@ -7,6 +7,11 @@ import { InMemoryEstimateRepository, createEstimate } from '../../src/estimates/
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemorySettingsRepository, TenantSettings } from '../../src/settings/settings';
 import { InMemoryBatchInvoiceRunRepository } from '../../src/invoices/batch-invoice-run';
+import {
+  InMemoryTransactionRunner,
+  TenantTransactionRunner,
+  TransactionScope,
+} from '../../src/db/tenant-transaction';
 import { buildLineItem } from '../../src/shared/billing-engine';
 import { createLogger } from '../../src/logging/logger';
 
@@ -76,6 +81,7 @@ describe('runBatchInvoiceSweep', () => {
       proposalRepo,
       settingsRepo,
       runRepo,
+      txRunner: new InMemoryTransactionRunner(),
       listTenantIds: async () => [TENANT],
       logger,
       now: () => now,
@@ -136,5 +142,49 @@ describe('runBatchInvoiceSweep', () => {
     await settingsRepo.create(makeSettings(true));
     const result = await runBatchInvoiceSweep(deps());
     expect(result.proposals).toBe(0);
+  });
+
+  // A runner that gives the in-memory ledger REAL rollback semantics (the
+  // default InMemoryTransactionRunner is a no-op): it snapshots the ledger
+  // before the unit of work and restores it if the work throws — mirroring the
+  // pg transaction the worker relies on — so we can assert reserve + propose
+  // are atomic.
+  function rollbackRunner(): TenantTransactionRunner {
+    return {
+      run: async <T>(_t: string, fn: (scope: TransactionScope) => Promise<T>): Promise<T> => {
+        const ledger = runRepo as unknown as { rows: Map<string, unknown> };
+        const snapshot = new Map(ledger.rows);
+        try {
+          return await fn({ lock: async () => undefined, savepoint: (w) => w() });
+        } catch (err) {
+          ledger.rows = snapshot; // roll back reservations made in this unit
+          throw err;
+        }
+      },
+    };
+  }
+
+  it('rolls reservations back with a failed proposal, so the job re-batches the same day', async () => {
+    await settingsRepo.create(makeSettings(true));
+    const job = await seedCandidate(20000);
+
+    // First sweep: the proposal write fails AFTER the reservation. The whole
+    // unit rolls back — no proposal AND no orphaned reservation.
+    const realCreate = proposalRepo.create.bind(proposalRepo);
+    proposalRepo.create = async () => {
+      throw new Error('proposal write failed');
+    };
+    const first = await runBatchInvoiceSweep({ ...deps(), txRunner: rollbackRunner() });
+    expect(first.failed).toBe(1);
+    expect(first.proposals).toBe(0);
+    expect(await runRepo.findByJobAndDate(TENANT, job.id, '2026-05-31')).toBeNull();
+
+    // Second sweep the SAME day succeeds: the rolled-back job is eligible again
+    // (the old reserve-first design would have skipped it until tomorrow).
+    proposalRepo.create = realCreate;
+    const second = await runBatchInvoiceSweep({ ...deps(), txRunner: rollbackRunner() });
+    expect(second.proposals).toBe(1);
+    expect(second.jobs).toBe(1);
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(1);
   });
 });

@@ -718,6 +718,7 @@ export function createApp(): express.Express {
   const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
   const invoiceScheduleRepo = pool ? new PgInvoiceScheduleRepository(pool) : new InMemoryInvoiceScheduleRepository();
   const batchInvoiceRunRepo = pool ? new PgBatchInvoiceRunRepository(pool) : new InMemoryBatchInvoiceRunRepository();
+  const batchInvoiceTxRunner = pool ? new PgTenantTransactionRunner(pool) : new InMemoryTransactionRunner();
   const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
   const expenseRepo        = pool ? new PgExpenseRepository(pool)        : new InMemoryExpenseRepository();
   // P5-017: Resolve the payment-link provider via the factory so the mock
@@ -2822,6 +2823,7 @@ export function createApp(): express.Express {
         proposalRepo,
         settingsRepo,
         runRepo: batchInvoiceRunRepo,
+        txRunner: batchInvoiceTxRunner,
         listTenantIds: async () => {
           if (!pool) return [];
           const r = await pool.query('SELECT id FROM tenants');

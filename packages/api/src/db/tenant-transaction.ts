@@ -12,6 +12,16 @@ import { tenantContextStore } from '../middleware/tenant-context';
  */
 export interface TransactionScope {
   lock(key: string): Promise<void>;
+  /**
+   * Run `fn` inside a SAVEPOINT. If `fn` throws (e.g. a 23505 unique
+   * violation), only `fn`'s writes roll back and the surrounding transaction
+   * stays usable for the next unit of work — without this, the first failed
+   * statement aborts the ENTIRE Postgres transaction. The original error is
+   * re-thrown after the rollback so the caller can branch on it (e.g. skip a
+   * row that was already processed). In-memory: runs `fn` directly (there is no
+   * real transaction to poison), so the error simply propagates unchanged.
+   */
+  savepoint<T>(fn: () => Promise<T>): Promise<T>;
 }
 
 export interface TenantTransactionRunner {
@@ -25,7 +35,7 @@ export interface TenantTransactionRunner {
  */
 export class InMemoryTransactionRunner implements TenantTransactionRunner {
   async run<T>(_tenantId: string, fn: (scope: TransactionScope) => Promise<T>): Promise<T> {
-    return fn({ lock: async () => undefined });
+    return fn({ lock: async () => undefined, savepoint: (work) => work() });
   }
 }
 
@@ -48,10 +58,26 @@ export class PgTenantTransactionRunner implements TenantTransactionRunner {
       await client.query('BEGIN');
       await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
 
+      let savepointSeq = 0;
       const scope: TransactionScope = {
         lock: async (key: string) => {
           const [k1, k2] = advisoryKeyPair(`${tenantId}\0${key}`);
           await client.query('SELECT pg_advisory_xact_lock($1::int, $2::int)', [k1, k2]);
+        },
+        savepoint: async <T>(work: () => Promise<T>): Promise<T> => {
+          // Internally generated name (never user input) — safe to interpolate.
+          const name = `sp_${(savepointSeq += 1)}`;
+          await client.query(`SAVEPOINT ${name}`);
+          try {
+            const result = await work();
+            await client.query(`RELEASE SAVEPOINT ${name}`);
+            return result;
+          } catch (err) {
+            // Undo only this unit's writes; the outer transaction lives on.
+            await client.query(`ROLLBACK TO SAVEPOINT ${name}`);
+            await client.query(`RELEASE SAVEPOINT ${name}`).catch(() => undefined);
+            throw err;
+          }
         },
       };
 
