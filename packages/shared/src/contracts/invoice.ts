@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { invoiceStatusSchema } from './status.js';
 import { lineItemSchema, documentTotalsSchema } from './money.js';
+import { customerSummarySchema } from './customer.js';
 
 /**
  * Canonical Invoice entity contract — single source of truth for the invoice
@@ -37,3 +38,14 @@ export const invoiceSchema = z.object({
   updatedAt: z.string(),
 });
 export type Invoice = z.infer<typeof invoiceSchema>;
+
+/**
+ * Shape consumed by the invoices list/detail UI: the Invoice entity plus an
+ * optional embedded `customer` summary a caller may join in. The bare
+ * GET /api/invoices(/:id) returns unenriched Invoice entities, so `customer` is
+ * optional and an unenriched response still validates.
+ */
+export const invoiceResponseSchema = invoiceSchema.extend({
+  customer: customerSummarySchema.optional(),
+});
+export type InvoiceResponse = z.infer<typeof invoiceResponseSchema>;

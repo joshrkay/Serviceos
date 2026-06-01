@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { invoiceSchema } from './invoice.js';
+import { invoiceSchema, invoiceResponseSchema } from './invoice.js';
 
 const baseInvoice = {
   id: '11111111-1111-1111-1111-111111111111',
@@ -48,5 +48,19 @@ describe('invoiceSchema', () => {
 
   it('keeps paid/due amounts integer cents', () => {
     expect(invoiceSchema.safeParse({ ...baseInvoice, amountDueCents: 149.0 + 0.5 }).success).toBe(false);
+  });
+});
+
+describe('invoiceResponseSchema', () => {
+  it('validates an unenriched invoice (no customer)', () => {
+    expect(invoiceResponseSchema.safeParse(baseInvoice).success).toBe(true);
+  });
+
+  it('accepts an optional embedded customer summary', () => {
+    const parsed = invoiceResponseSchema.parse({
+      ...baseInvoice,
+      customer: { id: 'cust-1', displayName: 'Acme Co', email: 'ap@acme.test' },
+    });
+    expect(parsed.customer?.displayName).toBe('Acme Co');
   });
 });

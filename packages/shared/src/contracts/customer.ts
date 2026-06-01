@@ -45,3 +45,18 @@ export const customerSchema = z.object({
   updatedAt: z.string(),
 });
 export type Customer = z.infer<typeof customerSchema>;
+
+/**
+ * Minimal customer summary embedded in enriched list/detail responses for other
+ * entities (e.g. the optional `customer` on an invoice/job response). A subset
+ * of the full Customer record — just what list/detail views render.
+ */
+export const customerSummarySchema = z.object({
+  id: z.string(),
+  displayName: z.string().optional(),
+  firstName: z.string().optional(),
+  lastName: z.string().optional(),
+  primaryPhone: z.string().optional(),
+  email: z.string().optional(),
+});
+export type CustomerSummary = z.infer<typeof customerSummarySchema>;
