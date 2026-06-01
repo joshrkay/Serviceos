@@ -13,6 +13,7 @@
  */
 import { v4 as uuidv4 } from 'uuid';
 import { ValidationError } from '../shared/errors';
+import { applyBps } from '../shared/billing-engine';
 
 export const MILESTONE_TYPES = ['percent', 'flat', 'remainder'] as const;
 export type MilestoneType = (typeof MILESTONE_TYPES)[number];
@@ -113,9 +114,10 @@ export function splitMilestones(
     throw new ValidationError(`Invalid milestones: ${errors.join('; ')}`);
   }
 
-  // First pass: fixed (non-remainder) amounts.
+  // First pass: fixed (non-remainder) amounts. percent uses the shared
+  // billing engine so milestone rounding matches the rest of the document.
   const fixed = milestones.map((m) => {
-    if (m.type === 'percent') return Math.round((totalCents * m.value) / 10000);
+    if (m.type === 'percent') return applyBps(totalCents, m.value);
     if (m.type === 'flat') return m.value;
     return 0; // remainder — resolved below
   });
