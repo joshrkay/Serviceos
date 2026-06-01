@@ -9,6 +9,7 @@ import {
   ChevronDown,
 } from 'lucide-react';
 import type { Job, JobActivity, MaterialItem, Customer, Technician } from '../../data/mock-data';
+import type { JobDetailResponse } from '@ai-service-os/shared';
 import { calcMaterialsTotal, calcEstimateTotalFromLines } from '../../utils/job-ui-math';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
@@ -17,48 +18,7 @@ import { useWorkerTerm } from '../../hooks/useWorkerTerm';
 import { normalizeJobStatus } from '../../utils/statusNormalize';
 import { apiFetch } from '../../utils/api-fetch';
 
-interface ApiJobDetail {
-  id: string;
-  jobNumber: string;
-  summary: string;
-  problemDescription?: string;
-  status: string;
-  priority?: string;
-  customerId?: string;
-  locationId?: string;
-  assignedTechnicianId?: string;
-  scheduledStart?: string;
-  createdAt?: string;
-  serviceType?: string;
-  customer?: {
-    id: string;
-    displayName?: string;
-    firstName?: string;
-    lastName?: string;
-    primaryPhone?: string;
-    email?: string;
-    communicationNotes?: string;
-    locations?: Array<{ id?: string; street1?: string; street2?: string; city?: string; state?: string; postalCode?: string; isPrimary?: boolean; label?: string }>;
-  };
-  location?: {
-    id?: string;
-    street1?: string;
-    city?: string;
-    state?: string;
-    postalCode?: string;
-    isPrimary?: boolean;
-    label?: string;
-  };
-  technician?: {
-    id: string;
-    firstName?: string;
-    lastName?: string;
-    color?: string;
-  };
-  lineItems?: Array<{ description: string; quantity: number; unitPriceCents: number; totalCents: number }>;
-}
-
-function buildJobCompat(api: ApiJobDetail): Job {
+function buildJobCompat(api: JobDetailResponse): Job {
   const techName = api.technician
     ? [api.technician.firstName, api.technician.lastName].filter(Boolean).join(' ')
     : undefined;
@@ -89,7 +49,7 @@ function buildJobCompat(api: ApiJobDetail): Job {
   };
 }
 
-function buildCustomerCompat(api: ApiJobDetail['customer']): Customer | undefined {
+function buildCustomerCompat(api: JobDetailResponse['customer']): Customer | undefined {
   if (!api) return undefined;
   const name = api.displayName || [api.firstName, api.lastName].filter(Boolean).join(' ') || 'Customer';
   const primaryLocation = api.locations?.find(l => l.isPrimary) ?? api.locations?.[0];
@@ -982,8 +942,8 @@ export function JobDetailView({ id }: { id: string }) {
   const apiFetch = useApiClient();
   const workerTerm = useWorkerTerm();
 
-  const { data: apiJob, isLoading, error, refetch: refetchJob } = useDetailQuery<ApiJobDetail>('/api/jobs', id);
-  const { mutate: transitionJob } = useMutation<{ status: string }, ApiJobDetail>('POST', `/api/jobs/${id}/transition`);
+  const { data: apiJob, isLoading, error, refetch: refetchJob } = useDetailQuery<JobDetailResponse>('/api/jobs', id);
+  const { mutate: transitionJob } = useMutation<{ status: string }, JobDetailResponse>('POST', `/api/jobs/${id}/transition`);
 
   const job      = apiJob ? buildJobCompat(apiJob) : null;
   const customer = apiJob?.customer ? buildCustomerCompat(apiJob.customer) : undefined;

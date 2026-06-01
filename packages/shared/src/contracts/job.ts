@@ -78,12 +78,6 @@ export type JobCustomerSummary = z.infer<typeof jobCustomerSummarySchema>;
  * Shape returned by `GET /api/jobs/:id`: the Job entity enriched with an
  * embedded customer summary and the resolved service location.
  */
-export const jobDetailResponseSchema = jobSchema.extend({
-  customer: jobCustomerSummarySchema.optional(),
-  location: jobLocationSummarySchema.optional(),
-});
-export type JobDetailResponse = z.infer<typeof jobDetailResponseSchema>;
-
 /** Minimal technician summary embedded in enriched job responses (name + lane color). */
 export const jobTechnicianSummarySchema = z.object({
   id: z.string(),
@@ -92,6 +86,21 @@ export const jobTechnicianSummarySchema = z.object({
   color: z.string().optional(),
 });
 export type JobTechnicianSummary = z.infer<typeof jobTechnicianSummarySchema>;
+
+/**
+ * Shape returned by `GET /api/jobs/:id`: the Job entity enriched with an
+ * embedded customer summary and the resolved service location. `technician` and
+ * `serviceType` are optional enrichment a caller may join in (the detail view
+ * renders them when present and falls back when absent), modeled optional so an
+ * unenriched response still validates.
+ */
+export const jobDetailResponseSchema = jobSchema.extend({
+  customer: jobCustomerSummarySchema.optional(),
+  location: jobLocationSummarySchema.optional(),
+  technician: jobTechnicianSummarySchema.optional(),
+  serviceType: z.string().optional(),
+});
+export type JobDetailResponse = z.infer<typeof jobDetailResponseSchema>;
 
 /**
  * Job as consumed by list UIs. The bare `GET /api/jobs` list returns Job
