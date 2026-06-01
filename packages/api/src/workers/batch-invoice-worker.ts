@@ -75,29 +75,40 @@ export async function runBatchInvoiceSweep(
       const candidates = await findJobsRequiringInvoicing(tenantId, deps);
       if (candidates.length === 0) continue;
 
-      // Exclude jobs already batched today (read-only — the sweep is leader-
-      // gated so there's no competing writer). Reserving the dedup rows is
-      // deferred until AFTER the proposal is persisted, so a transient failure
-      // here never suppresses a job's batching for the rest of the day.
-      const fresh: InvoicingCandidate[] = [];
+      // Reserve a dedup row per candidate BEFORE creating the proposal. The
+      // ledger's UNIQUE (tenant, job, batch_date) is the atomic dedup guard, so
+      // a job already batched today (re-run or a race) raises 23505 and is
+      // skipped. Reserving first is the correctness fix: previously the rows
+      // were written AFTER the proposal was persisted, so any non-23505 failure
+      // mid-reservation left a persisted batch_invoice proposal whose jobs had
+      // no dedup rows — and the next same-day sweep re-batched those jobs into a
+      // SECOND proposal, double-invoicing every job on dual approval. With
+      // reserve-first the worst case is a job batched one sweep later (row
+      // reserved but the proposal failed to persist), which self-heals on the
+      // next day's batch_date — never a double charge.
+      const reserved: InvoicingCandidate[] = [];
       for (const candidate of candidates) {
-        const already = await deps.runRepo.findByJobAndDate(tenantId, candidate.jobId, batchDate);
-        if (already) {
-          skipped += 1;
-          continue;
+        try {
+          await deps.runRepo.create(buildBatchInvoiceRun(tenantId, candidate.jobId, batchDate));
+          reserved.push(candidate);
+        } catch (err) {
+          if ((err as { code?: string }).code === '23505') {
+            skipped += 1; // already batched today
+            continue;
+          }
+          throw err; // real error — abort this tenant; no proposal created yet.
         }
-        fresh.push(candidate);
       }
-      if (fresh.length === 0) continue;
+      if (reserved.length === 0) continue;
 
-      const totalCents = fresh.reduce((sum, c) => sum + c.amountCents, 0);
+      const totalCents = reserved.reduce((sum, c) => sum + c.amountCents, 0);
       const proposal = createProposal({
         tenantId,
         proposalType: 'batch_invoice',
         payload: {
           batchDate,
           totalCents,
-          jobs: fresh.map((c) => ({
+          jobs: reserved.map((c) => ({
             jobId: c.jobId,
             customerId: c.customerId,
             ...(c.estimateId ? { estimateId: c.estimateId } : {}),
@@ -107,24 +118,13 @@ export async function runBatchInvoiceSweep(
             lineItems: c.lineItems,
           })),
         },
-        summary: `${fresh.length} job${fresh.length === 1 ? '' : 's'} ready to invoice ($${(totalCents / 100).toFixed(2)})`,
+        summary: `${reserved.length} job${reserved.length === 1 ? '' : 's'} ready to invoice ($${(totalCents / 100).toFixed(2)})`,
         explanation: 'Approve to draft an invoice for each job; you review each before sending.',
         createdBy: BATCH_ACTOR,
       });
       await deps.proposalRepo.create(proposal);
       proposals += 1;
-      jobsBatched += fresh.length;
-
-      // Now that the proposal exists, reserve a dedup row per job (tagged with
-      // the proposal id). A row that loses a race surfaces as 23505 and is
-      // treated as already-batched.
-      for (const candidate of fresh) {
-        try {
-          await deps.runRepo.create(buildBatchInvoiceRun(tenantId, candidate.jobId, batchDate, proposal.id));
-        } catch (err) {
-          if ((err as { code?: string }).code !== '23505') throw err;
-        }
-      }
+      jobsBatched += reserved.length;
 
       if (deps.auditRepo) {
         await deps.auditRepo.create(
@@ -135,7 +135,7 @@ export async function runBatchInvoiceSweep(
             eventType: 'invoice.batch_proposed',
             entityType: 'proposal',
             entityId: proposal.id,
-            metadata: { batchDate, jobCount: fresh.length, totalCents },
+            metadata: { batchDate, jobCount: reserved.length, totalCents },
           }),
         );
       }
