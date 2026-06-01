@@ -419,6 +419,19 @@ export interface ProposalRepository {
   findByStatus(tenantId: string, status: ProposalStatus): Promise<Proposal[]>;
   findByAiRun(tenantId: string, aiRunId: string): Promise<Proposal[]>;
   /**
+   * Indexed lookup for voice redelivery dedup (P1). Returns the most recent
+   * proposal whose idempotencyKey === `idempotencyKey` (single-action path) OR
+   * whose sourceContext.recordingId === `recordingId` (chain members, which
+   * can't share one key), else null. Replaces a per-message findByTenant scan
+   * on the hot inbound-voice path — backed by the idempotency unique index and
+   * idx_proposals_source_recording.
+   */
+  findByRecordingId(
+    tenantId: string,
+    recordingId: string,
+    idempotencyKey: string,
+  ): Promise<Proposal | null>;
+  /**
    * Multi-action chaining — fetch every proposal sharing a chainId,
    * ordered by chainIndex. Used by the execution-time chain resolver to
    * read a dependency's resultEntityId, and by the inbox to group a
@@ -617,6 +630,23 @@ export class InMemoryProposalRepository implements ProposalRepository {
     return Array.from(this.proposals.values())
       .filter((p) => p.tenantId === tenantId && p.aiRunId === aiRunId)
       .map((p) => ({ ...p }));
+  }
+
+  async findByRecordingId(
+    tenantId: string,
+    recordingId: string,
+    idempotencyKey: string,
+  ): Promise<Proposal | null> {
+    const match = Array.from(this.proposals.values())
+      .filter(
+        (p) =>
+          p.tenantId === tenantId &&
+          (p.idempotencyKey === idempotencyKey ||
+            (p.sourceContext as Record<string, unknown> | undefined)?.recordingId ===
+              recordingId),
+      )
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+    return match ? { ...match } : null;
   }
 
   async findByChain(tenantId: string, chainId: string): Promise<Proposal[]> {

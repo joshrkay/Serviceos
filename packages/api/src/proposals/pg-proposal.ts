@@ -187,6 +187,29 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     });
   }
 
+  async findByRecordingId(
+    tenantId: string,
+    recordingId: string,
+    idempotencyKey: string,
+  ): Promise<Proposal | null> {
+    return this.withTenant(tenantId, async (client) => {
+      // Indexed dedup lookup: the idempotency_key branch uses the unique index
+      // idx_proposals_idempotency(tenant_id, idempotency_key); the recordingId
+      // branch uses idx_proposals_source_recording(tenant_id,
+      // (source_context->>'recordingId')). Postgres BitmapOrs the two — no
+      // tenant-wide scan. LIMIT 1: we only need to know one already exists.
+      const result = await client.query(
+        `SELECT * FROM proposals
+         WHERE tenant_id = $1
+           AND (idempotency_key = $2 OR source_context->>'recordingId' = $3)
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [tenantId, idempotencyKey, recordingId]
+      );
+      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
   async findByChain(tenantId: string, chainId: string): Promise<Proposal[]> {
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(

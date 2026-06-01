@@ -312,6 +312,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
       deps.slotConflictChecker,
       deps.availabilityFinder,
       deps.appointmentRepo,
+      deps.jobRepo,
     ),
   );
   handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway));
@@ -382,12 +383,10 @@ async function findAlreadyProcessed(
 ): Promise<string | undefined> {
   if (!recordingId) return undefined;
   const key = voiceProposalIdempotencyKey(recordingId);
-  const existing = await proposalRepo.findByTenant(tenantId);
-  const match = existing.find((p) => {
-    if (p.idempotencyKey === key) return true; // single-action atomic key
-    const sc = p.sourceContext as Record<string, unknown> | undefined;
-    return sc?.recordingId === recordingId; // chain members (keyless)
-  });
+  // Indexed lookup (P1): matches the single-action atomic key OR a chain
+  // member's sourceContext.recordingId, without scanning every proposal for
+  // the tenant on each inbound message.
+  const match = await proposalRepo.findByRecordingId(tenantId, recordingId, key);
   return match?.id;
 }
 

@@ -1015,7 +1015,11 @@ describe('voice-action-router worker', () => {
     const real = new InMemoryProposalRepository();
     const racingRepo = {
       create: (p: Proposal) => real.create(p),
-      findByTenant: async () => [] as Proposal[], // always "nothing processed yet"
+      // The pre-check (findByRecordingId) always reports "nothing processed
+      // yet" so both deliveries pass it and race into create; the real repo's
+      // idempotency key must swallow the second create rather than throw.
+      findByRecordingId: async () => null,
+      findByTenant: async () => [] as Proposal[],
     } as unknown as InMemoryProposalRepository;
 
     const classifierResponse = JSON.stringify({

@@ -4,6 +4,7 @@ import {
   InMemoryProposalRepository,
   CreateProposalInput,
   ProposalType,
+  Proposal,
   decideInitialStatus,
   actionClassForProposalType,
 } from '../../src/proposals/proposal';
@@ -548,5 +549,50 @@ describe('createProposal — D3 trust-tier integration', () => {
     });
     expect(proposal.sourceContext?.conversationId).toBe('conv-42');
     expect(proposal.sourceContext?.missingFields).toEqual(['newScheduledStart']);
+  });
+});
+
+describe('InMemoryProposalRepository.findByRecordingId — voice dedup lookup', () => {
+  const TENANT = 'tenant-rec';
+
+  function seed(repo: InMemoryProposalRepository, p: Partial<Proposal> & { id: string }) {
+    const now = new Date();
+    return repo.create({
+      tenantId: TENANT,
+      proposalType: 'create_appointment',
+      status: 'draft',
+      payload: {},
+      summary: 's',
+      createdBy: 'u',
+      createdAt: now,
+      updatedAt: now,
+      ...p,
+    } as Proposal);
+  }
+
+  it('matches the single-action idempotency key', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seed(repo, { id: 'p1', idempotencyKey: 'voice:rec-1' });
+    const found = await repo.findByRecordingId(TENANT, 'rec-1', 'voice:rec-1');
+    expect(found?.id).toBe('p1');
+  });
+
+  it('matches a chain member by sourceContext.recordingId (no shared key)', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seed(repo, { id: 'p2', sourceContext: { recordingId: 'rec-2' } });
+    const found = await repo.findByRecordingId(TENANT, 'rec-2', 'voice:rec-2');
+    expect(found?.id).toBe('p2');
+  });
+
+  it('returns null when neither the key nor the recordingId matches', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seed(repo, { id: 'p3', idempotencyKey: 'voice:other' });
+    expect(await repo.findByRecordingId(TENANT, 'rec-x', 'voice:rec-x')).toBeNull();
+  });
+
+  it('is tenant-scoped — does not match another tenant', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seed(repo, { id: 'p4', tenantId: 'other-tenant', idempotencyKey: 'voice:rec-4' } as Partial<Proposal> & { id: string });
+    expect(await repo.findByRecordingId(TENANT, 'rec-4', 'voice:rec-4')).toBeNull();
   });
 });

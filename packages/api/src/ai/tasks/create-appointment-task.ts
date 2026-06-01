@@ -5,6 +5,7 @@ import { assessConfidence } from '../guardrails/confidence';
 import { SlotConflictChecker, SlotConflictResult } from './slot-conflict-checker';
 import { AvailabilityFinder, OpenSlot } from './availability-finder';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
+import { JobRepository } from '../../jobs/job';
 import {
   resolveDateTime,
   formatForReadback,
@@ -279,17 +280,20 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
   private readonly slotConflictChecker?: SlotConflictChecker;
   private readonly availabilityFinder?: AvailabilityFinder;
   private readonly appointmentRepo?: AppointmentRepository;
+  private readonly jobRepo?: JobRepository;
 
   constructor(
     gateway: LLMGateway,
     slotConflictChecker?: SlotConflictChecker,
     availabilityFinder?: AvailabilityFinder,
-    appointmentRepo?: AppointmentRepository
+    appointmentRepo?: AppointmentRepository,
+    jobRepo?: JobRepository
   ) {
     this.gateway = gateway;
     this.slotConflictChecker = slotConflictChecker;
     this.availabilityFinder = availabilityFinder;
     this.appointmentRepo = appointmentRepo;
+    this.jobRepo = jobRepo;
   }
 
   async handle(context: TaskContext): Promise<TaskResult> {
@@ -421,6 +425,23 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
     // `create_booking` proposal that references it.
     const repo = this.appointmentRepo;
     if (repo && typeof payload.jobId === 'string') {
+      // The jobId is LLM-extracted from untrusted transcript text. Before
+      // writing a real (held) appointment row against it, confirm it belongs to
+      // the verified caller — otherwise an injected/guessed id could place a
+      // hold on another customer's job and pollute their calendar for the 24h
+      // hold window. Mirrors the appointment→job→customer ownership check the
+      // reschedule/cancel handlers already perform. Only enforced when the
+      // caller is identified (context.customerId) and a jobRepo is wired; on a
+      // mismatch we degrade to the approval-gated create_appointment proposal
+      // rather than writing the hold.
+      if (this.jobRepo && context.customerId) {
+        const ownedJob = await this.jobRepo
+          .findById(context.tenantId, payload.jobId)
+          .catch(() => null);
+        if (!ownedJob || ownedJob.customerId !== context.customerId) {
+          return { proposal: createProposal(input), taskType: this.taskType };
+        }
+      }
       const holdExpiryAt = new Date(Date.now() + HOLD_WINDOW_MS);
       let held;
       try {

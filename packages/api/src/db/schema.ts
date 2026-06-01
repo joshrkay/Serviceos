@@ -3637,6 +3637,17 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS milestone_billing_enabled BOOLEAN NOT NULL DEFAULT false;
   `,
+
+  '142_proposals_source_recording_index': `
+    -- P1 perf: the voice redelivery dedup (findAlreadyProcessed) used to
+    -- SELECT every proposal for the tenant and JS-scan for a recordingId on
+    -- EVERY inbound voice message — O(tenant proposals), growing forever. The
+    -- replacement findByRecordingId looks up by idempotency_key (already
+    -- indexed) OR source_context->>'recordingId'; this index serves the latter
+    -- branch so the whole lookup is indexed instead of a full-tenant scan.
+    CREATE INDEX IF NOT EXISTS idx_proposals_source_recording
+      ON proposals (tenant_id, (source_context->>'recordingId'));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
