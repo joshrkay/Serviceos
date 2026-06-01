@@ -3617,6 +3617,70 @@ export const MIGRATIONS = {
     --     minted a SECOND schedule (fresh uuid). The completion hook dedups on
     --     schedule_id, so two schedules billed the on_completion balance TWICE.
     --     This unique index makes a duplicate schedule impossible at the DB.
+    --
+    --     RECONCILIATION (runs first): a DB that already hit this bug — or the
+    --     double-mint bug (2) — has duplicate rows the indexes below would
+    --     abort on. The deploy/migrate role bypasses RLS (see migration 119),
+    --     so this runs fleet-wide. For each job we keep ONE surviving schedule,
+    --     re-point every other duplicate's invoices onto it, unlink any invoice
+    --     that would then collide on (schedule_id, milestone_index) — keeping
+    --     the earliest and NULLing the rest's schedule link, so NO billing row
+    --     is deleted, only detached for manual review — then delete the emptied
+    --     duplicate schedules. Idempotent: once the indexes hold, every step
+    --     below matches nothing, so re-running this migration is a no-op.
+
+    --     (i) Re-point invoices from each non-surviving duplicate schedule onto
+    --         the survivor (most invoices, then earliest, then lowest id).
+    WITH counts AS (
+      SELECT s.tenant_id, s.job_id, s.id, s.created_at, COUNT(i.id) AS inv_count
+      FROM invoice_schedules s
+      LEFT JOIN invoices i ON i.schedule_id = s.id
+      GROUP BY s.tenant_id, s.job_id, s.id, s.created_at
+    ),
+    survivors AS (
+      SELECT DISTINCT ON (tenant_id, job_id) tenant_id, job_id, id AS survivor_id
+      FROM counts
+      ORDER BY tenant_id, job_id, inv_count DESC, created_at ASC, id ASC
+    )
+    UPDATE invoices i
+    SET schedule_id = sv.survivor_id
+    FROM invoice_schedules s
+    JOIN survivors sv ON sv.tenant_id = s.tenant_id AND sv.job_id = s.job_id
+    WHERE i.schedule_id = s.id AND s.id <> sv.survivor_id;
+
+    --     (ii) Resolve (schedule_id, milestone_index) collisions — from the
+    --          re-point above OR a prior double-mint — keeping the earliest
+    --          invoice per pair and unlinking the rest (schedule_id = NULL).
+    WITH ranked AS (
+      SELECT id,
+             ROW_NUMBER() OVER (
+               PARTITION BY schedule_id, milestone_index
+               ORDER BY created_at ASC, id ASC
+             ) AS rn
+      FROM invoices
+      WHERE schedule_id IS NOT NULL AND milestone_index IS NOT NULL
+    )
+    UPDATE invoices i
+    SET schedule_id = NULL
+    FROM ranked
+    WHERE i.id = ranked.id AND ranked.rn > 1;
+
+    --     (iii) Delete the now-empty duplicate schedules (nothing references them).
+    WITH counts AS (
+      SELECT s.tenant_id, s.job_id, s.id, s.created_at, COUNT(i.id) AS inv_count
+      FROM invoice_schedules s
+      LEFT JOIN invoices i ON i.schedule_id = s.id
+      GROUP BY s.tenant_id, s.job_id, s.id, s.created_at
+    ),
+    survivors AS (
+      SELECT DISTINCT ON (tenant_id, job_id) tenant_id, job_id, id AS survivor_id
+      FROM counts
+      ORDER BY tenant_id, job_id, inv_count DESC, created_at ASC, id ASC
+    )
+    DELETE FROM invoice_schedules s
+    USING survivors sv
+    WHERE sv.tenant_id = s.tenant_id AND sv.job_id = s.job_id AND s.id <> sv.survivor_id;
+
     CREATE UNIQUE INDEX IF NOT EXISTS uniq_invoice_schedules_job
       ON invoice_schedules(tenant_id, job_id);
 
