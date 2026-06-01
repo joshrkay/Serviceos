@@ -20,7 +20,7 @@ export const jobMoneyStateSchema = z.string();
  * enum by job.test.ts). A literal union — not z.nativeEnum — so consumers can
  * compare against literals (e.g. `priority === 'urgent'`) without TS friction.
  */
-export const jobPrioritySchema = z.enum(['normal', 'urgent', 'emergency']);
+export const jobPrioritySchema = z.enum(['low', 'normal', 'high', 'urgent']);
 export type JobPriorityValue = z.infer<typeof jobPrioritySchema>;
 
 export const jobSchema = z.object({

@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { LineItemCategory } from '../enums.js';
 
 /**
  * Canonical money primitives shared by estimates and invoices — reconciled to
@@ -8,10 +7,20 @@ import { LineItemCategory } from '../enums.js';
  * for the LineItem / DocumentTotals shapes both documents serialize.
  */
 
+/**
+ * Line-item category — string-literal union from the DB-true values
+ * (estimate_line_items / invoice_line_items `category` CHECK and the billing
+ * engine's LineItemCategory), kept in lockstep with both by money.test.ts.
+ * Defined here rather than via z.nativeEnum(LineItemCategory) so it tracks the
+ * persisted/billing-validated set, not the broader shared enum.
+ */
+export const lineItemCategorySchema = z.enum(['labor', 'material', 'equipment', 'other']);
+export type LineItemCategoryValue = z.infer<typeof lineItemCategorySchema>;
+
 export const lineItemSchema = z.object({
   id: z.string(),
   description: z.string(),
-  category: z.nativeEnum(LineItemCategory).optional(),
+  category: lineItemCategorySchema.optional(),
   // quantity is NUMERIC server-side and may be fractional (e.g. 1.5 hrs).
   quantity: z.number(),
   unitPriceCents: z.number().int(),

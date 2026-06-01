@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 import { JobPriority } from '../enums.js';
 import { jobSchema, jobDetailResponseSchema, jobPrioritySchema, jobListItemSchema } from './job.js';
+import { resolveDbCheckSet } from './db-check.js';
+
+const schemaSource = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), '../../../api/src/db/schema.ts'),
+  'utf8',
+);
 
 const baseJob = {
   id: '11111111-1111-1111-1111-111111111111',
@@ -39,6 +48,11 @@ describe('jobSchema', () => {
 
   it('jobPrioritySchema stays in lockstep with the JobPriority enum', () => {
     expect([...jobPrioritySchema.options].sort()).toEqual([...Object.values(JobPriority)].sort());
+  });
+
+  it('jobPrioritySchema equals the authoritative jobs.priority DB CHECK', () => {
+    const dbSet = resolveDbCheckSet(schemaSource, 'jobs', 'priority');
+    expect([...jobPrioritySchema.options].sort()).toEqual([...dbSet].sort());
   });
 });
 

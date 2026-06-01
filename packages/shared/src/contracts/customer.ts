@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { PreferredChannel } from '../enums.js';
 
 /**
  * Canonical Customer entity contract — single source of truth for the customer
@@ -7,13 +6,21 @@ import { PreferredChannel } from '../enums.js';
  * (`interface Customer`) and the customers table.
  *
  * Over-the-wire dates are ISO strings (the entity uses `Date` server-side).
- * `preferredChannel` reuses the shared PreferredChannel enum. This is the full
- * record; the smaller embedded shape used by GET /api/jobs/:id lives as
+ * The smaller embedded shape used by GET /api/jobs/:id lives as
  * jobCustomerSummarySchema in ./job.ts.
  *
  * Web migration (the per-page local `ApiCustomer` redefs) is a follow-up that
  * needs the running app to verify rendering, as with the Job entity.
  */
+
+/**
+ * Preferred contact channel — string-literal union from the DB-true values
+ * (`customers.preferred_channel` CHECK, DEFAULT 'none'), kept in lockstep with
+ * the PreferredChannel enum and the DB by customer.test.ts. Defined here rather
+ * than via z.nativeEnum so it can't silently drift from the persisted set.
+ */
+export const preferredChannelSchema = z.enum(['phone', 'email', 'sms', 'none']);
+export type PreferredChannelValue = z.infer<typeof preferredChannelSchema>;
 export const customerSchema = z.object({
   id: z.string().uuid(),
   tenantId: z.string().uuid(),
@@ -24,7 +31,7 @@ export const customerSchema = z.object({
   primaryPhone: z.string().optional(),
   secondaryPhone: z.string().optional(),
   email: z.string().optional(),
-  preferredChannel: z.nativeEnum(PreferredChannel),
+  preferredChannel: preferredChannelSchema,
   smsConsent: z.boolean(),
   communicationNotes: z.string().optional(),
   isArchived: z.boolean(),

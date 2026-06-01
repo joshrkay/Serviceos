@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { lineItemSchema, documentTotalsSchema } from './money.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
+import { LineItemCategory } from '../enums.js';
+import { lineItemSchema, documentTotalsSchema, lineItemCategorySchema } from './money.js';
+import { resolveDbCheckSet } from './db-check.js';
+
+const schemaSource = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), '../../../api/src/db/schema.ts'),
+  'utf8',
+);
 
 const baseLineItem = {
   id: 'li-1',
@@ -20,9 +30,17 @@ describe('lineItemSchema', () => {
     expect(lineItemSchema.safeParse({ ...baseLineItem, unitPriceCents: 120.5 }).success).toBe(false);
   });
 
-  it('constrains category to the shared LineItemCategory set', () => {
+  it('constrains category to the line-item category set', () => {
     expect(lineItemSchema.safeParse({ ...baseLineItem, category: 'labor' }).success).toBe(true);
+    // 'subcontractor' is in the broader shared enum but NOT a persisted line-item category.
+    expect(lineItemSchema.safeParse({ ...baseLineItem, category: 'subcontractor' }).success).toBe(false);
     expect(lineItemSchema.safeParse({ ...baseLineItem, category: 'overhead' }).success).toBe(false);
+  });
+
+  it('lineItemCategorySchema matches the LineItemCategory enum and the DB CHECK', () => {
+    expect([...lineItemCategorySchema.options].sort()).toEqual([...Object.values(LineItemCategory)].sort());
+    const dbSet = resolveDbCheckSet(schemaSource, 'estimate_line_items', 'category');
+    expect([...lineItemCategorySchema.options].sort()).toEqual([...dbSet].sort());
   });
 });
 

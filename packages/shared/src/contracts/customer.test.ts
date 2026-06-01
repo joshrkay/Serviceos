@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { customerSchema } from './customer.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
+import { PreferredChannel } from '../enums.js';
+import { customerSchema, preferredChannelSchema } from './customer.js';
+import { resolveDbCheckSet } from './db-check.js';
+
+const schemaSource = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), '../../../api/src/db/schema.ts'),
+  'utf8',
+);
 
 const baseCustomer = {
   id: '11111111-1111-1111-1111-111111111111',
@@ -7,7 +17,7 @@ const baseCustomer = {
   firstName: 'Dana',
   lastName: 'Reyes',
   displayName: 'Dana Reyes',
-  preferredChannel: 'text',
+  preferredChannel: 'sms',
   smsConsent: true,
   isArchived: false,
   createdBy: 'user_abc',
@@ -27,9 +37,18 @@ describe('customerSchema', () => {
   });
 
   it('constrains preferredChannel and accountType to known values', () => {
+    // 'text' was the old (wrong) shared-enum value; the DB uses 'sms' / 'none'.
+    expect(customerSchema.safeParse({ ...baseCustomer, preferredChannel: 'text' }).success).toBe(false);
+    expect(customerSchema.safeParse({ ...baseCustomer, preferredChannel: 'none' }).success).toBe(true);
     expect(customerSchema.safeParse({ ...baseCustomer, preferredChannel: 'carrier_pigeon' }).success).toBe(false);
     expect(customerSchema.safeParse({ ...baseCustomer, accountType: 'b2b' }).success).toBe(true);
     expect(customerSchema.safeParse({ ...baseCustomer, accountType: 'enterprise' }).success).toBe(false);
+  });
+
+  it('preferredChannelSchema matches the PreferredChannel enum and the DB CHECK', () => {
+    expect([...preferredChannelSchema.options].sort()).toEqual([...Object.values(PreferredChannel)].sort());
+    const dbSet = resolveDbCheckSet(schemaSource, 'customers', 'preferred_channel');
+    expect([...preferredChannelSchema.options].sort()).toEqual([...dbSet].sort());
   });
 
   it('accepts optional communication + attribution fields', () => {

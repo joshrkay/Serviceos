@@ -21,7 +21,8 @@ export enum CustomerStatus {
 export enum PreferredChannel {
   PHONE = 'phone',
   EMAIL = 'email',
-  TEXT = 'text',
+  SMS = 'sms',
+  NONE = 'none',
 }
 
 // ── Jobs ──
@@ -37,9 +38,10 @@ export enum JobStatus {
 }
 
 export enum JobPriority {
+  LOW = 'low',
   NORMAL = 'normal',
+  HIGH = 'high',
   URGENT = 'urgent',
-  EMERGENCY = 'emergency',
 }
 
 export enum JobSource {
@@ -115,11 +117,12 @@ export enum PaymentStatus {
 }
 
 // ── Line Items (shared between estimates and invoices) ──
+// Values mirror the estimate_line_items / invoice_line_items `category` CHECK in
+// packages/api/src/db/schema.ts and the billing engine's LineItemCategory.
 export enum LineItemCategory {
   LABOR = 'labor',
   MATERIAL = 'material',
   EQUIPMENT = 'equipment',
-  SUBCONTRACTOR = 'subcontractor',
   OTHER = 'other',
 }
 
