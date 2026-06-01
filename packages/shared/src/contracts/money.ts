@@ -20,7 +20,11 @@ export type LineItemCategoryValue = z.infer<typeof lineItemCategorySchema>;
 export const lineItemSchema = z.object({
   id: z.string(),
   description: z.string(),
-  category: lineItemCategorySchema.optional(),
+  // Nullish, not just optional: the DB columns (estimate_line_items /
+  // invoice_line_items `category`) are nullable and document-row-mappers.ts
+  // serializes `category: row.category` directly, so persisted rows arrive as
+  // `category: null` (not an omitted field).
+  category: lineItemCategorySchema.nullish(),
   // quantity is NUMERIC server-side and may be fractional (e.g. 1.5 hrs).
   quantity: z.number(),
   unitPriceCents: z.number().int(),

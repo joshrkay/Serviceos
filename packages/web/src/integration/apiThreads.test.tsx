@@ -139,7 +139,15 @@ describe('Thread 4 — InvoicesPage → /api/invoices → rendered rows', () => 
         id: 'i1',
         invoiceNumber: 'INV-0003',
         status: 'open',
-        totalCents: 50000,
+        // Money under nested `totals` to match the API's serialized Invoice entity.
+        totals: {
+          subtotalCents: 50000,
+          discountCents: 0,
+          taxRateBps: 0,
+          taxableSubtotalCents: 50000,
+          taxCents: 0,
+          totalCents: 50000,
+        },
         amountDueCents: 50000,
         customer: { id: 'c1', displayName: 'Carl Diaz' },
       },

@@ -37,6 +37,11 @@ describe('lineItemSchema', () => {
     expect(lineItemSchema.safeParse({ ...baseLineItem, category: 'overhead' }).success).toBe(false);
   });
 
+  it('accepts a null category (persisted rows serialize the nullable column as null)', () => {
+    expect(lineItemSchema.safeParse({ ...baseLineItem, category: null }).success).toBe(true);
+    expect(lineItemSchema.safeParse({ ...baseLineItem, category: undefined }).success).toBe(true);
+  });
+
   it('lineItemCategorySchema matches the LineItemCategory enum and the DB CHECK', () => {
     expect([...lineItemCategorySchema.options].sort()).toEqual([...Object.values(LineItemCategory)].sort());
     const dbSet = resolveDbCheckSet(schemaSource, 'estimate_line_items', 'category');
