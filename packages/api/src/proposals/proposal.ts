@@ -165,6 +165,19 @@ export interface CreateProposalInput {
    * back with the correct type.
    */
   missingFields?: string[];
+  /**
+   * Phase 12 supervisor-gating signals, forwarded verbatim to
+   * `decideInitialStatus`. These were previously declared on the AI
+   * task inputs but DROPPED here — `createProposal` never forwarded
+   * them — so the unsupervised hard-block and the per-tenant threshold
+   * override never engaged on the agent/voice path. They are now
+   * threaded through. Omitting them preserves the pre-Phase-12 default
+   * (supervisor assumed present, legacy 0.9 threshold) for callers that
+   * don't supply agent-source signals.
+   */
+  supervisorMode?: Mode;
+  supervisorPresent?: boolean;
+  tenantThresholdOverride?: ResolveThresholdInput['tenantOverride'];
 }
 
 /**
@@ -488,6 +501,14 @@ export function createProposal(input: CreateProposalInput): Proposal {
     sourceTrustTier: input.sourceTrustTier,
     confidenceScore: input.confidenceScore,
     missingFields: input.missingFields,
+    // Phase 12: forward the supervisor-gating signals. Previously these
+    // were silently dropped, so the unsupervised hard-block and the
+    // per-tenant threshold override were dead-wired on the voice path —
+    // a high-confidence autonomous proposal auto-approved even with no
+    // supervisor present. Forwarding restores the gate.
+    supervisorMode: input.supervisorMode,
+    supervisorPresent: input.supervisorPresent,
+    tenantThresholdOverride: input.tenantThresholdOverride,
   });
   // D9 undo window: auto-approved proposals stamp `approvedAt` at
   // creation so the 5-second undo window starts ticking immediately.

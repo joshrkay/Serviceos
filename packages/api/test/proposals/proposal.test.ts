@@ -440,6 +440,57 @@ describe('createProposal — D3 trust-tier integration', () => {
     expect(proposal.status).toBe('approved');
   });
 
+  it('forwards supervisorPresent=false: autonomous + capture + 0.95 → ready_for_review, not approved', () => {
+    // Regression for the P0 launch blocker: createProposal used to DROP
+    // supervisorPresent before calling decideInitialStatus, so the
+    // unsupervised hard-block never engaged and a high-confidence voice
+    // booking auto-approved (→ auto-executed) with no human in the loop.
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'create_appointment',
+      payload: { jobId: 'job-1' },
+      summary: 'Book via voice',
+      sourceTrustTier: 'autonomous',
+      confidenceScore: 0.95,
+      supervisorPresent: false,
+      createdBy: 'agent-voice',
+    });
+    expect(proposal.status).toBe('ready_for_review');
+    expect(proposal.approvedAt).toBeUndefined();
+  });
+
+  it('forwards supervisorPresent=true: autonomous + capture + 0.95 → approved (supervised path intact)', () => {
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'create_appointment',
+      payload: { jobId: 'job-1' },
+      summary: 'Book via voice',
+      sourceTrustTier: 'autonomous',
+      confidenceScore: 0.95,
+      supervisorPresent: true,
+      createdBy: 'agent-voice',
+    });
+    expect(proposal.status).toBe('approved');
+  });
+
+  it('forwards tenantThresholdOverride: a stricter override blocks an otherwise-approved booking', () => {
+    // The override was also silently dropped. With supervisor present + mode,
+    // a 0.99 tenant threshold must hold a 0.95-confidence booking in draft.
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'create_appointment',
+      payload: { jobId: 'job-1' },
+      summary: 'Book via voice',
+      sourceTrustTier: 'autonomous',
+      confidenceScore: 0.95,
+      supervisorPresent: true,
+      supervisorMode: 'supervisor',
+      tenantThresholdOverride: { supervisor: 0.99 },
+      createdBy: 'agent-voice',
+    });
+    expect(proposal.status).toBe('draft');
+  });
+
   it('with sourceTrustTier=autonomous + cancel_appointment, status is draft (irreversible)', () => {
     const proposal = createProposal({
       tenantId: 'tenant-1',

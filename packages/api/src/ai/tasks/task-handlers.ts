@@ -28,6 +28,21 @@ export interface TaskContext {
    */
   tenantThresholdOverride?: Partial<Record<'supervisor' | 'tech' | 'both', number>>;
   /**
+   * Phase 12 supervisor presence, resolved once per request by the
+   * entry-point (voice-action-router) via `isSupervisorPresent`. Threaded
+   * onto each task's CreateProposalInput so an autonomous, capture-class
+   * proposal can only auto-approve when a supervisor is actually present.
+   * When undefined (non-voice callers), the proposal falls back to the
+   * pre-Phase-12 permissive default.
+   */
+  supervisorPresent?: boolean;
+  /**
+   * Phase 12 supervisor current_mode at request time, when known. Tunes
+   * the auto-approve threshold (0.90 supervisor / 0.92 both / 0.95 tech).
+   * Optional — when undefined the legacy 0.9 threshold applies.
+   */
+  supervisorMode?: 'supervisor' | 'tech' | 'both';
+  /**
    * Tenant IANA timezone (e.g. "America/New_York"), resolved once per
    * request by the entry-point from tenant_settings. Scheduling handlers
    * use it to translate spoken times ("next Tuesday at 2pm") into the

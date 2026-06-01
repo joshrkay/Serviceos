@@ -406,6 +406,13 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       ...(context.tenantThresholdOverride
         ? { tenantThresholdOverride: context.tenantThresholdOverride }
         : {}),
+      // Phase 12 — forward supervisor presence so an unsupervised tenant's
+      // booking lands in review instead of auto-approving (the autonomous
+      // trust tier above is only honored when a supervisor is present).
+      ...(context.supervisorPresent !== undefined
+        ? { supervisorPresent: context.supervisorPresent }
+        : {}),
+      ...(context.supervisorMode ? { supervisorMode: context.supervisorMode } : {}),
     };
 
     // Held-slot booking path: when an appointmentRepo is wired AND the
@@ -463,6 +470,11 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
         ...(context.tenantThresholdOverride
           ? { tenantThresholdOverride: context.tenantThresholdOverride }
           : {}),
+        // Phase 12 — same supervisor gate as the create_appointment path.
+        ...(context.supervisorPresent !== undefined
+          ? { supervisorPresent: context.supervisorPresent }
+          : {}),
+        ...(context.supervisorMode ? { supervisorMode: context.supervisorMode } : {}),
       };
       return { proposal: createProposal(bookingInput), taskType: 'create_booking' };
     }

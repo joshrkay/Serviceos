@@ -116,6 +116,12 @@ export class InvoiceTaskHandler implements TaskHandler {
       ...(context.tenantThresholdOverride
         ? { tenantThresholdOverride: context.tenantThresholdOverride }
         : {}),
+      // Phase 12 — forward supervisor presence so this autonomous draft only
+      // auto-approves when a supervisor is present (same gate as create_appointment).
+      ...(context.supervisorPresent !== undefined
+        ? { supervisorPresent: context.supervisorPresent }
+        : {}),
+      ...(context.supervisorMode ? { supervisorMode: context.supervisorMode } : {}),
     };
 
     const proposal = createProposal(input);
