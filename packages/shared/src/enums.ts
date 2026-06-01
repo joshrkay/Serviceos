@@ -144,25 +144,26 @@ export enum ProposalStatus {
   UNDONE = 'undone',
 }
 
-// Mirrors the ProposalType union in
+// Mirrors the ProposalType union (VALID_PROPOSAL_TYPES) in
 // `packages/api/src/proposals/proposal.ts`. The API package owns
 // runtime validation via PROPOSAL_TYPE_SCHEMAS; this enum is the
 // shared identifier set that downstream packages (template specs,
-// voice/SMS/email registries, web UI) reference. Keep the two
-// sources in lockstep — adding a new ProposalType to the API
-// without mirroring it here will leave the shared registries
-// blind to the new type.
+// voice/SMS/email registries, web UI) reference. Kept in exact
+// lockstep with the API union by proposal-type.test.ts, which parses
+// VALID_PROPOSAL_TYPES and fails CI if the two sets diverge — so a new
+// API ProposalType can no longer silently leave this enum (and the
+// shared registries) blind to it.
 //
-// `update_appointment` was removed: the API never carried it.
+// `update_appointment` is intentionally absent: the API never carried it.
 // Update-style flows are modeled as `reassign_appointment`,
-// `reschedule_appointment`, or `cancel_appointment`, which template
-// consumers should reference directly.
+// `reschedule_appointment`, or `cancel_appointment`.
 export enum ProposalType {
   CREATE_CUSTOMER = 'create_customer',
   UPDATE_CUSTOMER = 'update_customer',
   CREATE_JOB = 'create_job',
   CREATE_APPOINTMENT = 'create_appointment',
   CREATE_BOOKING = 'create_booking',
+  CALLBACK = 'callback',
   DRAFT_ESTIMATE = 'draft_estimate',
   UPDATE_ESTIMATE = 'update_estimate',
   DRAFT_INVOICE = 'draft_invoice',
@@ -170,6 +171,8 @@ export enum ProposalType {
   ISSUE_INVOICE = 'issue_invoice',
   REASSIGN_APPOINTMENT = 'reassign_appointment',
   RESCHEDULE_APPOINTMENT = 'reschedule_appointment',
+  ADD_CREW_MEMBER = 'add_crew_member',
+  REMOVE_CREW_MEMBER = 'remove_crew_member',
   CANCEL_APPOINTMENT = 'cancel_appointment',
   VOICE_CLARIFICATION = 'voice_clarification',
   ADD_NOTE = 'add_note',
@@ -177,12 +180,20 @@ export enum ProposalType {
   SEND_ESTIMATE = 'send_estimate',
   RECORD_PAYMENT = 'record_payment',
   LOG_EXPENSE = 'log_expense',
+  CONVERT_LEAD = 'convert_lead',
+  CONFIRM_APPOINTMENT = 'confirm_appointment',
+  MARK_LEAD_LOST = 'mark_lead_lost',
+  ADD_SERVICE_LOCATION = 'add_service_location',
+  LOG_TIME_ENTRY = 'log_time_entry',
+  NOTIFY_DELAY = 'notify_delay',
+  REQUEST_FEEDBACK = 'request_feedback',
   EMERGENCY_DISPATCH = 'emergency_dispatch',
   ONBOARDING_TENANT_SETTINGS = 'onboarding_tenant_settings',
   ONBOARDING_SERVICE_CATEGORY = 'onboarding_service_category',
   ONBOARDING_ESTIMATE_TEMPLATE = 'onboarding_estimate_template',
   ONBOARDING_TEAM_MEMBER = 'onboarding_team_member',
   ONBOARDING_SCHEDULE = 'onboarding_schedule',
+  REVIEW_RESPONSE_PROPOSAL = 'review_response_proposal',
 }
 
 export enum RejectionCategory {

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ProposalType } from '../enums.js';
 import { proposalStatusSchema } from './status.js';
 
 /**
@@ -8,12 +9,9 @@ import { proposalStatusSchema } from './status.js';
 export const proposalResponseSchema = z.object({
   id: z.string().uuid(),
   tenantId: z.string().uuid(),
-  // `proposalType` stays `string` deliberately: the shared `ProposalType` enum
-  // is known-incomplete (e.g. the dispatch crew types `add_crew_member` /
-  // `remove_crew_member` the web already sends are absent from it). Reconciling
-  // that enum with the API's full ProposalType union is a tracked follow-up;
-  // typing this field to the incomplete enum today would reject valid values.
-  proposalType: z.string(),
+  // Typed to the canonical ProposalType enum, kept in exact lockstep with the
+  // API's VALID_PROPOSAL_TYPES union via proposal-type.test.ts.
+  proposalType: z.nativeEnum(ProposalType),
   status: proposalStatusSchema,
   summary: z.string(),
   explanation: z.string().optional(),
