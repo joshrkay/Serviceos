@@ -433,6 +433,12 @@ export function createApp(): express.Express {
   // and the global json() middleware skips it (body-parser sets req._body = true).
   app.use('/webhooks/stripe', express.raw({ type: 'application/json' }));
 
+  // Clerk/svix sign the raw request bytes too. Same treatment as Stripe:
+  // capture the raw Buffer here so the handler verifies over the exact bytes
+  // svix signed, instead of re-serializing the parsed object (key order /
+  // whitespace differences would fail legit webhooks and break tenant bootstrap).
+  app.use('/webhooks/clerk', express.raw({ type: 'application/json' }));
+
   // Twilio posts application/x-www-form-urlencoded — mount the matching parser
   // before global express.json() so /webhooks/twilio/* routes get populated
   // req.body fields (used for signature verification + AccountSid match).

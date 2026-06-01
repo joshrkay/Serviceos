@@ -214,8 +214,16 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       return res.status(400).json({ error: 'Missing svix headers' });
     }
 
-    // Reconstruct the signed payload string svix uses: id.timestamp.body
-    const rawBody = JSON.stringify(req.body);
+    // Verify over the RAW request bytes svix signed. Production mounts
+    // express.raw() before the global express.json() for this path, so req.body
+    // is a Buffer — verify over those exact bytes rather than re-serializing a
+    // parsed object (key order / whitespace / unicode escaping would diverge
+    // from the signed bytes and reject legit webhooks, breaking tenant bootstrap
+    // on signup). The JSON.stringify fallback only applies when the raw mount is
+    // absent (older test harnesses); the production path is always the Buffer.
+    const rawBody = Buffer.isBuffer(req.body)
+      ? req.body.toString('utf8')
+      : JSON.stringify(req.body);
     const signedContent = `${svixId}.${svixTimestamp}.${rawBody}`;
 
     // svix-signature contains comma-separated "v1,<base64sig>" values
@@ -235,8 +243,19 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       return res.status(401).json({ error: 'Invalid signature' });
     }
 
-    const eventType = req.body.type as string;
-    const payload = req.body as Record<string, unknown>;
+    // Parse the now-verified body. req.body is a Buffer on the raw-mounted
+    // production path; a parsed object on the fallback path.
+    let payload: Record<string, unknown>;
+    if (Buffer.isBuffer(req.body)) {
+      try {
+        payload = JSON.parse(rawBody) as Record<string, unknown>;
+      } catch {
+        return res.status(400).json({ error: 'Invalid JSON body' });
+      }
+    } else {
+      payload = req.body as Record<string, unknown>;
+    }
+    const eventType = payload.type as string;
 
     // Declared outside the try so the catch can mark this row 'failed'
     // (Codex P1 PR #384 — required for Stripe/Clerk retry to actually
