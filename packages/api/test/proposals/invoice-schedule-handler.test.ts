@@ -71,6 +71,19 @@ describe('P21-002 — create_invoice_schedule', () => {
       ).toBe(false);
     });
 
+    it('rejects percent milestones that sum past 100%', () => {
+      expect(
+        createInvoiceSchedulePayloadSchema.safeParse({
+          jobId: uuidv4(),
+          milestones: [
+            { label: 'A', type: 'percent', value: 6000, trigger: 'on_accept' },
+            { label: 'B', type: 'percent', value: 6000, trigger: 'manual' }, // 12000 > 10000
+            { label: 'Rest', type: 'remainder', value: 0, trigger: 'on_completion' },
+          ],
+        }).success,
+      ).toBe(false);
+    });
+
     it('rejects a percent milestone over 10000 bps', () => {
       expect(
         createInvoiceSchedulePayloadSchema.safeParse({

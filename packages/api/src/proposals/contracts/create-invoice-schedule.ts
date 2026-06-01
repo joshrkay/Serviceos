@@ -7,8 +7,9 @@ import { z } from 'zod';
  * the schedule + drafting the first milestone invoice moves no money (sending
  * each milestone invoice is a separate step). The Zod rules mirror
  * `invoices/invoice-schedule.ts validateMilestones` so the proposal layer and
- * the data layer reject the same shapes: percent in basis points (≤ 10000),
- * non-negative flat cents, and exactly one `remainder` milestone.
+ * the data layer reject the same shapes: percent in basis points (≤ 10000 each
+ * and ≤ 10000 summed), non-negative flat cents, and exactly one `remainder`
+ * milestone.
  */
 const milestoneSchema = z.object({
   label: z.string().min(1),
@@ -33,6 +34,17 @@ export const createInvoiceSchedulePayloadSchema = z
   .refine((v) => v.milestones.every((m) => m.type !== 'percent' || m.value <= 10000), {
     message: 'percent milestones must be ≤ 10000 bps',
     path: ['milestones'],
-  });
+  })
+  // Total-independent sum guard: the percent milestones together can't claim
+  // more than 100% (the remainder absorbs the rest), so reject an over-100%
+  // plan at proposal time instead of letting it pass review and fail in
+  // splitMilestones at execution. Mirrors validateMilestones.
+  .refine(
+    (v) => v.milestones.filter((m) => m.type === 'percent').reduce((sum, m) => sum + m.value, 0) <= 10000,
+    {
+      message: 'percent milestones cannot sum to more than 10000 bps (100%)',
+      path: ['milestones'],
+    },
+  );
 
 export type CreateInvoiceSchedulePayload = z.infer<typeof createInvoiceSchedulePayloadSchema>;

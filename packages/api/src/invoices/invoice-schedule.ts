@@ -92,6 +92,17 @@ export function validateMilestones(milestones: InvoiceMilestone[]): string[] {
     }
   });
 
+  // The percent milestones together can claim at most 100% of the total; the
+  // single remainder absorbs the rest. Percents summing past 10000 bps would
+  // drive the remainder negative — reject here (total-independent) rather than
+  // only catching it in splitMilestones once the total is known.
+  const percentBpsSum = milestones
+    .filter((m) => m.type === 'percent')
+    .reduce((sum, m) => sum + (Number.isInteger(m.value) ? m.value : 0), 0);
+  if (percentBpsSum > 10000) {
+    errors.push(`percent milestones sum to ${percentBpsSum} bps; cannot exceed 10000 (100%)`);
+  }
+
   return errors;
 }
 
