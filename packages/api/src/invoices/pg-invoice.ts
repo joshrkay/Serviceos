@@ -87,6 +87,18 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     });
   }
 
+  async findByJobs(tenantId: string, jobIds: string[]): Promise<Invoice[]> {
+    if (jobIds.length === 0) return [];
+    return this.withTenant(tenantId, async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM invoices WHERE tenant_id = $1 AND job_id = ANY($2) ORDER BY created_at DESC`,
+        [tenantId, jobIds],
+      );
+
+      return this.mapRowsToInvoices(client, tenantId, rows);
+    });
+  }
+
   /**
    * Build the parameterized WHERE clause shared between data and count queries
    * for `findByTenant` / `listWithMeta`. tenant_id is the FIRST predicate as
