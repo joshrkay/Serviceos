@@ -6,6 +6,7 @@ import {
   createProposal,
 } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
+import { ConflictError } from '../../shared/errors';
 
 interface BatchJob {
   jobId: string;
@@ -76,8 +77,19 @@ export class BatchInvoiceExecutionHandler implements ExecutionHandler {
           idempotencyKey: `batch_invoice:${proposal.id}:${job.jobId}`,
           createdBy: context.executedBy,
         });
-        const persisted = await this.proposalRepo.create(draft);
-        createdIds.push(persisted.id);
+        try {
+          const persisted = await this.proposalRepo.create(draft);
+          createdIds.push(persisted.id);
+        } catch (err) {
+          // Resumability: this proposal's resultEntityId is only set on full
+          // success, so a transient failure partway through the fan-out leaves
+          // the batch retryable. On retry the loop restarts at job 0, whose
+          // per-job idempotencyKey already exists — a ConflictError here means
+          // that draft was already created in the prior attempt, so skip it and
+          // continue drafting the rest instead of wedging the whole batch.
+          if (err instanceof ConflictError) continue;
+          throw err;
+        }
       }
       // The fan-out's "result" is the set of drafts; surface the first id.
       return { success: true, resultEntityId: createdIds[0] };
