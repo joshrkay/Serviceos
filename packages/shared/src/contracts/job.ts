@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { JobPriority } from '../enums.js';
 import { jobStatusSchema } from './status.js';
 
 /**
@@ -11,16 +10,18 @@ import { jobStatusSchema } from './status.js';
  * Over-the-wire dates are ISO strings (the entity uses `Date` server-side, which
  * JSON-serializes to a string), so `createdAt`/`updatedAt` are typed `string`
  * here, matching proposalResponseSchema.
- *
- * Web components (e.g. JobDetail's `ApiJobDetail`, JobsList's `ApiJob`) should
- * migrate onto these types. That migration is deliberately a separate PR: those
- * local interfaces over-declare fields the endpoints don't actually send
- * (technician, lineItems, scheduledStart, serviceType), so the swap needs the
- * running app to verify rendering rather than a type-only check.
  */
 
 /** Money-state rollup marker. TODO(follow-up): reconcile to the JobMoneyState union + a DB-parity test. */
 export const jobMoneyStateSchema = z.string();
+
+/**
+ * Job priority as a string-literal union (kept in lockstep with the JobPriority
+ * enum by job.test.ts). A literal union — not z.nativeEnum — so consumers can
+ * compare against literals (e.g. `priority === 'urgent'`) without TS friction.
+ */
+export const jobPrioritySchema = z.enum(['normal', 'urgent', 'emergency']);
+export type JobPriorityValue = z.infer<typeof jobPrioritySchema>;
 
 export const jobSchema = z.object({
   id: z.string().uuid(),
@@ -31,7 +32,7 @@ export const jobSchema = z.object({
   summary: z.string(),
   problemDescription: z.string().optional(),
   status: jobStatusSchema,
-  priority: z.nativeEnum(JobPriority),
+  priority: jobPrioritySchema,
   assignedTechnicianId: z.string().optional(),
   originatingLeadId: z.string().optional(),
   depositRequiredCents: z.number().int().optional(),
@@ -82,3 +83,27 @@ export const jobDetailResponseSchema = jobSchema.extend({
   location: jobLocationSummarySchema.optional(),
 });
 export type JobDetailResponse = z.infer<typeof jobDetailResponseSchema>;
+
+/** Minimal technician summary embedded in enriched job responses (name + lane color). */
+export const jobTechnicianSummarySchema = z.object({
+  id: z.string(),
+  firstName: z.string().optional(),
+  lastName: z.string().optional(),
+  color: z.string().optional(),
+});
+export type JobTechnicianSummary = z.infer<typeof jobTechnicianSummarySchema>;
+
+/**
+ * Job as consumed by list UIs. The bare `GET /api/jobs` list returns Job
+ * entities; `customer`, `technician`, `scheduledStart`, and `serviceType` are
+ * optional enrichment a caller may join in (the list view renders them when
+ * present and falls back when absent). Modeled optional so an unenriched
+ * response still validates.
+ */
+export const jobListItemSchema = jobSchema.extend({
+  customer: jobCustomerSummarySchema.optional(),
+  technician: jobTechnicianSummarySchema.optional(),
+  scheduledStart: z.string().optional(),
+  serviceType: z.string().optional(),
+});
+export type JobListItem = z.infer<typeof jobListItemSchema>;

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { jobSchema, jobDetailResponseSchema } from './job.js';
+import { JobPriority } from '../enums.js';
+import { jobSchema, jobDetailResponseSchema, jobPrioritySchema, jobListItemSchema } from './job.js';
 
 const baseJob = {
   id: '11111111-1111-1111-1111-111111111111',
@@ -34,6 +35,27 @@ describe('jobSchema', () => {
       moneyState: 'estimate_sent',
     });
     expect(parsed.depositRequiredCents).toBe(5000);
+  });
+
+  it('jobPrioritySchema stays in lockstep with the JobPriority enum', () => {
+    expect([...jobPrioritySchema.options].sort()).toEqual([...Object.values(JobPriority)].sort());
+  });
+});
+
+describe('jobListItemSchema', () => {
+  it('validates an unenriched list row (no customer/technician)', () => {
+    expect(jobListItemSchema.safeParse(baseJob).success).toBe(true);
+  });
+
+  it('accepts optional list enrichment', () => {
+    const parsed = jobListItemSchema.parse({
+      ...baseJob,
+      customer: { id: baseJob.customerId, displayName: 'Acme Co' },
+      technician: { id: 'tech-1', firstName: 'Sam', color: '#10b981' },
+      scheduledStart: '2026-06-02T15:00:00.000Z',
+      serviceType: 'HVAC',
+    });
+    expect(parsed.technician?.firstName).toBe('Sam');
   });
 });
 
