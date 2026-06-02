@@ -4,6 +4,7 @@ import {
   Search, Plus, ChevronRight, Camera, Clock,
   AlertCircle, Mic,
 } from 'lucide-react';
+import type { JobListItem } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { normalizeJobStatus } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
@@ -11,22 +12,8 @@ import { Spinner, EmptyState } from '../ui';
 import { ErrorState } from '../ErrorState';
 import { NewJobFlow } from './NewJobFlow';
 
+// UI tab-label union (distinct from the API status values mapped in TAB_API_STATUS).
 type JobStatus = 'New' | 'Scheduled' | 'In Progress' | 'Completed' | 'Canceled';
-
-interface ApiJob {
-  id: string;
-  jobNumber: string;
-  summary: string;
-  status: string;
-  priority?: string;
-  customerId?: string;
-  assignedTechnicianId?: string;
-  scheduledStart?: string;
-  createdAt?: string;
-  customer?: { id: string; displayName?: string; firstName?: string; lastName?: string };
-  technician?: { id: string; firstName?: string; lastName?: string; color?: string };
-  serviceType?: string;
-}
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
@@ -61,7 +48,7 @@ export function JobsList() {
   const [tab,     setTab]     = useState<JobStatus | 'All'>('All');
   const [showNew, setShowNew] = useState(false);
 
-  const { data, isLoading, error, refetch, setSearch, setFilters } = useListQuery<ApiJob>('/api/jobs');
+  const { data, isLoading, error, refetch, setSearch, setFilters } = useListQuery<JobListItem>('/api/jobs');
 
   const applyTabFilter = (nextTab: JobStatus | 'All') => {
     setTab(nextTab);

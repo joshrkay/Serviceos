@@ -7,6 +7,7 @@ import {
   Phone, Mail, Copy, Check, Pencil, Trash2, MessageSquare,
   ExternalLink, Lock, Building2, Smartphone, Briefcase,
 } from 'lucide-react';
+import type { InvoiceResponse, LineItem as InvoiceLineItem } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
@@ -33,43 +34,6 @@ interface InvCompat {
   paidDate?: string;
 }
 
-interface ApiLineItem {
-  id?: string;
-  description: string;
-  quantity: number;
-  unitPriceCents: number;
-  totalCents: number;
-}
-
-interface ApiCustomer {
-  id: string;
-  displayName?: string;
-  firstName?: string;
-  lastName?: string;
-  primaryPhone?: string;
-  email?: string;
-}
-
-interface ApiInvoice {
-  id: string;
-  invoiceNumber: string;
-  status: string;
-  jobId?: string;
-  estimateId?: string;
-  totalCents: number;
-  subtotalCents: number;
-  amountDueCents?: number;
-  amountPaidCents?: number;
-  discountCents?: number;
-  dueDate?: string;
-  issuedAt?: string;
-  lineItems?: ApiLineItem[];
-  createdAt?: string;
-  customer?: ApiCustomer;
-  customerId?: string;
-  originatingLeadId?: string;
-}
-
 interface ApiLead {
   id: string;
   source: string;
@@ -78,8 +42,8 @@ interface ApiLead {
   utmCampaign?: string;
 }
 
-/** Convert ApiLineItem to UI LineItem */
-function apiLineToUi(item: ApiLineItem): LineItem {
+/** Convert a shared line item to the UI LineItem shape */
+function apiLineToUi(item: InvoiceLineItem): LineItem {
   return {
     description: item.description,
     qty: item.quantity,
@@ -88,7 +52,7 @@ function apiLineToUi(item: ApiLineItem): LineItem {
 }
 
 /** Build an invoice-compat object for sub-components */
-function buildInvCompat(inv: ApiInvoice, uiStatus: InvoiceStatus, timezone: string) {
+function buildInvCompat(inv: InvoiceResponse, uiStatus: InvoiceStatus, timezone: string) {
   const customerName = inv.customer
     ? (inv.customer.displayName || [inv.customer.firstName, inv.customer.lastName].filter(Boolean).join(' ') || 'Customer')
     : 'Customer';
@@ -96,7 +60,7 @@ function buildInvCompat(inv: ApiInvoice, uiStatus: InvoiceStatus, timezone: stri
     id: inv.id,
     invoiceNumber: inv.invoiceNumber,
     customer: customerName,
-    customerId: inv.customerId ?? inv.customer?.id ?? '',
+    customerId: inv.customer?.id ?? '',
     description: '',
     status: uiStatus,
     lineItems: (inv.lineItems ?? []).map(apiLineToUi),
@@ -661,7 +625,7 @@ function OriginAttributionLine({ leadId }: { leadId: string }) {
 function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () => void }) {
   const navigate = useNavigate();
   const tz = useTenantTimezone();
-  const { data: inv, isLoading, error, refetch } = useDetailQuery<ApiInvoice>('/api/invoices', invoiceId);
+  const { data: inv, isLoading, error, refetch } = useDetailQuery<InvoiceResponse>('/api/invoices', invoiceId);
 
   const [lineItems, setLineItems] = useState<LineItem[]>([]);
   const [sendOpen,  setSendOpen]  = useState(false);
@@ -1008,7 +972,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
     setSelected(defaultSelectedId ?? null);
   }, [defaultSelectedId]);
 
-  const { data, total, isLoading, error, setFilters, refetch } = useListQuery<ApiInvoice>('/api/invoices');
+  const { data, total, isLoading, error, setFilters, refetch } = useListQuery<InvoiceResponse>('/api/invoices');
 
   // P5-018 — Auto-refresh loop. Webhooks update the DB; the dispatcher
   // sees the change on the next poll. Pause polling while a detail
@@ -1054,8 +1018,8 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
     ? normalizedData
     : normalizedData.filter(i => i.uiStatus === tab);
 
-  const totalUnpaid  = normalizedData.filter(i => i.uiStatus === 'Unpaid' || i.uiStatus === 'Overdue').reduce((s, i) => s + i.totalCents, 0);
-  const totalPaid    = normalizedData.filter(i => i.uiStatus === 'Paid').reduce((s, i) => s + i.totalCents, 0);
+  const totalUnpaid  = normalizedData.filter(i => i.uiStatus === 'Unpaid' || i.uiStatus === 'Overdue').reduce((s, i) => s + i.totals.totalCents, 0);
+  const totalPaid    = normalizedData.filter(i => i.uiStatus === 'Paid').reduce((s, i) => s + i.totals.totalCents, 0);
   const overdueCount = normalizedData.filter(i => i.uiStatus === 'Overdue').length;
 
   return (
@@ -1165,7 +1129,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
                         <p className="text-xs text-slate-400 mt-0.5 truncate">{inv.invoiceNumber}</p>
                       </div>
                       <div className="flex flex-col items-end gap-1 shrink-0">
-                        <p className="text-sm text-slate-800">{centsToDisplay(inv.totalCents)}</p>
+                        <p className="text-sm text-slate-800">{centsToDisplay(inv.totals.totalCents)}</p>
                         <StatusBadge status={status} size="sm" />
                       </div>
                     </div>
