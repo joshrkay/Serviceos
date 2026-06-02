@@ -6,6 +6,7 @@ import {
   User, Phone, Mail,
 } from 'lucide-react';
 import type { ServiceType } from '../../data/mock-data';
+import type { Customer, CustomerListItem } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { Spinner, EmptyState } from '../ui';
@@ -20,26 +21,15 @@ const SVC_CHIP: Record<ServiceType, string> = {
 };
 const SVC_ICON: Record<ServiceType, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
-interface ApiCustomer {
-  id: string;
-  displayName?: string;
-  firstName?: string;
-  lastName?: string;
-  primaryPhone?: string;
-  email?: string;
-  openJobs?: number;
-  tags?: string[];
-  lastService?: string;
-  locations?: Array<{ id: string; street1?: string; city?: string; state?: string; serviceTypes?: ServiceType[] }>;
-}
-
-function customerDisplayName(c: ApiCustomer): string {
+function customerDisplayName(c: CustomerListItem): string {
   return c.displayName || [c.firstName, c.lastName].filter(Boolean).join(' ') || 'Unknown';
 }
 
-function customerServiceTypes(c: ApiCustomer): ServiceType[] {
+function customerServiceTypes(c: CustomerListItem): ServiceType[] {
+  // The contract models location serviceTypes as free strings; narrow to the
+  // web's local ServiceType union at this single boundary.
   const all = (c.locations ?? []).flatMap(l => l.serviceTypes ?? []);
-  return [...new Set(all)];
+  return [...new Set(all)] as ServiceType[];
 }
 
 // ── Add Customer Sheet ───────────────────────────────────────────
@@ -53,13 +43,13 @@ interface AddCustomerSheetProps {
   onClose: () => void;
   onNewEstimate: () => void;
   onNewJob: () => void;
-  existingCustomers: ApiCustomer[];
+  existingCustomers: CustomerListItem[];
   onCreate: () => void;
 }
 
 function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers, onCreate }: AddCustomerSheetProps) {
   const navigate = useNavigate();
-  const { mutate: createCustomer } = useMutation<Record<string, unknown>, ApiCustomer>('POST', '/api/customers');
+  const { mutate: createCustomer } = useMutation<Record<string, unknown>, Customer>('POST', '/api/customers');
   const { mutate: createLocation } = useMutation<Record<string, unknown>, { id: string }>('POST', '/api/locations');
 
   const [step, setStep] = useState<SheetStep>('contact');
@@ -424,7 +414,7 @@ export function CustomersPage() {
   const [showEstimate, setShowEstimate] = useState(false);
   const [showJob,      setShowJob]      = useState(false);
 
-  const { data, total, isLoading, error, setSearch, refetch } = useListQuery<ApiCustomer>('/api/customers');
+  const { data, total, isLoading, error, setSearch, refetch } = useListQuery<CustomerListItem>('/api/customers');
 
   // Client-side service type filter (API doesn't support this filter)
   const filtered = filter === 'All'

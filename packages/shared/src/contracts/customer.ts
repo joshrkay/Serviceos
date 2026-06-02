@@ -60,3 +60,31 @@ export const customerSummarySchema = z.object({
   email: z.string().optional(),
 });
 export type CustomerSummary = z.infer<typeof customerSummarySchema>;
+
+/**
+ * Per-location summary embedded in a customer list row. `serviceTypes` is left
+ * as free strings here (the web narrows to its local ServiceType union); the
+ * authoritative service-type set lives client-side for now.
+ */
+export const customerLocationSummarySchema = z.object({
+  id: z.string(),
+  street1: z.string().optional(),
+  city: z.string().optional(),
+  state: z.string().optional(),
+  serviceTypes: z.array(z.string()).optional(),
+});
+export type CustomerLocationSummary = z.infer<typeof customerLocationSummarySchema>;
+
+/**
+ * Shape consumed by the customers list UI: the Customer entity plus optional
+ * list-view enrichments the row renders (open-job count, tags, last-service
+ * label, and per-location service-type chips). All enrichments are optional —
+ * a plain customer entity (without joins) still validates.
+ */
+export const customerListItemSchema = customerSchema.extend({
+  openJobs: z.number().int().optional(),
+  tags: z.array(z.string()).optional(),
+  lastService: z.string().optional(),
+  locations: z.array(customerLocationSummarySchema).optional(),
+});
+export type CustomerListItem = z.infer<typeof customerListItemSchema>;
