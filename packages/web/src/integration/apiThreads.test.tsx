@@ -114,7 +114,15 @@ describe('Thread 3 — EstimatesPage → /api/estimates → rendered rows', () =
         id: 'e1',
         estimateNumber: 'EST-0007',
         status: 'draft',
-        totalCents: 150000,
+        // Money under nested `totals` to match the API's serialized Estimate entity.
+        totals: {
+          subtotalCents: 150000,
+          discountCents: 0,
+          taxRateBps: 0,
+          taxableSubtotalCents: 150000,
+          taxCents: 0,
+          totalCents: 150000,
+        },
         customer: { id: 'c1', displayName: 'Beth Carter' },
       },
     ]);

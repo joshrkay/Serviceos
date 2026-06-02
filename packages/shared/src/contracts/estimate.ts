@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { estimateStatusSchema } from './status.js';
 import { lineItemSchema, documentTotalsSchema } from './money.js';
+import { customerSummarySchema } from './customer.js';
 
 /**
  * Canonical Estimate entity contract — single source of truth for the estimate
@@ -46,3 +47,14 @@ export const estimateSchema = z.object({
   updatedAt: z.string(),
 });
 export type Estimate = z.infer<typeof estimateSchema>;
+
+/**
+ * Shape consumed by the estimates list/detail UI: the Estimate entity plus an
+ * optional embedded `customer` summary a caller may join in. The bare
+ * GET /api/estimates(/:id) returns unenriched Estimate entities, so `customer`
+ * is optional and an unenriched response still validates.
+ */
+export const estimateResponseSchema = estimateSchema.extend({
+  customer: customerSummarySchema.optional(),
+});
+export type EstimateResponse = z.infer<typeof estimateResponseSchema>;

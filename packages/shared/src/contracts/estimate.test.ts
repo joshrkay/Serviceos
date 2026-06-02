@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { estimateSchema } from './estimate.js';
+import { estimateSchema, estimateResponseSchema } from './estimate.js';
 
 const baseEstimate = {
   id: '11111111-1111-1111-1111-111111111111',
@@ -49,5 +49,19 @@ describe('estimateSchema', () => {
     const { version, ...withoutVersion } = baseEstimate;
     void version;
     expect(estimateSchema.safeParse(withoutVersion).success).toBe(false);
+  });
+});
+
+describe('estimateResponseSchema', () => {
+  it('validates an unenriched estimate (no customer)', () => {
+    expect(estimateResponseSchema.safeParse(baseEstimate).success).toBe(true);
+  });
+
+  it('accepts an optional embedded customer summary', () => {
+    const parsed = estimateResponseSchema.parse({
+      ...baseEstimate,
+      customer: { id: 'cust-1', firstName: 'Dana', lastName: 'Lee' },
+    });
+    expect(parsed.customer?.firstName).toBe('Dana');
   });
 });
