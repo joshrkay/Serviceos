@@ -23,6 +23,18 @@ import { AuditRepository } from '../audit/audit';
 import { Queue } from '../queues/queue';
 import { FeedbackDispatcher } from '../feedback/dispatcher';
 import { LocationRepository, ServiceLocation } from '../locations/location';
+import {
+  maybeAutoInvoiceOnCompletion,
+  AutoInvoiceOnCompletionDeps,
+} from '../invoices/auto-invoice-on-completion';
+import { mintCompletionMilestones } from '../invoices/schedule-completion';
+import { InvoiceScheduleRepository } from '../invoices/invoice-schedule';
+import { createLogger } from '../logging/logger';
+
+const logger = createLogger({
+  service: 'jobs-route',
+  environment: process.env.NODE_ENV || 'development',
+});
 
 export function createJobRouter(
   jobRepo: JobRepository,
@@ -33,6 +45,11 @@ export function createJobRouter(
   feedbackDispatcher: FeedbackDispatcher,
   customerRepo?: CustomerRepository,
   locationRepo?: LocationRepository,
+  /**
+   * P20-001 — when present, completing a job may auto-draft an invoice.
+   * `scheduleRepo` (P21) additionally mints on_completion schedule milestones.
+   */
+  autoInvoiceDeps?: AutoInvoiceOnCompletionDeps & { scheduleRepo?: InvoiceScheduleRepository },
 ): Router {
   const router = Router();
   // Dispatcher is intentionally passed through router wiring so this API
@@ -266,6 +283,43 @@ export function createJobRouter(
             { tenantId: req.auth!.tenantId, jobId: req.params.id },
             `${req.auth!.tenantId}:${req.params.id}:feedback_send`
           );
+
+          // P20-001 — auto-draft an invoice (opt-in, gated inside). Best-effort:
+          // a drafting failure must never fail the completion the owner just made.
+          if (autoInvoiceDeps) {
+            try {
+              await maybeAutoInvoiceOnCompletion(autoInvoiceDeps, result.job);
+            } catch (autoErr) {
+              logger.error('auto-invoice on completion failed', {
+                tenantId: req.auth!.tenantId,
+                jobId: req.params.id,
+                error: autoErr instanceof Error ? autoErr.message : String(autoErr),
+              });
+            }
+          }
+
+          // P21 — mint on_completion milestones for any invoice schedule on this
+          // job (e.g. the balance of a deposit/balance plan). Best-effort, same
+          // as above; an approved schedule needs no re-approval to bill its plan.
+          if (autoInvoiceDeps?.scheduleRepo) {
+            try {
+              await mintCompletionMilestones(
+                {
+                  scheduleRepo: autoInvoiceDeps.scheduleRepo,
+                  invoiceRepo: autoInvoiceDeps.invoiceRepo,
+                  settingsRepo: autoInvoiceDeps.settingsRepo,
+                  auditRepo: autoInvoiceDeps.auditRepo,
+                },
+                result.job,
+              );
+            } catch (milestoneErr) {
+              logger.error('schedule completion milestone minting failed', {
+                tenantId: req.auth!.tenantId,
+                jobId: req.params.id,
+                error: milestoneErr instanceof Error ? milestoneErr.message : String(milestoneErr),
+              });
+            }
+          }
         }
 
         res.json(result);

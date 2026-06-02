@@ -28,6 +28,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
 import { CreateAppointmentAITaskHandler } from '../ai/tasks/create-appointment-task';
+import { DEFAULT_TENANT_TIMEZONE } from '../ai/scheduling/resolve-datetime';
 import { SlotConflictChecker } from '../ai/tasks/slot-conflict-checker';
 import { AvailabilityFinder } from '../ai/tasks/availability-finder';
 import { AppointmentRepository } from '../appointments/appointment';
@@ -164,6 +165,24 @@ export interface VoiceActionRouterDeps {
    * `buildVerticalPromptResolver(...)` from `verticals/resolve-active-pack.ts`.
    */
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
+  /**
+   * Resolves the tenant's scheduling context (IANA timezone) once per
+   * request from tenant_settings, mirroring `thresholdResolver`. Threaded
+   * onto the TaskContext so the create/reschedule appointment handlers
+   * translate spoken times against the TENANT's timezone instead of a
+   * hardcoded zone. Best-effort: a resolver hiccup degrades to the product
+   * default timezone rather than blocking the call.
+   */
+  tenantSchedulingResolver?: (
+    tenantId: string,
+  ) => Promise<{ timezone?: string } | undefined>;
+  /**
+   * Injectable clock for the scheduling handlers' relative-date resolution
+   * ("tomorrow", "next Tuesday"). Defaults to `new Date()` in production;
+   * the voice-quality corpus pins it so booking expectations are
+   * deterministic. Threaded onto TaskContext.now.
+   */
+  now?: () => Date;
   /**
    * Multi-action chaining feature gate. When this resolves truthy for a
    * tenant, the router first runs `decomposeTranscript`; a multi-action
@@ -702,6 +721,13 @@ async function processSegment(
     ? await deps.thresholdResolver(tenantId).catch(() => undefined)
     : undefined;
 
+  // Resolve the tenant's timezone (best-effort) so the create/reschedule
+  // appointment handlers translate spoken times against the right zone
+  // instead of a hardcoded one. Falls back to the product default.
+  const scheduling = deps.tenantSchedulingResolver
+    ? await deps.tenantSchedulingResolver(tenantId).catch(() => undefined)
+    : undefined;
+
   const context: TaskContext = {
     tenantId,
     userId,
@@ -711,6 +737,8 @@ async function processSegment(
       classification.intentType,
       classification.extractedEntities,
     ),
+    timezone: scheduling?.timezone ?? DEFAULT_TENANT_TIMEZONE,
+    now: deps.now ? deps.now() : new Date(),
     ...(customerId ? { customerId } : {}),
     // Single-action only: lets the held-slot path key the appointment on
     // `voice-hold:<recordingId>` so a concurrent redelivery can't double-book.

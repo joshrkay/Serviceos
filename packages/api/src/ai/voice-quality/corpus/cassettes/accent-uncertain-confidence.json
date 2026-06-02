@@ -326,7 +326,7 @@
         "outputTokens": 10,
         "costCents": 0
       },
-      "recordedAt": "2026-05-25T05:41:05.058Z"
+      "recordedAt": "2026-05-31T13:44:18.861Z"
     },
     {
       "requestHash": "sha256:bc6ade09da24b5aee34c47e18efd10b1fa70d7858ad03690ce21be0ea96eb5c9",
@@ -351,7 +351,57 @@
         "outputTokens": 10,
         "costCents": 0
       },
-      "recordedAt": "2026-05-25T05:41:05.069Z"
+      "recordedAt": "2026-05-31T13:44:18.917Z"
+    },
+    {
+      "requestHash": "sha256:cf77d9e146c09ab7f274040cc5e7a1dc6332f823f98c598f086172ce5876d626",
+      "request": {
+        "model": "(default)",
+        "prompt": "[{\"content\":\"You extract appointment details from a field service voice transcript.\\n\\nReturn valid JSON with this shape (no prose, no markdown fences):\\n{\\n  \\\"dateTimePhrase\\\": \\\"<the date/time phrase EXACTLY as spoken, e.g. 'next Tuesday at 2pm' or 'tomorrow morning'>\\\",\\n  \\\"customerName\\\": \\\"<string, optional>\\\",\\n  \\\"customerId\\\": \\\"<uuid, optional — only if explicitly known>\\\",\\n  \\\"jobId\\\": \\\"<uuid, optional — only if explicitly known>\\\",\\n  \\\"summary\\\": \\\"<one-line description of the work requested>\\\",\\n  \\\"durationMinutes\\\": <integer, optional — estimated job length if stated or clearly implied by the service>,\\n  \\\"confidence_score\\\": <number between 0 and 1>\\n}\\n\\nRules:\\n- Copy the date/time phrase VERBATIM into dateTimePhrase. Do NOT convert it to a\\n  date, do NOT compute a timezone, do NOT output an ISO timestamp. Downstream\\n  code resolves the actual time against the tenant's timezone.\\n- If the transcript mentions no date or time at all, set dateTimePhrase to \\\"\\\".\\n- durationMinutes is a hint only (e.g. a quick diagnostic ~60, a furnace install ~240).\\n- Never invent a customerId or jobId.\",\"role\":\"system\"},{\"content\":\"Transcript: Ah wud lyk ta scedool an apointmunt.\",\"role\":\"user\"}]",
+        "schema": "json"
+      },
+      "response": {
+        "content": "{\"summary\":\"Service appointment\",\"confidence_score\":0.95,\"dateTimePhrase\":\"\"}",
+        "model": "mock-model",
+        "provider": "mock",
+        "latencyMs": 1,
+        "tokenUsage": {
+          "input": 10,
+          "output": 10,
+          "total": 20
+        }
+      },
+      "tokenUsage": {
+        "inputTokens": 10,
+        "outputTokens": 10,
+        "costCents": 0
+      },
+      "recordedAt": "2026-05-31T13:44:18.866Z"
+    },
+    {
+      "requestHash": "sha256:7499e14acbf687c4a3ebe15b8b3e6b6e08b517e997ee380684df1f56f07a3eaf",
+      "request": {
+        "model": "(default)",
+        "prompt": "[{\"content\":\"You extract appointment details from a field service voice transcript.\\n\\nReturn valid JSON with this shape (no prose, no markdown fences):\\n{\\n  \\\"dateTimePhrase\\\": \\\"<the date/time phrase EXACTLY as spoken, e.g. 'next Tuesday at 2pm' or 'tomorrow morning'>\\\",\\n  \\\"customerName\\\": \\\"<string, optional>\\\",\\n  \\\"customerId\\\": \\\"<uuid, optional — only if explicitly known>\\\",\\n  \\\"jobId\\\": \\\"<uuid, optional — only if explicitly known>\\\",\\n  \\\"summary\\\": \\\"<one-line description of the work requested>\\\",\\n  \\\"durationMinutes\\\": <integer, optional — estimated job length if stated or clearly implied by the service>,\\n  \\\"confidence_score\\\": <number between 0 and 1>\\n}\\n\\nRules:\\n- Copy the date/time phrase VERBATIM into dateTimePhrase. Do NOT convert it to a\\n  date, do NOT compute a timezone, do NOT output an ISO timestamp. Downstream\\n  code resolves the actual time against the tenant's timezone.\\n- If the transcript mentions no date or time at all, set dateTimePhrase to \\\"\\\".\\n- durationMinutes is a hint only (e.g. a quick diagnostic ~60, a furnace install ~240).\\n- Never invent a customerId or jobId.\",\"role\":\"system\"},{\"content\":\"Transcript: Yes.\",\"role\":\"user\"}]",
+        "schema": "json"
+      },
+      "response": {
+        "content": "{\"summary\":\"Service appointment\",\"confidence_score\":0.95,\"dateTimePhrase\":\"\"}",
+        "model": "mock-model",
+        "provider": "mock",
+        "latencyMs": 1,
+        "tokenUsage": {
+          "input": 10,
+          "output": 10,
+          "total": 20
+        }
+      },
+      "tokenUsage": {
+        "inputTokens": 10,
+        "outputTokens": 10,
+        "costCents": 0
+      },
+      "recordedAt": "2026-05-31T13:44:18.922Z"
     }
   ]
 }
