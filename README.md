@@ -1,7 +1,11 @@
-# ServiceOS
+# Fieldly
 
-AI service-business operating system. The production system is a TypeScript
-monorepo deployed on **Railway**.
+AI back office for owner-operator home-service shops. The production
+system is a TypeScript monorepo deployed on **Railway**.
+
+> Repository directories and npm package names still use the
+> `serviceos` / `@serviceos` namespace internally. Renaming those is a
+> separate, deliberate refactor (see `docs/launch/2026-06-03-fieldly-gtm-brief.md`).
 
 ## Repository map
 
