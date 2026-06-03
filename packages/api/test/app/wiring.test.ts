@@ -45,4 +45,44 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
   it('pool initialization is gated on DATABASE_URL', () => {
     expect(src).toMatch(/process\.env\.DATABASE_URL\s*\?\s*createPool\(\)/);
   });
+
+  // Blocker 5 — graceful shutdown stops background loops before draining the
+  // pool, and tenant-wide sweeps are leader-elected via a Postgres advisory
+  // lock so they don't duplicate on multi-instance deploys.
+  describe('Blocker 5 — background-loop lifecycle + leader election', () => {
+    it('shutdown clears all registered background intervals before pool drain', () => {
+      expect(src).toMatch(/const\s+backgroundIntervals\s*:\s*NodeJS\.Timeout\[\]/);
+      expect(src).toMatch(/registerInterval\(setInterval\(/);
+      expect(src).toMatch(/for\s*\(const\s+handle\s+of\s+backgroundIntervals\)\s*clearInterval\(handle\)/);
+      // The clearInterval loop must run inside the shutdown handler, before pool.end().
+      const shutdownIdx = src.indexOf('const shutdown = async (signal');
+      const clearIdx = src.indexOf('for (const handle of backgroundIntervals)');
+      const poolEndIdx = src.indexOf('pool.end()');
+      expect(shutdownIdx).toBeGreaterThan(-1);
+      expect(clearIdx).toBeGreaterThan(shutdownIdx);
+      expect(poolEndIdx).toBeGreaterThan(clearIdx);
+    });
+
+    it('a shuttingDown guard gates new sweep work', () => {
+      expect(src).toMatch(/let\s+shuttingDown\s*=\s*false/);
+      expect(src).toMatch(/shuttingDown\s*=\s*true/);
+      expect(src).toMatch(/if\s*\(shuttingDown\)\s*return/);
+    });
+
+    it('tenant-wide sweeps are wrapped in runAsLeader with a pg advisory lock', () => {
+      expect(src).toMatch(/pg_try_advisory_lock/);
+      expect(src).toMatch(/pg_advisory_unlock/);
+      // Each of the six tenant-wide sweeps is gated by a distinct lock key.
+      for (const key of [
+        'recurringAgreements',
+        'overdueInvoice',
+        'appointmentReminder',
+        'estimateReminder',
+        'estimateExpiry',
+        'googleReviews',
+      ]) {
+        expect(src).toMatch(new RegExp(`runAsLeader\\(SWEEP_LOCK\\.${key}`));
+      }
+    });
+  });
 });

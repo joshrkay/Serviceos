@@ -163,6 +163,24 @@ describe('P2-033 — Shell proposal notification integration', () => {
     expect(badge.getAttribute('href')).toBe('/inbox');
   });
 
+  it('Mobile bell — top-bar Bell links to /inbox and shows the pending count', async () => {
+    mockProposalFetchSequence([
+      [
+        { id: 'p1', summary: 'Schedule visit' },
+        { id: 'p2', summary: 'Issue invoice' },
+      ],
+    ]);
+
+    renderShell();
+
+    // The mobile approvals entry point links to /inbox even though the
+    // supervisor bottom bar omits Inbox (Figma parity).
+    const bell = await screen.findByTestId('mobile-inbox-bell');
+    expect(bell.getAttribute('href')).toBe('/inbox');
+    const badge = await screen.findByTestId('mobile-inbox-badge');
+    expect(badge.textContent).toBe('2');
+  });
+
   it('Badge hidden when there are no pending proposals', async () => {
     const fetchSpy = mockProposalFetchSequence([[]]);
 

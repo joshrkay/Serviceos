@@ -124,6 +124,13 @@ export class EstimateEditTaskHandler implements TaskHandler {
       ...(context.tenantThresholdOverride
         ? { tenantThresholdOverride: context.tenantThresholdOverride }
         : {}),
+      // Phase 12 — forward supervisor presence so this autonomous, capture-class
+      // edit only auto-approves when a supervisor is on the wall (same gate as
+      // the create_appointment path).
+      ...(context.supervisorPresent !== undefined
+        ? { supervisorPresent: context.supervisorPresent }
+        : {}),
+      ...(context.supervisorMode ? { supervisorMode: context.supervisorMode } : {}),
     };
 
     return { proposal: createProposal(input), taskType: this.taskType };

@@ -93,6 +93,10 @@ import { lookupAccountSummary } from '../skills/lookup-account-summary';
 import { lookupCustomer } from '../skills/lookup-customer';
 import { lookupEstimates } from '../skills/lookup-estimates';
 import { lookupLeads } from '../skills/lookup-leads';
+import { lookupRevenue } from '../skills/lookup-revenue';
+import { lookupCatalog } from '../skills/lookup-catalog';
+import { lookupAvailability } from '../skills/lookup-availability';
+import type { AvailabilityFinder } from '../tasks/availability-finder';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
 
 // Repos (mutation handlers + lookup deps).
@@ -104,6 +108,8 @@ import type { JobRepository } from '../../jobs/job';
 import type { LeadRepository } from '../../leads/lead';
 import type { AuditRepository } from '../../audit/audit';
 import type { AgreementRepository } from '../../agreements/agreement';
+import type { MoneyDashboardRepository } from '../../reports/money-dashboard';
+import type { CatalogItemRepository } from '../../catalog/catalog-item';
 import { createProposal, type ProposalRepository } from '../../proposals/proposal';
 
 // Mutation worker (production code path for proposal creation).
@@ -177,6 +183,9 @@ export interface TextModeDriverDeps {
   leadRepo?: LeadRepository;
   auditRepo?: AuditRepository;
   agreementRepo?: AgreementRepository;
+  moneyDashboardRepo?: MoneyDashboardRepository;
+  catalogRepo?: CatalogItemRepository;
+  availabilityFinder?: AvailabilityFinder;
   /** Optional audit-trail of every lookup. */
   lookupEvents?: LookupEventService;
   /** Used as `userId` on synthesized voice-action-router messages. */
@@ -277,6 +286,18 @@ export class TextModeDriver implements AgentDriver {
       gateway: deps.gateway,
       proposalRepo: deps.proposalRepo,
       ...(deps.appointmentRepo ? { appointmentRepo: deps.appointmentRepo } : {}),
+      // Thread the fixture's tenant timezone so spoken times resolve in the
+      // tenant zone, and pin the scheduling clock to the fixture's call
+      // moment so relative/absolute booking dates are deterministic.
+      ...(deps.settingsRepo
+        ? {
+            tenantSchedulingResolver: async (t: string) => {
+              const s = await deps.settingsRepo!.findByTenant(t);
+              return { timezone: s?.timezone };
+            },
+          }
+        : {}),
+      now: () => (deps.now ? deps.now() : new Date()),
     });
   }
 
@@ -1153,6 +1174,62 @@ export class TextModeDriver implements AgentDriver {
             lookupExecutedEvent(intentType, performance.now() - startMs, true),
           );
           return result.summary;
+        }
+        case 'lookup_revenue': {
+          if (!this.deps.moneyDashboardRepo) {
+            return LOOKUP_NOT_WIRED_FALLBACK;
+          }
+          const result = await lookupRevenue(
+            { tenantId, sessionId: session.id },
+            {
+              moneyDashboardRepo: this.deps.moneyDashboardRepo,
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_catalog': {
+          if (!this.deps.catalogRepo) {
+            return LOOKUP_NOT_WIRED_FALLBACK;
+          }
+          const result = await lookupCatalog(
+            { tenantId, sessionId: session.id },
+            {
+              catalogRepo: this.deps.catalogRepo,
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_availability': {
+          if (!this.deps.availabilityFinder) {
+            return LOOKUP_NOT_WIRED_FALLBACK;
+          }
+          const from = this.deps.now ? this.deps.now() : new Date();
+          const result = await lookupAvailability(
+            {
+              tenantId,
+              searchFrom: from,
+              searchTo: new Date(from.getTime() + 14 * 24 * 60 * 60 * 1000),
+              durationMs: 2 * 60 * 60 * 1000,
+            },
+            this.deps.availabilityFinder,
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
+          );
+          return result.status === 'unavailable'
+            ? LOOKUP_NOT_WIRED_FALLBACK
+            : result.message;
         }
         default:
           return LOOKUP_NOT_WIRED_FALLBACK;

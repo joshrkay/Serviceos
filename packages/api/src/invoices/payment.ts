@@ -2,6 +2,22 @@ import { v4 as uuidv4 } from 'uuid';
 import { Invoice, InvoiceRepository } from './invoice';
 import { ValidationError } from '../shared/errors';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
+
+/**
+ * Optional audit context for `recordPayment`. When `auditRepo` is wired,
+ * recording a payment emits a `payment.recorded` event (plus an
+ * `invoice.status_changed` event when the invoice status flips). Emitted
+ * after the invoice update so it participates in the caller's
+ * request-scoped transaction (authenticated /api routes) and commits or
+ * rolls back atomically with the payment + invoice writes.
+ */
+export interface RecordPaymentAuditContext {
+  /** Actor role to stamp (defaults to 'system' for webhook/automation paths). */
+  actorRole?: string;
+  /** Correlation id (e.g. Stripe payment_intent / event id) for traceability. */
+  correlationId?: string;
+}
 
 export interface PaymentReceiptNotifier {
   notifyPaymentReceived(
@@ -43,6 +59,18 @@ export interface Payment {
   refundedAt: Date | null;
   /** Stripe `re_*` id of the most recent refund, or null. */
   lastRefundStripeId: string | null;
+  /**
+   * Invoice-to-cash failure handling — timestamp this payment was
+   * REVERSED, or null if it still stands. A reversal is distinct from a
+   * refund: it marks money that never truly settled (ACH/bank NSF return)
+   * or was clawed back (card chargeback). When set, `status` is flipped
+   * to 'failed' so the payment drops out of gross revenue, and the linked
+   * invoice has been reopened. Mutate ONLY via `reversePayment(...)` in
+   * `packages/api/src/payments/payment-service.ts`.
+   */
+  reversedAt: Date | null;
+  /** Why the payment was reversed (e.g. 'ach_return', 'dispute'), or null. */
+  reversalReason: string | null;
 }
 
 export interface RecordPaymentInput {
@@ -78,6 +106,19 @@ export interface IncrementRefundOptions {
   refundedAt: Date;
   /** Stripe `re_*` id of this refund (preserved if null/undefined). */
   stripeRefundId?: string | null;
+}
+
+/**
+ * Options for the atomic payment reversal. Used by `reversePaymentAtomic`
+ * to flip a `completed` payment to `failed` as a single compare-and-swap,
+ * so a redelivered NSF/chargeback webhook (or two concurrent deliveries)
+ * cannot reverse the same payment twice or double-decrement the invoice.
+ */
+export interface ReversePaymentOptions {
+  /** Timestamp to stamp onto `reversedAt`. */
+  reversedAt: Date;
+  /** Why the payment was reversed (e.g. 'ach_return', 'dispute'). */
+  reason: string;
 }
 
 export interface PaymentRepository {
@@ -125,6 +166,21 @@ export interface PaymentRepository {
     id: string,
     opts: IncrementRefundOptions,
   ): Promise<Payment | null>;
+  /**
+   * Invoice-to-cash failure handling — atomically flip a `completed`
+   * payment to `failed`, stamping `reversedAt`/`reversalReason`, but ONLY
+   * if it has not already been reversed. Returns the updated payment on
+   * success, or `null` when the row does not exist OR was already reversed
+   * / is not in 'completed' status (the guard lives in the WHERE clause,
+   * mirroring `incrementRefundAtomic`). This makes a duplicate NSF /
+   * chargeback webhook delivery a clean no-op rather than a double
+   * invoice-balance decrement.
+   */
+  reversePaymentAtomic(
+    tenantId: string,
+    id: string,
+    opts: ReversePaymentOptions,
+  ): Promise<Payment | null>;
 }
 
 export function validatePaymentInput(input: RecordPaymentInput): string[] {
@@ -147,6 +203,8 @@ export async function recordPayment(
   paymentRepo: PaymentRepository,
   moneyStateDeps?: RefreshJobMoneyStateDeps,
   paymentReceiptNotifier?: PaymentReceiptNotifier,
+  auditRepo?: AuditRepository,
+  auditContext?: RecordPaymentAuditContext,
 ): Promise<{ payment: Payment; invoice: Invoice }> {
   const errors = validatePaymentInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
@@ -179,6 +237,8 @@ export async function recordPayment(
     refundedAmountCents: 0,
     refundedAt: null,
     lastRefundStripeId: null,
+    reversedAt: null,
+    reversalReason: null,
   };
 
   await paymentRepo.create(payment);
@@ -200,6 +260,54 @@ export async function recordPayment(
     status: newStatus,
     updatedAt: new Date(),
   });
+
+  // Audit trail (CLAUDE.md: "All mutations: emit audit events"). Emitted
+  // before the best-effort money-state rollup so that — on authenticated
+  // /api routes, which run inside the request-scoped transaction — the
+  // audit row commits or rolls back atomically with the payment + invoice
+  // writes. A failure here intentionally bubbles: a payment with no audit
+  // record is not an acceptable committed state.
+  if (auditRepo) {
+    const actorRole = auditContext?.actorRole ?? 'system';
+    const correlationId = auditContext?.correlationId;
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId: input.tenantId,
+        actorId: input.processedBy,
+        actorRole,
+        eventType: 'payment.recorded',
+        entityType: 'invoice',
+        entityId: input.invoiceId,
+        correlationId,
+        metadata: {
+          paymentId: payment.id,
+          amountCents: payment.amountCents,
+          method: payment.method,
+          providerReference: payment.providerReference ?? null,
+          newInvoiceStatus: (updatedInvoice ?? invoice).status,
+        },
+      }),
+    );
+
+    if (updatedInvoice && updatedInvoice.status !== invoice.status) {
+      await auditRepo.create(
+        createAuditEvent({
+          tenantId: input.tenantId,
+          actorId: input.processedBy,
+          actorRole,
+          eventType: 'invoice.status_changed',
+          entityType: 'invoice',
+          entityId: input.invoiceId,
+          correlationId,
+          metadata: {
+            oldStatus: invoice.status,
+            newStatus: updatedInvoice.status,
+            paymentId: payment.id,
+          },
+        }),
+      );
+    }
+  }
 
   // §6 Time-to-Cash. Roll the job's money-state forward (best-effort —
   // the payment + invoice writes already succeeded; a rollup failure
@@ -311,6 +419,35 @@ export class InMemoryPaymentRepository implements PaymentRepository {
       refundedAmountCents: next,
       refundedAt: opts.refundedAt,
       lastRefundStripeId: opts.stripeRefundId ?? p.lastRefundStripeId ?? null,
+      updatedAt: new Date(),
+    };
+    this.payments.set(id, updated);
+    return { ...updated };
+  }
+
+  /**
+   * Mirror of the pg compare-and-swap reversal. Yields to the microtask
+   * queue once so two concurrent callers interleave under the in-memory
+   * repo (matching `incrementRefundAtomic`). The guard — only flip when
+   * `status === 'completed'` and not yet reversed — makes a second call
+   * a no-op, so a duplicate webhook can't double-reverse.
+   */
+  async reversePaymentAtomic(
+    tenantId: string,
+    id: string,
+    opts: ReversePaymentOptions,
+  ): Promise<Payment | null> {
+    await Promise.resolve();
+    const p = this.payments.get(id);
+    if (!p || p.tenantId !== tenantId) return null;
+    // `!= null` (loose) treats both null and a legacy `undefined` as
+    // "not yet reversed"; a Date blocks the second reversal.
+    if (p.status !== 'completed' || p.reversedAt != null) return null;
+    const updated: Payment = {
+      ...p,
+      status: 'failed',
+      reversedAt: opts.reversedAt,
+      reversalReason: opts.reason,
       updatedAt: new Date(),
     };
     this.payments.set(id, updated);

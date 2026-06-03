@@ -40,5 +40,20 @@ server.on('error', (err: NodeJS.ErrnoException) => {
   process.stdout.write(`FATAL server listen error: ${err.stack ?? err.message}\n`);
   process.exit(1);
 });
+
+// Blocker 5 — graceful shutdown. On a stop signal, stop accepting new
+// connections so in-flight requests can finish; createApp's own SIGTERM
+// handler concurrently stops the background loops and drains the pg pool.
+// A hard-timeout fallback (unref'd so it never keeps the process alive)
+// force-exits if draining stalls, well within Railway's stop grace period.
+const gracefulExit = (signal: NodeJS.Signals) => {
+  process.stdout.write(`[shutdown] ${signal} received — closing HTTP server\n`);
+  server.close(() => {
+    process.stdout.write('[shutdown] HTTP server closed\n');
+  });
+  setTimeout(() => process.exit(0), 10_000).unref();
+};
+process.once('SIGTERM', gracefulExit);
+process.once('SIGINT', gracefulExit);
 // Railway: targets api stage via dockerfileTarget in railway.toml
 // cache-bust: force fresh tsc compile

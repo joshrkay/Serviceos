@@ -113,6 +113,11 @@ const lineItemSchema = z.object({
   totalCents: z.number().int().nonnegative(),
   sortOrder: z.number().int(),
   taxable: z.boolean(),
+  // Good-better-best tiers + optional add-ons (estimates only).
+  groupKey: z.string().min(1).max(120).optional(),
+  groupLabel: z.string().min(1).max(200).optional(),
+  isOptional: z.boolean().optional(),
+  isDefaultSelected: z.boolean().optional(),
 });
 
 export const createCustomerSchema = z.object({
@@ -294,6 +299,13 @@ export const updateSettingsSchema = z.object({
   // Tier 4 — Quick-settings toggles persistence.
   autoApplyInternalUpdates: z.boolean().optional(),
   autoSendAppointmentReminders: z.boolean().optional(),
+  // P20-001 — opt into auto-drafting an invoice (as a proposal) on job completion.
+  autoInvoiceOnCompletion: z.boolean().optional(),
+  // P21-003 — opt into the daily batch-invoice proposal sweep.
+  batchInvoiceEnabled: z.boolean().optional(),
+  // P21 — opt into minting on_completion milestone invoices. Without this in
+  // the schema Zod strips it, so the toggle could never be set via the API.
+  milestoneBillingEnabled: z.boolean().optional(),
   // Tier 4 — AI approval rules: per-mode auto-approve threshold override.
   // Each entry is a confidence in [0, 1]. Missing keys fall back to
   // DEFAULT_AUTO_APPROVE_THRESHOLDS in proposals/auto-approve.ts.

@@ -3,12 +3,18 @@ import {
   Plus, Send, Pencil, ChevronRight, Clock, ArrowLeft, Check,
   Eye, FileText, X, Trash2, TrendingUp, AlertTriangle,
   CheckCircle2, Copy, Phone, Mail, Sparkles, MessageSquare,
-  Briefcase, MapPin,
+  Briefcase, MapPin, RotateCcw, Download,
 } from 'lucide-react';
+import type { EstimateResponse, LineItem as EstimateLineItem } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
+import { Spinner, EmptyState } from '../ui';
+import { ErrorState } from '../ErrorState';
 import { apiFetch } from '../../utils/api-fetch';
+import { printEstimateDocument } from '../../lib/estimatePdf';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { NewEstimateFlow } from './NewEstimateFlow';
@@ -16,7 +22,7 @@ import { ConvertToInvoiceSheet } from './ConvertToInvoiceSheet';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 
-type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined';
+type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined' | 'Expired';
 
 interface EstCompat {
   id: string;
@@ -33,67 +39,51 @@ interface EstCompat {
   validUntil?: string;
 }
 
-interface ApiLineItem {
-  id?: string;
-  description: string;
-  quantity: number;
-  unitPriceCents: number;
-  totalCents: number;
-  taxable?: boolean;
-  sortOrder?: number;
-}
-
-interface ApiCustomer {
-  id: string;
-  displayName?: string;
-  firstName?: string;
-  lastName?: string;
-  primaryPhone?: string;
-  email?: string;
-}
-
-interface ApiEstimate {
-  id: string;
-  estimateNumber: string;
-  status: string;
-  jobId?: string;
-  subtotalCents: number;
-  taxCents?: number;
-  totalCents: number;
-  discountCents?: number;
-  validUntil?: string;
-  customerMessage?: string;
-  lineItems?: ApiLineItem[];
-  createdAt?: string;
-  updatedAt?: string;
-  customer?: ApiCustomer;
-  customerId?: string;
-  /** Optimistic-concurrency token sent back as If-Match on edits. */
-  version?: number;
-}
-
-/** Convert ApiLineItem to UI LineItem for the editor */
-function apiLineToUi(item: ApiLineItem): LineItem {
+/** Convert a shared line item to UI LineItem for the editor */
+function apiLineToUi(item: EstimateLineItem): LineItem {
   return {
+    id: item.id,
     description: item.description,
     qty: item.quantity,
     rate: item.unitPriceCents / 100,
+    taxable: item.taxable,
+    // Preserve good-better-best metadata so an inline edit + save doesn't
+    // strip the tier/add-on structure the customer approves against.
+    groupKey: item.groupKey,
+    groupLabel: item.groupLabel,
+    isOptional: item.isOptional,
+    isDefaultSelected: item.isDefaultSelected,
   };
 }
 
-/** Convert UI LineItem back to ApiLineItem for saving */
-function uiLineToApi(item: LineItem, sortOrder: number): Partial<ApiLineItem> {
+/** Convert UI LineItem back to a shared line item for saving */
+function uiLineToApi(item: LineItem, sortOrder: number): Partial<EstimateLineItem> {
   return {
+    ...(item.id ? { id: item.id } : {}),
     description: item.description,
     quantity: item.qty,
     unitPriceCents: Math.round(item.rate * 100),
     totalCents: Math.round(item.qty * item.rate * 100),
     sortOrder,
-    taxable: false,
+    taxable: item.taxable ?? false,
+    groupKey: item.groupKey,
+    groupLabel: item.groupLabel,
+    isOptional: item.isOptional,
+    isDefaultSelected: item.isDefaultSelected,
   };
 }
 
-type LineItem = { description: string; qty: number; rate: number };
+type LineItem = {
+  id?: string;
+  description: string;
+  qty: number;
+  rate: number;
+  taxable?: boolean;
+  groupKey?: string;
+  groupLabel?: string;
+  isOptional?: boolean;
+  isDefaultSelected?: boolean;
+};
 
 // ─── AI suggestion types ──────────────────────────────────────────────────
 interface AISuggestion {
@@ -496,9 +486,25 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
             <p className="text-sm text-slate-700">Customer preview</p>
             <p className="text-xs text-slate-400">What {est.customer.split(' ')[0]} sees when they open the link</p>
           </div>
-          <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100 transition-colors">
-            <X size={15} className="text-slate-500" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => printEstimateDocument({
+                estimateNumber: est.estimateNumber,
+                customerName: est.customer,
+                businessName: 'Fieldly Pro Services',
+                businessContact: 'Austin, TX · (512) 555-0000',
+                description: est.description,
+                validUntil: est.validUntil,
+                lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate })),
+              })}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 transition-colors"
+            >
+              <Download size={12} /> PDF
+            </button>
+            <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100 transition-colors">
+              <X size={15} className="text-slate-500" />
+            </button>
+          </div>
         </div>
 
         {/* Document body */}
@@ -723,15 +729,60 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
 // ─── Estimate Detail ──────────────────────────────────────────────────────
 function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: () => void }) {
   const navigate = useNavigate();
-  const { data: est, isLoading, error, refetch } = useDetailQuery<ApiEstimate>('/api/estimates', estimateId);
-  const { mutate: updateEstimate } = useMutation<Record<string, unknown>, ApiEstimate>('PUT', `/api/estimates/${estimateId}`);
-  const { mutate: transitionEstimate } = useMutation<{ status: string }, ApiEstimate>('POST', `/api/estimates/${estimateId}/transition`);
+  const tz = useTenantTimezone();
+  const { data: est, isLoading, error, refetch } = useDetailQuery<EstimateResponse>('/api/estimates', estimateId);
+  const { mutate: updateEstimate } = useMutation<Record<string, unknown>, EstimateResponse>('PUT', `/api/estimates/${estimateId}`);
+  const { mutate: transitionEstimate } = useMutation<{ status: string }, EstimateResponse>('POST', `/api/estimates/${estimateId}/transition`);
 
   const [lineItems,    setLineItems]    = useState<LineItem[]>([]);
   const [sendOpen,     setSendOpen]     = useState(false);
   const [previewOpen,  setPreviewOpen]  = useState(false);
   const [wasSent,      setWasSent]      = useState(false);
   const [convertOpen,  setConvertOpen]  = useState(false);
+  const [actionBusy,   setActionBusy]   = useState(false);
+  const [actionError,  setActionError]  = useState<string | null>(null);
+
+  async function handleClone() {
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const res = await apiFetch(`/api/estimates/${estimateId}/clone`, { method: 'POST' });
+      if (!res.ok) throw new Error(`Could not clone estimate (HTTP ${res.status})`);
+      const clone = (await res.json()) as { id: string };
+      navigate(`/estimates/${clone.id}`);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to clone estimate');
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!window.confirm('Delete this estimate? It will be removed from your list.')) return;
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const res = await apiFetch(`/api/estimates/${estimateId}`, { method: 'DELETE' });
+      if (!res.ok && res.status !== 204) throw new Error(`Could not delete estimate (HTTP ${res.status})`);
+      onBack();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to delete estimate');
+      setActionBusy(false);
+    }
+  }
+
+  async function handleReopen() {
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      await transitionEstimate({ status: 'draft' });
+      await refetch();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to reopen estimate');
+    } finally {
+      setActionBusy(false);
+    }
+  }
 
   // Enriched customer/location from the linked job
   const [enrichedCustomer, setEnrichedCustomer] = useState<{ name: string; id: string; phone?: string; email?: string } | null>(null);
@@ -793,19 +844,33 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   }
 
   // Sync lineItems from API data when it loads
-  const apiLineItems = est?.lineItems ?? [];
+  // Once accepted with a good-better-best selection, show only the billed
+  // rows so the line items and the total match what the customer agreed to
+  // (the estimate keeps every option row underneath for history/clone).
+  const acceptedSel = est?.acceptedSelection;
+  const apiLineItems = (() => {
+    const all = est?.lineItems ?? [];
+    if (acceptedSel && acceptedSel.length > 0) {
+      return all.filter((li) => li.id && acceptedSel.includes(li.id));
+    }
+    return all;
+  })();
   const uiLineItems = lineItems.length > 0 ? lineItems : apiLineItems.map(apiLineToUi);
 
   const total    = uiLineItems.reduce((s, i) => s + i.qty * i.rate, 0);
   const customer = est?.customer;
   const apiStatus = wasSent ? 'sent' : (est?.status ?? 'draft');
   const status   = normalizeEstimateStatus(apiStatus) as EstimateStatus;
-  const editable = status === 'Draft';
+  // Editability follows the RAW status, not the normalized label: the API
+  // folds `expired` into the "Draft" label, but the backend blocks edits on
+  // expired/rejected. Keying off the raw status avoids offering an edit that
+  // would 409. Reopen (rejected/expired -> draft) is the supported path.
+  const editable = apiStatus === 'draft' || apiStatus === 'ready_for_review';
 
   if (isLoading) {
     return (
       <div className="h-full flex items-center justify-center">
-        <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+        <Spinner size="md" className="text-slate-900" label="Loading estimate" />
       </div>
     );
   }
@@ -822,7 +887,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   // Build a mock Estimate-like object for the sub-components that still need it
   const effectiveCustomerName = enrichedCustomer?.name
     ?? (customer ? (customer.displayName || [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Customer') : 'Customer');
-  const effectiveCustomerId = enrichedCustomer?.id ?? est.customerId ?? customer?.id ?? '';
+  const effectiveCustomerId = enrichedCustomer?.id ?? customer?.id ?? '';
   const estCompat = {
     id: est.id,
     estimateNumber: est.estimateNumber,
@@ -831,7 +896,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
     description: est.customerMessage ?? '',
     status,
     lineItems: uiLineItems,
-    createdDate: est.createdAt ? new Date(est.createdAt).toLocaleDateString() : '',
+    createdDate: est.createdAt ? formatDateInTenantTz(est.createdAt, tz) : '',
     sentDate: undefined as string | undefined,
     viewedDate: undefined as string | undefined,
     approvedDate: undefined as string | undefined,
@@ -912,7 +977,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                     {notes.map(n => (
                       <div key={n.id} className="px-4 py-3">
                         <p className="text-sm text-slate-700 leading-snug">{n.content}</p>
-                        <p className="text-xs text-slate-400 mt-1">{new Date(n.createdAt).toLocaleString()}</p>
+                        <p className="text-xs text-slate-400 mt-1">{formatDateTimeInTenantTz(n.createdAt, tz)}</p>
                       </div>
                     ))}
                   </div>
@@ -1012,12 +1077,40 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                     <FileText size={14} /> Convert to invoice
                   </button>
                 )}
+                {(est.status === 'rejected' || est.status === 'expired') && (
+                  <button
+                    onClick={() => void handleReopen()}
+                    disabled={actionBusy}
+                    className="flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-slate-700 py-3 text-sm hover:bg-slate-50 transition-colors disabled:opacity-50"
+                  >
+                    <RotateCcw size={14} /> Reopen as draft
+                  </button>
+                )}
                 <button
                   onClick={() => setPreviewOpen(true)}
                   className="flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-slate-700 py-3 text-sm hover:bg-slate-50 transition-colors"
                 >
                   <Eye size={14} /> Preview document
                 </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => void handleClone()}
+                    disabled={actionBusy}
+                    className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-slate-700 py-3 text-sm hover:bg-slate-50 transition-colors disabled:opacity-50"
+                  >
+                    <Copy size={14} /> Duplicate
+                  </button>
+                  {est.status !== 'accepted' && (
+                    <button
+                      onClick={() => void handleDelete()}
+                      disabled={actionBusy}
+                      className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-red-200 bg-white text-red-600 py-3 text-sm hover:bg-red-50 transition-colors disabled:opacity-50"
+                    >
+                      <Trash2 size={14} /> Delete
+                    </button>
+                  )}
+                </div>
+                {actionError && <p className="text-xs text-red-600">{actionError}</p>}
               </div>
 
               {/* Follow-up note for viewed/sent */}
@@ -1031,6 +1124,20 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                   </div>
                   <p className={`text-xs ${status === 'Viewed' ? 'text-violet-600' : 'text-amber-600'}`}>
                     {status === 'Viewed' ? 'Follow up if they have questions' : 'Awaiting response'}
+                  </p>
+                </div>
+              )}
+
+              {(status === 'Expired' || status === 'Declined') && (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Clock size={12} className="text-slate-500" />
+                    <p className="text-xs text-slate-600">
+                      {status === 'Expired' ? 'This estimate expired' : 'Customer declined this estimate'}
+                    </p>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    Reopen it as a draft to revise and resend.
                   </p>
                 </div>
               )}
@@ -1068,7 +1175,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
             customerName: estCompat.customer,
             description: estCompat.description,
             lineItems: uiLineItems,
-            discountCents: est.discountCents ?? 0,
+            discountCents: est.totals.discountCents,
             taxRateBps: 0,
             approvedLabel: status === 'Approved' ? 'Customer approved' : undefined,
           }}
@@ -1086,11 +1193,12 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
 // ─── API status → UI tab value mapping ───────────────────────────────────
 const API_STATUS_FOR_TAB: Record<EstimateStatus | 'All', string[]> = {
   All:      [],
-  Draft:    ['draft', 'expired'],
+  Draft:    ['draft'],
   Sent:     ['ready_for_review', 'sent'],
   Viewed:   [],
   Approved: ['accepted'],
   Declined: ['rejected'],
+  Expired:  ['expired'],
 };
 
 // ─── Estimates List ───────────────────────────────────────────────────────
@@ -1100,10 +1208,13 @@ const TABS: { label: string; value: EstimateStatus | 'All' }[] = [
   { label: 'Sent',     value: 'Sent'     },
   { label: 'Viewed',   value: 'Viewed'   },
   { label: 'Approved', value: 'Approved' },
+  { label: 'Declined', value: 'Declined' },
+  { label: 'Expired',  value: 'Expired'  },
 ];
 
 export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {
   const navigate = useNavigate();
+  const tz = useTenantTimezone();
   const [tab,              setTab]           = useState<EstimateStatus | 'All'>('All');
   const [selected,         setSelected]      = useState<string | null>(defaultSelectedId ?? null);
   const [newEstimateOpen,  setNewEstimate]   = useState(false);
@@ -1115,7 +1226,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
     setSelected(defaultSelectedId ?? null);
   }, [defaultSelectedId]);
 
-  const { data, total, isLoading, error, setFilters, refetch } = useListQuery<ApiEstimate>('/api/estimates');
+  const { data, total, isLoading, error, setFilters, refetch } = useListQuery<EstimateResponse>('/api/estimates');
 
   if (selected) {
     return <EstimateDetail estimateId={selected} onBack={() => {
@@ -1135,7 +1246,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
 
   const pendingCount  = normalizedData.filter(e => e.uiStatus === 'Sent' || e.uiStatus === 'Viewed').length;
   const approvedCount = normalizedData.filter(e => e.uiStatus === 'Approved').length;
-  const totalValue    = normalizedData.reduce((s, e) => s + e.totalCents, 0);
+  const totalValue    = normalizedData.reduce((s, e) => s + e.totals.totalCents, 0);
 
   return (
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
@@ -1188,14 +1299,11 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
         {/* Loading / Error */}
         {isLoading && (
           <div className="flex items-center justify-center py-16">
-            <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+            <Spinner size="md" className="text-slate-900" label="Loading estimates" />
           </div>
         )}
         {error && (
-          <div className="flex flex-col items-center py-12 gap-2 text-center">
-            <p className="text-sm text-red-500">Failed to load estimates</p>
-            <button onClick={refetch} className="text-xs text-blue-500 hover:underline">Retry</button>
-          </div>
+          <ErrorState message="Failed to load estimates" onRetry={refetch} />
         )}
 
         {/* List */}
@@ -1230,14 +1338,14 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
                         <p className="text-xs text-slate-400 mt-0.5 truncate">{est.estimateNumber}</p>
                       </div>
                       <div className="flex flex-col items-end gap-1 shrink-0">
-                        <p className="text-sm text-slate-800">{centsToDisplay(est.totalCents)}</p>
+                        <p className="text-sm text-slate-800">{centsToDisplay(est.totals.totalCents)}</p>
                         <StatusBadge status={status} size="sm" />
                       </div>
                     </div>
                     {est.createdAt && (
                       <div className="flex items-center gap-3 mt-2">
                         <span className="flex items-center gap-1 text-xs text-slate-400">
-                          <Clock size={10} /> {new Date(est.createdAt).toLocaleDateString()}
+                          <Clock size={10} /> {formatDateInTenantTz(est.createdAt, tz)}
                         </span>
                       </div>
                     )}
@@ -1247,7 +1355,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
               );
             })}
             {filtered.length === 0 && (
-              <p className="py-12 text-center text-sm text-slate-400">No estimates</p>
+              <EmptyState title="No estimates" />
             )}
           </div>
         )}

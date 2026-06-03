@@ -18,9 +18,14 @@ import {
   LogTimeEntryTaskHandler,
   NotifyDelayTaskHandler,
   RequestFeedbackTaskHandler,
+  RescheduleAppointmentTaskHandler,
+  CancelAppointmentTaskHandler,
 } from '../../../src/ai/tasks/voice-extended-tasks';
+import type { AppointmentRepository } from '../../../src/appointments/appointment';
+import type { JobRepository } from '../../../src/jobs/job';
 import { TaskContext } from '../../../src/ai/tasks/task-handlers';
 import { ConvertLeadExecutionHandler } from '../../../src/proposals/execution/convert-lead-handler';
+import { NotifyDelayExecutionHandler } from '../../../src/proposals/execution/full-app-voice-handlers';
 import { Proposal, ProposalType, missingFieldsFor } from '../../../src/proposals/proposal';
 import { InMemoryLeadRepository } from '../../../src/leads/lead';
 import { InMemoryCustomerRepository } from '../../../src/customers/customer';
@@ -176,6 +181,58 @@ function approved(proposalType: ProposalType, payload: Record<string, unknown>):
   };
 }
 
+describe('NotifyDelayExecutionHandler', () => {
+  it('resolves appointment→job→customer and sends a delay notice', async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const delayService = {
+      sendDelayNotice: async (req: Record<string, unknown>) => {
+        sent.push(req);
+        return { providerMessageId: 'msg-1' };
+      },
+    };
+    const appointmentRepo = {
+      findById: async () => ({ id: 'appt-1', jobId: 'job-1' }),
+    } as unknown as import('../../../src/appointments/appointment').AppointmentRepository;
+    const jobRepo = {
+      findById: async () => ({ id: 'job-1', customerId: 'cust-1' }),
+    } as unknown as import('../../../src/jobs/job').JobRepository;
+    const customerRepo = {
+      findById: async () => ({
+        id: 'cust-1',
+        displayName: 'Jane Smith',
+        preferredChannel: 'sms',
+        smsConsent: true,
+        primaryPhone: '+15555550143',
+      }),
+    } as unknown as import('../../../src/customers/customer').CustomerRepository;
+
+    const handler = new NotifyDelayExecutionHandler(
+      delayService as unknown as import('../../../src/notifications/delay-notifications').DelayNotificationService,
+      appointmentRepo,
+      jobRepo,
+      customerRepo,
+    );
+    const res = await handler.execute(approved('notify_delay', { appointmentId: 'appt-1', delayMinutes: 30 }), {
+      tenantId: 't-1',
+      executedBy: 'u-1',
+    });
+    expect(res.success).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].channel).toBe('sms');
+    expect(sent[0].destination).toBe('+15555550143');
+    expect(typeof sent[0].message).toBe('string');
+    expect((sent[0].message as string).length).toBeGreaterThan(0);
+  });
+
+  it('degrades to passthrough success when deps are absent', async () => {
+    const res = await new NotifyDelayExecutionHandler().execute(
+      approved('notify_delay', { appointmentId: 'appt-1' }),
+      { tenantId: 't-1', executedBy: 'u-1' },
+    );
+    expect(res.success).toBe(true);
+  });
+});
+
 describe('ConvertLeadExecutionHandler', () => {
   it('rejects when leadId is unresolved', async () => {
     const handler = new ConvertLeadExecutionHandler();
@@ -211,5 +268,114 @@ describe('ConvertLeadExecutionHandler', () => {
     expect(res.resultEntityId).toBeDefined();
     const refreshed = await leadRepo.findById('t-1', lead.id);
     expect(refreshed?.convertedCustomerId).toBe(res.resultEntityId);
+  });
+});
+
+describe('caller-scoped appointment resolution (reschedule/cancel/confirm)', () => {
+  const SOON = new Date(Date.now() + 24 * 60 * 60 * 1000); // upcoming
+
+  // Two upcoming appointments belonging to two different customers. A
+  // tenant-wide single-active scan would be ambiguous (2 active); the
+  // caller-scoped resolver must pick only the caller's own appointment.
+  function twoCustomerRepos(): { apptRepo: AppointmentRepository; jobRepo: JobRepository } {
+    const apptRepo = {
+      listWithMeta: async () => ({
+        data: [
+          { id: 'appt-A', jobId: 'job-A', status: 'scheduled', scheduledStart: SOON },
+          { id: 'appt-B', jobId: 'job-B', status: 'scheduled', scheduledStart: SOON },
+        ],
+      }),
+    } as unknown as AppointmentRepository;
+    const jobRepo = {
+      findById: async (_t: string, id: string) =>
+        id === 'job-A'
+          ? { id: 'job-A', customerId: 'cust-A' }
+          : id === 'job-B'
+            ? { id: 'job-B', customerId: 'cust-B' }
+            : null,
+    } as unknown as JobRepository;
+    return { apptRepo, jobRepo };
+  }
+
+  it('reschedule resolves the CALLER\'s own appointment, never another customer\'s', async () => {
+    const { apptRepo, jobRepo } = twoCustomerRepos();
+    const res = await new RescheduleAppointmentTaskHandler(undefined, apptRepo, jobRepo).handle(
+      ctx({ customerId: 'cust-A', existingEntities: { newDateTimeDescription: 'next Tue 2pm' } }),
+    );
+    expect(res.proposal.payload.appointmentId).toBe('appt-A');
+    expect(missingFieldsFor(res.proposal)).not.toContain('appointmentId');
+  });
+
+  it('cancel resolves the caller\'s own appointment', async () => {
+    const { apptRepo, jobRepo } = twoCustomerRepos();
+    const res = await new CancelAppointmentTaskHandler(apptRepo, jobRepo).handle(
+      ctx({ customerId: 'cust-B' }),
+    );
+    expect(res.proposal.payload.appointmentId).toBe('appt-B');
+  });
+
+  it('resolves the caller\'s own PAST appointment even when another customer has an upcoming one (scoping before upcoming)', async () => {
+    const PAST = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const apptRepo = {
+      listWithMeta: async () => ({
+        data: [
+          { id: 'appt-A-past', jobId: 'job-A', status: 'scheduled', scheduledStart: PAST },
+          { id: 'appt-B-soon', jobId: 'job-B', status: 'scheduled', scheduledStart: SOON },
+        ],
+      }),
+    } as unknown as AppointmentRepository;
+    const jobRepo = {
+      findById: async (_t: string, id: string) =>
+        id === 'job-A' ? { id: 'job-A', customerId: 'cust-A' } : { id: 'job-B', customerId: 'cust-B' },
+    } as unknown as JobRepository;
+    const res = await new CancelAppointmentTaskHandler(apptRepo, jobRepo).handle(
+      ctx({ customerId: 'cust-A' }),
+    );
+    expect(res.proposal.payload.appointmentId).toBe('appt-A-past');
+  });
+
+  it('UNSCOPED path (no caller identity) never auto-picks when >1 active exists, even if only one is upcoming', async () => {
+    const PAST = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const apptRepo = {
+      listWithMeta: async () => ({
+        data: [
+          { id: 'appt-past', jobId: 'job-X', status: 'scheduled', scheduledStart: PAST },
+          { id: 'appt-soon', jobId: 'job-Y', status: 'scheduled', scheduledStart: SOON },
+        ],
+      }),
+    } as unknown as AppointmentRepository;
+    // No jobRepo, no customerId -> unscoped operator path. The legacy
+    // "never auto-pick when >1 active" guard must hold (no upcoming narrowing).
+    const res = await new ConfirmAppointmentTaskHandler(apptRepo).handle(ctx({}));
+    expect(res.proposal.payload.appointmentId).toBeUndefined();
+    expect(missingFieldsFor(res.proposal)).toContain('appointmentId');
+  });
+
+  it('notify_delay scopes to the caller so the delay SMS targets the right customer', async () => {
+    const { apptRepo, jobRepo } = twoCustomerRepos();
+    const res = await new NotifyDelayTaskHandler(apptRepo, jobRepo).handle(
+      ctx({ customerId: 'cust-B', existingEntities: { delayMinutes: 20 } }),
+    );
+    expect(res.proposal.proposalType).toBe('notify_delay');
+    expect(res.proposal.payload.appointmentId).toBe('appt-B');
+  });
+
+  it('leaves appointmentId missing when the caller has >1 upcoming appointment (ambiguous)', async () => {
+    const apptRepo = {
+      listWithMeta: async () => ({
+        data: [
+          { id: 'appt-A1', jobId: 'job-A', status: 'scheduled', scheduledStart: SOON },
+          { id: 'appt-A2', jobId: 'job-A', status: 'scheduled', scheduledStart: SOON },
+        ],
+      }),
+    } as unknown as AppointmentRepository;
+    const jobRepo = {
+      findById: async () => ({ id: 'job-A', customerId: 'cust-A' }),
+    } as unknown as JobRepository;
+    const res = await new ConfirmAppointmentTaskHandler(apptRepo, jobRepo).handle(
+      ctx({ customerId: 'cust-A' }),
+    );
+    expect(res.proposal.payload.appointmentId).toBeUndefined();
+    expect(missingFieldsFor(res.proposal)).toContain('appointmentId');
   });
 });

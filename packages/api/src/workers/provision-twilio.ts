@@ -35,9 +35,14 @@ async function tenantQuery<R extends QueryResultRow = QueryResultRow>(
     await client.query('COMMIT');
     return result;
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    try { await client.query('ROLLBACK'); } catch { /* best-effort */ }
     throw err;
   } finally {
+    // GUC leak fix: plain `SET app.current_tenant_id` persists past
+    // COMMIT/ROLLBACK on the underlying connection. Clear it before
+    // release so the next pool checkout doesn't inherit this tenant's
+    // context.
+    try { await client.query('RESET app.current_tenant_id'); } catch { /* ignore */ }
     client.release();
   }
 }

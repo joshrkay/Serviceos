@@ -50,6 +50,17 @@ export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
         'Classify the user intent from the provided text. ' +
         'Respond only with valid JSON matching the IntentClassification schema.',
     },
+    // Multi-action chaining: split a multi-action utterance into ordered
+    // atomic sub-utterances. Cheap model (same tier as classify_intent);
+    // each segment is re-classified separately afterward.
+    decompose_transcript: {
+      model: defaultModel,
+      temperature: 0.0,
+      maxTokens: 512,
+      systemPrompt:
+        'Split a service-business voice command into ordered atomic actions. ' +
+        'Respond only with valid JSON. Be conservative — most commands are a single action.',
+    },
     extract_job_details: {
       model: defaultModel,
       temperature: 0.1,

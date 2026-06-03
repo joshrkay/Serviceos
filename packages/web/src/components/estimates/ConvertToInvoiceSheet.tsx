@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { X, Check, Receipt } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
-import { uiLineItemsToApiPayload, type UiLineItem } from '../../lib/lineItems';
+import { type UiLineItem } from '../../lib/lineItems';
+import { Button } from '../ui';
 
 export interface ConvertToInvoiceInput {
   estimateId: string;
@@ -29,7 +30,6 @@ export function ConvertToInvoiceSheet({
   const [error, setError] = useState<string | null>(null);
 
   const total = input.lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
-  const lineItems = uiLineItemsToApiPayload(input.lineItems);
 
   async function convert() {
     if (!input.jobId) {
@@ -39,16 +39,13 @@ export function ConvertToInvoiceSheet({
     setLoading(true);
     setError(null);
     try {
-      const res = await apiFetch('/api/invoices', {
+      // The backend convert route bills the customer's locked selection,
+      // links the invoice to the estimate, credits any paid deposit, and
+      // is idempotent — so no line-item payload is sent from the client.
+      const res = await apiFetch(`/api/estimates/${input.estimateId}/convert-to-invoice`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jobId: input.jobId,
-          estimateId: input.estimateId,
-          lineItems,
-          discountCents: input.discountCents ?? 0,
-          taxRateBps: input.taxRateBps ?? 0,
-        }),
+        body: JSON.stringify({}),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -88,13 +85,16 @@ export function ConvertToInvoiceSheet({
               <p className="text-slate-900" style={{ fontSize: '1rem' }}>Create invoice</p>
               <p className="text-xs text-slate-400 mt-0.5">From approved {input.estimateNumber}</p>
             </div>
-            <button
+            <Button
               onClick={onClose}
               type="button"
-              className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100 transition-colors"
+              variant="ghost"
+              size="sm"
+              aria-label="Close"
+              className="size-7 rounded-full p-0"
             >
-              <X size={15} className="text-slate-500" />
-            </button>
+              <X size={15} />
+            </Button>
           </div>
 
           {done ? (
@@ -156,25 +156,18 @@ export function ConvertToInvoiceSheet({
 
               {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
 
-              <button
+              <Button
                 onClick={() => void convert()}
-                disabled={loading}
+                loading={loading}
                 type="button"
-                className={`w-full flex items-center justify-center gap-2 rounded-xl py-3.5 text-sm transition-all ${
-                  loading ? 'bg-slate-400 text-white' : 'bg-slate-900 text-white hover:bg-slate-700'
-                }`}
+                size="lg"
+                fullWidth
+                leftIcon={<Receipt size={14} />}
               >
-                {loading ? (
-                  <>
-                    <span className="size-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />{' '}
-                    Creating…
-                  </>
-                ) : (
-                  <>
-                    <Receipt size={14} /> Create invoice for ${total.toLocaleString()}
-                  </>
-                )}
-              </button>
+                {loading
+                  ? 'Creating…'
+                  : `Create invoice for $${total.toLocaleString()}`}
+              </Button>
             </>
           )}
         </div>

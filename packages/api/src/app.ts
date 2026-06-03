@@ -9,6 +9,7 @@ import { toErrorResponse } from './shared/errors';
 import { createPool } from './db/pool';
 import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
+import { createIntegrationResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
@@ -59,6 +60,7 @@ import { createPaymentRouter } from './routes/payments';
 import { createNoteRouter } from './routes/notes';
 import {
   createMeRouter,
+  DEFAULT_TENANT_TIMEZONE,
   InMemoryUserModeService,
   type MeUserRecord,
   type MeTenantSettings,
@@ -71,6 +73,7 @@ import {
 } from './ai/supervisor-presence';
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
+import { createDncRouter } from './routes/dnc';
 import { createVerticalRouter } from './routes/verticals';
 import { createVerticalTrainingAssetsRouter } from './routes/vertical-training-assets';
 import { createTemplateRouter } from './routes/templates';
@@ -95,11 +98,13 @@ import { PgJobPhotoRepository } from './jobs/pg-job-photo';
 import { createDispatchRoutes } from './dispatch/routes';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
+import { createPublicBookingRouter } from './routes/public-booking';
 import { createReportsRouter } from './routes/reports';
 import { RepoBackedTimeGivenBackReporter } from './reports/time-given-back';
 import { createTimeEntriesRouter } from './routes/time-entries';
 import { InMemoryTimeEntryRepository } from './time-tracking/time-entry';
 import { PgTimeEntryRepository } from './time-tracking/pg-time-entry';
+import { TimeEntryService } from './time-tracking/time-entry-service';
 import {
   PgRevenueBySourceRepository,
   InMemoryRevenueBySourceRepository,
@@ -119,6 +124,11 @@ import { InMemoryAppointmentRepository } from './appointments/appointment';
 import { InMemoryAssignmentRepository } from './appointments/assignment';
 import { InMemoryEstimateRepository } from './estimates/estimate';
 import { InMemoryInvoiceRepository } from './invoices/invoice';
+import { InMemoryInvoiceScheduleRepository } from './invoices/invoice-schedule';
+import { PgInvoiceScheduleRepository } from './invoices/pg-invoice-schedule';
+import { InMemoryBatchInvoiceRunRepository } from './invoices/batch-invoice-run';
+import { PgBatchInvoiceRunRepository } from './invoices/pg-batch-invoice-run';
+import { runBatchInvoiceSweep } from './workers/batch-invoice-worker';
 import { InMemoryPaymentRepository } from './invoices/payment';
 import { createPaymentLinkProvider } from './payments/payment-link-provider';
 import { InMemoryNoteRepository } from './notes/note';
@@ -343,6 +353,7 @@ import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { resolveInvoiceDeliveryProvider } from './proposals/execution/invoice-delivery-factory';
 import { resolveEstimateDeliveryProvider } from './proposals/execution/estimate-delivery-factory';
 import { InMemoryWorkingHoursRepository } from './availability/working-hours';
+import { PgWorkingHoursRepository } from './availability/pg-working-hours';
 import { InMemoryUnavailableBlockRepository } from './availability/unavailable-block';
 import { createTravelTimeProvider } from './scheduling/travel-time/factory';
 import { StubSkillMatcher } from './scheduling/skill-matcher';
@@ -366,6 +377,7 @@ import { TwilioDelayNotificationService } from './notifications/twilio-delay-not
 import { TransactionalCommsService } from './notifications/transactional-comms-service';
 import { runAppointmentReminderSweep } from './workers/appointment-reminder-worker';
 import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
+import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import { registerKeywordHandler } from './sms/inbound-dispatch';
@@ -380,183 +392,19 @@ import {
 import { requireAuth } from './middleware/auth';
 import { withTenantTransaction } from './middleware/tenant-context';
 import type { TenantIntegrationStatus } from './integrations/status-machine';
+// In-memory dev fallback for the WebhookEvent idempotency repo. Extracted from
+// this composition-root into its own module so app.ts no longer carries an
+// inline repository class. Production/staging always use the Pg variant
+// (createApp() throws if DATABASE_URL is missing in those environments).
+import { InMemoryWebhookEventRepository } from './webhooks/in-memory-webhook-event';
 
-/**
- * In-memory dev fallback for the WebhookEvent idempotency repo.
- *
- * The Pg-backed variant (PgWebhookEventRepository, P0-020) sits on top of the
- * `webhook_events` table. There is no shared interface declaration in the
- * webhook-event source (only the Pg class), and per the P0-023 hard rules we
- * cannot edit any pg-* source file. To keep the `pool ? Pg : InMemory`
- * wiring pattern consistent across all six newly wired entities, a minimal
- * Map-backed stub lives here. It mirrors PgWebhookEventRepository's public
- * surface (recordReceipt / markProcessed / markFailed / findById /
- * findUnprocessed) so dev runs without DATABASE_URL still type-check.
- *
- * Production and staging ALWAYS use the Pg variant — `createApp()` throws
- * above if DATABASE_URL is missing in those environments. So this stub is a
- * dev-only fallback by construction.
- */
-class InMemoryWebhookEventRepository {
-  private events = new Map<string, {
-    id: string;
-    provider: string;
-    eventId: string;
-    eventType: string;
-    payload: Record<string, unknown>;
-    receivedAt: Date;
-    processedAt: Date | null;
-    processingError: string | null;
-  }>();
-
-  private key(provider: string, eventId: string): string {
-    return `${provider}:${eventId}`;
-  }
-
-  async recordReceipt(
-    provider: string,
-    eventId: string,
-    eventType: string,
-    payload: Record<string, unknown>,
-  ): Promise<{ inserted: boolean; record: {
-    id: string;
-    provider: string;
-    eventId: string;
-    eventType: string;
-    payload: Record<string, unknown>;
-    receivedAt: Date;
-    processedAt: Date | null;
-    processingError: string | null;
-  } }> {
-    if (!provider) throw new Error('provider is required');
-    if (!eventId) throw new Error('eventId is required');
-    const k = this.key(provider, eventId);
-    const existing = this.events.get(k);
-    if (existing) {
-      return { inserted: false, record: { ...existing } };
-    }
-    const record = {
-      id: `${k}:${this.events.size + 1}`,
-      provider,
-      eventId,
-      eventType,
-      payload,
-      receivedAt: new Date(),
-      processedAt: null,
-      processingError: null,
-    };
-    this.events.set(k, record);
-    return { inserted: true, record: { ...record } };
-  }
-
-  async markProcessed(provider: string, eventId: string): Promise<void> {
-    const r = this.events.get(this.key(provider, eventId));
-    if (r) {
-      r.processedAt = new Date();
-      r.processingError = null;
-    }
-  }
-
-  async markFailed(provider: string, eventId: string, error: string): Promise<void> {
-    const r = this.events.get(this.key(provider, eventId));
-    if (r) {
-      r.processingError = error;
-    }
-  }
-
-  async findById(provider: string, eventId: string) {
-    const r = this.events.get(this.key(provider, eventId));
-    return r ? { ...r } : null;
-  }
-
-  async findUnprocessed(limit = 100) {
-    return Array.from(this.events.values())
-      .filter((r) => r.processedAt === null && r.processingError === null)
-      .sort((a, b) => a.receivedAt.getTime() - b.receivedAt.getTime())
-      .slice(0, limit)
-      .map((r) => ({ ...r }));
-  }
-}
-
-/**
- * D1-3 — helmet options factory.
- *
- * Exported separately from `createApp()` so the middleware test can assert
- * header behaviour without booting the full app (which would require a real
- * Pg pool and a full set of production secrets when NODE_ENV=production).
- *
- * Production behaviour:
- *   - CSP whitelists the production frontend's external deps: Clerk
- *     (auth UI + JS), Stripe Elements, Twilio Voice JS SDK, Sentry browser
- *     SDK.
- *   - HSTS = 1 year, includeSubDomains, preload=false (preload list
- *     submission must be a deliberate human action).
- *   - X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy
- *     no-referrer.
- *   - crossOriginEmbedderPolicy is DISABLED because COEP=require-corp breaks
- *     Stripe Elements (cross-origin frames without CORP headers).
- *
- * Dev/test behaviour:
- *   - CSP disabled so Vite HMR / local tooling keep working. Other helmet
- *     defaults (nosniff, HSTS, frame deny, no-referrer) still apply.
- */
-export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0] {
-  return {
-    contentSecurityPolicy: isProd
-      ? {
-          directives: {
-            defaultSrc: ["'self'"],
-            scriptSrc: [
-              "'self'",
-              'https://js.stripe.com',
-              'https://*.clerk.com',
-              'https://*.clerk.accounts.dev',
-              'https://clerk.com',
-              'https://sdk.twilio.com',
-              'https://media.twiliocdn.com',
-            ],
-            styleSrc: [
-              "'self'",
-              "'unsafe-inline'",
-              'https://*.clerk.com',
-              'https://clerk.com',
-            ],
-            imgSrc: ["'self'", 'data:', 'https:', 'blob:'],
-            connectSrc: [
-              "'self'",
-              'https://api.stripe.com',
-              'https://*.clerk.com',
-              'https://clerk.com',
-              'https://*.clerk.accounts.dev',
-              'wss://*.twilio.com',
-              'https://*.twilio.com',
-              'https://*.ingest.sentry.io',
-              'https://*.ingest.us.sentry.io',
-            ],
-            frameSrc: [
-              "'self'",
-              'https://js.stripe.com',
-              'https://hooks.stripe.com',
-              'https://*.clerk.com',
-            ],
-            workerSrc: ["'self'", 'blob:'],
-            objectSrc: ["'none'"],
-            baseUri: ["'self'"],
-            frameAncestors: ["'none'"],
-          },
-        }
-      : false,
-    strictTransportSecurity: {
-      maxAge: 60 * 60 * 24 * 365,
-      includeSubDomains: true,
-      preload: false,
-    },
-    noSniff: true,
-    xFrameOptions: { action: 'deny' },
-    referrerPolicy: { policy: 'no-referrer' },
-    crossOriginEmbedderPolicy: false,
-  };
-}
+// Composition-root helpers extracted into ./bootstrap. Imported for local use
+// inside createApp() AND re-exported so existing tests that import them from
+// '../../src/app' keep working. (A bare `export { X } from './m'` re-export
+// does NOT bind X into local scope, so a local import is required too.)
+import { buildHelmetOptions } from './bootstrap/helmet-options';
+import { checkMetricsAuth, type MetricsAuthResult } from './bootstrap/metrics-auth';
+export { buildHelmetOptions, checkMetricsAuth, type MetricsAuthResult };
 
 export function createApp(): express.Express {
   // §11 H3: Initialize Sentry FIRST so any error thrown during startup
@@ -584,6 +432,12 @@ export function createApp(): express.Express {
   // Mount with express.raw() BEFORE express.json() so this path gets a Buffer
   // and the global json() middleware skips it (body-parser sets req._body = true).
   app.use('/webhooks/stripe', express.raw({ type: 'application/json' }));
+
+  // Clerk/svix sign the raw request bytes too. Same treatment as Stripe:
+  // capture the raw Buffer here so the handler verifies over the exact bytes
+  // svix signed, instead of re-serializing the parsed object (key order /
+  // whitespace differences would fail legit webhooks and break tenant bootstrap).
+  app.use('/webhooks/clerk', express.raw({ type: 'application/json' }));
 
   // Twilio posts application/x-www-form-urlencoded — mount the matching parser
   // before global express.json() so /webhooks/twilio/* routes get populated
@@ -693,9 +547,23 @@ export function createApp(): express.Express {
     createAiHealthRouter(registry)(req, res, next);
   });
 
-  // Prometheus metrics. Mounted on the public surface deliberately —
-  // production should rely on network-level allowlist (ingress / VPC).
-  app.get('/metrics', async (_req, res) => {
+  // Prometheus metrics — gated by `checkMetricsAuth` (METRICS_TOKEN bearer).
+  // The endpoint exposes tenant ids, request volumes, and pool counts, so
+  // network-level allowlists alone are not enough on a public hostname.
+  app.get('/metrics', async (req, res) => {
+    const auth = checkMetricsAuth(
+      req.headers.authorization,
+      process.env.METRICS_TOKEN,
+      process.env.NODE_ENV,
+    );
+    if (!auth.ok) {
+      if (auth.headers) {
+        for (const [k, v] of Object.entries(auth.headers)) res.setHeader(k, v);
+      }
+      res.status(auth.status).json(auth.body);
+      return;
+    }
+
     try {
       const { renderMetrics } = await import('./monitoring/metrics');
       const { contentType, body } = await renderMetrics();
@@ -772,6 +640,11 @@ export function createApp(): express.Express {
   const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
   const webhookAuditRepo = pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository();
   const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
+  // Blocker 1 — durable idempotency store for the Stripe/Clerk dedup path
+  // (handleWebhookEvent). Postgres-backed in real deploys; left undefined
+  // without a pool (tests/dev) so createWebhookRouter falls back to its
+  // in-memory map. createWebhookRouter throws if this is missing in prod.
+  const webhookRepo = pool ? new PgWebhookRepository(pool) : undefined;
 
   // §7 Phase 1 — DNC repository + STOP/START keyword handler registration.
   // The inbound-SMS dispatcher routes any matching first-token to these
@@ -784,66 +657,7 @@ export function createApp(): express.Express {
   // Resolves per-tenant integration credentials for inbound webhook signature
   // verification. Returns null when no row exists or the integration provider
   // doesn't match — recordTwilio / recordSendGrid then 403 with audit.
-  const integrationResolver = pool
-    ? async (tenantId: string, provider: 'twilio' | 'sendgrid') => {
-        const { decrypt } = await import('./integrations/crypto');
-        const { setTenantContext } = await import('./db/schema');
-        const encKey = process.env.TENANT_ENCRYPTION_KEY;
-
-        // tenant_integrations is FORCE RLS — must set app.current_tenant_id
-        // GUC on a dedicated client/transaction. Webhook handlers run outside
-        // withTenantTransaction so we open one here.
-        const client = await pool.connect();
-        let rows: Array<{
-          subaccount_sid: string | null;
-          auth_token_primary_enc: string | null;
-          auth_token_secondary_enc: string | null;
-          provider_data: Record<string, unknown>;
-        }> = [];
-        try {
-          await client.query('BEGIN');
-          await client.query(setTenantContext(tenantId));
-          const result = await client.query<{
-            subaccount_sid: string | null;
-            auth_token_primary_enc: string | null;
-            auth_token_secondary_enc: string | null;
-            provider_data: Record<string, unknown>;
-          }>(
-            `SELECT subaccount_sid, auth_token_primary_enc, auth_token_secondary_enc, provider_data
-             FROM tenant_integrations
-             WHERE tenant_id = $1 AND provider = $2`,
-            [tenantId, provider]
-          );
-          rows = result.rows;
-          await client.query('COMMIT');
-        } catch (err) {
-          await client.query('ROLLBACK');
-          throw err;
-        } finally {
-          client.release();
-        }
-        const row = rows[0];
-        if (!row) return null;
-        // Decryption is only needed for Twilio auth tokens. SendGrid integrations
-        // store a public verification key (not encrypted) in provider_data, so
-        // the resolver shouldn't 403 valid SendGrid webhooks just because
-        // TENANT_ENCRYPTION_KEY isn't configured.
-        const canDecrypt = Boolean(encKey);
-        if (provider === 'twilio' && !canDecrypt) return null;
-        return {
-          tenantId,
-          provider,
-          subaccountSid: row.subaccount_sid ?? undefined,
-          authTokenPrimary: row.auth_token_primary_enc && canDecrypt
-            ? decrypt(row.auth_token_primary_enc, encKey!)
-            : undefined,
-          authTokenSecondary: row.auth_token_secondary_enc && canDecrypt
-            ? decrypt(row.auth_token_secondary_enc, encKey!)
-            : undefined,
-          sendgridPublicKeyPem: (row.provider_data?.sendgridPublicKeyPem as string | undefined),
-        };
-      }
-    : undefined;
+  const integrationResolver = pool ? createIntegrationResolver(pool) : undefined;
 
   const webhookRouterDeps: import('./webhooks/routes').WebhookRouterDeps = {
     tenantRepo,
@@ -869,6 +683,7 @@ export function createApp(): express.Express {
     appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
     auditRepo: webhookAuditRepo,
     webhookEventRepo,
+    webhookRepo,
     integrationResolver,
   };
   app.use('/webhooks', createWebhookRouter(config, webhookRouterDeps));
@@ -889,16 +704,21 @@ export function createApp(): express.Express {
   const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
   const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository();
   const assignmentRepo     = pool ? new PgAssignmentRepository(pool)     : new InMemoryAssignmentRepository();
-  // Availability repos and skill matcher have no Pg variants yet — the
-  // dispatch feasibility composer treats missing rows as no-conflict, so
-  // running InMemory in production is degraded-but-safe (working-hours and
-  // unavailable-block warnings simply won't fire until Pg variants land).
-  const workingHoursRepo       = new InMemoryWorkingHoursRepository();
+  // Working hours are now Pg-backed in production (migration 137 added
+  // technician_working_hours), so the dispatch feasibility composer and the
+  // inbound-AI availability search enforce real working-hours rows instead of
+  // treating missing rows as no-conflict. The unavailable-block repo stays
+  // InMemory for now — wiring its Pg variant (table from migration 116) is a
+  // separate, out-of-scope change. InMemory variants stay for tests / no-pool.
+  const workingHoursRepo       = pool ? new PgWorkingHoursRepository(pool)     : new InMemoryWorkingHoursRepository();
   const unavailableBlockRepo   = new InMemoryUnavailableBlockRepository();
   const travelTimeProvider     = createTravelTimeProvider(process.env);
   const skillMatcher           = new StubSkillMatcher();
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
   const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
+  const invoiceScheduleRepo = pool ? new PgInvoiceScheduleRepository(pool) : new InMemoryInvoiceScheduleRepository();
+  const batchInvoiceRunRepo = pool ? new PgBatchInvoiceRunRepository(pool) : new InMemoryBatchInvoiceRunRepository();
+  const batchInvoiceTxRunner = pool ? new PgTenantTransactionRunner(pool) : new InMemoryTransactionRunner();
   const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
   const expenseRepo        = pool ? new PgExpenseRepository(pool)        : new InMemoryExpenseRepository();
   // P5-017: Resolve the payment-link provider via the factory so the mock
@@ -919,6 +739,21 @@ export function createApp(): express.Express {
   // worker) so settings hits the DB at most once per tenant per TTL
   // window across the whole process.
   const thresholdResolver = createThresholdResolver(settingsRepo);
+  // Per-tenant scheduling context (IANA timezone) for the voice booking
+  // path. Delegates to settingsRepo (same RLS / withTenant path) so spoken
+  // times ("next Tuesday at 2pm") resolve against the TENANT's zone instead
+  // of a hardcoded one. A 60s cache mirrors thresholdResolver/voicePersona
+  // so a multi-segment chain doesn't re-query settings per segment. Best-
+  // effort: the router falls back to the product default when undefined.
+  const schedulingTzCache = new Map<string, { timezone?: string; expiresAt: number }>();
+  const tenantSchedulingResolver = async (tenantId: string) => {
+    const hit = schedulingTzCache.get(tenantId);
+    if (hit && hit.expiresAt > Date.now()) return { timezone: hit.timezone };
+    const settings = await settingsRepo.findByTenant(tenantId);
+    const timezone = settings?.timezone;
+    schedulingTzCache.set(tenantId, { timezone, expiresAt: Date.now() + 60_000 });
+    return { timezone };
+  };
   // B1 — per-tenant voice persona. 60-second LRU cache; shared by
   // both the Twilio and in-app adapters.
   const voicePersonaResolver = createVoicePersonaResolver(settingsRepo);
@@ -1002,16 +837,7 @@ export function createApp(): express.Express {
   const agreementRunRepo = pool
     ? new PgAgreementRunRepository(pool)
     : new InMemoryAgreementRunRepository();
-  // P0-023: WebhookEvent idempotency repo. PgWebhookEventRepository (P0-020)
-  // is wired here so a future webhook handler can pull it from app-level
-  // wiring without re-instantiating. The webhooks/routes.ts router still
-  // uses its own InMemoryWebhookRepository for the legacy
-  // (provider/event/svix-id) shape — that one is unchanged.
-  const webhookEventRepo2   = webhookEventRepo;
   const timeEntryRepo      = pool ? new PgTimeEntryRepository(pool)       : new InMemoryTimeEntryRepository();
-  // Reference the variable so TS doesn't drop it; downstream consumers will
-  // attach in a follow-up PR.
-  void webhookEventRepo2;
 
   const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
     process.env as NodeJS.ProcessEnv
@@ -1157,6 +983,13 @@ export function createApp(): express.Express {
           recordingId: event.recordingId,
         });
       },
+      // Blocker 12 — encrypt retained raw transcripts at rest. Prefer a
+      // dedicated TRANSCRIPT_ENCRYPTION_KEY but fall back to the
+      // already-provisioned TENANT_ENCRYPTION_KEY so encryption is active in
+      // prod without a new ops step. When neither is set the raw transcript
+      // is not retained (no plaintext PII at rest).
+      rawTranscriptEncryptionKey:
+        process.env.TRANSCRIPT_ENCRYPTION_KEY ?? process.env.TENANT_ENCRYPTION_KEY,
     }
   );
 
@@ -1300,6 +1133,11 @@ export function createApp(): express.Express {
         customerRepo,
       )
     : undefined;
+  // Built ahead of the execution registry so the notify_delay handler can
+  // send a real delay notice; reused by the delay-notification worker below.
+  const delayNotificationService = messageDelivery
+    ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo)
+    : new NoopDelayNotificationService();
   const executionHandlers = createExecutionHandlerRegistry({
     customerRepo,
     jobRepo,
@@ -1309,6 +1147,8 @@ export function createApp(): express.Express {
     invoiceRepo,
     estimateRepo,
     settingsRepo,
+    scheduleRepo: invoiceScheduleRepo,
+    proposalRepo,
     docRevisionRepo: documentRevisionRepo,
     editDeltaRepo: deltaRepo,
     noteRepo,
@@ -1324,6 +1164,13 @@ export function createApp(): express.Express {
     ...(serviceCreditRepo ? { serviceCreditRepo } : {}),
     ...(googleReplyResolver ? { googleReplyResolver } : {}),
     ...(reviewPrivateMessageSender ? { reviewPrivateMessageSender } : {}),
+    // Full-app voice capability execution deps (convert_lead / mark_lead_lost,
+    // log_time_entry, request_feedback, notify_delay). Without these the
+    // respective handlers degrade to a validated passthrough.
+    leadRepo,
+    timeEntryService: new TimeEntryService(timeEntryRepo, auditRepo),
+    feedbackRepo: feedbackRequestRepo,
+    delayNotificationService,
   });
   // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
   // default to `proposal-run:{tenant}:{id}` when callers omit one.
@@ -1418,9 +1265,6 @@ export function createApp(): express.Express {
     new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
     delayNoticeStateRepo,
   );
-  const delayNotificationService = messageDelivery
-    ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo)
-    : new NoopDelayNotificationService();
   const delayNotificationWorker = createDelayNotificationWorker({
     service: delayNotificationService,
     stateRepo: delayNoticeStateRepo,
@@ -1430,11 +1274,65 @@ export function createApp(): express.Express {
     delayNotificationWorker.type,
     delayNotificationWorker as import('./queues/queue').WorkerHandler<unknown>
   );
+  // Blocker 5 — background-loop lifecycle + leader election.
+  //
+  // (1) Every setInterval below is registered here so graceful shutdown can
+  //     clearInterval them before the pg pool drains; otherwise a tick fires
+  //     mid-teardown and throws on a closed pool. `shuttingDown` also stops
+  //     leader-gated sweeps from starting new work during shutdown.
+  // (2) Tenant-wide sweeps (recurring agreements, overdue invoices,
+  //     appointment/estimate reminders, estimate expiry, Google reviews) run
+  //     in-process on EVERY instance. On a multi-instance deploy that means
+  //     duplicate invoices/reminders/review replies. `runAsLeader` gates each
+  //     tick behind a Postgres advisory lock so exactly one instance runs it;
+  //     others skip. Single-instance launch (or in-memory dev with no pool)
+  //     always runs. The execution worker and queue poll loop are NOT gated —
+  //     they are already multi-instance-safe (claimForExecution / FOR UPDATE
+  //     SKIP LOCKED) and gating them would needlessly serialize throughput.
+  const backgroundIntervals: NodeJS.Timeout[] = [];
+  let shuttingDown = false;
+  const registerInterval = (handle: NodeJS.Timeout): NodeJS.Timeout => {
+    backgroundIntervals.push(handle);
+    return handle;
+  };
+  const SWEEP_LOCK = {
+    recurringAgreements: 590001,
+    overdueInvoice: 590002,
+    appointmentReminder: 590003,
+    estimateReminder: 590004,
+    estimateExpiry: 590005,
+    googleReviews: 590006,
+    batchInvoice: 590007,
+  } as const;
+  const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
+    if (shuttingDown) return;
+    if (!pool) {
+      // In-memory dev: no coordination needed (sweeps no-op with no tenants).
+      await work();
+      return;
+    }
+    const client = await pool.connect();
+    try {
+      const res = await client.query<{ locked: boolean }>(
+        'SELECT pg_try_advisory_lock($1) AS locked',
+        [lockKey],
+      );
+      if (!res.rows[0]?.locked) return; // another instance owns this tick
+      try {
+        await work();
+      } finally {
+        await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
+      }
+    } finally {
+      client.release();
+    }
+  };
+
   const executionWorkerLogger = createLogger({
     service: 'execution-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  setInterval(async () => {
+  registerInterval(setInterval(async () => {
     try {
       await runExecutionSweep({
         proposalRepo,
@@ -1446,7 +1344,7 @@ export function createApp(): express.Express {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-  }, 1000);
+  }, 1000));
 
   // voice-action-router — consumes transcripts enqueued by the
   // transcription worker's onTranscribed hook, classifies intent,
@@ -1477,7 +1375,11 @@ export function createApp(): express.Express {
     slotConflictChecker,
     availabilityFinder,
     thresholdResolver,
+    tenantSchedulingResolver,
     appointmentRepo,
+    // Lets reschedule/cancel/confirm scope appointment resolution to the
+    // verified caller's own appointments (appointment → job → customerId).
+    jobRepo,
     // §3B/3D/3E — operator voice commands need the same vertical
     // terminology + intake-question disambiguation the customer-facing
     // adapters get. The shim is wired here because the real resolver
@@ -1531,7 +1433,7 @@ export function createApp(): express.Express {
   // matching worker by message.type. This is the single consumer for the
   // queue — multiple setInterval poll loops would race for the same row
   // under PgQueue's FOR UPDATE SKIP LOCKED semantics and waste cycles.
-  setInterval(async () => {
+  registerInterval(setInterval(async () => {
     try {
       const message = await queue.receive();
       if (!message) return;
@@ -1557,7 +1459,7 @@ export function createApp(): express.Express {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-  }, 250);
+  }, 250));
 
   // Cross-entity tenant ownership guard. Routes pass parent ids (e.g.
   // jobs.customerId) through validation against the requesting tenant
@@ -1616,6 +1518,9 @@ export function createApp(): express.Express {
     // D2-1d: emit public_estimate.{approved,declined} with the
     // synthetic public:<tokenHash> actor on every public approve/decline.
     auditRepo,
+    // Roll up job money state when a lapsed estimate is auto-expired on the
+    // public path, so the job doesn't stay stuck in 'estimate_sent'.
+    moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: requestLogger },
   });
   app.use('/public/estimates', createPublicEstimatesRouter(publicEstimateService));
 
@@ -1678,6 +1583,38 @@ export function createApp(): express.Express {
         ? new PgTenantTransactionRunner(pool)
         : new InMemoryTransactionRunner(),
       paymentLinkProvider,
+    }),
+  );
+
+  // Public, token-less online booking — the prospect acquisition funnel
+  // (Jobber "Online Booking" parity). Mounted BEFORE the global /api Clerk
+  // auth: there is no session, the tenant is the UUID in the path (same as
+  // public-intake). A booking never auto-confirms — it creates a held
+  // appointment + `create_booking` proposal for the owner to approve.
+  app.use(
+    '/api/public/booking',
+    // Stricter than the global /api limiter: an unauthenticated write path that
+    // creates customers/jobs/appointments + holds calendar slots. Mirrors the
+    // /public/intake limiter (booking is heavier, so a touch tighter).
+    rateLimit({
+      windowMs: 60 * 1000,
+      max: 5,
+      standardHeaders: true,
+      legacyHeaders: false,
+    }),
+    createPublicBookingRouter({
+      tenantRepo: intakeTenantRepo,
+      customerRepo,
+      locationRepo,
+      jobRepo,
+      appointmentRepo,
+      proposalRepo,
+      auditRepo,
+      assignmentRepo,
+      settingsRepo,
+      transactionRunner: pool
+        ? new PgTenantTransactionRunner(pool)
+        : new InMemoryTransactionRunner(),
     }),
   );
 
@@ -1821,6 +1758,13 @@ export function createApp(): express.Express {
     return sharedRichPackByType.get(base)?.repairTemplates ?? [];
   };
   const telephonyCallControl = new DefaultTwilioCallControl();
+  // Owner-scoped revenue lookup (voice `lookup_revenue`) shares the same
+  // money-dashboard repo the /api/reports router uses below.
+  const moneyDashboardRepo = new PgMoneyDashboardRepository(
+    invoiceRepo,
+    paymentRepo,
+    expenseRepo,
+  );
   const twilioAdapter = new TwilioGatherAdapter({
     store: voiceSessionStore,
     gateway: llmGateway,
@@ -1849,6 +1793,9 @@ export function createApp(): express.Express {
     appointmentRepo,
     invoiceRepo,
     agreementRepo,
+    moneyDashboardRepo,
+    catalogRepo,
+    availabilityFinder,
     lookupEvents: lookupEventService,
     systemActorId: 'system:inbound-call',
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
@@ -2407,7 +2354,14 @@ export function createApp(): express.Express {
   );
   app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership, auditRepo));
-  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher, customerRepo, locationRepo));
+  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher, customerRepo, locationRepo, {
+    estimateRepo,
+    invoiceRepo,
+    proposalRepo,
+    settingsRepo,
+    auditRepo,
+    scheduleRepo: invoiceScheduleRepo,
+  }));
   app.use(
     '/api/jobs',
     createJobFilesRouter({
@@ -2462,6 +2416,7 @@ export function createApp(): express.Express {
       { gateway: llmGateway, proposalRepo },
       { jobRepo, invoiceRepo },
       { docRevisionRepo: documentRevisionRepo, editDeltaRepo: deltaRepo },
+      paymentRepo,
     ),
   );
   app.use(
@@ -2519,11 +2474,6 @@ export function createApp(): express.Express {
   const revenueBySourceRepo = pool
     ? new PgRevenueBySourceRepository(pool)
     : new InMemoryRevenueBySourceRepository();
-  const moneyDashboardRepo = new PgMoneyDashboardRepository(
-    invoiceRepo,
-    paymentRepo,
-    expenseRepo,
-  );
   const timeGivenBackReporter = new RepoBackedTimeGivenBackReporter(
     proposalRepo,
     settingsRepo,
@@ -2538,6 +2488,17 @@ export function createApp(): express.Express {
       invoiceRepo,
       paymentRepo,
       timeGivenBackReporter,
+      // Look up the tenant tz so /money-dashboard buckets by local
+      // month boundaries. Without this the dashboard would default
+      // to America/New_York (matches tenant_settings.timezone's DB
+      // default) — close-enough for most US tenants but wrong for
+      // anyone on PST or other zones. Delegates to the existing
+      // settingsRepo so we don't add a second tenant_settings query
+      // path (and inherit its RLS / withTenant handling for free).
+      getTenantTimezone: async (tenantId: string) => {
+        const settings = await settingsRepo.findByTenant(tenantId);
+        return settings?.timezone ?? DEFAULT_TENANT_TIMEZONE;
+      },
     }),
   );
   app.use(
@@ -2594,14 +2555,16 @@ export function createApp(): express.Express {
         async getTenantSettings(tenantId) {
           const r = await pool.query(
             `SELECT backup_supervisor_user_id,
-                    COALESCE(unsupervised_proposal_routing, 'queue_and_sms') AS unsupervised_proposal_routing
+                    COALESCE(unsupervised_proposal_routing, 'queue_and_sms') AS unsupervised_proposal_routing,
+                    COALESCE(timezone, $2) AS timezone
              FROM tenant_settings WHERE tenant_id = $1 LIMIT 1`,
-            [tenantId],
+            [tenantId, DEFAULT_TENANT_TIMEZONE],
           );
           if (r.rowCount === 0) {
             return {
               backup_supervisor_user_id: null,
               unsupervised_proposal_routing: 'queue_and_sms',
+              timezone: DEFAULT_TENANT_TIMEZONE,
             } as MeTenantSettings;
           }
           const row = r.rows[0] as Record<string, unknown>;
@@ -2611,6 +2574,7 @@ export function createApp(): express.Express {
               : null,
             unsupervised_proposal_routing:
               row.unsupervised_proposal_routing as MeTenantSettings['unsupervised_proposal_routing'],
+            timezone: String(row.timezone),
           };
         },
         async getTenantIntegrationStatuses(tenantId) {
@@ -2663,7 +2627,14 @@ export function createApp(): express.Express {
 
   app.use('/api/me', createMeRouter(userModeService, auditRepo));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
-  app.use('/api/conversations', createConversationRouter(conversationRepo, auditRepo));
+  app.use(
+    '/api/conversations',
+    createConversationRouter(conversationRepo, auditRepo, {
+      gateway: llmGateway,
+      settingsRepo,
+    }),
+  );
+  app.use('/api/dnc', createDncRouter({ dncRepo, auditRepo }));
 
   app.use(
     '/api/settings',
@@ -2814,8 +2785,8 @@ export function createApp(): express.Express {
     service: 'recurring-agreements-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  setInterval(async () => {
-    try {
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.recurringAgreements, async () => {
       await runRecurringAgreementsSweep({
         agreementRepo,
         runRepo: agreementRunRepo,
@@ -2829,12 +2800,44 @@ export function createApp(): express.Express {
         auditRepo,
         logger: agreementsLogger,
       });
-    } catch (err) {
+    }).catch((err) => {
       agreementsLogger.error('Recurring-agreements sweep failed', {
         error: err instanceof Error ? err.message : String(err),
       });
-    }
-  }, 60_000);
+    });
+  }, 60_000));
+
+  // P21-003 — batch-invoice sweep. Daily-grained work; an hourly tick surfaces
+  // newly-completed jobs promptly. Opt-in per tenant (settings.batchInvoiceEnabled);
+  // in-memory dev returns no tenants so it no-ops locally.
+  const batchInvoiceLogger = createLogger({
+    service: 'batch-invoice-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.batchInvoice, async () => {
+      await runBatchInvoiceSweep({
+        jobRepo,
+        invoiceRepo,
+        estimateRepo,
+        proposalRepo,
+        settingsRepo,
+        runRepo: batchInvoiceRunRepo,
+        txRunner: batchInvoiceTxRunner,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        auditRepo,
+        logger: batchInvoiceLogger,
+      });
+    }).catch((err) => {
+      batchInvoiceLogger.error('Batch-invoice sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 3_600_000));
 
   // §6 Time-to-Cash: overdue-invoice sweep. Hourly — invoice due dates
   // have day granularity, so an hourly check surfaces newly-overdue
@@ -2845,8 +2848,8 @@ export function createApp(): express.Express {
     service: 'overdue-invoice-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  setInterval(async () => {
-    try {
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.overdueInvoice, async () => {
       await runOverdueInvoiceSweep({
         jobRepo,
         estimateRepo,
@@ -2860,20 +2863,20 @@ export function createApp(): express.Express {
         },
         logger: overdueInvoiceLogger,
       });
-    } catch (err) {
+    }).catch((err) => {
       overdueInvoiceLogger.error('Overdue-invoice sweep failed', {
         error: err instanceof Error ? err.message : String(err),
       });
-    }
-  }, 60 * 60_000);
+    });
+  }, 60 * 60_000));
 
   const appointmentReminderLogger = createLogger({
     service: 'appointment-reminder-worker',
     environment: process.env.NODE_ENV || 'development',
   });
   if (transactionalComms) {
-    setInterval(async () => {
-      try {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.appointmentReminder, async () => {
         await runAppointmentReminderSweep({
           appointmentRepo,
           transactionalComms,
@@ -2884,12 +2887,12 @@ export function createApp(): express.Express {
           },
           logger: appointmentReminderLogger,
         });
-      } catch (err) {
+      }).catch((err) => {
         appointmentReminderLogger.error('Appointment-reminder sweep failed', {
           error: err instanceof Error ? err.message : String(err),
         });
-      }
-    }, 60 * 60_000);
+      });
+    }, 60 * 60_000));
   }
 
   // Estimate-reminder worker — nudges customers on estimates sent but
@@ -2900,8 +2903,8 @@ export function createApp(): express.Express {
     environment: process.env.NODE_ENV || 'development',
   });
   if (sendService) {
-    setInterval(async () => {
-      try {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.estimateReminder, async () => {
         await runEstimateReminderSweep({
           estimateRepo,
           sendService,
@@ -2913,13 +2916,41 @@ export function createApp(): express.Express {
           },
           logger: estimateReminderLogger,
         });
-      } catch (err) {
+      }).catch((err) => {
         estimateReminderLogger.error('Estimate-reminder sweep failed', {
           error: err instanceof Error ? err.message : String(err),
         });
-      }
-    }, 60 * 60_000);
+      });
+    }, 60 * 60_000));
   }
+
+  // Estimate-expiry worker — transitions sent estimates past their
+  // valid_until date to 'expired' so stale quotes can't be accepted and
+  // the pipeline reflects lapsed offers. Runs hourly; no SendService
+  // dependency (it only changes status).
+  const estimateExpiryLogger = createLogger({
+    service: 'estimate-expiry-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.estimateExpiry, async () => {
+      await runEstimateExpirySweep({
+        estimateRepo,
+        auditRepo,
+        moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: estimateExpiryLogger },
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        logger: estimateExpiryLogger,
+      });
+    }).catch((err) => {
+      estimateExpiryLogger.error('Estimate-expiry sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 60 * 60_000));
 
   // P7-026 PR a: Google Business reviews polling. Every 15 minutes
   // we sweep every tenant with an active `google_business`
@@ -2966,7 +2997,7 @@ export function createApp(): express.Express {
       },
     );
   }
-  setInterval(async () => {
+  registerInterval(setInterval(() => {
     if (
       !googleReviewsReviewRepo ||
       !googleReviewsPollStateRepo ||
@@ -2974,7 +3005,7 @@ export function createApp(): express.Express {
     ) {
       return;
     }
-    try {
+    void runAsLeader(SWEEP_LOCK.googleReviews, async () => {
       await runGoogleReviewsSweep({
         reviewRepo: googleReviewsReviewRepo,
         pollStateRepo: googleReviewsPollStateRepo,
@@ -2989,12 +3020,12 @@ export function createApp(): express.Express {
           ? { proposalEmission: googleReviewsProposalEmission }
           : {}),
       });
-    } catch (err) {
+    }).catch((err) => {
       googleReviewsLogger.error('Google reviews sweep failed', {
         error: err instanceof Error ? err.message : String(err),
       });
-    }
-  }, 15 * 60_000);
+    });
+  }, 15 * 60_000));
 
   // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
   // unified TTS provider, and the existing proposal/audit/oncall repos.
@@ -3115,7 +3146,15 @@ export function createApp(): express.Express {
   const shutdown = async (signal: NodeJS.Signals) => {
     try {
       // eslint-disable-next-line no-console
-      console.log(`[app] ${signal} received — closing voice sessions and pg pool`);
+      console.log(`[app] ${signal} received — stopping background loops, closing voice sessions and pg pool`);
+      // Blocker 5 — stop all background setInterval loops (sweeps, queue poll,
+      // execution worker) BEFORE the pg pool drains. `shuttingDown` also
+      // prevents an already-scheduled leader-gated sweep tick from starting
+      // new work. Without this, a tick fires mid-teardown and throws on a
+      // closed pool. In-flight queue jobs are bounded by the pool-drain race
+      // below.
+      shuttingDown = true;
+      for (const handle of backgroundIntervals) clearInterval(handle);
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();

@@ -11,6 +11,7 @@ import {
   toLineItemPayload,
 } from '../../components/forms/LineItemEditor';
 import { apiFetch } from '../../utils/api-fetch';
+import { formatCurrency as formatCents } from '../../utils/currency';
 
 interface LineItem {
   id: string;
@@ -44,10 +45,6 @@ interface Invoice {
   lineItems: LineItem[];
   payments: Payment[];
   createdAt: string;
-}
-
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
 }
 
 function formatDateTime(isoDate: string): string {

@@ -179,6 +179,26 @@ describe('P9-001 — leads repository + service', () => {
     expect(customerEvent!.metadata).toMatchObject({ leadId: lead.id });
   });
 
+  it("convertToCustomer carries the lead's preferred language onto the customer", async () => {
+    const lead = await createLead(
+      { tenantId: tenantA, firstName: 'Sofia', source: 'phone_call', createdBy: 'u' },
+      leadRepo
+    );
+    await updateLead(tenantA, lead.id, { preferredLanguage: 'es' }, leadRepo);
+
+    const result = await convertToCustomer(
+      tenantA,
+      lead.id,
+      leadRepo,
+      customerRepo,
+      'user-2',
+      'owner',
+      auditRepo
+    );
+
+    expect(result!.customer.preferredLanguage).toBe('es');
+  });
+
   it('convertToCustomer rolls back when customer create fails', async () => {
     const lead = await createLead(
       { tenantId: tenantA, firstName: 'D', source: 'walk_in', createdBy: 'u' },

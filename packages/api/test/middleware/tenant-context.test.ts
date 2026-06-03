@@ -20,6 +20,7 @@ import {
   withTenantTransaction,
   tenantContextStore,
   currentTenantContext,
+  withRequestSavepoint,
 } from '../../src/middleware/tenant-context';
 import { PgBaseRepository } from '../../src/db/pg-base';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -434,6 +435,68 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     expect(sqls).not.toContain('COMMIT');
   });
 
+  it('rollback on error — handler throws (500) does not commit partial writes', async () => {
+    const { pool, calls } = makeMockPool();
+    // Simulate a multi-write handler: first write succeeds, then it throws.
+    // buildApp's route wrapper turns the throw into a 500 response, which
+    // fires `finish` — the middleware must ROLLBACK, not COMMIT.
+    const app = buildApp(pool, async () => {
+      const ctx = currentTenantContext();
+      await ctx!.client.query('INSERT INTO things (id) VALUES (1)');
+      throw new Error('second write failed');
+    });
+
+    const response = await request(app)
+      .get('/protected/echo')
+      .set('x-test-tenant', TENANT_A);
+
+    expect(response.status).toBe(500);
+    await new Promise((r) => setImmediate(r));
+    const sqls = calls.map((c) => c.sql);
+    expect(sqls).toContain('INSERT INTO things (id) VALUES (1)');
+    expect(sqls).toContain('ROLLBACK');
+    expect(sqls).not.toContain('COMMIT');
+  });
+
+  it('rollback on client-error response (4xx) — partial writes are not persisted', async () => {
+    const { pool, calls } = makeMockPool();
+    const app = buildApp(pool, async (_req, res) => {
+      const ctx = currentTenantContext();
+      await ctx!.client.query('INSERT INTO things (id) VALUES (2)');
+      res.status(409).json({ error: 'CONFLICT' });
+    });
+
+    const response = await request(app)
+      .get('/protected/echo')
+      .set('x-test-tenant', TENANT_A);
+
+    expect(response.status).toBe(409);
+    await new Promise((r) => setImmediate(r));
+    const sqls = calls.map((c) => c.sql);
+    expect(sqls).toContain('ROLLBACK');
+    expect(sqls).not.toContain('COMMIT');
+  });
+
+  it('forceCommit escape hatch — commits despite a >=400 status', async () => {
+    const { pool, calls } = makeMockPool();
+    const app = buildApp(pool, async (_req, res) => {
+      const ctx = currentTenantContext();
+      await ctx!.client.query('INSERT INTO things (id) VALUES (3)');
+      res.locals.forceCommit = true;
+      res.status(409).json({ error: 'CONFLICT_BUT_PERSISTED' });
+    });
+
+    const response = await request(app)
+      .get('/protected/echo')
+      .set('x-test-tenant', TENANT_A);
+
+    expect(response.status).toBe(409);
+    await new Promise((r) => setImmediate(r));
+    const sqls = calls.map((c) => c.sql);
+    expect(sqls).toContain('COMMIT');
+    expect(sqls).not.toContain('ROLLBACK');
+  });
+
   it('AsyncLocalStorage scope is request-local (does not leak between async tasks)', async () => {
     // Outside any middleware run, currentTenantContext() must be
     // undefined — proving we don't rely on a module-level mutable
@@ -448,5 +511,54 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     );
 
     expect(currentTenantContext()).toBeUndefined();
+  });
+});
+
+describe('withRequestSavepoint', () => {
+  function fakeClient(): { client: PoolClient; calls: string[] } {
+    const calls: string[] = [];
+    const client = {
+      query: async (text: string) => {
+        calls.push(text);
+        return { rows: [] } as unknown as QueryResult;
+      },
+    } as unknown as PoolClient;
+    return { client, calls };
+  }
+
+  it('runs fn directly when there is no request transaction (no savepoint)', async () => {
+    let ran = false;
+    const out = await withRequestSavepoint(async () => {
+      ran = true;
+      return 7;
+    });
+    expect(ran).toBe(true);
+    expect(out).toBe(7);
+  });
+
+  it('wraps fn in SAVEPOINT / RELEASE inside a request transaction', async () => {
+    const { client, calls } = fakeClient();
+    const out = await tenantContextStore.run({ client, tenantId: TENANT_A }, () =>
+      withRequestSavepoint(async () => 'ok'),
+    );
+    expect(out).toBe('ok');
+    expect(calls.some((q) => q.startsWith('SAVEPOINT'))).toBe(true);
+    expect(calls.some((q) => q.startsWith('RELEASE SAVEPOINT'))).toBe(true);
+    expect(calls.some((q) => q.startsWith('ROLLBACK TO SAVEPOINT'))).toBe(false);
+  });
+
+  it('rolls back to the savepoint and rethrows on error, leaving the tx usable', async () => {
+    const { client, calls } = fakeClient();
+    await expect(
+      tenantContextStore.run({ client, tenantId: TENANT_A }, () =>
+        withRequestSavepoint(async () => {
+          throw Object.assign(new Error('dup'), { code: '23505' });
+        }),
+      ),
+    ).rejects.toThrow('dup');
+    expect(calls.some((q) => q.startsWith('SAVEPOINT'))).toBe(true);
+    expect(calls.some((q) => q.startsWith('ROLLBACK TO SAVEPOINT'))).toBe(true);
+    // The outer transaction is NOT rolled back — only the savepoint is.
+    expect(calls).not.toContain('ROLLBACK');
   });
 });

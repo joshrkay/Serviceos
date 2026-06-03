@@ -1,6 +1,40 @@
 import { v4 as uuidv4 } from 'uuid';
 import { JobRepository } from '../jobs/job';
-import { ValidationError } from '../shared/errors';
+import { ValidationError, ConflictError } from '../shared/errors';
+import { AppointmentRepository, AppointmentStatus } from './appointment';
+import { detectOverlappingAppointments } from '../dispatch/validation';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
+
+/**
+ * Optional dependencies for `assignTechnician`.
+ *
+ * - `appointmentRepo`: when supplied, enforces a double-booking guard —
+ *   the technician cannot be assigned to an appointment whose time range
+ *   overlaps another of their active appointments (throws `ConflictError`,
+ *   409). The authoritative protection against the cross-request TOCTOU
+ *   race is the DB-level EXCLUDE constraint `no_double_booking` on
+ *   `appointment_assignments` (migration 131); this application-layer
+ *   check stays as a fast/friendly pre-flight that avoids a DB round-trip
+ *   on the obvious case and produces a context-rich error message.
+ * - `auditRepo` / `actorRole`: when `auditRepo` is supplied, emits an
+ *   `appointment.technician_assigned` audit event (CLAUDE.md: all
+ *   mutations emit audit events).
+ */
+export interface AssignTechnicianDeps {
+  appointmentRepo?: AppointmentRepository;
+  auditRepo?: AuditRepository;
+  actorRole?: string;
+}
+
+/** Optional dependencies for `unassignTechnician` (audit emission). */
+export interface UnassignTechnicianDeps {
+  auditRepo?: AuditRepository;
+  actorId?: string;
+  actorRole?: string;
+  /** Audit metadata describing the removed assignment. */
+  appointmentId?: string;
+  technicianId?: string;
+}
 
 export interface AppointmentAssignment {
   id: string;
@@ -43,14 +77,72 @@ export function validateAssignmentInput(input: CreateAssignmentInput): string[] 
 
 export async function assignTechnician(
   input: CreateAssignmentInput,
-  repository: AssignmentRepository
+  repository: AssignmentRepository,
+  deps: AssignTechnicianDeps = {},
 ): Promise<AppointmentAssignment> {
   const errors = validateAssignmentInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const isPrimary = input.isPrimary ?? true;
 
-  // Demote any existing primary assignments before assigning new primary
+  // Double-booking backstop. When an appointment repo is supplied, refuse
+  // to assign a technician who already has an active appointment whose time
+  // range overlaps the target. Callers that run a richer feasibility gate
+  // upstream still benefit from this as defense-in-depth. The authoritative
+  // race-safe check is the DB EXCLUDE constraint `no_double_booking`
+  // (migration 131); this layer fires earlier with a friendlier message
+  // and saves a DB round-trip on the obvious case.
+  if (deps.appointmentRepo) {
+    const target = await deps.appointmentRepo.findById(input.tenantId, input.appointmentId);
+    if (target) {
+      const techAssignments = await repository.findByTechnician(input.tenantId, input.technicianId);
+      const otherApptIds = Array.from(
+        new Set(
+          techAssignments
+            .map((a) => a.appointmentId)
+            .filter((apptId) => apptId !== input.appointmentId),
+        ),
+      );
+      const others: Array<{
+        id: string;
+        technicianId: string;
+        scheduledStart: Date;
+        scheduledEnd: Date;
+        status: AppointmentStatus;
+      }> = [];
+      for (const apptId of otherApptIds) {
+        const appt = await deps.appointmentRepo.findById(input.tenantId, apptId);
+        if (appt) {
+          others.push({
+            id: appt.id,
+            technicianId: input.technicianId,
+            scheduledStart: appt.scheduledStart,
+            scheduledEnd: appt.scheduledEnd,
+            status: appt.status,
+          });
+        }
+      }
+      const conflicts = detectOverlappingAppointments(
+        input.technicianId,
+        target.scheduledStart,
+        target.scheduledEnd,
+        others,
+        input.appointmentId,
+      );
+      if (conflicts.length > 0) {
+        throw new ConflictError(
+          `Technician is already booked at this time: ${conflicts[0].message}`,
+        );
+      }
+    }
+  }
+
+  // Demote any existing primary assignments before assigning new primary.
+  // Race protection: the partial unique index
+  // `uq_assignment_primary_per_appointment` (migration 131) is the durable
+  // backstop — two simultaneous primary assigns can't both INSERT
+  // is_primary=true; whichever loses the race surfaces as a 23505 which
+  // PgAssignmentRepository.create maps to ConflictError (409).
   if (isPrimary) {
     const existing = await repository.findByAppointment(input.tenantId, input.appointmentId);
     const currentPrimaries = existing.filter((a) => a.isPrimary);
@@ -67,15 +159,55 @@ export async function assignTechnician(
     assignedAt: new Date(),
   };
 
-  return repository.create(assignment);
+  const created = await repository.create(assignment);
+
+  if (deps.auditRepo) {
+    await deps.auditRepo.create(
+      createAuditEvent({
+        tenantId: input.tenantId,
+        actorId: input.assignedBy,
+        actorRole: deps.actorRole ?? 'system',
+        eventType: 'appointment.technician_assigned',
+        entityType: 'appointment',
+        entityId: input.appointmentId,
+        metadata: {
+          assignmentId: created.id,
+          technicianId: input.technicianId,
+          isPrimary: created.isPrimary,
+        },
+      }),
+    );
+  }
+
+  return created;
 }
 
 export async function unassignTechnician(
   tenantId: string,
   assignmentId: string,
-  repository: AssignmentRepository
+  repository: AssignmentRepository,
+  deps: UnassignTechnicianDeps = {},
 ): Promise<boolean> {
-  return repository.delete(tenantId, assignmentId);
+  const removed = await repository.delete(tenantId, assignmentId);
+
+  if (removed && deps.auditRepo) {
+    await deps.auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId: deps.actorId ?? 'system',
+        actorRole: deps.actorRole ?? 'system',
+        eventType: 'appointment.technician_unassigned',
+        entityType: 'appointment',
+        entityId: deps.appointmentId ?? assignmentId,
+        metadata: {
+          assignmentId,
+          technicianId: deps.technicianId,
+        },
+      }),
+    );
+  }
+
+  return removed;
 }
 
 export async function getAssignments(

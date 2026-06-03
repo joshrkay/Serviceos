@@ -56,7 +56,8 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
     const client = await pool.connect();
     try {
       const tenantId = req.auth!.tenantId;
-      await client.query(`SET app.tenant_id = '${tenantId}'`);
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
 
       const [countResult, dataResult] = await Promise.all([
         client.query(`SELECT COUNT(*) FROM voice_sessions WHERE tenant_id = $1`, [tenantId]),
@@ -65,6 +66,8 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
           [tenantId, limit, offset],
         ),
       ]);
+
+      await client.query('COMMIT');
 
       const total = parseInt((countResult.rows[0] as { total: string })?.total ?? '0', 10);
       const data = dataResult.rows.map(row => {
@@ -107,12 +110,15 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
       const tenantId = req.auth!.tenantId;
       const { id } = req.params;
 
-      await client.query(`SET app.tenant_id = '${tenantId}'`);
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
 
       const result = await client.query(
         `SELECT ${SESSION_COLUMNS} WHERE vs.tenant_id = $1 AND vs.id = $2`,
         [tenantId, id],
       );
+
+      await client.query('COMMIT');
 
       if (result.rows.length === 0) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Interaction not found' });

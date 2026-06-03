@@ -1,4 +1,11 @@
 import type { JobStatus, EstimateStatus, InvoiceStatus } from '../data/mock-data';
+import { formatCurrency } from './currency';
+
+// Re-export the canonical money formatter so existing imports of this
+// module (which historically owned `centsToDisplay`) can also reach
+// `formatCurrency` without a new import path. New code should prefer
+// importing from `utils/currency` directly.
+export { formatCurrency } from './currency';
 
 export const JOB_STATUS_MAP: Record<string, string> = {
   new:          'New',
@@ -14,7 +21,7 @@ export const ESTIMATE_STATUS_MAP: Record<string, string> = {
   sent:             'Sent',
   accepted:         'Approved',
   rejected:         'Declined',
-  expired:          'Draft',
+  expired:          'Expired',
 };
 
 export const INVOICE_STATUS_MAP: Record<string, string> = {
@@ -38,9 +45,16 @@ export function normalizeInvoiceStatus(apiStatus: string): InvoiceStatus {
   return (INVOICE_STATUS_MAP[apiStatus] ?? apiStatus) as InvoiceStatus;
 }
 
-/** Convert integer cents to display string: 15000 → "$150.00" */
+/**
+ * Convert integer cents to a display string with thousands separator and
+ * fixed two-decimal cents: 150000 → "$1,500.00".
+ *
+ * Delegates to the canonical `formatCurrency` in `utils/currency`. Kept
+ * as a stable name for the many existing callers; new code should
+ * import `formatCurrency` directly.
+ */
 export function centsToDisplay(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
+  return formatCurrency(cents);
 }
 
 /** §6 Time-to-Cash — job-level money rollup for dashboard badges. */

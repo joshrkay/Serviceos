@@ -1,11 +1,13 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   ChevronLeft, ChevronRight, Plus, Clock, User, AlertTriangle,
-  Bell, CheckCircle, X, MapPin, Briefcase,
+  Bell, CheckCircle, X, MapPin, Briefcase, LayoutGrid,
 } from 'lucide-react';
-import { useNavigate } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatInTenantTz, formatTimeInTenantTz } from '../../utils/formatInTenantTz';
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
@@ -37,20 +39,20 @@ interface EnrichedAppointment extends ApiAppointment {
   hasConflict: boolean;
 }
 
-/** Build a 7-day window starting from yesterday */
-function buildWeekDays(today: Date) {
+/** Build a 7-day window starting from yesterday, labelled in the tenant TZ. */
+function buildWeekDays(today: Date, timezone: string) {
   return Array.from({ length: 7 }, (_, i) => {
     const d = new Date(today);
     d.setDate(today.getDate() + i - 1);
-    const label = d.toLocaleDateString('en-US', { weekday: 'short' });
-    const date  = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const label = formatInTenantTz(d, timezone, { weekday: 'short' });
+    const date  = formatInTenantTz(d, timezone, { month: 'short', day: 'numeric' });
     const isoDate = d.toISOString().split('T')[0];
     return { label, date, isoDate, isToday: i === 1 };
   });
 }
 
-function toTimeLabel(iso: string) {
-  return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+function toTimeLabel(iso: string, timezone: string) {
+  return formatTimeInTenantTz(iso, timezone);
 }
 
 function overlap(a: ApiAppointment, b: ApiAppointment): boolean {
@@ -257,8 +259,9 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
 export function SchedulePage() {
   const navigate = useNavigate();
   const { technicians } = useTechnicianRoster();
+  const tz = useTenantTimezone();
   const today = useMemo(() => new Date(), []);
-  const weekDays = useMemo(() => buildWeekDays(today), [today]);
+  const weekDays = useMemo(() => buildWeekDays(today, tz), [today, tz]);
   const [selectedIso, setSelectedIso] = useState(weekDays[1].isoDate);
   const [showNew,     setShowNew]     = useState(false);
   const [techFilter,  setTechFilter]  = useState('All');
@@ -384,12 +387,22 @@ export function SchedulePage() {
             </p>
           )}
         </div>
-        <button
-          onClick={() => setShowNew(v => !v)}
-          className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors"
-        >
-          <Plus size={14} /> New appointment
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Dispatch Board lives off the sidebar (calm-nav decision), so the
+              Schedule header is its primary in-app entry point. */}
+          <Link
+            to="/dispatch"
+            className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
+          >
+            <LayoutGrid size={14} /> Dispatch board
+          </Link>
+          <button
+            onClick={() => setShowNew(v => !v)}
+            className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors"
+          >
+            <Plus size={14} /> New appointment
+          </button>
+        </div>
       </div>
 
       {/* Week nav */}
@@ -515,7 +528,7 @@ export function SchedulePage() {
                       Tentative hold
                       {appt.holdExpiryAt && (
                         <span>
-                          · expires {new Date(appt.holdExpiryAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                          · expires {formatTimeInTenantTz(appt.holdExpiryAt, tz)}
                         </span>
                       )}
                     </div>
@@ -530,8 +543,8 @@ export function SchedulePage() {
                   <div className="flex gap-4">
                     {/* Time column */}
                     <div className="shrink-0 w-16 text-right">
-                      <p className="text-sm text-slate-800">{toTimeLabel(appt.scheduledStart)}</p>
-                      <p className="text-xs text-slate-400 mt-0.5">{toTimeLabel(appt.scheduledEnd)}</p>
+                      <p className="text-sm text-slate-800">{toTimeLabel(appt.scheduledStart, tz)}</p>
+                      <p className="text-xs text-slate-400 mt-0.5">{toTimeLabel(appt.scheduledEnd, tz)}</p>
                     </div>
 
                     {/* Divider */}
@@ -625,7 +638,7 @@ export function SchedulePage() {
             )}
             <p className="text-xs text-slate-500 flex items-center gap-1.5">
               <Clock size={11} className="text-slate-400" />
-              {toTimeLabel(detailAppt.scheduledStart)} – {toTimeLabel(detailAppt.scheduledEnd)}
+              {toTimeLabel(detailAppt.scheduledStart, tz)} – {toTimeLabel(detailAppt.scheduledEnd, tz)}
             </p>
             <p className="text-xs text-slate-500">Technician: {detailAppt.technicianName}</p>
           </div>

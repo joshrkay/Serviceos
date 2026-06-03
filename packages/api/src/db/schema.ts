@@ -3095,10 +3095,12 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS yelp_review_url TEXT;
   `,
 
-  // 125 — widen message_dispatches entity_type to cover every dispatch type
-  // the application emits. Migration 092 only listed a subset; bring the
-  // CHECK in line with the DispatchEntityType union and add the new
-  // 'appointment_en_route' notice used by the "on my way" feature.
+  // Restored from main: a prior merge into this branch dropped this
+  // migration while the snapshot still referenced it. It widens the
+  // message_dispatches entity_type CHECK to cover the transactional-comms
+  // types the app actually emits (reminders, receipts, overdue, en_route).
+  // Ordered before 125_estimates_deleted_at so insertion order stays
+  // lexicographically non-decreasing.
   '125_dispatch_entity_en_route': `
     ALTER TABLE message_dispatches
       DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
@@ -3109,6 +3111,606 @@ export const MIGRATIONS = {
           'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
           'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route'
         ));
+  `,
+
+  '125_estimates_deleted_at': `
+    -- Soft-delete support for estimates. A non-null deleted_at hides the
+    -- estimate from every read path (list/get/job/token lookups) without
+    -- destroying the row, preserving the audit trail and any linked
+    -- invoice. Accepted estimates are never deletable (enforced in the
+    -- service layer). The partial index keeps the hot "live estimates"
+    -- scans cheap by only indexing the soft-deleted minority.
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_estimates_deleted
+      ON estimates(tenant_id, deleted_at) WHERE deleted_at IS NOT NULL;
+  `,
+
+  '126_invoices_estimate_unique': `
+    -- One invoice per estimate. The convert-to-invoice flow is idempotent
+    -- at the application layer (it returns the existing invoice), and this
+    -- partial unique index is the DB-level backstop against a double
+    -- convert racing two requests. NULL estimate_id (invoices not made
+    -- from an estimate) is unconstrained.
+    --
+    -- Deploy safety: if existing data already has two invoices pointing at
+    -- the same estimate (possible via the legacy POST /api/invoices path),
+    -- a UNIQUE index would FAIL the whole migration batch. Detect that and
+    -- fall back to a plain index, leaving app-level idempotency as the
+    -- guard, so the deploy never breaks on dirty data.
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM invoices
+        WHERE estimate_id IS NOT NULL
+        GROUP BY estimate_id HAVING COUNT(*) > 1
+      ) THEN
+        CREATE INDEX IF NOT EXISTS idx_invoices_estimate
+          ON invoices(estimate_id) WHERE estimate_id IS NOT NULL;
+        RAISE WARNING 'invoices.estimate_id has duplicates; created NON-unique index. Reconcile duplicates then add the unique index manually.';
+      ELSE
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_invoices_estimate
+          ON invoices(estimate_id) WHERE estimate_id IS NOT NULL;
+      END IF;
+    END $$;
+  `,
+
+  '127_estimate_line_item_options': `
+    -- Good-better-best tiers + optional add-ons on estimate line items.
+    --   group_key (non-null)  -> the item is one option in a mutually
+    --     exclusive group; the customer picks exactly one per group_key.
+    --   group_label           -> human label for the group (e.g. "Roof tier").
+    --   is_optional + null group_key -> a standalone add-on (checkbox).
+    --   null group_key + is_optional=false -> always billed (the default).
+    --   is_default_selected   -> pre-checked tier/add-on shown on first view.
+    ALTER TABLE estimate_line_items
+      ADD COLUMN IF NOT EXISTS group_key TEXT,
+      ADD COLUMN IF NOT EXISTS group_label TEXT,
+      ADD COLUMN IF NOT EXISTS is_optional BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS is_default_selected BOOLEAN NOT NULL DEFAULT FALSE;
+  `,
+
+  '128_estimates_accepted_selection': `
+    -- Locks the customer's good-better-best / add-on selection at accept
+    -- time. JSONB array of the estimate_line_item ids the customer chose;
+    -- NULL means no optional/tiered items (the whole estimate stands as-is).
+    -- The converted invoice reads this snapshot so a later revise can't
+    -- change what the customer actually agreed to.
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_selection JSONB;
+  `,
+
+  '129_estimates_one_accepted_per_job': `
+    -- At most one accepted estimate per job. The public approve flow has a
+    -- read-before-write guard for a friendly message, but that's racy; this
+    -- partial unique index is the atomic backstop so two simultaneous
+    -- approvals on the same job can't both land 'accepted' and both convert
+    -- to invoices. Soft-deleted rows are excluded.
+    -- Deploy safety: if data already has two accepted estimates on a job,
+    -- a UNIQUE index would fail the migration batch, so fall back to a plain
+    -- index + warning (app-level guard still applies).
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM estimates
+        WHERE status = 'accepted' AND deleted_at IS NULL
+        GROUP BY tenant_id, job_id HAVING COUNT(*) > 1
+      ) THEN
+        CREATE INDEX IF NOT EXISTS idx_estimates_accepted_per_job
+          ON estimates(tenant_id, job_id) WHERE status = 'accepted' AND deleted_at IS NULL;
+        RAISE WARNING 'Multiple accepted estimates exist on some jobs; created NON-unique index. Reconcile then add the unique index manually.';
+      ELSE
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_estimates_accepted_per_job
+          ON estimates(tenant_id, job_id) WHERE status = 'accepted' AND deleted_at IS NULL;
+      END IF;
+    END $$;
+  `,
+
+  '130_force_rls_missing_tables': `
+    -- Blocker 3: FORCE row-level security on every tenant-scoped table whose
+    -- earlier migration only called ENABLE. Without FORCE, the table OWNER
+    -- (the role the app connects as on Railway) bypasses RLS, so an unscoped
+    -- query inside a connection that forgot setTenantContext could silently
+    -- leak across tenants. With FORCE the owner is subject to the same
+    -- policies as everyone else; if the GUC is missing, the policy predicate
+    -- evaluates to NULL and the row is filtered out.
+    --
+    -- Idempotent: FORCE ROW LEVEL SECURITY is a no-op when already set.
+    ALTER TABLE ai_runs FORCE ROW LEVEL SECURITY;
+    ALTER TABLE appointment_calendar_events FORCE ROW LEVEL SECURITY;
+    ALTER TABLE audit_events FORCE ROW LEVEL SECURITY;
+    ALTER TABLE call_summaries FORCE ROW LEVEL SECURITY;
+    ALTER TABLE conversations FORCE ROW LEVEL SECURITY;
+    ALTER TABLE dispatch_analytics FORCE ROW LEVEL SECURITY;
+    ALTER TABLE dropped_call_recoveries FORCE ROW LEVEL SECURITY;
+    ALTER TABLE estimate_templates FORCE ROW LEVEL SECURITY;
+    ALTER TABLE expenses FORCE ROW LEVEL SECURITY;
+    ALTER TABLE files FORCE ROW LEVEL SECURITY;
+    ALTER TABLE messages FORCE ROW LEVEL SECURITY;
+    ALTER TABLE pending_invitations FORCE ROW LEVEL SECURITY;
+    ALTER TABLE phone_rate_limits FORCE ROW LEVEL SECURITY;
+    ALTER TABLE portal_sessions FORCE ROW LEVEL SECURITY;
+    ALTER TABLE proposals FORCE ROW LEVEL SECURITY;
+    ALTER TABLE quality_metrics FORCE ROW LEVEL SECURITY;
+    ALTER TABLE service_bundles FORCE ROW LEVEL SECURITY;
+    ALTER TABLE tech_status_today FORCE ROW LEVEL SECURITY;
+    ALTER TABLE tech_unavailable_blocks FORCE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_dnc_list FORCE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_oncall_rotation FORCE ROW LEVEL SECURITY;
+    ALTER TABLE user_calendar_integrations FORCE ROW LEVEL SECURITY;
+    ALTER TABLE users FORCE ROW LEVEL SECURITY;
+    ALTER TABLE voice_recordings FORCE ROW LEVEL SECURITY;
+    ALTER TABLE voice_sessions FORCE ROW LEVEL SECURITY;
+    ALTER TABLE vulnerability_signals FORCE ROW LEVEL SECURITY;
+    ALTER TABLE wording_preferences FORCE ROW LEVEL SECURITY;
+  `,
+
+  '131_appointment_assignments_no_double_booking': `
+    -- Blocker 7: prevent a technician from being assigned to two overlapping
+    -- appointments. The application-layer check in assignTechnician() is a
+    -- backstop but is subject to a TOCTOU race across concurrent requests
+    -- (two simultaneous assigns can both pass the existence check and both
+    -- INSERT). This migration adds the authoritative DB-level guard.
+    --
+    -- Design:
+    --
+    --  - The conflict is between (technician_id, time-range), but
+    --    appointment_assignments has technician_id while appointments
+    --    has scheduled_start/end. PostgreSQL EXCLUDE constraints can only
+    --    reference columns of the same row, so we denormalize the
+    --    appointment's scheduled_start/scheduled_end/status onto
+    --    appointment_assignments. The values are maintained by triggers
+    --    so application code does not have to know about them.
+    --  - A separate partial-unique index enforces at most one primary
+    --    technician per appointment (closes the second TOCTOU race in
+    --    assignTechnician's demote-then-create dance).
+    --  - btree_gist is required so the EXCLUDE constraint can mix equality
+    --    on UUID columns with range overlap on the time range in one GIST
+    --    index.
+
+    CREATE EXTENSION IF NOT EXISTS btree_gist;
+
+    -- Denormalized columns from appointments. Nullable initially so the
+    -- backfill below can run; promoted to NOT NULL once filled.
+    ALTER TABLE appointment_assignments
+      ADD COLUMN IF NOT EXISTS scheduled_start TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS scheduled_end TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS appointment_status TEXT;
+
+    UPDATE appointment_assignments aa
+       SET scheduled_start = a.scheduled_start,
+           scheduled_end = a.scheduled_end,
+           appointment_status = a.status
+      FROM appointments a
+     WHERE aa.appointment_id = a.id
+       AND aa.tenant_id = a.tenant_id
+       AND (aa.scheduled_start IS NULL OR aa.scheduled_end IS NULL OR aa.appointment_status IS NULL);
+
+    -- Any rows still missing values point at a deleted/missing appointment
+    -- — orphans that the FK should have prevented. Promote the columns to
+    -- NOT NULL only after confirming the backfill covered everything.
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM appointment_assignments
+         WHERE scheduled_start IS NULL OR scheduled_end IS NULL OR appointment_status IS NULL
+      ) THEN
+        RAISE WARNING 'appointment_assignments has rows with missing denormalized fields after backfill; leaving NULLable. Reconcile and re-deploy to enable NOT NULL.';
+      ELSE
+        ALTER TABLE appointment_assignments
+          ALTER COLUMN scheduled_start SET NOT NULL,
+          ALTER COLUMN scheduled_end SET NOT NULL,
+          ALTER COLUMN appointment_status SET NOT NULL;
+      END IF;
+    END $$;
+
+    -- Trigger 1 — fill denorm fields on INSERT (or when appointment_id
+    -- changes on UPDATE) by reading from the appointment row. Application
+    -- code does not need to supply scheduled_start/end/status.
+    CREATE OR REPLACE FUNCTION sync_assignment_appointment_fields()
+    RETURNS TRIGGER AS $$
+    DECLARE
+      appt_row RECORD;
+    BEGIN
+      SELECT scheduled_start, scheduled_end, status
+        INTO appt_row
+        FROM appointments
+       WHERE id = NEW.appointment_id AND tenant_id = NEW.tenant_id;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'Appointment % not found for tenant % when syncing assignment fields',
+          NEW.appointment_id, NEW.tenant_id;
+      END IF;
+      NEW.scheduled_start := appt_row.scheduled_start;
+      NEW.scheduled_end := appt_row.scheduled_end;
+      NEW.appointment_status := appt_row.status;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_assignment_sync_appointment_fields ON appointment_assignments;
+    CREATE TRIGGER trg_assignment_sync_appointment_fields
+      BEFORE INSERT OR UPDATE OF appointment_id ON appointment_assignments
+      FOR EACH ROW EXECUTE FUNCTION sync_assignment_appointment_fields();
+
+    -- Trigger 2 — propagate scheduled_start/end/status changes from
+    -- appointments down to every assignment that points at the row.
+    -- Rescheduling an appointment INTO a conflict will surface as an
+    -- exclusion_violation from this UPDATE, which is the correct outcome.
+    CREATE OR REPLACE FUNCTION sync_appointment_to_assignments()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF (NEW.scheduled_start IS DISTINCT FROM OLD.scheduled_start
+          OR NEW.scheduled_end IS DISTINCT FROM OLD.scheduled_end
+          OR NEW.status IS DISTINCT FROM OLD.status) THEN
+        UPDATE appointment_assignments
+           SET scheduled_start = NEW.scheduled_start,
+               scheduled_end = NEW.scheduled_end,
+               appointment_status = NEW.status
+         WHERE appointment_id = NEW.id AND tenant_id = NEW.tenant_id;
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_appointments_sync_to_assignments ON appointments;
+    CREATE TRIGGER trg_appointments_sync_to_assignments
+      AFTER UPDATE ON appointments
+      FOR EACH ROW EXECUTE FUNCTION sync_appointment_to_assignments();
+
+    -- EXCLUDE constraint — only added when no pre-existing overlaps remain.
+    -- If overlaps exist (legacy data), we WARN and skip; operators must
+    -- reconcile then re-deploy. We never silently downgrade to a weaker
+    -- check, because that would mask the bug we are closing.
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1
+          FROM appointment_assignments aa1
+          JOIN appointment_assignments aa2
+            ON aa2.tenant_id = aa1.tenant_id
+           AND aa2.technician_id = aa1.technician_id
+           AND aa2.id <> aa1.id
+         WHERE aa1.appointment_status IS NOT NULL
+           AND aa2.appointment_status IS NOT NULL
+           AND aa1.appointment_status NOT IN ('canceled', 'no_show')
+           AND aa2.appointment_status NOT IN ('canceled', 'no_show')
+           AND aa1.scheduled_start IS NOT NULL
+           AND aa1.scheduled_end IS NOT NULL
+           AND aa2.scheduled_start IS NOT NULL
+           AND aa2.scheduled_end IS NOT NULL
+           AND tstzrange(aa1.scheduled_start, aa1.scheduled_end)
+               && tstzrange(aa2.scheduled_start, aa2.scheduled_end)
+      ) THEN
+        RAISE WARNING 'Pre-existing overlapping technician assignments detected; skipping no_double_booking EXCLUDE constraint. Reconcile then re-deploy.';
+      ELSE
+        ALTER TABLE appointment_assignments
+          DROP CONSTRAINT IF EXISTS no_double_booking;
+        ALTER TABLE appointment_assignments
+          ADD CONSTRAINT no_double_booking
+          EXCLUDE USING gist (
+            tenant_id WITH =,
+            technician_id WITH =,
+            tstzrange(scheduled_start, scheduled_end) WITH &&
+          )
+          WHERE (appointment_status NOT IN ('canceled', 'no_show'));
+      END IF;
+    END $$;
+
+    -- Partial unique — closes the demote-then-create race in
+    -- assignTechnician. Without this, two concurrent primary assigns can
+    -- both pass the demote step and both INSERT is_primary = true.
+    DROP INDEX IF EXISTS uq_assignment_primary_per_appointment;
+    CREATE UNIQUE INDEX uq_assignment_primary_per_appointment
+      ON appointment_assignments (tenant_id, appointment_id)
+      WHERE is_primary;
+  `,
+
+  '132_customer_consent_status': `
+    -- Blocker 11 (TCPA / DNC compliance for voice-on launch).
+    --
+    -- An outbound AI call to a US number requires either prior express
+    -- consent (autodialer / pre-recorded message) or a documented
+    -- business relationship under the TCPA Safe Harbor. We store the
+    -- per-customer consent decision so the outbound gate can refuse a
+    -- call when the customer hasn't opted in.
+    --
+    -- The DNC list (\`tenant_dnc_list\`, migration 052) is the
+    -- tenant-local opt-out registry; a number on that list overrides
+    -- any granted consent.
+    --
+    -- Default 'not_requested' so existing rows don't accidentally
+    -- become 'granted' (which would be the riskiest possible default).
+    ALTER TABLE customers
+      ADD COLUMN IF NOT EXISTS consent_status TEXT NOT NULL DEFAULT 'not_requested'
+        CHECK (consent_status IN ('not_requested', 'granted', 'revoked', 'expired')),
+      ADD COLUMN IF NOT EXISTS consent_recorded_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS consent_recorded_by TEXT,
+      ADD COLUMN IF NOT EXISTS consent_method TEXT;
+  `,
+
+  // Invoice-to-cash failure handling. A SETTLED payment can later FAIL:
+  // an ACH/bank debit returned for insufficient funds (NSF), or a card
+  // chargeback. Unlike a refund (D2-4, which keeps the row 'completed'
+  // and accumulates refunded_amount_cents), a REVERSAL flips the payment
+  // to 'failed' — so it drops out of gross-revenue math (the money
+  // dashboard sums only status='completed') — and REOPENS the linked
+  // invoice (paid -> open/partially_paid) so it re-enters collections.
+  // reversed_at/reversal_reason record when + why; reversePayment()
+  // flips 'completed' -> 'failed' atomically, guarded on
+  // `reversed_at IS NULL` so a duplicate webhook delivery is a no-op.
+  '133_payments_reversal_tracking': `
+    ALTER TABLE payments
+      ADD COLUMN IF NOT EXISTS reversed_at TIMESTAMPTZ NULL,
+      ADD COLUMN IF NOT EXISTS reversal_reason TEXT NULL;
+    CREATE INDEX IF NOT EXISTS idx_payments_reversed_at
+      ON payments(reversed_at) WHERE reversed_at IS NOT NULL;
+
+    -- Widen the payment_method CHECK to match the domain PaymentMethod
+    -- union the code actually writes. The original inline constraint
+    -- only allowed ('stripe','cash','check','other'), but the Stripe
+    -- checkout webhook records 'credit_card' and the async-settlement
+    -- (ACH) path records 'bank_transfer' — both previously violated the
+    -- CHECK. Explicit DROP + ADD mirrors proposals_status_check.
+    ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_payment_method_check;
+    ALTER TABLE payments ADD CONSTRAINT payments_payment_method_check
+      CHECK (payment_method IN ('stripe', 'cash', 'check', 'credit_card', 'bank_transfer', 'other'));
+  `,
+
+  '134_proposal_chains': `
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS chain_id UUID;
+    CREATE INDEX IF NOT EXISTS idx_proposals_chain ON proposals(tenant_id, chain_id);
+  `,
+
+  // Idempotency key for AI-placed tentative holds. A redelivered voice
+  // message (at-least-once queue) must not create a second appointment hold
+  // for the same recording. The held-slot path stamps a deterministic key
+  // (`voice-hold:<recordingId>`); the partial unique index dedups concurrent
+  // re-inserts while leaving ordinary (keyless) appointments unaffected.
+  '135_appointments_idempotency_key': `
+    ALTER TABLE appointments
+      ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_appointments_idempotency
+      ON appointments(tenant_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+  `,
+
+  '136_create_invoice_dunning': `
+    CREATE TABLE IF NOT EXISTS invoice_dunning_configs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      -- ordered cadence, e.g.
+      -- [{"offsetDays":3,"channel":"sms"},{"offsetDays":7,"channel":"email"}]
+      reminder_steps JSONB NOT NULL DEFAULT '[]',
+      late_fee_type TEXT NOT NULL DEFAULT 'none'
+        CHECK (late_fee_type IN ('none','flat','percent')),
+      -- flat: amount in integer cents; percent: basis points (bps) of amount_due
+      late_fee_value_cents BIGINT NOT NULL DEFAULT 0,
+      late_fee_grace_days INTEGER NOT NULL DEFAULT 0,
+      late_fee_max_cents BIGINT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id)
+    );
+    -- (No separate tenant index: UNIQUE (tenant_id) already backs lookups.)
+    ALTER TABLE invoice_dunning_configs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE invoice_dunning_configs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_invoice_dunning_configs ON invoice_dunning_configs;
+    CREATE POLICY tenant_isolation_invoice_dunning_configs ON invoice_dunning_configs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS invoice_dunning_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      invoice_id UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK (kind IN ('reminder','late_fee')),
+      -- Stable per-step idempotency key (survives cadence edits): reminders use
+      -- '<offsetDays>:<channel>'; late fees use the accrual-period key supplied
+      -- by the worker (one-time fees use 'initial').
+      step_key TEXT NOT NULL,
+      amount_cents BIGINT,
+      channel TEXT,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, invoice_id, kind, step_key)
+    );
+    -- (No separate (tenant_id, invoice_id) index: the composite UNIQUE above
+    --  leads with those columns and already serves per-invoice lookups.)
+    CREATE INDEX IF NOT EXISTS idx_dunning_events_tenant ON invoice_dunning_events(tenant_id);
+    ALTER TABLE invoice_dunning_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE invoice_dunning_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_invoice_dunning_events ON invoice_dunning_events;
+    CREATE POLICY tenant_isolation_invoice_dunning_events ON invoice_dunning_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '137_technician_working_hours': `
+    CREATE TABLE IF NOT EXISTS technician_working_hours (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      technician_id UUID NOT NULL REFERENCES users(id),
+      day_of_week SMALLINT NOT NULL CHECK (day_of_week BETWEEN 0 AND 6),
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT uq_working_hours_per_tech_day UNIQUE (tenant_id, technician_id, day_of_week)
+    );
+    CREATE INDEX IF NOT EXISTS idx_technician_working_hours_tech
+      ON technician_working_hours (tenant_id, technician_id);
+    ALTER TABLE technician_working_hours ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE technician_working_hours FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_technician_working_hours ON technician_working_hours;
+    CREATE POLICY tenant_isolation_technician_working_hours ON technician_working_hours
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '138_tenant_settings_auto_invoice_on_completion': `
+    -- P20-001: opt-in toggle to auto-draft an invoice when a job is marked
+    -- complete. Off by default — owners opt in; the draft still routes
+    -- through the proposal/approval gate before anything is sent.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS auto_invoice_on_completion BOOLEAN NOT NULL DEFAULT false;
+  `,
+
+  '139_create_invoice_schedules': `
+    -- P21-001: progress / milestone billing. One schedule splits a job's total
+    -- into ordered milestones, each minted as its own invoice.
+    CREATE TABLE IF NOT EXISTS invoice_schedules (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      estimate_id UUID REFERENCES estimates(id),
+      total_amount_cents BIGINT NOT NULL,
+      -- ordered milestones, e.g.
+      -- [{"label":"Deposit","type":"percent","value":5000,"trigger":"on_accept"},
+      --  {"label":"Balance","type":"remainder","value":0,"trigger":"on_completion"}]
+      -- percent value is basis points (bps); flat is integer cents.
+      milestones JSONB NOT NULL DEFAULT '[]',
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_invoice_schedules_job
+      ON invoice_schedules(tenant_id, job_id);
+    ALTER TABLE invoice_schedules ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE invoice_schedules FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_invoice_schedules ON invoice_schedules;
+    CREATE POLICY tenant_isolation_invoice_schedules ON invoice_schedules
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    -- Link each minted milestone invoice back to its schedule + position.
+    ALTER TABLE invoices
+      ADD COLUMN IF NOT EXISTS schedule_id UUID REFERENCES invoice_schedules(id),
+      ADD COLUMN IF NOT EXISTS milestone_index INTEGER;
+  `,
+
+  '140_batch_invoicing': `
+    -- P21-003: batch-invoice sweep. Per (tenant, job, batch_date) dedup ledger
+    -- so a re-run never re-batches a job, plus a per-tenant opt-in toggle.
+    CREATE TABLE IF NOT EXISTS batch_invoice_runs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      -- Calendar date (YYYY-MM-DD) the batch ran.
+      batch_date TEXT NOT NULL,
+      proposal_id UUID REFERENCES proposals(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, job_id, batch_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_batch_invoice_runs_tenant
+      ON batch_invoice_runs(tenant_id);
+    ALTER TABLE batch_invoice_runs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE batch_invoice_runs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_batch_invoice_runs ON batch_invoice_runs;
+    CREATE POLICY tenant_isolation_batch_invoice_runs ON batch_invoice_runs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS batch_invoice_enabled BOOLEAN NOT NULL DEFAULT false;
+  `,
+
+  '141_milestone_billing_safeguards': `
+    -- P0 launch hardening for milestone (schedule) billing.
+    --
+    -- (1) One billing schedule per job. A create_invoice_schedule execution
+    --     that wrote the schedule row but then failed before drafting the
+    --     deposit left the proposal retryable with no resultEntityId; the retry
+    --     minted a SECOND schedule (fresh uuid). The completion hook dedups on
+    --     schedule_id, so two schedules billed the on_completion balance TWICE.
+    --     This unique index makes a duplicate schedule impossible at the DB.
+    --
+    --     RECONCILIATION (runs first): a DB that already hit this bug — or the
+    --     double-mint bug (2) — has duplicate rows the indexes below would
+    --     abort on. The deploy/migrate role bypasses RLS (see migration 119),
+    --     so this runs fleet-wide. For each job we keep ONE surviving schedule,
+    --     re-point every other duplicate's invoices onto it, unlink any invoice
+    --     that would then collide on (schedule_id, milestone_index) — keeping
+    --     the earliest and NULLing the rest's schedule link, so NO billing row
+    --     is deleted, only detached for manual review — then delete the emptied
+    --     duplicate schedules. Idempotent: once the indexes hold, every step
+    --     below matches nothing, so re-running this migration is a no-op.
+
+    --     (i) Re-point invoices from each non-surviving duplicate schedule onto
+    --         the survivor (most invoices, then earliest, then lowest id).
+    WITH counts AS (
+      SELECT s.tenant_id, s.job_id, s.id, s.created_at, COUNT(i.id) AS inv_count
+      FROM invoice_schedules s
+      LEFT JOIN invoices i ON i.schedule_id = s.id
+      GROUP BY s.tenant_id, s.job_id, s.id, s.created_at
+    ),
+    survivors AS (
+      SELECT DISTINCT ON (tenant_id, job_id) tenant_id, job_id, id AS survivor_id
+      FROM counts
+      ORDER BY tenant_id, job_id, inv_count DESC, created_at ASC, id ASC
+    )
+    UPDATE invoices i
+    SET schedule_id = sv.survivor_id
+    FROM invoice_schedules s
+    JOIN survivors sv ON sv.tenant_id = s.tenant_id AND sv.job_id = s.job_id
+    WHERE i.schedule_id = s.id AND s.id <> sv.survivor_id;
+
+    --     (ii) Resolve (schedule_id, milestone_index) collisions — from the
+    --          re-point above OR a prior double-mint — keeping the earliest
+    --          invoice per pair and unlinking the rest (schedule_id = NULL).
+    WITH ranked AS (
+      SELECT id,
+             ROW_NUMBER() OVER (
+               PARTITION BY schedule_id, milestone_index
+               ORDER BY created_at ASC, id ASC
+             ) AS rn
+      FROM invoices
+      WHERE schedule_id IS NOT NULL AND milestone_index IS NOT NULL
+    )
+    UPDATE invoices i
+    SET schedule_id = NULL
+    FROM ranked
+    WHERE i.id = ranked.id AND ranked.rn > 1;
+
+    --     (iii) Delete the now-empty duplicate schedules (nothing references them).
+    WITH counts AS (
+      SELECT s.tenant_id, s.job_id, s.id, s.created_at, COUNT(i.id) AS inv_count
+      FROM invoice_schedules s
+      LEFT JOIN invoices i ON i.schedule_id = s.id
+      GROUP BY s.tenant_id, s.job_id, s.id, s.created_at
+    ),
+    survivors AS (
+      SELECT DISTINCT ON (tenant_id, job_id) tenant_id, job_id, id AS survivor_id
+      FROM counts
+      ORDER BY tenant_id, job_id, inv_count DESC, created_at ASC, id ASC
+    )
+    DELETE FROM invoice_schedules s
+    USING survivors sv
+    WHERE sv.tenant_id = s.tenant_id AND sv.job_id = s.job_id AND s.id <> sv.survivor_id;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_invoice_schedules_job
+      ON invoice_schedules(tenant_id, job_id);
+
+    -- (2) One invoice per (schedule, milestone). The completion hook decided
+    --     "already minted" from an application read with no DB backstop and no
+    --     lock, so two concurrent / retried "mark complete" requests could both
+    --     mint the same balance invoice. Partial — non-milestone invoices carry
+    --     NULL schedule_id and must not collide.
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_invoices_schedule_milestone
+      ON invoices(schedule_id, milestone_index)
+      WHERE schedule_id IS NOT NULL;
+
+    -- (3) Fleet-wide opt-in / kill switch for on-completion milestone minting.
+    --     Mirrors auto_invoice_on_completion + batch_invoice_enabled (opt-in,
+    --     default false) so milestone billing — which writes real invoices
+    --     directly — is never silently active fleet-wide and can be halted in
+    --     an incident without deleting schedules.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS milestone_billing_enabled BOOLEAN NOT NULL DEFAULT false;
+  `,
+
+  '142_proposals_source_recording_index': `
+    -- P1 perf: the voice redelivery dedup (findAlreadyProcessed) used to
+    -- SELECT every proposal for the tenant and JS-scan for a recordingId on
+    -- EVERY inbound voice message — O(tenant proposals), growing forever. The
+    -- replacement findByRecordingId looks up by idempotency_key (already
+    -- indexed) OR source_context->>'recordingId'; this index serves the latter
+    -- branch so the whole lookup is indexed instead of a full-tenant scan.
+    CREATE INDEX IF NOT EXISTS idx_proposals_source_recording
+      ON proposals (tenant_id, (source_context->>'recordingId'));
   `,
 };
 
@@ -3140,6 +3742,45 @@ export function getMigrationSQL(): string {
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * True when `tenantId` is the canonical UUID shape that `setTenantContext`
+ * (and therefore every tenant-scoped DB path) accepts. Callers that take a
+ * tenant id from untrusted input — e.g. a public webhook URL param — should
+ * gate on this BEFORE doing any tenant-scoped work (resolver lookups, audit
+ * writes), otherwise the malformed id throws inside `setTenantContext` deeper
+ * in the call stack. Single source of truth so the guard can't drift from the
+ * throw it protects against.
+ */
+export function isValidTenantId(tenantId: string): boolean {
+  return UUID_REGEX.test(tenantId);
+}
+
+/**
+ * Produce the SQL that sets `app.current_tenant_id` for the current
+ * connection so RLS policies can scope queries to the tenant.
+ *
+ * **Callers must clear the GUC before returning the connection to the pool**
+ * — issue `RESET app.current_tenant_id` (or a wrapping transaction with
+ * `SET LOCAL` semantics) in the same `finally` that releases the client.
+ * Without that, the connection comes back to the pool with the previous
+ * tenant's context still set, and the next checkout silently bypasses RLS
+ * for any unscoped query until something else overwrites it. The wrappers
+ * in `pg-base.ts` enforce this; ad-hoc usages elsewhere (app.ts,
+ * voice-service.ts, provision-twilio.ts) do the same in their finally.
+ *
+ * Why plain `SET` and not `SET LOCAL`: `SET LOCAL` requires an enclosing
+ * transaction (it is silently dropped outside one), and a number of read
+ * paths intentionally run without `BEGIN/COMMIT`. Plain `SET` works in
+ * both shapes; the RESET-on-release pattern closes the leak window.
+ *
+ * Why interpolation is safe: the `UUID_REGEX` guard rejects anything other
+ * than `[0-9a-f-]{36}` before we build the string, so no attacker-controlled
+ * value ever reaches the SQL. PostgreSQL's `SET` syntax does not accept
+ * bind parameters; the equivalent `SELECT set_config(..., $1, false)`
+ * passes `(text, values)` to `client.query`, breaking the `(sql, params)`
+ * shape that the repo unit-test mocks expect. Keeping a SQL string
+ * preserves test compatibility while still closing the GUC-leak hole.
+ */
 export function setTenantContext(tenantId: string): string {
   if (!UUID_REGEX.test(tenantId)) {
     throw new Error('Invalid tenant ID format: must be a valid UUID');

@@ -193,4 +193,51 @@ describe('Leads — LeadDetail (P9-001)', () => {
       });
     });
   });
+
+  it('preserves an unsaved note draft when changing the language', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => baseLead,
+    } as unknown as Response);
+
+    render(<LeadDetail leadId="lead-1" />);
+
+    // Type a note draft but do NOT click "Save note".
+    const notes = await screen.findByLabelText('Lead notes');
+    fireEvent.change(notes, { target: { value: 'call back after 5pm' } });
+
+    // PATCH response for the language change (endpoint returns the updated lead).
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ ...baseLead, preferredLanguage: 'es' }),
+    } as unknown as Response);
+    // If the (removed) refetch ran, it would consume this GET and reset the
+    // notes textarea from the server, discarding the draft.
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => baseLead,
+    } as unknown as Response);
+
+    fireEvent.change(screen.getByLabelText('Preferred language'), {
+      target: { value: 'es' },
+    });
+
+    await waitFor(() => {
+      const langPatch = vi
+        .mocked(apiFetch)
+        .mock.calls.find(
+          (c) =>
+            (c[1] as RequestInit | undefined)?.method === 'PATCH' &&
+            JSON.parse((c[1] as RequestInit).body as string).preferredLanguage !==
+              undefined,
+        );
+      expect(langPatch).toBeDefined();
+    });
+
+    // The unsaved draft must survive the language change.
+    expect((notes as HTMLTextAreaElement).value).toBe('call back after 5pm');
+  });
 });

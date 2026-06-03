@@ -1,6 +1,6 @@
 export type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
 export type JobStatus = 'New' | 'Scheduled' | 'Unscheduled' | 'Dispatched' | 'En Route' | 'On Site' | 'Active' | 'In Progress' | 'Waiting for Parts' | 'Day 2' | 'Completed' | 'Canceled' | 'No Show' | 'Pending';
-export type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined';
+export type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined' | 'Expired';
 export type InvoiceStatus = 'Draft' | 'Sent' | 'Unpaid' | 'Paid' | 'Overdue';
 export type ProposalType = 'Invoice' | 'Estimate' | 'Schedule' | 'Follow-up' | 'Alert' | 'Duplicate' | 'Customer' | 'Clarification' | 'Note' | 'Payment' | 'Send';
 export type ProposalConfidence = 'High' | 'Medium';

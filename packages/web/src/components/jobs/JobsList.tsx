@@ -2,29 +2,18 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import {
   Search, Plus, ChevronRight, Camera, Clock,
-  AlertCircle, AlertTriangle, Zap, Mic,
+  AlertCircle, Mic,
 } from 'lucide-react';
+import type { JobListItem } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { normalizeJobStatus } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
+import { Spinner, EmptyState } from '../ui';
+import { ErrorState } from '../ErrorState';
 import { NewJobFlow } from './NewJobFlow';
 
+// UI tab-label union (distinct from the API status values mapped in TAB_API_STATUS).
 type JobStatus = 'New' | 'Scheduled' | 'In Progress' | 'Completed' | 'Canceled';
-
-interface ApiJob {
-  id: string;
-  jobNumber: string;
-  summary: string;
-  status: string;
-  priority?: string;
-  customerId?: string;
-  assignedTechnicianId?: string;
-  scheduledStart?: string;
-  createdAt?: string;
-  customer?: { id: string; displayName?: string; firstName?: string; lastName?: string };
-  technician?: { id: string; firstName?: string; lastName?: string; color?: string };
-  serviceType?: string;
-}
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
@@ -59,7 +48,7 @@ export function JobsList() {
   const [tab,     setTab]     = useState<JobStatus | 'All'>('All');
   const [showNew, setShowNew] = useState(false);
 
-  const { data, isLoading, error, refetch, setSearch, setFilters } = useListQuery<ApiJob>('/api/jobs');
+  const { data, isLoading, error, refetch, setSearch, setFilters } = useListQuery<JobListItem>('/api/jobs');
 
   const applyTabFilter = (nextTab: JobStatus | 'All') => {
     setTab(nextTab);
@@ -153,14 +142,11 @@ export function JobsList() {
         {/* Loading / Error */}
         {isLoading && (
           <div className="flex items-center justify-center py-16">
-            <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+            <Spinner size="md" className="text-slate-900" label="Loading jobs" />
           </div>
         )}
         {error && (
-          <div className="flex flex-col items-center gap-3 py-16">
-            <p className="text-sm text-red-500">Failed to load jobs</p>
-            <button onClick={refetch} className="text-xs text-blue-500 hover:underline">Retry</button>
-          </div>
+          <ErrorState message="Failed to load jobs" onRetry={refetch} />
         )}
 
         {/* Job cards */}
@@ -257,12 +243,7 @@ export function JobsList() {
             })}
 
             {filtered.length === 0 && (
-              <div className="flex flex-col items-center gap-3 py-16">
-                <div className="size-12 rounded-full bg-slate-100 flex items-center justify-center">
-                  <Zap size={18} className="text-slate-300" />
-                </div>
-                <p className="text-sm text-slate-400">No jobs match your filter</p>
-              </div>
+              <EmptyState title="No jobs match your filter" />
             )}
           </div>
         )}
