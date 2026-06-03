@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 import { Zap } from 'lucide-react';
 import { useOnboardingStatus } from '../../../hooks/useOnboardingStatus';
+import { track } from '../../../lib/analytics';
 import { Button, Spinner } from '../../ui';
 import { Sidebar } from './Sidebar';
 import { MobileProgress } from './MobileProgress';
@@ -35,6 +36,7 @@ export function OnboardingShell() {
     billingToastShown.current = true;
     if (billing === 'ok') {
       toast.success('Trial started — your card is on file for after the 14-day trial.');
+      track('trial_started');
       void refetch();
     } else if (billing === 'cancel') {
       toast.message('Checkout canceled — you can subscribe when you are ready.');
@@ -43,6 +45,16 @@ export function OnboardingShell() {
     next.delete('billing');
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams, refetch]);
+
+  // Fire once when the wizard transitions to "complete." React Strict
+  // double-mount in dev would call this twice — the ref guard keeps
+  // PostHog seeing exactly one event per finished tenant.
+  const completedFired = useRef(false);
+  useEffect(() => {
+    if (!data?.isComplete || completedFired.current) return;
+    completedFired.current = true;
+    track('onboarding_completed', { voiceAgentLive: data.voiceAgentLive });
+  }, [data?.isComplete, data?.voiceAgentLive]);
 
   if (isLoading && !data) {
     return (

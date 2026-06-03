@@ -81,6 +81,21 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
       (row.deposit_timing_policy as 'before_approval' | 'after_approval' | null) ?? undefined,
     // §9 — migration 098. Owner's hourly rate (integer cents).
     hourlyRateCents: (row.hourly_rate_cents as number | null) ?? undefined,
+    // §10 — identity fields persisted by PUT /api/onboarding/identity.
+    // Projected here so GET /api/settings returns them for the
+    // IdentityStep re-edit pre-load. NULL → undefined per the rest of
+    // this mapper's convention.
+    serviceAreaText: (row.service_area_text as string | null) ?? undefined,
+    serviceAreaRadius: (row.service_area_radius as number | null) ?? undefined,
+    businessHours: (() => {
+      const raw = row.business_hours as
+        | Record<string, { open: string; close: string } | null>
+        | null
+        | undefined;
+      if (!raw || typeof raw !== 'object') return undefined;
+      return raw;
+    })(),
+    jobBufferMinutes: (row.job_buffer_minutes as number | null) ?? undefined,
     // B1 — migration 088. NULL from DB → undefined in TS (same
     // convention as all other nullable optional columns here).
     voiceAgentName: (row.voice_agent_name as string | null) ?? undefined,

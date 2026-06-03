@@ -78,6 +78,8 @@ launch-week sequencing.
 | `VITE_CLERK_PUBLISHABLE_KEY` | _live pub key_ |
 | `VITE_STRIPE_PUBLISHABLE_KEY` | _live pub key_ |
 | `VITE_API_BASE_URL` | `https://api.fieldly.app` |
+| `VITE_POSTHOG_KEY` | _PostHog project key_ (required to enable funnel tracking) |
+| `VITE_POSTHOG_HOST` | optional override; defaults to `https://us.i.posthog.com` |
 
 **Voice-quality gate:**
 

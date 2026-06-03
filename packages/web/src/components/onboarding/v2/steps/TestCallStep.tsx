@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router';
 import { Phone, Copy, Check } from 'lucide-react';
 import { useApiClient } from '../../../../lib/apiClient';
 import { Button } from '../../../ui';
+import { track } from '../../../../lib/analytics';
 import type { OnboardingStatusResponse } from '../../../../types/onboarding';
 
 interface TestCallStepProps {
@@ -53,7 +54,10 @@ export function TestCallStep({ status, onSkipped, onRefresh }: TestCallStepProps
     setGoingLive(true);
     try {
       const res = await apiFetch('/api/voice/go-live', { method: 'POST' });
-      if (res.ok) onRefresh();
+      if (res.ok) {
+        track('voice_agent_turned_on');
+        onRefresh();
+      }
     } finally {
       setGoingLive(false);
     }

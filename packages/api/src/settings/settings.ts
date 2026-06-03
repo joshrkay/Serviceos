@@ -199,6 +199,16 @@ export interface TenantSettings {
    */
   hourlyRateCents?: number | null;
   /**
+   * §10 onboarding identity fields. Persisted by PUT /api/onboarding/identity
+   * via a raw INSERT/UPDATE; projected here so GET /api/settings can return
+   * them for the IdentityStep re-edit pre-load (otherwise the form
+   * silently re-saves its hardcoded defaults over the operator's values).
+   */
+  serviceAreaText?: string | null;
+  serviceAreaRadius?: number | null;
+  businessHours?: Record<string, { open: string; close: string } | null> | null;
+  jobBufferMinutes?: number | null;
+  /**
    * B1 — Per-tenant voice persona. When set, the calling agent uses
    * this name in its greeting ("Hi, I'm {voiceAgentName}. How can I
    * help?"). Null = use the default generic opener.

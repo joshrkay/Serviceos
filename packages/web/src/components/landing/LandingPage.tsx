@@ -10,6 +10,11 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { Button } from '../ui/button';
+import { track } from '../../lib/analytics';
+
+const onCtaClick = (location: string) => () =>
+  track('landing_signup_clicked', { location });
+const onPricingCtaClick = () => track('pricing_cta_clicked', { location: 'pricing_card' });
 
 export function LandingPage() {
   return (
@@ -48,7 +53,7 @@ function Header() {
           <Link to="/login">
             <Button variant="ghost" size="sm">Log in</Button>
           </Link>
-          <Link to="/signup">
+          <Link to="/signup" onClick={onCtaClick('header')}>
             <Button variant="primary" size="sm">Start free trial</Button>
           </Link>
         </div>
@@ -78,7 +83,7 @@ function Hero() {
             Built for the shop with 1&ndash;3 trucks and no office.
           </p>
           <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
-            <Link to="/signup">
+            <Link to="/signup" onClick={onCtaClick('hero')}>
               <Button variant="primary" size="lg" rightIcon={<ArrowRight size={16} />}>
                 Start 14-day free trial
               </Button>
@@ -419,7 +424,7 @@ function PricingSection() {
                   </li>
                 ))}
               </ul>
-              <Link to="/signup" className="mt-7 block">
+              <Link to="/signup" className="mt-7 block" onClick={onPricingCtaClick}>
                 <Button variant="primary" size="lg" fullWidth rightIcon={<ArrowRight size={16} />}>
                   Start free trial
                 </Button>
@@ -495,7 +500,7 @@ function FinalCTASection() {
           14-day free trial. No credit card. Live in 15 minutes.
         </p>
         <div className="mt-8 flex items-center justify-center gap-3">
-          <Link to="/signup">
+          <Link to="/signup" onClick={onCtaClick('final_cta')}>
             <Button variant="primary" size="lg" rightIcon={<ArrowRight size={16} />}>
               Start free trial
             </Button>
