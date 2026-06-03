@@ -160,7 +160,7 @@ export function TerminologySheet({ onClose }: TerminologySheetProps) {
 
         <div className="px-5 py-5 space-y-4">
           <p className="text-xs text-slate-500">
-            Customize how ServiceOS refers to common CRM entities. Leave a field
+            Customize how Fieldly refers to common CRM entities. Leave a field
             blank to use the default. Equipment terms (Furnace, AC, etc.) are
             managed by your vertical pack and are not edited here.
           </p>
