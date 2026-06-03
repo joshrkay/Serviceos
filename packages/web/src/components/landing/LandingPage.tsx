@@ -42,7 +42,7 @@ function Header() {
           <span className="flex size-8 items-center justify-center rounded-xl bg-slate-900">
             <Zap size={15} className="text-white" />
           </span>
-          <span className="text-base tracking-tight">Fieldly</span>
+          <span className="text-base tracking-tight">Rivet</span>
         </Link>
         <nav className="hidden items-center gap-7 text-sm text-slate-600 md:flex">
           <a href="#how" className="hover:text-slate-900">How it works</a>
@@ -75,7 +75,7 @@ function Hero() {
             Your AI dispatcher.
           </h1>
           <p className="mt-6 text-lg leading-relaxed text-slate-600 sm:text-xl">
-            Fieldly answers your phone, books your jobs, sends your
+            Rivet answers your phone, books your jobs, sends your
             estimates, and chases your invoices. You approve what matters
             in 30 seconds a day.
           </p>
@@ -133,13 +133,13 @@ function FeaturesSection() {
       icon: Phone,
       title: 'Answers every call',
       body:
-        'Fieldly picks up in your shop&apos;s voice, books the job, and routes emergencies straight to you. Never another missed call on a 102&deg; day.',
+        'Rivet picks up in your shop&apos;s voice, books the job, and routes emergencies straight to you. Never another missed call on a 102&deg; day.',
     },
     {
       icon: FileText,
       title: 'Drafts your quotes',
       body:
-        'From the call recording and your customer history, Fieldly drafts the estimate. You approve or edit by tapping a single SMS.',
+        'From the call recording and your customer history, Rivet drafts the estimate. You approve or edit by tapping a single SMS.',
     },
     {
       icon: CreditCard,
@@ -159,7 +159,7 @@ function FeaturesSection() {
       <div className="mx-auto max-w-6xl px-6 py-20">
         <div className="text-center">
           <p className="text-sm uppercase tracking-widest text-slate-500">
-            What Fieldly does
+            What Rivet does
           </p>
           <h2 className="mt-4 text-3xl font-medium tracking-tight text-slate-900 sm:text-4xl">
             The whole back office, on autopilot.
@@ -209,7 +209,7 @@ function ComparisonSection() {
     {
       time: '4:30 PM',
       without: '"My AC just stopped, 104 in here, my mom is on oxygen." You\'re two hours away.',
-      with: 'Fieldly flags emergency + medical. Patches the call straight to your cell with a 5-second context preface.',
+      with: 'Rivet flags emergency + medical. Patches the call straight to your cell with a 5-second context preface.',
     },
     {
       time: '9:30 PM',
@@ -231,8 +231,8 @@ function ComparisonSection() {
         <div className="mt-14 overflow-hidden rounded-2xl border border-slate-200 bg-white">
           <div className="grid grid-cols-1 border-b border-slate-200 bg-slate-100 text-xs font-medium uppercase tracking-wider text-slate-500 sm:grid-cols-[100px_1fr_1fr]">
             <div className="hidden p-4 sm:block">Time</div>
-            <div className="border-l border-slate-200 p-4 sm:border-l">Without Fieldly</div>
-            <div className="border-l border-slate-200 p-4">With Fieldly</div>
+            <div className="border-l border-slate-200 p-4 sm:border-l">Without Rivet</div>
+            <div className="border-l border-slate-200 p-4">With Rivet</div>
           </div>
           {rows.map((row, i) => (
             <div
@@ -271,7 +271,7 @@ function HowItWorksSection() {
       n: '2',
       title: 'Forward your business line',
       body:
-        'We provision you a local phone number. Forward your line in 5 minutes. Fieldly starts answering immediately.',
+        'We provision you a local phone number. Forward your line in 5 minutes. Rivet starts answering immediately.',
     },
     {
       n: '3',
@@ -315,7 +315,7 @@ function HowItWorksSection() {
 function TrustSection() {
   const pillars = [
     {
-      title: 'Fieldly tells you when it\'s unsure',
+      title: 'Rivet tells you when it\'s unsure',
       body:
         'Low-confidence parts, anomalous prices, and unverified accounts are flagged before they reach your customer.',
     },
@@ -405,7 +405,7 @@ function PricingSection() {
           <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
             <div className="bg-slate-900 px-8 py-8 text-center text-white">
               <p className="text-sm uppercase tracking-widest text-slate-400">
-                Fieldly
+                Rivet
               </p>
               <div className="mt-4 flex items-baseline justify-center">
                 <span className="text-5xl font-medium tracking-tight">$297</span>
@@ -444,11 +444,11 @@ function FAQSection() {
   const faqs = [
     {
       q: 'Will my customers know it\'s an AI?',
-      a: 'Fieldly answers in your shop\'s voice with the name you give it (e.g. "M&R Mechanical\'s office"). Most customers do not notice. The voice quality is high. If a caller asks directly, we are honest about it.',
+      a: 'Rivet answers in your shop\'s voice with the name you give it (e.g. "M&R Mechanical\'s office"). Most customers do not notice. The voice quality is high. If a caller asks directly, we are honest about it.',
     },
     {
       q: 'What if the AI makes a mistake?',
-      a: 'Nothing irreversible is sent without your approval. Every quote, invoice, and follow-up arrives in your phone as an SMS with Approve / Edit / Reject. Fieldly also surfaces its own uncertainty — low-confidence parts and pricing anomalies are flagged before they reach you.',
+      a: 'Nothing irreversible is sent without your approval. Every quote, invoice, and follow-up arrives in your phone as an SMS with Approve / Edit / Reject. Rivet also surfaces its own uncertainty — low-confidence parts and pricing anomalies are flagged before they reach you.',
     },
     {
       q: 'Do I have to log into a dashboard every day?',
@@ -522,10 +522,10 @@ function Footer() {
           <span className="flex size-7 items-center justify-center rounded-lg bg-slate-900">
             <Zap size={13} className="text-white" />
           </span>
-          <span className="text-sm tracking-tight text-slate-900">Fieldly</span>
+          <span className="text-sm tracking-tight text-slate-900">Rivet</span>
         </div>
         <p className="text-xs text-slate-500">
-          &copy; 2026 Fieldly &middot; Privacy &middot; Terms
+          &copy; 2026 Rivet &middot; Privacy &middot; Terms
         </p>
       </div>
     </footer>

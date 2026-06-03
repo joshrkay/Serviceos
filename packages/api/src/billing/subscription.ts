@@ -2,7 +2,7 @@ import type { Pool } from 'pg';
 import { ValidationError, NotFoundError } from '../shared/errors';
 
 /**
- * Tier 4 (Subscription — Fieldly billing). Service that mints Stripe
+ * Tier 4 (Subscription — Rivet billing). Service that mints Stripe
  * Customer Portal sessions for the tenant's SaaS subscription. Distinct
  * from `public-invoice-service.getOrCreateCheckoutUrl` (which is
  * billing the TENANT's customers via Stripe Connect — different

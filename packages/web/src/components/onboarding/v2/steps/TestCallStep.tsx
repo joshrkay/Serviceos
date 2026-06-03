@@ -129,7 +129,7 @@ export function TestCallStep({ status, onSkipped, onRefresh }: TestCallStepProps
       <header>
         <h1 className="text-2xl font-medium tracking-tight text-slate-900">Make a test call</h1>
         <p className="text-sm text-slate-500 mt-2">
-          Call your Fieldly number from your phone. We&apos;ll detect it and let you turn on AI
+          Call your Rivet number from your phone. We&apos;ll detect it and let you turn on AI
           answering for real.
         </p>
       </header>

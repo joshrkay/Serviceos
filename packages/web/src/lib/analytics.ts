@@ -19,7 +19,7 @@
 import { getRuntimeConfigValue } from './runtimeConfig';
 
 /**
- * Funnel events tracked across the Fieldly app. Adding a new event?
+ * Funnel events tracked across the Rivet app. Adding a new event?
  * Put it here so all surfaces query the same name.
  */
 export type AnalyticsEvent =

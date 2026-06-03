@@ -55,7 +55,7 @@ describe('EstimateApprovalPage — Blocker 8: no fixture-data leak on failure', 
     );
     // No fixture customer should ever surface here.
     expect(screen.queryByText(/Sarah Johnson/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Fieldly Pro Services/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Rivet Pro Services/i)).not.toBeInTheDocument();
   });
 
   it('shows an error screen on a non-OK (500) response', async () => {

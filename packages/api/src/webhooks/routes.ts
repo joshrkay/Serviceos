@@ -116,7 +116,7 @@ export interface WebhookRouterDeps {
    */
   pendingInvitationRepo?: PendingInvitationRepository;
   /**
-   * Tier 4 (Subscription — Fieldly billing). When wired, the Stripe
+   * Tier 4 (Subscription — Rivet billing). When wired, the Stripe
    * webhook applies customer.subscription.* events onto tenants
    * (cached subscription_status). Optional so legacy harnesses
    * without Stripe configured still build the router.
@@ -1116,7 +1116,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         }
       }
 
-      // Tier 4 (Subscription — Fieldly billing). customer.subscription.*
+      // Tier 4 (Subscription — Rivet billing). customer.subscription.*
       // events update the tenant's cached subscription status. Match
       // by stripe_customer_id (the BillingService persists it on
       // first portal-open). Idempotent — we just write the latest

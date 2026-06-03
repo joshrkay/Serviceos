@@ -369,7 +369,7 @@ function SuccessScreen({
               <span className="text-white" style={{ fontSize: 13 }}>F</span>
             </div>
             <div>
-              <p className="text-sm text-slate-800">Fieldly Pro Services</p>
+              <p className="text-sm text-slate-800">Rivet Pro Services</p>
               <p className="text-xs text-slate-400">Austin, TX</p>
             </div>
           </div>
@@ -409,7 +409,7 @@ function SuccessScreen({
                 <div className="size-6 rounded-lg bg-white/10 flex items-center justify-center">
                   <span className="text-white" style={{ fontSize: 11 }}>F</span>
                 </div>
-                <p className="text-sm text-white">Fieldly Pro Services</p>
+                <p className="text-sm text-white">Rivet Pro Services</p>
               </div>
               <div className="flex items-center gap-1.5">
                 <span className="size-2 rounded-full bg-green-400 animate-pulse" />
@@ -511,7 +511,7 @@ function SuccessScreen({
               className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 hover:border-slate-300 hover:bg-slate-50 transition-colors">
               <Phone size={13} className="text-slate-500" /> (512) 555-0000
             </a>
-            <a href="mailto:info@fieldly.pro"
+            <a href="mailto:info@rivet.ai"
               className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 hover:border-slate-300 hover:bg-slate-50 transition-colors">
               <Mail size={13} className="text-slate-500" /> Email us
             </a>

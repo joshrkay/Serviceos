@@ -56,7 +56,7 @@ export function Sidebar({ status, activeId, onSelect }: SidebarProps) {
         <span className="flex size-8 items-center justify-center rounded-xl bg-slate-900">
           <Zap size={14} className="text-white" />
         </span>
-        <span className="text-base tracking-tight text-slate-900">Fieldly</span>
+        <span className="text-base tracking-tight text-slate-900">Rivet</span>
       </div>
 
       <div className="mb-4 text-xs uppercase tracking-widest text-slate-500">Setup</div>

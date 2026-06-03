@@ -1,7 +1,7 @@
 export const openApiSpec = {
   openapi: '3.0.3',
   info: {
-    title: 'Fieldly API',
+    title: 'Rivet API',
     description: 'Multi-tenant field service management platform API. Use Bearer token authentication with Clerk JWT. All endpoints require the `Authorization: Bearer <token>` header.',
     version: '1.0.0',
   },

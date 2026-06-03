@@ -1,10 +1,10 @@
-# Fieldly — Launch-Day Posts
+# Rivet — Launch-Day Posts
 
 **Date:** 2026-06-03
 **Owner:** Founder
 **Status:** Ready to schedule (review before posting)
 
-Source of truth for messaging is `2026-06-03-fieldly-gtm-brief.md`. Use these
+Source of truth for messaging is `2026-06-03-rivet-gtm-brief.md`. Use these
 posts as a starting point — edit for your voice, but don't drift from the
 brief's positioning.
 
@@ -19,11 +19,11 @@ brief's positioning.
 > They miss six calls before lunch. They lose one emergency a week to a
 > competitor who happened to answer.
 >
-> We built Fieldly so they stop having to.
+> We built Rivet so they stop having to.
 
 **Tweet 2 (the offer):**
 
-> Fieldly is an AI dispatcher for solo home-service operators.
+> Rivet is an AI dispatcher for solo home-service operators.
 >
 > It answers your phone in your shop's voice, books the job, drafts the
 > quote from the call, sends the invoice when the job's done, and chases
@@ -35,7 +35,7 @@ brief's positioning.
 
 > Every AI receptionist on the market hides its mistakes.
 >
-> Fieldly tells you. Every evening, a text: "Today I booked 4 jobs, sent
+> Rivet tells you. Every evening, a text: "Today I booked 4 jobs, sent
 > 5 quotes, collected $2,100. Here's what I wasn't sure about."
 >
 > That's the trust differentiator. Nobody else is honest enough to ship it.
@@ -48,7 +48,7 @@ brief's positioning.
 >
 > If it doesn't return you 10 hours a week, cancel and keep your data.
 >
-> fieldly.app
+> rivet.ai
 
 ---
 
@@ -56,7 +56,7 @@ brief's positioning.
 
 **Title-style opener:**
 
-> Today we're launching Fieldly. Here's why it exists.
+> Today we're launching Rivet. Here's why it exists.
 
 **Body:**
 
@@ -83,10 +83,10 @@ When I asked Mike what he'd hire for, he didn't say a tech. He said:
 The answer for the last 20 years was: hire a receptionist. Today nobody's
 available, nobody can afford one, and nobody has time to train one.
 
-So we built Fieldly. The AI back office for the shop with 1–3 trucks and
+So we built Rivet. The AI back office for the shop with 1–3 trucks and
 no office.
 
-Fieldly answers your phone in your shop's voice. It books the job. It
+Rivet answers your phone in your shop's voice. It books the job. It
 drafts the quote from the call. It sends the invoice when the job's done.
 It chases payment. It monitors your Google reviews and drafts responses.
 
@@ -97,7 +97,7 @@ why we built this and not just another AI receptionist.
 $297/month. 14-day free trial. Card on file, nothing charged until day 15.
 
 If you run a small home-service shop and you're the bottleneck, we built
-this for you. fieldly.app
+this for you. rivet.ai
 
 ---
 
@@ -113,7 +113,7 @@ Built an AI back office for solo plumbers / 1-3 truck shops. Honest feedback wan
 
 Hey r/HVAC,
 
-I'm one of the people behind Fieldly. We just launched today. I'm posting
+I'm one of the people behind Rivet. We just launched today. I'm posting
 here because this group is the actual ICP and I'd rather get honest beat-
 downs from operators than polite nodding from a tech audience.
 
@@ -145,7 +145,7 @@ I'd love honest critique:
   phone?
 - What am I missing?
 
-If you want to try it, fieldly.app. If you don't, I'll take the feedback
+If you want to try it, rivet.ai. If you don't, I'll take the feedback
 in the comments and shut up.
 
 ---
@@ -158,7 +158,7 @@ in the comments and shut up.
 
 Hey [Name],
 
-Quick note. We just launched Fieldly today — the AI back office I
+Quick note. We just launched Rivet today — the AI back office I
 mentioned [last time we talked / on our call in May / over drinks].
 
 You said you'd be willing to be honest with me about whether it actually
@@ -177,7 +177,7 @@ Two asks:
    onboard you personally over a 20-minute call.
 2. Whatever you find — good, bad, embarrassing — would you tell me?
 
-If yes to either: fieldly.app/signup or reply with a time.
+If yes to either: rivet.ai/signup or reply with a time.
 
 If no: no worries, and thanks for the time you've already given me.
 
@@ -191,7 +191,7 @@ If no: no worries, and thanks for the time you've already given me.
 
 Hey everyone — quick intro and an ask.
 
-I'm [Name], spent the last year building [Fieldly](https://fieldly.app)
+I'm [Name], spent the last year building [Rivet](https://rivet.ai)
 — an AI dispatcher for owner-operator HVAC/plumbing shops. Just
 launched today.
 
@@ -223,7 +223,7 @@ Comment or DM. Thanks.
 
 ## Don't post until
 
-- [ ] Landing page live at fieldly.app (or chosen domain) — `/`
+- [ ] Landing page live at rivet.ai (or chosen domain) — `/`
 - [ ] Signup works end-to-end (real Clerk, real email, real onboarding)
 - [ ] AI check passes for new tenants (model provisioned)
 - [ ] At least one test call succeeds in production

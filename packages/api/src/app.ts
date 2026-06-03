@@ -609,7 +609,7 @@ export function createApp(): express.Express {
   const pendingInvitationRepo = pool
     ? new PgPendingInvitationRepository(pool)
     : new InMemoryPendingInvitationRepository();
-  // Tier 4 (Subscription — Fieldly billing). Hoisted up so the Stripe
+  // Tier 4 (Subscription — Rivet billing). Hoisted up so the Stripe
   // webhook can update the cached subscription status when
   // customer.subscription.* events arrive. Single instance shared
   // with the /api/billing route. Requires both Pg pool + Stripe key

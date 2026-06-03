@@ -7,7 +7,7 @@ this checklist, and about 90 minutes.
 **Staging URL:** https://serviceosweb-development.up.railway.app
 
 **Before you start — confirm the app loads:**
-Open the staging URL. You should see a Fieldly login page. If you see a white
+Open the staging URL. You should see a Rivet login page. If you see a white
 screen or a JavaScript error, stop and message the dev team — the deployment
 needs a fix before this review can proceed.
 

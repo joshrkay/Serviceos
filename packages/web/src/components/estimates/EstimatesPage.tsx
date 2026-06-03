@@ -472,7 +472,7 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
 }) {
   const total    = lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
   const [copied, setCopied] = useState(false);
-  const link = `fieldly.app/e/${est.estimateNumber.toLowerCase().replace('-', '')}`;
+  const link = `rivet.ai/e/${est.estimateNumber.toLowerCase().replace('-', '')}`;
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center p-4" onClick={onClose}>
@@ -491,7 +491,7 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
               onClick={() => printEstimateDocument({
                 estimateNumber: est.estimateNumber,
                 customerName: est.customer,
-                businessName: 'Fieldly Pro Services',
+                businessName: 'Rivet Pro Services',
                 businessContact: 'Austin, TX · (512) 555-0000',
                 description: est.description,
                 validUntil: est.validUntil,
@@ -514,7 +514,7 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
             <div>
               <div className="flex items-center gap-2 mb-1">
                 <div className="flex size-8 items-center justify-center rounded-lg bg-slate-900 text-white" style={{ fontSize: 12 }}>F</div>
-                <p className="text-sm text-slate-900">Fieldly Pro Services</p>
+                <p className="text-sm text-slate-900">Rivet Pro Services</p>
               </div>
               <p className="text-xs text-slate-400">Austin, TX · (512) 555-0000</p>
             </div>

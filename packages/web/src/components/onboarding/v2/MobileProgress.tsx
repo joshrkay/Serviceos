@@ -35,7 +35,7 @@ export function MobileProgress({ status, activeId }: MobileProgressProps) {
           <span className="flex size-7 items-center justify-center rounded-lg bg-slate-900">
             <Zap size={12} className="text-white" />
           </span>
-          <span className="text-sm tracking-tight text-slate-900">Fieldly</span>
+          <span className="text-sm tracking-tight text-slate-900">Rivet</span>
         </div>
         <span className="text-xs text-slate-500">
           Step {completedCount + 1} of {total} · {STEP_LABELS[activeId]}

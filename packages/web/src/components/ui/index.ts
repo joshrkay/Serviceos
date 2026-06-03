@@ -1,5 +1,5 @@
 /**
- * Fieldly design-system primitives.
+ * Rivet design-system primitives.
  *
  * Token-driven, dependency-free building blocks (no cva/radix) that
  * replace hand-rolled Tailwind markup across the app so spacing, color,

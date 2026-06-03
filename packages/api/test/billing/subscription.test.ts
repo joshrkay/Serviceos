@@ -4,7 +4,7 @@ import { BillingService } from '../../src/billing/subscription';
 const TENANT = '11111111-1111-4111-8111-111111111111';
 
 /**
- * Tier 4 (Subscription — Fieldly billing) — BillingService unit tests.
+ * Tier 4 (Subscription — Rivet billing) — BillingService unit tests.
  * The service queries Pg directly via `pool.query`; we stub the pool
  * with a vi.fn() that pattern-matches SQL strings. The Stripe API is
  * stubbed via the injectable fetchFn dependency.

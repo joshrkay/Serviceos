@@ -1,4 +1,4 @@
-# Fieldly — Go-to-Market Brief
+# Rivet — Go-to-Market Brief
 
 **Date:** 2026-06-03
 **Stage:** Public launch (Wave 3 entry)
@@ -9,7 +9,7 @@
 
 ## 1. One-paragraph pitch
 
-Fieldly is the AI back office for solo home-service operators. It answers
+Rivet is the AI back office for solo home-service operators. It answers
 the phone in your shop's voice, drafts quotes from the call, sends invoices
 when the job is done, and chases payment — and surfaces only the
 30-second decisions that actually need you. Built for the 1–3 truck HVAC
@@ -76,7 +76,7 @@ Three things became true in the last 18 months:
 
 ## 4. Pricing
 
-| | Fieldly |
+| | Rivet |
 |---|---|
 | **Price** | **$297 / month** |
 | **Free trial** | 14 days; card on file, nothing charged until day 15 |
@@ -107,10 +107,10 @@ var). 14-day trial baked into the Checkout Session. Webhook flips
 | **Housecall Pro** | "All-in-one home service software" | Owner still answers the phone, writes the quote, sends the invoice |
 | **Jobber** | "Field service CRM" | Same — software, not staff |
 | **Rosie / Goodcall / Numa** | "AI receptionist" | Books an appointment. Doesn't quote, invoice, chase payment, or monitor reviews. And papers over its mistakes. |
-| **Fieldly** | **AI back office** | Replaces the dispatcher, not the truck. The owner runs the trade; we run the business side. |
+| **Rivet** | **AI back office** | Replaces the dispatcher, not the truck. The owner runs the trade; we run the business side. |
 
 **The honesty wedge.** Every AI receptionist on the market hides its
-mistakes. Fieldly surfaces them. The end-of-day digest has a
+mistakes. Rivet surfaces them. The end-of-day digest has a
 "what I wasn't sure about today" section. That's the trust pillar
 nobody else will copy because nobody else wants to admit AI is
 sometimes wrong.
@@ -121,19 +121,19 @@ sometimes wrong.
 
 ### Homepage hero
 - **H1:** Your AI dispatcher.
-- **Sub:** Fieldly answers your phone, books your jobs, sends your
+- **Sub:** Rivet answers your phone, books your jobs, sends your
   quotes, and chases your invoices. You approve what matters in
   30 seconds a day.
 - **CTA:** Start 14-day free trial — nothing charged until day 15.
 
 ### Email/cold outreach (one-liner)
-"Replace your dispatcher with AI. Fieldly answers every call in
+"Replace your dispatcher with AI. Rivet answers every call in
 your shop's voice and books the job — for the cost of half a tank
 of gas a day."
 
 ### Social (X / LinkedIn launch post)
 > Most HVAC owners I know are dispatching from inside an attic on
-> a 102° day. We built Fieldly because they shouldn't have to.
+> a 102° day. We built Rivet because they shouldn't have to.
 > AI answers the phone, books the job, sends the quote, chases
 > the invoice. Owner approves what matters in 30 seconds a day.
 > $297/mo. 14-day trial. Link below.
@@ -148,7 +148,7 @@ without-column from `day-in-the-life.md`.)
 ## 7. Soft-launch channel plan (this week)
 
 Day 1–2 (build): land critical fixes (webhook idempotency, estimate
-page mock-data leak, RLS FORCE), ship landing page, rebrand to Fieldly,
+page mock-data leak, RLS FORCE), ship landing page, rebrand to Rivet,
 wire Stripe pricing, set up PostHog.
 
 Day 3 (quiet launch): open signups to a closed list of ~10 trusted
@@ -219,13 +219,13 @@ re-evaluate before scaling channels.
 - [ ] Production TypeScript build green (`npx tsc --project tsconfig.build.json --noEmit`)
 
 ### Must-have marketing (Day 2)
-- [ ] Public landing page at fieldly.app `/`
-- [ ] Rebrand cleanup (all user-facing "ServiceOS" → "Fieldly")
+- [ ] Public landing page at rivet.ai `/`
+- [ ] Rebrand cleanup (all user-facing "ServiceOS" → "Rivet")
 - [ ] Pricing visible on landing + Stripe Checkout configured to $297/mo
 - [ ] PostHog wired with `signup`, `onboarding_step_completed`, `first_ai_call`, `trial_to_paid` events
 
 ### Must-have ops (Day 2–3)
-- [ ] Production domain DNS pointed at Railway (`fieldly.app`, `api.fieldly.app`)
+- [ ] Production domain DNS pointed at Railway (`rivet.ai`, `api.rivet.ai`)
 - [ ] TLS cert provisioned
 - [ ] Sentry alerting wired to founder phone for critical errors
 - [ ] Voice-quality Layer 1 gate signed off (per `voice-quality-launch-gate.md`)
@@ -249,10 +249,10 @@ re-evaluate before scaling channels.
 
 ## 11. Open questions
 
-1. **Domain**: confirm `fieldly.app` vs `fieldly.com` vs other. Anything
+1. **Domain**: confirm `rivet.ai` is registered and DNS points at Railway. Anything
    we register today will need DNS + TLS + Clerk app rename before
    Friday.
-2. **Voice number**: do we provision a Fieldly support number for trial
+2. **Voice number**: do we provision a Rivet support number for trial
    users to call us, separate from their provisioned business number?
 3. **Free-trial gating**: 14 days, or 14 days + 100 AI-minute cap
    (whichever comes first)? Cap protects margin if a high-volume shop

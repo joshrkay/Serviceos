@@ -172,7 +172,7 @@ export function PhoneStep({ status, onAdvance, onRetryComplete }: PhoneStepProps
           Your business number is ready
         </h1>
         <p className="text-sm text-slate-500 mt-2">
-          This is the number Fieldly will answer in. Forward your existing line to it
+          This is the number Rivet will answer in. Forward your existing line to it
           (instructions below) or share it directly with new customers.
         </p>
       </header>
@@ -180,7 +180,7 @@ export function PhoneStep({ status, onAdvance, onRetryComplete }: PhoneStepProps
       <div className="rounded-2xl border border-slate-200 bg-white p-6">
         <div className="flex items-center justify-center gap-2 text-slate-500">
           <Phone size={14} />
-          <span className="text-xs uppercase tracking-widest">Your Fieldly number</span>
+          <span className="text-xs uppercase tracking-widest">Your Rivet number</span>
         </div>
         <div className="mt-3 text-center text-3xl font-medium tracking-tight text-slate-900">
           {formatted || phoneNumber}
@@ -201,7 +201,7 @@ export function PhoneStep({ status, onAdvance, onRetryComplete }: PhoneStepProps
         <h2 className="text-sm font-medium text-slate-900">How to forward your business line</h2>
         <p className="mt-1 text-xs text-slate-600">
           From your existing business phone, dial the carrier code and then your new
-          Fieldly number. Forwarding turns on right away.
+          Rivet number. Forwarding turns on right away.
         </p>
         <ul className="mt-4 divide-y divide-slate-200 rounded-xl border border-slate-200 bg-white">
           {CARRIERS.map((c) => (

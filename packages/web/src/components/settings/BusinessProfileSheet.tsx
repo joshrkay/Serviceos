@@ -208,7 +208,7 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
                 <span className="text-sm text-slate-700">Your cell phone</span>
                 <span className="block text-xs text-slate-500 mt-0.5">
                   For emergency triage. When a caller has a medical, water-damage,
-                  or other high-risk signal, Fieldly patches the call straight to
+                  or other high-risk signal, Rivet patches the call straight to
                   your cell with a 5-second context preface.
                 </span>
                 <input

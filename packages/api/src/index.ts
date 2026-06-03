@@ -31,7 +31,7 @@ try {
 }
 
 const server = app.listen(PORT, () => {
-  console.log(`Fieldly API running on http://localhost:${PORT}`);
+  console.log(`Rivet API running on http://localhost:${PORT}`);
   console.log(`Swagger UI available at http://localhost:${PORT}/api-docs`);
   console.log(`Health check at http://localhost:${PORT}/health`);
 });

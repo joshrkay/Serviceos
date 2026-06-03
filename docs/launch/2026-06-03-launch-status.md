@@ -1,4 +1,4 @@
-# Fieldly Launch Status — 2026-06-03 (refreshed)
+# Rivet Launch Status — 2026-06-03 (refreshed)
 
 Single dashboard for launch-week progress. When this disagrees with any
 other doc on "is X done?", **this wins**. Last refresh: end of day
@@ -44,9 +44,9 @@ should re-run and stay green.
 ## 2. Done in this session — full inventory
 
 ### Strategy & marketing
-- `2026-06-03-fieldly-gtm-brief.md` — positioning, ICP, pricing, channels, success metrics, risk register
-- `2026-06-03-fieldly-launch-posts.md` — X thread, LinkedIn, Reddit, cold email, FB group drafts
-- `2026-06-03-fieldly-launch-day-runbook.md` — day-by-day ops, env vars, rollback paths
+- `2026-06-03-rivet-gtm-brief.md` — positioning, ICP, pricing, channels, success metrics, risk register
+- `2026-06-03-rivet-launch-posts.md` — X thread, LinkedIn, Reddit, cold email, FB group drafts
+- `2026-06-03-rivet-launch-day-runbook.md` — day-by-day ops, env vars, rollback paths
 
 ### Product / code
 
@@ -54,9 +54,9 @@ should re-run and stay green.
 - Hero, problem framing, 4-feature grid, Tuesday-comparison table, 3-step how-it-works, 4-pillar trust section, $297 pricing card, FAQ, final CTA
 - Mounted at `/` via `ProtectedRoute` wrapper (signed-out → landing, signed-in → dashboard)
 
-**Brand rebrand to Fieldly** — auth pages, swagger spec, console logs, settings copy, README, calendar test events, OpenRouter `X-Title`, escalation SMS fallback host; npm scope + DB identifiers + Clerk JWT template intentionally kept as internal contracts
+**Brand rebrand to Rivet** — auth pages, swagger spec, console logs, settings copy, README, calendar test events, OpenRouter `X-Title`, escalation SMS fallback host; npm scope + DB identifiers + Clerk JWT template intentionally kept as internal contracts
 
-**Onboarding deep-QA pass** — every step rebuilt on the Fieldly design system + targeted UX fixes:
+**Onboarding deep-QA pass** — every step rebuilt on the Rivet design system + targeted UX fixes:
 - IdentityStep: pre-loads existing settings on mount; timezone picker (browser-detected, allowlist-validated); owner-phone field with emergency-triage explainer; all-days-off client guard
 - PackStep: prefixed seed names (HVAC vs plumbing collision fixed); brand-aligned cards
 - PhoneStep: blocker-code → friendly copy mapping; forwarding instructions inline; E.164 → `(XXX) XXX-XXXX` formatting; 30s "still working" cue
@@ -98,11 +98,11 @@ should re-run and stay green.
 
 | Task | Owner | Notes |
 |---|---|---|
-| Confirm domain (`fieldly.app` recommended) | Founder | Drives DNS, Clerk URLs, Stripe webhooks, Twilio webhooks |
-| DNS + TLS for `fieldly.app`, `api.fieldly.app`, `app.fieldly.app` | Founder | Railway auto-cert handles TLS once DNS resolves |
+| Confirm domain (`rivet.ai` recommended) | Founder | Drives DNS, Clerk URLs, Stripe webhooks, Twilio webhooks |
+| DNS + TLS for `rivet.ai`, `api.rivet.ai`, `app.rivet.ai` | Founder | Railway auto-cert handles TLS once DNS resolves |
 | Clerk application URLs & allowed origins | Founder | Update after domain is live |
 | Stripe product + recurring price | Founder | `$297/mo` with 14-day trial; copy price id into Railway `STRIPE_PRICE_ID` |
-| Production env vars on Railway | Founder | Full list in `2026-06-03-fieldly-launch-day-runbook.md` §Day 2 |
+| Production env vars on Railway | Founder | Full list in `2026-06-03-rivet-launch-day-runbook.md` §Day 2 |
 | Voice-quality Layer 1 cassette refresh | Founder + engineer | Requires `ANTHROPIC_API_KEY` on a trusted machine; `npm run voice-quality:refresh` → `voice-quality` until `launchGate.pass === true` |
 | Voice-quality human sign-off | Founder | Record in `docs/superpowers/plans/2026-05-19-solo-owner-launch-audit.md` |
 | Sentry → founder phone alerting | Founder | Wire after `SENTRY_DSN` is set |
@@ -131,11 +131,11 @@ should re-run and stay green.
 34eb5df fix(security): FORCE row level security on all tenant-scoped tables
 828093b docs(launch): launch-status dashboard
 c9f27e5 fix(onboarding): auto-seed job types and templates on pack activation
-4da9df8 chore(rebrand): finish ServiceOS→Fieldly cleanup pass
+4da9df8 chore(rebrand): finish ServiceOS→Rivet cleanup pass
 dd7eae5 docs(launch): launch-day operational runbook
 08c2707 fix(onboarding): seed default AI model on tenant creation
 fd5e6a3 docs(launch): launch-day posts (X/LinkedIn/Reddit/email) + README rebrand
-934045e feat(launch): public landing page, GTM brief, rebrand to Fieldly
+934045e feat(launch): public landing page, GTM brief, rebrand to Rivet
 83b50e7 fix(web): remove mock-data fallback from public estimate page
 ```
 

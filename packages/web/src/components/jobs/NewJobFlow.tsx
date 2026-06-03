@@ -293,7 +293,7 @@ function ParsedReviewCard({
         <div className="flex size-6 items-center justify-center rounded-full bg-indigo-600 shrink-0">
           <Sparkles size={11} className="text-white" />
         </div>
-        <p className="text-sm text-indigo-800">Fieldly AI · Job parsed from voice</p>
+        <p className="text-sm text-indigo-800">Rivet AI · Job parsed from voice</p>
         {parsed.priority === 'Urgent' && (
           <span className="ml-auto flex items-center gap-1 text-xs bg-red-100 text-red-600 border border-red-200 rounded-full px-2 py-0.5">
             <AlertCircle size={10} /> Urgent

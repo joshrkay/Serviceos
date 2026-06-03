@@ -111,8 +111,8 @@ export function createLLMGateway(
     defaultHeaders:
       baseURL.includes('openrouter.ai')
         ? {
-            'HTTP-Referer': 'https://fieldly.app',
-            'X-Title': 'Fieldly',
+            'HTTP-Referer': 'https://rivet.ai',
+            'X-Title': 'Rivet',
           }
         : undefined,
   });

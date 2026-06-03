@@ -191,7 +191,7 @@ export function IdentityStep({ onSaved }: IdentityStepProps) {
 
       <Field
         label={<>Your cell phone <span className="text-slate-400 font-normal">(recommended)</span></>}
-        hint="For emergency triage — when a caller has a medical issue, water damage in progress, or other high-risk signal, Fieldly patches the call straight to your cell with a 5-second context preface instead of trying to book."
+        hint="For emergency triage — when a caller has a medical issue, water damage in progress, or other high-risk signal, Rivet patches the call straight to your cell with a 5-second context preface instead of trying to book."
       >
         <Input
           type="tel"

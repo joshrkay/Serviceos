@@ -1,4 +1,4 @@
-# Fieldly — Launch-Day Runbook
+# Rivet — Launch-Day Runbook
 
 **Date:** 2026-06-03
 **Owner:** Founder
@@ -6,7 +6,7 @@
 
 This is the ordered list of things that need to happen, by whom, in
 what order, to flip the public switch. It is a companion to
-`2026-06-03-fieldly-gtm-brief.md` (strategy) and
+`2026-06-03-rivet-gtm-brief.md` (strategy) and
 `docs/superpowers/runbooks/solo-owner-public-launch.md` (voice
 quality gate). When this doc and those disagree, this one wins for
 launch-week sequencing.
@@ -17,10 +17,10 @@ launch-week sequencing.
 
 ### Day 0 — Today
 
-- [x] GTM brief written (`2026-06-03-fieldly-gtm-brief.md`)
+- [x] GTM brief written (`2026-06-03-rivet-gtm-brief.md`)
 - [x] Landing page shipped at `/` (unauth) / dashboard preserved (auth)
-- [x] Brand cleanup pass: Fieldly everywhere user-facing
-- [x] Launch-day social posts drafted (`2026-06-03-fieldly-launch-posts.md`)
+- [x] Brand cleanup pass: Rivet everywhere user-facing
+- [x] Launch-day social posts drafted (`2026-06-03-rivet-launch-posts.md`)
 - [x] Estimate-page mock-data leak fixed (privacy blocker)
 - [x] Webhook idempotency confirmed durable (PR #457)
 - [ ] AI model auto-provisioned on tenant create (in flight)
@@ -40,8 +40,8 @@ launch-week sequencing.
 
 **Ops (founder):**
 
-- [ ] Register / confirm domain (`fieldly.app` or alternative)
-- [ ] Point DNS to Railway: `fieldly.app`, `app.fieldly.app`, `api.fieldly.app`
+- [ ] Register / confirm domain (`rivet.ai` or alternative)
+- [ ] Point DNS to Railway: `rivet.ai`, `app.rivet.ai`, `api.rivet.ai`
 - [ ] Provision TLS cert (Railway auto-cert + verify)
 - [ ] Update Clerk application URLs and allowed origins for the new domain
 - [ ] Update Stripe webhook URL to the new domain
@@ -79,7 +79,7 @@ launch-week sequencing.
 | `VITE_ONBOARDING_V2_ENABLED` | `true` |
 | `VITE_CLERK_PUBLISHABLE_KEY` | _live pub key_ |
 | `VITE_STRIPE_PUBLISHABLE_KEY` | _live pub key_ |
-| `VITE_API_BASE_URL` | `https://api.fieldly.app` |
+| `VITE_API_BASE_URL` | `https://api.rivet.ai` |
 | `VITE_POSTHOG_KEY` | _PostHog project key_ (required to enable funnel tracking) |
 | `VITE_POSTHOG_HOST` | optional override; defaults to `https://us.i.posthog.com` |
 
@@ -115,7 +115,7 @@ launch-week sequencing.
 
 - [ ] Confirm domain points to landing page
 - [ ] Send the cold-email template to the 20 warm contacts
-      (`2026-06-03-fieldly-launch-posts.md` §4)
+      (`2026-06-03-rivet-launch-posts.md` §4)
 
 **Throughout the day:**
 
@@ -126,7 +126,7 @@ launch-week sequencing.
 
 ### Day 4 — Friday (Broaden)
 
-**10:00 PT — X thread** (`2026-06-03-fieldly-launch-posts.md` §1)
+**10:00 PT — X thread** (`2026-06-03-rivet-launch-posts.md` §1)
 **11:00 PT — LinkedIn post** (§2)
 **12:00 PT — r/HVAC + r/Plumbing** (§3) — Mon–Thu only for Reddit
 **Throughout — Founder responsive in DMs**
@@ -135,7 +135,7 @@ launch-week sequencing.
 
 - [ ] Triage incoming signups
 - [ ] Reach out personally to anyone stalled in onboarding
-- [ ] Post in local Facebook groups (`2026-06-03-fieldly-launch-posts.md` §5)
+- [ ] Post in local Facebook groups (`2026-06-03-rivet-launch-posts.md` §5)
 - [ ] Check Sentry + Stripe + Twilio dashboards for anomalies
 
 ### Day 7 — Monday post-launch
@@ -181,7 +181,7 @@ Per `docs/superpowers/runbooks/solo-owner-public-launch.md` §Rollback:
 ## Post-launch (week 2+)
 
 - [ ] Product Hunt launch (if Day 7 metrics are green)
-- [ ] Founder blog post: "Why we built Fieldly"
+- [ ] Founder blog post: "Why we built Rivet"
 - [ ] One demo video (60s screen recording of digest + approval)
 - [ ] FAQ page on landing site
 - [ ] Build the 5 help-center articles (forward your line, how
@@ -193,7 +193,7 @@ Per `docs/superpowers/runbooks/solo-owner-public-launch.md` §Rollback:
 
 ## Open questions before launch day
 
-1. Confirmed domain? (`fieldly.app` vs other)
+1. Confirmed domain? (`rivet.ai` vs other)
 2. Founder availability for on-call hours during Days 3–5?
 3. Warm-list of 20 contacts ready for cold email?
 4. Twilio phone number budget for first 10 tenants?
