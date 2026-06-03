@@ -2284,6 +2284,17 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
+  // Blocker 3 RLS exception: oauth_states has tenant_id for the binding
+  // record but is INTENTIONALLY NOT row-level-security protected. The
+  // /callback path calls consume(stateId) BEFORE any tenant context is
+  // set — recovering the tenant_id from the state row is the entire point
+  // of the lookup. RLS would force the row to be invisible to the very
+  // call that needs it. Safety: the id is a 128-bit random UUID acting as
+  // a single-use nonce (consumed_at flips on read), expires_at enforces a
+  // 5-minute window, and the row is created server-side bound to the
+  // already-authenticated tenant/user. The schema-guard test
+  // (every-table-with-tenant_id-has-FORCE) explicitly allowlists this
+  // table; any change should be reviewed alongside that test.
   '085_create_oauth_states': `
     -- Tier 4 (Calendar sync — PR 1). Short-lived nonces for the
     -- Google OAuth flow. The /connect route mints a state, persists
@@ -3068,7 +3079,10 @@ export const MIGRATIONS = {
   // no FK to tenants (the tenant row is gone by the time we write this) and
   // NO row-level security, so it survives the purge and remains readable
   // cross-tenant by ops. This is the only audit trail of a deprovision, since
-  // the tenant's audit_events rows are themselves purged.
+  // the tenant's audit_events rows are themselves purged. The schema-guard
+  // test (every-table-with-tenant_id-has-FORCE) explicitly allowlists this
+  // table; the tenant_id column is denormalized identity for the purged row,
+  // not a tenancy boundary.
   '123_platform_deprovision_log': `
     CREATE TABLE IF NOT EXISTS platform_deprovision_log (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

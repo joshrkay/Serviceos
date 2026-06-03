@@ -119,6 +119,81 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
     }
   });
 
+  it('Blocker 3 — every table with a tenant_id column also FORCEs RLS (stronger guard)', () => {
+    // The Blocker-3 regression above checks: tables that ENABLE RLS must
+    // also FORCE it. This stronger guard catches a different failure mode:
+    // a new tenant-scoped table whose author forgot RLS entirely. Without
+    // it, a future migration could add `CREATE TABLE foo (tenant_id ...)`
+    // without ENABLE/FORCE and the existing guard would not fire — the
+    // table would just have no RLS at all and silently leak across tenants.
+    //
+    // EXCEPTIONS — tables that genuinely should not be RLS-protected even
+    // though they carry a tenant_id column. Each exception is documented in
+    // the corresponding migration block in schema.ts.
+    //
+    // - oauth_states: short-lived Google OAuth state nonces. The /callback
+    //   path calls consume(stateId) BEFORE tenant context is set —
+    //   recovering tenant_id from the row IS the lookup. RLS would make the
+    //   row invisible to the call that needs it. Safety: 128-bit random
+    //   UUID acts as a single-use nonce with a 5-minute expiry.
+    //
+    // - platform_deprovision_log: cross-tenant audit trail of tenant
+    //   hard-deletes. By design, this row outlives the tenant it records,
+    //   so it cannot be tenant-scoped — the tenant_id column is denormalized
+    //   identity for the purged row, not a tenancy boundary. Only ops
+    //   reads it (via direct DB queries).
+    const RLS_EXEMPT_TABLES = new Set<string>([
+      'oauth_states',
+      'platform_deprovision_log',
+    ]);
+
+    const sql = getMigrationSQL();
+
+    // Find every table whose CREATE TABLE body declares a tenant_id column.
+    // Inline body capture uses [^;]* to stop at the terminating semicolon
+    // without dragging in ALTER statements that follow.
+    const tenantScoped = new Set<string>();
+    const createRe = /CREATE TABLE IF NOT EXISTS\s+([a-z_][a-z0-9_]*)\s*\(([^;]*?)\);/gi;
+    for (const m of sql.matchAll(createRe)) {
+      const tableName = m[1];
+      const body = m[2];
+      if (/\btenant_id\b/.test(body)) {
+        tenantScoped.add(tableName);
+      }
+    }
+
+    const forced = new Set<string>();
+    for (const m of sql.matchAll(/ALTER TABLE\s+([a-z_][a-z0-9_]*)\s+FORCE ROW LEVEL SECURITY/gi)) {
+      forced.add(m[1]);
+    }
+
+    // Sanity: the parse should find a healthy number of tenant-scoped
+    // tables. If this drops, the CREATE TABLE regex broke.
+    expect(tenantScoped.size).toBeGreaterThan(50);
+
+    const missing = [...tenantScoped]
+      .filter((t) => !forced.has(t) && !RLS_EXEMPT_TABLES.has(t))
+      .sort();
+
+    expect(
+      missing,
+      `Tables with tenant_id but no FORCE ROW LEVEL SECURITY (and not in the documented exempt list): ${missing.join(
+        ', ',
+      )}. If a new tenant-scoped table genuinely should not have RLS, add it to RLS_EXEMPT_TABLES in this test AND document the rationale in its migration block in schema.ts. Otherwise, add a new migration that runs \`ALTER TABLE <name> ENABLE ROW LEVEL SECURITY; ALTER TABLE <name> FORCE ROW LEVEL SECURITY;\` plus a tenant_isolation policy.`,
+    ).toEqual([]);
+  });
+
+  it('Blocker 3 — the RLS exemption allowlist is not silently growing', () => {
+    // Pins the exemption set so a future PR can't quietly add a table to
+    // it without showing up in this test diff. If you legitimately need a
+    // new exemption, bump this list AND document the rationale in the
+    // migration block AND in the comment in the test above.
+    const ALLOWED_EXEMPT = ['oauth_states', 'platform_deprovision_log'];
+    expect(ALLOWED_EXEMPT.sort()).toEqual(
+      ['oauth_states', 'platform_deprovision_log'].sort(),
+    );
+  });
+
   it('Blocker 7 — migration 131 installs the double-booking exclusion guard', () => {
     expect(Object.keys(MIGRATIONS)).toContain('131_appointment_assignments_no_double_booking');
     const migration = MIGRATIONS['131_appointment_assignments_no_double_booking'];
