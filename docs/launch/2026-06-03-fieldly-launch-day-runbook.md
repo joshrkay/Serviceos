@@ -69,6 +69,8 @@ launch-week sequencing.
 | `CLERK_WEBHOOK_SECRET` | _signing secret_ |
 | `SENDGRID_API_KEY` | _live key_ |
 | `SENTRY_DSN` | _live DSN_ |
+| `POSTHOG_API_KEY` | _server-side PostHog project API key_ (matches the web `VITE_POSTHOG_KEY`) |
+| `POSTHOG_HOST` | optional override; defaults to `https://us.i.posthog.com` |
 
 **Production env vars** (Railway web service, build-time):
 

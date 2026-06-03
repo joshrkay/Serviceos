@@ -12,15 +12,26 @@ interface PhoneStepProps {
 
 interface CarrierTip {
   name: string;
-  code: string;
+  /**
+   * Returns the full dial string the operator should punch into their
+   * existing phone — prefix, the national 10-digit number, and any
+   * carrier-specific terminator. The function form lets each carrier
+   * compose its own format (e.g. T-Mobile's `**21*1<number>#` has a
+   * leading 1 and a trailing #, neither of which fits the simple
+   * "prefix + number" pattern Verizon/AT&T use).
+   */
+  formatCode: (national: string) => string;
   note?: string;
 }
 
 const CARRIERS: CarrierTip[] = [
-  { name: 'Verizon',  code: '*72' },
-  { name: 'AT&T',     code: '*72' },
-  { name: 'T-Mobile', code: '**21*' },
-  { name: 'Other',    code: 'Ask your carrier', note: 'Most US carriers support unconditional call forwarding.' },
+  { name: 'Verizon',  formatCode: (n) => n ? `*72 ${n}` : '*72' },
+  { name: 'AT&T',     formatCode: (n) => n ? `*72 ${n}` : '*72' },
+  // T-Mobile per support.t-mobile.com short-code table: unconditional
+  // forwarding is `**21*1+PhoneNumber#` — needs the leading 1 and
+  // the trailing # to register the forward.
+  { name: 'T-Mobile', formatCode: (n) => n ? `**21*1${n}#` : '**21*1...#' },
+  { name: 'Other',    formatCode: () => 'Ask your carrier', note: 'Most US carriers support unconditional call forwarding.' },
 ];
 
 const BLOCKER_COPY: Record<string, string> = {
@@ -193,19 +204,14 @@ export function PhoneStep({ status, onAdvance, onRetryComplete }: PhoneStepProps
           Fieldly number. Forwarding turns on right away.
         </p>
         <ul className="mt-4 divide-y divide-slate-200 rounded-xl border border-slate-200 bg-white">
-          {CARRIERS.map((c) => {
-            const showSuffix = national && c.code !== 'Ask your carrier';
-            return (
-              <li key={c.name} className="flex flex-col gap-1 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-                <span className="text-sm font-medium text-slate-700">{c.name}</span>
-                <span className="text-sm text-slate-600">
-                  <span className="font-mono">{c.code}</span>
-                  {showSuffix && <span className="text-slate-400"> + </span>}
-                  {showSuffix && <span className="font-mono">{national}</span>}
-                </span>
-              </li>
-            );
-          })}
+          {CARRIERS.map((c) => (
+            <li key={c.name} className="flex flex-col gap-1 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <span className="text-sm font-medium text-slate-700">{c.name}</span>
+              <span className="font-mono text-sm text-slate-600">
+                {c.formatCode(national)}
+              </span>
+            </li>
+          ))}
         </ul>
         <p className="mt-3 text-xs text-slate-500">
           To turn forwarding off later, dial <span className="font-mono">*73</span> (Verizon/AT&amp;T)

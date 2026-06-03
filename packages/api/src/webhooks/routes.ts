@@ -26,6 +26,7 @@ import {
 } from '../workers/deprovision-tenant';
 import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
 import { VERIFY_AI_JOB_TYPE, type VerifyAiPayload } from '../workers/verify-ai';
+import { recordFunnelEvent } from '../analytics/posthog';
 import { verifyTwilioSignature, reconstructWebhookUrl } from '../telephony/twilio-signature';
 import { verifySendGridSignature } from './sendgrid-signature';
 import { createAuditEvent, AuditRepository } from '../audit/audit';
@@ -469,6 +470,21 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             settingsSeeded: Boolean(deps.settingsRepo),
             signupCorrelationId,
           });
+
+          // Server-side funnel: every Clerk userId here matches the
+          // distinctId the browser SDK identifies with, so this single
+          // event closes the gap between the page load that fires
+          // landing_signup_clicked and the onboarding the user starts.
+          if (result.created) {
+            recordFunnelEvent({
+              distinctId: userId,
+              event: 'signup_completed',
+              properties: {
+                tenantId: result.tenantId,
+                emailDomain: primaryEmail.split('@')[1] ?? null,
+              },
+            });
+          }
 
           // Enqueue Twilio subaccount provisioning for new tenants only.
           // Idempotent — the worker checks tenant_integrations.status and
@@ -1119,6 +1135,35 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           status?: string;
         };
         if (sub.id && sub.customer && sub.status) {
+          // Read the prior status + owner before we overwrite, so the
+          // server-side funnel can attribute the lifecycle transition
+          // (trial_started, trial_to_paid, subscription_canceled) to
+          // the same distinctId the browser SDK uses. Best-effort —
+          // a missing row just means we skip the funnel event and
+          // continue the normal lifecycle update below.
+          let priorStatus: string | null = null;
+          let ownerClerkId: string | null = null;
+          let funnelTenantId: string | null = null;
+          if (deps.pool) {
+            const tenantRow = await deps.pool.query<{
+              id: string;
+              owner_id: string | null;
+              subscription_status: string | null;
+            }>(
+              `SELECT id, owner_id, subscription_status
+                 FROM tenants
+                WHERE stripe_customer_id = $1
+                LIMIT 1`,
+              [sub.customer],
+            );
+            const row = tenantRow.rows[0];
+            if (row) {
+              funnelTenantId = row.id;
+              ownerClerkId = row.owner_id;
+              priorStatus = row.subscription_status;
+            }
+          }
+
           await deps.billingService.applySubscriptionEvent({
             customerId: sub.customer,
             subscriptionId: sub.id,
@@ -1127,6 +1172,35 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.info('Subscription status mirrored from Stripe', {
             customerId: sub.customer, subscriptionId: sub.id, status: sub.status,
           });
+
+          // Server-side funnel events. Off when POSTHOG_API_KEY is unset.
+          if (ownerClerkId) {
+            const properties = {
+              tenantId: funnelTenantId,
+              subscriptionId: sub.id,
+              priorStatus,
+              newStatus: sub.status,
+            };
+            if (sub.status === 'trialing' && priorStatus !== 'trialing') {
+              recordFunnelEvent({
+                distinctId: ownerClerkId,
+                event: 'trial_started',
+                properties,
+              });
+            } else if (sub.status === 'active' && priorStatus === 'trialing') {
+              recordFunnelEvent({
+                distinctId: ownerClerkId,
+                event: 'trial_to_paid',
+                properties,
+              });
+            } else if (sub.status === 'canceled' && priorStatus !== 'canceled') {
+              recordFunnelEvent({
+                distinctId: ownerClerkId,
+                event: 'subscription_canceled',
+                properties,
+              });
+            }
+          }
 
           // Once billing reaches a live state, seed the tenant's AI model from
           // the platform default and enqueue the onboarding AI self-check.

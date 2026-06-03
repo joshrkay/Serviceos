@@ -3169,6 +3169,13 @@ export function createApp(): express.Express {
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();
+      // Flush any queued PostHog server-side funnel events before the
+      // process exits so Railway shutdown doesn't drop in-flight
+      // signup/trial/conversion captures.
+      {
+        const { shutdownAnalytics } = await import('./analytics/posthog');
+        await shutdownAnalytics();
+      }
       // Disconnect Redis cache store(s) before draining the DB pool so Railway
       // shutdown is not slowed by lingering Redis connections.
       await shutdownCacheStores();
