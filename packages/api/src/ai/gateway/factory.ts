@@ -111,8 +111,8 @@ export function createLLMGateway(
     defaultHeaders:
       baseURL.includes('openrouter.ai')
         ? {
-            'HTTP-Referer': 'https://serviceos.app',
-            'X-Title': 'ServiceOS',
+            'HTTP-Referer': 'https://fieldly.app',
+            'X-Title': 'Fieldly',
           }
         : undefined,
   });

@@ -337,9 +337,9 @@ export function createCalendarIntegrationsRouter(
             scheduledStart: start,
             scheduledEnd: end,
             timezone: 'UTC',
-            summary: 'ServiceOS test event',
+            summary: 'Fieldly test event',
             description:
-              'This is a test event from ServiceOS confirming your calendar is connected.',
+              'This is a test event from Fieldly confirming your calendar is connected.',
           },
           { persist: false },
         );

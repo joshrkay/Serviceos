@@ -96,7 +96,7 @@ describe('buildEscalationSummary', () => {
     });
     const result = buildEscalationSummary(ctx);
     expect(result.sms.length).toBeLessThanOrEqual(160);
-    expect(result.sms).toContain('app.serviceos.app/c/<escalationId>');
+    expect(result.sms).toContain('app.fieldly.app/c/<escalationId>');
   });
 
   it('renders lastInteraction date in tenant timezone, not UTC', () => {
