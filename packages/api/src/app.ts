@@ -2667,7 +2667,18 @@ export function createApp(): express.Express {
     '/api/voice',
     createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger, pool ? { pool } : undefined),
   );
-  app.use('/api/onboarding', createOnboardingRouter({ settingsRepo, packActivationRepo, auditRepo, pool, billingService, queue }));
+  app.use(
+    '/api/onboarding',
+    createOnboardingRouter({
+      settingsRepo,
+      packActivationRepo,
+      auditRepo,
+      pool,
+      billingService,
+      queue,
+      packSeedDeps: { catalogRepo, templateRepo },
+    }),
+  );
   app.use(
     '/api/technician-location',
     createTechnicianLocationRouter({

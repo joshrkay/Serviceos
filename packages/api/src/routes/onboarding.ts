@@ -21,6 +21,10 @@ import {
   type ProvisionTwilioPayload,
 } from '../workers/provision-twilio';
 import { VERIFY_AI_JOB_TYPE, type VerifyAiPayload } from '../workers/verify-ai';
+import {
+  seedPackDefaults,
+  type SeedPackDefaultsDeps,
+} from '../packs/seed-pack-defaults';
 
 export interface OnboardingRouterDeps {
   settingsRepo: SettingsRepository;
@@ -29,10 +33,26 @@ export interface OnboardingRouterDeps {
   pool?: Pool;
   billingService?: BillingService;
   queue?: Queue;
+  /**
+   * When provided, /api/onboarding/pack auto-seeds canonical job types,
+   * price-book entries, and customer-message defaults for the picked
+   * pack. Without this, the wizard's promise of "we'll set up job types,
+   * pricing, and message templates for you" goes unfulfilled and new
+   * tenants land on an empty estimate page.
+   */
+  packSeedDeps?: SeedPackDefaultsDeps;
 }
 
 export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
-  const { settingsRepo, packActivationRepo, auditRepo, pool, billingService, queue } = deps;
+  const {
+    settingsRepo,
+    packActivationRepo,
+    auditRepo,
+    pool,
+    billingService,
+    queue,
+    packSeedDeps,
+  } = deps;
   const router = Router();
 
   router.get(
@@ -197,6 +217,29 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           }
         }
 
+        // Auto-seed canonical job types, price book, and message-template
+        // defaults so the wizard's "we'll set this up for you" promise is
+        // real. Idempotent — safe on reactivation. We swallow failures
+        // here on purpose: a partial seed is recoverable from Settings
+        // post-onboarding, but a hard failure shouldn't block the wizard
+        // from advancing (the pack_activations row is the source of
+        // truth for which packs are picked).
+        let seedResult: Awaited<ReturnType<typeof seedPackDefaults>> | null = null;
+        if (packSeedDeps) {
+          try {
+            seedResult = await seedPackDefaults(
+              { tenantId, packId, actorId: userId },
+              packSeedDeps,
+            );
+          } catch (seedErr) {
+            // eslint-disable-next-line no-console
+            console.error(
+              `[onboarding] Pack seed failed for tenant=${tenantId} pack=${packId}:`,
+              seedErr instanceof Error ? seedErr.message : seedErr,
+            );
+          }
+        }
+
         // Emit audit event
         await auditRepo.create(
           createAuditEvent({
@@ -206,7 +249,16 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             eventType: 'tenant.pack_activated',
             entityType: 'tenant_packs',
             entityId: packId,
-            metadata: { packId },
+            metadata: {
+              packId,
+              ...(seedResult
+                ? {
+                    seedAlreadyApplied: seedResult.alreadySeeded,
+                    catalogItemsCreated: seedResult.catalogItemsCreated,
+                    templatesCreated: seedResult.templatesCreated,
+                  }
+                : {}),
+            },
           })
         );
 
