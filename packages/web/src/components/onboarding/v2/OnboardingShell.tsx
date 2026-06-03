@@ -36,7 +36,10 @@ export function OnboardingShell() {
     billingToastShown.current = true;
     if (billing === 'ok') {
       toast.success('Trial started — your card is on file for after the 14-day trial.');
-      track('trial_started');
+      // trial_started is captured server-side from the Stripe
+      // customer.subscription.* webhook (see webhooks/routes.ts). Firing
+      // it here too would double-count every checkout redirect in the
+      // funnel since both paths run on a normal completed checkout.
       void refetch();
     } else if (billing === 'cancel') {
       toast.message('Checkout canceled — you can subscribe when you are ready.');

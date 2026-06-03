@@ -26,7 +26,7 @@ import {
   type SeedPackDefaultsDeps,
 } from '../packs/seed-pack-defaults';
 import { normalizeMobileE164 } from '../shared/phone/normalize';
-import { VALID_TIMEZONES, resolveBootstrapAiModel } from '../settings/settings';
+import { isValidIanaTimezone, resolveBootstrapAiModel } from '../settings/settings';
 
 export interface OnboardingRouterDeps {
   settingsRepo: SettingsRepository;
@@ -113,15 +113,18 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         // Timezone: prefer the value the client submitted (browser-detected
         // IANA name), then keep whatever was previously stored, then fall
         // back to ET as last-resort default for the initial INSERT.
-        // Validated against the supported allowlist so downstream Intl
-        // calls (board-query, money-dashboard) never throw on bogus values.
+        // Validated via Intl.DateTimeFormat so any runtime-recognized
+        // IANA zone (e.g. America/Adak, America/North_Dakota/Center) is
+        // accepted, but bogus strings like "Foo/Bar" still 400 instead
+        // of silently corrupting tenant_settings.timezone and blowing up
+        // downstream Intl callers later.
         const submittedTimezone = v.timezone?.trim() || null;
-        if (submittedTimezone && !VALID_TIMEZONES.includes(submittedTimezone)) {
+        if (submittedTimezone && !isValidIanaTimezone(submittedTimezone)) {
           res.status(400).json({
             error: 'VALIDATION_ERROR',
             issues: [{
               path: ['timezone'],
-              message: `Unsupported timezone "${submittedTimezone}". Pick one of: ${VALID_TIMEZONES.join(', ')}.`,
+              message: `"${submittedTimezone}" is not a recognized IANA timezone.`,
             }],
           });
           return;

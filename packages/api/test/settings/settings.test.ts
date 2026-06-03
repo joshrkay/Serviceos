@@ -136,6 +136,26 @@ describe('P1-017 — Tenant business settings and numbering preferences', () => 
     expect(errors).toContain('Invalid timezone');
   });
 
+  it('validation — accepts any IANA timezone Intl recognizes (not just the display list)', () => {
+    // Regression for the "browser detected America/Juneau but onboarding
+    // 400s" bug — the VALID_TIMEZONES dropdown list is intentionally
+    // small but Intl-recognized zones outside it must still validate.
+    for (const tz of [
+      'America/Juneau',
+      'America/Adak',
+      'America/North_Dakota/Center',
+      'Europe/London',
+      'Asia/Tokyo',
+    ]) {
+      const errors = validateSettingsInput({
+        tenantId: 'tenant-1',
+        businessName: 'ACME',
+        timezone: tz,
+      });
+      expect(errors, `expected ${tz} to be accepted`).not.toContain('Invalid timezone');
+    }
+  });
+
   it('validation — rejects empty prefix', () => {
     const errors = validateSettingsInput({
       tenantId: 'tenant-1',

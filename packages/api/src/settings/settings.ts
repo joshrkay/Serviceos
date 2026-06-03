@@ -378,11 +378,34 @@ export interface ActiveVerticalPackValidationOptions {
   knownPackIds?: string[];
 }
 
+/**
+ * Curated display list for the BusinessProfileSheet dropdown. Not used
+ * for validation — that path goes through `isValidIanaTimezone` so any
+ * runtime-recognized IANA zone (e.g. America/Adak, America/Juneau,
+ * America/North_Dakota/Center) is accepted when the browser submits it.
+ */
 export const VALID_TIMEZONES = [
   'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
   'America/Phoenix', 'America/Anchorage', 'Pacific/Honolulu', 'America/Detroit',
   'America/Indiana/Indianapolis', 'America/Boise', 'UTC',
 ];
+
+/**
+ * True iff the runtime's Intl can construct a DateTimeFormat with this
+ * timezone — i.e. it's a known IANA zone. Used by every server-side
+ * validation path so we accept anything Intl downstream will accept
+ * (preventing the "browser detected America/Juneau but onboarding 400s"
+ * gap) while still rejecting bogus values like "Foo/Bar" that would
+ * blow up board-query.ts / money-dashboard.ts at render time.
+ */
+export function isValidIanaTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export function validateSettingsInput(
   input: CreateSettingsInput,
@@ -415,7 +438,7 @@ function validateCommonSettingsFields(
   }
 ): string[] {
   const errors: string[] = [];
-  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) {
+  if (input.timezone && !isValidIanaTimezone(input.timezone)) {
     errors.push('Invalid timezone');
   }
   if (input.estimatePrefix !== undefined && input.estimatePrefix.length === 0) {
