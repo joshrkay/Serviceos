@@ -25,6 +25,7 @@ import {
   seedPackDefaults,
   type SeedPackDefaultsDeps,
 } from '../packs/seed-pack-defaults';
+import { normalizeMobileE164 } from '../shared/phone/normalize';
 
 export interface OnboardingRouterDeps {
   settingsRepo: SettingsRepository;
@@ -113,15 +114,41 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         // back to ET as last-resort default for the initial INSERT.
         const submittedTimezone = v.timezone?.trim() || null;
 
+        // Owner phone: empty string explicitly clears (SQL NULL); omitted
+        // leaves the existing value untouched; a populated value is
+        // normalized to E.164 — invalid input returns 400 with a clear
+        // message instead of being silently dropped.
+        let ownerPhoneToWrite: string | null | undefined = undefined;
+        if (v.ownerPhone !== undefined) {
+          const trimmed = v.ownerPhone.trim();
+          if (trimmed === '') {
+            ownerPhoneToWrite = null;
+          } else {
+            try {
+              ownerPhoneToWrite = normalizeMobileE164(trimmed);
+            } catch (err) {
+              res.status(400).json({
+                error: 'VALIDATION_ERROR',
+                issues: [{
+                  path: ['ownerPhone'],
+                  message: err instanceof Error ? err.message : 'Invalid owner phone number',
+                }],
+              });
+              return;
+            }
+          }
+        }
+
         await db.query(
           `INSERT INTO tenant_settings (
              id, tenant_id, business_name, service_area_text, service_area_radius,
              business_hours, job_buffer_minutes, hourly_rate_cents,
-             timezone, estimate_prefix, invoice_prefix, next_estimate_number,
+             timezone, owner_phone, estimate_prefix, invoice_prefix, next_estimate_number,
              next_invoice_number, default_payment_term_days
            )
            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5::jsonb, $6, $7,
                    COALESCE($8, 'America/New_York'),
+                   $9,
                    'EST-', 'INV-', 1001, 1001, 30)
            ON CONFLICT (tenant_id) DO UPDATE SET
              business_name        = EXCLUDED.business_name,
@@ -131,6 +158,10 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
              job_buffer_minutes   = EXCLUDED.job_buffer_minutes,
              hourly_rate_cents    = EXCLUDED.hourly_rate_cents,
              timezone             = COALESCE($8, tenant_settings.timezone),
+             owner_phone          = CASE
+               WHEN $10::boolean THEN $9
+               ELSE tenant_settings.owner_phone
+             END,
              updated_at           = now()`,
           [
             tenantId,
@@ -141,6 +172,8 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             v.jobBufferMinutes,
             v.hourlyRateCents,
             submittedTimezone,
+            ownerPhoneToWrite ?? null,
+            ownerPhoneToWrite !== undefined,
           ]
         );
 

@@ -3726,6 +3726,18 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_proposals_source_recording
       ON proposals (tenant_id, (source_context->>'recordingId'));
   `,
+
+  '143_tenant_settings_owner_phone': `
+    -- P8-016 (forward-wiring) — the OWNER's personal cell phone used by
+    -- vulnerability-aware emergency triage to patch a customer call
+    -- directly to the owner with a 5-second context preface. Stored in
+    -- E.164 (+15551234567). Distinct from business_phone (the public number
+    -- the AI answers on) and from users.mobile_number (per-team-member
+    -- binding, multi-user model). For V1 solo operators there is one owner
+    -- per tenant, so settings is the natural home.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS owner_phone TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

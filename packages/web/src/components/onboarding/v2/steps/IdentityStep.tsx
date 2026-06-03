@@ -43,6 +43,18 @@ function detectBrowserTimezone(): string {
   }
 }
 
+/** +15125551234 → (512) 555-1234 for the form's initial display. */
+function formatPhoneForDisplay(e164: string): string {
+  const digits = e164.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return `(${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
+  }
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  }
+  return e164;
+}
+
 const COMMON_TIMEZONES = [
   { value: 'America/New_York',    label: 'Eastern (New York)' },
   { value: 'America/Chicago',     label: 'Central (Chicago)' },
@@ -56,6 +68,7 @@ const COMMON_TIMEZONES = [
 export function IdentityStep({ onSaved }: IdentityStepProps) {
   const apiFetch = useApiClient();
   const [businessName, setBusinessName] = useState('');
+  const [ownerPhone, setOwnerPhone] = useState('');
   const [serviceAreaText, setServiceAreaText] = useState('');
   const [serviceAreaRadius, setServiceAreaRadius] = useState<number>(25);
   const [jobBufferMinutes, setJobBufferMinutes] = useState<number>(30);
@@ -81,6 +94,7 @@ export function IdentityStep({ onSaved }: IdentityStepProps) {
           jobBufferMinutes?: number;
           hourlyRateCents?: number;
           timezone?: string;
+          ownerPhone?: string | null;
         };
         if (!alive) return;
         if (body.businessName) setBusinessName(body.businessName);
@@ -90,6 +104,7 @@ export function IdentityStep({ onSaved }: IdentityStepProps) {
         if (typeof body.jobBufferMinutes === 'number') setJobBufferMinutes(body.jobBufferMinutes);
         if (typeof body.hourlyRateCents === 'number') setHourlyRateDollars(body.hourlyRateCents / 100);
         if (body.timezone) setTimezone(body.timezone);
+        if (body.ownerPhone) setOwnerPhone(formatPhoneForDisplay(body.ownerPhone));
       } catch {
         // Silent — pre-load is best-effort.
       } finally {
@@ -132,6 +147,7 @@ export function IdentityStep({ onSaved }: IdentityStepProps) {
           jobBufferMinutes,
           hourlyRateCents: Math.round(hourlyRateDollars * 100),
           timezone,
+          ownerPhone: ownerPhone.trim() || undefined,
         }),
       });
       if (!res.ok) {
@@ -166,6 +182,20 @@ export function IdentityStep({ onSaved }: IdentityStepProps) {
           onChange={(e) => setBusinessName(e.target.value)}
           placeholder="M&R Mechanical"
           required
+        />
+      </Field>
+
+      <Field
+        label={<>Your cell phone <span className="text-slate-400 font-normal">(recommended)</span></>}
+        hint="For emergency triage — when a caller has a medical issue, water damage in progress, or other high-risk signal, Fieldly patches the call straight to your cell with a 5-second context preface instead of trying to book."
+      >
+        <Input
+          type="tel"
+          autoComplete="tel"
+          inputMode="tel"
+          value={ownerPhone}
+          onChange={(e) => setOwnerPhone(e.target.value)}
+          placeholder="(512) 555-1234"
         />
       </Field>
 

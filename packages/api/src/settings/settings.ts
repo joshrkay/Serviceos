@@ -95,6 +95,10 @@ export interface TenantSettings {
   // undefined; null only appears transiently in update inputs.
   businessPhone?: string | null;
   businessEmail?: string | null;
+  // P8-016 — owner's personal cell (E.164), used by vulnerability-aware
+  // emergency triage to patch a customer through to the owner. Never the
+  // same as businessPhone (which the AI answers on).
+  ownerPhone?: string | null;
   timezone: string;
   estimatePrefix: string;
   invoicePrefix: string;
@@ -258,6 +262,7 @@ export interface CreateSettingsInput {
   businessName: string;
   businessPhone?: string;
   businessEmail?: string;
+  ownerPhone?: string;
   timezone?: string;
   estimatePrefix?: string;
   invoicePrefix?: string;
@@ -296,6 +301,7 @@ export interface UpdateSettingsInput {
   // routes through PgSettings.update's `value ?? null` to a SQL NULL.
   businessPhone?: string | null;
   businessEmail?: string | null;
+  ownerPhone?: string | null;
   timezone?: string | null;
   estimatePrefix?: string;
   invoicePrefix?: string;
@@ -508,6 +514,7 @@ export async function createSettings(
     businessName: input.businessName,
     businessPhone: input.businessPhone,
     businessEmail: input.businessEmail,
+    ownerPhone: input.ownerPhone,
     timezone: input.timezone || 'America/New_York',
     estimatePrefix: input.estimatePrefix || 'EST-',
     invoicePrefix: input.invoicePrefix || 'INV-',
@@ -533,6 +540,21 @@ export async function getSettings(
   repository: SettingsRepository
 ): Promise<TenantSettings | null> {
   return repository.findByTenant(tenantId);
+}
+
+/**
+ * P8-016 — convenience factory matching the `OwnerPhoneResolver` shape
+ * expected by `escalate-to-human` / `owner-cell-patch`. Wire this into
+ * the voice/triage stack when the `patch_owner` branch lands so
+ * vulnerability-triggered calls patch to the owner's actual cell.
+ */
+export function createSettingsOwnerPhoneResolver(
+  repository: SettingsRepository,
+): (tenantId: string) => Promise<string | null> {
+  return async (tenantId) => {
+    const settings = await repository.findByTenant(tenantId);
+    return settings?.ownerPhone ?? null;
+  };
 }
 
 export async function updateSettings(

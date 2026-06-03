@@ -26,6 +26,11 @@ export const BusinessIdentityInputSchema = z.object({
   // sends browser-detected tz so the AI books at the operator's local
   // time. Omit to keep whatever's already stored; first-write defaults to ET.
   timezone: z.string().min(1).max(64).optional(),
+  // P8-016 — owner's personal cell phone for emergency patch-through.
+  // Accepts raw user input ("(512) 555-1234", "+15125551234", "512.555.1234")
+  // and is normalized to E.164 server-side via normalizeMobileE164. Empty
+  // string clears the value; omit to leave whatever is already stored.
+  ownerPhone: z.string().max(40).optional(),
 });
 export type BusinessIdentityInput = z.infer<typeof BusinessIdentityInputSchema>;
 

@@ -28,6 +28,7 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     businessName: row.business_name as string,
     businessPhone: (row.business_phone as string) ?? undefined,
     businessEmail: (row.business_email as string) ?? undefined,
+    ownerPhone: (row.owner_phone as string) ?? undefined,
     timezone: row.timezone as string,
     estimatePrefix: row.estimate_prefix as string,
     invoicePrefix: row.invoice_prefix as string,
@@ -154,10 +155,10 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
       const result = await client.query(
         `INSERT INTO tenant_settings (
           id, tenant_id, business_name, business_phone, business_email,
-          timezone, estimate_prefix, invoice_prefix, next_estimate_number,
+          owner_phone, timezone, estimate_prefix, invoice_prefix, next_estimate_number,
           next_invoice_number, default_payment_term_days, terminology_preferences,
           ai_model, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         RETURNING *`,
         [
           settings.id,
@@ -165,6 +166,7 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           settings.businessName,
           settings.businessPhone ?? null,
           settings.businessEmail ?? null,
+          settings.ownerPhone ?? null,
           settings.timezone,
           settings.estimatePrefix,
           settings.invoicePrefix,
@@ -228,6 +230,7 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         businessName: 'business_name',
         businessPhone: 'business_phone',
         businessEmail: 'business_email',
+        ownerPhone: 'owner_phone',
         timezone: 'timezone',
         estimatePrefix: 'estimate_prefix',
         invoicePrefix: 'invoice_prefix',
