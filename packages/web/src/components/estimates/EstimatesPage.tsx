@@ -5,6 +5,7 @@ import {
   CheckCircle2, Copy, Phone, Mail, Sparkles, MessageSquare,
   Briefcase, MapPin, RotateCcw, Download,
 } from 'lucide-react';
+import type { EstimateResponse, LineItem as EstimateLineItem } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
@@ -38,53 +39,8 @@ interface EstCompat {
   validUntil?: string;
 }
 
-interface ApiLineItem {
-  id?: string;
-  description: string;
-  quantity: number;
-  unitPriceCents: number;
-  totalCents: number;
-  taxable?: boolean;
-  sortOrder?: number;
-  groupKey?: string;
-  groupLabel?: string;
-  isOptional?: boolean;
-  isDefaultSelected?: boolean;
-}
-
-interface ApiCustomer {
-  id: string;
-  displayName?: string;
-  firstName?: string;
-  lastName?: string;
-  primaryPhone?: string;
-  email?: string;
-}
-
-interface ApiEstimate {
-  id: string;
-  estimateNumber: string;
-  status: string;
-  jobId?: string;
-  subtotalCents: number;
-  taxCents?: number;
-  totalCents: number;
-  discountCents?: number;
-  validUntil?: string;
-  customerMessage?: string;
-  lineItems?: ApiLineItem[];
-  createdAt?: string;
-  updatedAt?: string;
-  customer?: ApiCustomer;
-  customerId?: string;
-  /** Optimistic-concurrency token sent back as If-Match on edits. */
-  version?: number;
-  /** Locked good-better-best selection (line-item ids) once accepted. */
-  acceptedSelection?: string[];
-}
-
-/** Convert ApiLineItem to UI LineItem for the editor */
-function apiLineToUi(item: ApiLineItem): LineItem {
+/** Convert a shared line item to UI LineItem for the editor */
+function apiLineToUi(item: EstimateLineItem): LineItem {
   return {
     id: item.id,
     description: item.description,
@@ -100,8 +56,8 @@ function apiLineToUi(item: ApiLineItem): LineItem {
   };
 }
 
-/** Convert UI LineItem back to ApiLineItem for saving */
-function uiLineToApi(item: LineItem, sortOrder: number): Partial<ApiLineItem> {
+/** Convert UI LineItem back to a shared line item for saving */
+function uiLineToApi(item: LineItem, sortOrder: number): Partial<EstimateLineItem> {
   return {
     ...(item.id ? { id: item.id } : {}),
     description: item.description,
@@ -774,9 +730,9 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
 function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: () => void }) {
   const navigate = useNavigate();
   const tz = useTenantTimezone();
-  const { data: est, isLoading, error, refetch } = useDetailQuery<ApiEstimate>('/api/estimates', estimateId);
-  const { mutate: updateEstimate } = useMutation<Record<string, unknown>, ApiEstimate>('PUT', `/api/estimates/${estimateId}`);
-  const { mutate: transitionEstimate } = useMutation<{ status: string }, ApiEstimate>('POST', `/api/estimates/${estimateId}/transition`);
+  const { data: est, isLoading, error, refetch } = useDetailQuery<EstimateResponse>('/api/estimates', estimateId);
+  const { mutate: updateEstimate } = useMutation<Record<string, unknown>, EstimateResponse>('PUT', `/api/estimates/${estimateId}`);
+  const { mutate: transitionEstimate } = useMutation<{ status: string }, EstimateResponse>('POST', `/api/estimates/${estimateId}/transition`);
 
   const [lineItems,    setLineItems]    = useState<LineItem[]>([]);
   const [sendOpen,     setSendOpen]     = useState(false);
@@ -931,7 +887,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   // Build a mock Estimate-like object for the sub-components that still need it
   const effectiveCustomerName = enrichedCustomer?.name
     ?? (customer ? (customer.displayName || [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Customer') : 'Customer');
-  const effectiveCustomerId = enrichedCustomer?.id ?? est.customerId ?? customer?.id ?? '';
+  const effectiveCustomerId = enrichedCustomer?.id ?? customer?.id ?? '';
   const estCompat = {
     id: est.id,
     estimateNumber: est.estimateNumber,
@@ -1219,7 +1175,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
             customerName: estCompat.customer,
             description: estCompat.description,
             lineItems: uiLineItems,
-            discountCents: est.discountCents ?? 0,
+            discountCents: est.totals.discountCents,
             taxRateBps: 0,
             approvedLabel: status === 'Approved' ? 'Customer approved' : undefined,
           }}
@@ -1270,7 +1226,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
     setSelected(defaultSelectedId ?? null);
   }, [defaultSelectedId]);
 
-  const { data, total, isLoading, error, setFilters, refetch } = useListQuery<ApiEstimate>('/api/estimates');
+  const { data, total, isLoading, error, setFilters, refetch } = useListQuery<EstimateResponse>('/api/estimates');
 
   if (selected) {
     return <EstimateDetail estimateId={selected} onBack={() => {
@@ -1290,7 +1246,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
 
   const pendingCount  = normalizedData.filter(e => e.uiStatus === 'Sent' || e.uiStatus === 'Viewed').length;
   const approvedCount = normalizedData.filter(e => e.uiStatus === 'Approved').length;
-  const totalValue    = normalizedData.reduce((s, e) => s + e.totalCents, 0);
+  const totalValue    = normalizedData.reduce((s, e) => s + e.totals.totalCents, 0);
 
   return (
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
@@ -1382,7 +1338,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
                         <p className="text-xs text-slate-400 mt-0.5 truncate">{est.estimateNumber}</p>
                       </div>
                       <div className="flex flex-col items-end gap-1 shrink-0">
-                        <p className="text-sm text-slate-800">{centsToDisplay(est.totalCents)}</p>
+                        <p className="text-sm text-slate-800">{centsToDisplay(est.totals.totalCents)}</p>
                         <StatusBadge status={status} size="sm" />
                       </div>
                     </div>

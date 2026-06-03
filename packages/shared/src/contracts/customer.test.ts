@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { PreferredChannel } from '../enums.js';
-import { customerSchema, preferredChannelSchema } from './customer.js';
+import { customerSchema, preferredChannelSchema, customerListItemSchema } from './customer.js';
 import { resolveDbCheckSet } from './db-check.js';
 
 const schemaSource = readFileSync(
@@ -24,6 +24,24 @@ const baseCustomer = {
   createdAt: '2026-06-01T00:00:00.000Z',
   updatedAt: '2026-06-01T00:00:00.000Z',
 };
+
+describe('customerListItemSchema', () => {
+  it('validates a plain customer entity (no list enrichments)', () => {
+    expect(customerListItemSchema.safeParse(baseCustomer).success).toBe(true);
+  });
+
+  it('accepts optional list enrichments (open jobs, tags, locations)', () => {
+    const parsed = customerListItemSchema.parse({
+      ...baseCustomer,
+      openJobs: 2,
+      tags: ['VIP'],
+      lastService: '2026-05-01',
+      locations: [{ id: 'loc-1', street1: '123 Main St', serviceTypes: ['HVAC'] }],
+    });
+    expect(parsed.openJobs).toBe(2);
+    expect(parsed.locations?.[0].serviceTypes).toEqual(['HVAC']);
+  });
+});
 
 describe('customerSchema', () => {
   it('parses a representative customer payload', () => {
