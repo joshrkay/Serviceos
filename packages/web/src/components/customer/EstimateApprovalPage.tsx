@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router';
 import {
   Check, Phone, Mail, ChevronDown, ChevronUp, CheckCircle2, X,
@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import { printEstimateDocument } from '../../lib/estimatePdf';
+import { Button } from '../ui/button';
 
 /**
  * Format a USD dollar amount with exactly two fraction digits. A bare
@@ -534,15 +535,20 @@ export function EstimateApprovalPage() {
   const [accepted,     setAccept] = useState(false);
   const [showAllItems, setAll]    = useState(false);
 
-  // Try the real public API first. Falls back to mock data for the demo
-  // /e/<estimate-number-slug> URLs that don't correspond to real tokens.
+  // Load the estimate from the real public API. We must NOT fall back to
+  // fixture/mock data on failure: this page is served on a public URL, so
+  // a fixture render would leak another customer's name, address, and
+  // pricing. 404 → "Link not found"; any other failure → retryable error.
   const [apiView, setApiView] = useState<PublicEstimateView | null>(null);
   const [apiLoading, setApiLoading] = useState(true);
   const [apiNotFound, setApiNotFound] = useState(false);
   // Set when the estimate could not be loaded for a reason other than 404
   // (network error or non-OK response). We render a safe error screen
-  // rather than fixture data — this is a public URL.
+  // with a Retry action rather than any fixture data.
   const [apiError, setApiError] = useState(false);
+  // Bumped by the Retry button to re-trigger the load effect after a
+  // transient network/server error.
+  const [retryNonce, setRetryNonce] = useState(0);
   // Set when a background poll detects the business revised the estimate
   // (version bumped) after the customer opened the page. The banner asks
   // them to review the latest version; approve is also blocked server-side.
@@ -550,6 +556,13 @@ export function EstimateApprovalPage() {
   // Good-better-best: the line-item ids the customer has chosen. Null
   // until the estimate loads, then seeded from the server's defaults.
   const [selectedIds, setSelectedIds] = useState<string[] | null>(null);
+
+  const retryLoad = useCallback(() => {
+    setApiError(false);
+    setApiNotFound(false);
+    setApiLoading(true);
+    setRetryNonce(n => n + 1);
+  }, []);
 
   useEffect(() => {
     if (!id) {
@@ -589,7 +602,7 @@ export function EstimateApprovalPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [id]);
+  }, [id, retryNonce]);
 
   // Re-sync poll: while the page is open on a live (sent) estimate, poll
   // for a revision so the customer can't accept stale numbers. When the
@@ -657,17 +670,31 @@ export function EstimateApprovalPage() {
   // No real estimate data to show. We deliberately do NOT fall back to
   // fixture/mock data: this page is served on a public URL, so rendering a
   // mock estimate would expose another customer's name, address, and
-  // pricing. Show a safe message instead (404 vs transient error).
+  // pricing. Show a safe message instead (404 vs transient error). A
+  // Retry button is offered for transient errors so the customer doesn't
+  // have to hunt for a refresh control on mobile.
   if (!apiView) {
     const heading = apiNotFound ? 'Link not found' : 'Couldn’t load this estimate';
     const detail = apiNotFound
       ? 'This estimate link is invalid or has been revoked. Please contact the business that sent it.'
-      : 'We couldn’t load this estimate right now. Please refresh the page, or contact the business that sent it.';
+      : 'We couldn’t load this estimate. Please refresh or contact us.';
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center px-6">
         <div className="max-w-md text-center">
           <h1 className="text-slate-900 mb-2" style={{ fontSize: '1.4rem' }}>{heading}</h1>
           <p className="text-sm text-slate-500">{detail}</p>
+          {apiError && !apiNotFound && (
+            <div className="mt-5 flex justify-center">
+              <Button
+                variant="primary"
+                size="md"
+                onClick={retryLoad}
+                data-testid="estimate-load-retry"
+              >
+                Retry
+              </Button>
+            </div>
+          )}
         </div>
       </div>
     );

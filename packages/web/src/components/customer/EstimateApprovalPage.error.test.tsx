@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter, Routes, Route } from 'react-router';
 
@@ -74,6 +75,45 @@ describe('EstimateApprovalPage — Blocker 8: no fixture-data leak on failure', 
 
     await waitFor(() =>
       expect(screen.getByRole('heading', { name: /Link not found/i })).toBeInTheDocument(),
+    );
+    // No retry button on 404 — the link is dead, retrying won't help.
+    expect(screen.queryByTestId('estimate-load-retry')).not.toBeInTheDocument();
+  });
+
+  it('offers a Retry button on a transient error and recovers when the API succeeds', async () => {
+    // First call fails, second call returns a real estimate.
+    apiFetchMock
+      .mockResolvedValueOnce(errResponse(500))
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          id: 'est_1',
+          estimateNumber: 'EST-001',
+          status: 'sent',
+          customerName: 'Real Customer',
+          businessName: 'Real Business',
+          lineItems: [],
+          totalCents: 0,
+          subtotalCents: 0,
+          taxCents: 0,
+          discountCents: 0,
+          version: 1,
+          isExpired: false,
+        }),
+      } as unknown as Response)
+      // The component fires a fire-and-forget /view ping after a
+      // successful load; mock it as a no-op so we don't see an
+      // unexpected-call error.
+      .mockResolvedValue({ ok: true, status: 204, json: async () => ({}) } as unknown as Response);
+
+    renderPageAtToken('some-token');
+
+    const retry = await screen.findByTestId('estimate-load-retry');
+    await userEvent.click(retry);
+
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: /Hi, Real!/i })).toBeInTheDocument(),
     );
   });
 });
