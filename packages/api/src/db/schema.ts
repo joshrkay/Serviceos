@@ -3453,6 +3453,265 @@ export const MIGRATIONS = {
     ALTER TABLE payments ADD CONSTRAINT payments_payment_method_check
       CHECK (payment_method IN ('stripe', 'cash', 'check', 'credit_card', 'bank_transfer', 'other'));
   `,
+
+  '134_proposal_chains': `
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS chain_id UUID;
+    CREATE INDEX IF NOT EXISTS idx_proposals_chain ON proposals(tenant_id, chain_id);
+  `,
+
+  // Idempotency key for AI-placed tentative holds. A redelivered voice
+  // message (at-least-once queue) must not create a second appointment hold
+  // for the same recording. The held-slot path stamps a deterministic key
+  // (`voice-hold:<recordingId>`); the partial unique index dedups concurrent
+  // re-inserts while leaving ordinary (keyless) appointments unaffected.
+  '135_appointments_idempotency_key': `
+    ALTER TABLE appointments
+      ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_appointments_idempotency
+      ON appointments(tenant_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+  `,
+
+  '136_create_invoice_dunning': `
+    CREATE TABLE IF NOT EXISTS invoice_dunning_configs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      -- ordered cadence, e.g.
+      -- [{"offsetDays":3,"channel":"sms"},{"offsetDays":7,"channel":"email"}]
+      reminder_steps JSONB NOT NULL DEFAULT '[]',
+      late_fee_type TEXT NOT NULL DEFAULT 'none'
+        CHECK (late_fee_type IN ('none','flat','percent')),
+      -- flat: amount in integer cents; percent: basis points (bps) of amount_due
+      late_fee_value_cents BIGINT NOT NULL DEFAULT 0,
+      late_fee_grace_days INTEGER NOT NULL DEFAULT 0,
+      late_fee_max_cents BIGINT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id)
+    );
+    -- (No separate tenant index: UNIQUE (tenant_id) already backs lookups.)
+    ALTER TABLE invoice_dunning_configs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE invoice_dunning_configs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_invoice_dunning_configs ON invoice_dunning_configs;
+    CREATE POLICY tenant_isolation_invoice_dunning_configs ON invoice_dunning_configs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS invoice_dunning_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      invoice_id UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK (kind IN ('reminder','late_fee')),
+      -- Stable per-step idempotency key (survives cadence edits): reminders use
+      -- '<offsetDays>:<channel>'; late fees use the accrual-period key supplied
+      -- by the worker (one-time fees use 'initial').
+      step_key TEXT NOT NULL,
+      amount_cents BIGINT,
+      channel TEXT,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, invoice_id, kind, step_key)
+    );
+    -- (No separate (tenant_id, invoice_id) index: the composite UNIQUE above
+    --  leads with those columns and already serves per-invoice lookups.)
+    CREATE INDEX IF NOT EXISTS idx_dunning_events_tenant ON invoice_dunning_events(tenant_id);
+    ALTER TABLE invoice_dunning_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE invoice_dunning_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_invoice_dunning_events ON invoice_dunning_events;
+    CREATE POLICY tenant_isolation_invoice_dunning_events ON invoice_dunning_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '137_technician_working_hours': `
+    CREATE TABLE IF NOT EXISTS technician_working_hours (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      technician_id UUID NOT NULL REFERENCES users(id),
+      day_of_week SMALLINT NOT NULL CHECK (day_of_week BETWEEN 0 AND 6),
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT uq_working_hours_per_tech_day UNIQUE (tenant_id, technician_id, day_of_week)
+    );
+    CREATE INDEX IF NOT EXISTS idx_technician_working_hours_tech
+      ON technician_working_hours (tenant_id, technician_id);
+    ALTER TABLE technician_working_hours ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE technician_working_hours FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_technician_working_hours ON technician_working_hours;
+    CREATE POLICY tenant_isolation_technician_working_hours ON technician_working_hours
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '138_tenant_settings_auto_invoice_on_completion': `
+    -- P20-001: opt-in toggle to auto-draft an invoice when a job is marked
+    -- complete. Off by default — owners opt in; the draft still routes
+    -- through the proposal/approval gate before anything is sent.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS auto_invoice_on_completion BOOLEAN NOT NULL DEFAULT false;
+  `,
+
+  '139_create_invoice_schedules': `
+    -- P21-001: progress / milestone billing. One schedule splits a job's total
+    -- into ordered milestones, each minted as its own invoice.
+    CREATE TABLE IF NOT EXISTS invoice_schedules (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      estimate_id UUID REFERENCES estimates(id),
+      total_amount_cents BIGINT NOT NULL,
+      -- ordered milestones, e.g.
+      -- [{"label":"Deposit","type":"percent","value":5000,"trigger":"on_accept"},
+      --  {"label":"Balance","type":"remainder","value":0,"trigger":"on_completion"}]
+      -- percent value is basis points (bps); flat is integer cents.
+      milestones JSONB NOT NULL DEFAULT '[]',
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_invoice_schedules_job
+      ON invoice_schedules(tenant_id, job_id);
+    ALTER TABLE invoice_schedules ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE invoice_schedules FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_invoice_schedules ON invoice_schedules;
+    CREATE POLICY tenant_isolation_invoice_schedules ON invoice_schedules
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    -- Link each minted milestone invoice back to its schedule + position.
+    ALTER TABLE invoices
+      ADD COLUMN IF NOT EXISTS schedule_id UUID REFERENCES invoice_schedules(id),
+      ADD COLUMN IF NOT EXISTS milestone_index INTEGER;
+  `,
+
+  '140_batch_invoicing': `
+    -- P21-003: batch-invoice sweep. Per (tenant, job, batch_date) dedup ledger
+    -- so a re-run never re-batches a job, plus a per-tenant opt-in toggle.
+    CREATE TABLE IF NOT EXISTS batch_invoice_runs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      -- Calendar date (YYYY-MM-DD) the batch ran.
+      batch_date TEXT NOT NULL,
+      proposal_id UUID REFERENCES proposals(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, job_id, batch_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_batch_invoice_runs_tenant
+      ON batch_invoice_runs(tenant_id);
+    ALTER TABLE batch_invoice_runs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE batch_invoice_runs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_batch_invoice_runs ON batch_invoice_runs;
+    CREATE POLICY tenant_isolation_batch_invoice_runs ON batch_invoice_runs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS batch_invoice_enabled BOOLEAN NOT NULL DEFAULT false;
+  `,
+
+  '141_milestone_billing_safeguards': `
+    -- P0 launch hardening for milestone (schedule) billing.
+    --
+    -- (1) One billing schedule per job. A create_invoice_schedule execution
+    --     that wrote the schedule row but then failed before drafting the
+    --     deposit left the proposal retryable with no resultEntityId; the retry
+    --     minted a SECOND schedule (fresh uuid). The completion hook dedups on
+    --     schedule_id, so two schedules billed the on_completion balance TWICE.
+    --     This unique index makes a duplicate schedule impossible at the DB.
+    --
+    --     RECONCILIATION (runs first): a DB that already hit this bug — or the
+    --     double-mint bug (2) — has duplicate rows the indexes below would
+    --     abort on. The deploy/migrate role bypasses RLS (see migration 119),
+    --     so this runs fleet-wide. For each job we keep ONE surviving schedule,
+    --     re-point every other duplicate's invoices onto it, unlink any invoice
+    --     that would then collide on (schedule_id, milestone_index) — keeping
+    --     the earliest and NULLing the rest's schedule link, so NO billing row
+    --     is deleted, only detached for manual review — then delete the emptied
+    --     duplicate schedules. Idempotent: once the indexes hold, every step
+    --     below matches nothing, so re-running this migration is a no-op.
+
+    --     (i) Re-point invoices from each non-surviving duplicate schedule onto
+    --         the survivor (most invoices, then earliest, then lowest id).
+    WITH counts AS (
+      SELECT s.tenant_id, s.job_id, s.id, s.created_at, COUNT(i.id) AS inv_count
+      FROM invoice_schedules s
+      LEFT JOIN invoices i ON i.schedule_id = s.id
+      GROUP BY s.tenant_id, s.job_id, s.id, s.created_at
+    ),
+    survivors AS (
+      SELECT DISTINCT ON (tenant_id, job_id) tenant_id, job_id, id AS survivor_id
+      FROM counts
+      ORDER BY tenant_id, job_id, inv_count DESC, created_at ASC, id ASC
+    )
+    UPDATE invoices i
+    SET schedule_id = sv.survivor_id
+    FROM invoice_schedules s
+    JOIN survivors sv ON sv.tenant_id = s.tenant_id AND sv.job_id = s.job_id
+    WHERE i.schedule_id = s.id AND s.id <> sv.survivor_id;
+
+    --     (ii) Resolve (schedule_id, milestone_index) collisions — from the
+    --          re-point above OR a prior double-mint — keeping the earliest
+    --          invoice per pair and unlinking the rest (schedule_id = NULL).
+    WITH ranked AS (
+      SELECT id,
+             ROW_NUMBER() OVER (
+               PARTITION BY schedule_id, milestone_index
+               ORDER BY created_at ASC, id ASC
+             ) AS rn
+      FROM invoices
+      WHERE schedule_id IS NOT NULL AND milestone_index IS NOT NULL
+    )
+    UPDATE invoices i
+    SET schedule_id = NULL
+    FROM ranked
+    WHERE i.id = ranked.id AND ranked.rn > 1;
+
+    --     (iii) Delete the now-empty duplicate schedules (nothing references them).
+    WITH counts AS (
+      SELECT s.tenant_id, s.job_id, s.id, s.created_at, COUNT(i.id) AS inv_count
+      FROM invoice_schedules s
+      LEFT JOIN invoices i ON i.schedule_id = s.id
+      GROUP BY s.tenant_id, s.job_id, s.id, s.created_at
+    ),
+    survivors AS (
+      SELECT DISTINCT ON (tenant_id, job_id) tenant_id, job_id, id AS survivor_id
+      FROM counts
+      ORDER BY tenant_id, job_id, inv_count DESC, created_at ASC, id ASC
+    )
+    DELETE FROM invoice_schedules s
+    USING survivors sv
+    WHERE sv.tenant_id = s.tenant_id AND sv.job_id = s.job_id AND s.id <> sv.survivor_id;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_invoice_schedules_job
+      ON invoice_schedules(tenant_id, job_id);
+
+    -- (2) One invoice per (schedule, milestone). The completion hook decided
+    --     "already minted" from an application read with no DB backstop and no
+    --     lock, so two concurrent / retried "mark complete" requests could both
+    --     mint the same balance invoice. Partial — non-milestone invoices carry
+    --     NULL schedule_id and must not collide.
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_invoices_schedule_milestone
+      ON invoices(schedule_id, milestone_index)
+      WHERE schedule_id IS NOT NULL;
+
+    -- (3) Fleet-wide opt-in / kill switch for on-completion milestone minting.
+    --     Mirrors auto_invoice_on_completion + batch_invoice_enabled (opt-in,
+    --     default false) so milestone billing — which writes real invoices
+    --     directly — is never silently active fleet-wide and can be halted in
+    --     an incident without deleting schedules.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS milestone_billing_enabled BOOLEAN NOT NULL DEFAULT false;
+  `,
+
+  '142_proposals_source_recording_index': `
+    -- P1 perf: the voice redelivery dedup (findAlreadyProcessed) used to
+    -- SELECT every proposal for the tenant and JS-scan for a recordingId on
+    -- EVERY inbound voice message — O(tenant proposals), growing forever. The
+    -- replacement findByRecordingId looks up by idempotency_key (already
+    -- indexed) OR source_context->>'recordingId'; this index serves the latter
+    -- branch so the whole lookup is indexed instead of a full-tenant scan.
+    CREATE INDEX IF NOT EXISTS idx_proposals_source_recording
+      ON proposals (tenant_id, (source_context->>'recordingId'));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
@@ -3482,6 +3741,19 @@ export function getMigrationSQL(): string {
 }
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * True when `tenantId` is the canonical UUID shape that `setTenantContext`
+ * (and therefore every tenant-scoped DB path) accepts. Callers that take a
+ * tenant id from untrusted input — e.g. a public webhook URL param — should
+ * gate on this BEFORE doing any tenant-scoped work (resolver lookups, audit
+ * writes), otherwise the malformed id throws inside `setTenantContext` deeper
+ * in the call stack. Single source of truth so the guard can't drift from the
+ * throw it protects against.
+ */
+export function isValidTenantId(tenantId: string): boolean {
+  return UUID_REGEX.test(tenantId);
+}
 
 /**
  * Produce the SQL that sets `app.current_tenant_id` for the current

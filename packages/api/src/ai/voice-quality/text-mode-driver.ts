@@ -286,6 +286,18 @@ export class TextModeDriver implements AgentDriver {
       gateway: deps.gateway,
       proposalRepo: deps.proposalRepo,
       ...(deps.appointmentRepo ? { appointmentRepo: deps.appointmentRepo } : {}),
+      // Thread the fixture's tenant timezone so spoken times resolve in the
+      // tenant zone, and pin the scheduling clock to the fixture's call
+      // moment so relative/absolute booking dates are deterministic.
+      ...(deps.settingsRepo
+        ? {
+            tenantSchedulingResolver: async (t: string) => {
+              const s = await deps.settingsRepo!.findByTenant(t);
+              return { timezone: s?.timezone };
+            },
+          }
+        : {}),
+      now: () => (deps.now ? deps.now() : new Date()),
     });
   }
 

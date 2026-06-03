@@ -1,7 +1,11 @@
 import { z } from 'zod';
+import { proposalStatusSchema } from '@ai-service-os/shared';
 
 export const proposalFilterSchema = z.object({
-  status: z.enum(['draft', 'ready_for_review', 'approved', 'executing', 'rejected', 'expired', 'executed', 'execution_failed']).optional(),
+  // Reuse the canonical proposal status set (kept in lockstep with the DB CHECK
+  // via shared/contracts/status.test.ts). Previously hand-listed here and had
+  // already drifted — it was missing 'undone'.
+  status: proposalStatusSchema.optional(),
   proposalType: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).default(0),
@@ -22,23 +26,8 @@ export const editProposalBodySchema = z.object({
 
 export type EditProposalBody = z.infer<typeof editProposalBodySchema>;
 
-export const proposalResponseSchema = z.object({
-  id: z.string().uuid(),
-  tenantId: z.string().uuid(),
-  proposalType: z.string(),
-  status: z.string(),
-  summary: z.string(),
-  explanation: z.string().optional(),
-  confidenceScore: z.number().optional(),
-  confidenceFactors: z.array(z.string()).optional(),
-  payload: z.record(z.unknown()),
-  sourceContext: z.record(z.unknown()).optional(),
-  targetEntityType: z.string().optional(),
-  targetEntityId: z.string().optional(),
-  resultEntityId: z.string().optional(),
-  createdBy: z.string(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
-
-export type ProposalResponse = z.infer<typeof proposalResponseSchema>;
+// The proposal response shape lives in @ai-service-os/shared so api and web
+// share one definition. This file previously carried a byte-for-byte duplicate
+// (with the same loose `status: z.string()`); it's now re-exported from the
+// canonical source, which types `status` via proposalStatusSchema.
+export { proposalResponseSchema, type ProposalResponse } from '@ai-service-os/shared';

@@ -4,6 +4,7 @@ import {
   InMemoryProposalRepository,
   CreateProposalInput,
   ProposalType,
+  Proposal,
   decideInitialStatus,
   actionClassForProposalType,
 } from '../../src/proposals/proposal';
@@ -125,6 +126,25 @@ describe('P2-001 — Proposal entity and core schema', () => {
 
     const patched = await repo.update('other-tenant', proposal.id, { summary: 'hacked' });
     expect(patched).toBeNull();
+  });
+
+  it('createMany persists every member and is atomic on idempotency conflict', async () => {
+    const repo = new InMemoryProposalRepository();
+    // Chain members carry no idempotency key (they dedupe by recordingId
+    // at the worker layer), so use undefined here.
+    const a = createProposal({ ...validInput, idempotencyKey: undefined, summary: 'chain-a' });
+    const b = createProposal({ ...validInput, idempotencyKey: undefined, summary: 'chain-b' });
+    const created = await repo.createMany([a, b]);
+    expect(created).toHaveLength(2);
+    expect(await repo.findByTenant(validInput.tenantId)).toHaveLength(2);
+
+    // A batch with a duplicate idempotency key rejects without persisting
+    // any member (validated before the commit loop).
+    const repo2 = new InMemoryProposalRepository();
+    const c = createProposal({ ...validInput, idempotencyKey: 'dup', summary: 'c' });
+    const d = createProposal({ ...validInput, idempotencyKey: 'dup', summary: 'd' });
+    await expect(repo2.createMany([c, d])).rejects.toThrow();
+    expect(await repo2.findByTenant(validInput.tenantId)).toHaveLength(0);
   });
 
   it('idempotency — duplicate key within tenant throws ConflictError', async () => {
@@ -421,6 +441,57 @@ describe('createProposal — D3 trust-tier integration', () => {
     expect(proposal.status).toBe('approved');
   });
 
+  it('forwards supervisorPresent=false: autonomous + capture + 0.95 → ready_for_review, not approved', () => {
+    // Regression for the P0 launch blocker: createProposal used to DROP
+    // supervisorPresent before calling decideInitialStatus, so the
+    // unsupervised hard-block never engaged and a high-confidence voice
+    // booking auto-approved (→ auto-executed) with no human in the loop.
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'create_appointment',
+      payload: { jobId: 'job-1' },
+      summary: 'Book via voice',
+      sourceTrustTier: 'autonomous',
+      confidenceScore: 0.95,
+      supervisorPresent: false,
+      createdBy: 'agent-voice',
+    });
+    expect(proposal.status).toBe('ready_for_review');
+    expect(proposal.approvedAt).toBeUndefined();
+  });
+
+  it('forwards supervisorPresent=true: autonomous + capture + 0.95 → approved (supervised path intact)', () => {
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'create_appointment',
+      payload: { jobId: 'job-1' },
+      summary: 'Book via voice',
+      sourceTrustTier: 'autonomous',
+      confidenceScore: 0.95,
+      supervisorPresent: true,
+      createdBy: 'agent-voice',
+    });
+    expect(proposal.status).toBe('approved');
+  });
+
+  it('forwards tenantThresholdOverride: a stricter override blocks an otherwise-approved booking', () => {
+    // The override was also silently dropped. With supervisor present + mode,
+    // a 0.99 tenant threshold must hold a 0.95-confidence booking in draft.
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'create_appointment',
+      payload: { jobId: 'job-1' },
+      summary: 'Book via voice',
+      sourceTrustTier: 'autonomous',
+      confidenceScore: 0.95,
+      supervisorPresent: true,
+      supervisorMode: 'supervisor',
+      tenantThresholdOverride: { supervisor: 0.99 },
+      createdBy: 'agent-voice',
+    });
+    expect(proposal.status).toBe('draft');
+  });
+
   it('with sourceTrustTier=autonomous + cancel_appointment, status is draft (irreversible)', () => {
     const proposal = createProposal({
       tenantId: 'tenant-1',
@@ -478,5 +549,50 @@ describe('createProposal — D3 trust-tier integration', () => {
     });
     expect(proposal.sourceContext?.conversationId).toBe('conv-42');
     expect(proposal.sourceContext?.missingFields).toEqual(['newScheduledStart']);
+  });
+});
+
+describe('InMemoryProposalRepository.findByRecordingId — voice dedup lookup', () => {
+  const TENANT = 'tenant-rec';
+
+  function seed(repo: InMemoryProposalRepository, p: Partial<Proposal> & { id: string }) {
+    const now = new Date();
+    return repo.create({
+      tenantId: TENANT,
+      proposalType: 'create_appointment',
+      status: 'draft',
+      payload: {},
+      summary: 's',
+      createdBy: 'u',
+      createdAt: now,
+      updatedAt: now,
+      ...p,
+    } as Proposal);
+  }
+
+  it('matches the single-action idempotency key', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seed(repo, { id: 'p1', idempotencyKey: 'voice:rec-1' });
+    const found = await repo.findByRecordingId(TENANT, 'rec-1', 'voice:rec-1');
+    expect(found?.id).toBe('p1');
+  });
+
+  it('matches a chain member by sourceContext.recordingId (no shared key)', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seed(repo, { id: 'p2', sourceContext: { recordingId: 'rec-2' } });
+    const found = await repo.findByRecordingId(TENANT, 'rec-2', 'voice:rec-2');
+    expect(found?.id).toBe('p2');
+  });
+
+  it('returns null when neither the key nor the recordingId matches', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seed(repo, { id: 'p3', idempotencyKey: 'voice:other' });
+    expect(await repo.findByRecordingId(TENANT, 'rec-x', 'voice:rec-x')).toBeNull();
+  });
+
+  it('is tenant-scoped — does not match another tenant', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seed(repo, { id: 'p4', tenantId: 'other-tenant', idempotencyKey: 'voice:rec-4' } as Partial<Proposal> & { id: string });
+    expect(await repo.findByRecordingId(TENANT, 'rec-4', 'voice:rec-4')).toBeNull();
   });
 });

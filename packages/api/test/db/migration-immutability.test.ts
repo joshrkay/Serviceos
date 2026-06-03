@@ -187,6 +187,15 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['131_appointment_assignments_no_double_booking', '27484d3c8eef021201ccd827419b3cbbec8516c14868759543b0f16d7ba3f295'],
   ['132_customer_consent_status', 'd4d2d0b5de1471a746cb9db7757630e27ef5a0f45e4fd61ad9c236645c49396d'],
   ['133_payments_reversal_tracking', '9e4be3033b999501b6faa258b4475d58452f322f797751b57f203529668f6afb'],
+  ['134_proposal_chains', 'edcfadb2580167f35be75ea42d258fa7d499088d28cca5bbfc8b84823aa9e2ad'],
+  ['135_appointments_idempotency_key', 'ab65a6bf7b64221c2761b81e7c5d6f42b2e048b7fa7fcb52ab4adffe1c370aeb'],
+  ['136_create_invoice_dunning', '085bab2c52bb030111b677d061d70019eded0a144aa99797ac1eff80bfb3149a'],
+  ['137_technician_working_hours', '9337884066ddee9644370bca78c50c7489a854a831ceec4e5cedfce8a707248d'],
+  ['138_tenant_settings_auto_invoice_on_completion', '022db9a74cf4fab10dd8c23b6fabcbbf6edb36a7629adff7e39e5f05292e85f2'],
+  ['139_create_invoice_schedules', '01debb27ace85e2ac1df38317894cce7b35fd54a20431fe526d12246fda696d9'],
+  ['140_batch_invoicing', '63f7146c5a2b08ed910edff1f1f9136955d79474e796801239abb1ff96430fdc'],
+  ['141_milestone_billing_safeguards', '38e660dbced93c8fa49efa7ddd4ae6e868c5cf10f3b1d5048dfed243e7d6c777'],
+  ['142_proposals_source_recording_index', '2af70e5368d61c8338ac16f66557fd34c3a8daebc2d48b009d3bafa13514659d'],
 ];
 
 function hashMigration(value: string): string {

@@ -7,9 +7,13 @@
  * produce proposals — they get logged and dropped so the user is not
  * surprised by actions they didn't clearly request.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-router';
 import { InMemoryProposalRepository, Proposal } from '../../src/proposals/proposal';
+import {
+  setSupervisorPresenceLoader,
+  _resetSupervisorPresenceCache,
+} from '../../src/ai/supervisor-presence';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { IntentClassification } from '../../src/ai/orchestration/intent-classifier';
@@ -62,6 +66,14 @@ describe('voice-action-router worker', () => {
 
   beforeEach(() => {
     proposalRepo = new InMemoryProposalRepository();
+  });
+
+  afterEach(() => {
+    // Supervisor presence is a module-level singleton with a 30s cache; reset
+    // both so a test that wires a loader can't bleed into the permissive
+    // default the other tests rely on.
+    _resetSupervisorPresenceCache();
+    setSupervisorPresenceLoader(null);
   });
 
   it('classifies "create invoice" transcript and persists a draft_invoice proposal', async () => {
@@ -125,6 +137,66 @@ describe('voice-action-router worker', () => {
     const byTenant = await proposalRepo.findByTenant('t-1');
     expect(byTenant).toHaveLength(1);
     expect(byTenant[0].proposalType).toBe('create_appointment');
+  });
+
+  it('does NOT auto-approve a high-confidence voice booking when the tenant is unsupervised', async () => {
+    // P0 launch blocker: with no supervisor present, an autonomous,
+    // capture-class booking must land in the review queue — never 'approved'
+    // (which the execution worker would auto-run after the undo window).
+    setSupervisorPresenceLoader(async () => false);
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'create_appointment',
+        confidence: 0.97,
+        extractedEntities: { customerName: 'Mrs Lee', dateTimeDescription: 'next Tuesday 2pm' },
+      } satisfies IntentClassification),
+      JSON.stringify({
+        customerName: 'Mrs Lee',
+        scheduledStart: '2026-04-21T21:00:00Z',
+        scheduledEnd: '2026-04-21T22:00:00Z',
+        confidence_score: 0.97,
+      }),
+    ]);
+
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+    await worker.handle(
+      msg({ tenantId: 't-unsup', userId: 'u-1', transcript: 'Book Mrs Lee next Tuesday at 2pm' }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-unsup');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].status).toBe('ready_for_review');
+    expect(byTenant[0].approvedAt).toBeUndefined();
+  });
+
+  it('auto-approves the same high-confidence booking when a supervisor IS present', async () => {
+    // Contrast to the unsupervised case: the Phase-12 supervised auto-approve
+    // path stays intact when presence is confirmed.
+    setSupervisorPresenceLoader(async () => true);
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'create_appointment',
+        confidence: 0.97,
+        extractedEntities: { customerName: 'Mrs Lee', dateTimeDescription: 'next Tuesday 2pm' },
+      } satisfies IntentClassification),
+      JSON.stringify({
+        customerName: 'Mrs Lee',
+        scheduledStart: '2026-04-21T21:00:00Z',
+        scheduledEnd: '2026-04-21T22:00:00Z',
+        confidence_score: 0.97,
+      }),
+    ]);
+
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+    await worker.handle(
+      msg({ tenantId: 't-sup', userId: 'u-1', transcript: 'Book Mrs Lee next Tuesday at 2pm' }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-sup');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].status).toBe('approved');
   });
 
   it('P0-035: passes the slotConflictChecker to CreateAppointmentAITaskHandler so the pre-check is wired in production', async () => {
@@ -449,7 +521,7 @@ describe('voice-action-router worker', () => {
     expect(p.cancellationType).toBe('other');
   });
 
-  it('routes reschedule_appointment and marks ISO times as missing when only a description is given', async () => {
+  it('routes reschedule_appointment, resolves the spoken new time, and holds only on the appointment id', async () => {
     const gateway = gatewayReturning([
       JSON.stringify({
         intentType: 'reschedule_appointment',
@@ -475,13 +547,20 @@ describe('voice-action-router worker', () => {
     expect(byTenant).toHaveLength(1);
     const p = byTenant[0];
     expect(p.proposalType).toBe('reschedule_appointment');
+    // Still draft: we resolved the new TIME, but with no appointmentRepo
+    // wired the concrete appointment id is unknown, so it holds for review.
     expect(p.status).toBe('draft');
-    expect(p.sourceContext?.missingFields).toEqual(
-      expect.arrayContaining(['newScheduledStart', 'newScheduledEnd'])
-    );
+    const missing = p.sourceContext?.missingFields as string[];
+    expect(missing).toContain('appointmentId');
+    // The spoken time is now resolved deterministically — no longer missing.
+    expect(missing).not.toContain('newScheduledStart');
+    expect(missing).not.toContain('newScheduledEnd');
     const payload = p.payload as Record<string, unknown>;
     expect(payload.appointmentReference).toBe('the Miller job');
     expect(payload.newDateTimeDescription).toBe('Thursday at 2pm');
+    // Resolved to a concrete UTC instant.
+    expect(typeof payload.newScheduledStart).toBe('string');
+    expect(Number.isNaN(Date.parse(payload.newScheduledStart as string))).toBe(false);
   });
 
   it('routes cancel_appointment and stays in draft even at high confidence (irreversible class)', async () => {
@@ -913,6 +992,9 @@ describe('voice-action-router worker', () => {
 
     const byTenant = await proposalRepo.findByTenant('t-1');
     expect(byTenant).toHaveLength(1);
+    // The proposal carries the deterministic idempotency key so a concurrent
+    // redelivery (one that races past the pre-check) is deduped at the DB layer.
+    expect(byTenant[0].idempotencyKey).toBe('voice-proposal:rec-dedup-1');
 
     const appts = await appointmentRepo.findByDateRange(
       't-1',
@@ -920,5 +1002,57 @@ describe('voice-action-router worker', () => {
       new Date('2100-01-01T00:00:00Z'),
     );
     expect(appts).toHaveLength(1);
+    // The held appointment carries its own key so a concurrent redelivery
+    // returns the existing hold instead of inserting a second one.
+    expect(appts[0].idempotencyKey).toBe('voice-hold:rec-dedup-1');
+  });
+
+  it('concurrent redelivery past the pre-check is deduped by the idempotency key (no throw, one proposal)', async () => {
+    // Simulate the race: both deliveries see an EMPTY proposal store at
+    // pre-check time (a proposalRepo whose findByTenant always reports empty
+    // until the underlying create has happened), so both pass findAlreadyProcessed
+    // and both reach create — the second must be swallowed as a dedup, not throw.
+    const real = new InMemoryProposalRepository();
+    const racingRepo = {
+      create: (p: Proposal) => real.create(p),
+      // The pre-check (findByRecordingId) always reports "nothing processed
+      // yet" so both deliveries pass it and race into create; the real repo's
+      // idempotency key must swallow the second create rather than throw.
+      findByRecordingId: async () => null,
+      findByTenant: async () => [] as Proposal[],
+    } as unknown as InMemoryProposalRepository;
+
+    const classifierResponse = JSON.stringify({
+      intentType: 'create_appointment',
+      confidence: 0.9,
+      extractedEntities: { customerName: 'Mrs Lee' },
+    } satisfies IntentClassification);
+    const appointmentResponse = JSON.stringify({
+      customerName: 'Mrs Lee',
+      scheduledStart: '2026-04-21T21:00:00Z',
+      scheduledEnd: '2026-04-21T22:00:00Z',
+      confidence_score: 0.9,
+    });
+    // Two full classify+extract passes (both deliveries run end-to-end).
+    const gateway = gatewayReturning([
+      classifierResponse,
+      appointmentResponse,
+      classifierResponse,
+      appointmentResponse,
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo: racingRepo });
+    const payload = {
+      tenantId: 't-1',
+      userId: 'u-1',
+      transcript: 'Schedule a follow-up with Mrs Lee next Tuesday at 2pm',
+      recordingId: 'rec-race-1',
+    };
+
+    await worker.handle(msg(payload), silentLogger());
+    // Second delivery races past the (empty) pre-check and must NOT throw.
+    await expect(worker.handle(msg(payload), silentLogger())).resolves.toBeUndefined();
+
+    // Exactly one proposal actually persisted despite two create attempts.
+    expect(await real.findByTenant('t-1')).toHaveLength(1);
   });
 });

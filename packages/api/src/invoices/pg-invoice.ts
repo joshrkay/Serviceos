@@ -26,8 +26,9 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
           discount_cents, tax_rate_bps, subtotal_cents, taxable_subtotal_cents,
           tax_cents, total_cents, amount_paid_cents, amount_due_cents,
           issued_at, due_date, customer_message, originating_lead_id,
+          schedule_id, milestone_index,
           created_by, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
         [
           invoice.id,
           invoice.tenantId,
@@ -47,6 +48,8 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
           invoice.dueDate ?? null,
           invoice.customerMessage ?? null,
           invoice.originatingLeadId ?? null,
+          invoice.scheduleId ?? null,
+          invoice.milestoneIndex ?? null,
           invoice.createdBy,
           invoice.createdAt,
           invoice.updatedAt,
@@ -78,6 +81,18 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       const { rows } = await client.query(
         `SELECT * FROM invoices WHERE tenant_id = $1 AND job_id = $2 ORDER BY created_at DESC`,
         [tenantId, jobId],
+      );
+
+      return this.mapRowsToInvoices(client, tenantId, rows);
+    });
+  }
+
+  async findByJobs(tenantId: string, jobIds: string[]): Promise<Invoice[]> {
+    if (jobIds.length === 0) return [];
+    return this.withTenant(tenantId, async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM invoices WHERE tenant_id = $1 AND job_id = ANY($2) ORDER BY created_at DESC`,
+        [tenantId, jobIds],
       );
 
       return this.mapRowsToInvoices(client, tenantId, rows);
@@ -426,6 +441,11 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       stripePaymentLinkId: row.stripe_payment_link_id ?? undefined,
       stripePaymentLinkUrl: row.stripe_payment_link_url ?? undefined,
       originatingLeadId: row.originating_lead_id ?? undefined,
+      scheduleId: row.schedule_id ?? undefined,
+      milestoneIndex:
+        row.milestone_index !== undefined && row.milestone_index !== null
+          ? Number(row.milestone_index)
+          : undefined,
       createdBy: row.created_by,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),

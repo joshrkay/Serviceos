@@ -1,6 +1,9 @@
 import { v4 as uuidv4 } from 'uuid';
-import { Proposal, ProposalType } from '../proposal';
+import { Proposal, ProposalType, ProposalRepository } from '../proposal';
 import { CreateInvoiceExecutionHandler } from './invoice-execution-handler';
+import { CreateInvoiceScheduleExecutionHandler } from './invoice-schedule-handler';
+import { InvoiceScheduleRepository } from '../../invoices/invoice-schedule';
+import { BatchInvoiceExecutionHandler } from './batch-invoice-handler';
 import { UpdateInvoiceExecutionHandler } from './update-invoice-handler';
 import { IssueInvoiceExecutionHandler } from '../handlers/issue-invoice';
 import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
@@ -266,6 +269,12 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
 
     const timezone = typeof payload.timezone === 'string' ? payload.timezone : 'UTC';
 
+    // Optional customer-facing arrival window (e.g. "we'll be there 8–12").
+    const arrivalWindowStart =
+      typeof payload.arrivalWindowStart === 'string' ? new Date(payload.arrivalWindowStart) : undefined;
+    const arrivalWindowEnd =
+      typeof payload.arrivalWindowEnd === 'string' ? new Date(payload.arrivalWindowEnd) : undefined;
+
     if (this.assignmentRepo && payload.technicianId && typeof payload.technicianId === 'string') {
       const techAssignments = await this.assignmentRepo.findByTechnician(context.tenantId, payload.technicianId);
       const techAppointments = await Promise.all(
@@ -297,6 +306,9 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
       jobId: payload.jobId,
       scheduledStart,
       scheduledEnd,
+      ...(arrivalWindowStart && arrivalWindowEnd && !isNaN(arrivalWindowStart.getTime()) && !isNaN(arrivalWindowEnd.getTime())
+        ? { arrivalWindowStart, arrivalWindowEnd }
+        : {}),
       timezone,
       notes: typeof payload.notes === 'string' ? payload.notes : undefined,
       createdBy: context.executedBy,
@@ -407,6 +419,10 @@ export function createExecutionHandlerRegistry(deps?: {
   invoiceRepo?: InvoiceRepository;
   estimateRepo?: EstimateRepository;
   settingsRepo?: SettingsRepository;
+  // P21-002 — create_invoice_schedule. Absent → handler degrades to passthrough.
+  scheduleRepo?: InvoiceScheduleRepository;
+  // P21-003 — batch_invoice fans out draft_invoice proposals via this repo.
+  proposalRepo?: ProposalRepository;
   // Estimate edit history — when wired, voice update_estimate snapshots a
   // revision + edit delta, matching the authenticated edit path.
   docRevisionRepo?: DocumentRevisionRepository;
@@ -460,6 +476,8 @@ export function createExecutionHandlerRegistry(deps?: {
     new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
     new DraftEstimateExecutionHandler(deps?.estimateRepo, deps?.settingsRepo),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
+    new CreateInvoiceScheduleExecutionHandler(deps?.scheduleRepo, deps?.invoiceRepo, deps?.settingsRepo, deps?.estimateRepo),
+    new BatchInvoiceExecutionHandler(deps?.proposalRepo),
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps, deps?.auditRepo),
     new AddCrewMemberExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps, deps?.auditRepo),
     new RemoveCrewMemberExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.auditRepo),

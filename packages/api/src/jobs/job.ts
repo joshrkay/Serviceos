@@ -60,6 +60,15 @@ export interface Job {
   depositStripePaymentLinkId?: string;
   depositStripePaymentLinkUrl?: string;
   /**
+   * Hennessy — payment-link UX. Durable deadline for the deposit
+   * Payment Link. Stripe Payment Links have no native expiry, so we own
+   * the clock: the public checkout path treats a link past this instant
+   * as stale, deactivates it, and mints a fresh one. Surfaced to the
+   * customer so the signing page can show an honest "pay by" date.
+   * Undefined for links minted before this column existed.
+   */
+  depositStripePaymentLinkExpiresAt?: Date;
+  /**
    * Tier 4 (Deposit rules — PR 3c). Set the first time an invoice is
    * created from this job — points at the invoice that consumed the
    * deposit credit. Used to keep the credit single-use: subsequent
