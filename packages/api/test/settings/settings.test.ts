@@ -5,6 +5,7 @@ import {
   getNextEstimateNumber,
   getNextInvoiceNumber,
   validateSettingsInput,
+  ensureTenantSettings,
   InMemorySettingsRepository,
 } from '../../src/settings/settings';
 
@@ -178,5 +179,53 @@ describe('P1-017 — Tenant business settings and numbering preferences', () => 
     await expect(
       createSettings({ tenantId: 'tenant-1', businessName: 'Duplicate' }, repo)
     ).rejects.toThrow('Settings already exist');
+  });
+
+  describe('onboarding-blocker fix — ensureTenantSettings seeds aiModel', () => {
+    const ORIGINAL_DEFAULT_MODEL = process.env.AI_DEFAULT_MODEL;
+
+    afterEach(() => {
+      if (ORIGINAL_DEFAULT_MODEL === undefined) {
+        delete process.env.AI_DEFAULT_MODEL;
+      } else {
+        process.env.AI_DEFAULT_MODEL = ORIGINAL_DEFAULT_MODEL;
+      }
+    });
+
+    it('writes a non-null aiModel for a fresh tenant (env default wins)', async () => {
+      process.env.AI_DEFAULT_MODEL = 'gpt-4o-mini-test';
+
+      const settings = await ensureTenantSettings('tenant-new', repo, {
+        businessName: 'Fresh Co',
+      });
+
+      expect(settings.aiModel).toBe('gpt-4o-mini-test');
+      // Sanity: the row that lands in the repo carries the same value so
+      // the onboarding "AI check" step finds aiConfigPresent === true.
+      const reread = await getSettings('tenant-new', repo);
+      expect(reread?.aiModel).toBe('gpt-4o-mini-test');
+    });
+
+    it('falls back to a hardcoded default when AI_DEFAULT_MODEL is unset', async () => {
+      delete process.env.AI_DEFAULT_MODEL;
+
+      const settings = await ensureTenantSettings('tenant-no-env', repo);
+
+      expect(settings.aiModel).toBe('gpt-4o-mini');
+      expect(settings.aiModel).not.toBeNull();
+    });
+
+    it('never overwrites an existing tenant override on idempotent re-call', async () => {
+      // Seed with a different model than what AI_DEFAULT_MODEL would yield.
+      process.env.AI_DEFAULT_MODEL = 'platform-default-now';
+      await createSettings({ tenantId: 'tenant-override', businessName: 'X' }, repo);
+      await updateSettings('tenant-override', { aiModel: 'tenant-pinned-model' }, repo);
+
+      // Change AI_DEFAULT_MODEL to prove ensureTenantSettings does not re-seed.
+      process.env.AI_DEFAULT_MODEL = 'new-platform-default';
+      const second = await ensureTenantSettings('tenant-override', repo);
+
+      expect(second.aiModel).toBe('tenant-pinned-model');
+    });
   });
 });

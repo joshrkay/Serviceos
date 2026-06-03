@@ -111,6 +111,10 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     ttsVoiceEs: (row.tts_voice_es as string | null) ?? undefined,
     spanishDispatcherUserIds:
       (row.spanish_dispatcher_user_ids as string[] | null) ?? undefined,
+    // Migration 120 (`120_tenant_settings_ai_config`). NULL → undefined to
+    // match the InMemory repo shape; consumers (onboarding's
+    // `aiConfigPresent`, verify_ai worker) treat undefined as "not seeded".
+    aiModel: (row.ai_model as string | null) ?? undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -152,8 +156,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           id, tenant_id, business_name, business_phone, business_email,
           timezone, estimate_prefix, invoice_prefix, next_estimate_number,
           next_invoice_number, default_payment_term_days, terminology_preferences,
-          created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+          ai_model, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         RETURNING *`,
         [
           settings.id,
@@ -168,6 +172,11 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           settings.nextInvoiceNumber,
           settings.defaultPaymentTermDays,
           terminologyJson ? JSON.stringify(terminologyJson) : null,
+          // Onboarding-blocker fix: persist the seeded ai_model so the
+          // verify_ai worker finds a model on the very first tenant_settings
+          // row. The COALESCE backfill in webhooks/routes.ts is kept as a
+          // safety net for tenants whose bootstrap predates this code.
+          settings.aiModel ?? null,
           settings.createdAt,
           settings.updatedAt,
         ]
@@ -258,6 +267,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         ttsVoiceEn: 'tts_voice_en',
         ttsVoiceEs: 'tts_voice_es',
         spanishDispatcherUserIds: 'spanish_dispatcher_user_ids',
+        // Migration 120 — per-tenant AI model override.
+        aiModel: 'ai_model',
         updatedAt: 'updated_at',
       };
 

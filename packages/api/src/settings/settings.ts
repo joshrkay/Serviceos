@@ -239,6 +239,16 @@ export interface TenantSettings {
   ttsVoiceEn?: string | null;
   ttsVoiceEs?: string | null;
   spanishDispatcherUserIds?: string[];
+  /**
+   * Per-tenant AI model override. Seeded on tenant creation from
+   * `AI_DEFAULT_MODEL` so the onboarding "AI check" step finds an
+   * `aiConfigPresent` row immediately and the verify_ai worker has a
+   * model to call. The gateway already resolves overrides via its own
+   * env+config path; this column just unblocks onboarding and acts as a
+   * future per-tenant pinning surface. Column added in migration 120
+   * (`120_tenant_settings_ai_config`).
+   */
+  aiModel?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -254,6 +264,29 @@ export interface CreateSettingsInput {
   defaultPaymentTermDays?: number;
   terminologyPreferences?: Record<string, string>;
   activeVerticalPacks?: string[];
+  /** Per-tenant AI model override. See `TenantSettings.aiModel`. */
+  aiModel?: string | null;
+}
+
+/**
+ * Built-in safety fallback if `AI_DEFAULT_MODEL` is unset at tenant-bootstrap
+ * time. Matches the lowest-tier OpenAI model the gateway documents in
+ * `factory.ts` so a tenant created without env config still reports
+ * `aiConfigPresent` true to the onboarding wizard and the verify_ai worker
+ * has a model to attempt. The gateway's own resolution is unaffected.
+ */
+const AI_MODEL_BOOTSTRAP_FALLBACK = 'gpt-4o-mini';
+
+/**
+ * Resolve the AI model to seed onto a freshly-created tenant_settings row.
+ * Mirrors the env precedence the gateway uses (`AI_DEFAULT_MODEL`) so the
+ * onboarding "AI check" step is unblocked without coupling the settings
+ * module to the gateway's tier-resolution code.
+ */
+export function resolveBootstrapAiModel(): string {
+  const env = process.env.AI_DEFAULT_MODEL;
+  if (env && env.trim().length > 0) return env;
+  return AI_MODEL_BOOTSTRAP_FALLBACK;
 }
 
 export interface UpdateSettingsInput {
@@ -311,6 +344,8 @@ export interface UpdateSettingsInput {
   ttsVoiceEn?: string | null;
   ttsVoiceEs?: string | null;
   spanishDispatcherUserIds?: string[];
+  /** Per-tenant AI model override; null clears the field. */
+  aiModel?: string | null;
 }
 
 export interface SettingsRepository {
@@ -568,6 +603,12 @@ export async function ensureTenantSettings(
     defaultPaymentTermDays: 30,
     defaultLanguage: 'en',
     autoDetectLanguage: true,
+    // Onboarding-blocker fix: seed the platform default AI model so the
+    // onboarding "AI check" (Step 6) does not fail with `ai_config_missing`
+    // for every new tenant. The webhooks/routes.ts billing handler also
+    // backfills via COALESCE for tenants whose bootstrap predates this code,
+    // so writing here never clobbers an existing tenant's override.
+    aiModel: resolveBootstrapAiModel(),
     createdAt: new Date(),
     updatedAt: new Date(),
   };
