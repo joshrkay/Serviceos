@@ -12,6 +12,7 @@
  * rounded to the nearest cent, matching billing-engine tax math.
  */
 import { DunningConfig } from './dunning-config';
+import { applyBps } from '../shared/billing-engine';
 
 export interface LateFeeInput {
   /** Current outstanding balance on the invoice, in cents. */
@@ -59,8 +60,10 @@ export function computeLateFeeCents(config: DunningConfig, input: LateFeeInput):
   if (config.lateFeeType === 'flat') {
     fee = Math.round(config.lateFeeValueCents);
   } else {
-    // percent: value is basis points of the outstanding balance.
-    fee = Math.round((amountDueCents * config.lateFeeValueCents) / 10000);
+    // percent: value is basis points of the outstanding balance. Use the
+    // shared billing engine so the rounding convention can't drift from tax /
+    // deposit / discount math (CLAUDE.md: single home for percent-of-money).
+    fee = applyBps(amountDueCents, config.lateFeeValueCents);
   }
 
   if (config.lateFeeMaxCents !== undefined) {

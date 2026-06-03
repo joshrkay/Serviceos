@@ -7,9 +7,13 @@
  * produce proposals — they get logged and dropped so the user is not
  * surprised by actions they didn't clearly request.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-router';
 import { InMemoryProposalRepository, Proposal } from '../../src/proposals/proposal';
+import {
+  setSupervisorPresenceLoader,
+  _resetSupervisorPresenceCache,
+} from '../../src/ai/supervisor-presence';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { IntentClassification } from '../../src/ai/orchestration/intent-classifier';
@@ -62,6 +66,14 @@ describe('voice-action-router worker', () => {
 
   beforeEach(() => {
     proposalRepo = new InMemoryProposalRepository();
+  });
+
+  afterEach(() => {
+    // Supervisor presence is a module-level singleton with a 30s cache; reset
+    // both so a test that wires a loader can't bleed into the permissive
+    // default the other tests rely on.
+    _resetSupervisorPresenceCache();
+    setSupervisorPresenceLoader(null);
   });
 
   it('classifies "create invoice" transcript and persists a draft_invoice proposal', async () => {
@@ -125,6 +137,66 @@ describe('voice-action-router worker', () => {
     const byTenant = await proposalRepo.findByTenant('t-1');
     expect(byTenant).toHaveLength(1);
     expect(byTenant[0].proposalType).toBe('create_appointment');
+  });
+
+  it('does NOT auto-approve a high-confidence voice booking when the tenant is unsupervised', async () => {
+    // P0 launch blocker: with no supervisor present, an autonomous,
+    // capture-class booking must land in the review queue — never 'approved'
+    // (which the execution worker would auto-run after the undo window).
+    setSupervisorPresenceLoader(async () => false);
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'create_appointment',
+        confidence: 0.97,
+        extractedEntities: { customerName: 'Mrs Lee', dateTimeDescription: 'next Tuesday 2pm' },
+      } satisfies IntentClassification),
+      JSON.stringify({
+        customerName: 'Mrs Lee',
+        scheduledStart: '2026-04-21T21:00:00Z',
+        scheduledEnd: '2026-04-21T22:00:00Z',
+        confidence_score: 0.97,
+      }),
+    ]);
+
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+    await worker.handle(
+      msg({ tenantId: 't-unsup', userId: 'u-1', transcript: 'Book Mrs Lee next Tuesday at 2pm' }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-unsup');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].status).toBe('ready_for_review');
+    expect(byTenant[0].approvedAt).toBeUndefined();
+  });
+
+  it('auto-approves the same high-confidence booking when a supervisor IS present', async () => {
+    // Contrast to the unsupervised case: the Phase-12 supervised auto-approve
+    // path stays intact when presence is confirmed.
+    setSupervisorPresenceLoader(async () => true);
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'create_appointment',
+        confidence: 0.97,
+        extractedEntities: { customerName: 'Mrs Lee', dateTimeDescription: 'next Tuesday 2pm' },
+      } satisfies IntentClassification),
+      JSON.stringify({
+        customerName: 'Mrs Lee',
+        scheduledStart: '2026-04-21T21:00:00Z',
+        scheduledEnd: '2026-04-21T22:00:00Z',
+        confidence_score: 0.97,
+      }),
+    ]);
+
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+    await worker.handle(
+      msg({ tenantId: 't-sup', userId: 'u-1', transcript: 'Book Mrs Lee next Tuesday at 2pm' }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-sup');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].status).toBe('approved');
   });
 
   it('P0-035: passes the slotConflictChecker to CreateAppointmentAITaskHandler so the pre-check is wired in production', async () => {
@@ -943,7 +1015,11 @@ describe('voice-action-router worker', () => {
     const real = new InMemoryProposalRepository();
     const racingRepo = {
       create: (p: Proposal) => real.create(p),
-      findByTenant: async () => [] as Proposal[], // always "nothing processed yet"
+      // The pre-check (findByRecordingId) always reports "nothing processed
+      // yet" so both deliveries pass it and race into create; the real repo's
+      // idempotency key must swallow the second create rather than throw.
+      findByRecordingId: async () => null,
+      findByTenant: async () => [] as Proposal[],
     } as unknown as InMemoryProposalRepository;
 
     const classifierResponse = JSON.stringify({

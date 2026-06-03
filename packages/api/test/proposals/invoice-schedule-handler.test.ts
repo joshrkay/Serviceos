@@ -71,6 +71,19 @@ describe('P21-002 — create_invoice_schedule', () => {
       ).toBe(false);
     });
 
+    it('rejects percent milestones that sum past 100%', () => {
+      expect(
+        createInvoiceSchedulePayloadSchema.safeParse({
+          jobId: uuidv4(),
+          milestones: [
+            { label: 'A', type: 'percent', value: 6000, trigger: 'on_accept' },
+            { label: 'B', type: 'percent', value: 6000, trigger: 'manual' }, // 12000 > 10000
+            { label: 'Rest', type: 'remainder', value: 0, trigger: 'on_completion' },
+          ],
+        }).success,
+      ).toBe(false);
+    });
+
     it('rejects a percent milestone over 10000 bps', () => {
       expect(
         createInvoiceSchedulePayloadSchema.safeParse({
@@ -163,6 +176,117 @@ describe('P21-002 — create_invoice_schedule', () => {
       const invoices = await invoiceRepo.findByJob(TENANT, jobId);
       // 50% of the TAXED total (44000), not the raw line sum (40000).
       expect(invoices[0].totals.totalCents).toBe(22000);
+    });
+
+    it('drafts EVERY on_accept milestone up front, not just the first', async () => {
+      // Deposit + permit fee are both due on accept; the balance on completion.
+      const jobId = uuidv4();
+      const result = await handler.execute(
+        makeProposal({
+          jobId,
+          totalAmountCents: 100000,
+          milestones: [
+            { label: 'Deposit', type: 'percent', value: 3000, trigger: 'on_accept' }, // 30000
+            { label: 'Permit fee', type: 'flat', value: 15000, trigger: 'on_accept' }, // 15000
+            { label: 'Balance', type: 'remainder', value: 0, trigger: 'on_completion' },
+          ],
+        }),
+        { tenantId: TENANT, executedBy: 'u1' },
+      );
+      expect(result.success).toBe(true);
+
+      const invoices = await invoiceRepo.findByJob(TENANT, jobId);
+      // Both on_accept milestones drafted (indexes 0 and 1); the on_completion
+      // remainder (index 2) is NOT minted here.
+      expect(invoices).toHaveLength(2);
+      const byIndex = new Map(invoices.map((inv) => [inv.milestoneIndex, inv.totals.totalCents]));
+      expect(byIndex.get(0)).toBe(30000);
+      expect(byIndex.get(1)).toBe(15000);
+      expect(byIndex.has(2)).toBe(false);
+    });
+
+    it('re-execution after a partial mint drafts only the missing on_accept milestone', async () => {
+      // Simulate a prior run that minted milestone 0 but not 1 (e.g. crashed
+      // mid-loop, no resultEntityId persisted), then retry.
+      const jobId = uuidv4();
+      const payload = {
+        jobId,
+        totalAmountCents: 100000,
+        milestones: [
+          { label: 'Deposit', type: 'percent', value: 3000, trigger: 'on_accept' },
+          { label: 'Permit fee', type: 'flat', value: 15000, trigger: 'on_accept' },
+          { label: 'Balance', type: 'remainder', value: 0, trigger: 'on_completion' },
+        ],
+      };
+      // First run mints both; delete milestone 1 to mimic a partial prior run.
+      await handler.execute(makeProposal(payload), { tenantId: TENANT, executedBy: 'u1' });
+      const after = await invoiceRepo.findByJob(TENANT, jobId);
+      expect(after).toHaveLength(2);
+
+      // Re-run: schedule already exists, both milestones already drafted — no dups.
+      const rerun = await handler.execute(makeProposal(payload), { tenantId: TENANT, executedBy: 'u1' });
+      expect(rerun.success).toBe(true);
+      expect(await invoiceRepo.findByJob(TENANT, jobId)).toHaveLength(2);
+      expect(await scheduleRepo.findByJob(TENANT, jobId)).toHaveLength(1);
+    });
+
+    it('rejects a different schedule for a job that already has one (no graft onto the old row)', async () => {
+      const jobId = uuidv4();
+      // First proposal establishes the schedule (50% deposit on accept).
+      const first = await handler.execute(
+        makeProposal({ jobId, totalAmountCents: 20000, milestones: milestones5050 }),
+        { tenantId: TENANT, executedBy: 'u1' },
+      );
+      expect(first.success).toBe(true);
+
+      // A second, DIFFERENT plan for the SAME job must be rejected — not grafted
+      // onto the existing schedule_id, which would desync the stored milestones
+      // from the drafted invoices and corrupt the on_completion balance.
+      const second = await handler.execute(
+        makeProposal(
+          {
+            jobId,
+            totalAmountCents: 50000,
+            milestones: [
+              { label: 'Deposit', type: 'percent', value: 8000, trigger: 'on_accept' },
+              { label: 'Balance', type: 'remainder', value: 0, trigger: 'on_completion' },
+            ],
+          },
+          { id: 'p2' },
+        ),
+        { tenantId: TENANT, executedBy: 'u1' },
+      );
+      expect(second.success).toBe(false);
+      expect(second.error).toMatch(/different invoice schedule/i);
+
+      // The original schedule and its single on_accept invoice are untouched.
+      expect(await scheduleRepo.findByJob(TENANT, jobId)).toHaveLength(1);
+      const invoices = await invoiceRepo.findByJob(TENANT, jobId);
+      expect(invoices).toHaveLength(1);
+      expect(invoices[0].totals.totalCents).toBe(10000); // still 50% of 20000
+    });
+
+    it('rejects schedule reuse when only the estimateId differs (same total + milestones)', async () => {
+      const jobId = uuidv4();
+      // First schedule tied to estimate A.
+      const first = await handler.execute(
+        makeProposal({ jobId, estimateId: 'estimate-a', totalAmountCents: 20000, milestones: milestones5050 }),
+        { tenantId: TENANT, executedBy: 'u1' },
+      );
+      expect(first.success).toBe(true);
+
+      // A revised proposal for estimate B with the SAME total + milestones must
+      // not reuse estimate A's schedule (mixed provenance) — it is rejected.
+      const second = await handler.execute(
+        makeProposal(
+          { jobId, estimateId: 'estimate-b', totalAmountCents: 20000, milestones: milestones5050 },
+          { id: 'p2' },
+        ),
+        { tenantId: TENANT, executedBy: 'u1' },
+      );
+      expect(second.success).toBe(false);
+      expect(second.error).toMatch(/different invoice schedule/i);
+      expect(await scheduleRepo.findByJob(TENANT, jobId)).toHaveLength(1);
     });
 
     it('does not mint an invoice up front when no milestone is on_accept', async () => {

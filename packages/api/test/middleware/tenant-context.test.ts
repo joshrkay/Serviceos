@@ -20,6 +20,7 @@ import {
   withTenantTransaction,
   tenantContextStore,
   currentTenantContext,
+  withRequestSavepoint,
 } from '../../src/middleware/tenant-context';
 import { PgBaseRepository } from '../../src/db/pg-base';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -510,5 +511,54 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     );
 
     expect(currentTenantContext()).toBeUndefined();
+  });
+});
+
+describe('withRequestSavepoint', () => {
+  function fakeClient(): { client: PoolClient; calls: string[] } {
+    const calls: string[] = [];
+    const client = {
+      query: async (text: string) => {
+        calls.push(text);
+        return { rows: [] } as unknown as QueryResult;
+      },
+    } as unknown as PoolClient;
+    return { client, calls };
+  }
+
+  it('runs fn directly when there is no request transaction (no savepoint)', async () => {
+    let ran = false;
+    const out = await withRequestSavepoint(async () => {
+      ran = true;
+      return 7;
+    });
+    expect(ran).toBe(true);
+    expect(out).toBe(7);
+  });
+
+  it('wraps fn in SAVEPOINT / RELEASE inside a request transaction', async () => {
+    const { client, calls } = fakeClient();
+    const out = await tenantContextStore.run({ client, tenantId: TENANT_A }, () =>
+      withRequestSavepoint(async () => 'ok'),
+    );
+    expect(out).toBe('ok');
+    expect(calls.some((q) => q.startsWith('SAVEPOINT'))).toBe(true);
+    expect(calls.some((q) => q.startsWith('RELEASE SAVEPOINT'))).toBe(true);
+    expect(calls.some((q) => q.startsWith('ROLLBACK TO SAVEPOINT'))).toBe(false);
+  });
+
+  it('rolls back to the savepoint and rethrows on error, leaving the tx usable', async () => {
+    const { client, calls } = fakeClient();
+    await expect(
+      tenantContextStore.run({ client, tenantId: TENANT_A }, () =>
+        withRequestSavepoint(async () => {
+          throw Object.assign(new Error('dup'), { code: '23505' });
+        }),
+      ),
+    ).rejects.toThrow('dup');
+    expect(calls.some((q) => q.startsWith('SAVEPOINT'))).toBe(true);
+    expect(calls.some((q) => q.startsWith('ROLLBACK TO SAVEPOINT'))).toBe(true);
+    // The outer transaction is NOT rolled back — only the savepoint is.
+    expect(calls).not.toContain('ROLLBACK');
   });
 });

@@ -84,6 +84,23 @@ describe('validateMilestones', () => {
     ).toContainEqual(expect.stringMatching(/exactly one 'remainder'/i));
   });
 
+  it('rejects percent milestones that sum past 100% (total-independent)', () => {
+    expect(
+      validateMilestones([
+        { label: 'A', type: 'percent', value: 6000, trigger: 'on_accept' },
+        { label: 'B', type: 'percent', value: 6000, trigger: 'manual' }, // 12000 > 10000
+        { label: 'R', type: 'remainder', value: 0, trigger: 'on_completion' },
+      ]),
+    ).toContainEqual(expect.stringMatching(/sum to 12000 bps/i));
+    // Exactly 100% across percents is fine (remainder just takes 0).
+    expect(
+      validateMilestones([
+        { label: 'A', type: 'percent', value: 10000, trigger: 'on_accept' },
+        { label: 'R', type: 'remainder', value: 0, trigger: 'on_completion' },
+      ]),
+    ).toEqual([]);
+  });
+
   it('rejects out-of-range percent bps and negative flats', () => {
     expect(
       validateMilestones([

@@ -138,6 +138,15 @@ export interface TenantSettings {
    */
   batchInvoiceEnabled?: boolean;
   /**
+   * P21 — when true, completing a job mints its invoice-schedule's
+   * `on_completion` milestones (e.g. the balance) directly as invoices.
+   * Default false (opt-in). Acts as the fleet-wide kill switch for
+   * milestone billing — the per-job plan is already owner-approved via the
+   * create_invoice_schedule proposal, but this lets an owner halt all
+   * milestone minting at once.
+   */
+  milestoneBillingEnabled?: boolean;
+  /**
    * Tier 4 (AI approval rules) — per-mode override of the proposal
    * auto-approve threshold. Consumed by
    * `proposals/auto-approve.ts:resolveAutoApproveThreshold` via the
@@ -272,6 +281,8 @@ export interface UpdateSettingsInput {
   autoInvoiceOnCompletion?: boolean;
   /** P21-003 — opt into the daily batch-invoice proposal sweep. */
   batchInvoiceEnabled?: boolean;
+  /** P21 — opt into / kill-switch on-completion milestone minting. */
+  milestoneBillingEnabled?: boolean;
   /** Tier 4 — per-mode override of the proposal auto-approve threshold. */
   autoApproveThreshold?: Partial<Record<'supervisor' | 'tech' | 'both', number>>;
   /** Tier 4 (Deposit rules) — see TenantSettings doc for correlation rules. */

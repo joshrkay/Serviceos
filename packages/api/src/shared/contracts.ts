@@ -303,6 +303,9 @@ export const updateSettingsSchema = z.object({
   autoInvoiceOnCompletion: z.boolean().optional(),
   // P21-003 — opt into the daily batch-invoice proposal sweep.
   batchInvoiceEnabled: z.boolean().optional(),
+  // P21 — opt into minting on_completion milestone invoices. Without this in
+  // the schema Zod strips it, so the toggle could never be set via the API.
+  milestoneBillingEnabled: z.boolean().optional(),
   // Tier 4 — AI approval rules: per-mode auto-approve threshold override.
   // Each entry is a confidence in [0, 1]. Missing keys fall back to
   // DEFAULT_AUTO_APPROVE_THRESHOLDS in proposals/auto-approve.ts.

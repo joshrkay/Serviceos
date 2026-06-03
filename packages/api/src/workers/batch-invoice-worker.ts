@@ -21,6 +21,7 @@ import {
 } from '../invoices/invoicing-queue';
 import { BatchInvoiceRunRepository, buildBatchInvoiceRun } from '../invoices/batch-invoice-run';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { TenantTransactionRunner } from '../db/tenant-transaction';
 
 const BATCH_ACTOR = 'system:batch_invoice';
 
@@ -28,6 +29,14 @@ export interface BatchInvoiceWorkerDeps extends InvoicingQueueDeps {
   proposalRepo: ProposalRepository;
   settingsRepo: SettingsRepository;
   runRepo: BatchInvoiceRunRepository;
+  /**
+   * Wraps each tenant's dedup-row reservations + the batch_invoice proposal
+   * write in ONE transaction, so a proposal failure rolls the reservations back
+   * with it (no orphaned rows) and the jobs stay eligible for the next sweep.
+   * Each reservation runs in a SAVEPOINT so an already-batched row (23505)
+   * rolls back just that insert and the sweep continues.
+   */
+  txRunner: TenantTransactionRunner;
   listTenantIds: () => Promise<string[]>;
   auditRepo?: AuditRepository;
   logger: Logger;
@@ -75,57 +84,70 @@ export async function runBatchInvoiceSweep(
       const candidates = await findJobsRequiringInvoicing(tenantId, deps);
       if (candidates.length === 0) continue;
 
-      // Exclude jobs already batched today (read-only — the sweep is leader-
-      // gated so there's no competing writer). Reserving the dedup rows is
-      // deferred until AFTER the proposal is persisted, so a transient failure
-      // here never suppresses a job's batching for the rest of the day.
-      const fresh: InvoicingCandidate[] = [];
-      for (const candidate of candidates) {
-        const already = await deps.runRepo.findByJobAndDate(tenantId, candidate.jobId, batchDate);
-        if (already) {
-          skipped += 1;
-          continue;
+      // Reserve a dedup row per candidate AND create the batch proposal inside
+      // ONE transaction. The ledger's UNIQUE (tenant, job, batch_date) is the
+      // atomic dedup guard, so a job already batched today (re-run or a race)
+      // raises 23505 — caught inside a per-candidate SAVEPOINT that rolls back
+      // just that insert and leaves the transaction usable, so the sweep keeps
+      // going. Atomicity is the correctness fix: if the proposal write fails the
+      // reservations roll back with it, so we never persist a proposal whose
+      // jobs lack dedup rows (the next same-day sweep would re-batch them into a
+      // SECOND proposal, double-invoicing on dual approval) and never leave rows
+      // reserved for jobs that got no proposal (which would silently skip them
+      // until the next day's batch_date).
+      const outcome = await deps.txRunner.run(tenantId, async (scope) => {
+        const reserved: InvoicingCandidate[] = [];
+        let txSkipped = 0;
+        for (const candidate of candidates) {
+          try {
+            await scope.savepoint(() =>
+              deps.runRepo.create(buildBatchInvoiceRun(tenantId, candidate.jobId, batchDate)),
+            );
+            reserved.push(candidate);
+          } catch (err) {
+            if (err && typeof err === 'object' && (err as { code?: string }).code === '23505') {
+              txSkipped += 1; // already batched today
+              continue;
+            }
+            throw err; // real error — roll the whole tenant back; no proposal.
+          }
         }
-        fresh.push(candidate);
-      }
-      if (fresh.length === 0) continue;
+        if (reserved.length === 0) {
+          return { proposalId: undefined, jobCount: 0, totalCents: 0, txSkipped };
+        }
 
-      const totalCents = fresh.reduce((sum, c) => sum + c.amountCents, 0);
-      const proposal = createProposal({
-        tenantId,
-        proposalType: 'batch_invoice',
-        payload: {
-          batchDate,
-          totalCents,
-          jobs: fresh.map((c) => ({
-            jobId: c.jobId,
-            customerId: c.customerId,
-            ...(c.estimateId ? { estimateId: c.estimateId } : {}),
-            amountCents: c.amountCents,
-            discountCents: c.discountCents,
-            taxRateBps: c.taxRateBps,
-            lineItems: c.lineItems,
-          })),
-        },
-        summary: `${fresh.length} job${fresh.length === 1 ? '' : 's'} ready to invoice ($${(totalCents / 100).toFixed(2)})`,
-        explanation: 'Approve to draft an invoice for each job; you review each before sending.',
-        createdBy: BATCH_ACTOR,
+        const totalCents = reserved.reduce((sum, c) => sum + c.amountCents, 0);
+        const proposal = createProposal({
+          tenantId,
+          proposalType: 'batch_invoice',
+          payload: {
+            batchDate,
+            totalCents,
+            jobs: reserved.map((c) => ({
+              jobId: c.jobId,
+              customerId: c.customerId,
+              ...(c.estimateId ? { estimateId: c.estimateId } : {}),
+              amountCents: c.amountCents,
+              discountCents: c.discountCents,
+              taxRateBps: c.taxRateBps,
+              lineItems: c.lineItems,
+            })),
+          },
+          summary: `${reserved.length} job${reserved.length === 1 ? '' : 's'} ready to invoice ($${(totalCents / 100).toFixed(2)})`,
+          explanation: 'Approve to draft an invoice for each job; you review each before sending.',
+          createdBy: BATCH_ACTOR,
+        });
+        await deps.proposalRepo.create(proposal);
+        return { proposalId: proposal.id, jobCount: reserved.length, totalCents, txSkipped };
       });
-      await deps.proposalRepo.create(proposal);
+
+      skipped += outcome.txSkipped;
+      if (!outcome.proposalId) continue;
       proposals += 1;
-      jobsBatched += fresh.length;
+      jobsBatched += outcome.jobCount;
 
-      // Now that the proposal exists, reserve a dedup row per job (tagged with
-      // the proposal id). A row that loses a race surfaces as 23505 and is
-      // treated as already-batched.
-      for (const candidate of fresh) {
-        try {
-          await deps.runRepo.create(buildBatchInvoiceRun(tenantId, candidate.jobId, batchDate, proposal.id));
-        } catch (err) {
-          if ((err as { code?: string }).code !== '23505') throw err;
-        }
-      }
-
+      // Audit is emitted after the proposal commits (best-effort, as before):
+      // it records the now-durable batch and must not roll the proposal back.
       if (deps.auditRepo) {
         await deps.auditRepo.create(
           createAuditEvent({
@@ -134,8 +156,8 @@ export async function runBatchInvoiceSweep(
             actorRole: 'system',
             eventType: 'invoice.batch_proposed',
             entityType: 'proposal',
-            entityId: proposal.id,
-            metadata: { batchDate, jobCount: fresh.length, totalCents },
+            entityId: outcome.proposalId,
+            metadata: { batchDate, jobCount: outcome.jobCount, totalCents: outcome.totalCents },
           }),
         );
       }

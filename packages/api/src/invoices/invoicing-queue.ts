@@ -41,6 +41,18 @@ function hasLiveInvoice(statuses: string[]): boolean {
   return statuses.some((s) => s !== 'void' && s !== 'canceled');
 }
 
+/** Group rows by a key into a Map, preserving insertion order within a key. */
+function groupBy<T>(rows: T[], keyOf: (row: T) => string): Map<string, T[]> {
+  const out = new Map<string, T[]>();
+  for (const row of rows) {
+    const key = keyOf(row);
+    const arr = out.get(key);
+    if (arr) arr.push(row);
+    else out.set(key, [row]);
+  }
+  return out;
+}
+
 /**
  * Returns the jobs requiring invoicing for a tenant. Excludes jobs that
  * already have a live (non-void/canceled) invoice and jobs with nothing to
@@ -55,15 +67,30 @@ export async function findJobsRequiringInvoicing(
     limit: MAX_CANDIDATES,
   });
 
-  const candidates: InvoicingCandidate[] = [];
-  for (const job of jobs) {
-    const moneyState = job.moneyState ?? 'no_estimate';
-    if (!ELIGIBLE_MONEY_STATES.includes(moneyState)) continue;
+  // Narrow to billable money-states first so we only fetch invoices/estimates
+  // for jobs that could actually be invoiced.
+  const eligible = jobs.filter((j) =>
+    ELIGIBLE_MONEY_STATES.includes(j.moneyState ?? 'no_estimate'),
+  );
+  if (eligible.length === 0) return [];
+  const jobIds = eligible.map((j) => j.id);
 
-    const invoices = await deps.invoiceRepo.findByJob(tenantId, job.id);
+  // Batch the per-job lookups: TWO queries total instead of 2N. This path runs
+  // in the cross-tenant batch sweep AND backs a user-facing "requires
+  // invoicing" list, so the prior findByJob-per-job loop was a real N+1.
+  const [allInvoices, allEstimates] = await Promise.all([
+    deps.invoiceRepo.findByJobs(tenantId, jobIds),
+    deps.estimateRepo.findByJobs(tenantId, jobIds),
+  ]);
+  const invoicesByJob = groupBy(allInvoices, (i) => i.jobId);
+  const estimatesByJob = groupBy(allEstimates, (e) => e.jobId);
+
+  const candidates: InvoicingCandidate[] = [];
+  for (const job of eligible) {
+    const invoices = invoicesByJob.get(job.id) ?? [];
     if (hasLiveInvoice(invoices.map((i) => i.status))) continue;
 
-    const estimates = await deps.estimateRepo.findByJob(tenantId, job.id);
+    const estimates = estimatesByJob.get(job.id) ?? [];
     const accepted = estimates.find((e) => e.status === 'accepted');
     const lineItems = accepted
       ? resolveSelectedLineItems(accepted.lineItems, accepted.acceptedSelection)

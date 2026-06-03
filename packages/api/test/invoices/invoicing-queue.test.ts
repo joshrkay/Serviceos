@@ -115,4 +115,32 @@ describe('findJobsRequiringInvoicing', () => {
     await seedAcceptedEstimate(job.id, [buildLineItem('i1', 'Repair', 1, 20000, 0, true)]);
     expect(await findJobsRequiringInvoicing(TENANT, deps())).toHaveLength(0);
   });
+
+  it('groups batched invoice/estimate lookups to the right job (no cross-contamination)', async () => {
+    // Three completed jobs in one sweep — exercises the batched findByJobs +
+    // group-by-job path. jobA: billable, no invoice → included. jobB: billable
+    // but already invoiced → excluded. jobC: billable, distinct amount →
+    // included. A grouping bug (mixing one job's invoice/estimate into another)
+    // would mis-include B or mis-total A/C.
+    const jobA = await jobRepo.create(makeJob({ jobNumber: 'JOB-A' }));
+    const jobB = await jobRepo.create(makeJob({ jobNumber: 'JOB-B' }));
+    const jobC = await jobRepo.create(makeJob({ jobNumber: 'JOB-C' }));
+
+    await seedAcceptedEstimate(jobA.id, [buildLineItem('a1', 'A work', 1, 20000, 0, true)]);
+    await seedAcceptedEstimate(jobB.id, [buildLineItem('b1', 'B work', 1, 30000, 0, true)]);
+    await seedAcceptedEstimate(jobC.id, [buildLineItem('c1', 'C work', 1, 45000, 0, true)]);
+
+    // Only jobB has a live invoice.
+    await createInvoice(
+      { tenantId: TENANT, jobId: jobB.id, invoiceNumber: 'INV-B', lineItems: [buildLineItem('b1', 'B work', 1, 30000, 0, true)], createdBy: 'u1' },
+      invoiceRepo,
+    );
+
+    const candidates = await findJobsRequiringInvoicing(TENANT, deps());
+    const byJob = new Map(candidates.map((c) => [c.jobId, c]));
+    expect(byJob.has(jobB.id)).toBe(false); // already invoiced
+    expect(byJob.get(jobA.id)?.amountCents).toBe(20000);
+    expect(byJob.get(jobC.id)?.amountCents).toBe(45000);
+    expect(candidates).toHaveLength(2);
+  });
 });

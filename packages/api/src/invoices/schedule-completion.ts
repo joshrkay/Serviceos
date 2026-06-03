@@ -17,6 +17,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Invoice, InvoiceRepository, createInvoiceWithNextNumber } from './invoice';
 import { InvoiceScheduleRepository, splitMilestones } from './invoice-schedule';
 import { SettingsRepository } from '../settings/settings';
+import { withRequestSavepoint } from '../middleware/tenant-context';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { buildLineItem } from '../shared/billing-engine';
 import { Job } from '../jobs/job';
@@ -38,6 +39,14 @@ export async function mintCompletionMilestones(
   deps: ScheduleCompletionDeps,
   job: Job,
 ): Promise<Invoice[]> {
+  // Opt-in / kill switch. Milestone minting writes real invoices directly
+  // (the plan was owner-approved at create_invoice_schedule time), so it is
+  // gated by an explicit per-tenant toggle — default false — exactly like
+  // auto_invoice_on_completion and batch_invoice_enabled. Lets an owner halt
+  // all milestone billing fleet-wide without deleting schedules.
+  const settings = await deps.settingsRepo.findByTenant(job.tenantId);
+  if (!settings?.milestoneBillingEnabled) return [];
+
   const schedules = await deps.scheduleRepo.findByJob(job.tenantId, job.id);
   if (schedules.length === 0) return [];
 
@@ -59,19 +68,42 @@ export async function mintCompletionMilestones(
       const key = `${schedule.id}:${alloc.index}`;
       if (minted.has(key)) continue;
 
-      const invoice = await createInvoiceWithNextNumber(
-        {
-          tenantId: job.tenantId,
-          jobId: job.id,
-          estimateId: schedule.estimateId,
-          lineItems: [buildLineItem(uuidv4(), alloc.label, 1, alloc.amountCents, 0, true)],
-          createdBy: COMPLETION_ACTOR,
-          scheduleId: schedule.id,
-          milestoneIndex: alloc.index,
-        },
-        deps.invoiceRepo,
-        deps.settingsRepo,
-      );
+      let invoice: Invoice;
+      try {
+        // SAVEPOINT-wrap the INSERT: this runs inside the request transaction on
+        // the job-completion path (POST /api/jobs/:id/transition), so a 23505
+        // would abort the WHOLE request transaction — rolling back the job-status
+        // transition itself at COMMIT — even though we mean to catch it and skip.
+        // The savepoint confines the rollback to this insert. (No-op off the
+        // request path, e.g. background workers, where each write self-transacts.)
+        invoice = await withRequestSavepoint(() =>
+          createInvoiceWithNextNumber(
+            {
+              tenantId: job.tenantId,
+              jobId: job.id,
+              estimateId: schedule.estimateId,
+              lineItems: [buildLineItem(uuidv4(), alloc.label, 1, alloc.amountCents, 0, true)],
+              createdBy: COMPLETION_ACTOR,
+              scheduleId: schedule.id,
+              milestoneIndex: alloc.index,
+            },
+            deps.invoiceRepo,
+            deps.settingsRepo,
+          ),
+        );
+      } catch (err) {
+        // A concurrent / retried completion already minted this exact
+        // milestone: the partial unique index uniq_invoices_schedule_milestone
+        // (schedule_id, milestone_index) rejects the duplicate INSERT with
+        // 23505 before any invoice number is allocated. Treat it as already
+        // minted and move on — the other run owns the invoice. Any other error
+        // is a real failure and must propagate.
+        if (err && typeof err === 'object' && (err as { code?: string }).code === '23505') {
+          minted.add(key);
+          continue;
+        }
+        throw err;
+      }
       created.push(invoice);
       minted.add(key);
 

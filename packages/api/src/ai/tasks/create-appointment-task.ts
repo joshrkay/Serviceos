@@ -5,6 +5,7 @@ import { assessConfidence } from '../guardrails/confidence';
 import { SlotConflictChecker, SlotConflictResult } from './slot-conflict-checker';
 import { AvailabilityFinder, OpenSlot } from './availability-finder';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
+import { JobRepository } from '../../jobs/job';
 import {
   resolveDateTime,
   formatForReadback,
@@ -64,6 +65,9 @@ Rules:
 
 /** A tentative hold survives 24h before the availability finder treats it as free. */
 const HOLD_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** RFC-4122 UUID matcher — validates the LLM-extracted jobId before any DB read. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function tryParseJson(content: string): Record<string, unknown> | null {
   try {
@@ -279,17 +283,20 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
   private readonly slotConflictChecker?: SlotConflictChecker;
   private readonly availabilityFinder?: AvailabilityFinder;
   private readonly appointmentRepo?: AppointmentRepository;
+  private readonly jobRepo?: JobRepository;
 
   constructor(
     gateway: LLMGateway,
     slotConflictChecker?: SlotConflictChecker,
     availabilityFinder?: AvailabilityFinder,
-    appointmentRepo?: AppointmentRepository
+    appointmentRepo?: AppointmentRepository,
+    jobRepo?: JobRepository
   ) {
     this.gateway = gateway;
     this.slotConflictChecker = slotConflictChecker;
     this.availabilityFinder = availabilityFinder;
     this.appointmentRepo = appointmentRepo;
+    this.jobRepo = jobRepo;
   }
 
   async handle(context: TaskContext): Promise<TaskResult> {
@@ -406,6 +413,13 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       ...(context.tenantThresholdOverride
         ? { tenantThresholdOverride: context.tenantThresholdOverride }
         : {}),
+      // Phase 12 — forward supervisor presence so an unsupervised tenant's
+      // booking lands in review instead of auto-approving (the autonomous
+      // trust tier above is only honored when a supervisor is present).
+      ...(context.supervisorPresent !== undefined
+        ? { supervisorPresent: context.supervisorPresent }
+        : {}),
+      ...(context.supervisorMode ? { supervisorMode: context.supervisorMode } : {}),
     };
 
     // Held-slot booking path: when an appointmentRepo is wired AND the
@@ -414,6 +428,42 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
     // `create_booking` proposal that references it.
     const repo = this.appointmentRepo;
     if (repo && typeof payload.jobId === 'string') {
+      // The jobId is LLM-extracted from untrusted transcript text. Before
+      // writing a real (held) appointment row against it, confirm it belongs to
+      // the verified caller — otherwise an injected/guessed id could place a
+      // hold on another customer's job and pollute their calendar for the 24h
+      // hold window. Mirrors the appointment→job→customer ownership check the
+      // reschedule/cancel handlers already perform.
+      //
+      // When a jobRepo is wired we CAN verify ownership, so we MUST: the held
+      // write only proceeds for an identified caller (context.customerId) whose
+      // jobId is a well-formed UUID that resolves to a job they own. An
+      // unidentified caller, a malformed id, or someone else's job degrades to
+      // the approval-gated create_appointment proposal rather than writing a
+      // hold against an unverified job. (No jobRepo → cannot check → the legacy
+      // held path is unchanged.)
+      if (this.jobRepo) {
+        // Fallback for every case where we cannot positively attribute the
+        // LLM-supplied jobId to the verified caller. It MUST NOT auto-execute:
+        // `input` carries sourceTrustTier:'autonomous', so for a supervised,
+        // high-confidence tenant the create_appointment would auto-approve and
+        // CreateAppointmentExecutionHandler (which only checks jobId is a
+        // string) would book against the unverified job. Dropping the trust
+        // tier lands it in 'draft' so a human reviews the booking first.
+        const reviewGatedFallback = (): TaskResult => ({
+          proposal: createProposal({ ...input, sourceTrustTier: undefined }),
+          taskType: this.taskType,
+        });
+        if (!UUID_RE.test(payload.jobId) || !context.customerId) {
+          return reviewGatedFallback();
+        }
+        const ownedJob = await this.jobRepo
+          .findById(context.tenantId, payload.jobId)
+          .catch(() => null);
+        if (!ownedJob || ownedJob.customerId !== context.customerId) {
+          return reviewGatedFallback();
+        }
+      }
       const holdExpiryAt = new Date(Date.now() + HOLD_WINDOW_MS);
       let held;
       try {
@@ -463,6 +513,11 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
         ...(context.tenantThresholdOverride
           ? { tenantThresholdOverride: context.tenantThresholdOverride }
           : {}),
+        // Phase 12 — same supervisor gate as the create_appointment path.
+        ...(context.supervisorPresent !== undefined
+          ? { supervisorPresent: context.supervisorPresent }
+          : {}),
+        ...(context.supervisorMode ? { supervisorMode: context.supervisorMode } : {}),
       };
       return { proposal: createProposal(bookingInput), taskType: 'create_booking' };
     }

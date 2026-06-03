@@ -127,6 +127,12 @@ export class InvoiceEditTaskHandler implements TaskHandler {
       ...(context.tenantThresholdOverride
         ? { tenantThresholdOverride: context.tenantThresholdOverride }
         : {}),
+      // Phase 12 — forward supervisor presence so this autonomous edit only
+      // auto-approves when a supervisor is present (same gate as create_appointment).
+      ...(context.supervisorPresent !== undefined
+        ? { supervisorPresent: context.supervisorPresent }
+        : {}),
+      ...(context.supervisorMode ? { supervisorMode: context.supervisorMode } : {}),
     };
 
     return { proposal: createProposal(input), taskType: this.taskType };

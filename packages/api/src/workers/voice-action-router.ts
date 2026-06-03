@@ -3,6 +3,7 @@ import { Logger } from '../logging/logger';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { Proposal, ProposalRepository, createProposal, CreateProposalInput, ProposalType } from '../proposals/proposal';
 import { assertValidProposalPayload } from '../proposals/contracts';
+import { isSupervisorPresent } from '../ai/supervisor-presence';
 import { ConflictError } from '../shared/errors';
 import { voiceProposalIdempotencyKey } from '../voice/voice-audit';
 import {
@@ -311,6 +312,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
       deps.slotConflictChecker,
       deps.availabilityFinder,
       deps.appointmentRepo,
+      deps.jobRepo,
     ),
   );
   handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway));
@@ -381,12 +383,10 @@ async function findAlreadyProcessed(
 ): Promise<string | undefined> {
   if (!recordingId) return undefined;
   const key = voiceProposalIdempotencyKey(recordingId);
-  const existing = await proposalRepo.findByTenant(tenantId);
-  const match = existing.find((p) => {
-    if (p.idempotencyKey === key) return true; // single-action atomic key
-    const sc = p.sourceContext as Record<string, unknown> | undefined;
-    return sc?.recordingId === recordingId; // chain members (keyless)
-  });
+  // Indexed lookup (P1): matches the single-action atomic key OR a chain
+  // member's sourceContext.recordingId, without scanning every proposal for
+  // the tenant on each inbound message.
+  const match = await proposalRepo.findByRecordingId(tenantId, recordingId, key);
   return match?.id;
 }
 
@@ -728,6 +728,16 @@ async function processSegment(
     ? await deps.tenantSchedulingResolver(tenantId).catch(() => undefined)
     : undefined;
 
+  // Phase 12 supervisor gate. Resolve presence once per request and thread
+  // it onto the context so an autonomous, capture-class proposal (today:
+  // create_appointment / create_booking) can only auto-approve when a
+  // supervisor is actually on the wall. Reads the singleton wired in app.ts
+  // (pgSupervisorPresenceLoader); in tests with no loader it returns the
+  // permissive default, preserving existing fixtures. Without this the
+  // proposal-status decision used a permissive default and voice bookings
+  // auto-executed with no human in the loop.
+  const supervisorPresent = await isSupervisorPresent(tenantId);
+
   const context: TaskContext = {
     tenantId,
     userId,
@@ -739,6 +749,7 @@ async function processSegment(
     ),
     timezone: scheduling?.timezone ?? DEFAULT_TENANT_TIMEZONE,
     now: deps.now ? deps.now() : new Date(),
+    supervisorPresent,
     ...(customerId ? { customerId } : {}),
     // Single-action only: lets the held-slot path key the appointment on
     // `voice-hold:<recordingId>` so a concurrent redelivery can't double-book.
@@ -747,7 +758,24 @@ async function processSegment(
   };
 
   const { proposal } = await handler.handle(context);
-  return { kind: 'proposal', proposal, classification };
+  // Chokepoint backstop for the "never auto-execute when unsupervised"
+  // invariant. Every task handler forwards supervisorPresent into its
+  // CreateProposalInput, but this is the single place every voice-sourced
+  // proposal flows through — so even a future autonomous handler that forgets
+  // to thread presence can't slip an auto-approved (→ auto-executing) proposal
+  // past an unsupervised tenant. No-op in the normal case (the handler already
+  // computed 'ready_for_review').
+  return { kind: 'proposal', proposal: holdIfUnsupervised(proposal, supervisorPresent), classification };
+}
+
+/**
+ * Downgrade an auto-approved proposal to the review queue when the tenant is
+ * unsupervised. Pure — returns the proposal unchanged unless it would
+ * auto-execute (status 'approved') with no supervisor present.
+ */
+function holdIfUnsupervised(proposal: Proposal, supervisorPresent: boolean): Proposal {
+  if (supervisorPresent || proposal.status !== 'approved') return proposal;
+  return { ...proposal, status: 'ready_for_review', approvedAt: undefined };
 }
 
 /**
