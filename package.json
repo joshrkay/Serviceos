@@ -29,6 +29,7 @@
     "qa:doctor": "tsx scripts/qa-matrix-doctor.ts",
     "qa:smoke-tools": "tsx scripts/qa-smoke-tools.ts",
     "qa:matrix:run": "bash scripts/qa-matrix-run.sh",
+    "qa:matrix:gate": "tsx scripts/qa-matrix-gate.ts",
     "qa:mint-tokens": "tsx scripts/qa-mint-tokens.ts",
     "qa:runbook": "bash scripts/qa-runbook-run.sh",
     "qa:run": "node qa-runner/src/orchestrator.mjs run",

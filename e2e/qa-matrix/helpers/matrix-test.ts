@@ -80,6 +80,12 @@ export function matrixTest(
       throw err;
     } finally {
       await teardownRow(harness);
+      if (process.env.QA_GATE_STRICT === '1') {
+        expect(
+          harness.evidence.verdict,
+          `${id} harness verdict must be pass when QA_GATE_STRICT=1 (got ${harness.evidence.verdict})`,
+        ).toBe('pass');
+      }
     }
   });
 }

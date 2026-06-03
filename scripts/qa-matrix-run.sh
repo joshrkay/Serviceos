@@ -38,11 +38,11 @@ section "Step 3/5 — seed Tenant A + Tenant B"
 # Seeder is idempotent on owner_id, so re-runs are safe.
 npx tsx e2e/qa-matrix/fixtures/seed.ts
 
-section "Step 4/5 — run the QA matrix (18 rows)"
+section "Step 4/6 — run the QA matrix"
 # e2e:qa-matrix sets QA_MATRIX=1 and runs the qa-matrix Playwright project.
 npm run e2e:qa-matrix
 
-section "Step 5/5 — locate the QA report"
+section "Step 5/6 — locate the QA report"
 # Newest dated report dir is the one we just wrote.
 if [ -d qa/reports ]; then
   ls -lat qa/reports/ | head -10
@@ -68,3 +68,6 @@ else
   echo "WARNING: qa/reports/ does not exist; teardown may have failed."
   exit 1
 fi
+
+section "Step 6/6 — enforce voice + business gates"
+npx tsx --no-warnings scripts/qa-matrix-gate.ts
