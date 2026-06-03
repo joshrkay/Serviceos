@@ -79,7 +79,7 @@ Three things became true in the last 18 months:
 | | Fieldly |
 |---|---|
 | **Price** | **$297 / month** |
-| **Free trial** | 14 days, no card required |
+| **Free trial** | 14 days; card on file, nothing charged until day 15 |
 | **Includes** | Unlimited inbound calls, unlimited SMS, AI quoting, AI invoicing, payment chasing, review monitoring, end-of-day digest |
 | **AI voice minutes** | 500 / month included; $0.30 / min after |
 | **Phone number** | One US local number included |
@@ -124,7 +124,7 @@ sometimes wrong.
 - **Sub:** Fieldly answers your phone, books your jobs, sends your
   quotes, and chases your invoices. You approve what matters in
   30 seconds a day.
-- **CTA:** Start 14-day free trial — no card.
+- **CTA:** Start 14-day free trial — nothing charged until day 15.
 
 ### Email/cold outreach (one-liner)
 "Replace your dispatcher with AI. Fieldly answers every call in

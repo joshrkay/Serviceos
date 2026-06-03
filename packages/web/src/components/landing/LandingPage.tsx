@@ -93,7 +93,7 @@ function Hero() {
             </a>
           </div>
           <p className="mt-4 text-xs text-slate-500">
-            No credit card required &middot; Forward your line in 5 minutes
+            Card on file, nothing charged for 14 days &middot; Cancel anytime
           </p>
         </div>
       </div>
@@ -412,7 +412,7 @@ function PricingSection() {
                 <span className="ml-2 text-base text-slate-400">/ month</span>
               </div>
               <p className="mt-3 text-sm text-slate-300">
-                14-day free trial &middot; No credit card required
+                14-day free trial &middot; Card held, nothing charged until day 15
               </p>
             </div>
             <div className="px-8 py-8">
@@ -497,7 +497,7 @@ function FinalCTASection() {
           Stop dispatching from the attic.
         </h2>
         <p className="mx-auto mt-4 max-w-xl text-base text-slate-600">
-          14-day free trial. No credit card. Live in 15 minutes.
+          14-day free trial. Card held, nothing charged until day 15. Live in 15 minutes.
         </p>
         <div className="mt-8 flex items-center justify-center gap-3">
           <Link to="/signup" onClick={onCtaClick('final_cta')}>

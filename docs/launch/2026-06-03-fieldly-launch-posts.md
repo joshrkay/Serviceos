@@ -42,7 +42,7 @@ brief's positioning.
 
 **Tweet 4 (the offer + CTA):**
 
-> $297/month. 14-day free trial. No credit card.
+> $297/month. 14-day free trial. Card on file, nothing charged until day 15.
 >
 > Live in 15 minutes (forward your business line, we handle the rest).
 >
@@ -94,7 +94,7 @@ It also tells you when it's wrong. Every evening, a text message: what
 got done, what got paid, what I wasn't sure about. That last section is
 why we built this and not just another AI receptionist.
 
-$297/month. 14-day free trial. No credit card.
+$297/month. 14-day free trial. Card on file, nothing charged until day 15.
 
 If you run a small home-service shop and you're the bottleneck, we built
 this for you. fieldly.app
@@ -135,7 +135,8 @@ it. Every evening you get a text: "Here's what I wasn't sure about
 today." If you can't trust the AI to tell you when it's wrong, you can't
 trust it at all.
 
-**Pricing:** $297/mo, 14 days free, no card. About 1/8th the cost of a
+**Pricing:** $297/mo, 14 days free, card on file (nothing charged until
+day 15). About 1/8th the cost of a
 part-time dispatcher.
 
 I'd love honest critique:
@@ -168,7 +169,7 @@ phone, books the job, drafts the quote, sends the invoice, chases
 payment. End-of-day text summary of what happened and what it wasn't
 sure about.
 
-$297/mo, 14-day free trial, no credit card.
+$297/mo, 14-day free trial — card on file, nothing charged until day 15.
 
 Two asks:
 
