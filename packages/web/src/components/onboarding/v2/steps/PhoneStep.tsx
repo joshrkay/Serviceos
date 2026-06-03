@@ -1,5 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { Phone, Copy, Check } from 'lucide-react';
 import { useApiClient } from '../../../../lib/apiClient';
+import { Button } from '../../../ui';
 import type { OnboardingStatusResponse } from '../../../../types/onboarding';
 
 interface PhoneStepProps {
@@ -15,87 +17,64 @@ interface CarrierTip {
 }
 
 const CARRIERS: CarrierTip[] = [
-  { name: 'Verizon', code: '*72' },
-  { name: 'AT&T', code: '*72' },
+  { name: 'Verizon',  code: '*72' },
+  { name: 'AT&T',     code: '*72' },
   { name: 'T-Mobile', code: '**21*' },
-  { name: 'Other', code: 'Ask your carrier', note: 'Most carriers support unconditional call forwarding.' },
+  { name: 'Other',    code: 'Ask your carrier', note: 'Most US carriers support unconditional call forwarding.' },
 ];
+
+const BLOCKER_COPY: Record<string, string> = {
+  twilio_provisioning_failed:
+    "We couldn't claim a phone number for you. Our team has been alerted.",
+  twilio_credentials_missing:
+    'Twilio is not configured for this environment. Contact support to enable phone provisioning.',
+  area_code_unavailable:
+    'No numbers were available in the area code we tried. Hit Retry — we will try the next one.',
+  rate_limited:
+    'Too many provisioning attempts. Hit Retry in a minute and we will try again.',
+};
+
+/** Render +15125551234 → (512) 555-1234 for US numbers. */
+function formatPhone(e164: string | null | undefined): string {
+  if (!e164) return '';
+  const digits = e164.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return `(${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
+  }
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  }
+  return e164;
+}
+
+function nationalDigits(e164: string | null | undefined): string {
+  if (!e164) return '';
+  const digits = e164.replace(/\D/g, '');
+  return digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+}
 
 export function PhoneStep({ status, onAdvance, onRetryComplete }: PhoneStepProps) {
   const apiFetch = useApiClient();
   const phoneStep = status.steps.find((s) => s.id === 'phone');
   const meta = (phoneStep?.metadata ?? {}) as { phoneNumber?: string };
   const phoneNumber = meta.phoneNumber ?? null;
-  const [forwardingOpen, setForwardingOpen] = useState(false);
+  const formatted = formatPhone(phoneNumber);
+  const national = nationalDigits(phoneNumber);
   const [copied, setCopied] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
+  const [waitedLong, setWaitedLong] = useState(false);
+
+  // After 30s of provisioning, surface a "still working" cue so the
+  // user knows it isn't frozen.
+  useEffect(() => {
+    if (phoneNumber) return;
+    if (phoneStep?.status !== 'current' && phoneStep?.status !== 'pending') return;
+    const t = setTimeout(() => setWaitedLong(true), 30_000);
+    return () => clearTimeout(t);
+  }, [phoneNumber, phoneStep?.status]);
 
   if (!phoneStep) return null;
-
-  if (phoneStep.status === 'error') {
-    return (
-      <div className="space-y-4 max-w-md">
-        <h1 className="text-2xl font-bold text-slate-900">Phone number</h1>
-        <div className="border border-red-300 bg-red-50 rounded p-4">
-          <p className="text-sm text-red-700">
-            We hit an issue purchasing your number. Our team has been alerted.
-          </p>
-          <p className="text-xs text-red-600 mt-2">
-            {(phoneStep.blockers ?? []).join(', ') || 'twilio_provisioning_failed'}
-          </p>
-        </div>
-        {retryError && (
-          <p className="text-sm text-red-600">{retryError}</p>
-        )}
-        <button
-          type="button"
-          disabled={retrying}
-          onClick={async () => {
-            setRetrying(true);
-            setRetryError(null);
-            try {
-              const res = await apiFetch('/api/onboarding/phone/retry', { method: 'POST' });
-              if (!res.ok) {
-                const body = (await res.json().catch(() => ({}))) as { message?: string };
-                setRetryError(body.message ?? `Retry failed (${res.status})`);
-                return;
-              }
-              onRetryComplete?.();
-            } catch (err) {
-              setRetryError(err instanceof Error ? err.message : 'Retry failed');
-            } finally {
-              setRetrying(false);
-            }
-          }}
-          className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-50"
-        >
-          {retrying ? 'Retrying…' : 'Retry provisioning'}
-        </button>
-      </div>
-    );
-  }
-
-  if (phoneStep.status !== 'done' && phoneStep.status !== 'current') {
-    return null;
-  }
-
-  if (!phoneNumber) {
-    return (
-      <div className="space-y-4 max-w-md">
-        <h1 className="text-2xl font-bold text-slate-900">Phone number</h1>
-        <div className="flex items-center gap-3 border border-slate-200 rounded p-4">
-          <div className="size-3 rounded-full bg-blue-500 animate-pulse" />
-          <p className="text-sm text-slate-700">
-            We're claiming your phone number… usually takes about 30 seconds.
-          </p>
-        </div>
-        <p className="text-xs text-slate-500">
-          This page refreshes automatically when the number is ready.
-        </p>
-      </div>
-    );
-  }
 
   async function copy() {
     if (!phoneNumber) return;
@@ -108,66 +87,141 @@ export function PhoneStep({ status, onAdvance, onRetryComplete }: PhoneStepProps
     }
   }
 
+  async function retry() {
+    setRetrying(true);
+    setRetryError(null);
+    try {
+      const res = await apiFetch('/api/onboarding/phone/retry', { method: 'POST' });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { message?: string };
+        setRetryError(body.message ?? `Retry failed (HTTP ${res.status})`);
+        return;
+      }
+      onRetryComplete?.();
+    } catch (err) {
+      setRetryError(err instanceof Error ? err.message : 'Retry failed. Check your connection.');
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  // ── Error: provisioning failed ─────────────────────────────────────
+  if (phoneStep.status === 'error') {
+    const code = (phoneStep.blockers ?? [])[0] ?? 'twilio_provisioning_failed';
+    const friendly = BLOCKER_COPY[code] ?? "Something went wrong claiming your number. Hit Retry and we will try again.";
+    return (
+      <div className="space-y-5 max-w-md">
+        <header>
+          <h1 className="text-2xl font-medium tracking-tight text-slate-900">
+            We hit a snag with your number
+          </h1>
+        </header>
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4">
+          <p className="text-sm text-red-700">{friendly}</p>
+        </div>
+        {retryError && (
+          <p className="text-sm text-red-600">{retryError}</p>
+        )}
+        <Button variant="primary" size="lg" loading={retrying} onClick={() => void retry()}>
+          {retrying ? 'Retrying…' : 'Retry provisioning'}
+        </Button>
+      </div>
+    );
+  }
+
+  // ── Provisioning in progress (no number yet) ───────────────────────
+  if (!phoneNumber) {
+    return (
+      <div className="space-y-5 max-w-md">
+        <header>
+          <h1 className="text-2xl font-medium tracking-tight text-slate-900">
+            Claiming your phone number
+          </h1>
+          <p className="text-sm text-slate-500 mt-2">
+            We&apos;re reserving a local number you&apos;ll forward calls to.
+          </p>
+        </header>
+        <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <div className="size-2 rounded-full bg-slate-900 animate-pulse" />
+          <p className="text-sm text-slate-700">
+            {waitedLong
+              ? "Still working — most numbers arrive in 30 seconds, occasionally up to a minute."
+              : 'Usually takes about 30 seconds. This page refreshes automatically.'}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Ready (number provisioned) ─────────────────────────────────────
   return (
-    <div className="space-y-6 max-w-md">
+    <div className="space-y-7 max-w-xl">
       <header>
-        <h1 className="text-2xl font-bold text-slate-900">Your phone number is ready</h1>
-        <p className="text-sm text-slate-500 mt-1">
-          Forward your existing business line to it, or share it with new customers directly.
-        </p>
-        <p className="text-sm text-amber-800 mt-2">
-          Your number is ready. AI will not answer until you turn it on after billing.
+        <h1 className="text-2xl font-medium tracking-tight text-slate-900">
+          Your business number is ready
+        </h1>
+        <p className="text-sm text-slate-500 mt-2">
+          This is the number Fieldly will answer in. Forward your existing line to it
+          (instructions below) or share it directly with new customers.
         </p>
       </header>
 
-      <div className="border-2 border-blue-500 rounded-lg p-6 text-center">
-        <div className="text-3xl font-mono text-slate-900">{phoneNumber}</div>
-        <button
-          type="button"
-          onClick={() => void copy()}
-          className="mt-3 text-sm text-blue-600 hover:underline"
-        >
-          {copied ? 'Copied!' : 'Copy'}
-        </button>
+      <div className="rounded-2xl border border-slate-200 bg-white p-6">
+        <div className="flex items-center justify-center gap-2 text-slate-500">
+          <Phone size={14} />
+          <span className="text-xs uppercase tracking-widest">Your Fieldly number</span>
+        </div>
+        <div className="mt-3 text-center text-3xl font-medium tracking-tight text-slate-900">
+          {formatted || phoneNumber}
+        </div>
+        <div className="mt-4 flex justify-center">
+          <Button
+            variant="outline"
+            size="sm"
+            leftIcon={copied ? <Check size={14} /> : <Copy size={14} />}
+            onClick={() => void copy()}
+          >
+            {copied ? 'Copied' : 'Copy number'}
+          </Button>
+        </div>
       </div>
 
-      <button
-        type="button"
-        onClick={() => setForwardingOpen((v) => !v)}
-        className="text-sm text-slate-700 underline"
-      >
-        {forwardingOpen ? 'Hide' : 'Show'} forwarding instructions
-      </button>
-
-      {forwardingOpen && (
-        <div className="border border-slate-200 rounded p-4 space-y-3 text-sm">
-          <p className="text-slate-700">
-            Dial the carrier code from your existing business line to forward all incoming calls to the new number.
-          </p>
-          <ul className="space-y-2">
-            {CARRIERS.map((c) => (
-              <li key={c.name} className="flex justify-between gap-3">
-                <span className="font-medium text-slate-700">{c.name}</span>
-                <span className="text-slate-600">
+      <section className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+        <h2 className="text-sm font-medium text-slate-900">How to forward your business line</h2>
+        <p className="mt-1 text-xs text-slate-600">
+          From your existing business phone, dial the carrier code and then your new
+          Fieldly number. Forwarding turns on right away.
+        </p>
+        <ul className="mt-4 divide-y divide-slate-200 rounded-xl border border-slate-200 bg-white">
+          {CARRIERS.map((c) => {
+            const showSuffix = national && c.code !== 'Ask your carrier';
+            return (
+              <li key={c.name} className="flex flex-col gap-1 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <span className="text-sm font-medium text-slate-700">{c.name}</span>
+                <span className="text-sm text-slate-600">
                   <span className="font-mono">{c.code}</span>
-                  {phoneNumber && c.code !== 'Ask your carrier' && (
-                    <> + {phoneNumber.replace(/^\+1/, '')}</>
-                  )}
+                  {showSuffix && <span className="text-slate-400"> + </span>}
+                  {showSuffix && <span className="font-mono">{national}</span>}
                 </span>
               </li>
-            ))}
-          </ul>
-        </div>
-      )}
+            );
+          })}
+        </ul>
+        <p className="mt-3 text-xs text-slate-500">
+          To turn forwarding off later, dial <span className="font-mono">*73</span> (Verizon/AT&amp;T)
+          or <span className="font-mono">##21#</span> (T-Mobile) from the same line.
+        </p>
+      </section>
 
-      <div className="flex gap-3 pt-2">
-        <button
-          type="button"
-          onClick={onAdvance}
-          className="px-4 py-2 bg-blue-600 text-white rounded"
-        >
-          Continue
-        </button>
+      <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+        <strong className="font-medium">Heads up:</strong> the AI doesn&apos;t start answering until you
+        finish billing and turn it on. You can forward your line now or after — your call.
+      </div>
+
+      <div className="flex">
+        <Button variant="primary" size="lg" onClick={onAdvance}>
+          Continue to billing
+        </Button>
       </div>
     </div>
   );

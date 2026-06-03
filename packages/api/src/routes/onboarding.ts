@@ -108,6 +108,11 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         const v = parsed.data;
         const db = currentTenantContext()?.client ?? pool;
 
+        // Timezone: prefer the value the client submitted (browser-detected
+        // IANA name), then keep whatever was previously stored, then fall
+        // back to ET as last-resort default for the initial INSERT.
+        const submittedTimezone = v.timezone?.trim() || null;
+
         await db.query(
           `INSERT INTO tenant_settings (
              id, tenant_id, business_name, service_area_text, service_area_radius,
@@ -116,7 +121,8 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
              next_invoice_number, default_payment_term_days
            )
            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5::jsonb, $6, $7,
-                   'America/New_York', 'EST-', 'INV-', 1001, 1001, 30)
+                   COALESCE($8, 'America/New_York'),
+                   'EST-', 'INV-', 1001, 1001, 30)
            ON CONFLICT (tenant_id) DO UPDATE SET
              business_name        = EXCLUDED.business_name,
              service_area_text    = EXCLUDED.service_area_text,
@@ -124,6 +130,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
              business_hours       = EXCLUDED.business_hours,
              job_buffer_minutes   = EXCLUDED.job_buffer_minutes,
              hourly_rate_cents    = EXCLUDED.hourly_rate_cents,
+             timezone             = COALESCE($8, tenant_settings.timezone),
              updated_at           = now()`,
           [
             tenantId,
@@ -133,6 +140,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             JSON.stringify(v.businessHours),
             v.jobBufferMinutes,
             v.hourlyRateCents,
+            submittedTimezone,
           ]
         );
 

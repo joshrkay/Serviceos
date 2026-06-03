@@ -1,6 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
+import { Phone, Copy, Check } from 'lucide-react';
 import { useApiClient } from '../../../../lib/apiClient';
+import { Button } from '../../../ui';
 import type { OnboardingStatusResponse } from '../../../../types/onboarding';
 
 interface TestCallStepProps {
@@ -9,19 +11,43 @@ interface TestCallStepProps {
   onRefresh: () => void;
 }
 
+function formatPhone(e164: string | null | undefined): string {
+  if (!e164) return '';
+  const digits = e164.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return `(${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
+  }
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  }
+  return e164;
+}
+
 export function TestCallStep({ status, onSkipped, onRefresh }: TestCallStepProps) {
   const apiFetch = useApiClient();
   const navigate = useNavigate();
   const [skipping, setSkipping] = useState(false);
   const [goingLive, setGoingLive] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [waitedLong, setWaitedLong] = useState(false);
 
   const step = status.steps.find((s) => s.id === 'test_call');
-  if (!step) return null;
-
   const phoneStep = status.steps.find((s) => s.id === 'phone');
-  const phoneNumber =
-    ((phoneStep?.metadata ?? {}) as { phoneNumber?: string }).phoneNumber ?? null;
+  const phoneNumber = ((phoneStep?.metadata ?? {}) as { phoneNumber?: string }).phoneNumber ?? null;
+  const formatted = formatPhone(phoneNumber);
+  const telHref = phoneNumber ? `tel:${phoneNumber.replace(/[^\d+]/g, '')}` : undefined;
   const voiceAgentLive = status.voiceAgentLive;
+
+  // Surface a "still waiting" cue after 60s so the user knows they may
+  // need to redial or skip.
+  useEffect(() => {
+    if (!step) return;
+    if (step.status === 'done' || step.status === 'skipped') return;
+    const t = setTimeout(() => setWaitedLong(true), 60_000);
+    return () => clearTimeout(t);
+  }, [step?.status]);
+
+  if (!step) return null;
 
   async function turnOnAiAnswering() {
     setGoingLive(true);
@@ -33,47 +59,15 @@ export function TestCallStep({ status, onSkipped, onRefresh }: TestCallStepProps
     }
   }
 
-  if (step.status === 'done' || step.status === 'skipped') {
-    const title = voiceAgentLive ? "You're live" : 'Setup complete';
-    return (
-      <div className="text-center space-y-6 py-16">
-        <div className="text-6xl" aria-hidden>
-          {voiceAgentLive ? '🎉' : '✓'}
-        </div>
-        <h1 className="text-3xl font-bold text-slate-900">{title}</h1>
-        <p className="text-slate-600 max-w-md mx-auto">
-          {voiceAgentLive ? (
-            <>
-              Your AI agent is answering calls.
-              {step.status === 'skipped' &&
-                ' (Test call skipped — you can call your number anytime to try it.)'}
-            </>
-          ) : (
-            <>
-              Onboarding is finished, but AI phone answering is still off. Turn it on when you are
-              ready to forward your line.
-            </>
-          )}
-        </p>
-        {!voiceAgentLive && (
-          <button
-            type="button"
-            onClick={() => void turnOnAiAnswering()}
-            disabled={goingLive}
-            className="px-6 py-3 bg-blue-600 text-white rounded text-lg disabled:opacity-50"
-          >
-            {goingLive ? 'Turning on…' : 'Turn on AI answering'}
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={() => navigate('/', { replace: true })}
-          className="px-6 py-3 border border-slate-300 text-slate-800 rounded text-lg"
-        >
-          Go to dashboard
-        </button>
-      </div>
-    );
+  async function copy() {
+    if (!phoneNumber) return;
+    try {
+      await navigator.clipboard.writeText(phoneNumber);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Best-effort; clipboard may be gated on non-https origins.
+    }
   }
 
   async function skip() {
@@ -86,66 +80,115 @@ export function TestCallStep({ status, onSkipped, onRefresh }: TestCallStepProps
     }
   }
 
+  // ── Done state — onboarding complete ────────────────────────────────
+  if (step.status === 'done' || step.status === 'skipped') {
+    const title = voiceAgentLive ? "You're live" : 'Setup complete';
+    return (
+      <div className="mx-auto max-w-md space-y-6 py-12 text-center">
+        <div className="mx-auto flex size-14 items-center justify-center rounded-2xl bg-slate-900 text-white">
+          {voiceAgentLive ? <Phone size={22} /> : <Check size={22} />}
+        </div>
+        <div>
+          <h1 className="text-3xl font-medium tracking-tight text-slate-900">{title}</h1>
+          <p className="mx-auto mt-3 max-w-sm text-sm text-slate-600">
+            {voiceAgentLive ? (
+              <>
+                Your AI dispatcher is answering calls.
+                {step.status === 'skipped' &&
+                  ' (You skipped the test call — feel free to call your number anytime to try it.)'}
+              </>
+            ) : (
+              <>
+                Onboarding is finished, but AI answering is still off. Turn it on whenever
+                you&apos;re ready to forward your line.
+              </>
+            )}
+          </p>
+        </div>
+        <div className="flex flex-col items-center gap-3">
+          {!voiceAgentLive && (
+            <Button variant="primary" size="lg" loading={goingLive} onClick={() => void turnOnAiAnswering()}>
+              {goingLive ? 'Turning on…' : 'Turn on AI answering'}
+            </Button>
+          )}
+          <Button variant="outline" size="lg" onClick={() => navigate('/', { replace: true })}>
+            Go to dashboard
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Active — waiting for the test call ──────────────────────────────
   return (
-    <div className="space-y-6 max-w-md">
+    <div className="space-y-7 max-w-md">
       <header>
-        <h1 className="text-2xl font-bold text-slate-900">Make a test call</h1>
-        <p className="text-sm text-slate-500 mt-1">
-          Call this number from your phone. We will detect it and can turn on AI answering
-          automatically after your first successful call.
+        <h1 className="text-2xl font-medium tracking-tight text-slate-900">Make a test call</h1>
+        <p className="text-sm text-slate-500 mt-2">
+          Call your Fieldly number from your phone. We&apos;ll detect it and let you turn on AI
+          answering for real.
         </p>
       </header>
 
-      <div className="border-2 border-blue-500 rounded-lg p-6 text-center space-y-3">
+      <div className="rounded-2xl border border-slate-200 bg-white p-6">
+        <div className="flex items-center justify-center gap-2 text-slate-500">
+          <Phone size={14} />
+          <span className="text-xs uppercase tracking-widest">Call this number</span>
+        </div>
         {phoneNumber ? (
           <a
-            href={`tel:${phoneNumber.replace(/\s/g, '')}`}
-            className="block text-3xl font-mono text-blue-700 hover:underline"
+            href={telHref}
+            className="mt-3 block text-center text-3xl font-medium tracking-tight text-slate-900 hover:underline"
           >
-            {phoneNumber}
+            {formatted || phoneNumber}
           </a>
         ) : (
-          <p className="text-3xl font-mono text-slate-900">(provisioning…)</p>
+          <p className="mt-3 text-center text-3xl font-medium tracking-tight text-slate-400">
+            (provisioning…)
+          </p>
         )}
         {phoneNumber && (
-          <button
-            type="button"
-            className="text-xs text-slate-500 underline"
-            onClick={() => {
-              void navigator.clipboard.writeText(phoneNumber);
-            }}
-          >
-            Copy number
-          </button>
+          <div className="mt-4 flex justify-center">
+            <Button
+              variant="outline"
+              size="sm"
+              leftIcon={copied ? <Check size={14} /> : <Copy size={14} />}
+              onClick={() => void copy()}
+            >
+              {copied ? 'Copied' : 'Copy number'}
+            </Button>
+          </div>
+        )}
+      </div>
+
+      <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+        <div className="size-2 rounded-full bg-slate-900 animate-pulse" />
+        {waitedLong ? (
+          <span>
+            No call detected yet. Try calling again — or skip and turn it on manually.
+          </span>
+        ) : (
+          <span>Waiting for your call…</span>
         )}
       </div>
 
       {voiceAgentLive ? (
-        <p className="text-sm text-green-700 font-medium">AI answering is on</p>
+        <p className="text-sm font-medium text-green-700">AI answering is on</p>
       ) : (
-        <button
-          type="button"
-          onClick={() => void turnOnAiAnswering()}
-          disabled={goingLive}
-          className="w-full px-4 py-3 bg-blue-600 text-white rounded font-medium disabled:opacity-50"
-        >
+        <Button variant="primary" size="lg" loading={goingLive} onClick={() => void turnOnAiAnswering()} fullWidth>
           {goingLive ? 'Turning on…' : 'Turn on AI answering'}
-        </button>
+        </Button>
       )}
 
-      <div className="flex items-center gap-3 text-sm text-slate-600">
-        <div className="size-2 rounded-full bg-blue-500 animate-pulse" />
-        Waiting for your call…
-      </div>
-
-      <button
-        type="button"
+      <Button
+        variant="ghost"
+        size="sm"
+        loading={skipping}
         onClick={() => void skip()}
-        disabled={skipping}
-        className="text-sm text-slate-500 underline disabled:opacity-50"
+        className="text-slate-500"
       >
         {skipping ? 'Skipping…' : "Skip — I'll test later"}
-      </button>
+      </Button>
     </div>
   );
 }

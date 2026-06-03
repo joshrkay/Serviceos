@@ -53,6 +53,8 @@ export interface BusinessIdentityInput {
   businessHours: BusinessHours;
   jobBufferMinutes: number;
   hourlyRateCents: number;
+  /** IANA timezone name (e.g. "America/Phoenix"). Browser-detected on submit. */
+  timezone?: string;
 }
 
 export type PackId = 'hvac' | 'plumbing';
