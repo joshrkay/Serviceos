@@ -3,6 +3,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { updateSettingsSchema } from '../shared/contracts';
 import { toErrorResponse, ValidationError } from '../shared/errors';
+import { normalizeMobileE164 } from '../shared/phone/normalize';
 import { loadActivePackConfigs } from '../shared/pack-config-loader';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { PackActivationRepository } from '../settings/pack-activation';
@@ -170,6 +171,25 @@ export function createSettingsRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const parsed = updateSettingsSchema.parse(req.body);
+
+        // P8-016 — normalize owner_phone to E.164 before persisting (or
+        // null to clear). Done at the route boundary so the repo and
+        // downstream Twilio dial code can trust the stored shape.
+        if (parsed.ownerPhone !== undefined && parsed.ownerPhone !== null) {
+          const trimmed = parsed.ownerPhone.trim();
+          if (trimmed === '') {
+            parsed.ownerPhone = null;
+          } else {
+            try {
+              parsed.ownerPhone = normalizeMobileE164(trimmed);
+            } catch (err) {
+              throw new ValidationError(
+                err instanceof Error ? err.message : 'Invalid owner phone number',
+                { field: 'ownerPhone' },
+              );
+            }
+          }
+        }
 
         if (parsed.terminologyPreferences) {
           // Tier 4 — when deps are wired, validate against the union of

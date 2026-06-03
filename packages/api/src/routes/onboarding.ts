@@ -26,6 +26,7 @@ import {
   type SeedPackDefaultsDeps,
 } from '../packs/seed-pack-defaults';
 import { normalizeMobileE164 } from '../shared/phone/normalize';
+import { VALID_TIMEZONES } from '../settings/settings';
 
 export interface OnboardingRouterDeps {
   settingsRepo: SettingsRepository;
@@ -112,7 +113,19 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         // Timezone: prefer the value the client submitted (browser-detected
         // IANA name), then keep whatever was previously stored, then fall
         // back to ET as last-resort default for the initial INSERT.
+        // Validated against the supported allowlist so downstream Intl
+        // calls (board-query, money-dashboard) never throw on bogus values.
         const submittedTimezone = v.timezone?.trim() || null;
+        if (submittedTimezone && !VALID_TIMEZONES.includes(submittedTimezone)) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            issues: [{
+              path: ['timezone'],
+              message: `Unsupported timezone "${submittedTimezone}". Pick one of: ${VALID_TIMEZONES.join(', ')}.`,
+            }],
+          });
+          return;
+        }
 
         // Owner phone: empty string explicitly clears (SQL NULL); omitted
         // leaves the existing value untouched; a populated value is

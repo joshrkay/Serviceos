@@ -147,7 +147,11 @@ export function IdentityStep({ onSaved }: IdentityStepProps) {
           jobBufferMinutes,
           hourlyRateCents: Math.round(hourlyRateDollars * 100),
           timezone,
-          ownerPhone: ownerPhone.trim() || undefined,
+          // Always send the trimmed value — empty string explicitly clears
+          // a previously-saved owner phone (the route treats omitted as
+          // "leave untouched"). Sending undefined would drop the key and
+          // silently leave a stale number on file.
+          ownerPhone: ownerPhone.trim(),
         }),
       });
       if (!res.ok) {

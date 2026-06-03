@@ -18,6 +18,7 @@ interface BusinessProfileFields {
   businessName: string;
   businessPhone: string;
   businessEmail: string;
+  ownerPhone: string;
   timezone: string;
 }
 
@@ -25,8 +26,21 @@ const EMPTY: BusinessProfileFields = {
   businessName: '',
   businessPhone: '',
   businessEmail: '',
+  ownerPhone: '',
   timezone: '',
 };
+
+/** +15125551234 → (512) 555-1234 for display in the form. */
+function formatPhoneForDisplay(e164: string): string {
+  const digits = e164.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return `(${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
+  }
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  }
+  return e164;
+}
 
 const TIMEZONE_OPTIONS = [
   'America/New_York',
@@ -62,6 +76,7 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
           businessName: data.businessName ?? '',
           businessPhone: data.businessPhone ?? '',
           businessEmail: data.businessEmail ?? '',
+          ownerPhone: data.ownerPhone ? formatPhoneForDisplay(data.ownerPhone) : '',
           timezone: data.timezone ?? '',
         });
       } catch (err) {
@@ -96,6 +111,7 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
           businessName: fields.businessName.trim(),
           businessPhone: fields.businessPhone.trim() || null,
           businessEmail: fields.businessEmail.trim() || null,
+          ownerPhone: fields.ownerPhone.trim() || null,
           timezone: fields.timezone || null,
         }),
       });
@@ -114,6 +130,7 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
         businessName: fields.businessName.trim(),
         businessPhone: fields.businessPhone.trim(),
         businessEmail: fields.businessEmail.trim(),
+        ownerPhone: fields.ownerPhone.trim(),
         timezone: fields.timezone,
       });
       onClose();
@@ -173,13 +190,35 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
               </label>
 
               <label htmlFor="bp-phone" className="block">
-                <span className="text-sm text-slate-700">Phone</span>
+                <span className="text-sm text-slate-700">Business phone</span>
+                <span className="block text-xs text-slate-500 mt-0.5">
+                  The public number the AI answers on.
+                </span>
                 <input
                   id="bp-phone"
                   type="tel"
                   value={fields.businessPhone}
                   onChange={(e) => setFields((f) => ({ ...f, businessPhone: e.target.value }))}
                   placeholder="+1 (555) 123-4567"
+                  className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+                />
+              </label>
+
+              <label htmlFor="bp-owner-phone" className="block">
+                <span className="text-sm text-slate-700">Your cell phone</span>
+                <span className="block text-xs text-slate-500 mt-0.5">
+                  For emergency triage. When a caller has a medical, water-damage,
+                  or other high-risk signal, Fieldly patches the call straight to
+                  your cell with a 5-second context preface.
+                </span>
+                <input
+                  id="bp-owner-phone"
+                  type="tel"
+                  autoComplete="tel"
+                  inputMode="tel"
+                  value={fields.ownerPhone}
+                  onChange={(e) => setFields((f) => ({ ...f, ownerPhone: e.target.value }))}
+                  placeholder="(512) 555-1234"
                   className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
                 />
               </label>
