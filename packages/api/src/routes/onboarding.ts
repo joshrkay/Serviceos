@@ -26,7 +26,7 @@ import {
   type SeedPackDefaultsDeps,
 } from '../packs/seed-pack-defaults';
 import { normalizeMobileE164 } from '../shared/phone/normalize';
-import { VALID_TIMEZONES } from '../settings/settings';
+import { VALID_TIMEZONES, resolveBootstrapAiModel } from '../settings/settings';
 
 export interface OnboardingRouterDeps {
   settingsRepo: SettingsRepository;
@@ -152,16 +152,23 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           }
         }
 
+        // Seed the platform default AI model on the very first INSERT so
+        // the onboarding "AI check" (Step 6) finds aiConfigPresent=true. The
+        // COALESCE on update keeps any tenant-specific override the user
+        // has already set elsewhere — same convention as the timezone and
+        // owner_phone columns below.
+        const bootstrapAiModel = resolveBootstrapAiModel();
+
         await db.query(
           `INSERT INTO tenant_settings (
              id, tenant_id, business_name, service_area_text, service_area_radius,
              business_hours, job_buffer_minutes, hourly_rate_cents,
-             timezone, owner_phone, estimate_prefix, invoice_prefix, next_estimate_number,
+             timezone, owner_phone, ai_model, estimate_prefix, invoice_prefix, next_estimate_number,
              next_invoice_number, default_payment_term_days
            )
            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5::jsonb, $6, $7,
                    COALESCE($8, 'America/New_York'),
-                   $9,
+                   $9, $11,
                    'EST-', 'INV-', 1001, 1001, 30)
            ON CONFLICT (tenant_id) DO UPDATE SET
              business_name        = EXCLUDED.business_name,
@@ -175,6 +182,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
                WHEN $10::boolean THEN $9
                ELSE tenant_settings.owner_phone
              END,
+             ai_model             = COALESCE(tenant_settings.ai_model, $11),
              updated_at           = now()`,
           [
             tenantId,
@@ -187,6 +195,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             submittedTimezone,
             ownerPhoneToWrite ?? null,
             ownerPhoneToWrite !== undefined,
+            bootstrapAiModel,
           ]
         );
 
@@ -257,6 +266,10 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             nextInvoiceNumber: 1001,
             defaultPaymentTermDays: 30,
             activeVerticalPacks: newPacks,
+            // Seed the platform default AI model so the onboarding
+            // "AI check" (Step 6) finds aiConfigPresent=true. Same
+            // value the ensureTenantSettings bootstrap path uses.
+            aiModel: resolveBootstrapAiModel(),
             createdAt: new Date(),
             updatedAt: new Date(),
           });
@@ -273,25 +286,23 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
 
         // Auto-seed canonical job types, price book, and message-template
         // defaults so the wizard's "we'll set this up for you" promise is
-        // real. Idempotent — safe on reactivation. We swallow failures
-        // here on purpose: a partial seed is recoverable from Settings
-        // post-onboarding, but a hard failure shouldn't block the wizard
-        // from advancing (the pack_activations row is the source of
-        // truth for which packs are picked).
+        // real. Idempotent: safe to re-run because each helper checks
+        // for the canonical names first.
+        //
+        // We do NOT swallow seed errors here. Every /api route runs inside
+        // withTenantTransaction, and catching a SQL error mid-transaction
+        // leaves the connection in an aborted state — the auditRepo.create
+        // call below would then fail with "current transaction is aborted,
+        // commands ignored until end of transaction block." Letting the
+        // error propagate rolls the whole request back (including the
+        // pack_activation write) so the next click retries cleanly with
+        // no partial seed left behind.
         let seedResult: Awaited<ReturnType<typeof seedPackDefaults>> | null = null;
         if (packSeedDeps) {
-          try {
-            seedResult = await seedPackDefaults(
-              { tenantId, packId, actorId: userId },
-              packSeedDeps,
-            );
-          } catch (seedErr) {
-            // eslint-disable-next-line no-console
-            console.error(
-              `[onboarding] Pack seed failed for tenant=${tenantId} pack=${packId}:`,
-              seedErr instanceof Error ? seedErr.message : seedErr,
-            );
-          }
+          seedResult = await seedPackDefaults(
+            { tenantId, packId, actorId: userId },
+            packSeedDeps,
+          );
         }
 
         // Emit audit event

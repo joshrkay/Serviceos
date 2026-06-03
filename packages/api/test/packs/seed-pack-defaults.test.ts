@@ -60,7 +60,9 @@ describe('seedPackDefaults', () => {
     expect(labor?.unit).toBe('hour');
     expect(labor?.unitPriceCents).toBeGreaterThan(0);
 
-    const diagnostic = catalog.find((c) => c.name === 'Diagnostic Fee');
+    // Pack-prefixed name — see seed-pack-defaults.ts hvacCatalogSeeds
+    // comment for why HVAC and plumbing seeds carry distinct names.
+    const diagnostic = catalog.find((c) => c.name === 'HVAC Diagnostic Fee');
     expect(diagnostic).toBeDefined();
 
     // The "job types" promise — every template is HVAC and carries a
@@ -130,6 +132,29 @@ describe('seedPackDefaults', () => {
 
     expect(otherCatalog).toEqual([]);
     expect(otherTemplates).toEqual([]);
+  });
+
+  it('a tenant on both packs gets both Diagnostic Fees at their pack prices', async () => {
+    // Regression for the catalog name-collision: before the seed names
+    // were pack-prefixed, plumbing's "Diagnostic Fee" was deduped against
+    // HVAC's by name, so the second pack silently kept the first pack's
+    // price.
+    await seedPackDefaults(
+      { tenantId: TENANT, packId: 'hvac' },
+      { catalogRepo, templateRepo },
+    );
+    await seedPackDefaults(
+      { tenantId: TENANT, packId: 'plumbing' },
+      { catalogRepo, templateRepo },
+    );
+
+    const catalog = await catalogRepo.listByTenant(TENANT);
+    const hvacDx = catalog.find((c) => c.name === 'HVAC Diagnostic Fee');
+    const plumbingDx = catalog.find((c) => c.name === 'Plumbing Diagnostic Fee');
+    expect(hvacDx).toBeDefined();
+    expect(plumbingDx).toBeDefined();
+    // Different sources (HVAC vs plumbing defaults) → different cents.
+    expect(hvacDx!.unitPriceCents).not.toBe(plumbingDx!.unitPriceCents);
   });
 
   it('quietly no-ops on an unknown packId so the route never 500s', async () => {

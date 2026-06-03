@@ -88,6 +88,22 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
     expect(getMigrationSQL()).toContain('CREATE TABLE IF NOT EXISTS dispatch_analytics');
   });
 
+  // EXCEPTIONS — tables that genuinely should not be RLS-protected even
+  // though they carry a tenant_id column. Hoisted to the describe scope so
+  // both the "FORCE everywhere except here" assertion and the "allowlist
+  // didn't silently grow" pin reference the same set (otherwise the pin
+  // test compares a duplicate constant against itself and can never fail).
+  const RLS_EXEMPT_TABLES_SHARED = new Set<string>([
+    // oauth_states: short-lived Google OAuth state nonces. The /callback
+    // path calls consume(stateId) BEFORE tenant context is set —
+    // recovering tenant_id from the row IS the lookup. RLS would make the
+    // row invisible to the call that needs it.
+    'oauth_states',
+    // platform_deprovision_log: cross-tenant audit trail of tenant
+    // hard-deletes. By design, this row outlives the tenant it records.
+    'platform_deprovision_log',
+  ]);
+
   it('Blocker 3 — every ENABLE-RLS table also FORCEs RLS', () => {
     // Without FORCE, the table OWNER (the app's connection role) bypasses
     // RLS, so any unscoped query inside a connection that forgot
@@ -142,10 +158,7 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
     //   so it cannot be tenant-scoped — the tenant_id column is denormalized
     //   identity for the purged row, not a tenancy boundary. Only ops
     //   reads it (via direct DB queries).
-    const RLS_EXEMPT_TABLES = new Set<string>([
-      'oauth_states',
-      'platform_deprovision_log',
-    ]);
+    const RLS_EXEMPT_TABLES = RLS_EXEMPT_TABLES_SHARED;
 
     const sql = getMigrationSQL();
 
@@ -185,13 +198,12 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
 
   it('Blocker 3 — the RLS exemption allowlist is not silently growing', () => {
     // Pins the exemption set so a future PR can't quietly add a table to
-    // it without showing up in this test diff. If you legitimately need a
-    // new exemption, bump this list AND document the rationale in the
-    // migration block AND in the comment in the test above.
+    // it without showing up in this test diff. References the same set
+    // the "FORCE everywhere" assertion uses, so any add to that set
+    // breaks this pin as well — otherwise the test compares a duplicate
+    // constant against itself and is tautological.
     const ALLOWED_EXEMPT = ['oauth_states', 'platform_deprovision_log'];
-    expect(ALLOWED_EXEMPT.sort()).toEqual(
-      ['oauth_states', 'platform_deprovision_log'].sort(),
-    );
+    expect([...RLS_EXEMPT_TABLES_SHARED].sort()).toEqual(ALLOWED_EXEMPT.sort());
   });
 
   it('Blocker 7 — migration 131 installs the double-booking exclusion guard', () => {

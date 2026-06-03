@@ -73,6 +73,11 @@ interface CatalogSeed {
   unitPriceCents: number;
 }
 
+// Catalog seed names are pack-prefixed (e.g. "HVAC Diagnostic Fee" vs
+// "Plumbing Diagnostic Fee") so a multi-pack tenant gets both sets at
+// their pack-specific prices. The name-only idempotency probe below
+// would otherwise treat the plumbing seed as a duplicate of HVAC's and
+// silently skip the price difference (HVAC $89 vs plumbing $75 etc.).
 function hvacCatalogSeeds(): CatalogSeed[] {
   const d = HVAC_LINE_ITEM_DEFAULTS;
   return [
@@ -84,21 +89,21 @@ function hvacCatalogSeeds(): CatalogSeed[] {
       unitPriceCents: d.laborRatePerHourCents,
     },
     {
-      name: 'Diagnostic Fee',
+      name: 'HVAC Diagnostic Fee',
       description: 'Trip + diagnostic to inspect the system on site.',
       category: 'Labor',
       unit: 'each',
       unitPriceCents: d.diagnosticFeeCents,
     },
     {
-      name: 'Emergency Call Fee',
+      name: 'HVAC Emergency Call Fee',
       description: 'After-hours / same-day emergency dispatch fee.',
       category: 'Labor',
       unit: 'each',
       unitPriceCents: d.emergencyCallFeeCents,
     },
     {
-      name: 'Trip Charge',
+      name: 'HVAC Trip Charge',
       description: 'Standard truck roll fee.',
       category: 'Labor',
       unit: 'each',
@@ -132,21 +137,21 @@ function plumbingCatalogSeeds(): CatalogSeed[] {
       unitPriceCents: d.laborRatePerHourCents,
     },
     {
-      name: 'Diagnostic Fee',
+      name: 'Plumbing Diagnostic Fee',
       description: 'Trip + diagnostic to locate the issue on site.',
       category: 'Labor',
       unit: 'each',
       unitPriceCents: d.diagnosticFeeCents,
     },
     {
-      name: 'Emergency Call Fee',
+      name: 'Plumbing Emergency Call Fee',
       description: 'After-hours / same-day emergency dispatch fee.',
       category: 'Labor',
       unit: 'each',
       unitPriceCents: d.emergencyCallFeeCents,
     },
     {
-      name: 'Trip Charge',
+      name: 'Plumbing Trip Charge',
       description: 'Standard truck roll fee.',
       category: 'Labor',
       unit: 'each',
