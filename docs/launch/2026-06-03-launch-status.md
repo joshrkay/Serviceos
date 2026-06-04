@@ -110,33 +110,63 @@ should re-run and stay green.
 
 ---
 
-## 4. Nice-to-haves (post-soft-launch is fine)
+## 4. Done since prior status refresh (server-side analytics + billing race)
 
-- **PostHog wiring** for funnel metrics (signup → onboarding-complete → trial → paid)
-- **patch_owner state-machine implementation** — owner_phone data is captured + queryable, but the voice-agent FSM's `patch_owner` branch is documented and not yet implemented. When it lands, the resolver helper is the only wiring needed.
-- **Sidebar re-edit state invalidation** — changing Pack mid-wizard doesn't reset downstream Phone state; current behavior is non-destructive but confusing if re-picked
-- **Settings page surface for the timezone field** — currently only editable via the BusinessProfileSheet's existing tz picker, which already worked
-- **Quarantine CDK + langgraph prototypes** — pure cosmetic / repo hygiene
-- **Demo video** and **help-center articles** per GTM brief §10
+**Server-side PostHog funnel** (`3fe4743`)
+- `lib/analytics/posthog.ts` (server) + `lib/analytics.ts` (client) — both off-by-default. Browser SDK init turns `capture_pageview: false` (token-leak fix from `139ecee`).
+- Concrete events fire at signup, onboarding-complete, voice-agent-turned-on, trial_started, trial_to_paid, subscription_canceled. Server-side path stamps tenants.stripe_customer_id from subscription metadata + clears pending marker on subscription.created.
+
+**Billing-race hardening** (PR-#501 bot-driven, `43025cb` → `e94ee62`)
+1. `createTrialCheckoutSession` reuses the canonical Stripe customer (no more orphan customers across tabs/retries).
+2. Subscription_status gate refuses new checkout when one is already live.
+3. Postgres advisory transaction lock serializes per-tenant trial checkouts.
+4. Migration 144 adds `tenants.pending_checkout_at`; migration 145 adds `tenants.pending_checkout_session_id`. Combined gate refuses new checkout when a session is open OR a marker is fresh.
+5. Stripe `expires_at` bound to the gate's 32-min ceiling so the session can't outlive enforcement.
+6. `clearPendingCheckout` reads the session id server-side and calls `/v1/checkout/sessions/:id/expire` before clearing — cancel-return on the browser then actually invalidates the prior URL.
+7. Marker clear moved out of the subscription handler and onto `checkout.session.expired` (abandoned) + `customer.subscription.created` (success) so a delayed sub.updated/deleted can't clobber a newer pending row, and `session.completed` arriving before `subscription.created` doesn't open the gate prematurely.
+8. Atomic `trial_started` transition via `SELECT ... FOR UPDATE` in the webhook handler closes the funnel double-fire under concurrent same-transition events.
+
+**Other PR-#501 review remediations** addressed in commits `4a33b01` (Stripe session expires_at + cancel-return), `3229233` (cancel-cleanup error surfacing + stale-tab cancel deferred), `f82ba52` (`/api/onboarding/pack` requires owner role), `dd20e2d` (`/billing/cancel` requires owner role).
+
+## 5. Nice-to-haves (post-soft-launch)
+
+- **`patch_owner` state-machine implementation** — owner_phone is captured and the resolver is ready, but the production voice-agent FSM's `patch_owner` branch needs vulnerability + urgency classifiers that don't yet exist in tree. Explore agent estimate: **LARGE, 4-5 engineer-days**. Path documented in `createSettingsOwnerPhoneResolver`'s docstring; not a single-PR drop-in.
+- **Sidebar re-edit state invalidation** — changing Pack mid-wizard doesn't reset downstream Phone state; current behavior is non-destructive but confusing if re-picked.
+- **Per-checkout cancellation nonce** — stale tabs returning via cancel_url currently clear the marker for the wrong session id. Documented in `clearPendingCheckout`. Soft-launch consequence: operator clicks Start Trial again. Tracked as follow-up.
+- **Settings page surface for the timezone field** — currently editable via the BusinessProfileSheet picker, which already worked.
+- **Quarantine CDK + langgraph prototypes** — pure cosmetic / repo hygiene.
+- **Demo video** and **help-center articles** per GTM brief §10.
 
 ---
 
-## 5. Commit log (PR #501)
+## 6. Commit log (PR #501, most recent first)
 
 ```
-7f81b7f fix(onboarding): close PR #501 review-bot findings (#2/#1/#4/#5/#7/#3)
-20e3e47 feat(settings): owner phone editor + timezone validation hardening
+e94ee62 fix(webhooks): atomic trial_started transition via SELECT ... FOR UPDATE
+9667d0b fix(webhooks): keep checkout gate closed until subscription mirrored
+dd20e2d fix(billing): scope marker clear to session id + gate cancel to owners
+f82ba52 fix(onboarding): gate pack activation behind requireRole('owner')
+3229233 fix(billing): surface cancel-cleanup failures + document stale-tab edge
+ae06a6c fix(billing): persist Stripe session id server-side
+4a33b01 fix(billing): expire canceled Stripe session before reopening gate
+1d02ebf fix(billing): bind Stripe session lifetime to gate + clear marker on cancel
+91fe4d5 fix(billing): close residual checkout race with pending_checkout_at marker
+54c30aa fix(billing): serialize trial checkout per tenant via advisory lock
+43025cb fix(billing): prevent orphaned duplicate trial subscriptions
+d85a0b4 test(billing): update integration mock for two-step Stripe flow
+477b65c fix: honest patch-through copy + repair trial_started funnel
+139ecee fix(analytics): close PostHog pageview token leak + repair completed dedup
+3fe4743 feat(analytics): server-side PostHog for trial funnel + T-Mobile fix
+900908b feat(analytics): PostHog wiring + fix CI snapshot + IdentityStep preload bug
+ffecce0 rebrand: Fieldly → Rivet (rivet.ai)
 580e6b4 feat(onboarding): collect owner cell phone for emergency triage
 2819184 qa(onboarding): design system + UX pass on every step
 34eb5df fix(security): FORCE row level security on all tenant-scoped tables
-828093b docs(launch): launch-status dashboard
 c9f27e5 fix(onboarding): auto-seed job types and templates on pack activation
-4da9df8 chore(rebrand): finish ServiceOS→Rivet cleanup pass
-dd7eae5 docs(launch): launch-day operational runbook
 08c2707 fix(onboarding): seed default AI model on tenant creation
-fd5e6a3 docs(launch): launch-day posts (X/LinkedIn/Reddit/email) + README rebrand
 934045e feat(launch): public landing page, GTM brief, rebrand to Rivet
 83b50e7 fix(web): remove mock-data fallback from public estimate page
+(... earlier commits truncated; full history on the branch)
 ```
 
 All on branch `claude/gallant-hypatia-D6GAv` — open as PR #501.
