@@ -119,6 +119,26 @@ issues below before reading the table.
 | [VOICE-intent-confirm-drift](./VOICE-intent-confirm-drift.md) | CUST-02, SCH-02, SCH-03 | Voice rows fail "no proposal", but evidence shows the LLM classified `create_customer` at 0.9 confidence and the session parked in `intent_confirm` awaiting caller confirmation. Harness sends one utterance and never confirms. Product contract changed or harness must drive the confirm turn. Report's "AI key unset" hypothesis is wrong — AI provider is live on dev. |
 | [ISO-01-rls-probe-role](./ISO-01-rls-probe-role.md) | ISO-01 | Agent C must use a non-superuser probe role (or accept error-as-suppressed); with the superuser conn the no-GUC check can never pass. API-side isolation (B→A 404s, cross-tenant write blocked) passed. |
 
+### Second pass — after fixes on `fix/qa-matrix-live-run-findings` (2026-06-04)
+
+All six new stories plus the catalog restoration were built the same day;
+counts moved **40/7/26/1 → 44 pass · 9 partial · 15 fail · 1 n/a**, with
+zero harness-noise rows left (69 catalog rows, no orphans, every verdict
+evidence-backed). Flipped live: ISO-01, JRN-02, EST-03..06, EST-05/06 +
+INV-03..07 + AST-01..07 all produce real verdicts now (AST-01/03/06 and
+INV row passes include: assistant create-customer proposal works with HITL
+preserved; payment-link provider exists but is unmounted → INV-04 story
+confirmed precise).
+
+Still failing, **deploy-gated** (fixes are on this branch; dev runs
+`cursor/qa-matrix-voice-gates-b78e` which predates them AND main's proposal
+gate): PROV-01/02 (re-activation 500 → idempotent fix here), CUST-02 +
+SCH-02/03 (voice `ai_run_id` FK fix here), PROP-01..04 (gate on main,
+regression tests here). Merge + redeploy dev from main lineage, re-run
+those rows, and the expected state is ~55+ pass with the remaining
+fails/partials being real env/feature gaps (Stripe webhook secret, delivery
+wiring, overdue sweep worker, AST-04/05/07 features).
+
 ### Remaining live partials (no story yet — verify on dev config first)
 
 - SMS-01: no `appointment_confirmation` dispatch row from a REST-created
