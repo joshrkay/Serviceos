@@ -180,13 +180,25 @@ export class BillingService {
         );
       }
 
-      // Re-check subscription_status INSIDE the lock so a concurrent
-      // checkout's webhook lifecycle is visible to us if it landed
-      // between our arrival and our lock acquisition. Refuse on any
-      // live status; the in-app billing portal is the right surface
-      // for an already-subscribed tenant.
-      const statusRows = await client.query<{ subscription_status: string | null }>(
-        `SELECT subscription_status FROM tenants WHERE id = $1`,
+      // Re-check status INSIDE the lock. Two signals refuse a new
+      // checkout:
+      //   (1) subscription_status reflects a live subscription — a
+      //       prior checkout completed and its webhook landed;
+      //   (2) pending_checkout_at is recent (<30 min) — a prior
+      //       checkout minted a Stripe session that is still
+      //       outstanding. This closes the residual race the lock
+      //       alone left open: the previous caller already released
+      //       the lock at COMMIT, but its subscription.created
+      //       webhook hasn't fired yet so subscription_status is
+      //       still null. The pending timestamp survives lock
+      //       release until either the webhook clears it or the
+      //       30-min timeout expires for an abandoned checkout.
+      const statusRows = await client.query<{
+        subscription_status: string | null;
+        pending_checkout_at: Date | null;
+      }>(
+        `SELECT subscription_status, pending_checkout_at
+           FROM tenants WHERE id = $1`,
         [input.tenantId],
       );
       const existingStatus = statusRows.rows[0]?.subscription_status ?? null;
@@ -194,6 +206,15 @@ export class BillingService {
         throw new ValidationError(
           'A subscription is already active for this tenant. Manage it from Settings → Billing.',
         );
+      }
+      const pendingAt = statusRows.rows[0]?.pending_checkout_at ?? null;
+      if (pendingAt) {
+        const ageMs = Date.now() - new Date(pendingAt).getTime();
+        if (ageMs < 30 * 60 * 1000) {
+          throw new ValidationError(
+            'A checkout was just started for this tenant. Complete it or wait a moment before trying again.',
+          );
+        }
       }
 
       // Reuse the tenant's single canonical Stripe customer so two
@@ -236,6 +257,16 @@ export class BillingService {
       if (!session.url) {
         throw new Error('Stripe checkout session returned no url');
       }
+
+      // Stamp the pending-checkout timestamp INSIDE the lock so a
+      // racing follower can see it the moment they acquire the lock.
+      // Cleared by the customer.subscription.created webhook; the
+      // 30-min staleness check above handles abandoned sessions.
+      await client.query(
+        `UPDATE tenants SET pending_checkout_at = NOW(), updated_at = NOW()
+          WHERE id = $1`,
+        [input.tenantId],
+      );
 
       await client.query('COMMIT');
       return { url: session.url };

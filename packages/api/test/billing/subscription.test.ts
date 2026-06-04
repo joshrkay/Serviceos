@@ -31,6 +31,10 @@ function makePool(rows: Record<string, unknown> = {}) {
     ['pg_try_advisory_xact_lock', { rows: [{ locked: true }] }],
     ['SELECT subscription_status FROM tenants', { rows: [rows] }],
     [
+      'SELECT subscription_status, pending_checkout_at',
+      { rows: [{ ...rows, pending_checkout_at: null }] },
+    ],
+    [
       'UPDATE tenants\n          SET stripe_customer_id',
       (_sql, params) => ({ rows: [{ stripe_customer_id: params?.[0] }] }),
     ],

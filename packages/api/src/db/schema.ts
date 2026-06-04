@@ -3738,6 +3738,21 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS owner_phone TEXT;
   `,
+
+  '144_tenants_pending_checkout_at': `
+    -- Trial-checkout dedup. When a tenant opens Stripe Checkout, we
+    -- stamp pending_checkout_at = NOW() inside the same advisory-lock
+    -- transaction that mints the session. A second checkout request
+    -- that arrives BEFORE Stripe's subscription.created webhook has
+    -- flipped subscription_status to 'trialing' sees the pending
+    -- timestamp inside its own gate check and refuses — closing the
+    -- residual race the in-process advisory lock alone could not
+    -- cover (lock-release vs webhook-delivery window). Cleared by
+    -- the subscription.created webhook handler; a 30-minute timeout
+    -- in the gate handles abandoned checkouts.
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS pending_checkout_at TIMESTAMPTZ;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
