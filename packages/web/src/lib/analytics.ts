@@ -72,7 +72,14 @@ async function loadPosthog(): Promise<PostHogLike | null> {
         // We capture explicitly via track() — autocapture would surface
         // proposal/customer/etc names from the dashboard which is PII.
         autocapture: false,
-        capture_pageview: true,
+        // PostHog pageviews include the current URL. Public routes in
+        // routes.ts use credential-bearing path params (/portal/:token,
+        // /public/feedback/:token, /e/:id, /pay/:id, /book) where the
+        // path itself is the bearer secret — sending those URLs to a
+        // third-party analytics service would leak the credential.
+        // Disable autocapture pageviews; the launch funnel is built
+        // from the explicit named track() events, not page hits.
+        capture_pageview: false,
         disable_session_recording: true,
         persistence: 'localStorage+cookie',
       });

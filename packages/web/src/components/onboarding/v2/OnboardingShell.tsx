@@ -49,14 +49,21 @@ export function OnboardingShell() {
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams, refetch]);
 
-  // Fire once when the wizard transitions to "complete." React Strict
-  // double-mount in dev would call this twice — the ref guard keeps
-  // PostHog seeing exactly one event per finished tenant.
-  const completedFired = useRef(false);
+  // Fire exactly on the incomplete → complete transition, never on a
+  // "complete on first load" revisit. The previous ref-only guard
+  // counted every refresh of an already-finished tenant as a new
+  // completion. We track the prior value across renders and only emit
+  // when isComplete flips true after having been observed as not-true.
+  const wasIncompleteRef = useRef(false);
   useEffect(() => {
-    if (!data?.isComplete || completedFired.current) return;
-    completedFired.current = true;
-    track('onboarding_completed', { voiceAgentLive: data.voiceAgentLive });
+    if (data?.isComplete === false) {
+      wasIncompleteRef.current = true;
+      return;
+    }
+    if (data?.isComplete && wasIncompleteRef.current) {
+      wasIncompleteRef.current = false;
+      track('onboarding_completed', { voiceAgentLive: data.voiceAgentLive });
+    }
   }, [data?.isComplete, data?.voiceAgentLive]);
 
   if (isLoading && !data) {
