@@ -190,8 +190,8 @@ export function IdentityStep({ onSaved }: IdentityStepProps) {
       </Field>
 
       <Field
-        label={<>Your cell phone <span className="text-slate-400 font-normal">(recommended)</span></>}
-        hint="For emergency triage — when a caller has a medical issue, water damage in progress, or other high-risk signal, Rivet patches the call straight to your cell with a 5-second context preface instead of trying to book."
+        label={<>Your cell phone <span className="text-slate-400 font-normal">(optional)</span></>}
+        hint="So Rivet knows how to reach you about high-risk calls. Automatic patch-through to your cell is coming shortly — for now urgent callers are flagged in your inbox and the end-of-day digest."
       >
         <Input
           type="tel"

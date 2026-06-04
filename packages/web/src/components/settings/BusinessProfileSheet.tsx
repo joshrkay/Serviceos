@@ -207,9 +207,9 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
               <label htmlFor="bp-owner-phone" className="block">
                 <span className="text-sm text-slate-700">Your cell phone</span>
                 <span className="block text-xs text-slate-500 mt-0.5">
-                  For emergency triage. When a caller has a medical, water-damage,
-                  or other high-risk signal, Rivet patches the call straight to
-                  your cell with a 5-second context preface.
+                  Where Rivet reaches you about high-risk calls. Automatic
+                  patch-through is on the roadmap; today urgent callers are
+                  surfaced in your inbox and the end-of-day digest.
                 </span>
                 <input
                   id="bp-owner-phone"

@@ -1133,34 +1133,63 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           id?: string;
           customer?: string;
           status?: string;
+          metadata?: { tenant_id?: string };
         };
         if (sub.id && sub.customer && sub.status) {
-          // Read the prior status + owner before we overwrite, so the
-          // server-side funnel can attribute the lifecycle transition
-          // (trial_started, trial_to_paid, subscription_canceled) to
-          // the same distinctId the browser SDK uses. Best-effort —
-          // a missing row just means we skip the funnel event and
-          // continue the normal lifecycle update below.
+          // Trial-checkout sessions stamp subscription.metadata.tenant_id
+          // (see createTrialCheckoutSession), but Stripe doesn't echo our
+          // tenants.stripe_customer_id back to us — so for a brand-new
+          // trial subscription, the WHERE stripe_customer_id = $customer
+          // lookup below returns zero rows, applySubscriptionEvent is a
+          // silent no-op, and the funnel event never fires. Resolve the
+          // tenant by metadata first when present, fall back to the
+          // persisted customer-id mapping for billing-portal-managed
+          // subscriptions where the trial metadata wasn't set.
+          const tenantIdFromMeta = sub.metadata?.tenant_id?.trim() || null;
+
           let priorStatus: string | null = null;
           let ownerClerkId: string | null = null;
           let funnelTenantId: string | null = null;
           if (deps.pool) {
-            const tenantRow = await deps.pool.query<{
-              id: string;
-              owner_id: string | null;
-              subscription_status: string | null;
-            }>(
-              `SELECT id, owner_id, subscription_status
-                 FROM tenants
-                WHERE stripe_customer_id = $1
-                LIMIT 1`,
-              [sub.customer],
-            );
+            const tenantRow = tenantIdFromMeta
+              ? await deps.pool.query<{
+                  id: string;
+                  owner_id: string | null;
+                  subscription_status: string | null;
+                  stripe_customer_id: string | null;
+                }>(
+                  `SELECT id, owner_id, subscription_status, stripe_customer_id
+                     FROM tenants WHERE id = $1 LIMIT 1`,
+                  [tenantIdFromMeta],
+                )
+              : await deps.pool.query<{
+                  id: string;
+                  owner_id: string | null;
+                  subscription_status: string | null;
+                  stripe_customer_id: string | null;
+                }>(
+                  `SELECT id, owner_id, subscription_status, stripe_customer_id
+                     FROM tenants WHERE stripe_customer_id = $1 LIMIT 1`,
+                  [sub.customer],
+                );
             const row = tenantRow.rows[0];
             if (row) {
               funnelTenantId = row.id;
               ownerClerkId = row.owner_id;
               priorStatus = row.subscription_status;
+              // Claim the Stripe customer for this tenant on first sight
+              // so the applySubscriptionEvent UPDATE below actually
+              // matches a row AND so the billing-portal path can find
+              // the tenant on a return visit. Idempotent — only writes
+              // when the column is null, never clobbers an existing mapping.
+              if (!row.stripe_customer_id) {
+                await deps.pool.query(
+                  `UPDATE tenants
+                      SET stripe_customer_id = $1, updated_at = NOW()
+                    WHERE id = $2 AND stripe_customer_id IS NULL`,
+                  [sub.customer, row.id],
+                );
+              }
             }
           }
 
