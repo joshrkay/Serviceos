@@ -66,6 +66,65 @@ tier, parallel-safe stories are grouped.
 
 ## Observed verdicts (live)
 
-_This section gets filled in after the first real matrix run against Railway
-dev (blocked on `.env.qa` + password rotation as of 2026-04-22). Update the
-predicted column in each story if live verdicts differ._
+**First live run: 2026-06-04** against Railway dev
+(`serviceosapi-development`, deployed from PR #470 merge; local repo at
+`3a0ff1e8`). Full report: [`qa/reports/2026-06-04/QA-REPORT.md`](../reports/2026-06-04/QA-REPORT.md).
+
+Raw report counts: **40 pass · 7 partial · 26 fail · 1 n/a** (74 catalog
+rows). The fail count overstates product defects — see the two harness
+issues below before reading the table.
+
+### Run prerequisites discovered (runbook corrections)
+
+1. **`CLERK_DEV_HMAC_TOKENS=true` must be set on the dev API service.**
+   The runbook claims matching `CLERK_SECRET_KEY` is sufficient; it is not —
+   since P0-033 the API verifies RS256/JWKS by default and refuses minted
+   HMAC tokens without this flag (every row 401s). Set on Railway dev
+   2026-06-04; keep it out of prod (schema + runtime both refuse it there).
+2. **Appendix C's quick fix breaks ISO-01.** Pointing `E2E_DB_URL_READONLY`
+   at the default Railway `postgres` user means Agent C connects as a
+   superuser with `rolbypassrls` — the no-GUC RLS check then always sees
+   rows and ISO-01 false-fails. Verified manually 2026-06-04: RLS is
+   enabled + FORCED on customers/jobs/estimates/invoices/notes, and a
+   non-superuser role with no GUC **fails closed** (policy errors on the
+   missing `app.current_tenant_id` parameter; per-tenant scoping correct
+   with the GUC set). Fix tracked in
+   [ISO-01-rls-probe-role](./ISO-01-rls-probe-role.md).
+3. **node-pg vs Railway's self-signed cert:** use `?sslmode=no-verify` in
+   both DB URLs (the runbook's `?sslmode=require` makes node-pg verify the
+   chain and fail).
+
+### Story-by-story: predicted vs live
+
+| Story | Predicted | Live 2026-06-04 | Status |
+|---|---|---|---|
+| EST-03 PATCH alias | partial | **partial** (PUT-only confirmed; [artifact](../reports/2026-06-04/artifacts/EST-03/)) | Confirmed — story stands |
+| INV-02 list endpoint | fail | **pass** ("List/filter invoices" green) | **Gap closed since 2026-04-22** — story can be archived |
+| INV-05 stripe webhook | fail | not executed | Blocked by catalog drift (below); also needs `stripe listen` |
+| INV-04 payment link | fail | not executed | Blocked by catalog drift |
+| INV-03 invoice delivery | partial | not executed | Blocked by catalog drift; corroborating signal: PORT-01/02 `POST /:id/send` → 400, send service unwired on dev |
+| AST-01/04/05/06/07 assistant intents | partial/fail | not executed | Blocked by catalog drift; classifier itself works (see CUST-02 note below) |
+| INV-07 overdue cron | fail | **partial** under new id PAY-04: `money_state` stays `invoiced` after backdated `due_date` — overdue sweep not running on dev | Confirmed — story stands |
+| EST-05 (note-only) | n/a | conversion path exercised by JRN-03 → **pass** | Resolution holds |
+| INV-06 (note-only) | n/a | equivalent new row PAY-01 (idempotent webhook handling) → **pass** | Resolution holds — close once INV-05 wires the route |
+
+### New defects found by the live run (stories created 2026-06-04)
+
+| Story | Row | What broke |
+|---|---|---|
+| [PROP-01-reject-guard](./PROP-01-reject-guard.md) | PROP-01 | `POST /api/proposals/:id/reject` on a **draft** returns 200 + `status=rejected`; expected 409 (approval-state guard). Human-in-the-loop contract violation. |
+| [JRN-02-estimate-accept-500](./JRN-02-estimate-accept-500.md) | JRN-02 | `POST /api/estimates/:id/transition {status:"accepted"}` → 500 INTERNAL_ERROR on JRN-02's estimate while JRN-01's identical transition passes. |
+| [PROV-01-onboarding-configure-route](./PROV-01-onboarding-configure-route.md) | PROV-01/02 | `POST /api/onboarding/configure` → Express 404; route exists nowhere in `packages/api/src`. Matrix expectation vs API reality — decide build-or-rewrite. |
+| [QA-MATRIX-catalog-drift](./QA-MATRIX-catalog-drift.md) | 15 tests | `matrix.ts` lacks rows EST-04..06, INV-03..07, AST-01..07 → those tests die on `Unknown matrix row` before producing evidence; 13 legacy rows (CUS/BILL/VOICE/PORTAL/ISO-02/LEGACY-…) have no implementing spec and always report fail/no-manifest. |
+| [VOICE-intent-confirm-drift](./VOICE-intent-confirm-drift.md) | CUST-02, SCH-02, SCH-03 | Voice rows fail "no proposal", but evidence shows the LLM classified `create_customer` at 0.9 confidence and the session parked in `intent_confirm` awaiting caller confirmation. Harness sends one utterance and never confirms. Product contract changed or harness must drive the confirm turn. Report's "AI key unset" hypothesis is wrong — AI provider is live on dev. |
+| [ISO-01-rls-probe-role](./ISO-01-rls-probe-role.md) | ISO-01 | Agent C must use a non-superuser probe role (or accept error-as-suppressed); with the superuser conn the no-GUC check can never pass. API-side isolation (B→A 404s, cross-tenant write blocked) passed. |
+
+### Remaining live partials (no story yet — verify on dev config first)
+
+- SMS-01: no `appointment_confirmation` dispatch row from a REST-created
+  appointment — confirmation may only fire via the `create_booking`
+  proposal path, or Twilio is unconfigured on dev.
+- VOX-02: Spanish utterance answered with canned `intent_confirm` prompt —
+  i18n of the confirm turn.
+- PORT-01/02: `send` → 400 (no view token mintable) — send service unwired
+  on dev; same root cause as INV-03's delivery leg.
