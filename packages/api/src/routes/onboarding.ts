@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import type { Pool } from 'pg';
 import { AuthenticatedRequest } from '../auth/clerk';
-import { requireAuth, requireTenant } from '../middleware/auth';
+import { requireAuth, requireTenant, requireRole } from '../middleware/auth';
 import { currentTenantContext } from '../middleware/tenant-context';
 import { toErrorResponse } from '../shared/errors';
 import { SettingsRepository } from '../settings/settings';
@@ -229,6 +229,15 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     '/pack',
     requireAuth,
     requireTenant,
+    // Pack activation seeds rows into catalog_items and
+    // estimate_templates — the same tables that the main mutation
+    // routes guard with settings:update and estimates:create. Without
+    // an owner-role gate here, a dispatcher or technician with a
+    // valid session could call /api/onboarding/pack and alter the
+    // tenant's price book + job types. Onboarding is owner-driven
+    // anyway (the wizard runs for the operator who signed up), so
+    // restricting to owner matches the actual flow.
+    requireRole('owner'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!pool) {
