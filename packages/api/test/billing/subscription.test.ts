@@ -35,6 +35,10 @@ function makePool(rows: Record<string, unknown> = {}) {
       { rows: [{ ...rows, pending_checkout_at: null }] },
     ],
     [
+      'SELECT pending_checkout_session_id',
+      { rows: [{ pending_checkout_session_id: null }] },
+    ],
+    [
       'UPDATE tenants\n          SET stripe_customer_id',
       (_sql, params) => ({ rows: [{ stripe_customer_id: params?.[0] }] }),
     ],

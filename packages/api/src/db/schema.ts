@@ -3753,6 +3753,19 @@ export const MIGRATIONS = {
     ALTER TABLE tenants
       ADD COLUMN IF NOT EXISTS pending_checkout_at TIMESTAMPTZ;
   `,
+
+  '145_tenants_pending_checkout_session_id': `
+    -- Pair the pending_checkout_at marker with the Stripe session id
+    -- so cancellation can actively EXPIRE the open session at Stripe
+    -- before reopening the gate. Earlier attempts to round-trip the
+    -- id via cancel_url interpolation failed — Stripe only expands
+    -- {CHECKOUT_SESSION_ID} in success_url. Persisting it server-side
+    -- on creation is the supported path. Cleared together with
+    -- pending_checkout_at when the subscription.created webhook lands
+    -- or when the cancel endpoint runs.
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS pending_checkout_session_id TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

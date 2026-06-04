@@ -722,18 +722,12 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           return;
         }
         const tenantId = req.auth!.tenantId;
-        // Optional session id — the cancel_url from
-        // createTrialCheckoutSession interpolates Stripe's
-        // {CHECKOUT_SESSION_ID} so the browser POSTs it back. When
-        // present, clearPendingCheckout EXPIREs that Stripe session
-        // before clearing the marker so the original URL can't be
-        // re-used from history to complete checkout after the gate
-        // reopens.
-        const rawSessionId = (req.body as { sessionId?: unknown } | undefined)?.sessionId;
-        const sessionId = typeof rawSessionId === 'string' && rawSessionId.trim()
-          ? rawSessionId.trim()
-          : undefined;
-        await billingService.clearPendingCheckout(tenantId, { sessionId });
+        // No body needed — the Stripe session id is read from the
+        // tenants row (createTrialCheckoutSession persisted it).
+        // Stripe only interpolates {CHECKOUT_SESSION_ID} into
+        // success_url, never cancel_url, so the client has no
+        // reliable way to send us the right id.
+        await billingService.clearPendingCheckout(tenantId);
         res.json({ ok: true });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);

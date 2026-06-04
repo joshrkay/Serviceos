@@ -1190,13 +1190,19 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                   [sub.customer, row.id],
                 );
               }
-              // Clear the pending-checkout marker the trial-checkout
-              // path stamped while the lock was held. A new subscription
-              // on this customer means the prior checkout completed; the
-              // gate no longer needs to refuse follow-up requests.
+              // Clear the pending-checkout marker (timestamp + session
+              // id) the trial-checkout path stamped while the lock was
+              // held. A new subscription on this customer means the
+              // prior checkout completed; the gate no longer needs to
+              // refuse follow-up requests, and the persisted session id
+              // is no longer useful for expiry.
               await deps.pool.query(
-                `UPDATE tenants SET pending_checkout_at = NULL, updated_at = NOW()
-                  WHERE id = $1 AND pending_checkout_at IS NOT NULL`,
+                `UPDATE tenants
+                    SET pending_checkout_at = NULL,
+                        pending_checkout_session_id = NULL,
+                        updated_at = NOW()
+                  WHERE id = $1
+                    AND (pending_checkout_at IS NOT NULL OR pending_checkout_session_id IS NOT NULL)`,
                 [row.id],
               );
             }

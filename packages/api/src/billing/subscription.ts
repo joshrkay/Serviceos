@@ -242,16 +242,7 @@ export class BillingService {
       body.set('payment_method_collection', 'always');
       body.set('customer', customerId);
       body.set('success_url', input.successUrl);
-      // Interpolate the Stripe session id back into the cancel URL so
-      // the frontend can call /api/onboarding/billing/cancel with the
-      // session id — the server then EXPIREs that session at Stripe
-      // before clearing the pending marker, so the original cancel-URL
-      // can't be re-used from history/another tab to complete checkout
-      // after the gate has reopened.
-      const sessionedCancelUrl = input.cancelUrl.includes('?')
-        ? `${input.cancelUrl}&session_id={CHECKOUT_SESSION_ID}`
-        : `${input.cancelUrl}?session_id={CHECKOUT_SESSION_ID}`;
-      body.set('cancel_url', sessionedCancelUrl);
+      body.set('cancel_url', input.cancelUrl);
       body.set('client_reference_id', input.tenantId);
       // Bind the Stripe session lifetime to the gate's staleness
       // ceiling so a session can't outlive pending_checkout_at.
@@ -273,19 +264,27 @@ export class BillingService {
         const text = await res.text();
         throw new Error(`Stripe checkout session failed (${res.status}): ${text}`);
       }
-      const session = (await res.json()) as { url?: string };
+      const session = (await res.json()) as { id?: string; url?: string };
       if (!session.url) {
         throw new Error('Stripe checkout session returned no url');
       }
 
-      // Stamp the pending-checkout timestamp INSIDE the lock so a
-      // racing follower can see it the moment they acquire the lock.
-      // Cleared by the customer.subscription.created webhook; the
-      // 30-min staleness check above handles abandoned sessions.
+      // Stamp the pending-checkout timestamp AND the Stripe session id
+      // INSIDE the lock so a racing follower sees both the moment they
+      // acquire the lock. The session id is what /billing/cancel hands
+      // to Stripe's expire endpoint — cancel_url can't carry it back to
+      // us because Stripe only interpolates {CHECKOUT_SESSION_ID} into
+      // success_url, not cancel_url. Cleared by the
+      // subscription.created webhook (success path) or by /billing/cancel
+      // (cancel path); the 32-min staleness check handles abandoned
+      // sessions.
       await client.query(
-        `UPDATE tenants SET pending_checkout_at = NOW(), updated_at = NOW()
+        `UPDATE tenants
+            SET pending_checkout_at = NOW(),
+                pending_checkout_session_id = $2,
+                updated_at = NOW()
           WHERE id = $1`,
-        [input.tenantId],
+        [input.tenantId, session.id ?? null],
       );
 
       await client.query('COMMIT');
@@ -367,24 +366,33 @@ export class BillingService {
    * Clears tenants.pending_checkout_at so the trial-checkout gate
    * reopens. Called when the operator returns via Stripe's cancel_url.
    *
-   * When the caller supplies the canceled session's id (set by
-   * createTrialCheckoutSession via the {CHECKOUT_SESSION_ID}
-   * interpolation in cancel_url), the server EXPIREs that session at
-   * Stripe BEFORE clearing the marker — without that, the operator
-   * could re-open the original cancel_url from browser history and
-   * complete the old session AFTER opening a new one, creating two
-   * subscriptions. If Stripe-side expire fails, the marker stays
-   * stamped so the gate continues to refuse new checkouts until the
-   * staleness ceiling drops the session naturally.
+   * The session id is read from tenants.pending_checkout_session_id
+   * (persisted at create time) rather than trusting the client — Stripe
+   * only interpolates {CHECKOUT_SESSION_ID} into success_url, so we
+   * can't get the id back via the cancel redirect. When the persisted
+   * id is non-null, the server POSTs Stripe's expire endpoint BEFORE
+   * clearing the marker — without that, the operator could re-open the
+   * original Stripe URL from browser history and complete the old
+   * session AFTER opening a new one, creating two subscriptions.
+   *
+   * 404 from Stripe (session already expired/canceled) is treated as
+   * success — the goal state is reached. Any other non-OK leaves the
+   * marker stamped so the gate continues to refuse new checkouts until
+   * the staleness ceiling drops it naturally.
    */
-  async clearPendingCheckout(
-    tenantId: string,
-    options?: { sessionId?: string },
-  ): Promise<void> {
-    if (options?.sessionId && this.deps.config?.apiKey) {
+  async clearPendingCheckout(tenantId: string): Promise<void> {
+    const { rows } = await this.deps.pool.query<{
+      pending_checkout_session_id: string | null;
+    }>(
+      `SELECT pending_checkout_session_id FROM tenants WHERE id = $1`,
+      [tenantId],
+    );
+    const sessionId = rows[0]?.pending_checkout_session_id ?? null;
+
+    if (sessionId && this.deps.config?.apiKey) {
       const fetchFn = this.deps.fetchFn ?? fetch;
       const res = await fetchFn(
-        `https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(options.sessionId)}/expire`,
+        `https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}/expire`,
         {
           method: 'POST',
           headers: {
@@ -392,18 +400,19 @@ export class BillingService {
           },
         },
       );
-      // 404 (session already expired/canceled by Stripe) is harmless —
-      // treat as success and clear. Any other non-OK leaves the marker
-      // stamped so a malicious or buggy caller can't reopen the gate
-      // while the original session is still completable.
       if (!res.ok && res.status !== 404) {
         const body = await res.text();
         throw new Error(`Stripe session expire failed (${res.status}): ${body}`);
       }
     }
+
     await this.deps.pool.query(
-      `UPDATE tenants SET pending_checkout_at = NULL, updated_at = NOW()
-        WHERE id = $1 AND pending_checkout_at IS NOT NULL`,
+      `UPDATE tenants
+          SET pending_checkout_at = NULL,
+              pending_checkout_session_id = NULL,
+              updated_at = NOW()
+        WHERE id = $1
+          AND (pending_checkout_at IS NOT NULL OR pending_checkout_session_id IS NOT NULL)`,
       [tenantId],
     );
   }
