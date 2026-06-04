@@ -2,6 +2,12 @@
 
 **Matrix row:** PROP-01 (Proposals · approval-state guard)
 **Live verdict (2026-06-04):** fail
+**Status 2026-06-04: code already guarded on main lineage — live fail is DEPLOY DRIFT.**
+The dev service deploys from `cursor/qa-matrix-voice-gates-b78e`, which predates
+main's proposal gate (PR #499). Local `transitionProposal` 409s draft→rejected;
+regression tests added in `packages/api/test/proposals/actions.test.ts`
+(PROP-01 describe block). Fix = redeploy dev from a main-lineage build
+(e.g. merge `fix/qa-matrix-live-run-findings`), then re-run the row.
 **Target verdict:** pass
 **Effort:** S
 
