@@ -16,10 +16,21 @@ describe('BillingService — trial flows', () => {
 
   describe('createTrialCheckoutSession', () => {
     it('calls Stripe Checkout API with trial_period_days=14 and returns url', async () => {
-      const fetchMock = vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({ url: 'https://checkout.stripe.com/test_sess_abc' }),
-      } as Response);
+      // Two-step Stripe interaction: first POST /v1/customers to mint
+      // (or reuse) the tenant's canonical customer, then POST
+      // /v1/checkout/sessions binding that customer. Mock returns the
+      // right shape per call so getOrCreateStripeCustomer and
+      // createTrialCheckoutSession each see what they expect.
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ id: 'cus_test_abc' }),
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ url: 'https://checkout.stripe.com/test_sess_abc' }),
+        } as Response);
       const svc = new BillingService({ pool, config: { apiKey: 'sk_test_x' }, fetchFn: fetchMock as unknown as typeof fetch });
       process.env.STRIPE_PRICE_ID = 'price_test_1';
 
@@ -31,16 +42,25 @@ describe('BillingService — trial flows', () => {
         cancelUrl: 'https://app.test/onboarding?billing=cancel',
       });
       expect(url).toBe('https://checkout.stripe.com/test_sess_abc');
-      expect(fetchMock).toHaveBeenCalledWith(
+      expect(fetchMock).toHaveBeenNthCalledWith(
+        1,
+        'https://api.stripe.com/v1/customers',
+        expect.objectContaining({ method: 'POST' }),
+      );
+      expect(fetchMock).toHaveBeenNthCalledWith(
+        2,
         'https://api.stripe.com/v1/checkout/sessions',
         expect.objectContaining({ method: 'POST' }),
       );
-      const callArgs = fetchMock.mock.calls[0][1] as RequestInit;
-      const body = (callArgs.body as URLSearchParams).toString();
+      const checkoutCallArgs = fetchMock.mock.calls[1][1] as RequestInit;
+      const body = (checkoutCallArgs.body as URLSearchParams).toString();
       expect(body).toContain('mode=subscription');
       expect(body).toContain('subscription_data%5Btrial_period_days%5D=14');
       expect(body).toContain('payment_method_collection=always');
-      expect(body).toContain('customer_email=owner%40example.com');
+      // Trial checkout now binds to the persisted customer id rather than
+      // letting Stripe mint a new customer per session.
+      expect(body).toContain('customer=cus_test_abc');
+      expect(body).not.toContain('customer_email=');
       delete process.env.STRIPE_PRICE_ID;
     });
 
