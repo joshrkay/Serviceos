@@ -86,11 +86,13 @@ test('precheck — voice utterance generates proposal IDs (non-mock LLM path)', 
   const sessionId = created.id ?? created.sessionId;
   expect(sessionId, `Voice session create response did not include id/sessionId: ${JSON.stringify(created)}`).toBeTruthy();
 
-  const utter = await request.post(`${base}/api/voice/sessions/${sessionId}/utterances`, {
+  // QA-2026-06-04: the deployed route is /input (singular turn), not
+  // /utterances — the old path 404'd on every env. Keep this aligned with
+  // e2e/qa-matrix/helpers/voice-flow.ts.
+  const utter = await request.post(`${base}/api/voice/sessions/${sessionId}/input`, {
     headers: { Authorization: `Bearer ${t.token}` },
     data: {
       text: `Create an estimate proposal for job ${t.jobId} with diagnostic labor line item for $125 total.`,
-      source: 'qa-precheck',
     },
   });
   expect([200, 201], `Unexpected utterance status: ${utter.status()}`).toContain(utter.status());

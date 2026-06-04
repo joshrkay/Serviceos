@@ -16,7 +16,6 @@
  * text-in / TTS-out, exposed at /api/voice/sessions.
  */
 
-import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
 import type { LLMGateway } from '../../gateway/gateway';
 import type { TtsProvider } from '../../tts/tts-provider';
@@ -781,7 +780,12 @@ export class InAppVoiceAdapter {
           channel: session.channel,
           sessionId: session.id,
         },
-        aiRunId: uuidv4(),
+        // QA-2026-06-04: do NOT fabricate an aiRunId. proposals.ai_run_id has
+        // an FK to ai_runs(id); a random uuid violates it and the swallowed
+        // error silently dropped EVERY voice proposal on Postgres-backed envs
+        // (in-memory repos don't enforce the FK, which is why tests passed).
+        // Use a real run id when the engine provides one, else leave it null.
+        ...(typeof payload.aiRunId === 'string' && payload.aiRunId ? { aiRunId: payload.aiRunId } : {}),
         createdBy: typeof payload.customerId === 'string'
           ? payload.customerId
           : this.deps.systemActorId ?? 'calling-agent',
@@ -791,10 +795,21 @@ export class InAppVoiceAdapter {
       session.proposalIds.push(stored.id);
       session.events.emit('voice-event', { type: 'proposal_created', proposalId: stored.id });
       return stored.id;
-    } catch {
+    } catch (err) {
       // Proposal creation failure should never break the flow — the
-      // operator can re-state the request. Errors are logged via the
-      // audit_log side-effect that always accompanies create_proposal.
+      // operator can re-state the request — but it must never be silent
+      // either: a swallowed FK violation hid the dropped-proposal defect
+      // for every voice session. Surface it in the audit log.
+      await this.handleAuditLog(session, {
+        type: 'audit_log',
+        payload: {
+          eventType: 'agent.calling.proposal_persist_failed',
+          intent,
+          proposalType,
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: session.id,
+        },
+      } as SideEffect);
       return undefined;
     }
   }

@@ -1,48 +1,53 @@
-# VOICE — harness doesn't drive the intent_confirm turn
+# VOICE — voice proposals silently dropped (fabricated ai_run_id FK violation)
 
-**Matrix rows:** CUST-02, SCH-02, SCH-03 (voice → proposal rows)
+**Matrix rows:** CUST-02, SCH-02, SCH-03 (+ precheck voice gate)
 **Live verdict (2026-06-04):** fail ("no proposal produced")
-**Target verdict:** pass
-**Effort:** S (harness) — pending a product-contract decision
+**Status: FIXED on branch `fix/qa-matrix-live-run-findings` (2026-06-04) — needs deploy + re-run**
+**Effort:** S (done)
 
-## Problem
+## Actual root cause (supersedes the first draft of this story)
 
-All three voice rows fail with "no proposal — AI pipeline not ready", but
-the evidence contradicts that diagnosis: the LLM is live on dev and the
-session works — it just stops one turn short. The conversation engine now
-parks in `intent_confirm` and waits for the caller to confirm before a
-proposal is drafted. The harness sends a single utterance and immediately
-polls for a proposal, so it never arrives.
+The conversation engine works end-to-end: the LLM classified
+`create_customer` at 0.9 confidence, resolved entities, reached
+`proposal_draft`, and emitted a `create_proposal` side effect. The drop
+happened in `inapp-adapter.ts#handleCreateProposal`:
 
-## Evidence from the live run
+1. It fabricated `aiRunId: uuidv4()`. `proposals.ai_run_id` carries a
+   foreign key to `ai_runs(id)`, so the insert **always** violates the FK
+   on Postgres-backed environments. Verified live against dev: insert with
+   a random `ai_run_id` → FK violation; with NULL → succeeds.
+2. The `catch` swallowed the error and returned `undefined`, so
+   `proposalIds` came back `[]` with no trace. In-memory repos don't
+   enforce the FK — which is why unit tests never caught it.
 
-- `qa/reports/2026-06-04/artifacts/CUST-02/api/02-vinput.json` — response
-  `state: "proposal_draft"` flow shows
-  `intent_classified` → `intentType: "create_customer", confidence: 0.9` →
-  `entity_resolved` → `toState: "intent_confirm"`. Real LLM classification,
-  no proposal row yet.
-- VOX-02 partial corroborates: response `ttsText="intent_confirm"` (the
-  canned confirm prompt — also not localized for Spanish input).
-- The report's hypothesis "AI_PROVIDER_API_KEY is likely unset (mock LLM)"
-  is wrong: the key is set on Railway dev and classification clearly ran.
+The earlier hypothesis (harness missing an `intent_confirm` turn) was
+wrong; no confirm turn gates persistence. The report's "AI key unset"
+hypothesis was also wrong.
 
-## Acceptance criteria
+## Fix (this branch)
 
-- [ ] Decide: is the confirm turn the intended contract? If yes, harness
-      sends the confirmation utterance ("yes, book it") and then asserts the
-      proposal; if no, the engine should draft the proposal at
-      `intent_confirm` and the product is the fix.
-- [ ] CUST-02, SCH-02, SCH-03 flip fail → pass.
-- [ ] Update precheck "voice utterance generates proposal IDs" the same way
-      (currently fails 404 on its own utterance endpoint — align it with the
-      `/api/voice/sessions/:id/input` path the specs use).
+- `handleCreateProposal` no longer fabricates a run id: uses
+  `payload.aiRunId` when the engine provides a real one, else omits it
+  (column is nullable).
+- The catch now emits an `agent.calling.proposal_persist_failed` audit
+  event with the error message — dropped proposals can never be silent
+  again.
+- `precheck.spec.ts` voice gate now posts to the real route
+  (`/api/voice/sessions/:id/input`); the old `/utterances` path 404'd
+  everywhere.
 
-## Allowed files
-
-- `e2e/qa-matrix/helpers/voice-flow.ts`, the three specs, `precheck.spec.ts`
-
-## Verify
+## Verify (after deploy)
 
 ```bash
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit
 npm run e2e:qa-matrix -- --grep "CUST-02|SCH-02|SCH-03"
 ```
+
+Expect proposals to persist; rows then depend only on the execution worker
+running on dev (see PAY-04 for the worker-liveness caveat).
+
+## Follow-up (out of scope here)
+
+Plumb the REAL LLM run id from the classifier through the
+`create_proposal` side-effect payload so the audit chain
+(`ai_runs` → `proposals`) is complete instead of null.
