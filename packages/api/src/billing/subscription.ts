@@ -379,6 +379,16 @@ export class BillingService {
    * success — the goal state is reached. Any other non-OK leaves the
    * marker stamped so the gate continues to refuse new checkouts until
    * the staleness ceiling drops it naturally.
+   *
+   * KNOWN LIMITATION (deferred post-soft-launch): this always acts on
+   * the tenant's CURRENT pending session. If checkout A goes stale,
+   * the operator opens checkout B, and a stale tab / history entry
+   * from A then follows its cancel_url, B's session is expired and
+   * its marker cleared. The proper fix is a per-checkout cancellation
+   * token persisted alongside session id and verified here before
+   * acting. Soft-launch consequence: operator clicks Start Trial
+   * again and gets a fresh session — annoying but recoverable. Track
+   * in a follow-up issue.
    */
   async clearPendingCheckout(tenantId: string): Promise<void> {
     const { rows } = await this.deps.pool.query<{

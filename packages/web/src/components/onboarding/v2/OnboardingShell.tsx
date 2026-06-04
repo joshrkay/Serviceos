@@ -44,13 +44,29 @@ export function OnboardingShell() {
       // funnel since both paths run on a normal completed checkout.
       void refetch();
     } else if (billing === 'cancel') {
-      toast.message('Checkout canceled — you can subscribe when you are ready.');
-      // Fire-and-forget — the backend reads the canceled session id
-      // from tenants.pending_checkout_session_id (persisted at create
-      // time) and expires it at Stripe before clearing the gate.
-      void apiFetch('/api/onboarding/billing/cancel', {
-        method: 'POST',
-      }).catch(() => undefined);
+      // AWAIT the cleanup so we can tell the operator the truth.
+      // If Stripe's expire endpoint transiently fails,
+      // /billing/cancel returns non-OK and leaves the pending marker
+      // in place — the gate will keep refusing for up to 32 minutes.
+      // A fire-and-forget here would have shown the "you can
+      // subscribe when ready" toast even when the next click would
+      // bounce with "checkout in progress" and no retry signal.
+      (async () => {
+        try {
+          const res = await apiFetch('/api/onboarding/billing/cancel', { method: 'POST' });
+          if (res.ok) {
+            toast.message('Checkout canceled — you can subscribe when you are ready.');
+          } else {
+            toast.error(
+              "Checkout canceled, but cleanup hit a hiccup. Wait a minute and try again — or contact support if it doesn't clear.",
+            );
+          }
+        } catch {
+          toast.error(
+            'Checkout canceled, but cleanup didn’t complete. Check your connection and try again in a minute.',
+          );
+        }
+      })();
     }
     const next = new URLSearchParams(searchParams);
     next.delete('billing');
