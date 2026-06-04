@@ -2,6 +2,15 @@
 
 **Matrix row:** JRN-02 (Billing journey · three estimates → invoice two)
 **Live verdict (2026-06-04):** fail
+**Status: FIXED on `fix/qa-matrix-live-run-findings` 2026-06-04 — JRN-02 re-run = PASS**
+Root cause: the partial unique index `uq_estimates_accepted_per_job` (one
+accepted estimate per job, a deliberate billing-correctness rule). The
+transition handler let the unique violation escape as a raw 500, and the
+journey rows shared one seeded job so JRN-01's accepted estimate poisoned
+JRN-02 (and EST-05, and any re-run). Fix: (a) transitionEstimateStatus
+pre-checks the job and maps the 23505 race to ConflictError 409 with an
+actionable message; (b) rows that accept estimates seed their OWN job
+(e2e/qa-matrix/helpers/seed-entities.ts).
 **Target verdict:** pass
 **Effort:** M (needs server-log diagnosis first)
 
