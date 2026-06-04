@@ -90,6 +90,13 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     '/identity',
     requireAuth,
     requireTenant,
+    // /identity rewrites business_name, hourly_rate_cents,
+    // business_hours, timezone, AND owner_phone — the same fields
+    // guarded by settings:update / tenant:manage on the main
+    // mutation routes. Without an owner gate here, a dispatcher or
+    // technician could overwrite the owner's personal cell. Same
+    // shape as /pack and /billing/cancel.
+    requireRole('owner'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!pool) {
