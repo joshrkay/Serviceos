@@ -210,7 +210,10 @@ export class BillingService {
       const pendingAt = statusRows.rows[0]?.pending_checkout_at ?? null;
       if (pendingAt) {
         const ageMs = Date.now() - new Date(pendingAt).getTime();
-        if (ageMs < 30 * 60 * 1000) {
+        // Match the Stripe expires_at headroom (32 min) so the gate
+        // never reopens while the previous session could still be
+        // completed from browser history.
+        if (ageMs < 32 * 60 * 1000) {
           throw new ValidationError(
             'A checkout was just started for this tenant. Complete it or wait a moment before trying again.',
           );
@@ -239,16 +242,24 @@ export class BillingService {
       body.set('payment_method_collection', 'always');
       body.set('customer', customerId);
       body.set('success_url', input.successUrl);
-      body.set('cancel_url', input.cancelUrl);
+      // Interpolate the Stripe session id back into the cancel URL so
+      // the frontend can call /api/onboarding/billing/cancel with the
+      // session id — the server then EXPIREs that session at Stripe
+      // before clearing the pending marker, so the original cancel-URL
+      // can't be re-used from history/another tab to complete checkout
+      // after the gate has reopened.
+      const sessionedCancelUrl = input.cancelUrl.includes('?')
+        ? `${input.cancelUrl}&session_id={CHECKOUT_SESSION_ID}`
+        : `${input.cancelUrl}?session_id={CHECKOUT_SESSION_ID}`;
+      body.set('cancel_url', sessionedCancelUrl);
       body.set('client_reference_id', input.tenantId);
-      // Bind the Stripe session lifetime to the gate's pending marker
-      // window so a session can't outlive pending_checkout_at. Without
-      // this the session defaults to ~24h; the gate would reopen after
-      // 30 min while the original session was still completable,
-      // letting a user complete BOTH and create two subscriptions.
-      // Stripe's minimum expires_at is 30 minutes from now, which
-      // matches our staleness ceiling exactly.
-      const expiresAt = Math.floor(Date.now() / 1000) + 30 * 60;
+      // Bind the Stripe session lifetime to the gate's staleness
+      // ceiling so a session can't outlive pending_checkout_at.
+      // Stripe's minimum expires_at is 30 minutes from now — we send
+      // 32 min so positive clock skew or a slow Stripe-side parse
+      // can't push our value below the minimum and reject the
+      // request. PENDING_CHECKOUT_STALE_MS matches.
+      const expiresAt = Math.floor(Date.now() / 1000) + 32 * 60;
       body.set('expires_at', String(expiresAt));
       const res = await fetchFn('https://api.stripe.com/v1/checkout/sessions', {
         method: 'POST',
@@ -354,13 +365,42 @@ export class BillingService {
 
   /**
    * Clears tenants.pending_checkout_at so the trial-checkout gate
-   * reopens immediately. Called when the operator returns via Stripe's
-   * cancel_url — without this, the gate would refuse new checkouts
-   * for the full staleness window (30 min) even after an intentional
-   * cancel, contradicting the "you can subscribe when ready" toast.
-   * Idempotent and tenant-scoped.
+   * reopens. Called when the operator returns via Stripe's cancel_url.
+   *
+   * When the caller supplies the canceled session's id (set by
+   * createTrialCheckoutSession via the {CHECKOUT_SESSION_ID}
+   * interpolation in cancel_url), the server EXPIREs that session at
+   * Stripe BEFORE clearing the marker — without that, the operator
+   * could re-open the original cancel_url from browser history and
+   * complete the old session AFTER opening a new one, creating two
+   * subscriptions. If Stripe-side expire fails, the marker stays
+   * stamped so the gate continues to refuse new checkouts until the
+   * staleness ceiling drops the session naturally.
    */
-  async clearPendingCheckout(tenantId: string): Promise<void> {
+  async clearPendingCheckout(
+    tenantId: string,
+    options?: { sessionId?: string },
+  ): Promise<void> {
+    if (options?.sessionId && this.deps.config?.apiKey) {
+      const fetchFn = this.deps.fetchFn ?? fetch;
+      const res = await fetchFn(
+        `https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(options.sessionId)}/expire`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${this.deps.config.apiKey}`,
+          },
+        },
+      );
+      // 404 (session already expired/canceled by Stripe) is harmless —
+      // treat as success and clear. Any other non-OK leaves the marker
+      // stamped so a malicious or buggy caller can't reopen the gate
+      // while the original session is still completable.
+      if (!res.ok && res.status !== 404) {
+        const body = await res.text();
+        throw new Error(`Stripe session expire failed (${res.status}): ${body}`);
+      }
+    }
     await this.deps.pool.query(
       `UPDATE tenants SET pending_checkout_at = NULL, updated_at = NOW()
         WHERE id = $1 AND pending_checkout_at IS NOT NULL`,

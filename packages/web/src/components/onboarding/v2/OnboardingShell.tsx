@@ -45,15 +45,22 @@ export function OnboardingShell() {
       void refetch();
     } else if (billing === 'cancel') {
       toast.message('Checkout canceled — you can subscribe when you are ready.');
-      // Clear the server-side pending-checkout marker so the trial
-      // gate reopens immediately. Without this the operator would be
-      // blocked for the full 30-min staleness window after an
-      // intentional cancel — fire-and-forget; an analytics/network
-      // failure here must not derail the rest of the wizard.
-      void apiFetch('/api/onboarding/billing/cancel', { method: 'POST' }).catch(() => undefined);
+      // Clear the server-side pending-checkout marker AND expire the
+      // canceled Stripe session so the original cancel_url can't be
+      // re-used from history. createTrialCheckoutSession's cancel_url
+      // interpolates {CHECKOUT_SESSION_ID} so it lands here as
+      // ?session_id=cs_…; pass it through so the backend can call
+      // Stripe expire before reopening the gate.
+      const sessionId = searchParams.get('session_id');
+      void apiFetch('/api/onboarding/billing/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sessionId ? { sessionId } : {}),
+      }).catch(() => undefined);
     }
     const next = new URLSearchParams(searchParams);
     next.delete('billing');
+    next.delete('session_id');
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams, refetch]);
 
