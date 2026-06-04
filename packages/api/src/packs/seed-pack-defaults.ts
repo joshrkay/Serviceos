@@ -449,30 +449,26 @@ export async function seedPackDefaults(
     };
   }
 
-  // Idempotency probe: if any template for this vertical already exists
-  // with a name we'd seed, treat the pack as already seeded. The schema
-  // has no `seed_source` column, so we rely on name + vertical_type as
-  // the natural key. Cheap (single SELECT) on the templates table —
-  // estimate_templates is indexed on (tenant_id, vertical_type).
+  // Per-seed idempotency: we seed each catalog item and each template
+  // independently, skipping any whose name already exists. A previous
+  // version of this code probed "does ANY of our seed names appear in
+  // the existing templates" and bailed the whole pack if true — but
+  // that meant a tenant who happened to have a manually-created
+  // template named "Seasonal Tune-Up" or "Drain Cleaning" got the pack
+  // skipped wholesale, leaving an empty price book + missing job types.
+  // Per-seed checks recover the missing rows without overwriting the
+  // operator's manual entries.
   const templateSeeds = config.templateSeeds();
   const existingTemplates = await deps.templateRepo.findByVertical(
     tenantId,
     config.verticalType,
   );
-  const seededNames = new Set(templateSeeds.map((s) => s.name));
-  const alreadySeeded = existingTemplates.some((t) => seededNames.has(t.name));
+  const existingTemplateNames = new Set(
+    existingTemplates.map((t) => t.name.toLowerCase()),
+  );
 
-  if (alreadySeeded) {
-    return {
-      packId,
-      catalogItemsCreated: 0,
-      templatesCreated: 0,
-      alreadySeeded: true,
-    };
-  }
-
-  // Seed catalog items. Also idempotency-check by name to be safe in case
-  // an admin pre-populated the price book by hand.
+  // Seed catalog items. Idempotency-check each by name (case-insensitive)
+  // so an admin's pre-populated price book is never overwritten.
   const existingCatalog = await deps.catalogRepo.listByTenant(tenantId, {
     includeArchived: false,
   });
@@ -503,10 +499,14 @@ export async function seedPackDefaults(
     catalogItemsCreated += 1;
   }
 
-  // Seed estimate templates (job types).
+  // Seed estimate templates (job types). Per-seed name check matches the
+  // catalog-side behavior above.
   let templatesCreated = 0;
   const seedDate = new Date();
   for (const seed of templateSeeds) {
+    if (existingTemplateNames.has(seed.name.toLowerCase())) {
+      continue;
+    }
     const template: EstimateTemplate = {
       id: uuidv4(),
       tenantId,
@@ -532,6 +532,11 @@ export async function seedPackDefaults(
     packId,
     catalogItemsCreated,
     templatesCreated,
-    alreadySeeded: false,
+    // Reflects whether nothing new needed to be inserted — true when
+    // every seed name was already present (so the pack was fully
+    // covered). Distinct from the prior wholesale "any match" check
+    // which falsely reported alreadySeeded on a single overlapping
+    // template name and then skipped every other row.
+    alreadySeeded: catalogItemsCreated === 0 && templatesCreated === 0,
   };
 }

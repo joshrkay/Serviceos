@@ -209,7 +209,7 @@ function ComparisonSection() {
     {
       time: '4:30 PM',
       without: '"My AC just stopped, 104 in here, my mom is on oxygen." You\'re two hours away.',
-      with: 'Rivet flags emergency + medical. Patches the call straight to your cell with a 5-second context preface.',
+      with: 'Rivet flags the call as emergency + medical and surfaces it at the top of your inbox with the urgency notes — so you see it the moment you check your phone, not buried at the bottom of the call list.',
     },
     {
       time: '9:30 PM',
@@ -456,7 +456,7 @@ function FAQSection() {
     },
     {
       q: 'What about emergencies?',
-      a: 'Vulnerability and urgency signals (medical mentions, extreme weather, water damage in progress) bypass automated booking and patch the call to your cell with a 5-second context preface.',
+      a: 'Vulnerability and urgency signals (medical mentions, extreme weather, water damage in progress) flag the call at the top of your inbox with the urgency notes — so a high-risk caller never sits behind a tire-kicker. Automatic patch-through to your cell is on the roadmap.',
     },
     {
       q: 'What integrations do you have?',

@@ -100,6 +100,48 @@ describe('seedPackDefaults', () => {
     expect(templates.some((t) => t.name === 'Drain Cleaning')).toBe(true);
   });
 
+  it('seeds the missing rows even when one template name pre-exists (per-seed idempotency)', async () => {
+    // Regression: an earlier version of the seeder probed for ANY of
+    // the seed names in existing templates and bailed the whole pack
+    // when even one matched. A tenant with a manually-created template
+    // named "Seasonal Tune-Up" (a common entry) was then stuck with
+    // zero catalog items and zero remaining templates after activating
+    // HVAC. The fix is per-seed name checks so the pre-existing row is
+    // skipped but everything else still seeds.
+    const seedDate = new Date();
+    await templateRepo.create({
+      id: '11111111-1111-1111-1111-111111111111',
+      tenantId: TENANT,
+      verticalType: 'hvac',
+      categoryId: 'manual-cat',
+      name: 'Seasonal Tune-Up',
+      description: 'I made this myself',
+      lineItemTemplates: [],
+      defaultDiscountCents: 0,
+      defaultTaxRateBps: 0,
+      isActive: true,
+      usageCount: 0,
+      createdBy: undefined,
+      createdAt: seedDate,
+      updatedAt: seedDate,
+    });
+
+    const result = await seedPackDefaults(
+      { tenantId: TENANT, packId: 'hvac' },
+      { catalogRepo, templateRepo },
+    );
+
+    expect(result.alreadySeeded).toBe(false);
+    expect(result.templatesCreated).toBeGreaterThan(0);
+    expect(result.catalogItemsCreated).toBeGreaterThan(0);
+
+    const templatesAfter = await templateRepo.findByTenant(TENANT);
+    // The manual template stays at its original description; the seed
+    // didn't overwrite it.
+    const manual = templatesAfter.find((t) => t.name === 'Seasonal Tune-Up');
+    expect(manual?.description).toBe('I made this myself');
+  });
+
   it('is idempotent — re-seeding the same pack is a no-op', async () => {
     const first = await seedPackDefaults(
       { tenantId: TENANT, packId: 'hvac' },
