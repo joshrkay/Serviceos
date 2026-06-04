@@ -150,64 +150,105 @@ export class BillingService {
     }
     const fetchFn = this.deps.fetchFn ?? fetch;
 
-    // Refuse to start a new trial when one is already running. Without
-    // this guard, an operator who clicked "Start trial" twice (or
-    // returned from Stripe and clicked again) would land on a fresh
-    // checkout and Stripe would mint a second subscription — billing
-    // them twice on day 15. The portal session is the right surface
-    // for an already-subscribed tenant.
-    const statusRows = await this.deps.pool.query(
-      `SELECT subscription_status FROM tenants WHERE id = $1`,
-      [input.tenantId],
-    );
-    const existingStatus =
-      (statusRows.rows[0] as { subscription_status?: string | null } | undefined)
-        ?.subscription_status ?? null;
-    if (existingStatus === 'trialing' || existingStatus === 'active' || existingStatus === 'past_due') {
-      throw new ValidationError(
-        'A subscription is already active for this tenant. Manage it from Settings → Billing.',
+    // Serialize trial checkout per tenant via a Postgres advisory
+    // transaction lock. Without this, two callers that ran the
+    // subscription_status check at the same time (two tabs, retry
+    // while a webhook is delayed) could both pass the gate, both reach
+    // Stripe, and both mint a subscription on the SAME customer —
+    // billing the operator twice on day 15. With the lock, only one
+    // checkout per tenant is in flight at a time; the second caller
+    // gets a clear "in progress" error and can retry once the first
+    // finishes.
+    //
+    // Lock is held until the Stripe checkout session is minted, then
+    // released at COMMIT. Residual race window remains for callers
+    // arriving after the COMMIT but before the
+    // customer.subscription.created webhook lands; that's typically
+    // sub-second. A follow-up will add belt-and-suspenders
+    // compensating cancellation in the subscription webhook handler.
+    const client = await this.deps.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const lockRes = await client.query<{ locked: boolean }>(
+        `SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0)) AS locked`,
+        [input.tenantId],
       );
-    }
+      if (!lockRes.rows[0]?.locked) {
+        throw new ValidationError(
+          'A checkout is already in progress for this tenant. Wait a moment and try again.',
+        );
+      }
 
-    // Reuse the tenant's single canonical Stripe customer so two
-    // concurrent / retried checkouts never produce two different
-    // customers (one of which would have a subscription invisible to
-    // the in-app billing portal). getOrCreateStripeCustomer is
-    // idempotent on tenants.stripe_customer_id, so the second caller
-    // re-reads whatever the first persisted.
-    const customerId = await this.getOrCreateStripeCustomer(
-      input.tenantId,
-      input.ownerEmail,
-    );
+      // Re-check subscription_status INSIDE the lock so a concurrent
+      // checkout's webhook lifecycle is visible to us if it landed
+      // between our arrival and our lock acquisition. Refuse on any
+      // live status; the in-app billing portal is the right surface
+      // for an already-subscribed tenant.
+      const statusRows = await client.query<{ subscription_status: string | null }>(
+        `SELECT subscription_status FROM tenants WHERE id = $1`,
+        [input.tenantId],
+      );
+      const existingStatus = statusRows.rows[0]?.subscription_status ?? null;
+      if (existingStatus === 'trialing' || existingStatus === 'active' || existingStatus === 'past_due') {
+        throw new ValidationError(
+          'A subscription is already active for this tenant. Manage it from Settings → Billing.',
+        );
+      }
 
-    const body = new URLSearchParams();
-    body.set('mode', 'subscription');
-    body.set('line_items[0][price]', priceId);
-    body.set('line_items[0][quantity]', '1');
-    body.set('subscription_data[trial_period_days]', '14');
-    body.set('subscription_data[metadata][tenant_id]', input.tenantId);
-    body.set('payment_method_collection', 'always');
-    body.set('customer', customerId);
-    body.set('success_url', input.successUrl);
-    body.set('cancel_url', input.cancelUrl);
-    body.set('client_reference_id', input.tenantId);
-    const res = await fetchFn('https://api.stripe.com/v1/checkout/sessions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.deps.config.apiKey}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body,
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Stripe checkout session failed (${res.status}): ${text}`);
+      // Reuse the tenant's single canonical Stripe customer so two
+      // concurrent / retried checkouts never produce two different
+      // customers (one of which would have a subscription invisible
+      // to the in-app billing portal). getOrCreateStripeCustomer
+      // queries through the pool, not this client — that's
+      // intentional: customer creation persists independently of the
+      // checkout transaction, so a rollback here doesn't unbind a
+      // customer that Stripe already minted.
+      const customerId = await this.getOrCreateStripeCustomer(
+        input.tenantId,
+        input.ownerEmail,
+      );
+
+      const body = new URLSearchParams();
+      body.set('mode', 'subscription');
+      body.set('line_items[0][price]', priceId);
+      body.set('line_items[0][quantity]', '1');
+      body.set('subscription_data[trial_period_days]', '14');
+      body.set('subscription_data[metadata][tenant_id]', input.tenantId);
+      body.set('payment_method_collection', 'always');
+      body.set('customer', customerId);
+      body.set('success_url', input.successUrl);
+      body.set('cancel_url', input.cancelUrl);
+      body.set('client_reference_id', input.tenantId);
+      const res = await fetchFn('https://api.stripe.com/v1/checkout/sessions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.deps.config.apiKey}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body,
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Stripe checkout session failed (${res.status}): ${text}`);
+      }
+      const session = (await res.json()) as { url?: string };
+      if (!session.url) {
+        throw new Error('Stripe checkout session returned no url');
+      }
+
+      await client.query('COMMIT');
+      return { url: session.url };
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        /* best-effort — connection may already be in an unknown state */
+      }
+      throw err;
+    } finally {
+      client.release();
     }
-    const session = (await res.json()) as { url?: string };
-    if (!session.url) {
-      throw new Error('Stripe checkout session returned no url');
-    }
-    return { url: session.url };
   }
 
   /**

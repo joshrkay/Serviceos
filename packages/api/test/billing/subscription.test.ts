@@ -23,6 +23,13 @@ function makePool(rows: Record<string, unknown> = {}) {
       { rows: [rows] },
     ],
     ['SELECT stripe_customer_id FROM tenants', { rows: [rows] }],
+    // createTrialCheckoutSession serializes per tenant via a Postgres
+    // advisory transaction lock. Default mock: the lock is always
+    // available (we're a single test). Tests that exercise the
+    // "concurrent checkout" path can override this entry to return
+    // `{ locked: false }`.
+    ['pg_try_advisory_xact_lock', { rows: [{ locked: true }] }],
+    ['SELECT subscription_status FROM tenants', { rows: [rows] }],
     [
       'UPDATE tenants\n          SET stripe_customer_id',
       (_sql, params) => ({ rows: [{ stripe_customer_id: params?.[0] }] }),
@@ -40,7 +47,15 @@ function makePool(rows: Record<string, unknown> = {}) {
     return { rows: [] };
   });
 
-  return { query: queryMock, responses };
+  // pool.connect() returns a checked-out Client. We hand back an
+  // object that shares the same query mock so all the matching logic
+  // above applies, plus a no-op release().
+  const connectMock = vi.fn(async () => ({
+    query: queryMock,
+    release: vi.fn(),
+  }));
+
+  return { query: queryMock, connect: connectMock, responses };
 }
 
 function jsonOk(body: unknown): Response {
