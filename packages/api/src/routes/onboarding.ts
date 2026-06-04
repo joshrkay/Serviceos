@@ -666,6 +666,11 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     '/billing/checkout-session',
     requireAuth,
     requireTenant,
+    // Owner-only: the route persists a canonical Stripe customer keyed
+    // to the requester's email and stamps the per-tenant pending-checkout
+    // gate. A dispatcher/tech calling here would bind billing to their
+    // email AND lock the owner out of starting checkout for 30 minutes.
+    requireRole('owner'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!billingService) {
