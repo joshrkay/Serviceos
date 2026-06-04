@@ -83,7 +83,7 @@ export const MATRIX: MatrixRow[] = [
     module: 'PROV',
     feature: 'HVAC tenant provisioned with correct vertical context',
     passCriteria:
-      'Onboarding configure({services:["HVAC"]}) activates the hvac pack; GET /api/settings + /api/verticals report hvac; categories/terminology are HVAC-specific',
+      'PUT /api/settings/packs/:packId/activate (packId resolved from GET /api/verticals by verticalType=hvac) activates the pack; GET /api/settings/packs + pack_activations show it; categories are HVAC-specific',
     expected: 'pass',
   },
   {
@@ -91,7 +91,7 @@ export const MATRIX: MatrixRow[] = [
     module: 'PROV',
     feature: 'Plumbing tenant provisioned with correct vertical context',
     passCriteria:
-      'Onboarding configure({services:["Plumbing"]}) activates the plumbing pack; GET /api/settings + /api/verticals report plumbing; categories/terminology are plumbing-specific and distinct from HVAC',
+      'PUT /api/settings/packs/:packId/activate (verticalType=plumbing) activates the pack for tenant B; categories are plumbing-specific and distinct from HVAC',
     expected: 'pass',
   },
 
