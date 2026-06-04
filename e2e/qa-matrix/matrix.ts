@@ -3,9 +3,9 @@
  * builder uses this as the canonical list when a row never produced a manifest
  * (e.g., test crashed before writing one).
  *
- * NOTE: This catalog now reflects the end-to-end scope (provisioning, customers,
- * estimates variants, billing journey, scheduling, SMS, payments edge, voice,
- * isolation, and public portal). Legacy EST/INV/AST-only coverage is deprecated.
+ * NOTE: Catalog cleaned 2026-06-04 (QA-MATRIX-catalog-drift): legacy no-spec
+ * rows removed; every row below has an implementing spec and every matrixTest
+ * id has a row. Keep the two in lockstep or setupRow throws Unknown matrix row.
  *
  * `expected` documents the pre-run prediction from Phase-1 exploration.
  * It is NOT the pass criterion — actual pass/fail comes from runtime checks.
@@ -13,15 +13,11 @@
 
 export type MatrixModule =
   | 'PROV'
-  | 'CUS'
   | 'EST'
-  | 'BILL'
   | 'SCH'
   | 'SMS'
   | 'PAY'
-  | 'VOICE'
   | 'ISO'
-  | 'PORTAL'
   | 'PROP'
   | 'RPT'
   | 'JRN'
@@ -39,7 +35,9 @@ export type MatrixModule =
   | 'LOC'
   | 'ME'
   | 'MC'
-  | 'LEGACY';
+  | 'PORT'
+  | 'VOX'
+  | 'AST';
 export type MatrixExpectation = 'pass' | 'partial' | 'fail' | 'na';
 
 export interface MatrixRow {
@@ -52,43 +50,7 @@ export interface MatrixRow {
 }
 
 export const MATRIX: MatrixRow[] = [
-  // ----- Provisioning -----
-  {
-    id: 'PROV-01',
-    module: 'PROV',
-    feature: 'Tenant bootstrap',
-    passCriteria:
-      'Provision API returns tenantId/environmentId, setup UI shows active workspace, and DB has tenant + default settings rows for tenant_id',
-    expected: 'pass',
-  },
-  {
-    id: 'PROV-02',
-    module: 'PROV',
-    feature: 'Role/permission seed',
-    passCriteria:
-      'Provision run seeds owner/manager/tech roles, role matrix appears in admin UI, and DB role_permissions rows match seeded policy set',
-    expected: 'pass',
-  },
-
-  // ----- Customers -----
-  {
-    id: 'CUS-01',
-    module: 'CUS',
-    feature: 'Create customer',
-    passCriteria:
-      'POST create returns customer id, customer detail UI resolves same id, and DB customers row persists canonical name/email/phone fields',
-    expected: 'pass',
-  },
-  {
-    id: 'CUS-02',
-    module: 'CUS',
-    feature: 'Update + dedupe customer',
-    passCriteria:
-      'PATCH/PUT update returns updated_at advance, UI reflects merged profile, and DB enforces unique dedupe key without duplicate active records',
-    expected: 'partial',
-  },
-
-  // ----- Estimates variants -----
+  // ----- Estimates (core + variants) -----
   {
     id: 'EST-01',
     module: 'EST',
@@ -114,150 +76,6 @@ export const MATRIX: MatrixRow[] = [
     expected: 'pass',
   },
 
-  // ----- Billing journey -----
-  {
-    id: 'BILL-01',
-    module: 'BILL',
-    feature: 'Estimate to invoice conversion',
-    passCriteria:
-      'Conversion creates invoice linked by estimate_id, billing UI shows lifecycle transition, and DB invoice status starts in expected initial state',
-    expected: 'pass',
-  },
-  {
-    id: 'BILL-02',
-    module: 'BILL',
-    feature: 'Issue and deliver invoice',
-    passCriteria:
-      'Issue/send action records issued timestamp in API payload, UI marks invoice as issued/sent, and DB stores delivery metadata + status transition',
-    expected: 'partial',
-  },
-  {
-    id: 'BILL-03',
-    module: 'BILL',
-    feature: 'Payment application and closeout',
-    passCriteria:
-      'Payment event marks invoice paid in API/UI, DB amount_paid_cents equals settled amount, and remaining_balance reaches zero with immutable audit row',
-    expected: 'partial',
-  },
-
-  // ----- Scheduling -----
-  {
-    id: 'SCH-01',
-    module: 'SCH',
-    feature: 'Create job from sold work',
-    passCriteria:
-      'Scheduling API creates job/work order tied to source estimate or invoice, dispatch board UI shows entry, and DB job row stores linkage foreign keys',
-    expected: 'pass',
-  },
-  {
-    id: 'SCH-02',
-    module: 'SCH',
-    feature: 'Reschedule and assignment integrity',
-    passCriteria:
-      'Reschedule API updates window + assignee, UI calendar repositions once, and DB keeps single current assignment with prior change captured in history',
-    expected: 'pass',
-  },
-
-  // ----- SMS -----
-  {
-    id: 'SMS-01',
-    module: 'SMS',
-    feature: 'Outbound transactional SMS',
-    passCriteria:
-      'Send endpoint returns provider message id, UI conversation timeline appends outbound event, and DB message log persists status + provider identifiers',
-    expected: 'partial',
-  },
-  {
-    id: 'SMS-02',
-    module: 'SMS',
-    feature: 'Inbound reply threading',
-    passCriteria:
-      'Inbound webhook attaches reply to correct thread/job in API response, UI thread updates in order, and DB links inbound row by conversation foreign key',
-    expected: 'partial',
-  },
-
-  // ----- Payments edge -----
-  {
-    id: 'PAY-01',
-    module: 'PAY',
-    feature: 'Idempotent webhook handling',
-    passCriteria:
-      'Duplicate webhook deliveries produce one financial side effect, UI payment activity shows single entry, and DB unique event key prevents duplicates',
-    expected: 'partial',
-  },
-  {
-    id: 'PAY-02',
-    module: 'PAY',
-    feature: 'Failed/partial payment recovery',
-    passCriteria:
-      'Decline or partial-capture event sets recoverable status via API, UI surfaces retry call-to-action, and DB records failure code with unchanged principal',
-    expected: 'partial',
-  },
-
-  // ----- Voice extras -----
-  {
-    id: 'VOICE-01',
-    module: 'VOICE',
-    feature: 'Call logging sync',
-    passCriteria:
-      'Voice event ingestion maps call to customer/job context, UI activity feed shows call metadata, and DB call log row stores direction/duration/disposition',
-    expected: 'partial',
-  },
-  {
-    id: 'VOICE-02',
-    module: 'VOICE',
-    feature: 'Voicemail/transcript attachment',
-    passCriteria:
-      'Transcript or recording URL from provider webhook is retrievable by API, UI renders playback or transcript, and DB stores artifact reference + timestamps',
-    expected: 'fail',
-  },
-
-  // ----- Isolation -----
-  {
-    id: 'ISO-01',
-    module: 'ISO',
-    feature: 'Cross-tenant API denial',
-    passCriteria:
-      'Tenant B token cannot fetch Tenant A resources (404/403), UI deep-link attempt shows access denied, and DB scoped query returns zero foreign-tenant rows',
-    expected: 'pass',
-  },
-  {
-    id: 'ISO-02',
-    module: 'ISO',
-    feature: 'Cross-tenant background job isolation',
-    passCriteria:
-      'Async workers process only jobs with matching tenant context, UI audit pages show no bleed-through, and DB job execution log entries remain tenant-pure',
-    expected: 'pass',
-  },
-
-  // ----- Public portal -----
-  {
-    id: 'PORTAL-01',
-    module: 'PORTAL',
-    feature: 'Public estimate/invoice view token access',
-    passCriteria:
-      'Portal token endpoint resolves document for valid token only, public UI displays sanitized document data, and DB token lookup never exposes internal tenant ids',
-    expected: 'partial',
-  },
-  {
-    id: 'PORTAL-02',
-    module: 'PORTAL',
-    feature: 'Public acceptance/payment intent flow',
-    passCriteria:
-      'Customer accept/pay action from portal updates API state, internal UI reflects accepted/paid status, and DB writes signed acceptance/payment intent audit rows',
-    expected: 'partial',
-  },
-
-  // ----- Legacy assumptions (explicitly deprecated) -----
-  {
-    id: 'LEGACY-ESTINVAST-01',
-    module: 'LEGACY',
-    feature: 'Legacy EST/INV/AST-only matrix completeness',
-    passCriteria:
-      'Deprecated: report builder should not use EST/INV/AST-only catalog as completeness baseline for current E2E scope',
-    expected: 'na',
-    expectedReason: 'Deprecated in favor of multi-domain catalog rows above.',
-  },
 
   // ----- Provisioning / verticals -----
   {
@@ -720,6 +538,132 @@ export const MATRIX: MatrixRow[] = [
       'Public intake → lead → convert → location → job → estimate (totals checked) → estimate sent → invoice created+issued (open), each verified in the DB. The delivery/payment tail (SendGrid/Stripe) is attempted; PASS when the delivery leg is accepted, PARTIAL when it is mock/unavailable (no false pass).',
     expected: 'pass',
   },
+
+  // ----- Estimates (additional rows — restored 2026-06-04, see QA-MATRIX-catalog-drift) -----
+  {
+    id: 'EST-04',
+    module: 'EST',
+    feature: 'Estimate total correctness',
+    passCriteria:
+      'POST /api/estimates returns totals matching the shared billing-engine math for known line items; DB total_cents equals the computed total',
+    expected: 'pass',
+  },
+  {
+    id: 'EST-05',
+    module: 'EST',
+    feature: 'Convert estimate to invoice',
+    passCriteria:
+      'POST /api/invoices { estimateId } converts an accepted estimate into a draft invoice linked by estimate_id (no dedicated convert endpoint by design)',
+    expected: 'pass',
+  },
+  {
+    id: 'EST-06',
+    module: 'EST',
+    feature: 'Estimate tenant isolation',
+    passCriteria:
+      'Tenant B token cannot read a Tenant A estimate by id (403/404); estimate lists stay tenant-scoped',
+    expected: 'pass',
+  },
+
+  // ----- Invoices (delivery / payments edge — restored 2026-06-04) -----
+  {
+    id: 'INV-03',
+    module: 'INV',
+    feature: 'Send invoice',
+    passCriteria:
+      'POST /api/invoices/:id/send returns 200/202 and records a delivery dispatch; UI shows the sent state',
+    expected: 'partial',
+    expectedReason: 'Delivery provider (SendGrid/Twilio) likely unwired on dev — PORT rows show send → 400.',
+  },
+  {
+    id: 'INV-04',
+    module: 'INV',
+    feature: 'Payment link generation',
+    passCriteria: 'Payment-link endpoint returns a checkout URL for an open invoice',
+    expected: 'fail',
+    expectedReason: 'Provider not exposed via HTTP yet — see qa/backlog/INV-04-payment-link-route.md.',
+  },
+  {
+    id: 'INV-05',
+    module: 'INV',
+    feature: 'Mark paid via webhook',
+    passCriteria:
+      'Stripe payment_intent.succeeded webhook marks the invoice paid (requires `stripe listen` forwarding in dev)',
+    expected: 'fail',
+    expectedReason: 'Needs a running stripe listener + wired route — see qa/backlog/INV-05-wire-stripe-webhook-route.md.',
+  },
+  {
+    id: 'INV-06',
+    module: 'INV',
+    feature: 'Idempotent payment handling',
+    passCriteria:
+      'Duplicate webhook delivery produces exactly one payment side effect (webhook_events idempotency key)',
+    expected: 'pass',
+    expectedReason: 'DB-backed idempotency already exists; flips with INV-05 route wiring.',
+  },
+  {
+    id: 'INV-07',
+    module: 'INV',
+    feature: 'Overdue lifecycle',
+    passCriteria: 'A past-due open invoice transitions to overdue via the sweep worker',
+    expected: 'fail',
+    expectedReason: 'Overdue sweep worker not running on dev (PAY-04 live partial corroborates).',
+  },
+
+  // ----- Assistant (chat intents — restored 2026-06-04) -----
+  {
+    id: 'AST-01',
+    module: 'AST',
+    feature: 'Create customer via assistant intent',
+    passCriteria:
+      'POST /api/assistant/chat with a create-customer ask yields a proposal; approve → executed customer row',
+    expected: 'partial',
+  },
+  {
+    id: 'AST-02',
+    module: 'AST',
+    feature: 'Create estimate via assistant',
+    passCriteria: 'Assistant chat drafts an estimate proposal for a job from a natural-language ask',
+    expected: 'partial',
+  },
+  {
+    id: 'AST-03',
+    module: 'AST',
+    feature: 'Revise estimate via assistant',
+    passCriteria: 'Assistant chat revises an existing draft estimate (line-item change) via proposal',
+    expected: 'partial',
+  },
+  {
+    id: 'AST-04',
+    module: 'AST',
+    feature: 'Create/send invoice via assistant',
+    passCriteria: 'Assistant chat creates and sends an invoice via proposal (delivery leg depends on INV-03)',
+    expected: 'partial',
+  },
+  {
+    id: 'AST-05',
+    module: 'AST',
+    feature: 'Payment status query via assistant',
+    passCriteria: 'Assistant chat answers a payment-status query read-only (no proposal created)',
+    expected: 'fail',
+    expectedReason: 'Read/query intents not implemented — see qa/backlog/AST-05-query-intents.md.',
+  },
+  {
+    id: 'AST-06',
+    module: 'AST',
+    feature: 'Failure handling + recovery',
+    passCriteria: 'Invalid/empty assistant input returns a friendly recoverable error, not a 5xx',
+    expected: 'partial',
+  },
+  {
+    id: 'AST-07',
+    module: 'AST',
+    feature: 'Multi-step orchestration (customer → estimate → invoice)',
+    passCriteria: 'A multi-step ask yields chained proposals executed in order',
+    expected: 'fail',
+    expectedReason: 'Proposal chaining not implemented — see qa/backlog/AST-07-multi-step-chaining.md.',
+  },
+
 ];
 
 export function findRow(id: string): MatrixRow | undefined {
