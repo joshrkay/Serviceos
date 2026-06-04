@@ -97,45 +97,11 @@ export class BillingService {
     const fetchFn = this.deps.fetchFn ?? fetch;
     const apiKey = this.deps.config.apiKey;
 
-    // Step 1 — look up or create the Stripe customer.
-    const { rows } = await this.deps.pool.query(
-      `SELECT stripe_customer_id FROM tenants WHERE id = $1`,
-      [tenantId],
-    );
-    if (rows.length === 0) throw new NotFoundError('Tenant', tenantId);
-    let customerId = (rows[0] as Record<string, unknown>).stripe_customer_id as
-      | string
-      | null;
+    // Reuse the tenant's single canonical Stripe customer so the portal
+    // and trial-checkout paths both bind to the same id.
+    const customerId = await this.getOrCreateStripeCustomer(tenantId, ownerEmail);
 
-    if (!customerId) {
-      const customerRes = await fetchFn('https://api.stripe.com/v1/customers', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({
-          email: ownerEmail,
-          'metadata[tenant_id]': tenantId,
-        }),
-      });
-      if (!customerRes.ok) {
-        const body = await customerRes.text();
-        throw new Error(`Stripe customer creation failed (${customerRes.status}): ${body}`);
-      }
-      const customer = (await customerRes.json()) as { id?: string };
-      if (!customer.id) {
-        throw new Error('Stripe customer creation returned no id');
-      }
-      customerId = customer.id;
-
-      await this.deps.pool.query(
-        `UPDATE tenants SET stripe_customer_id = $1, updated_at = NOW() WHERE id = $2`,
-        [customerId, tenantId],
-      );
-    }
-
-    // Step 2 — mint the portal session.
+    // Mint the portal session.
     const params = new URLSearchParams({
       customer: customerId,
       return_url: returnUrl,
@@ -183,6 +149,37 @@ export class BillingService {
       throw new ValidationError('STRIPE_PRICE_ID is not set');
     }
     const fetchFn = this.deps.fetchFn ?? fetch;
+
+    // Refuse to start a new trial when one is already running. Without
+    // this guard, an operator who clicked "Start trial" twice (or
+    // returned from Stripe and clicked again) would land on a fresh
+    // checkout and Stripe would mint a second subscription — billing
+    // them twice on day 15. The portal session is the right surface
+    // for an already-subscribed tenant.
+    const statusRows = await this.deps.pool.query(
+      `SELECT subscription_status FROM tenants WHERE id = $1`,
+      [input.tenantId],
+    );
+    const existingStatus =
+      (statusRows.rows[0] as { subscription_status?: string | null } | undefined)
+        ?.subscription_status ?? null;
+    if (existingStatus === 'trialing' || existingStatus === 'active' || existingStatus === 'past_due') {
+      throw new ValidationError(
+        'A subscription is already active for this tenant. Manage it from Settings → Billing.',
+      );
+    }
+
+    // Reuse the tenant's single canonical Stripe customer so two
+    // concurrent / retried checkouts never produce two different
+    // customers (one of which would have a subscription invisible to
+    // the in-app billing portal). getOrCreateStripeCustomer is
+    // idempotent on tenants.stripe_customer_id, so the second caller
+    // re-reads whatever the first persisted.
+    const customerId = await this.getOrCreateStripeCustomer(
+      input.tenantId,
+      input.ownerEmail,
+    );
+
     const body = new URLSearchParams();
     body.set('mode', 'subscription');
     body.set('line_items[0][price]', priceId);
@@ -190,7 +187,7 @@ export class BillingService {
     body.set('subscription_data[trial_period_days]', '14');
     body.set('subscription_data[metadata][tenant_id]', input.tenantId);
     body.set('payment_method_collection', 'always');
-    body.set('customer_email', input.ownerEmail);
+    body.set('customer', customerId);
     body.set('success_url', input.successUrl);
     body.set('cancel_url', input.cancelUrl);
     body.set('client_reference_id', input.tenantId);
@@ -272,5 +269,83 @@ export class BillingService {
        WHERE stripe_customer_id = $3`,
       [input.subscriptionId, input.status, input.customerId],
     );
+  }
+
+  /**
+   * Single canonical Stripe customer per tenant. Used by both the trial
+   * checkout and billing-portal paths so concurrent or retried
+   * checkouts never produce two different Stripe customers (one of
+   * which would carry a subscription invisible to the in-app portal).
+   *
+   * Race-tolerant: when two callers see stripe_customer_id IS NULL at
+   * the same time, each POSTs a new Stripe customer, but only the
+   * first UPDATE wins. The losing caller re-reads the winner's id and
+   * uses it. The losing call's Stripe customer becomes a no-op orphan
+   * — it has no subscription, no payment method, and Stripe doesn't
+   * bill empty customers.
+   */
+  private async getOrCreateStripeCustomer(
+    tenantId: string,
+    ownerEmail: string,
+  ): Promise<string> {
+    if (!this.deps.config?.apiKey) {
+      throw new ValidationError('Subscription billing is not configured');
+    }
+    const apiKey = this.deps.config.apiKey;
+    const fetchFn = this.deps.fetchFn ?? fetch;
+
+    const { rows } = await this.deps.pool.query(
+      `SELECT stripe_customer_id FROM tenants WHERE id = $1`,
+      [tenantId],
+    );
+    if (rows.length === 0) throw new NotFoundError('Tenant', tenantId);
+    const existing = (rows[0] as Record<string, unknown>).stripe_customer_id as
+      | string
+      | null;
+    if (existing) return existing;
+
+    const customerRes = await fetchFn('https://api.stripe.com/v1/customers', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        email: ownerEmail,
+        'metadata[tenant_id]': tenantId,
+      }),
+    });
+    if (!customerRes.ok) {
+      const body = await customerRes.text();
+      throw new Error(`Stripe customer creation failed (${customerRes.status}): ${body}`);
+    }
+    const customer = (await customerRes.json()) as { id?: string };
+    if (!customer.id) {
+      throw new Error('Stripe customer creation returned no id');
+    }
+
+    // Conditional UPDATE: only claim the column when still NULL so a
+    // concurrent get-or-create never overwrites a winning customer id.
+    const updateRes = await this.deps.pool.query<{ stripe_customer_id: string }>(
+      `UPDATE tenants
+          SET stripe_customer_id = $1, updated_at = NOW()
+        WHERE id = $2 AND stripe_customer_id IS NULL
+        RETURNING stripe_customer_id`,
+      [customer.id, tenantId],
+    );
+    if (updateRes.rows.length > 0) {
+      return updateRes.rows[0].stripe_customer_id;
+    }
+
+    // Lost the race — re-read what the winner persisted.
+    const reread = await this.deps.pool.query<{ stripe_customer_id: string }>(
+      `SELECT stripe_customer_id FROM tenants WHERE id = $1`,
+      [tenantId],
+    );
+    const winner = reread.rows[0]?.stripe_customer_id;
+    if (!winner) {
+      throw new Error('getOrCreateStripeCustomer: lost race but no winner persisted');
+    }
+    return winner;
   }
 }

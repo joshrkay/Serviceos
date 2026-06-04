@@ -10,20 +10,32 @@ const TENANT = '11111111-1111-4111-8111-111111111111';
  * stubbed via the injectable fetchFn dependency.
  */
 function makePool(rows: Record<string, unknown> = {}) {
-  // Map of (sql substring → response). Tests override per-call below.
-  const responses = new Map<string, { rows: Record<string, unknown>[] }>([
+  // Map of (sql substring → response). Some responses are dynamic
+  // (function form) so the mock can mirror RETURNING semantics — the
+  // UPDATE that claims stripe_customer_id RETURNs the value being set,
+  // so getOrCreateStripeCustomer can distinguish a winning claim from
+  // a concurrent-race no-op.
+  type StaticResponse = { rows: Record<string, unknown>[] };
+  type DynamicResponse = (sql: string, params?: unknown[]) => StaticResponse;
+  const responses = new Map<string, StaticResponse | DynamicResponse>([
     [
       'SELECT stripe_customer_id, stripe_subscription_id, subscription_status',
       { rows: [rows] },
     ],
     ['SELECT stripe_customer_id FROM tenants', { rows: [rows] }],
+    [
+      'UPDATE tenants\n          SET stripe_customer_id',
+      (_sql, params) => ({ rows: [{ stripe_customer_id: params?.[0] }] }),
+    ],
     ['UPDATE tenants SET stripe_customer_id', { rows: [] }],
     ['UPDATE tenants', { rows: [] }],
   ]);
 
-  const queryMock = vi.fn(async (sql: string, _params?: unknown[]) => {
+  const queryMock = vi.fn(async (sql: string, params?: unknown[]) => {
     for (const [needle, response] of responses) {
-      if (sql.includes(needle)) return response;
+      if (sql.includes(needle)) {
+        return typeof response === 'function' ? response(sql, params) : response;
+      }
     }
     return { rows: [] };
   });
