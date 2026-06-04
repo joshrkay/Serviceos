@@ -767,27 +767,28 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     logger.info('Stripe webhook received', { eventId: event.id, type: event.type });
 
     try {
-      // Trial-checkout marker clear, bound to the SPECIFIC session
-      // id rather than any subscription event on the customer. Fires
-      // on both completion (success path) and expiry (abandoned /
-      // server-initiated /v1/checkout/sessions/:id/expire path).
-      // Scoped via WHERE pending_checkout_session_id = $1, so only
-      // the tenant whose pending session actually matches gets its
-      // marker cleared — a delayed subscription.* event for a
-      // different session can no longer clobber a newer pending row.
-      if (
-        event.type === 'checkout.session.completed' ||
-        event.type === 'checkout.session.expired'
-      ) {
-        const completedSessionId = (event.data.object as { id?: string }).id;
-        if (completedSessionId && deps.pool) {
+      // Trial-checkout marker clear on the ABANDONED path only.
+      // checkout.session.expired fires when the session times out
+      // without completion or when /v1/checkout/sessions/:id/expire
+      // runs from clearPendingCheckout — no subscription will arrive
+      // for this session, so the marker can clear immediately.
+      //
+      // We do NOT clear on checkout.session.completed: that event
+      // can be delivered BEFORE customer.subscription.created, and
+      // clearing here would reopen the gate while subscription_status
+      // is still null, letting the operator mint a SECOND completable
+      // session in the gap. The subscription.created branch below
+      // does the clear once subscription_status is actually live.
+      if (event.type === 'checkout.session.expired') {
+        const expiredSessionId = (event.data.object as { id?: string }).id;
+        if (expiredSessionId && deps.pool) {
           await deps.pool.query(
             `UPDATE tenants
                 SET pending_checkout_at = NULL,
                     pending_checkout_session_id = NULL,
                     updated_at = NOW()
               WHERE pending_checkout_session_id = $1`,
-            [completedSessionId],
+            [expiredSessionId],
           );
         }
       }
@@ -1215,14 +1216,28 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                   [sub.customer, row.id],
                 );
               }
-              // The pending-checkout marker is now cleared by the
-              // checkout.session.completed/expired handler above,
-              // bound to the specific session id. Clearing it here on
-              // every subscription.* event was a P1 race: a delayed
-              // subscription.updated/deleted event for a different
-              // session could clobber a newer pending row, reopening
-              // the gate while the operator's just-minted Stripe
-              // session was still completable.
+              // Clear the pending-checkout marker only on
+              // customer.subscription.created — that's the event that
+              // means "the trial subscription actually exists at
+              // Stripe AND we just mirrored it to subscription_status."
+              // checkout.session.completed can land BEFORE
+              // subscription.created and would leave a gap where
+              // subscription_status is still null but pending is
+              // cleared — exposing a second-checkout race. Clearing
+              // on subscription.updated / .deleted would also clobber
+              // a NEW pending row when a delayed event for an OLD
+              // subscription arrives. Created is the right surface.
+              if (event.type === 'customer.subscription.created') {
+                await deps.pool.query(
+                  `UPDATE tenants
+                      SET pending_checkout_at = NULL,
+                          pending_checkout_session_id = NULL,
+                          updated_at = NOW()
+                    WHERE id = $1
+                      AND (pending_checkout_at IS NOT NULL OR pending_checkout_session_id IS NOT NULL)`,
+                  [row.id],
+                );
+              }
             }
           }
 
@@ -1243,6 +1258,20 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               priorStatus,
               newStatus: sub.status,
             };
+            // KNOWN LIMITATION (deferred post-soft-launch): the
+            // priorStatus → newStatus check is non-atomic. If two
+            // distinct Stripe events for the same transition arrive
+            // concurrently (e.g., customer.subscription.created AND a
+            // customer.subscription.updated that both report
+            // trialing), both handlers can read the same non-live
+            // priorStatus before either applySubscriptionEvent
+            // commits, and both emit trial_started. The proper fix is
+            // to wrap the SELECT prior + applySubscriptionEvent in a
+            // single transaction with SELECT … FOR UPDATE on the
+            // tenants row so the second handler reads the first's
+            // committed status. Impact is metric inflation only — no
+            // user-facing harm, no duplicate Stripe charges. Tracked
+            // as post-launch follow-up.
             if (sub.status === 'trialing' && priorStatus !== 'trialing') {
               recordFunnelEvent({
                 distinctId: ownerClerkId,
