@@ -11,14 +11,6 @@ nothing in CI actually creates.
 
 ## Known issues (reasons it is not production-ready)
 
-- **Runtime crash on its only write path.**
-  `clients/service_os_api.py` calls `json.dumps(...)` (around line 146)
-  but never imports `json`, so `draft_proposal` raises `NameError` the
-  first time it runs.
-- **`/process` is unauthenticated.** `main.py` accepts `auth_token` as a
-  plain request-body field and never verifies it; CORS defaults to an
-  empty allow-list (`CORS_ALLOWED_ORIGINS` unset → `[""]`). Exposing this
-  service would be an open, unauthenticated LLM/proxy endpoint.
 - **Dead scaffold.** `agents/` (capture/payment/invoice) and
   `mcp_servers/` (money_server/jobs_server/ceilings) exist but are not
   imported by the runtime — `agent/graph.py` builds only a small graph and
@@ -31,9 +23,19 @@ Production AI runs **inside `packages/api`** (the LLM gateway at
 becomes a human-approved, audited proposal. This standalone agent does not
 go through that gate.
 
+## Hardening already applied
+
+- **`NameError` fixed.** `clients/service_os_api.py` now imports `json`, so
+  `draft_proposal` no longer crashes on its write path.
+- **`/process` requires auth.** The endpoint is gated behind
+  `AGENT_SERVICE_TOKEN` (sent as `Authorization: Bearer <token>`, compared in
+  constant time). It is **fail-closed**: if `AGENT_SERVICE_TOKEN` is unset the
+  endpoint returns 503, never open. CORS now filters empties from
+  `CORS_ALLOWED_ORIGINS`, so an unset value yields `[]` (no origins) rather
+  than `[""]`. `/health` stays open for probes.
+
 ## Before relying on this
 
-Fix the `NameError`, add real authentication + a CORS allow-list to
-`/process`, and wire (or delete) the dead `agents/`/`mcp_servers/`
-scaffold — and only then give it a deployment + auth story. Until then,
-keep it un-exposed.
+Wire (or delete) the dead `agents/`/`mcp_servers/` scaffold — and only then
+give it a real deployment story. It still bypasses the canonical
+proposal/audit gate, so keep it un-exposed and out of the deploy pipeline.

@@ -20,6 +20,7 @@ FastAPI event loop while calling the TS gateway.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import httpx
