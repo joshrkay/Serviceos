@@ -767,6 +767,31 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     logger.info('Stripe webhook received', { eventId: event.id, type: event.type });
 
     try {
+      // Trial-checkout marker clear, bound to the SPECIFIC session
+      // id rather than any subscription event on the customer. Fires
+      // on both completion (success path) and expiry (abandoned /
+      // server-initiated /v1/checkout/sessions/:id/expire path).
+      // Scoped via WHERE pending_checkout_session_id = $1, so only
+      // the tenant whose pending session actually matches gets its
+      // marker cleared — a delayed subscription.* event for a
+      // different session can no longer clobber a newer pending row.
+      if (
+        event.type === 'checkout.session.completed' ||
+        event.type === 'checkout.session.expired'
+      ) {
+        const completedSessionId = (event.data.object as { id?: string }).id;
+        if (completedSessionId && deps.pool) {
+          await deps.pool.query(
+            `UPDATE tenants
+                SET pending_checkout_at = NULL,
+                    pending_checkout_session_id = NULL,
+                    updated_at = NOW()
+              WHERE pending_checkout_session_id = $1`,
+            [completedSessionId],
+          );
+        }
+      }
+
       if (event.type === 'checkout.session.completed') {
         const session = event.data.object as {
           metadata?: {
@@ -1190,21 +1215,14 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                   [sub.customer, row.id],
                 );
               }
-              // Clear the pending-checkout marker (timestamp + session
-              // id) the trial-checkout path stamped while the lock was
-              // held. A new subscription on this customer means the
-              // prior checkout completed; the gate no longer needs to
-              // refuse follow-up requests, and the persisted session id
-              // is no longer useful for expiry.
-              await deps.pool.query(
-                `UPDATE tenants
-                    SET pending_checkout_at = NULL,
-                        pending_checkout_session_id = NULL,
-                        updated_at = NOW()
-                  WHERE id = $1
-                    AND (pending_checkout_at IS NOT NULL OR pending_checkout_session_id IS NOT NULL)`,
-                [row.id],
-              );
+              // The pending-checkout marker is now cleared by the
+              // checkout.session.completed/expired handler above,
+              // bound to the specific session id. Clearing it here on
+              // every subscription.* event was a P1 race: a delayed
+              // subscription.updated/deleted event for a different
+              // session could clobber a newer pending row, reopening
+              // the gate while the operator's just-minted Stripe
+              // session was still completable.
             }
           }
 

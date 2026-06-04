@@ -721,6 +721,12 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     '/billing/cancel',
     requireAuth,
     requireTenant,
+    // Same authorization as the billing portal (routes/billing.ts uses
+    // tenant:manage there): this endpoint EXPIREs the active Stripe
+    // checkout session and clears the gate, so a dispatcher or
+    // technician could otherwise DOS the owner's onboarding by
+    // repeatedly canceling whatever the owner just started.
+    requireRole('owner'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!billingService) {
