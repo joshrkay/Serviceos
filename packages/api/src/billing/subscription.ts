@@ -241,6 +241,15 @@ export class BillingService {
       body.set('success_url', input.successUrl);
       body.set('cancel_url', input.cancelUrl);
       body.set('client_reference_id', input.tenantId);
+      // Bind the Stripe session lifetime to the gate's pending marker
+      // window so a session can't outlive pending_checkout_at. Without
+      // this the session defaults to ~24h; the gate would reopen after
+      // 30 min while the original session was still completable,
+      // letting a user complete BOTH and create two subscriptions.
+      // Stripe's minimum expires_at is 30 minutes from now, which
+      // matches our staleness ceiling exactly.
+      const expiresAt = Math.floor(Date.now() / 1000) + 30 * 60;
+      body.set('expires_at', String(expiresAt));
       const res = await fetchFn('https://api.stripe.com/v1/checkout/sessions', {
         method: 'POST',
         headers: {
@@ -340,6 +349,22 @@ export class BillingService {
        SET stripe_subscription_id = $1, subscription_status = $2, updated_at = NOW()
        WHERE stripe_customer_id = $3`,
       [input.subscriptionId, input.status, input.customerId],
+    );
+  }
+
+  /**
+   * Clears tenants.pending_checkout_at so the trial-checkout gate
+   * reopens immediately. Called when the operator returns via Stripe's
+   * cancel_url — without this, the gate would refuse new checkouts
+   * for the full staleness window (30 min) even after an intentional
+   * cancel, contradicting the "you can subscribe when ready" toast.
+   * Idempotent and tenant-scoped.
+   */
+  async clearPendingCheckout(tenantId: string): Promise<void> {
+    await this.deps.pool.query(
+      `UPDATE tenants SET pending_checkout_at = NULL, updated_at = NOW()
+        WHERE id = $1 AND pending_checkout_at IS NOT NULL`,
+      [tenantId],
     );
   }
 

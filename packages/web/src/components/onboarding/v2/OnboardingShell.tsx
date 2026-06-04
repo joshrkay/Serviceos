@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 import { Zap } from 'lucide-react';
+import { useApiClient } from '../../../lib/apiClient';
 import { useOnboardingStatus } from '../../../hooks/useOnboardingStatus';
 import { track } from '../../../lib/analytics';
 import { Button, Spinner } from '../../ui';
@@ -26,6 +27,7 @@ import type { OnboardingStepId } from '../../../types/onboarding';
 export function OnboardingShell() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const apiFetch = useApiClient();
   const { data, isLoading, error, refetch } = useOnboardingStatus(3000);
   const [override, setOverride] = useState<OnboardingStepId | null>(null);
   const billingToastShown = useRef(false);
@@ -43,6 +45,12 @@ export function OnboardingShell() {
       void refetch();
     } else if (billing === 'cancel') {
       toast.message('Checkout canceled — you can subscribe when you are ready.');
+      // Clear the server-side pending-checkout marker so the trial
+      // gate reopens immediately. Without this the operator would be
+      // blocked for the full 30-min staleness window after an
+      // intentional cancel — fire-and-forget; an analytics/network
+      // failure here must not derail the rest of the wizard.
+      void apiFetch('/api/onboarding/billing/cancel', { method: 'POST' }).catch(() => undefined);
     }
     const next = new URLSearchParams(searchParams);
     next.delete('billing');

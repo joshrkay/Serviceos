@@ -693,5 +693,43 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     }
   );
 
+  /**
+   * POST /api/onboarding/billing/cancel
+   *
+   * Called from OnboardingShell when the operator returns via Stripe's
+   * cancel_url (?billing=cancel). Clears tenants.pending_checkout_at so
+   * the trial-checkout gate reopens immediately — without this, the
+   * gate would refuse new checkouts for the full 30-minute staleness
+   * window even after an intentional cancel, contradicting the toast
+   * that says they can subscribe when ready.
+   *
+   * Self-service action on the requesting tenant's own row, no Stripe
+   * round-trip. The Stripe session itself expires at the same 30-min
+   * mark (expires_at is bound in createTrialCheckoutSession) so a
+   * malicious clear can't outlive Stripe's session lifetime anyway.
+   */
+  router.post(
+    '/billing/cancel',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!billingService) {
+          res.status(503).json({
+            error: 'BILLING_NOT_CONFIGURED',
+            message: 'Subscription billing is not configured',
+          });
+          return;
+        }
+        const tenantId = req.auth!.tenantId;
+        await billingService.clearPendingCheckout(tenantId);
+        res.json({ ok: true });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
   return router;
 }
