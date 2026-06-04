@@ -31,18 +31,23 @@ matrixTest('AST-01', 'Create customer via assistant intent', async (h) => {
   const db = await h.db.query({
     label: '01-customer-check',
     tenantId: h.tenantA.tenantId,
-    sql: `SELECT id, name FROM customers WHERE tenant_id = $1 AND name ILIKE 'John Doe%'`,
+    sql: `SELECT id, display_name FROM customers WHERE tenant_id = $1 AND display_name ILIKE 'John Doe%'`,
     params: [h.tenantA.tenantId],
   });
 
   await gotoUi(h, '/assistant', '01-chat');
 
-  if (proposedCustomer && reply.content.toLowerCase().includes('customer')) {
-    h.evidence.partial('Assistant replied about customer creation but no proposal type for create_customer is exposed via /api/assistant/chat.');
+  // QA-2026-06-04: the live build returns a real create_customer proposal
+  // (taskType assistant.create_customer + proposal.id). Pass when a proposal
+  // came back AND nothing was auto-created (human-in-the-loop preserved).
+  const proposalId = (reply.proposal as { id?: string } | null | undefined)?.id;
+  if (proposalId && db.rowCount === 0) {
+    h.evidence.pass('create_customer proposal returned; no auto-created customer row (HITL preserved).');
+  } else if (proposedCustomer && reply.content.toLowerCase().includes('customer')) {
+    h.evidence.partial('Assistant replied about customer creation but no usable proposal id was exposed.');
   } else {
     h.evidence.fail(
-      'Intent classifier returns generic reply, no create_customer proposal returned. Proposal types DB row (if any): ' +
-        JSON.stringify(db.rows)
+      'No create_customer proposal returned. Auto-created rows (should be none): ' + JSON.stringify(db.rows)
     );
   }
 });
@@ -256,7 +261,7 @@ matrixTest('AST-07', 'Multi-step orchestration (customer → estimate → invoic
           LEFT JOIN invoices i ON i.estimate_id = e.id AND i.tenant_id = c.tenant_id
           WHERE c.tenant_id = $1
             AND c.created_at > now() - interval '2 minutes'
-            AND c.name ILIKE 'Jane Smith%'
+            AND c.display_name ILIKE 'Jane Smith%'
           ORDER BY c.created_at DESC
           LIMIT 1`,
     params: [h.tenantA.tenantId],

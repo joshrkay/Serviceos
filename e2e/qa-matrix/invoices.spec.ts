@@ -161,6 +161,9 @@ matrixTest('INV-05', 'Mark paid via webhook', async (h) => {
   });
 
   const webhookPayload = buildStripeWebhook(id);
+  // QA-2026-06-04: tolerate every plausible webhook response (route absent →
+  // 404, bad signature → 400/401, accepted → 200). The verdict is decided by
+  // the DB check below; throwing here serially blocked INV-06/07 forever.
   const resp = await h.api.call({
     method: 'POST',
     path: '/webhooks/stripe',
@@ -169,6 +172,7 @@ matrixTest('INV-05', 'Mark paid via webhook', async (h) => {
     headers: {
       'stripe-signature': 't=0,v1=test-sig', // signature check will reject in prod, captured as evidence
     },
+    expectStatus: [200, 201, 202, 400, 401, 403, 404, 500],
   });
 
   const db = await h.db.query({
@@ -184,8 +188,11 @@ matrixTest('INV-05', 'Mark paid via webhook', async (h) => {
   if (row.status === 'paid') {
     h.evidence.pass();
   } else {
+    const bodyErr = (resp.response.body as { error?: string } | null)?.error ?? '';
     h.evidence.fail(
-      `Stripe webhook responded ${resp.response.status}; invoice status remained '${row.status}'. Stripe webhook route is not mounted and no auto status transition exists.`
+      `Stripe webhook responded ${resp.response.status}${bodyErr ? ` (${bodyErr})` : ''}; invoice status remained '${row.status}'. ` +
+        'Route is mounted; on dev this is typically STRIPE_WEBHOOK_SECRET unset (500 "not configured") or a forged signature (401). ' +
+        'A real verdict needs `stripe listen` + the secret configured.'
     );
   }
 });
@@ -258,12 +265,13 @@ matrixTest('INV-07', 'Overdue lifecycle', async (h) => {
     expectStatus: [200, 400],
   });
 
+  // QA-2026-06-04: tenant-scoped existence probe (the old no-GUC query
+  // errored on RLS under qa_readonly). Scoped to tenant A is sufficient —
+  // the question is only whether 'overdue' is a reachable status value.
   const db = await h.db.query({
     label: '07-check-enum',
-    sql: `SELECT unnest(enum_range(NULL::text)) AS status
-          WHERE FALSE
-          UNION ALL
-          SELECT DISTINCT status FROM invoices WHERE status = 'overdue'`,
+    tenantId: h.tenantA.tenantId,
+    sql: `SELECT DISTINCT status FROM invoices WHERE status = 'overdue'`,
   });
 
   await gotoUi(h, `/invoices/${id}`, '07-detail');
