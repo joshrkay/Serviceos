@@ -73,11 +73,33 @@ export function Sidebar({ status, activeId, onSelect }: SidebarProps) {
               : isError
                 ? 'text-red-700 hover:bg-slate-100 border-transparent'
                 : 'text-slate-500 hover:bg-slate-100 border-transparent';
+          // Identity and Pack determine downstream behavior (timezone,
+          // hourly rate, AI prompts, job-type seed). Re-editing a
+          // completed Identity / Pack step doesn't roll back the
+          // Phone / Billing / AI-check artifacts the wizard already
+          // produced, so a casual back-click can silently overwrite
+          // saved values. A confirm() before navigating warns the
+          // operator that we won't reset downstream setup for them.
+          const requiresInvalidationWarning =
+            isDone && !isActive && (step.id === 'identity' || step.id === 'pack');
+          const handleClick = () => {
+            if (
+              requiresInvalidationWarning &&
+              !window.confirm(
+                step.id === 'identity'
+                  ? 'Re-editing business identity will overwrite saved values when you save. Downstream setup (phone, billing, AI check) is not reset. Continue?'
+                  : 'Re-picking your trade may add another pack to your tenant but will not reset the job types and templates the previous pack seeded. Continue?',
+              )
+            ) {
+              return;
+            }
+            onSelect(step.id);
+          };
           return (
             <li key={step.id}>
               <button
                 type="button"
-                onClick={() => onSelect(step.id)}
+                onClick={handleClick}
                 aria-current={isActive ? 'step' : undefined}
                 className={`flex w-full items-center gap-3 rounded-xl border px-3 py-2 text-left text-sm transition ${tone}`}
               >
