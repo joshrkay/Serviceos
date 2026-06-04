@@ -3,6 +3,7 @@ import type { Pool } from 'pg';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant } from '../middleware/auth';
 import { currentTenantContext } from '../middleware/tenant-context';
+import { toErrorResponse } from '../shared/errors';
 import { SettingsRepository } from '../settings/settings';
 import { PackActivationRepository, activatePack } from '../settings/pack-activation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
@@ -276,6 +277,30 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             createdAt: new Date(),
             updatedAt: new Date(),
           });
+        }
+
+        // Serialize pack activation + seed per (tenant, pack) via a
+        // Postgres advisory transaction lock. Two concurrent /pack
+        // requests for the same tenant+pack could both pass the
+        // "already activated" branch and reach the seed probe before
+        // either has committed; both would then observe an empty
+        // catalog/template set and INSERT a full duplicate. Lock is
+        // held until COMMIT (end of this request transaction); a
+        // concurrent caller's try-lock returns false and gets a
+        // clear 409 message.
+        const ctx = currentTenantContext();
+        if (ctx) {
+          const lockRes = await ctx.client.query<{ locked: boolean }>(
+            `SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0)) AS locked`,
+            [`pack:${tenantId}:${packId}`],
+          );
+          if (!lockRes.rows[0]?.locked) {
+            res.status(409).json({
+              error: 'PACK_ACTIVATION_IN_PROGRESS',
+              message: 'Another pack activation is already running for this tenant. Wait a moment and try again.',
+            });
+            return;
+          }
         }
 
         try {
@@ -657,10 +682,13 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         });
         res.json(result);
       } catch (err: unknown) {
-        res.status(500).json({
-          error: 'CHECKOUT_SESSION_FAILED',
-          message: err instanceof Error ? err.message : 'Failed to create checkout session',
-        });
+        // ValidationError from createTrialCheckoutSession (already
+        // subscribed, checkout in progress, etc.) must surface as
+        // 400 with its actionable message — otherwise BillingStep
+        // shows the generic "Stripe is temporarily unavailable"
+        // copy reserved for real 5xx outages.
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
       }
     }
   );
