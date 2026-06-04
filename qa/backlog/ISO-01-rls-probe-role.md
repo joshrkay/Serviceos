@@ -2,6 +2,7 @@
 
 **Matrix row:** ISO-01 (cross-tenant isolation + RLS)
 **Live verdict (2026-06-04):** fail — but the product posture verified healthy
+**Status: DONE 2026-06-04 — `qa_readonly` created on dev, db-verifier + spec fixed, ISO-01 re-run = PASS**
 **Target verdict:** pass
 **Effort:** S
 
