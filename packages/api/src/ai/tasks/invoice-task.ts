@@ -110,7 +110,15 @@ export class InvoiceTaskHandler implements TaskHandler {
           return {
             id: typeof li.id === 'string' ? li.id : `li-${idx + 1}`,
             description: typeof li.description === 'string' ? li.description : 'Service',
-            category: typeof li.category === 'string' ? li.category.toLowerCase() : 'labor',
+            // DB CHECK allows labor/material/equipment/other — map the
+            // LLM's vocabulary onto it, defaulting to 'other'.
+            category: (() => {
+              const c = typeof li.category === 'string' ? li.category.toLowerCase() : 'labor';
+              if (['labor', 'material', 'equipment', 'other'].includes(c)) return c;
+              if (['service', 'work', 'visit'].includes(c)) return 'labor';
+              if (['parts', 'part', 'supplies'].includes(c)) return 'material';
+              return 'other';
+            })(),
             quantity: qty,
             unitPriceCents: Math.round(unitPriceCents),
             totalCents,
