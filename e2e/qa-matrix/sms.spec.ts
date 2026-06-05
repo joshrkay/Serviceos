@@ -1,4 +1,5 @@
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
+import { startVoiceSession, voiceInput, approveAndAwaitExecution } from './helpers/voice-flow';
 
 /**
  * SMS-01 — outbound SMS dispatch records: create a consenting customer + job +
@@ -105,7 +106,27 @@ matrixTest('SMS-01', 'Outbound SMS dispatch records + entity_type CHECK', async 
     );
   }
 
-  const { appointmentId } = await chain(h, true, '01');
+  // QA-2026-06-05: drive the PROPOSAL path the confirmation notifier is
+  // actually wired to (REST-created appointments don't notify by design).
+  // chain() seeds the consenting customer + job; the voice booking resolves
+  // the tenant's most recent active job — that one — and execution fires the
+  // confirmation through scheduling-notifications.
+  await chain(h, true, '01');
+  const sessionId = await startVoiceSession(h, h.tenantA.token, '01');
+  if (!sessionId) return void h.evidence.fail('Voice session could not be started.');
+  const proposalIds = await voiceInput(
+    h,
+    h.tenantA.token,
+    sessionId,
+    'Schedule a maintenance visit for our customer tomorrow at 10 am',
+    '01'
+  );
+  if (proposalIds.length === 0) return void h.evidence.fail('No booking proposal from voice utterance.');
+  const outcome = await approveAndAwaitExecution(h, h.tenantA.token, proposalIds[0], '01');
+  if (outcome.status !== 'executed' || !outcome.resultEntityId) {
+    return void h.evidence.partial(`Booking proposal did not execute (status=${outcome.status}); confirmation trigger not reached.`);
+  }
+  const appointmentId = outcome.resultEntityId;
   const dispatched = await pollDispatchCount(h, appointmentId, '01');
 
   const rows = await h.db.query({
@@ -125,10 +146,8 @@ matrixTest('SMS-01', 'Outbound SMS dispatch records + entity_type CHECK', async 
     );
   } else {
     h.evidence.partial(
-      'No appointment_confirmation dispatch from a REST-created appointment — CONFIRMED BY DESIGN ' +
-        '(2026-06-05): the confirmation notifier is wired to the proposal-execution path only ' +
-        '(appointment-confirmation-notifier.ts via scheduling-notifications). Either add a REST-create ' +
-        'trigger (product decision) or repoint this check at the voice/proposal path, which now works E2E.'
+      'Voice booking executed but no appointment_confirmation dispatch row appeared — check ' +
+        'scheduling-notifications wiring / customer consent on the resolved job.'
     );
   }
   expect(rows.rowCount, 'dispatch query executed').toBeGreaterThanOrEqual(0);
