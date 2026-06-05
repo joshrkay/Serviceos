@@ -176,6 +176,12 @@ export class ProposalExecutor {
           resultEntityId: updatedProposal.resultEntityId,
           executedAt: updatedProposal.executedAt,
           executedBy: updatedProposal.executedBy,
+          // QA-2026-06-05: persist WHY execution failed. Handlers return a
+          // reason in result.error, but it was dropped — execution_failed
+          // rows had execution_error NULL and were undebuggable (live: every
+          // voice create_customer failed silently on a payload-shape
+          // mismatch for weeks of QA archaeology).
+          ...(result.success ? {} : { executionError: result.error ?? 'unknown execution failure' }),
         }
       );
     } else if (proposal.status === 'approved') {

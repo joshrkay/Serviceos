@@ -765,10 +765,22 @@ export class InAppVoiceAdapter {
           tenantThresholdOverride = undefined;
         }
       }
+      // QA-2026-06-05: execution handlers read the FLAT task contract
+      // (create_customer wants payload.name/email/phone — see
+      // create-customer-handler.ts), but this adapter only nested the raw
+      // classifier entities. Every voice create_customer execution failed
+      // 'Payload must include a non-empty name'. Mirror the assistant
+      // route's translation while keeping `entities` for audit/rendering.
+      const flat: Record<string, unknown> = {};
+      if (typeof entities.displayName === 'string') flat.name = entities.displayName;
+      else if (typeof entities.name === 'string') flat.name = entities.name;
+      if (typeof entities.email === 'string') flat.email = entities.email;
+      if (typeof entities.phone === 'string') flat.phone = entities.phone;
       const proposal = buildProposal({
         tenantId: session.tenantId,
         proposalType,
         payload: {
+          ...flat,
           intent,
           entities,
           sessionId: session.id,
