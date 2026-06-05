@@ -2820,6 +2820,8 @@ export function createApp(): express.Express {
     createAssistantRouter({
       gateway: llmGateway,
       proposalRepo,
+      // QA-2026-06-05 (AST-05): read-only query intents answer from data.
+      invoiceRepo,
       // §3B/3D/3E — assistant chat shares the operator-side resolver
       // shim with the voice-action-router so the same vertical context
       // reaches both text and voice classification paths.
