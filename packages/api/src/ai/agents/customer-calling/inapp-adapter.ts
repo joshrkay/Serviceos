@@ -798,7 +798,24 @@ export class InAppVoiceAdapter {
           : this.deps.systemActorId ?? 'calling-agent',
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       });
-      const stored = await this.deps.proposalRepo.create(proposal);
+      let stored = await this.deps.proposalRepo.create(proposal);
+      // QA-2026-06-05: parity with the AI-task pipeline's guardrail promote
+      // step (ai/guardrails/low-confidence.ts) which the calling-agent path
+      // does not run. Proposals that initialProposalStatus left in 'draft'
+      // despite a complete, caller-confirmed payload (e.g. irreversible
+      // classes like cancel_appointment that must never auto-approve) have
+      // to surface in the operator inbox — the inbox reads
+      // 'ready_for_review' and the lifecycle guard refuses to approve a
+      // 'draft'. Without this promote, non-capture voice intents were
+      // permanently invisible AND unapprovable.
+      if (stored.status === 'draft') {
+        const promoted = await this.deps.proposalRepo.updateStatus(
+          session.tenantId,
+          stored.id,
+          'ready_for_review'
+        );
+        if (promoted) stored = promoted;
+      }
       session.proposalIds.push(stored.id);
       session.events.emit('voice-event', { type: 'proposal_created', proposalId: stored.id });
       return stored.id;
