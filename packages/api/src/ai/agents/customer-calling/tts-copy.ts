@@ -84,6 +84,31 @@ const TEMPLATE_KEYS = new Set(['intent_confirm', 'greeting', 'confirm_intent', '
  * Render a tts_play payload into speakable copy. Template keys are expanded
  * and localized; anything else passes through unchanged.
  */
+
+/**
+ * es translations for the FSM's hardcoded sentences (exact-match). Kept
+ * small and literal — anything not listed passes through in English rather
+ * than risking a bad machine paraphrase.
+ */
+const SENTENCE_CATALOG_ES: Record<string, string> = {
+  "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?":
+    'Perfecto, ya quedó registrado. Recibirá una confirmación en breve. ¿Hay algo más en lo que pueda ayudarle?',
+  'How can I help you today?': '¿En qué puedo ayudarle hoy?',
+  'Thank you for calling. Have a great day!': '¡Gracias por llamar. Que tenga un excelente día!',
+  "What's your name and the address you're calling about?":
+    '¿Me puede dar su nombre y la dirección por la que llama?',
+  "I'm connecting you with a team member who can assist you further.":
+    'Le comunico con un miembro del equipo que podrá ayudarle.',
+  'Of course — let me connect you with a person right now.':
+    'Por supuesto — le comunico con una persona ahora mismo.',
+  'I understand. Let me get a person on the line for you right away.':
+    'Entiendo. Enseguida le paso con una persona.',
+  "I'm having trouble completing that. Let me connect you with a team member.":
+    'Tengo dificultades para completar eso. Le comunico con un miembro del equipo.',
+  "I'm having trouble pulling up your account. Let me connect you with a team member.":
+    'Tengo dificultades para acceder a su cuenta. Le comunico con un miembro del equipo.',
+};
+
 export function renderTtsText(
   rawText: string,
   payload: Record<string, unknown>,
@@ -91,7 +116,16 @@ export function renderTtsText(
 ): string {
   const template = typeof payload.template === 'string' ? payload.template : undefined;
   const key = template ?? (TEMPLATE_KEYS.has(rawText) ? rawText : undefined);
-  if (!key) return rawText;
+  if (!key) {
+    // Exact-match catalog for the FSM's fixed customer-facing sentences —
+    // they aren't templated, but a Spanish-language session must not flip
+    // back to English mid-call for the closing/ack lines.
+    if (lang === 'es') {
+      const es = SENTENCE_CATALOG_ES[rawText];
+      if (es) return es;
+    }
+    return rawText;
+  }
 
   const intent = typeof payload.intent === 'string' ? payload.intent : undefined;
   switch (key) {
