@@ -36,9 +36,10 @@ def require_service_auth(authorization: str = Header(None)) -> None:
     if not expected:
         raise HTTPException(status_code=503, detail="Agent auth not configured")
 
-    scheme, _, token = (authorization or "").partition(" ")
-    if scheme.lower() != "bearer" or not token:
+    parts = (authorization or "").split(maxsplit=1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
         raise HTTPException(status_code=401, detail="Missing or malformed Authorization header")
+    token = parts[1]
 
     if not hmac.compare_digest(token, expected):
         raise HTTPException(status_code=401, detail="Invalid service token")
@@ -59,8 +60,12 @@ def health():
     return {"status": "ok", "version": "0.1.0"}
 
 
+# Sync handler (not `async def`): LangGraph's `agent.invoke` is synchronous and
+# does blocking network I/O (LLM calls). FastAPI runs sync routes in a thread
+# pool, so a long agent run won't block the event loop / concurrent /health
+# checks. Switch to `await agent.ainvoke(...)` only if the graph goes async.
 @app.post("/process", dependencies=[Depends(require_service_auth)])
-async def process(req: ProcessRequest):
+def process(req: ProcessRequest):
     try:
         result = agent.invoke({
             "tenant_id": req.tenant_id,
