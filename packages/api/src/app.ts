@@ -1725,6 +1725,7 @@ export function createApp(): express.Express {
   // the Stripe-Account header. Without it, payments stay on the
   // legacy platform path.
   const publicInvoiceService = new PublicInvoiceService({
+    paymentLinkProvider,
     invoiceRepo,
     jobRepo,
     customerRepo,
