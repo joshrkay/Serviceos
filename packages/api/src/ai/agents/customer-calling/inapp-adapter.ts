@@ -41,6 +41,7 @@ import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
 import type { VoiceSessionRepository } from '../../../voice/voice-session';
 import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
+import { resolveSchedulingEntities } from './entity-resolution';
 import type { VoicePersona, VoicePersonaResolver } from '../../../settings/voice-persona-resolver';
 import type { RepairTemplate } from '../../../verticals/registry';
 import type { DroppedCallScheduler } from '../../../sms/recovery/scheduler';
@@ -462,6 +463,24 @@ export class InAppVoiceAdapter {
       const refs: Record<string, string> = {};
       for (const [k, v] of Object.entries(fsmEvent.entities)) {
         if (typeof v === 'string') refs[k] = v;
+      }
+      // QA-2026-06-05 (SCH-02/03): REAL resolution before entity_resolved —
+      // turn customer/job/appointment references and natural-language times
+      // into concrete ids/timestamps so the execution contract is satisfied.
+      // Best-effort: failures leave refs as-is and the proposal surfaces for
+      // operator review.
+      if (this.deps.pool) {
+        try {
+          const concrete = await resolveSchedulingEntities(
+            this.deps.pool,
+            session.tenantId,
+            fsmEvent.intentType,
+            fsmEvent.entities,
+          );
+          Object.assign(refs, concrete);
+        } catch {
+          // Resolution must never break the call flow.
+        }
       }
       const effects2 = session.machine.dispatch({ type: 'entity_resolved', refs });
       allSideEffects.push(...effects2);
