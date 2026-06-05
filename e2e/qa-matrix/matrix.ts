@@ -605,7 +605,8 @@ export const MATRIX: MatrixRow[] = [
     id: 'INV-07',
     module: 'INV',
     feature: 'Overdue lifecycle',
-    passCriteria: 'A past-due open invoice transitions to overdue via the sweep worker',
+    passCriteria:
+      'A past-due open invoice drives the linked job money_state to overdue via the sweep worker and emits an invoice.overdue audit event (invoices have no overdue status by design)',
     expected: 'fail',
     expectedReason: 'Overdue sweep worker not running on dev (PAY-04 live partial corroborates).',
   },

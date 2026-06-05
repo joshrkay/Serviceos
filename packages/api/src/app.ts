@@ -2969,7 +2969,9 @@ export function createApp(): express.Express {
         error: err instanceof Error ? err.message : String(err),
       });
     });
-  }, 60 * 60_000));
+  }, Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) > 0 ? Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) : 60 * 60_000));
+  // QA-2026-06-05: interval is env-tunable (OVERDUE_SWEEP_INTERVAL_MS) so dev/QA
+  // can observe the sweep inside a test window; default stays hourly.
 
   const appointmentReminderLogger = createLogger({
     service: 'appointment-reminder-worker',

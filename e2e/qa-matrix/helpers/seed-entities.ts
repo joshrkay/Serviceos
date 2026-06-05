@@ -13,10 +13,18 @@ export interface SeededJob {
   jobId: string;
 }
 
+export interface SeedFreshJobOptions {
+  /** Grant SMS consent so delivery channels aren't suppressed (PORT/SMS rows). */
+  smsConsent?: boolean;
+  /** Attach an email so the email channel is available. */
+  email?: string;
+}
+
 export async function seedFreshJob(
   h: RowHarness,
   label: string,
-  tenant: { token: string } = h.tenantA
+  tenant: { token: string } = h.tenantA,
+  opts: SeedFreshJobOptions = {}
 ): Promise<SeededJob> {
   const { token } = tenant;
   const stamp = Date.now();
@@ -27,6 +35,8 @@ export async function seedFreshJob(
       firstName: 'QA',
       lastName: `${label}-${stamp}`,
       primaryPhone: `+1555${String(stamp).slice(-7)}`,
+      ...(opts.smsConsent !== undefined ? { smsConsent: opts.smsConsent } : {}),
+      ...(opts.email ? { email: opts.email } : {}),
     },
     token,
     label: `${label}-customer`,

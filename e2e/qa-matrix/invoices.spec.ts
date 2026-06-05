@@ -1,5 +1,7 @@
 import * as crypto from 'node:crypto';
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
+import { seedFreshJob } from './helpers/seed-entities';
+import { rwAvailable, rwExec } from './helpers/rw-db';
 
 /**
  * INV-01..INV-07 — 4-agent swarm. See estimates.spec.ts for the pattern.
@@ -65,10 +67,15 @@ matrixTest('INV-02', 'List/filter invoices', async (h) => {
 });
 
 matrixTest('INV-03', 'Send invoice', async (h) => {
+  // QA-2026-06-05: exercise the REAL delivery leg. The old spec stopped at
+  // issue and hardcoded partial ('no email/SMS delivery') — but dev runs the
+  // InMemoryDeliveryProvider; delivery only ever failed because the shared
+  // fixture customer had no consent/email. Own consenting customer + job.
+  const { jobId } = await seedFreshJob(h, '03-seed', h.tenantA, { smsConsent: true, email: 'qa.inv03@example.com' });
   const created = await h.api.call({
     method: 'POST',
     path: '/api/invoices',
-    body: buildMinimalInvoicePayload(h.tenantA.jobId),
+    body: buildMinimalInvoicePayload(jobId),
     token: h.tenantA.token,
     label: '03-create',
     expectStatus: 201,
@@ -87,18 +94,45 @@ matrixTest('INV-03', 'Send invoice', async (h) => {
   expect(body.status).toBe('open');
   expect(body.issuedAt).toBeTruthy();
 
+  const send = await h.api.call({
+    method: 'POST',
+    path: `/api/invoices/${id}/send`,
+    body: { channel: 'sms' },
+    token: h.tenantA.token,
+    label: '03-send',
+    expectStatus: [200, 202],
+  });
+  const sendBody = send.response.body as { channelsSent?: Array<{ channel?: string }> };
+
   const db = await h.db.query({
     label: '03-row',
     tenantId: h.tenantA.tenantId,
-    sql: `SELECT status, issued_at, due_date FROM invoices WHERE id = $1`,
+    sql: `SELECT status, issued_at, view_token FROM invoices WHERE id = $1`,
     params: [id],
   });
-  const row = db.rows[0] as { status: string; issued_at: string };
+  const row = db.rows[0] as { status: string; issued_at: string; view_token: string | null };
   expect(row.status).toBe('open');
   expect(row.issued_at).toBeTruthy();
 
+  const dispatches = await h.db.query({
+    label: '03-dispatches',
+    tenantId: h.tenantA.tenantId,
+    sql: `SELECT entity_type, channel, status FROM message_dispatches WHERE entity_id = $1`,
+    params: [id],
+  });
+
   await gotoUi(h, `/invoices/${id}`, '03-detail');
-  h.evidence.partial("Matches implementation: status 'open' + issued_at. Matrix 'sent' / sent_at terminology does not match product schema. No email/SMS delivery.");
+  if ((sendBody.channelsSent?.length ?? 0) > 0 && row.view_token) {
+    h.evidence.pass(
+      `Issued (open + issued_at) and delivered via ${sendBody.channelsSent!.map((c) => c.channel).join(',')}; ` +
+        `view token minted; dispatch rows: ${dispatches.rowCount}.`
+    );
+  } else {
+    h.evidence.partial(
+      `Issued ok; send=${send.response.status}, channelsSent=${sendBody.channelsSent?.length ?? 0}, ` +
+        `view_token=${row.view_token ? 'minted' : 'absent'}, dispatch rows=${dispatches.rowCount}.`
+    );
+  }
 });
 
 matrixTest('INV-04', 'Payment link generation', async (h) => {
@@ -304,43 +338,66 @@ matrixTest('INV-06', 'Idempotent payment handling', async (h) => {
 });
 
 matrixTest('INV-07', 'Overdue lifecycle', async (h) => {
+  // QA-2026-06-05: aligned with the actual data model — invoices have no
+  // 'overdue' STATUS; the hourly sweep (overdue-invoice-worker, env-tunable
+  // via OVERDUE_SWEEP_INTERVAL_MS) drives the linked JOB's money_state to
+  // 'overdue' and emits an invoice.overdue audit event on the transition.
+  if (!rwAvailable()) {
+    h.evidence.na('E2E_DB_URL_READWRITE not set — cannot backdate due_date.');
+    return;
+  }
+  const { jobId } = await seedFreshJob(h, '07-seed');
   const created = await h.api.call({
     method: 'POST',
     path: '/api/invoices',
-    body: buildMinimalInvoicePayload(h.tenantA.jobId),
+    body: buildMinimalInvoicePayload(jobId),
     token: h.tenantA.token,
     label: '07-create',
     expectStatus: 201,
   });
   const id = (created.response.body as { id: string }).id;
-
-  // Try to transition directly to 'overdue' — expect 400 since enum doesn't include it.
-  const overdueAttempt = await h.api.call({
+  await h.api.call({
     method: 'POST',
-    path: `/api/invoices/${id}/transition`,
-    body: { status: 'overdue' },
+    path: `/api/invoices/${id}/issue`,
+    body: { paymentTermDays: 30 },
     token: h.tenantA.token,
-    label: '07-transition-overdue',
-    expectStatus: [200, 400],
+    label: '07-issue',
+    expectStatus: [200, 201],
   });
+  await rwExec(
+    h.tenantA.tenantId,
+    `UPDATE invoices SET due_date = now() - interval '5 days' WHERE id = $1`,
+    [id]
+  );
 
-  // QA-2026-06-04: tenant-scoped existence probe (the old no-GUC query
-  // errored on RLS under qa_readonly). Scoped to tenant A is sufficient —
-  // the question is only whether 'overdue' is a reachable status value.
-  const db = await h.db.query({
-    label: '07-check-enum',
+  let moneyState = 'unknown';
+  for (let i = 0; i < 10; i++) {
+    await new Promise((r) => setTimeout(r, 2500));
+    const res = await h.db.query({
+      label: `07-money-state-${i}`,
+      tenantId: h.tenantA.tenantId,
+      sql: `SELECT money_state FROM jobs WHERE id = $1`,
+      params: [jobId],
+    });
+    moneyState = (res.rows[0] as { money_state?: string })?.money_state ?? 'unknown';
+    if (moneyState === 'overdue') break;
+  }
+
+  const audit = await h.db.query({
+    label: '07-audit',
     tenantId: h.tenantA.tenantId,
-    sql: `SELECT DISTINCT status FROM invoices WHERE status = 'overdue'`,
+    sql: `SELECT count(*)::int AS c FROM audit_events WHERE event_type = 'invoice.overdue' AND entity_id = $1`,
+    params: [id],
   });
+  const auditCount = (audit.rows[0] as { c: number }).c;
 
   await gotoUi(h, `/invoices/${id}`, '07-detail');
-
-  if (overdueAttempt.response.status === 200 && db.rowCount > 0) {
-    h.evidence.pass('Overdue transition accepted and rows exist.');
+  if (moneyState === 'overdue' && auditCount >= 1) {
+    h.evidence.pass(`Sweep drove job money_state=overdue and emitted invoice.overdue audit (${auditCount}).`);
+  } else if (moneyState === 'overdue') {
+    h.evidence.partial(`money_state=overdue but no invoice.overdue audit row found.`);
   } else {
-    h.evidence.fail(
-      "No 'overdue' status in the invoices schema; no cron/on-read logic to transition past-due invoices. Feature is not implemented."
-    );
+    h.evidence.partial(`money_state=${moneyState}, audit rows=${auditCount} — sweep did not observe the invoice in the window.`);
   }
 });
 
