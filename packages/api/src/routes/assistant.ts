@@ -177,6 +177,27 @@ function customerProposalToUI(
   };
 }
 
+
+/**
+ * QA-2026-06-05: the assistant accepts FREE TEXT — entity ids in LLM-built
+ * payloads must literally appear in the operator's message (or classifier
+ * entities); the model may not invent them (live: hallucinated textbook
+ * UUIDs sent executions into doomed lookups).
+ */
+function dropUnverifiedIds(
+  payload: Record<string, unknown>,
+  operatorText: string,
+  entities: Record<string, unknown>
+): void {
+  const haystack = (operatorText + ' ' + JSON.stringify(entities)).toLowerCase();
+  for (const key of ['jobId', 'customerId', 'estimateId', 'invoiceId', 'appointmentId']) {
+    const v = payload[key];
+    if (typeof v === 'string' && v.length >= 32 && !haystack.includes(v.toLowerCase())) {
+      delete payload[key];
+    }
+  }
+}
+
 /**
  * QA-2026-06-05 (AST-02/03/04): map any persisted proposal to the UI card
  * shape — estimates/invoices were previously unpersisted LLM JSON.
@@ -322,6 +343,7 @@ async function generateAssistantReply(
             message: segment,
             existingEntities: segEntities,
           });
+          dropUnverifiedIds(proposal.payload, segment, segEntities);
           proposal.sourceContext = { ...(proposal.sourceContext ?? {}), chainId, chainStep: chainCards.length + 1 };
           // Dependency gate: steps after the first reference results that
           // don't exist yet (the customer, their job). Auto-approval would
@@ -393,6 +415,7 @@ async function generateAssistantReply(
           message: lastUserText,
           existingEntities: { ...(classification.extractedEntities ?? {}) },
         });
+        dropUnverifiedIds(proposal.payload, lastUserText, { ...(classification.extractedEntities ?? {}) });
         await deps.proposalRepo.create(proposal);
         if (proposal.status === 'draft') {
           await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');

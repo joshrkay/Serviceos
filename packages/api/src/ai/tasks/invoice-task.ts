@@ -93,25 +93,18 @@ export class InvoiceTaskHandler implements TaskHandler {
 
     const parsed = tryParseInvoiceJson(llmResponse.content);
     const payload = buildPartialInvoicePayload(parsed);
-    // QA-2026-06-05: harden the LLM payload before it becomes a proposal —
-    // live executions failed with NaN money casts and hallucinated example
-    // UUIDs (123e4567-…). Two rules:
-    //  1. Entity ids must literally appear in the operator's message —
-    //     the model may not invent them. Dropped ids surface as missing
-    //     fields for review instead of doomed executions.
-    //  2. Line items normalize to integer cents (dollar floats → cents,
-    //     non-numeric → dropped) with quantity defaulting to 1.
-    const UUID_IN_MSG = (id: unknown): boolean =>
-      typeof id === 'string' && context.message.toLowerCase().includes(id.toLowerCase());
-    for (const key of ['jobId', 'customerId', 'estimateId'] as const) {
-      if (payload[key] !== undefined && !UUID_IN_MSG(payload[key])) delete payload[key];
-    }
+    // QA-2026-06-05: normalize line items to the execution contract — the
+    // LLM emits `unitPrice` (cents per the system prompt) while the executor
+    // reads `unitPriceCents`; the mismatch produced NaN money casts in live
+    // executions. Non-finite amounts are dropped (they surface as missing
+    // fields for operator review instead of doomed executions). Entity-id
+    // trust is enforced at the entry points that accept free text (the
+    // assistant route) — pipeline callers feed verified context ids.
     if (Array.isArray(payload.lineItems)) {
       payload.lineItems = (payload.lineItems as Array<Record<string, unknown>>)
         .map((li, idx) => {
           const qty = Number(li.quantity ?? 1) || 1;
-          const rawCents = li.unitPriceCents ?? (typeof li.unitPrice === 'number' ? Math.round(li.unitPrice * 100) : undefined);
-          const unitPriceCents = Number(rawCents);
+          const unitPriceCents = Number(li.unitPriceCents ?? li.unitPrice);
           if (!Number.isFinite(unitPriceCents) || unitPriceCents < 0) return undefined;
           const totalCents = Math.round(unitPriceCents * qty);
           return {
