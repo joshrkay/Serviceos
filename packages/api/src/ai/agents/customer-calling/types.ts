@@ -81,6 +81,14 @@ export interface CallingAgentContext {
   callSid?: string;           // telephony only
   conversationId?: string;    // in-app only
   customerId?: string;        // set after identifying
+  /**
+   * QA-2026-06-04: classifier confidence captured at intent_classified so the
+   * eventual create_proposal side-effect can thread a REAL confidenceScore
+   * into the proposal (auto-approve thresholds). Without it the calling-agent
+   * proposals were born 'draft' with no trust tier — unapprovable once the
+   * draft guard landed.
+   */
+  lastIntentConfidence?: number;
   customerName?: string;
   currentIntent?: string;
   extractedEntities?: Record<string, unknown>;

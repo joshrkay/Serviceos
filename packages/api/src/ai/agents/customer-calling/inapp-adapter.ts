@@ -775,6 +775,13 @@ export class InAppVoiceAdapter {
           conversationId: typeof payload.conversationId === 'string' ? payload.conversationId : undefined,
         },
         summary,
+        // QA-2026-06-04: mirror the AI task handlers (create-appointment-task
+        // et al.) — calling-agent proposals are capture-class from the
+        // autonomous tier with a real classifier confidence. Without these,
+        // initialProposalStatus always returned 'draft', which the approval
+        // guard correctly refuses to approve — voice proposals were stuck.
+        ...(typeof payload.confidence === 'number' ? { confidenceScore: payload.confidence } : {}),
+        sourceTrustTier: 'autonomous',
         sourceContext: {
           source: 'calling-agent',
           channel: session.channel,
