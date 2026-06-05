@@ -36,8 +36,12 @@ const assistantProposalSchema = z.object({
   confidence: z.enum(['High', 'Medium']),
   type: z.enum(['Invoice', 'Estimate', 'Schedule', 'Follow-up', 'Alert', 'Duplicate', 'Customer']),
   status: z.enum(['Pending', 'Approved', 'Rejected']),
-  relatedId: z.string().optional(),
-  impact: z.string().optional(),
+  // QA-2026-06-05: LLMs emit JSON null for "no value" — .optional() alone
+  // rejects null, so every estimate-draft completion whose relatedId/impact
+  // was null failed validation and degraded to the fallback envelope
+  // (live: "LLM completion failed ... expected string, received null").
+  relatedId: z.string().nullish().transform((v) => v ?? undefined),
+  impact: z.string().nullish().transform((v) => v ?? undefined),
 });
 
 const assistantReplySchema = z.object({
