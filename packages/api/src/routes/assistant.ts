@@ -215,6 +215,14 @@ async function generateAssistantReply(
           existingEntities: customerPayload,
         });
         await deps.proposalRepo.create(proposal);
+        // QA-2026-06-05: parity with the guardrail promote step (see
+        // inapp-adapter.handleCreateProposal). create-customer-task builds
+        // proposals without a trust tier, so they land 'draft' — invisible
+        // to the inbox and unapprovable under the lifecycle guard. Promote
+        // complete drafts so the operator can act on them.
+        if (proposal.status === 'draft') {
+          await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
+        }
 
         const uiProposal = customerProposalToUI(
           proposal.id,
