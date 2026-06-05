@@ -238,6 +238,17 @@ matrixTest('AST-05', 'Payment status query via assistant', async (h) => {
 });
 
 matrixTest('AST-06', 'Failure handling + recovery', async (h) => {
+  // QA-2026-06-05: before/after delta instead of a 30s lookback — the old
+  // window caught the serial neighbor's legitimate REST seed (AST-03 creates
+  // a target estimate) and false-failed this row.
+  const before = await h.db.query({
+    label: '06-count-before',
+    tenantId: h.tenantA.tenantId,
+    sql: `SELECT count(*)::int AS c FROM estimates WHERE tenant_id = $1`,
+    params: [h.tenantA.tenantId],
+  });
+  const countBefore = (before.rows[0] as { c: number }).c;
+
   // Force a validation failure — empty content string.
   const resp = await h.api.call({
     method: 'POST',
@@ -249,20 +260,20 @@ matrixTest('AST-06', 'Failure handling + recovery', async (h) => {
   });
   expect([400, 422]).toContain(resp.response.status);
 
-  const db = await h.db.query({
-    label: '06-no-new-rows',
+  const after = await h.db.query({
+    label: '06-count-after',
     tenantId: h.tenantA.tenantId,
-    sql: `SELECT count(*)::int AS c FROM estimates WHERE tenant_id = $1 AND created_at > now() - interval '30 seconds'`,
+    sql: `SELECT count(*)::int AS c FROM estimates WHERE tenant_id = $1`,
     params: [h.tenantA.tenantId],
   });
-  const c = (db.rows[0] as { c: number }).c;
+  const delta = (after.rows[0] as { c: number }).c - countBefore;
 
   await gotoUi(h, '/assistant', '06-error');
 
-  if (c === 0) {
+  if (delta === 0) {
     h.evidence.pass('Invalid request returned clear error and no downstream rows were created.');
   } else {
-    h.evidence.fail(`Invalid request caused ${c} new estimate rows — validation bypassed.`);
+    h.evidence.fail(`Invalid request caused ${delta} new estimate rows — validation bypassed.`);
   }
 });
 
