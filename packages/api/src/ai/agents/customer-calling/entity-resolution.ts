@@ -169,6 +169,12 @@ export async function resolveSchedulingEntities(
       }
     }
     if (appointmentId) resolved.appointmentId = appointmentId;
+    // The cancellation handler requires a reason. Use the classifier's when
+    // present; otherwise record the channel — the operator sees the full
+    // summary at approval time.
+    if (intent === 'cancel_appointment' && typeof entities.reason !== 'string') {
+      resolved.reason = 'Requested by caller via voice session';
+    }
   }
 
   return resolved;
