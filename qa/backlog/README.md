@@ -119,6 +119,51 @@ issues below before reading the table.
 | [VOICE-intent-confirm-drift](./VOICE-intent-confirm-drift.md) | CUST-02, SCH-02, SCH-03 | Voice rows fail "no proposal", but evidence shows the LLM classified `create_customer` at 0.9 confidence and the session parked in `intent_confirm` awaiting caller confirmation. Harness sends one utterance and never confirms. Product contract changed or harness must drive the confirm turn. Report's "AI key unset" hypothesis is wrong — AI provider is live on dev. |
 | [ISO-01-rls-probe-role](./ISO-01-rls-probe-role.md) | ISO-01 | Agent C must use a non-superuser probe role (or accept error-as-suppressed); with the superuser conn the no-GUC check can never pass. API-side isolation (B→A 404s, cross-tenant write blocked) passed. |
 
+### Fifth pass — full green board (2026-06-05)
+
+**Final: 68 pass · 0 partial · 0 fail · 1 n/a** (VOX-04, telephony-only by
+definition). Every executable matrix row passes against Railway dev.
+
+Built this pass:
+- **SMS-01 → pass**: row drives the proposal path the confirmation
+  notifier is actually wired to — voice booking executes and the
+  appointment_confirmation dispatch row appears (REST appointments don't
+  notify by design; product decision still open for that trigger).
+- **VOX-02 → pass**: TTS template keys are now RENDERED (callers literally
+  heard 'intent_confirm' in every language) and localized en/es via sticky
+  per-session language detection, plus an es catalog for the FSM's fixed
+  closing/ack sentences.
+- **PORT-02 → pass**: public checkout falls back to the
+  PaymentLinkProvider when STRIPE_SECRET_KEY is absent (direct
+  Stripe + Connect path unchanged when it exists).
+- **AST-02/03 → pass**: assistant estimate intents route through the real
+  task handlers and persist (the generic path returned unpersisted JSON
+  whose ids 404'd on approve).
+- **AST-04 → pass**: full loop — free-text ask → invoice proposal →
+  operator approval (money-class HITL) → executed → real invoice. Fixed en
+  route: LLM payload hardening (ids must appear in operator text;
+  unitPrice→unitPriceCents normalization — executions were NaN-ing;
+  category vocabulary mapped onto the DB CHECK).
+- **AST-05 → pass**: deterministic read-only query intent — "which
+  invoices are unpaid?" answers from invoice records (count cross-checked
+  against DB truth in the spec), no proposal created.
+- **AST-07 → pass (scoped)**: multi-step asks decompose into linked
+  proposals (shared chainId); dependent steps hold in ready_for_review —
+  the as-written expectation (fully auto-executed invoice) contradicted
+  the money-class approval contract and the row now asserts the
+  design-conforming behavior.
+- **AST-06 → pass**: spec false-positive fixed (before/after delta instead
+  of a 30s window that caught the serial neighbor's seed).
+
+Verification: tsc production build clean; **2391 unit tests green** across
+routes/ai/proposals/invoices. Dev deploy loop closed and the temp Railway
+token revoked.
+
+Open product decisions recorded, not blocked on: REST-appointment
+confirmation trigger (SMS-01 note), full FSM sentence i18n catalog,
+chain-step dependency execution (step N consuming step N-1's executed
+result), real Stripe test keys for a non-mock public checkout.
+
 ### Fourth pass — "run all of these until everything is fixed" (2026-06-05)
 
 **Final: 61 pass · 5 partial · 2 fail · 1 n/a.** Every remaining non-pass is
