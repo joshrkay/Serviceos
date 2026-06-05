@@ -660,7 +660,8 @@ export const MATRIX: MatrixRow[] = [
     id: 'AST-07',
     module: 'AST',
     feature: 'Multi-step orchestration (customer → estimate → invoice)',
-    passCriteria: 'A multi-step ask yields chained proposals executed in order',
+    passCriteria:
+      'A multi-step ask decomposes into linked proposals (shared chainId); capture-class steps execute after approval windows, money-class steps land ready_for_review — HITL is never bypassed (full auto-executed chains would violate the money-class approval contract)',
     expected: 'fail',
     expectedReason: 'Proposal chaining not implemented — see qa/backlog/AST-07-multi-step-chaining.md.',
   },

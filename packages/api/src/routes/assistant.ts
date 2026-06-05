@@ -271,6 +271,90 @@ async function generateAssistantReply(
         deps.gateway,
       );
 
+      // QA-2026-06-05 (AST-07, scoped): multi-step asks ("…, then …") are
+      // decomposed into SEQUENTIAL linked proposals sharing a chainId in
+      // sourceContext. Each step executes per its action class: capture
+      // steps auto-approve at confidence and the worker executes them;
+      // money/comms steps land ready_for_review — the HITL contract is
+      // never bypassed (the original matrix expectation of a fully-executed
+      // invoice without approval contradicts 'money never auto-approves').
+      const chainSegments = lastUserText.split(/(?:,\s*)?\bthen\b\s+/i).map((seg) => seg.trim()).filter(Boolean);
+      if (chainSegments.length >= 2 && chainSegments.length <= 4) {
+        const chainId = `chain_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const chainCards: AssistantProposal[] = [];
+        const carried: Record<string, unknown> = {};
+        for (const segment of chainSegments) {
+          let segClass;
+          try {
+            segClass = await classifyIntent(
+              segment,
+              { tenantId, ...(verticalPromptSection ? { verticalPromptSection } : {}) },
+              deps.gateway,
+            );
+          } catch {
+            continue;
+          }
+          const chainHandlers: Record<string, (() => TaskHandler) | undefined> = {
+            create_customer: () => new CreateCustomerTaskHandler(),
+            draft_estimate: () => new EstimateTaskHandler(deps.gateway),
+            update_estimate: () => new EstimateEditTaskHandler(deps.gateway),
+            create_invoice: () => new InvoiceTaskHandler(deps.gateway),
+            send_invoice: () => new InvoiceTaskHandler(deps.gateway),
+          };
+          const factory = chainHandlers[segClass.intentType];
+          if (!factory) continue;
+          const segEntities: Record<string, unknown> = { ...carried, ...(segClass.extractedEntities ?? {}) };
+          if (segClass.intentType === 'create_customer' && segEntities.displayName && !segEntities.name) {
+            segEntities.name = segEntities.displayName;
+          }
+          const { proposal } = await factory().handle({
+            tenantId,
+            userId,
+            message: segment,
+            existingEntities: segEntities,
+          });
+          proposal.sourceContext = { ...(proposal.sourceContext ?? {}), chainId, chainStep: chainCards.length + 1 };
+          await deps.proposalRepo.create(proposal);
+          if (proposal.status === 'draft') {
+            await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
+          }
+          // Carry the customer reference into later steps so "for her" /
+          // "their estimate" resolves at execution time.
+          if (typeof segEntities.name === 'string') carried.customerName = segEntities.name;
+          if (typeof segEntities.displayName === 'string') carried.customerName = segEntities.displayName;
+          chainCards.push(proposalToUI(proposal, segment));
+        }
+        if (chainCards.length === 1) {
+          // Only one segment produced a proposal — return it directly so the
+          // single-intent path doesn't mint a duplicate.
+          return {
+            taskType: 'assistant.chain',
+            model: 'intent-classifier',
+            usage: { input: 0, output: 0, total: 0 },
+            message: {
+              role: 'assistant' as const,
+              content: `${chainCards[0].title}. Review and approve to proceed.`,
+              proposal: chainCards[0],
+            },
+          };
+        }
+        if (chainCards.length >= 2) {
+          return {
+            taskType: 'assistant.chain',
+            model: 'intent-classifier',
+            usage: { input: 0, output: 0, total: 0 },
+            message: {
+              role: 'assistant' as const,
+              content:
+                `Created ${chainCards.length} linked steps: ` +
+                chainCards.map((c, i) => `${i + 1}) ${c.title}`).join('; ') +
+                '. Capture steps run after approval windows; money steps wait for your approval.',
+              proposal: chainCards[0],
+            },
+          };
+        }
+      }
+
       // QA-2026-06-05 (AST-02/03/04): estimate/invoice intents go through
       // the REAL task handlers and persist — the generic LLM path returned
       // unpersisted JSON cards whose ids 404'd on approve.
