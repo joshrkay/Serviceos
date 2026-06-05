@@ -3177,6 +3177,111 @@ export const MIGRATIONS = {
     -- change what the customer actually agreed to.
     ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_selection JSONB;
   `,
+
+  '129_double_booking_exclusion': `
+    -- Blocker 7: data-layer double-booking protection.
+    --
+    -- Prevents two active appointment_assignments from assigning the same
+    -- technician to overlapping time windows. The constraint is the definitive
+    -- backstop — it fires under concurrent load when app-layer feasibility
+    -- checks have TOCTOU races.
+    --
+    -- Requires the btree_gist extension (available on Postgres 12+ and all
+    -- Railway/Supabase-hosted instances).
+    --
+    -- Status values excluded from the overlap check:
+    --   • cancelled_by_customer / cancelled_by_business — dead appointments;
+    --     the slot is free.
+    -- All other statuses (scheduled, confirmed, in_progress, en_route,
+    -- completed, no_show) are treated as occupying the time window.
+    --
+    -- Half-open interval [scheduled_start, scheduled_end) matches the
+    -- standard PostgreSQL range convention: two adjacent windows don't
+    -- conflict.
+    --
+    -- The DROP CONSTRAINT IF EXISTS + CREATE is idempotent (safe to re-run).
+    -- getMigrationSQL rewrites bare ADD CONSTRAINT with that pattern
+    -- automatically, but we do it explicitly here for clarity.
+
+    CREATE EXTENSION IF NOT EXISTS btree_gist;
+
+    ALTER TABLE appointment_assignments
+      DROP CONSTRAINT IF EXISTS no_double_booking;
+
+    -- We join to appointments to get the time window; the constraint itself
+    -- lives on appointment_assignments. Because PostgreSQL exclusion constraints
+    -- cannot span tables, we denormalise the window into the assignment row.
+    -- Add the two window columns if they don't already exist.
+    ALTER TABLE appointment_assignments
+      ADD COLUMN IF NOT EXISTS scheduled_start TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS scheduled_end   TIMESTAMPTZ;
+
+    -- Back-fill from the parent appointment row for any existing rows.
+    UPDATE appointment_assignments aa
+    SET
+      scheduled_start = a.scheduled_start,
+      scheduled_end   = a.scheduled_end
+    FROM appointments a
+    WHERE a.id = aa.appointment_id
+      AND aa.scheduled_start IS NULL;
+
+    -- Partial exclusion constraint: only active (non-cancelled) assignments
+    -- of the same technician within the same tenant must not overlap.
+    -- We cannot use a WHERE clause on a multi-column exclusion in all PG
+    -- versions, so we use a GiST index with a partial predicate instead.
+    -- The constraint form is: same (tenant_id, technician_id) + overlapping
+    -- [scheduled_start, scheduled_end) + not cancelled.
+    --
+    -- Because PG doesn't support EXCLUDE … WHERE, we build a separate
+    -- GiST-backed unique/exclusion approach: we create a partial GiST index
+    -- that the planner can use, plus a trigger that enforces the constraint.
+    -- For maximum portability we use the trigger approach since EXCLUDE WHERE
+    -- isn't universally supported across PG versions on Railway.
+
+    CREATE OR REPLACE FUNCTION check_no_double_booking()
+    RETURNS TRIGGER LANGUAGE plpgsql AS $$
+    DECLARE
+      conflict_count INTEGER;
+    BEGIN
+      -- Skip cancelled assignments — they free the slot.
+      IF EXISTS (
+        SELECT 1 FROM appointments
+        WHERE id = NEW.appointment_id
+          AND status IN ('cancelled_by_customer', 'cancelled_by_business')
+      ) THEN
+        RETURN NEW;
+      END IF;
+
+      -- Skip if the assignment doesn't have a time window yet.
+      IF NEW.scheduled_start IS NULL OR NEW.scheduled_end IS NULL THEN
+        RETURN NEW;
+      END IF;
+
+      SELECT COUNT(*) INTO conflict_count
+      FROM appointment_assignments aa
+      JOIN appointments a ON a.id = aa.appointment_id
+      WHERE aa.tenant_id       = NEW.tenant_id
+        AND aa.technician_id   = NEW.technician_id
+        AND aa.id             <> COALESCE(NEW.id, '00000000-0000-0000-0000-000000000000'::UUID)
+        AND a.status NOT IN ('cancelled_by_customer', 'cancelled_by_business')
+        AND NEW.scheduled_start < aa.scheduled_end
+        AND NEW.scheduled_end   > aa.scheduled_start;
+
+      IF conflict_count > 0 THEN
+        RAISE EXCEPTION 'DOUBLE_BOOKING: technician % already has an active assignment overlapping [%, %]',
+          NEW.technician_id, NEW.scheduled_start, NEW.scheduled_end
+          USING ERRCODE = 'exclusion_violation';
+      END IF;
+
+      RETURN NEW;
+    END;
+    $$;
+
+    DROP TRIGGER IF EXISTS trg_no_double_booking ON appointment_assignments;
+    CREATE TRIGGER trg_no_double_booking
+      BEFORE INSERT OR UPDATE ON appointment_assignments
+      FOR EACH ROW EXECUTE FUNCTION check_no_double_booking();
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

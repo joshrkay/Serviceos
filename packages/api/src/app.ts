@@ -695,9 +695,39 @@ export function createApp(): express.Express {
     createAiHealthRouter(registry)(req, res, next);
   });
 
-  // Prometheus metrics. Mounted on the public surface deliberately —
-  // production should rely on network-level allowlist (ingress / VPC).
-  app.get('/metrics', async (_req, res) => {
+  // Prometheus metrics — gated by a shared secret token so scrape targets
+  // can authenticate without a full Clerk JWT. Set METRICS_SECRET in env;
+  // if unset the route is disabled in production (returns 403) and open in
+  // non-production for local Prometheus dev. Callers: send the token as
+  //   Authorization: Bearer <METRICS_SECRET>
+  // or as query param ?token=<METRICS_SECRET>.
+  app.get('/metrics', async (req, res) => {
+    const metricsSecret = process.env.METRICS_SECRET;
+    const nodeEnv = process.env.NODE_ENV ?? 'development';
+    const isProd = nodeEnv === 'production' || nodeEnv === 'prod';
+
+    if (metricsSecret) {
+      // Require token when METRICS_SECRET is configured.
+      const authHeader = req.headers['authorization'] ?? '';
+      const queryToken = typeof req.query['token'] === 'string' ? req.query['token'] : '';
+      const provided = authHeader.startsWith('Bearer ')
+        ? authHeader.slice(7).trim()
+        : queryToken;
+
+      if (provided !== metricsSecret) {
+        res.status(401).json({ error: 'UNAUTHORIZED', message: 'Valid METRICS_SECRET required' });
+        return;
+      }
+    } else if (isProd) {
+      // Production with no secret configured — refuse rather than leak.
+      res.status(403).json({
+        error: 'FORBIDDEN',
+        message: 'METRICS_SECRET env var must be set in production to expose /metrics',
+      });
+      return;
+    }
+    // Non-production with no secret: open (local Prometheus dev convenience).
+
     try {
       const { renderMetrics } = await import('./monitoring/metrics');
       const { contentType, body } = await renderMetrics();
