@@ -119,6 +119,43 @@ issues below before reading the table.
 | [VOICE-intent-confirm-drift](./VOICE-intent-confirm-drift.md) | CUST-02, SCH-02, SCH-03 | Voice rows fail "no proposal", but evidence shows the LLM classified `create_customer` at 0.9 confidence and the session parked in `intent_confirm` awaiting caller confirmation. Harness sends one utterance and never confirms. Product contract changed or harness must drive the confirm turn. Report's "AI key unset" hypothesis is wrong — AI provider is live on dev. |
 | [ISO-01-rls-probe-role](./ISO-01-rls-probe-role.md) | ISO-01 | Agent C must use a non-superuser probe role (or accept error-as-suppressed); with the superuser conn the no-GUC check can never pass. API-side isolation (B→A 404s, cross-tenant write blocked) passed. |
 
+### Fourth pass — "run all of these until everything is fixed" (2026-06-05)
+
+**Final: 61 pass · 5 partial · 2 fail · 1 n/a.** Every remaining non-pass is
+a documented design decision, env choice, or explicitly deferred feature:
+
+Built this pass:
+- **INV-04 → pass**: route existed; spec now exercises issue → payment-link
+  (mock provider on dev, draft 409 guard verified).
+- **INV-05/06 → pass**: shared dev `STRIPE_WEBHOOK_SECRET`; the harness
+  signs `checkout.session.completed` exactly like Stripe — signature
+  verification, payment application, and event dedup verified end-to-end.
+- **INV-03 + PORT-01 → pass**: the "unwired send service" was actually the
+  fixture customer's missing sms_consent/email suppressing every channel;
+  dev's InMemoryDeliveryProvider works. Rows seed consenting customers;
+  view tokens read from the DB (captured responses are redaction-scrubbed).
+- **PAY-04 + INV-07 → pass**: `OVERDUE_SWEEP_INTERVAL_MS` makes the hourly
+  sweep observable (15s on dev); INV-07 aligned with the real model (job
+  money_state + invoice.overdue audit; invoices have no overdue status).
+- **SCH-02/03 → pass**: REAL voice entity resolution
+  (`customer-calling/entity-resolution.ts`): NL datetimes parse
+  deterministically (7 unit tests), customerName → tenant-scoped customer,
+  create intents resolve the customer's latest active job,
+  cancel/reschedule resolve by recency, default cancellation reason.
+  Full loops verified live: schedule-by-voice creates a real appointment;
+  cancel-by-voice cancels the right one.
+
+Remaining (all storied/explained): SMS-01 partial (REST appointments don't
+send confirmations BY DESIGN — proposal path only; product decision
+pending), PORT-02 partial (public checkout needs real Stripe keys),
+VOX-02 partial (confirm prompt not localized), VOX-04 n/a (telephony-only),
+AST-02/03 partial + AST-05/07 fail (assistant estimate persistence, query
+intents, multi-step chaining — the explicitly deferred Tier 3/4 stories).
+
+Build verification: `tsc --project tsconfig.build.json` clean; 584 unit
+tests green across the touched areas. Dev config added:
+`STRIPE_WEBHOOK_SECRET`, `OVERDUE_SWEEP_INTERVAL_MS=15000`.
+
 ### Third pass — branch deployed to Railway dev via `railway up` (2026-06-05)
 
 **Final: 52 pass · 11 partial · 5 fail · 1 n/a** (report:

@@ -125,8 +125,10 @@ matrixTest('SMS-01', 'Outbound SMS dispatch records + entity_type CHECK', async 
     );
   } else {
     h.evidence.partial(
-      'No appointment_confirmation dispatch row from a REST-created appointment. Confirmation may only ' +
-        'fire via the create_booking proposal path, or Twilio is unconfigured on dev. Verify the trigger live.'
+      'No appointment_confirmation dispatch from a REST-created appointment — CONFIRMED BY DESIGN ' +
+        '(2026-06-05): the confirmation notifier is wired to the proposal-execution path only ' +
+        '(appointment-confirmation-notifier.ts via scheduling-notifications). Either add a REST-create ' +
+        'trigger (product decision) or repoint this check at the voice/proposal path, which now works E2E.'
     );
   }
   expect(rows.rowCount, 'dispatch query executed').toBeGreaterThanOrEqual(0);
