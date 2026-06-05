@@ -93,6 +93,40 @@ export class InvoiceTaskHandler implements TaskHandler {
 
     const parsed = tryParseInvoiceJson(llmResponse.content);
     const payload = buildPartialInvoicePayload(parsed);
+    // QA-2026-06-05: harden the LLM payload before it becomes a proposal —
+    // live executions failed with NaN money casts and hallucinated example
+    // UUIDs (123e4567-…). Two rules:
+    //  1. Entity ids must literally appear in the operator's message —
+    //     the model may not invent them. Dropped ids surface as missing
+    //     fields for review instead of doomed executions.
+    //  2. Line items normalize to integer cents (dollar floats → cents,
+    //     non-numeric → dropped) with quantity defaulting to 1.
+    const UUID_IN_MSG = (id: unknown): boolean =>
+      typeof id === 'string' && context.message.toLowerCase().includes(id.toLowerCase());
+    for (const key of ['jobId', 'customerId', 'estimateId'] as const) {
+      if (payload[key] !== undefined && !UUID_IN_MSG(payload[key])) delete payload[key];
+    }
+    if (Array.isArray(payload.lineItems)) {
+      payload.lineItems = (payload.lineItems as Array<Record<string, unknown>>)
+        .map((li, idx) => {
+          const qty = Number(li.quantity ?? 1) || 1;
+          const rawCents = li.unitPriceCents ?? (typeof li.unitPrice === 'number' ? Math.round(li.unitPrice * 100) : undefined);
+          const unitPriceCents = Number(rawCents);
+          if (!Number.isFinite(unitPriceCents) || unitPriceCents < 0) return undefined;
+          const totalCents = Math.round(unitPriceCents * qty);
+          return {
+            id: typeof li.id === 'string' ? li.id : `li-${idx + 1}`,
+            description: typeof li.description === 'string' ? li.description : 'Service',
+            category: typeof li.category === 'string' ? li.category.toLowerCase() : 'labor',
+            quantity: qty,
+            unitPriceCents: Math.round(unitPriceCents),
+            totalCents,
+            sortOrder: idx,
+            taxable: typeof li.taxable === 'boolean' ? li.taxable : false,
+          };
+        })
+        .filter(Boolean);
+    }
 
     const confidenceInput = parsed ?? {};
     const confidence = assessConfidence(confidenceInput);

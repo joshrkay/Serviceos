@@ -190,6 +190,8 @@ function proposalToUI(
     update_estimate: 'Estimate',
     draft_invoice: 'Invoice',
     send_invoice: 'Invoice',
+    create_customer: 'Customer',
+    update_customer: 'Customer',
   };
   const cardType = typeMap[proposal.proposalType] ?? 'Follow-up';
   const total = typeof proposal.payload.totalCents === 'number'
@@ -321,6 +323,15 @@ async function generateAssistantReply(
             existingEntities: segEntities,
           });
           proposal.sourceContext = { ...(proposal.sourceContext ?? {}), chainId, chainStep: chainCards.length + 1 };
+          // Dependency gate: steps after the first reference results that
+          // don't exist yet (the customer, their job). Auto-approval would
+          // send them into doomed executions — hold every dependent step
+          // (and any draft) in ready_for_review for sequential operator
+          // approval as predecessors materialize.
+          if (chainCards.length >= 1 && proposal.status === 'approved') {
+            proposal.status = 'ready_for_review';
+            proposal.approvedAt = undefined;
+          }
           await deps.proposalRepo.create(proposal);
           if (proposal.status === 'draft') {
             await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
