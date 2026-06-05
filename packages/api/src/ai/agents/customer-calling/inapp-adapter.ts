@@ -766,16 +766,23 @@ export class InAppVoiceAdapter {
         }
       }
       // QA-2026-06-05: execution handlers read the FLAT task contract
-      // (create_customer wants payload.name/email/phone — see
-      // create-customer-handler.ts), but this adapter only nested the raw
-      // classifier entities. Every voice create_customer execution failed
-      // 'Payload must include a non-empty name'. Mirror the assistant
-      // route's translation while keeping `entities` for audit/rendering.
+      // (create_customer wants payload.name; create_appointment wants
+      // payload.jobId/scheduledStart/... — see proposals/execution/*), but
+      // this adapter only nested the raw classifier entities, so EVERY
+      // voice execution failed its handler validation (live:
+      // 'Payload must include a non-empty name' / 'a valid jobId').
+      // Promote primitive entity values to the payload top level — the
+      // classifier's entity keys ARE the task-contract field names — while
+      // keeping `entities` intact for audit/rendering. Reserved envelope
+      // keys are never clobbered, and create_customer's displayName→name
+      // alias mirrors the assistant route's translation.
+      const RESERVED = new Set(['intent', 'entities', 'sessionId', 'conversationId', 'callSid', 'customerId', 'confidence']);
       const flat: Record<string, unknown> = {};
-      if (typeof entities.displayName === 'string') flat.name = entities.displayName;
-      else if (typeof entities.name === 'string') flat.name = entities.name;
-      if (typeof entities.email === 'string') flat.email = entities.email;
-      if (typeof entities.phone === 'string') flat.phone = entities.phone;
+      for (const [k, v] of Object.entries(entities)) {
+        if (RESERVED.has(k)) continue;
+        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') flat[k] = v;
+      }
+      if (typeof entities.displayName === 'string' && flat.name === undefined) flat.name = entities.displayName;
       const proposal = buildProposal({
         tenantId: session.tenantId,
         proposalType,
