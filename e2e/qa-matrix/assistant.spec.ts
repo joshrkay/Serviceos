@@ -305,22 +305,6 @@ matrixTest('AST-07', 'Multi-step orchestration (customer → estimate → invoic
   }
 });
 
-  await gotoUi(h, '/assistant', '07-chat');
-
-  const row = db.rows[0] as
-    | { customer_id: string; estimate_id: string | null; invoice_id: string | null }
-    | undefined;
-  if (row && row.estimate_id && row.invoice_id) {
-    h.evidence.pass();
-  } else if (reply.proposal) {
-    h.evidence.fail(
-      `Assistant returned a single proposal (type=${reply.proposal.type}) but did not chain customer→estimate→invoice. No orchestration support exists.`
-    );
-  } else {
-    h.evidence.fail('No proposal chain produced and no DB linkage created. Orchestration not implemented.');
-  }
-});
-
 // ---------------- helpers ----------------
 
 interface AssistantReplyRaw {

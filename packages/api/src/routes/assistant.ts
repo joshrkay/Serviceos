@@ -40,7 +40,12 @@ const assistantProposalSchema = z.object({
   editFields: z.array(z.object({ label: z.string(), key: z.string(), value: z.string() })).optional(),
   confidence: z.enum(['High', 'Medium']),
   type: z.enum(['Invoice', 'Estimate', 'Schedule', 'Follow-up', 'Alert', 'Duplicate', 'Customer']),
-  status: z.enum(['Pending', 'Approved', 'Rejected']),
+  // QA-2026-06-05: LLMs emit free-form statuses ('Sent', 'Draft', …) —
+  // coerce anything unknown to 'Pending' instead of discarding the reply.
+  status: z.preprocess(
+    (v) => (v === 'Approved' || v === 'Rejected' ? v : 'Pending'),
+    z.enum(['Pending', 'Approved', 'Rejected'])
+  ),
   // QA-2026-06-05: LLMs emit JSON null for "no value" — .optional() alone
   // rejects null, so every estimate-draft completion whose relatedId/impact
   // was null failed validation and degraded to the fallback envelope
@@ -300,6 +305,8 @@ async function generateAssistantReply(
             update_estimate: () => new EstimateEditTaskHandler(deps.gateway),
             create_invoice: () => new InvoiceTaskHandler(deps.gateway),
             send_invoice: () => new InvoiceTaskHandler(deps.gateway),
+            issue_invoice: () => new InvoiceTaskHandler(deps.gateway),
+            update_invoice: () => new InvoiceTaskHandler(deps.gateway),
           };
           const factory = chainHandlers[segClass.intentType];
           if (!factory) continue;
@@ -363,6 +370,8 @@ async function generateAssistantReply(
         update_estimate: () => new EstimateEditTaskHandler(deps.gateway),
         create_invoice: () => new InvoiceTaskHandler(deps.gateway),
         send_invoice: () => new InvoiceTaskHandler(deps.gateway),
+        issue_invoice: () => new InvoiceTaskHandler(deps.gateway),
+        update_invoice: () => new InvoiceTaskHandler(deps.gateway),
       };
       const handlerFactory = proposalHandlers[classification.intentType];
       if (handlerFactory) {
