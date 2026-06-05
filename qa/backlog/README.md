@@ -119,6 +119,56 @@ issues below before reading the table.
 | [VOICE-intent-confirm-drift](./VOICE-intent-confirm-drift.md) | CUST-02, SCH-02, SCH-03 | Voice rows fail "no proposal", but evidence shows the LLM classified `create_customer` at 0.9 confidence and the session parked in `intent_confirm` awaiting caller confirmation. Harness sends one utterance and never confirms. Product contract changed or harness must drive the confirm turn. Report's "AI key unset" hypothesis is wrong — AI provider is live on dev. |
 | [ISO-01-rls-probe-role](./ISO-01-rls-probe-role.md) | ISO-01 | Agent C must use a non-superuser probe role (or accept error-as-suppressed); with the superuser conn the no-GUC check can never pass. API-side isolation (B→A 404s, cross-tenant write blocked) passed. |
 
+### Third pass — branch deployed to Railway dev via `railway up` (2026-06-05)
+
+**Final: 52 pass · 11 partial · 5 fail · 1 n/a** (report:
+`qa/reports/2026-06-05/QA-REPORT.md`, 20 commits on the branch). Every
+deploy-gated row flipped after deploying the branch to dev. Five MORE live
+defects were found and fixed during the deploy-verify loop:
+
+1. **Deploys were bricked**: the every-boot migration runner re-validated
+   070's strict region CHECK; any `tenant_settings` row with NULL region
+   (legal under 088's relaxed final constraint) failed boot with 23514.
+   Fix: `NOT VALID` + dev data backfill (1 row).
+2. **The execution worker could never claim**: `proposals.claimed_by` was
+   UUID; the worker claims with the name 'execution-worker' → 22P02 every
+   second, forever, on every approved proposal. Migration 130 → TEXT.
+3. **Voice/assistant proposals were unapprovable**: no trust tier or
+   confidence was threaded (calling-agent + assistant paths), so all
+   landed 'draft' — invisible to the inbox and 409 under the approval
+   guard. Confidence now flows from the classifier; complete drafts get
+   the guardrail-parity promote to ready_for_review.
+4. **Voice executions failed handler validation**: the adapter nested raw
+   classifier entities while handlers read the flat task contract
+   (payload.name / payload.jobId …). Primitives are now promoted; and the
+   executor finally **persists execution_error** (it was dropped — failed
+   proposals were undebuggable, which is why all of this hid for so long).
+5. **Assistant completions were discarded**: the proposal schema rejected
+   JSON null for relatedId/impact, degrading valid LLM replies to the
+   fallback envelope.
+
+Verified green end-to-end after the fixes: full voice loop (CUST-02:
+utterance → proposal → auto-approve → undo window → worker executes →
+customer row), voice scheduling proposal flow (SCH-02 through approval),
+voice cancel (SCH-03 through approval), PROV-01/02, PROP-01..04, and the
+D9 undo-window precheck via the assistant's persisted create_customer.
+
+**Remaining 5 fail / 11 partial are all feature/env gaps with stories —
+no unexplained failures**: voice entity resolution can't yet turn "next
+Tuesday at 2 PM" + "our customer" into jobId+timestamps (SCH-02/03
+partial; see the voice-scheduling-robustness effort), delivery/send
+service unwired on dev (INV-03, PORT-01/02), payment-link route unmounted
+(INV-04), STRIPE_WEBHOOK_SECRET unset (INV-05/06), no invoice 'overdue'
+status (INV-07) and job money_state sweep (PAY-04), SMS confirmation
+trigger (SMS-01), i18n confirm prompt (VOX-02), assistant
+estimate-persistence/query/chaining (AST-02/03/05/07), telephony-only
+cases (VOX-04 n/a).
+
+**Deploy-source caution**: dev currently runs CLI deploys of this branch;
+the service still *tracks GitHub main*, so the next push to main will
+replace dev with a build that lacks these fixes until the branch is
+merged. Push + merge promptly.
+
 ### Second pass — after fixes on `fix/qa-matrix-live-run-findings` (2026-06-04)
 
 All six new stories plus the catalog restoration were built the same day;
