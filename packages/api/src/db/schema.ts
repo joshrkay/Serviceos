@@ -3288,6 +3288,24 @@ export const MIGRATIONS = {
       BEFORE INSERT OR UPDATE ON appointment_assignments
       FOR EACH ROW EXECUTE FUNCTION check_no_double_booking();
   `,
+
+  '130_proposals_claimed_by_text': `
+    -- QA-2026-06-05: the execution worker claims proposals with a NAMED
+    -- worker id ('execution-worker'), but claimed_by was UUID — every
+    -- claimForExecution failed with 22P02 (invalid uuid) and the 1s sweep
+    -- retried the same approved proposal forever. Found live on Railway dev
+    -- (voice CUST-02: proposal auto-approved, never executed). Align the
+    -- column with executed_by/created_by, which are already TEXT.
+    -- Guarded so the every-boot migration runner doesn't rewrite the table
+    -- on each start.
+    DO $$
+    BEGIN
+      IF (SELECT data_type FROM information_schema.columns
+          WHERE table_name = 'proposals' AND column_name = 'claimed_by') = 'uuid' THEN
+        ALTER TABLE proposals ALTER COLUMN claimed_by TYPE TEXT USING claimed_by::text;
+      END IF;
+    END $$;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
