@@ -42,6 +42,7 @@ import type { VoiceSessionRepository } from '../../../voice/voice-session';
 import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
 import { resolveSchedulingEntities } from './entity-resolution';
+import { detectLanguage, renderTtsText } from './tts-copy';
 import type { VoicePersona, VoicePersonaResolver } from '../../../settings/voice-persona-resolver';
 import type { RepairTemplate } from '../../../verticals/registry';
 import type { DroppedCallScheduler } from '../../../sms/recovery/scheduler';
@@ -350,6 +351,9 @@ export class InAppVoiceAdapter {
     }
 
     session.transcript.push(`caller: ${text}`);
+    // VOX-02: sticky language detection from the caller's own words.
+    if (detectLanguage(text) === 'es') session.language = 'es';
+    else if (!session.language) session.language = 'en';
 
     // §3B + §3D: vertical + intake-question prompt section.
     // §3C: caller-plan prompt section (only when caller is identified).
@@ -514,7 +518,9 @@ export class InAppVoiceAdapter {
     let ttsAudio: Buffer | undefined;
     let ttsText: string | undefined;
     if (ttsLast && typeof ttsLast.payload.text === 'string') {
-      ttsText = ttsLast.payload.text;
+      // VOX-02: expand template keys ('intent_confirm', 'greeting', …) into
+      // localized human copy — callers were literally hearing the raw key.
+      ttsText = renderTtsText(ttsLast.payload.text, ttsLast.payload, session.language ?? 'en');
       session.transcript.push(`agent: ${ttsText}`);
       if (this.deps.ttsProvider) {
         try {
