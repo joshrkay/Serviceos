@@ -149,12 +149,16 @@ export async function resolveSchedulingEntities(
       ? entities.appointmentId
       : undefined;
     if (!appointmentId) {
+      // Recency heuristic: "the appointment" in a live session almost always
+      // means the one just discussed/created — the most recently CREATED
+      // upcoming appointment, not the soonest-starting one (a busy tenant
+      // has many of those). The operator confirms at approval time.
       const upcoming = await pool.query(
         `SELECT id FROM appointments
          WHERE tenant_id = $1
            AND status IN ('scheduled', 'confirmed')
            AND scheduled_start > now() - interval '1 hour'
-         ORDER BY scheduled_start ASC LIMIT 1`,
+         ORDER BY created_at DESC LIMIT 1`,
         [tenantId],
       );
       appointmentId = (upcoming.rows[0]?.id as string) ?? undefined;
