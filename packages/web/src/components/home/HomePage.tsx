@@ -2,10 +2,11 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import {
   AlertCircle, Clock, ChevronRight, ArrowRight,
-  DollarSign, FileText, Send, Eye, Plus,
+  DollarSign, FileText, Send, Eye, Briefcase,
   CheckCircle2, Mic, TrendingUp, Bell,
 } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
+import { StatCard } from '../ui';
 import {
   normalizeJobStatus,
   normalizeEstimateStatus,
@@ -17,6 +18,12 @@ import { StatusBadge } from '../shared/StatusBadge';
 import { TimeGivenBackCard } from './TimeGivenBackCard';
 import { MoneyLoopHomeCard } from './MoneyLoopHomeCard';
 import { ErrorState } from '../ErrorState';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import {
+  formatDateInTenantTz,
+  formatInTenantTz,
+  formatTimeInTenantTz,
+} from '../../utils/formatInTenantTz';
 
 // ─── API Types ────────────────────────────────────────────────────────────
 interface ApiJob {
@@ -78,28 +85,28 @@ function customerName(c?: ApiJob['customer']): string {
   return c.displayName || [c.firstName, c.lastName].filter(Boolean).join(' ') || 'Customer';
 }
 
-function formatTime(iso?: string): string | null {
+function formatTime(iso: string | undefined, timezone: string): string | null {
   if (!iso) return null;
-  return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  return formatTimeInTenantTz(iso, timezone);
 }
 
-function formatDate(iso?: string): string {
+function formatDate(iso: string | undefined, timezone: string): string {
   if (!iso) return '';
-  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return formatDateInTenantTz(iso, timezone);
 }
 
 function todayIso(): string {
   return new Date().toISOString().split('T')[0];
 }
 
-function buildWeek(): { day: string; date: string; isToday: boolean }[] {
+function buildWeek(timezone: string): { day: string; date: string; isToday: boolean }[] {
   const today = new Date();
   return Array.from({ length: 7 }, (_, i) => {
     const d = new Date(today);
     d.setDate(today.getDate() + i);
     return {
-      day: d.toLocaleDateString('en-US', { weekday: 'short' }),
-      date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+      day: formatInTenantTz(d, timezone, { weekday: 'short' }),
+      date: formatDateInTenantTz(d, timezone),
       isToday: i === 0,
     };
   });
@@ -153,6 +160,7 @@ function AttentionRow({
 
 // ─── Compact job row ──────────────────────────────────────────────────────
 function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
+  const tz = useTenantTimezone();
   const svc = SVC[job.serviceType ?? ''] ?? SVC.HVAC;
   const name = customerName(job.customer);
   const uiStatus = normalizeJobStatus(job.status);
@@ -160,7 +168,7 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
     ? [job.technician.firstName, job.technician.lastName].filter(Boolean).join(' ')
     : null;
   const techColor = job.technician?.color ?? '#94a3b8';
-  const scheduledTime = formatTime(job.scheduledStart);
+  const scheduledTime = formatTime(job.scheduledStart, tz);
   const moneyState = normalizeJobMoneyState(job.moneyState);
   const moneyLabel = moneyState ? JOB_MONEY_STATE_LABEL[moneyState] : null;
   const moneyBadgeClasses: Record<string, string> = {
@@ -220,7 +228,8 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
 
 // ─── This week strip ──────────────────────────────────────────────────────
 function WeekStrip({ todayCount }: { todayCount: number }) {
-  const WEEK = buildWeek();
+  const tz = useTenantTimezone();
+  const WEEK = buildWeek(tz);
   return (
     <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: 'none' }}>
       {WEEK.map((d, i) => {
@@ -256,6 +265,7 @@ function WeekStrip({ todayCount }: { todayCount: number }) {
 // ─── Main dashboard ───────────────────────────────────────────────────────
 export function HomePage() {
   const navigate   = useNavigate();
+  const tz         = useTenantTimezone();
   const [dismissed, setDismiss] = useState<Set<string>>(new Set());
 
   const today = todayIso();
@@ -293,7 +303,7 @@ export function HomePage() {
     ...pendingEsts.filter(e => !dismissed.has(`est-${e.id}`)).map(e => ({
       id: `est-${e.id}`, type: 'followup' as const,
       message: `${customerName(e.customer)} estimate not yet opened`,
-      sub: `${e.estimateNumber} · ${centsToDisplay(e.totalCents)}${e.sentAt ? ` · Sent ${formatDate(e.sentAt)}` : ''}`,
+      sub: `${e.estimateNumber} · ${centsToDisplay(e.totalCents)}${e.sentAt ? ` · Sent ${formatDate(e.sentAt, tz)}` : ''}`,
       action: 'Follow up', to: `/estimates/${e.id}`,
     })),
   ].filter(item => !dismissed.has(item.id));
@@ -312,7 +322,7 @@ export function HomePage() {
             <div>
               <h1 className="text-slate-900">Good morning, Mike ☀️</h1>
               <p className="text-sm text-slate-400 mt-0.5">
-                {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
+                {formatInTenantTz(new Date(), tz, { weekday: 'long', month: 'long', day: 'numeric' })}
               </p>
             </div>
             <button
@@ -323,41 +333,53 @@ export function HomePage() {
             </button>
           </div>
 
-          {/* 3-stat pulse */}
+          {/* 3-stat pulse — calm StatCard tiles (tone tints only the icon
+              chip, per the design vision). Each tile is a button that
+              drills into the matching surface. */}
           <div className="grid grid-cols-3 gap-3 mt-4">
             <button
               type="button"
               onClick={() => navigate('/jobs')}
-              className="rounded-xl border px-3 py-2.5 text-left bg-blue-50 border-blue-100 hover:border-blue-200 transition-colors"
+              className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
             >
-              <p className="text-xs mb-0.5 text-blue-700">Active today</p>
-              <p className="text-sm text-blue-700">{activeCount} jobs</p>
+              <StatCard
+                className="h-full"
+                tone="info"
+                label="Active today"
+                value={activeCount}
+                hint="jobs"
+                icon={<Briefcase size={16} />}
+              />
             </button>
             <button
               type="button"
               onClick={() => navigate('/reports/money')}
               data-testid="home-stat-outstanding"
-              className="rounded-xl border px-3 py-2.5 text-left bg-amber-50 border-amber-100 hover:border-amber-200 transition-colors"
+              className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
             >
-              <p className="text-xs mb-0.5 text-amber-700">Outstanding</p>
-              <p className="text-sm text-amber-700">${totalOut.toLocaleString()}</p>
+              <StatCard
+                className="h-full"
+                tone="warning"
+                label="Outstanding"
+                value={`$${totalOut.toLocaleString()}`}
+                hint={`${unpaidInvs.length} unpaid`}
+                icon={<DollarSign size={16} />}
+              />
             </button>
             <button
               type="button"
               onClick={() => navigate(attentionItems.length > 0 ? '/invoices' : '/inbox')}
               data-testid="home-stat-attention"
-              className={`rounded-xl border px-3 py-2.5 text-left transition-colors ${
-                attentionItems.length > 0
-                  ? 'bg-red-50 border-red-100 hover:border-red-200'
-                  : 'bg-green-50 border-green-100 hover:border-green-200'
-              }`}
+              className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
             >
-              <p className={`text-xs mb-0.5 ${attentionItems.length > 0 ? 'text-red-600' : 'text-green-700'}`}>
-                Needs attention
-              </p>
-              <p className={`text-sm ${attentionItems.length > 0 ? 'text-red-600' : 'text-green-700'}`}>
-                {attentionItems.length} items
-              </p>
+              <StatCard
+                className="h-full"
+                tone={attentionItems.length > 0 ? 'danger' : 'success'}
+                label="Needs attention"
+                value={`${attentionItems.length} items`}
+                hint={attentionItems.length > 0 ? 'review now' : 'all clear'}
+                icon={attentionItems.length > 0 ? <AlertCircle size={16} /> : <CheckCircle2 size={16} />}
+              />
             </button>
           </div>
         </div>
@@ -525,7 +547,7 @@ export function HomePage() {
                         <div className="flex-1 min-w-0">
                           <p className="text-sm text-slate-800 truncate">{customerName(est.customer)}</p>
                           <p className="text-xs text-slate-400 mt-0.5">
-                            {est.estimateNumber}{est.sentAt ? ` · Sent ${formatDate(est.sentAt)}` : ''}
+                            {est.estimateNumber}{est.sentAt ? ` · Sent ${formatDate(est.sentAt, tz)}` : ''}
                           </p>
                         </div>
                         <div className="flex flex-col items-end gap-1 shrink-0">

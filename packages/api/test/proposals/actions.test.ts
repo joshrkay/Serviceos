@@ -52,6 +52,27 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     expect(result.status).toBe('approved');
   });
 
+  it('approves a draft directly (inbox surfaces drafts)', async () => {
+    const repo = makeRepo();
+    const proposal = createProposal(baseInput); // lands in 'draft'
+    await repo.create(proposal);
+
+    const result = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+    expect(result.status).toBe('approved');
+  });
+
+  it('refuses to approve a proposal with unfilled missingFields', async () => {
+    const repo = makeRepo();
+    const proposal = createProposal({ ...baseInput, missingFields: ['phone'] });
+    await repo.create(proposal);
+
+    await expect(
+      approveProposal(repo, tenantId, proposal.id, actorId, 'owner')
+    ).rejects.toThrow(ValidationError);
+    // Untouched — still draft.
+    expect((await repo.findById(tenantId, proposal.id))!.status).toBe('draft');
+  });
+
   it('validation — technician cannot approve', async () => {
     const repo = makeRepo();
     const proposal = await createReadyProposal(repo);

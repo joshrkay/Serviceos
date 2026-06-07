@@ -13,6 +13,8 @@
  * Tailwind primitives + lucide icons, both already present in the app.
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import {
   StickyNote,
   Briefcase,
@@ -151,6 +153,7 @@ export function CommunicationTimeline({
   fetcher = getCustomerTimeline,
   pageSize = 50,
 }: CommunicationTimelineProps) {
+  const tz = useTenantTimezone();
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -287,7 +290,7 @@ export function CommunicationTimeline({
                 <div className="flex items-center gap-2 text-xs text-gray-500">
                   <time
                     dateTime={ev.occurredAt}
-                    title={occurredAt.toLocaleString()}
+                    title={formatDateTimeInTenantTz(occurredAt, tz)}
                   >
                     {relativeTime(now, occurredAt.getTime())}
                   </time>

@@ -31,6 +31,42 @@ const JUDGE_PASS_JSON = JSON.stringify({
   rationale: 'vq mock judge pass',
 });
 
+/** The fixture tenant's IANA timezone (booker fixtures pin America/Los_Angeles). */
+function tenantTimezone(script: VoiceQualityScript): string {
+  const tz = (script.fixtures.tenant as Record<string, unknown> | undefined)?.timezone;
+  return typeof tz === 'string' ? tz : 'America/Los_Angeles';
+}
+
+/**
+ * Format a UTC instant as an absolute, tz-correct wall-clock phrase
+ * (e.g. "May 12 2026 2:00 PM") that the deterministic resolver round-trips
+ * back to exactly that instant. This is the new-contract analogue of the
+ * old mock handing the task a pre-resolved ISO: the LLM only ever emits a
+ * verbatim phrase, and resolveDateTime owns the timezone math.
+ */
+function absolutePhraseFromIso(iso: string, timezone: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  }).formatToParts(new Date(iso));
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+  return `${get('month')} ${get('day')} ${get('year')} ${get('hour')}:${get('minute')} ${get('dayPeriod')}`;
+}
+
+/** True when any turn expects a booking intent (drives the pinned clock). */
+function scriptBooksAppointment(script: VoiceQualityScript): boolean {
+  return script.turns.some(
+    (t) =>
+      t.expected.intent === 'create_appointment' ||
+      t.expected.intent === 'reschedule_appointment',
+  );
+}
+
 /** Extract a display name from common signup phrasing in corpus scripts. */
 function displayNameFromCaller(caller: string): string | undefined {
   const m = caller.match(
@@ -78,7 +114,13 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
   }
   if (intent === 'reschedule_appointment') {
     entities.appointmentReference = 'the appointment';
-    entities.newDateTimeDescription = 'the requested new time';
+    // New contract: the reschedule handler resolves this phrase against the
+    // tenant tz + clock. Derive an absolute phrase from the expected new
+    // start so the resolver round-trips back to it.
+    const newStart = typeof slots.newScheduledStart === 'string' ? slots.newScheduledStart : undefined;
+    entities.newDateTimeDescription = newStart
+      ? absolutePhraseFromIso(newStart, tenantTimezone(script))
+      : 'the requested new time';
   }
   // Full-app voice coverage intents — surface the entities each task
   // handler needs so the proposal payload is well-formed. Values are
@@ -152,14 +194,23 @@ function turnIndexForUserMessage(script: VoiceQualityScript, userLine: string): 
   return idx >= 0 ? idx : 0;
 }
 
-/** Appointment-extraction JSON: ISO datetimes drawn from the turn's expected slots. */
+/**
+ * Appointment-extraction JSON (new hybrid contract): the LLM emits a
+ * verbatim `dateTimePhrase`, NOT ISO. We derive an absolute, tz-correct
+ * phrase from the expected start so the deterministic resolver reproduces
+ * exactly that instant; `durationMinutes` preserves the prior 2h window so
+ * any fixture pinning `scheduledEnd` still matches. No date in the slots →
+ * empty phrase, which the task turns into a clarification.
+ */
 function appointmentJsonForTurn(script: VoiceQualityScript, turnIndex: number): string {
   const slots = (script.turns[turnIndex].expected.slots ?? {}) as Record<string, unknown>;
   const out: Record<string, unknown> = { summary: 'Service appointment', confidence_score: 0.95 };
   const start = typeof slots.scheduledStart === 'string' ? slots.scheduledStart : undefined;
   if (start) {
-    out.scheduledStart = start;
-    out.scheduledEnd = new Date(new Date(start).getTime() + 2 * 60 * 60 * 1000).toISOString();
+    out.dateTimePhrase = absolutePhraseFromIso(start, tenantTimezone(script));
+    out.durationMinutes = 120;
+  } else {
+    out.dateTimePhrase = '';
   }
   return JSON.stringify(out);
 }
@@ -284,13 +335,18 @@ export function makeVoiceQualityDriverFactory(
     const businessHours = tenant.businessHours as
       | { timezone?: string; schedule?: unknown; callMomentLocal?: string }
       | undefined;
-    const settingsRow = businessHours
-      ? ({
-          tenantId: fctx.tenantId,
-          timezone: businessHours.timezone ?? (tenant.timezone as string) ?? 'America/Los_Angeles',
-          businessHoursSchedule: businessHours.schedule ?? [],
-        } as unknown as TenantSettings)
-      : null;
+    // Build the row when the fixture defines business hours OR a tenant
+    // timezone, so the scheduling resolver can thread the tenant zone even
+    // for booker fixtures that pin only `tenant.timezone`.
+    const tenantTz = typeof tenant.timezone === 'string' ? tenant.timezone : undefined;
+    const settingsRow =
+      businessHours || tenantTz
+        ? ({
+            tenantId: fctx.tenantId,
+            timezone: businessHours?.timezone ?? tenantTz ?? 'America/Los_Angeles',
+            businessHoursSchedule: businessHours?.schedule ?? [],
+          } as unknown as TenantSettings)
+        : null;
     const settingsRepo: SettingsRepository = {
       findByTenant: async (t: string) => (t === fctx.tenantId ? settingsRow : null),
       create: async (s: TenantSettings) => s,
@@ -301,6 +357,13 @@ export function makeVoiceQualityDriverFactory(
     let now: (() => Date) | undefined;
     if (businessHours?.callMomentLocal) {
       const fixed = new Date(businessHours.callMomentLocal);
+      now = () => fixed;
+    } else if (scriptBooksAppointment(script)) {
+      // Pin the scheduling clock before all corpus booking dates so the
+      // deterministic resolver accepts the (fixed, past-relative-to-real-now)
+      // expected dates. Only booking scripts are pinned — others keep
+      // wall-clock to avoid shifting unrelated expectations.
+      const fixed = new Date('2026-05-01T12:00:00.000Z');
       now = () => fixed;
     }
 

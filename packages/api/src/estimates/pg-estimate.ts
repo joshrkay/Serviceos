@@ -79,6 +79,18 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
     });
   }
 
+  async findByJobs(tenantId: string, jobIds: string[]): Promise<Estimate[]> {
+    if (jobIds.length === 0) return [];
+    return this.withTenant(tenantId, async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM estimates WHERE tenant_id = $1 AND job_id = ANY($2) AND deleted_at IS NULL ORDER BY created_at DESC`,
+        [tenantId, jobIds],
+      );
+
+      return this.mapRowsToEstimates(client, tenantId, rows);
+    });
+  }
+
   /**
    * Build the parameterized WHERE clause shared between data and count queries.
    * tenant_id is the FIRST predicate (defense-in-depth alongside RLS).

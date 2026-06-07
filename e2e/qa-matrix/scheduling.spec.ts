@@ -87,7 +87,7 @@ matrixTest('SCH-02', 'Schedule appointment by voice', async (h) => {
 
   const outcome = await approveAndAwaitExecution(h, token, proposalIds[0], '02');
   if (outcome.status !== 'executed') {
-    return void h.evidence.partial(`Scheduling proposal did not execute (status=${outcome.status}); worker/entity-resolution may be incomplete.`);
+    return void h.evidence.fail(`Scheduling proposal did not execute (status=${outcome.status}); worker/entity-resolution may be incomplete.`);
   }
 
   if (!outcome.resultEntityId) {
@@ -135,7 +135,7 @@ matrixTest('SCH-03', 'Cancel appointment by voice', async (h) => {
   if (outcome.status === 'executed' && status === 'canceled') {
     h.evidence.pass();
   } else {
-    h.evidence.partial(
+    h.evidence.fail(
       `Cancel-by-voice incomplete (proposal=${outcome.status}, appointment=${status}). ` +
         'Voice agent must resolve which appointment to cancel; verify entity resolution live.'
     );

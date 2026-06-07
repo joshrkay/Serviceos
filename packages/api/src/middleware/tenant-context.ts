@@ -171,5 +171,35 @@ export function currentTenantContext(): TenantContext | undefined {
   return tenantContextStore.getStore();
 }
 
+let requestSavepointSeq = 0;
+
+/**
+ * Run `fn` inside a SAVEPOINT when executing within a request-scoped
+ * transaction (the `/api` `withTenantTransaction` middleware put a shared
+ * client in the store). A statement that throws — e.g. a 23505 the caller
+ * intends to catch and skip past — then rolls back only `fn` and leaves the
+ * surrounding transaction usable, instead of aborting the whole request
+ * transaction (which would silently roll back unrelated writes at COMMIT).
+ * Outside a request transaction (background workers, in-memory tests) there is
+ * no shared client to poison, so `fn` runs directly. The original error is
+ * always re-thrown for the caller to inspect.
+ */
+export async function withRequestSavepoint<T>(fn: () => Promise<T>): Promise<T> {
+  const ctx = tenantContextStore.getStore();
+  if (!ctx) return fn();
+  const { client } = ctx;
+  const name = `sp_req_${(requestSavepointSeq += 1)}`;
+  await client.query(`SAVEPOINT ${name}`);
+  try {
+    const result = await fn();
+    await client.query(`RELEASE SAVEPOINT ${name}`);
+    return result;
+  } catch (err) {
+    await client.query(`ROLLBACK TO SAVEPOINT ${name}`);
+    await client.query(`RELEASE SAVEPOINT ${name}`).catch(() => undefined);
+    throw err;
+  }
+}
+
 // Re-export Request for tests that want to attach req.auth.
 export type { Request };

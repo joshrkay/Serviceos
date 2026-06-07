@@ -101,19 +101,33 @@ export interface BookInput {
   locationId?: string;
 }
 
-export type BookResult =
-  | {
-      ok: true;
-      status: 'pending_confirmation';
-      proposalId: string;
-      appointmentId: string;
-      scheduledStart: string;
-      scheduledEnd: string;
-      timezone: string;
-      message: string;
-    }
+/**
+ * Shared result for slot-submitting actions (book + reschedule). Both routes
+ * answer a lost race with a 409 + alternative slots, so both surface the same
+ * shape instead of throwing — letting the slot picker swap in alternatives.
+ */
+export type SlotActionResult<T> =
+  | ({ ok: true } & T)
   | { ok: false; slotTaken: true; alternatives: PortalSlot[]; message: string }
   | { ok: false; slotTaken: false; message: string };
+
+export interface BookSuccess {
+  status: 'pending_confirmation';
+  proposalId: string;
+  appointmentId: string;
+  scheduledStart: string;
+  scheduledEnd: string;
+  timezone: string;
+  message: string;
+}
+export type BookResult = SlotActionResult<BookSuccess>;
+
+export interface RescheduleSuccess {
+  status: string;
+  proposalId: string;
+  message: string;
+}
+export type RescheduleResult = SlotActionResult<RescheduleSuccess>;
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { headers: { Accept: 'application/json' } });
@@ -135,6 +149,42 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
     throw new Error(`Portal request failed (${res.status}): ${text || res.statusText}`);
   }
   return (await res.json()) as T;
+}
+
+/**
+ * POST a slot-submitting action that may lose a race for the slot. On 409 the
+ * server returns alternative slots; we surface that as a structured result
+ * rather than throwing, so the caller (book / reschedule) can re-render.
+ */
+async function postSlotAction<T>(
+  url: string,
+  body: unknown,
+  fallbacks: { taken: string; failed: string },
+): Promise<SlotActionResult<T>> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (res.ok) {
+    // A 2xx must carry the success payload — let a malformed body throw rather
+    // than silently returning an object missing T's fields.
+    const payload = (await res.json()) as T;
+    return { ok: true, ...payload };
+  }
+  const payload = await res.json().catch(() => ({} as Record<string, unknown>));
+  // Only an availability race (SLOT_TAKEN) should swap in alternatives. Other
+  // 409s (e.g. NOT_CHANGEABLE, TOO_LATE) are real failures — fall through to
+  // the error message so we don't wrongly blank the slot grid.
+  if (res.status === 409 && payload.error === 'SLOT_TAKEN') {
+    return {
+      ok: false,
+      slotTaken: true,
+      alternatives: (payload.alternatives ?? []) as PortalSlot[],
+      message: (payload.message as string) ?? fallbacks.taken,
+    };
+  }
+  return { ok: false, slotTaken: false, message: (payload.message as string) ?? fallbacks.failed };
 }
 
 const base = (token: string) => `/api/public/portal/${encodeURIComponent(token)}`;
@@ -176,31 +226,17 @@ export const portalApi = {
     token: string,
     appointmentId: string,
     slot: { slotStart: string; slotEnd: string },
-  ) =>
-    postJson<{ status: string; proposalId: string; message: string }>(
+  ): Promise<RescheduleResult> =>
+    postSlotAction<RescheduleSuccess>(
       `${base(token)}/appointments/${encodeURIComponent(appointmentId)}/reschedule`,
       slot,
+      { taken: 'That time is no longer available.', failed: 'Could not reschedule that time.' },
     ),
-  book: async (token: string, input: BookInput): Promise<BookResult> => {
-    const res = await fetch(`${base(token)}/book`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify(input),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (res.ok) {
-      return { ok: true, ...body };
-    }
-    if (res.status === 409) {
-      return {
-        ok: false,
-        slotTaken: true,
-        alternatives: (body.alternatives ?? []) as PortalSlot[],
-        message: body.message ?? 'That time was just booked.',
-      };
-    }
-    return { ok: false, slotTaken: false, message: body.message ?? 'Could not book that time.' };
-  },
+  book: (token: string, input: BookInput): Promise<BookResult> =>
+    postSlotAction<BookSuccess>(`${base(token)}/book`, input, {
+      taken: 'That time was just booked.',
+      failed: 'Could not book that time.',
+    }),
 };
 
 export function formatPortalCents(cents: number): string {

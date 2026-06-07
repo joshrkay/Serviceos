@@ -36,6 +36,19 @@ function buildTestApp(
   return app;
 }
 
+/**
+ * Mirrors the PRODUCTION mount: express.raw() for /webhooks/clerk BEFORE the
+ * global express.json(), so the handler verifies over the exact signed bytes.
+ */
+function buildRawMountedApp(tenantRepo?: TenantRepository, secret: string = WEBHOOK_SECRET) {
+  const app = express();
+  app.use('/webhooks/clerk', express.raw({ type: 'application/json' }));
+  app.use(express.json());
+  const config = { CLERK_WEBHOOK_SECRET: secret, CLERK_SECRET_KEY: undefined } as unknown as AppConfig;
+  app.use('/webhooks', createWebhookRouter(config, { tenantRepo }));
+  return app;
+}
+
 class FakeTenantRepository implements TenantRepository {
   public created: Array<{ ownerId: string; ownerEmail: string; name: string }> = [];
   private byOwner = new Map<string, Tenant>();
@@ -120,6 +133,55 @@ describe('EXP-3 — Clerk webhook → tenant bootstrap integration', () => {
       ownerId: 'user_new_1',
       ownerEmail: 'new@example.com',
     });
+  });
+
+  it('raw-mounted (production) path — verifies over the exact signed bytes', async () => {
+    const rawApp = buildRawMountedApp(tenantRepo);
+    const svixId = 'evt_raw_1';
+    const svixTimestamp = String(Math.floor(Date.now() / 1000));
+    const payload = userCreatedPayload('user_raw_1', 'raw@example.com');
+    const { rawBody, signature } = signSvixPayload(payload, svixId, svixTimestamp, WEBHOOK_SECRET);
+
+    const res = await request(rawApp)
+      .post('/webhooks/clerk')
+      .set('svix-id', svixId)
+      .set('svix-timestamp', svixTimestamp)
+      .set('svix-signature', signature)
+      .set('content-type', 'application/json')
+      .send(rawBody); // exact signed bytes
+
+    expect(res.status).toBe(200);
+    expect(tenantRepo.created).toHaveLength(1);
+  });
+
+  it('raw-mounted path verifies bytes that JSON.stringify would NOT reproduce', async () => {
+    // The regression: the old handler verified over JSON.stringify(req.body),
+    // so a body with non-canonical key order / extra whitespace (exactly what
+    // svix signs but V8 re-serialization changes) would be rejected. Sign and
+    // send such bytes; the raw-bytes path must accept them.
+    const rawApp = buildRawMountedApp(tenantRepo);
+    const svixId = 'evt_raw_2';
+    const svixTimestamp = String(Math.floor(Date.now() / 1000));
+    // Keys out of insertion order + spaces: re-serialization would differ.
+    const rawBody =
+      '{ "data": {"email_addresses": [{"email_address": "noncanon@example.com"}], "id": "user_raw_2"}, "type": "user.created" }';
+    const secretBytes = Buffer.from(WEBHOOK_SECRET.replace(/^whsec_/, ''), 'base64');
+    const signedContent = `${svixId}.${svixTimestamp}.${rawBody}`;
+    const sig = crypto
+      .createHmac('sha256', secretBytes.toString('hex'))
+      .update(`${svixTimestamp}.${signedContent}`)
+      .digest('hex');
+
+    const res = await request(rawApp)
+      .post('/webhooks/clerk')
+      .set('svix-id', svixId)
+      .set('svix-timestamp', svixTimestamp)
+      .set('svix-signature', `v1,${sig}`)
+      .set('content-type', 'application/json')
+      .send(rawBody);
+
+    expect(res.status).toBe(200);
+    expect(tenantRepo.created[0]).toMatchObject({ ownerId: 'user_raw_2', ownerEmail: 'noncanon@example.com' });
   });
 
   it('idempotency — replaying the same svix-id does not double-bootstrap', async () => {

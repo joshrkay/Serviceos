@@ -42,7 +42,7 @@ matrixTest('VOX-01', 'Emergency triage fast-path (voice)', async (h) => {
   if (escalated) {
     h.evidence.pass('Emergency utterance routed to escalation / urgent handling.');
   } else {
-    h.evidence.partial('Voice responded but no clear emergency/escalation signal in the turn — review captured response.');
+    h.evidence.fail('Voice responded but no clear emergency/escalation signal in the turn — review captured response.');
   }
 });
 
@@ -57,7 +57,7 @@ matrixTest('VOX-02', 'Spanish / i18n voice response', async (h) => {
     '02-input'
   );
   if (res.response.status !== 200) {
-    return void h.evidence.partial(`Voice input returned ${res.response.status}; cannot assess language handling.`);
+    return void h.evidence.fail(`Voice input returned ${res.response.status}; cannot assess language handling.`);
   }
   const tts = ((res.response.body as { ttsText?: string }).ttsText ?? '').toLowerCase();
   // Whole-word match on distinctive Spanish tokens (avoid short substrings
@@ -73,13 +73,13 @@ matrixTest('VOX-02', 'Spanish / i18n voice response', async (h) => {
   if (tts && looksSpanish) {
     h.evidence.pass('Voice responded in Spanish to a Spanish utterance.');
   } else {
-    h.evidence.partial(`Response captured but Spanish not clearly detected (ttsText="${tts.slice(0, 80)}").`);
+    h.evidence.fail(`Response captured but Spanish not clearly detected (ttsText="${tts.slice(0, 80)}").`);
   }
 });
 
 matrixTest('VOX-03', 'DNC suppression of outbound SMS', async (h) => {
   if (!rwAvailable()) {
-    h.evidence.na('E2E_DB_URL_READWRITE not set — cannot seed a DNC entry.');
+    h.evidence.fail('E2E_DB_URL_READWRITE not set — cannot seed a DNC entry (required for voice DNC gate).');
     return;
   }
   const dncPhone = '+15555550199';
@@ -91,7 +91,7 @@ matrixTest('VOX-03', 'DNC suppression of outbound SMS', async (h) => {
       [h.tenantA.tenantId, dncPhone]
     );
   } catch (err) {
-    h.evidence.na(`Could not seed DNC (schema differs?): ${(err as Error).message}`);
+    h.evidence.fail(`Could not seed DNC (schema differs?): ${(err as Error).message}`);
     return;
   }
 
@@ -122,7 +122,7 @@ matrixTest('VOX-03', 'DNC suppression of outbound SMS', async (h) => {
   // For an SMS-only send to a DNC number, suppression yields 400 (no channel
   // actually sent). 200/202/400 all mean "attempted" — proceed to verify no SMS.
   if (![200, 202, 400].includes(send.response.status)) {
-    h.evidence.na(`Estimate send returned ${send.response.status}; DNC path not exercised.`);
+    h.evidence.fail(`Estimate send returned ${send.response.status}; DNC path not exercised.`);
     return;
   }
 

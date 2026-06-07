@@ -10,6 +10,8 @@ import { sendInvoicePayloadSchema } from './contracts/send-invoice';
 import { sendEstimatePayloadSchema } from './contracts/send-estimate';
 import { recordPaymentPayloadSchema } from './contracts/record-payment';
 import { logExpensePayloadSchema } from './contracts/log-expense';
+import { createInvoiceSchedulePayloadSchema } from './contracts/create-invoice-schedule';
+import { batchInvoicePayloadSchema } from './contracts/batch-invoice';
 import {
   onboardingTenantSettingsPayloadSchema,
   onboardingServiceCategoryPayloadSchema,
@@ -47,13 +49,45 @@ export const createJobPayloadSchema = z.object({
   priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
 });
 
-export const createAppointmentPayloadSchema = z.object({
-  jobId: z.string().uuid(),
-  scheduledStart: z.string().min(1),
-  scheduledEnd: z.string().min(1),
-  technicianId: z.string().uuid().optional(),
-  notes: z.string().optional(),
-});
+export const createAppointmentPayloadSchema = z
+  .object({
+    jobId: z.string().uuid(),
+    scheduledStart: z.string().min(1),
+    scheduledEnd: z.string().min(1),
+    technicianId: z.string().uuid().optional(),
+    notes: z.string().optional(),
+    // IANA tenant timezone the times should render in (UTC instants are
+    // stored; this is display/context only). Set by the AI booking path.
+    timezone: z.string().optional(),
+    // Optional customer-facing arrival window (home-services standard).
+    arrivalWindowStart: z.string().optional(),
+    arrivalWindowEnd: z.string().optional(),
+    // Carried from the voice path for the dispatcher review card; not all
+    // are persisted directly on the appointment.
+    customerId: z.string().optional(),
+    customerName: z.string().optional(),
+    summary: z.string().optional(),
+  })
+  .refine(
+    (v) => {
+      const s = Date.parse(v.scheduledStart);
+      const e = Date.parse(v.scheduledEnd);
+      return !Number.isNaN(s) && !Number.isNaN(e) && e > s;
+    },
+    { message: 'scheduledEnd must be a valid datetime after scheduledStart' },
+  )
+  .refine(
+    (v) => {
+      // Arrival window is optional, but if both ends are present (e.g. a
+      // dispatcher edit) they must be valid and ordered — never "12pm–8am".
+      if (v.arrivalWindowStart == null && v.arrivalWindowEnd == null) return true;
+      if (v.arrivalWindowStart == null || v.arrivalWindowEnd == null) return false;
+      const s = Date.parse(v.arrivalWindowStart);
+      const e = Date.parse(v.arrivalWindowEnd);
+      return !Number.isNaN(s) && !Number.isNaN(e) && e > s;
+    },
+    { message: 'arrivalWindowEnd must be a valid datetime after arrivalWindowStart' },
+  );
 
 export const createBookingPayloadSchema = z.object({
   appointmentId: z.string().uuid(),
@@ -287,6 +321,8 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   draft_invoice: draftInvoicePayloadSchema,
   update_invoice: updateInvoicePayloadSchema,
   issue_invoice: issueInvoicePayloadSchema,
+  create_invoice_schedule: createInvoiceSchedulePayloadSchema,
+  batch_invoice: batchInvoicePayloadSchema,
   reassign_appointment: reassignAppointmentPayloadSchema,
   reschedule_appointment: rescheduleAppointmentPayloadSchema,
   add_crew_member: addCrewMemberPayloadSchema,

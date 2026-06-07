@@ -5,6 +5,7 @@ import {
   ChevronRight, Building2, Users, Shield, Bell, Globe, Clock,
   CreditCard, Link, Zap, FileText, Sparkles, Copy, ExternalLink,
   MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen, Star, Phone,
+  Calendar,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { QuickBooksModal } from './QuickBooksModal';
@@ -22,6 +23,7 @@ import { PaymentMethodsSheet } from './PaymentMethodsSheet';
 import { VerticalPacksSheet } from './VerticalPacksSheet';
 import { CallRoutingSheet } from './CallRoutingSheet';
 import { OperatorHoursSheet } from './OperatorHoursSheet';
+import { DncListSheet } from './DncListSheet';
 import {
   fetchLanguageSettings,
   updateLanguageSettings,
@@ -148,6 +150,7 @@ export function SettingsPage() {
   const [paymentMethodsOpen, setPaymentMethodsOpen] = useState(false);
   const [verticalPacksOpen, setVerticalPacksOpen] = useState(false);
   const [callRoutingOpen, setCallRoutingOpen] = useState(false);
+  const [dncListOpen, setDncListOpen] = useState(false);
   const [operatorHoursOpen, setOperatorHoursOpen] = useState(false);
   // Tier 4 (Calendar sync — PR 1). Auto-open the sheet + toast when
   // the user lands back here from Google's OAuth redirect. The
@@ -186,6 +189,7 @@ export function SettingsPage() {
     }
   }, []);
   const [copied, setCopied]         = useState(false);
+  const [bookingCopied, setBookingCopied] = useState(false);
   const [googleReviewUrl, setGoogleReviewUrl] = useState('');
   const [yelpReviewUrl, setYelpReviewUrl]     = useState('');
   const [savingReviews, setSavingReviews]     = useState(false);
@@ -273,6 +277,30 @@ export function SettingsPage() {
     setTimeout(() => setCopied(false), 2000);
   }
 
+  const bookingPath = useMemo(() => {
+    if (!me?.tenant_id) return null;
+    return `/book?t=${me.tenant_id}`;
+  }, [me?.tenant_id]);
+
+  const bookingUrlDisplay = useMemo(() => {
+    if (!bookingPath) return 'Sign in to generate your booking link';
+    if (typeof window === 'undefined') return bookingPath;
+    return `${window.location.host}${bookingPath}`;
+  }, [bookingPath]);
+
+  const bookingUrlAbsolute = useMemo(() => {
+    if (!bookingPath) return '';
+    if (typeof window === 'undefined') return bookingPath;
+    return `${window.location.origin}${bookingPath}`;
+  }, [bookingPath]);
+
+  function copyBookingUrl() {
+    if (!bookingUrlAbsolute) return;
+    navigator.clipboard.writeText(bookingUrlAbsolute).catch(() => {});
+    setBookingCopied(true);
+    setTimeout(() => setBookingCopied(false), 2000);
+  }
+
   const SECTIONS = [
     {
       title: 'Business',
@@ -323,6 +351,7 @@ export function SettingsPage() {
         { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => navigate('/settings/templates') },
         { icon: Clock,    label: 'Operator hours',                  description: 'Business hours for after-hours call routing', action: () => setOperatorHoursOpen(true) },
         { icon: Zap,      label: 'Call routing & handoff',          description: 'Channels, triggers, and after-hours behavior', action: () => setCallRoutingOpen(true) },
+        { icon: Zap,      label: 'Do-Not-Call list',                description: 'Numbers blocked from outbound calls (TCPA / DNC)', action: () => setDncListOpen(true) },
       ],
     },
     {
@@ -500,6 +529,45 @@ export function SettingsPage() {
           <div className="px-4 py-3 border-t border-slate-100">
             <p className="text-xs text-slate-400">
               New leads from this form appear in your <button onClick={() => navigate('/leads')} className="text-blue-600 hover:underline">Lead Pipeline</button> automatically.
+            </p>
+          </div>
+        </div>
+
+        {/* Online Booking — featured card */}
+        <div className="rounded-xl bg-white border border-slate-200 overflow-hidden mb-5">
+          <div className="flex items-center gap-3 px-4 py-3.5 border-b border-slate-100">
+            <span className="flex size-7 items-center justify-center rounded-lg bg-blue-100 shrink-0">
+              <Calendar size={14} className="text-blue-600" />
+            </span>
+            <div className="flex-1">
+              <p className="text-sm text-slate-800">Online booking link</p>
+              <p className="text-xs text-slate-400 mt-0.5">Let customers self-schedule a real time slot — paste into Google Business or your site</p>
+            </div>
+            <button
+              onClick={() => bookingPath && navigate(bookingPath)}
+              disabled={!bookingPath}
+              className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors shrink-0 disabled:opacity-40"
+            >
+              <ExternalLink size={11} /> Preview
+            </button>
+          </div>
+          <div className="px-4 py-3 bg-slate-50 flex items-center gap-3">
+            <p className="flex-1 text-xs text-slate-500 truncate font-mono">{bookingUrlDisplay}</p>
+            <button
+              onClick={copyBookingUrl}
+              disabled={!bookingUrlAbsolute}
+              className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs transition-all shrink-0 ${
+                bookingCopied
+                  ? 'bg-green-100 text-green-700'
+                  : 'bg-white border border-slate-200 text-slate-600 hover:border-slate-300'
+              }`}
+            >
+              {bookingCopied ? <><Check size={11} /> Copied!</> : <><Copy size={11} /> Copy link</>}
+            </button>
+          </div>
+          <div className="px-4 py-3 border-t border-slate-100">
+            <p className="text-xs text-slate-400">
+              Bookings arrive as a held appointment plus an approval in your <button onClick={() => navigate('/assistant')} className="text-blue-600 hover:underline">approval queue</button> — nothing is confirmed without you.
             </p>
           </div>
         </div>
@@ -768,6 +836,10 @@ export function SettingsPage() {
       <OperatorHoursSheet
         open={operatorHoursOpen}
         onOpenChange={setOperatorHoursOpen}
+      />
+      <DncListSheet
+        open={dncListOpen}
+        onOpenChange={setDncListOpen}
       />
     </div>
   );

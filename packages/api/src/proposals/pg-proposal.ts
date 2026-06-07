@@ -1,4 +1,4 @@
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
 import { PgBaseRepository } from '../db/pg-base';
@@ -35,6 +35,7 @@ function mapRow(row: Record<string, unknown>): Proposal {
       row.execution_retry_count != null ? Number(row.execution_retry_count) : undefined,
     undoneAt: row.undone_at ? new Date(row.undone_at as string) : undefined,
     undoneBy: (row.undone_by as string) ?? undefined,
+    chainId: (row.chain_id as string) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -46,77 +47,104 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     super(pool);
   }
 
-  async create(proposal: Proposal): Promise<Proposal> {
-    return this.withTenantTransaction(proposal.tenantId, async (client) => {
-      // Idempotency is enforced by the unique index
-      // idx_proposals_idempotency(tenant_id, idempotency_key). Using
-      // ON CONFLICT DO NOTHING avoids the check-then-insert race where
-      // two concurrent transactions would both pass a SELECT check,
-      // then one INSERT would throw a raw duplicate-key error (SQLSTATE
-      // 23505) that surfaces as a 500 instead of a 409 ConflictError.
-      const conflictClause = proposal.idempotencyKey
-        ? 'ON CONFLICT (tenant_id, idempotency_key) DO NOTHING'
-        : '';
+  /**
+   * Insert one proposal on an existing client. Shared by `create` and
+   * `createMany` so the SQL lives in one place and `createMany` can run
+   * several inserts inside a single transaction.
+   */
+  private async insertOne(client: PoolClient, proposal: Proposal): Promise<Proposal> {
+    // Idempotency is enforced by the unique index
+    // idx_proposals_idempotency(tenant_id, idempotency_key). Using
+    // ON CONFLICT DO NOTHING avoids the check-then-insert race where
+    // two concurrent transactions would both pass a SELECT check,
+    // then one INSERT would throw a raw duplicate-key error (SQLSTATE
+    // 23505) that surfaces as a 500 instead of a 409 ConflictError.
+    const conflictClause = proposal.idempotencyKey
+      ? 'ON CONFLICT (tenant_id, idempotency_key) DO NOTHING'
+      : '';
 
-      const status: ProposalStatus = proposal.status ?? 'draft';
-      const createdAt = proposal.createdAt ?? new Date();
-      const updatedAt = proposal.updatedAt ?? createdAt;
+    const status: ProposalStatus = proposal.status ?? 'draft';
+    const createdAt = proposal.createdAt ?? new Date();
+    const updatedAt = proposal.updatedAt ?? createdAt;
 
-      const result = await client.query(
-        `INSERT INTO proposals (
-          id, tenant_id, proposal_type, status, payload, summary, explanation,
-          confidence_score, confidence_factors, source_context, ai_run_id, prompt_version_id,
-          target_entity_type, target_entity_id, result_entity_id,
-          rejection_reason, rejection_details, idempotency_key, expires_at,
-          approved_at, executed_at, executed_by, undone_at, undone_by,
-          created_by, created_at, updated_at
-        ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7,
-          $8, $9, $10, $11, $12,
-          $13, $14, $15,
-          $16, $17, $18, $19,
-          $20, $21, $22, $23, $24,
-          $25, $26, $27
-        ) ${conflictClause} RETURNING *`,
-        [
-          proposal.id ?? uuidv4(),
-          proposal.tenantId,
-          proposal.proposalType,
-          status,
-          JSON.stringify(proposal.payload),
-          proposal.summary,
-          proposal.explanation ?? null,
-          proposal.confidenceScore ?? null,
-          proposal.confidenceFactors ? JSON.stringify(proposal.confidenceFactors) : null,
-          proposal.sourceContext ? JSON.stringify(proposal.sourceContext) : null,
-          proposal.aiRunId ?? null,
-          proposal.promptVersionId ?? null,
-          proposal.targetEntityType ?? null,
-          proposal.targetEntityId ?? null,
-          proposal.resultEntityId ?? null,
-          proposal.rejectionReason ?? null,
-          proposal.rejectionDetails ?? null,
-          proposal.idempotencyKey ?? null,
-          proposal.expiresAt ?? null,
-          proposal.approvedAt ?? null,
-          proposal.executedAt ?? null,
-          proposal.executedBy ?? null,
-          proposal.undoneAt ?? null,
-          proposal.undoneBy ?? null,
-          proposal.createdBy,
-          createdAt,
-          updatedAt,
-        ]
+    const result = await client.query(
+      `INSERT INTO proposals (
+        id, tenant_id, proposal_type, status, payload, summary, explanation,
+        confidence_score, confidence_factors, source_context, ai_run_id, prompt_version_id,
+        target_entity_type, target_entity_id, result_entity_id,
+        rejection_reason, rejection_details, idempotency_key, expires_at,
+        approved_at, executed_at, executed_by, undone_at, undone_by,
+        chain_id,
+        created_by, created_at, updated_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7,
+        $8, $9, $10, $11, $12,
+        $13, $14, $15,
+        $16, $17, $18, $19,
+        $20, $21, $22, $23, $24,
+        $25,
+        $26, $27, $28
+      ) ${conflictClause} RETURNING *`,
+      [
+        proposal.id ?? uuidv4(),
+        proposal.tenantId,
+        proposal.proposalType,
+        status,
+        JSON.stringify(proposal.payload),
+        proposal.summary,
+        proposal.explanation ?? null,
+        proposal.confidenceScore ?? null,
+        proposal.confidenceFactors ? JSON.stringify(proposal.confidenceFactors) : null,
+        proposal.sourceContext ? JSON.stringify(proposal.sourceContext) : null,
+        proposal.aiRunId ?? null,
+        proposal.promptVersionId ?? null,
+        proposal.targetEntityType ?? null,
+        proposal.targetEntityId ?? null,
+        proposal.resultEntityId ?? null,
+        proposal.rejectionReason ?? null,
+        proposal.rejectionDetails ?? null,
+        proposal.idempotencyKey ?? null,
+        proposal.expiresAt ?? null,
+        proposal.approvedAt ?? null,
+        proposal.executedAt ?? null,
+        proposal.executedBy ?? null,
+        proposal.undoneAt ?? null,
+        proposal.undoneBy ?? null,
+        proposal.chainId ?? null,
+        proposal.createdBy,
+        createdAt,
+        updatedAt,
+      ]
+    );
+    if (result.rows.length === 0) {
+      // ON CONFLICT DO NOTHING returned no row — another transaction
+      // committed an insert with the same (tenant_id, idempotency_key)
+      // while we were racing. Surface as ConflictError → 409.
+      throw new ConflictError(
+        `Proposal with idempotency key '${proposal.idempotencyKey}' already exists for this tenant`
       );
-      if (result.rows.length === 0) {
-        // ON CONFLICT DO NOTHING returned no row — another transaction
-        // committed an insert with the same (tenant_id, idempotency_key)
-        // while we were racing. Surface as ConflictError → 409.
-        throw new ConflictError(
-          `Proposal with idempotency key '${proposal.idempotencyKey}' already exists for this tenant`
-        );
+    }
+    return mapRow(result.rows[0]);
+  }
+
+  async create(proposal: Proposal): Promise<Proposal> {
+    return this.withTenantTransaction(proposal.tenantId, async (client) =>
+      this.insertOne(client, proposal),
+    );
+  }
+
+  async createMany(proposals: Proposal[]): Promise<Proposal[]> {
+    if (proposals.length === 0) return [];
+    // All members share a tenant (enforced by the caller); a single
+    // withTenantTransaction wraps every insert so a failure on any
+    // member rolls back the whole batch — no orphaned chain records.
+    const tenantId = proposals[0].tenantId;
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const created: Proposal[] = [];
+      for (const proposal of proposals) {
+        created.push(await this.insertOne(client, proposal));
       }
-      return mapRow(result.rows[0]);
+      return created;
     });
   }
 
@@ -155,6 +183,41 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       const result = await client.query(
         'SELECT * FROM proposals WHERE tenant_id = $1 AND ai_run_id = $2 ORDER BY created_at DESC',
         [tenantId, aiRunId]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
+  async findByRecordingId(
+    tenantId: string,
+    recordingId: string,
+    idempotencyKey: string,
+  ): Promise<Proposal | null> {
+    return this.withTenant(tenantId, async (client) => {
+      // Indexed dedup lookup: the idempotency_key branch uses the unique index
+      // idx_proposals_idempotency(tenant_id, idempotency_key); the recordingId
+      // branch uses idx_proposals_source_recording(tenant_id,
+      // (source_context->>'recordingId')). Postgres BitmapOrs the two — no
+      // tenant-wide scan. LIMIT 1: we only need to know one already exists.
+      const result = await client.query(
+        `SELECT * FROM proposals
+         WHERE tenant_id = $1
+           AND (idempotency_key = $2 OR source_context->>'recordingId' = $3)
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [tenantId, idempotencyKey, recordingId]
+      );
+      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
+  async findByChain(tenantId: string, chainId: string): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM proposals
+         WHERE tenant_id = $1 AND chain_id = $2
+         ORDER BY (source_context->>'chainIndex')::int ASC NULLS LAST, created_at ASC`,
+        [tenantId, chainId]
       );
       return result.rows.map(mapRow);
     });

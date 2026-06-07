@@ -40,6 +40,19 @@ describe('updateSettingsSchema — call routing + review URLs', () => {
     expect(result.success).toBe(false);
   });
 
+  it('accepts the milestoneBillingEnabled opt-in (reachable via PATCH /api/settings)', () => {
+    // Zod strips unknown keys, so without this field the toggle could only be
+    // set by editing the DB. It must survive parsing alongside the sibling
+    // billing opt-ins.
+    const result = updateSettingsSchema.safeParse({
+      milestoneBillingEnabled: true,
+      batchInvoiceEnabled: true,
+      autoInvoiceOnCompletion: true,
+    });
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.milestoneBillingEnabled).toBe(true);
+  });
+
   it('accepts review URLs and normalizes empty strings to null', () => {
     const result = updateSettingsSchema.safeParse({
       googleReviewUrl: 'https://g.page/r/abc',

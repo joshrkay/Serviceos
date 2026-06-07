@@ -121,6 +121,7 @@ export default defineConfig({
               'scheduling.spec.ts',
               'sms.spec.ts',
               'voice-extras.spec.ts',
+              'voice-billing.spec.ts',
               'isolation.spec.ts',
               'assistant.spec.ts',
             ],

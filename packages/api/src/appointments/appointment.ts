@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { validateAppointmentTimes, validateAppointmentUpdateInput } from './validation';
+import { assertValidAppointmentTransition } from './appointment-lifecycle';
 import { VALID_TIMEZONES } from '../settings/settings';
 import { toUtcDate } from './time';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
@@ -33,10 +34,33 @@ export interface Appointment {
   holdPendingApproval: boolean;
   /** When the tentative hold auto-releases if not approved (set when holdPendingApproval is true). */
   holdExpiryAt?: Date;
+  /**
+   * Optional dedup key for at-least-once write paths (e.g. a redelivered
+   * voice message). Unique per tenant via a partial index; when set, a
+   * second create with the same key returns the existing appointment
+   * instead of inserting a duplicate.
+   */
+  idempotencyKey?: string;
   notes?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/**
+ * A tentative AI-placed hold has released its slot once its expiry passes —
+ * the scheduling read paths (availability-finder, slot-conflict-checker)
+ * treat such an appointment as free rather than as occupying the slot.
+ * A live hold (expiry in the future) and any non-hold appointment still
+ * occupy their slot. Shared so all readers apply identical semantics.
+ */
+export function isExpiredHold(
+  appt: Pick<Appointment, 'holdPendingApproval' | 'holdExpiryAt'>,
+  now: number,
+): boolean {
+  return Boolean(
+    appt.holdPendingApproval && appt.holdExpiryAt && appt.holdExpiryAt.getTime() < now,
+  );
 }
 
 export interface CreateAppointmentInput {
@@ -57,6 +81,8 @@ export interface CreateAppointmentInput {
   holdPendingApproval?: boolean;
   /** When the tentative hold auto-releases. Set when holdPendingApproval is true. */
   holdExpiryAt?: Date;
+  /** Optional dedup key for at-least-once writes; see Appointment.idempotencyKey. */
+  idempotencyKey?: string;
   createdBy: string;
 }
 
@@ -181,6 +207,7 @@ export async function createAppointment(
     status: 'scheduled',
     holdPendingApproval: input.holdPendingApproval ?? false,
     holdExpiryAt: input.holdExpiryAt,
+    idempotencyKey: input.idempotencyKey,
     notes: input.notes,
     createdBy: input.createdBy,
     createdAt: new Date(),
@@ -194,7 +221,13 @@ export async function createAppointment(
 
   const created = await repository.create(appointment);
 
-  if (auditRepo) {
+  // On an idempotency-key dedup hit the repo returns a pre-existing row
+  // (different id than the one we generated) without inserting — don't emit
+  // a second `appointment.created` audit event for an appointment we didn't
+  // actually create.
+  const wasDeduped = created.id !== appointment.id;
+
+  if (auditRepo && !wasDeduped) {
     const event = createAuditEvent({
       tenantId: input.tenantId,
       actorId: input.createdBy,
@@ -242,6 +275,15 @@ export async function updateAppointment(
   const validation = validateAppointmentUpdateInput(existing, input);
   if (validation.errors.length > 0) throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
 
+  // Status lifecycle enforcement. When a status is supplied AND differs
+  // from the persisted value, ensure the transition is in the allowed set
+  // (e.g. `completed` is terminal — nothing transitions out of it). The
+  // helper accepts self-transitions so proposal-execution dedup that
+  // replays the same status update isn't rejected as a 400.
+  if (input.status !== undefined) {
+    assertValidAppointmentTransition(existing.status, input.status);
+  }
+
   const normalizedTimes = normalizeAppointmentTimeUpdates(input);
   const updated = await repository.update(tenantId, id, {
     ...input,
@@ -260,6 +302,24 @@ export async function updateAppointment(
       metadata: { changes: Object.keys(input) },
     });
     await auditRepo.create(event);
+
+    // Emit a dedicated `appointment.status_changed` event when the status
+    // actually moved (skip on self-transition or when status wasn't in the
+    // patch). Downstream observers — dispatch dashboards, analytics —
+    // subscribe to the specific event type rather than scanning every
+    // generic `appointment.updated` payload.
+    if (input.status !== undefined && input.status !== existing.status) {
+      const statusEvent = createAuditEvent({
+        tenantId,
+        actorId,
+        actorRole: actorRole ?? 'unknown',
+        eventType: 'appointment.status_changed',
+        entityType: 'appointment',
+        entityId: id,
+        metadata: { from: existing.status, to: input.status },
+      });
+      await auditRepo.create(statusEvent);
+    }
   }
 
   return updated;

@@ -606,11 +606,36 @@ function VoiceInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
 const CATEGORY_COLOR: Record<string, string> = {
   Service:     'bg-blue-100 text-blue-700',
   Labor:       'bg-violet-100 text-violet-700',
+  // The live catalog API (CatalogCategory) returns plural 'Parts' / 'Materials';
+  // the bundled MANUAL_CATALOG uses the singular forms. Key on both so real
+  // Price Book items don't fall through to the default gray chip.
   Part:        'bg-amber-100 text-amber-700',
+  Parts:       'bg-amber-100 text-amber-700',
   Material:    'bg-green-100 text-green-700',
+  Materials:   'bg-green-100 text-green-700',
   Equipment:   'bg-slate-100 text-slate-600',
   'Parts+Labor':'bg-indigo-100 text-indigo-700',
 };
+
+// Shape of a catalog item from GET /api/catalog/items, mapped into the
+// wizard's CatalogItem so real Price Book entries render in the toggle list.
+interface ApiCatalogItem {
+  id: string;
+  name: string;
+  unitPriceCents: number;
+  unit?: string;
+  category?: string;
+}
+function apiCatalogToCatalogItem(it: ApiCatalogItem): CatalogItem {
+  return {
+    id: it.id,
+    name: it.name,
+    defaultRate: it.unitPriceCents / 100,
+    defaultQty: 1,
+    ...(it.unit ? { unit: it.unit } : {}),
+    category: it.category ?? 'Service',
+  };
+}
 
 function ManualBuildInput({ svcType: initialSvc, onResult }: {
   svcType?: ServiceType;
@@ -621,7 +646,24 @@ function ManualBuildInput({ svcType: initialSvc, onResult }: {
   const [showCustom, setShowCustom] = useState(false);
   const [customDraft, setCustom] = useState({ desc: '', qty: '1', rate: '' });
 
-  const catalog = MANUAL_CATALOG[svcType];
+  // Prefer the tenant's real Price Book. Catalog items aren't service-typed,
+  // so when they exist we show them all (the service tabs still set the
+  // estimate's summary label). With an empty Price Book we fall back to the
+  // bundled starter catalog keyed by service type — same fallback spirit as
+  // the AI-suggest path's local generator.
+  // This toggle list has no in-flow search/paging, so request the API's max
+  // page size (500, matching the CSV import cap) so larger Price Books are
+  // fully reachable here. The shared editor's CatalogPicker pages smaller
+  // because it has server-side search.
+  const { data: apiCatalog, isLoading: catalogLoading } = useListQuery<ApiCatalogItem>('/api/catalog/items', { pageSize: 500 });
+  const realCatalog = Array.isArray(apiCatalog) ? apiCatalog.map(apiCatalogToCatalogItem) : [];
+  // Don't fall back to the bundled starter catalog while the Price Book is
+  // still loading — otherwise a tenant that *has* items could briefly tap
+  // hardcoded starter pricing before the real list lands. Only fall back once
+  // the fetch has settled and confirmed there are no items (covers empty + error).
+  const catalog = realCatalog.length > 0
+    ? realCatalog
+    : (catalogLoading ? [] : MANUAL_CATALOG[svcType]);
   const total   = selected.reduce((s, i) => s + i.qty * i.rate, 0);
 
   function toggleItem(item: CatalogItem) {
@@ -692,6 +734,9 @@ function ManualBuildInput({ svcType: initialSvc, onResult }: {
       <div>
         <p className="text-xs text-slate-500 mb-2">Tap items to add — prices pre-filled &amp; editable</p>
         <div className="flex flex-col gap-1.5">
+          {catalogLoading && catalog.length === 0 && (
+            <p className="text-xs text-slate-400">Loading your price book…</p>
+          )}
           {catalog.map(item => {
             const isSel = !!selected.find(s => s.id === item.id);
             return (
