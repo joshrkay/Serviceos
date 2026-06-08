@@ -209,6 +209,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['147_tenant_settings_vapi_assistant', '8e59538f846f9de4d53577e5fafbc0c3327b3e823c7907a2f6bc21290eae8a7a'],
   ['148_tenant_settings_business_profile_extras', '0b9f55aedb42e1a503aa1fc7338fa790a11be08d4bf3eca26cf205da582c9002'],
   ['149_tenant_settings_calendar_provider', '1ef4dcbef697bb3e060f0a3ba3102381631c053d0c696131623a63c6d0d03440'],
+  ['150_tenant_settings_availability_template', 'c05e63c2025ecc6fd69cf4fdbee4ac447cda294f65f8e9efb77532c37cfe1175'],
 ];
 
 function hashMigration(value: string): string {

@@ -177,10 +177,10 @@ describe('RLS tenant isolation (DB-level enforcement)', () => {
         [tenantB, SECRET_B] as const,
       ]) {
         await pool.query(
-          `INSERT INTO tenant_settings (id, tenant_id, business_name, activated_at)
-             VALUES (gen_random_uuid(), $1, 'Biz', now())
-           ON CONFLICT (tenant_id) DO UPDATE SET activated_at = EXCLUDED.activated_at`,
-          [t.tenantId],
+          `INSERT INTO tenant_settings (id, tenant_id, business_name, activated_at, vapi_assistant_id)
+             VALUES (gen_random_uuid(), $1, 'Biz', now(), $2)
+           ON CONFLICT (tenant_id) DO UPDATE SET activated_at = EXCLUDED.activated_at, vapi_assistant_id = EXCLUDED.vapi_assistant_id`,
+          [t.tenantId, secret],
         );
         await pool.query(
           `INSERT INTO tenant_integrations (id, tenant_id, provider, status, provider_data)
@@ -200,6 +200,17 @@ describe('RLS tenant isolation (DB-level enforcement)', () => {
       });
       expect(rows).toContain(tenantA.tenantId);
       expect(rows).not.toContain(tenantB.tenantId);
+    });
+
+    it('tenant A cannot read tenant B vapi_assistant_id (isolation)', async () => {
+      const seen = await asTenant(pool, tenantA.tenantId, async (c) => {
+        const r = await c.query<{ vapi_assistant_id: string | null }>(
+          'SELECT vapi_assistant_id FROM tenant_settings',
+        );
+        return r.rows.map((row) => row.vapi_assistant_id);
+      });
+      expect(seen).toContain(SECRET_A);
+      expect(seen).not.toContain(SECRET_B);
     });
 
     it('tenant A cannot read tenant B provisioning secrets (provider_data)', async () => {

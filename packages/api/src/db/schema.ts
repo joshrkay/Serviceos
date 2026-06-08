@@ -3818,6 +3818,16 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS calendar_provider TEXT
         CHECK (calendar_provider IS NULL OR calendar_provider IN ('google', 'builtin'));
   `,
+
+  '150_tenant_settings_availability_template': `
+    -- Tech-availability template seeded from the next 7 days of the owner's
+    -- Google Calendar free/busy on connect (see availability/seed-from-google.ts).
+    -- JSONB: { source, generatedAt, windowDays, busy: [{start,end}] }. NULL
+    -- until a Google calendar is connected + seeded. Additive; inherits the
+    -- FORCE-RLS policy.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS availability_template JSONB;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

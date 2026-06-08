@@ -12,7 +12,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 describe('HttpVapiClient (mocked fetch — no real Vapi calls)', () => {
   it('createAssistant POSTs /assistant with the 11labs voice + bearer auth', async () => {
-    const fetchFn = vi.fn(async () => jsonResponse({ id: 'asst_1' }));
+    const fetchFn = vi.fn(async (_url: string, _init?: RequestInit) => jsonResponse({ id: 'asst_1' }));
     const client = new HttpVapiClient({ apiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch });
     const res = await client.createAssistant({ name: 'A', firstMessage: 'hi', voiceId: 'v1', serverUrl: 'u', serverUrlSecret: 's' });
     expect(res).toEqual({ assistantId: 'asst_1' });
@@ -27,7 +27,7 @@ describe('HttpVapiClient (mocked fetch — no real Vapi calls)', () => {
   });
 
   it('updateAssistant PATCHes /assistant/:id', async () => {
-    const fetchFn = vi.fn(async () => jsonResponse({}, 200));
+    const fetchFn = vi.fn(async (_url: string, _init?: RequestInit) => jsonResponse({}, 200));
     const client = new HttpVapiClient({ apiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch });
     await client.updateAssistant('asst_1', { firstMessage: 'new greeting' });
     const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit];
@@ -36,7 +36,7 @@ describe('HttpVapiClient (mocked fetch — no real Vapi calls)', () => {
   });
 
   it('linkPhoneNumber POSTs /phone-number with assistant + number', async () => {
-    const fetchFn = vi.fn(async () => jsonResponse({ id: 'pn_1' }));
+    const fetchFn = vi.fn(async (_url: string, _init?: RequestInit) => jsonResponse({ id: 'pn_1' }));
     const client = new HttpVapiClient({ apiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch });
     const res = await client.linkPhoneNumber({ assistantId: 'asst_1', phoneE164: '+15125550000', twilioPhoneNumberSid: 'PN9' });
     expect(res).toEqual({ phoneNumberId: 'pn_1' });
@@ -47,7 +47,7 @@ describe('HttpVapiClient (mocked fetch — no real Vapi calls)', () => {
   });
 
   it('throws on a non-2xx response', async () => {
-    const fetchFn = vi.fn(async () => jsonResponse({ error: 'bad' }, 400));
+    const fetchFn = vi.fn(async (_url: string, _init?: RequestInit) => jsonResponse({ error: 'bad' }, 400));
     const client = new HttpVapiClient({ apiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch });
     await expect(client.createAssistant({ name: 'A', firstMessage: 'h', voiceId: 'v' })).rejects.toThrow(/Vapi POST/);
   });

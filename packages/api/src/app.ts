@@ -1693,6 +1693,9 @@ export function createApp(): express.Express {
     // callback uses `system:google-oauth-callback` because there is no
     // Clerk session in flight when Google redirects the browser back.
     auditRepo,
+    // Feature 5 — seed a 7-day availability template from the connected
+    // calendar in the OAuth callback. Pool-gated (skipped in-memory).
+    ...(pool ? { pool } : {}),
   };
   app.use(
     '/api/calendar-integrations',
