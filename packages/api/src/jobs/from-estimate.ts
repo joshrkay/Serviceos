@@ -114,18 +114,22 @@ async function chooseTechnicianAndSlot(
     throw new ConflictError('No technicians available to schedule this job');
   }
 
-  // Operator pinned an exact start: verify it's free for the chosen tech.
+  // Operator pinned an exact start: assign the first candidate free at that
+  // time. When technicianId was also given, candidates is just that tech; when
+  // it wasn't, we search every technician rather than only the first-created
+  // one (otherwise a pinned start fails when tech #1 is busy but others are free).
   if (input.scheduledStart) {
-    const tech = candidates[0];
     const scheduledStart = input.scheduledStart;
     const scheduledEnd = new Date(scheduledStart.getTime() + durationMin * 60_000);
-    const free = await isSlotFree(slotDeps, {
-      tenantId, start: scheduledStart, end: scheduledEnd, technicianId: tech.id,
-    });
-    if (!free) {
-      throw new ConflictError('Requested start time is not available for the technician');
+    for (const tech of candidates) {
+      const free = await isSlotFree(slotDeps, {
+        tenantId, start: scheduledStart, end: scheduledEnd, technicianId: tech.id,
+      });
+      if (free) {
+        return { technicianId: tech.id, technicianRole: tech.role, scheduledStart, scheduledEnd };
+      }
     }
-    return { technicianId: tech.id, technicianRole: tech.role, scheduledStart, scheduledEnd };
+    throw new ConflictError('Requested start time is not available for any technician');
   }
 
   // Auto-pick the first technician with an open slot in the search window.
@@ -185,6 +189,9 @@ export async function convertEstimateToScheduledJob(
   // 4. Create the appointment, then assign the primary technician (the
   //    assign step's double-booking guard + DB EXCLUDE constraint are the
   //    authoritative protections).
+  // Stable idempotency key so a client/network retry or a duplicate operator
+  // click (especially on the already-accepted path) reuses the same
+  // appointment instead of stacking another active one on the job's schedule.
   const appointment = await createAppointment(
     {
       tenantId,
@@ -193,6 +200,7 @@ export async function convertEstimateToScheduledJob(
       scheduledEnd: chosen.scheduledEnd,
       timezone,
       createdBy: actorId,
+      idempotencyKey: `from-estimate:${estimateId}`,
     },
     deps.appointmentRepo,
     undefined,
@@ -200,8 +208,17 @@ export async function convertEstimateToScheduledJob(
     input.actorRole,
   );
 
+  // On a retry the appointment is deduped (same key) and may already carry a
+  // primary assignment for the chosen tech — reuse it rather than stacking a
+  // duplicate assignment.
+  const priorAssignments = await deps.assignmentRepo.findByAppointment(tenantId, appointment.id);
+  const existing = priorAssignments.find(
+    (a) => a.isPrimary && a.technicianId === chosen.technicianId,
+  );
   let assignment: AppointmentAssignment;
-  try {
+  if (existing) {
+    assignment = existing;
+  } else try {
     assignment = await assignTechnician(
       {
         tenantId,
@@ -215,13 +232,14 @@ export async function convertEstimateToScheduledJob(
       { appointmentRepo: deps.appointmentRepo, auditRepo: deps.auditRepo, actorRole: input.actorRole },
     );
   } catch (err) {
-    // Compensate: cancel the just-created appointment rather than leave an
-    // unassigned orphan behind when the assign step fails (e.g. a race lost to
-    // the no_double_booking constraint).
-    try {
-      await deps.appointmentRepo.update(tenantId, appointment.id, { status: 'canceled' });
-    } catch {
-      // best-effort compensation; surface the original error below
+    // Compensate ONLY when we created a fresh appointment (no prior assignments);
+    // never cancel an appointment that already existed from a prior run.
+    if (priorAssignments.length === 0) {
+      try {
+        await deps.appointmentRepo.update(tenantId, appointment.id, { status: 'canceled' });
+      } catch {
+        // best-effort compensation; surface the original error below
+      }
     }
     throw err;
   }

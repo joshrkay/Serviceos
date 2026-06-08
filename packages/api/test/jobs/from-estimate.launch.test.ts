@@ -163,6 +163,50 @@ describe('Feature 5 — Estimate → Job conversion', () => {
     expect(result.assignment.technicianId).toBe(TECH_1);
   });
 
+  it('re-conversion is idempotent — no duplicate appointment or assignment', async () => {
+    const job = await jobRepo.create(makeJob());
+    const est = await seedSentEstimate(job.id);
+
+    const first = await convertEstimateToScheduledJob(deps([tech(TECH_1)]), {
+      tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', now: NOW,
+    });
+    // Retry / duplicate click — the estimate is already accepted now.
+    const second = await convertEstimateToScheduledJob(deps([tech(TECH_1)]), {
+      tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', now: NOW,
+    });
+
+    expect(second.appointment.id).toBe(first.appointment.id);
+    expect(await appointmentRepo.findByJob(TENANT, job.id)).toHaveLength(1);
+    const assignments = await assignmentRepo.findByAppointment(TENANT, first.appointment.id);
+    expect(assignments.filter((a) => a.isPrimary)).toHaveLength(1);
+  });
+
+  it('honors a pinned start by trying all technicians when the first is busy', async () => {
+    const job = await jobRepo.create(makeJob());
+    const est = await seedSentEstimate(job.id);
+    const start = new Date('2026-06-12T15:00:00Z');
+
+    // Tech 1 is already booked at the pinned start; tech 2 is free.
+    const busy = await appointmentRepo.create({
+      id: uuidv4(), tenantId: TENANT, jobId: uuidv4(),
+      scheduledStart: start, scheduledEnd: new Date(start.getTime() + 60 * 60_000),
+      timezone: 'UTC', status: 'scheduled', holdPendingApproval: false,
+      createdBy: 'u1', createdAt: NOW, updatedAt: NOW,
+    });
+    await assignmentRepo.create({
+      id: uuidv4(), tenantId: TENANT, appointmentId: busy.id, technicianId: TECH_1,
+      isPrimary: true, assignedBy: 'u1', assignedAt: NOW,
+    });
+
+    const result = await convertEstimateToScheduledJob(deps([tech(TECH_1), tech(TECH_2)]), {
+      tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', scheduledStart: start, now: NOW,
+    });
+
+    // Tech 1 was busy at that slot, so the free tech 2 is assigned instead of erroring.
+    expect(result.assignment.technicianId).toBe(TECH_2);
+    expect(result.appointment.scheduledStart.toISOString()).toBe(start.toISOString());
+  });
+
   it('returns 503 when scheduling deps are not wired, and 401 unauthenticated', async () => {
     // No fromEstimateDeps -> NOT_CONFIGURED for an authenticated owner.
     const authed = express();
