@@ -15,7 +15,7 @@ import { convertEstimateToScheduledJob } from '../../src/jobs/from-estimate';
 import { Job, InMemoryJobRepository } from '../../src/jobs/job';
 import { InMemoryEstimateRepository, createEstimate } from '../../src/estimates/estimate';
 import { InMemoryAppointmentRepository } from '../../src/appointments/appointment';
-import { InMemoryAssignmentRepository } from '../../src/appointments/assignment';
+import { InMemoryAssignmentRepository, AssignmentRepository } from '../../src/appointments/assignment';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
 import { User, UserRepository } from '../../src/users/user';
@@ -179,6 +179,45 @@ describe('Feature 5 — Estimate → Job conversion', () => {
 
     // The pre-flight check fired before scheduling — no side effects left behind.
     expect(await appointmentRepo.findByJob(TENANT, job.id)).toHaveLength(0);
+  });
+
+  it('retries cleanly after a failed assignment — never binds the job to a canceled appointment', async () => {
+    const job = await jobRepo.create(makeJob());
+    const est = await seedSentEstimate(job.id);
+
+    // Assignment repo that throws on the FIRST create (a transient
+    // double-booking/race), then behaves normally on retry.
+    let failNext = true;
+    const flakyAssign: AssignmentRepository = {
+      create: async (a) => {
+        if (failNext) { failNext = false; throw new Error('transient assign failure'); }
+        return assignmentRepo.create(a);
+      },
+      update: (a) => assignmentRepo.update(a),
+      findByAppointment: (t, id) => assignmentRepo.findByAppointment(t, id),
+      findByTechnician: (t, id) => assignmentRepo.findByTechnician(t, id),
+      delete: (t, id) => assignmentRepo.delete(t, id),
+    };
+    const flakyDeps = {
+      estimateRepo, jobRepo, appointmentRepo, assignmentRepo: flakyAssign,
+      userRepo: fakeUserRepo([tech(TECH_1)]), invoiceRepo, auditRepo,
+    };
+
+    // First attempt fails at assignment → compensation cancels the appointment.
+    await expect(
+      convertEstimateToScheduledJob(flakyDeps, { tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', now: NOW }),
+    ).rejects.toBeDefined();
+
+    // Retry dedupes to the canceled appointment by key — it must be revived, not
+    // returned as a canceled "scheduled job".
+    const retry = await convertEstimateToScheduledJob(flakyDeps, {
+      tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', now: NOW,
+    });
+    expect(retry.appointment.status).not.toBe('canceled');
+    expect(retry.assignment.technicianId).toBe(TECH_1);
+    // Still exactly one appointment on the job (the revived one).
+    const live = (await appointmentRepo.findByJob(TENANT, job.id)).filter((a) => a.status !== 'canceled');
+    expect(live).toHaveLength(1);
   });
 
   it('re-conversion is idempotent — no duplicate appointment or assignment', async () => {
