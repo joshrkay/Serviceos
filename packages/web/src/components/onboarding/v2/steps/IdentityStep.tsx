@@ -71,6 +71,9 @@ export function IdentityStep({ onSaved }: IdentityStepProps) {
   const [ownerPhone, setOwnerPhone] = useState('');
   const [serviceAreaText, setServiceAreaText] = useState('');
   const [serviceAreaRadius, setServiceAreaRadius] = useState<number>(25);
+  const [serviceAddress, setServiceAddress] = useState('');
+  const [serviceAreaZips, setServiceAreaZips] = useState(''); // comma/space-separated
+  const [servicesOffered, setServicesOffered] = useState(''); // comma-separated
   const [jobBufferMinutes, setJobBufferMinutes] = useState<number>(30);
   const [hourlyRateDollars, setHourlyRateDollars] = useState<number>(125);
   const [timezone, setTimezone] = useState<string>(detectBrowserTimezone);
@@ -135,6 +138,8 @@ export function IdentityStep({ onSaved }: IdentityStepProps) {
       return;
     }
     setSubmitting(true);
+    const zips = serviceAreaZips.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+    const services = servicesOffered.split(',').map((s) => s.trim()).filter(Boolean);
     try {
       const res = await apiFetch('/api/onboarding/identity', {
         method: 'PUT',
@@ -143,6 +148,9 @@ export function IdentityStep({ onSaved }: IdentityStepProps) {
           businessName,
           serviceAreaText: serviceAreaText || undefined,
           serviceAreaRadius,
+          serviceAddress: serviceAddress.trim() || undefined,
+          serviceAreaZips: zips.length ? zips : undefined,
+          servicesOffered: services.length ? services : undefined,
           businessHours: hours,
           jobBufferMinutes,
           hourlyRateCents: Math.round(hourlyRateDollars * 100),
@@ -200,6 +208,39 @@ export function IdentityStep({ onSaved }: IdentityStepProps) {
           value={ownerPhone}
           onChange={(e) => setOwnerPhone(e.target.value)}
           placeholder="(512) 555-1234"
+        />
+      </Field>
+
+      <Field
+        label={<>Service address <span className="text-slate-400 font-normal">(optional)</span></>}
+        hint="Your shop or dispatch address. Used for travel-time estimates."
+      >
+        <Input
+          value={serviceAddress}
+          onChange={(e) => setServiceAddress(e.target.value)}
+          placeholder="123 Main St, Phoenix AZ"
+        />
+      </Field>
+
+      <Field
+        label={<>ZIP codes you serve <span className="text-slate-400 font-normal">(optional)</span></>}
+        hint="Comma-separated 5-digit ZIPs the AI will book jobs in."
+      >
+        <Input
+          value={serviceAreaZips}
+          onChange={(e) => setServiceAreaZips(e.target.value)}
+          placeholder="78701, 78702, 78703"
+        />
+      </Field>
+
+      <Field
+        label={<>Services offered <span className="text-slate-400 font-normal">(optional)</span></>}
+        hint="Comma-separated. The AI uses these to greet callers and qualify jobs."
+      >
+        <Input
+          value={servicesOffered}
+          onChange={(e) => setServicesOffered(e.target.value)}
+          placeholder="AC repair, furnace install, maintenance plans"
         />
       </Field>
 

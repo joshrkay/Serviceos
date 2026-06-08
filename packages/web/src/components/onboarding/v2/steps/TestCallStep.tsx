@@ -5,6 +5,7 @@ import { Phone, Copy, Check } from 'lucide-react';
 import { useApiClient } from '../../../../lib/apiClient';
 import { Button } from '../../../ui';
 import { track, trackFunnel } from '../../../../lib/analytics';
+import { CalendarChoicePanel } from '../CalendarChoicePanel';
 import type { OnboardingStatusResponse } from '../../../../types/onboarding';
 
 interface TestCallStepProps {
@@ -136,6 +137,7 @@ export function TestCallStep({ status, onSkipped, onRefresh }: TestCallStepProps
             )}
           </p>
         </div>
+        <CalendarChoicePanel tenantId={status.tenantId} onChosen={onRefresh} />
         <div className="flex flex-col items-center gap-3">
           {!voiceAgentLive && (
             <Button variant="primary" size="lg" loading={goingLive} onClick={() => void turnOnAiAnswering()}>

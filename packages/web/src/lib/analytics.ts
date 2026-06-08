@@ -41,6 +41,7 @@ export type AnalyticsEvent =
   | 'wizard_step_business'
   | 'wizard_step_phone'
   | 'wizard_step_voice'
+  | 'wizard_step_calendar'
   | 'wizard_completed'
   | 'test_call_initiated'
   | 'test_call_succeeded'
