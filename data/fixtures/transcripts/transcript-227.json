@@ -1,0 +1,15 @@
+{
+  "id": "transcript-227",
+  "type": "inbound_call",
+  "duration_seconds": 90,
+  "service_type": "plumbing",
+  "transcript": "Customer: Hi, this is Jennifer Wu. I need to reschedule my appointment for the toilet. Dispatcher: No problem Jennifer. When works better for you? Customer: Could we do next Monday at 9? Dispatcher: That works. I've moved your appointment to next Monday at 9. Customer: Perfect, thanks.",
+  "expected_entities": {
+    "customer_name": "Jennifer Wu",
+    "issue": "reschedule toilet appointment",
+    "equipment": "toilet",
+    "address": "",
+    "appointment_window": "next Monday at 9"
+  },
+  "source": "synthetic"
+}

@@ -1,0 +1,15 @@
+{
+  "id": "transcript-093",
+  "type": "inbound_call",
+  "duration_seconds": 80,
+  "service_type": "electrical",
+  "transcript": "Customer: This is an emergency, my light fixture has no power and it's getting bad! This is Angela Reed at 9 Lakeview Drive. Dispatcher: Okay Angela, stay calm. I'm getting a technician dispatched to 9 Lakeview Drive right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "expected_entities": {
+    "customer_name": "Angela Reed",
+    "issue": "emergency: light fixture has no power",
+    "equipment": "light fixture",
+    "address": "9 Lakeview Drive",
+    "appointment_window": "immediate dispatch"
+  },
+  "source": "synthetic"
+}

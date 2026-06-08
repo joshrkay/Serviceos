@@ -1,0 +1,15 @@
+{
+  "id": "transcript-202",
+  "type": "inbound_call",
+  "duration_seconds": 100,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is Carlos Mendez. I need to reschedule my appointment for the furnace. Dispatcher: No problem Carlos. When works better for you? Customer: Could we do next Monday at 9? Dispatcher: That works. I've moved your appointment to next Monday at 9. Customer: Perfect, thanks.",
+  "expected_entities": {
+    "customer_name": "Carlos Mendez",
+    "issue": "reschedule furnace appointment",
+    "equipment": "furnace",
+    "address": "",
+    "appointment_window": "next Monday at 9"
+  },
+  "source": "synthetic"
+}

@@ -1,0 +1,15 @@
+{
+  "id": "transcript-104",
+  "type": "inbound_call",
+  "duration_seconds": 90,
+  "service_type": "plumbing",
+  "transcript": "Customer: This is an emergency, my shower valve has low water pressure and it's getting bad! This is Carlos Mendez at 456 Oak Avenue. Dispatcher: Okay Carlos, stay calm. I'm getting a technician dispatched to 456 Oak Avenue right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "expected_entities": {
+    "customer_name": "Carlos Mendez",
+    "issue": "emergency: shower valve has low water pressure",
+    "equipment": "shower valve",
+    "address": "456 Oak Avenue",
+    "appointment_window": "immediate dispatch"
+  },
+  "source": "synthetic"
+}
