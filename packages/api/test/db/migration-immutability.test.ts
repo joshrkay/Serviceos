@@ -206,6 +206,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['144_tenants_pending_checkout_at', '93cb5302caca35e6587b01d97151e8424e554a6ec90c08274d67c81eb436f2b2'],
   ['145_tenants_pending_checkout_session_id', '2f4d5f3c8be0510bfbc1490192810d65358632d0bcc2540f116d77e5233eed36'],
   ['146_proposals_claimed_by_text', 'e82ae5ebe8476850f5aae1354088820ea462f94247ffad5c37b474c1205e9b6b'],
+  ['147_tenant_settings_csr_seats', '4196ce4aca7235cbf777c2f9b6abf44809b8ef7f57550dec66dd82b8076f2d18'],
 ];
 
 function hashMigration(value: string): string {

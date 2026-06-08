@@ -1,0 +1,202 @@
+[
+  {
+    "name": "book-clear",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "I'd like to schedule a furnace tune-up for next week, please.",
+    "expectedIntent": "book_appointment",
+    "expectedEmergencyDial": false,
+    "confidence": 0.93,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "book-low-confidence",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "uh maybe set something up I think, not sure",
+    "expectedIntent": "book_appointment",
+    "expectedEmergencyDial": false,
+    "confidence": 0.55,
+    "expectedCriticalHandoff": true
+  },
+  {
+    "name": "estimate-water-heater",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "Can I get a quote to replace my water heater?",
+    "expectedIntent": "request_estimate",
+    "expectedEmergencyDial": false,
+    "confidence": 0.9,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "emergency-gas-leak",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "I smell gas in my kitchen and it's really strong right now.",
+    "expectedIntent": "emergency_dispatch",
+    "expectedEmergencyDial": true,
+    "confidence": 0.97,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "emergency-flooding",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "My basement is flooding, water is everywhere from a burst pipe.",
+    "expectedIntent": "emergency_dispatch",
+    "expectedEmergencyDial": true,
+    "confidence": 0.96,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "emergency-no-heat-winter",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "My furnace died and it's ten degrees outside, we have no heat at all.",
+    "expectedIntent": "emergency_dispatch",
+    "expectedEmergencyDial": true,
+    "confidence": 0.95,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "emergency-no-ac-summer",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "The AC is out and it's a hundred and two degrees, my mother is elderly.",
+    "expectedIntent": "emergency_dispatch",
+    "expectedEmergencyDial": true,
+    "confidence": 0.94,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "existing-customer-eta",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "When is my technician arriving tomorrow morning?",
+    "expectedIntent": "lookup_appointments",
+    "expectedEmergencyDial": false,
+    "confidence": 0.88,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "existing-customer-confirm",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "Can you confirm what time my appointment is on Thursday?",
+    "expectedIntent": "lookup_appointments",
+    "expectedEmergencyDial": false,
+    "confidence": 0.85,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "billing-invoice-question",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "I have a question about a charge on my last invoice.",
+    "expectedIntent": "billing_question",
+    "expectedEmergencyDial": false,
+    "confidence": 0.9,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "billing-low-confidence",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "something about a charge I don't really get on the bill",
+    "expectedIntent": "billing_question",
+    "expectedEmergencyDial": false,
+    "confidence": 0.6,
+    "expectedCriticalHandoff": true
+  },
+  {
+    "name": "complaint-no-show",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "The technician never showed up today and I am absolutely furious.",
+    "expectedIntent": "complaint",
+    "expectedEmergencyDial": false,
+    "confidence": 0.82,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "complaint-low-confidence",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "this whole thing is really not okay at all honestly",
+    "expectedIntent": "complaint",
+    "expectedEmergencyDial": false,
+    "confidence": 0.5,
+    "expectedCriticalHandoff": true
+  },
+  {
+    "name": "reach-human-direct",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "Just let me talk to a real person, please.",
+    "expectedIntent": "operator_request",
+    "expectedEmergencyDial": false,
+    "confidence": 0.97,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "reach-human-owner",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "Can I speak with the owner of the business?",
+    "expectedIntent": "operator_request",
+    "expectedEmergencyDial": false,
+    "confidence": 0.9,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "unknown-noise",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "yeah I was just wondering about the weather honestly nothing else",
+    "expectedIntent": "unknown",
+    "expectedEmergencyDial": false,
+    "confidence": 0.3,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "book-drain-cleaning",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "I'd like to schedule a drain cleaning for Friday afternoon.",
+    "expectedIntent": "book_appointment",
+    "expectedEmergencyDial": false,
+    "confidence": 0.92,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "estimate-ac-install",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "How much would a brand new AC unit install run me?",
+    "expectedIntent": "request_estimate",
+    "expectedEmergencyDial": false,
+    "confidence": 0.88,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "payment-over-phone",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "I'd like to pay my outstanding balance over the phone now.",
+    "expectedIntent": "record_payment",
+    "expectedEmergencyDial": false,
+    "confidence": 0.9,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "payment-low-confidence",
+    "feature": "feature-2-intent-escalation",
+    "language": "en",
+    "utterance": "I want to pay uh the thing for the service",
+    "expectedIntent": "record_payment",
+    "expectedEmergencyDial": false,
+    "confidence": 0.55,
+    "expectedCriticalHandoff": true
+  }
+]

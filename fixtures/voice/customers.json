@@ -1,0 +1,52 @@
+[
+  {
+    "name": "returning-with-service-en",
+    "feature": "feature-3-customer-recognition",
+    "language": "en",
+    "scenario": "returning",
+    "customerName": "John",
+    "timezone": "America/New_York",
+    "lastService": { "date": "2026-03-12T15:00:00.000Z", "type": "AC tune-up" },
+    "expectedGreetingContains": ["John", "AC tune-up", "March"]
+  },
+  {
+    "name": "returning-with-service-es",
+    "feature": "feature-3-customer-recognition",
+    "language": "es",
+    "scenario": "returning",
+    "customerName": "María",
+    "timezone": "America/New_York",
+    "lastService": { "date": "2026-03-12T15:00:00.000Z", "type": "revisión de calefacción" },
+    "expectedGreetingContains": ["María", "revisión de calefacción", "marzo"]
+  },
+  {
+    "name": "returning-no-service-en",
+    "feature": "feature-3-customer-recognition",
+    "language": "en",
+    "scenario": "returning",
+    "customerName": "Dana",
+    "timezone": "America/New_York",
+    "lastService": null,
+    "expectedGreetingContains": ["Dana", "How can I help you today?"]
+  },
+  {
+    "name": "returning-no-service-es",
+    "feature": "feature-3-customer-recognition",
+    "language": "es",
+    "scenario": "returning",
+    "customerName": "Carlos",
+    "timezone": "America/New_York",
+    "lastService": null,
+    "expectedGreetingContains": ["Carlos", "¿En qué puedo ayudarle hoy?"]
+  },
+  {
+    "name": "new-caller-en",
+    "feature": "feature-3-customer-recognition",
+    "language": "en",
+    "scenario": "new",
+    "customerName": "",
+    "timezone": "America/New_York",
+    "lastService": null,
+    "expectedGreetingContains": []
+  }
+]
