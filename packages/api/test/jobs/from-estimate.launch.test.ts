@@ -1,0 +1,177 @@
+/**
+ * Feature 5 — Estimate → Job conversion (launch-readiness pass).
+ *
+ * Exercises convertEstimateToScheduledJob: it reuses the estimate's existing
+ * job, schedules an appointment + assigns a technician by availability, flips
+ * the estimate to accepted, syncs job.assignedTechnicianId, and inherits the
+ * estimate's line items. Plus a route-level check that POST
+ * /api/jobs/from-estimate/:id is auth-gated.
+ */
+import { describe, it, expect, beforeEach } from 'vitest';
+import { v4 as uuidv4 } from 'uuid';
+import express from 'express';
+import request from 'supertest';
+import { convertEstimateToScheduledJob } from '../../src/jobs/from-estimate';
+import { Job, InMemoryJobRepository } from '../../src/jobs/job';
+import { InMemoryEstimateRepository, createEstimate } from '../../src/estimates/estimate';
+import { InMemoryAppointmentRepository } from '../../src/appointments/appointment';
+import { InMemoryAssignmentRepository } from '../../src/appointments/assignment';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { User, UserRepository } from '../../src/users/user';
+import { buildLineItem } from '../../src/shared/billing-engine';
+import { createJobRouter } from '../../src/routes/jobs';
+
+const TENANT = 'tenant-from-estimate';
+const NOW = new Date('2026-06-10T00:00:00Z');
+
+function tech(id: string): User {
+  return {
+    id, tenantId: TENANT, email: `${id}@x.com`, role: 'technician',
+    canFieldServe: true, createdAt: NOW, updatedAt: NOW,
+  };
+}
+
+function fakeUserRepo(users: User[]): UserRepository {
+  return {
+    findByTenant: async (t, opts) =>
+      users.filter((u) => u.tenantId === t && (!opts?.role || u.role === opts.role)).map((u) => ({ ...u })),
+    findById: async (t, id) => users.find((u) => u.tenantId === t && u.id === id) ?? null,
+    findByMobileNumber: async () => null,
+    update: async () => null,
+  };
+}
+
+function makeJob(): Job {
+  return {
+    id: uuidv4(), tenantId: TENANT, customerId: uuidv4(), locationId: uuidv4(),
+    jobNumber: 'JOB-1', summary: 'AC repair', status: 'scheduled', priority: 'normal',
+    depositRequiredCents: 0, depositPaidCents: 0, depositStatus: 'not_required',
+    moneyState: 'estimate_sent', createdBy: 'u1', createdAt: NOW, updatedAt: NOW,
+  };
+}
+
+describe('Feature 5 — Estimate → Job conversion', () => {
+  let estimateRepo: InMemoryEstimateRepository;
+  let jobRepo: InMemoryJobRepository;
+  let appointmentRepo: InMemoryAppointmentRepository;
+  let assignmentRepo: InMemoryAssignmentRepository;
+  let auditRepo: InMemoryAuditRepository;
+
+  beforeEach(() => {
+    estimateRepo = new InMemoryEstimateRepository();
+    jobRepo = new InMemoryJobRepository();
+    appointmentRepo = new InMemoryAppointmentRepository();
+    assignmentRepo = new InMemoryAssignmentRepository();
+    auditRepo = new InMemoryAuditRepository();
+  });
+
+  function deps(users: User[]) {
+    return { estimateRepo, jobRepo, appointmentRepo, assignmentRepo, userRepo: fakeUserRepo(users), auditRepo };
+  }
+
+  async function seedSentEstimate(jobId: string) {
+    const est = await createEstimate(
+      {
+        tenantId: TENANT, jobId, estimateNumber: 'EST-1', createdBy: 'u1',
+        lineItems: [
+          buildLineItem('l1', 'Labor', 2, 12000, 0, false, 'labor'),
+          buildLineItem('m1', 'Part', 1, 4500, 1, true, 'material'),
+        ],
+      },
+      estimateRepo,
+    );
+    return (await estimateRepo.update(TENANT, est.id, { status: 'sent' }))!;
+  }
+
+  it('schedules + assigns the existing job and accepts the estimate', async () => {
+    const job = await jobRepo.create(makeJob());
+    const est = await seedSentEstimate(job.id);
+
+    const result = await convertEstimateToScheduledJob(deps([tech('tech-1')]), {
+      tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', actorRole: 'owner', now: NOW,
+    });
+
+    // Reuses the estimate's existing job (no new job minted).
+    expect(result.job.id).toBe(job.id);
+    // Estimate is accepted and keeps its line items.
+    expect(result.estimate.status).toBe('accepted');
+    expect(result.estimate.lineItems).toHaveLength(2);
+    // An appointment + primary assignment now exist for the chosen tech.
+    expect(result.appointment.jobId).toBe(job.id);
+    expect(result.assignment.technicianId).toBe('tech-1');
+    expect(result.assignment.isPrimary).toBe(true);
+    // Tech is denormalized onto the job.
+    expect(result.job.assignedTechnicianId).toBe('tech-1');
+    // Conversion is audited.
+    expect(auditRepo.getAll().some((e) => e.eventType === 'job.created_from_estimate')).toBe(true);
+  });
+
+  it('honors an operator-specified technician and start time', async () => {
+    const job = await jobRepo.create(makeJob());
+    const est = await seedSentEstimate(job.id);
+    const start = new Date('2026-06-12T15:00:00Z');
+
+    const result = await convertEstimateToScheduledJob(deps([tech('tech-1'), tech('tech-2')]), {
+      tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', actorRole: 'owner',
+      technicianId: 'tech-2', scheduledStart: start, durationMin: 90, now: NOW,
+    });
+
+    expect(result.assignment.technicianId).toBe('tech-2');
+    expect(result.appointment.scheduledStart.toISOString()).toBe(start.toISOString());
+    expect(result.appointment.scheduledEnd.getTime() - result.appointment.scheduledStart.getTime()).toBe(90 * 60_000);
+  });
+
+  it('rejects a draft estimate (must be sent first)', async () => {
+    const job = await jobRepo.create(makeJob());
+    const est = await createEstimate(
+      { tenantId: TENANT, jobId: job.id, estimateNumber: 'EST-2', createdBy: 'u1', lineItems: [buildLineItem('l1', 'Labor', 1, 10000, 0, false, 'labor')] },
+      estimateRepo,
+    );
+
+    await expect(
+      convertEstimateToScheduledJob(deps([tech('tech-1')]), {
+        tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('throws NotFoundError for a missing estimate', async () => {
+    await expect(
+      convertEstimateToScheduledJob(deps([tech('tech-1')]), {
+        tenantId: TENANT, estimateId: uuidv4(), actorId: 'owner-1', now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('is idempotent for an already-accepted estimate', async () => {
+    const job = await jobRepo.create(makeJob());
+    const est = await seedSentEstimate(job.id);
+    await estimateRepo.update(TENANT, est.id, { status: 'accepted' });
+
+    const result = await convertEstimateToScheduledJob(deps([tech('tech-1')]), {
+      tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', now: NOW,
+    });
+    expect(result.estimate.status).toBe('accepted');
+    expect(result.assignment.technicianId).toBe('tech-1');
+  });
+
+  it('returns 503 when scheduling deps are not wired, and 401 unauthenticated', async () => {
+    // No fromEstimateDeps -> NOT_CONFIGURED for an authenticated owner.
+    const authed = express();
+    authed.use(express.json());
+    authed.use((req: any, _res, next) => {
+      req.auth = { tenantId: TENANT, userId: 'owner-1', role: 'owner' };
+      next();
+    });
+    authed.use('/api/jobs', createJobRouter({} as any, {} as any, {} as any, {} as any, {} as any, {} as any));
+    const res503 = await request(authed).post('/api/jobs/from-estimate/abc').send({});
+    expect(res503.status).toBe(503);
+
+    // No auth -> 401 (route is behind requireAuth).
+    const open = express();
+    open.use(express.json());
+    open.use('/api/jobs', createJobRouter({} as any, {} as any, {} as any, {} as any, {} as any, {} as any));
+    const res401 = await request(open).post('/api/jobs/from-estimate/abc').send({});
+    expect(res401.status).toBe(401);
+  });
+});

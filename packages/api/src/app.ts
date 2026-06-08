@@ -705,6 +705,9 @@ export function createApp(): express.Express {
   const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
   const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository();
   const assignmentRepo     = pool ? new PgAssignmentRepository(pool)     : new InMemoryAssignmentRepository();
+  // Declared here (ahead of its first router use) so the jobs router's
+  // from-estimate scheduling deps can reference it.
+  const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
   // Working hours are now Pg-backed in production (migration 137 added
   // technician_working_hours), so the dispatch feasibility composer and the
   // inbound-AI availability search enforce real working-hours rows instead of
@@ -2377,6 +2380,13 @@ export function createApp(): express.Express {
     auditRepo,
     timeEntryRepo,
     scheduleRepo: invoiceScheduleRepo,
+  }, {
+    estimateRepo,
+    jobRepo,
+    appointmentRepo,
+    assignmentRepo,
+    userRepo,
+    auditRepo,
   }));
   app.use(
     '/api/jobs',
@@ -2456,7 +2466,6 @@ export function createApp(): express.Express {
   // best-effort: missing CLERK_SECRET_KEY just persists the local
   // intent; the operator can still re-send via dashboard and the
   // webhook still attaches the invitee on accept (lookup is by email).
-  const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
   app.use(
     '/api/users',
     createUsersRouter(

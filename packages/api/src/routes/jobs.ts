@@ -1,8 +1,13 @@
 import { Router, Response } from 'express';
+import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createJobSchema } from '../shared/contracts';
 import { toErrorResponse, ValidationError } from '../shared/errors';
+import {
+  convertEstimateToScheduledJob,
+  ConvertEstimateToScheduledJobDeps,
+} from '../jobs/from-estimate';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import { Customer, CustomerRepository } from '../customers/customer';
 import {
@@ -50,8 +55,24 @@ export function createJobRouter(
    * `scheduleRepo` (P21) additionally mints on_completion schedule milestones.
    */
   autoInvoiceDeps?: AutoInvoiceOnCompletionDeps & { scheduleRepo?: InvoiceScheduleRepository },
+  /**
+   * Feature 5 — when present, enables POST /from-estimate/:estimateId to
+   * schedule + assign the job an accepted/sent estimate belongs to. Optional so
+   * existing callers/tests that don't wire scheduling deps stay valid (the
+   * route returns 503 NOT_CONFIGURED when absent).
+   */
+  fromEstimateDeps?: ConvertEstimateToScheduledJobDeps,
 ): Router {
   const router = Router();
+
+  const fromEstimateBodySchema = z
+    .object({
+      durationMin: z.number().int().positive().optional(),
+      technicianId: z.string().min(1).optional(),
+      scheduledStart: z.string().datetime().optional(),
+      timezone: z.string().min(1).optional(),
+    })
+    .strict();
   // Dispatcher is intentionally passed through router wiring so this API
   // surface aligns with app-level dependency injection for feedback_send.
   void feedbackDispatcher;
@@ -102,6 +123,48 @@ export function createJobRouter(
         );
         res.status(201).json(result);
       } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  // Feature 5 — schedule + assign the job an accepted/sent estimate belongs to,
+  // and flip the estimate to accepted. Reuses the estimate's existing job.
+  router.post(
+    '/from-estimate/:estimateId',
+    requireAuth,
+    requireTenant,
+    requirePermission('jobs:create'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!fromEstimateDeps) {
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Estimate-to-job scheduling is not configured',
+          });
+          return;
+        }
+        const body = fromEstimateBodySchema.parse(req.body ?? {});
+        const result = await convertEstimateToScheduledJob(fromEstimateDeps, {
+          tenantId: req.auth!.tenantId,
+          estimateId: req.params.estimateId,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role,
+          durationMin: body.durationMin,
+          technicianId: body.technicianId,
+          scheduledStart: body.scheduledStart ? new Date(body.scheduledStart) : undefined,
+          timezone: body.timezone,
+        });
+        res.status(201).json(result);
+      } catch (err) {
+        if (err instanceof z.ZodError) {
+          const { statusCode, body } = toErrorResponse(
+            new ValidationError(`Validation failed: ${err.issues.map((i) => i.message).join(', ')}`),
+          );
+          res.status(statusCode).json(body);
+          return;
+        }
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
       }
