@@ -3732,7 +3732,47 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_proposals_source_recording
       ON proposals (tenant_id, (source_context->>'recordingId'));
   `,
-  '143_proposals_claimed_by_text': `
+  '143_tenant_settings_owner_phone': `
+    -- P8-016 (forward-wiring) — the OWNER's personal cell phone used by
+    -- vulnerability-aware emergency triage to patch a customer call
+    -- directly to the owner with a 5-second context preface. Stored in
+    -- E.164 (+15551234567). Distinct from business_phone (the public number
+    -- the AI answers on) and from users.mobile_number (per-team-member
+    -- binding, multi-user model). For V1 solo operators there is one owner
+    -- per tenant, so settings is the natural home.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS owner_phone TEXT;
+  `,
+
+  '144_tenants_pending_checkout_at': `
+    -- Trial-checkout dedup. When a tenant opens Stripe Checkout, we
+    -- stamp pending_checkout_at = NOW() inside the same advisory-lock
+    -- transaction that mints the session. A second checkout request
+    -- that arrives BEFORE Stripe's subscription.created webhook has
+    -- flipped subscription_status to 'trialing' sees the pending
+    -- timestamp inside its own gate check and refuses — closing the
+    -- residual race the in-process advisory lock alone could not
+    -- cover (lock-release vs webhook-delivery window). Cleared by
+    -- the subscription.created webhook handler; a 30-minute timeout
+    -- in the gate handles abandoned checkouts.
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS pending_checkout_at TIMESTAMPTZ;
+  `,
+
+  '145_tenants_pending_checkout_session_id': `
+    -- Pair the pending_checkout_at marker with the Stripe session id
+    -- so cancellation can actively EXPIRE the open session at Stripe
+    -- before reopening the gate. Earlier attempts to round-trip the
+    -- id via cancel_url interpolation failed — Stripe only expands
+    -- {CHECKOUT_SESSION_ID} in success_url. Persisting it server-side
+    -- on creation is the supported path. Cleared together with
+    -- pending_checkout_at when the subscription.created webhook lands
+    -- or when the cancel endpoint runs.
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS pending_checkout_session_id TEXT;
+  `,
+
+  '146_proposals_claimed_by_text': `
     -- QA-2026-06-05: the execution worker claims proposals with a NAMED
     -- worker id ('execution-worker'), but claimed_by was UUID — every
     -- claimForExecution failed with 22P02 (invalid uuid) and the 1s sweep
