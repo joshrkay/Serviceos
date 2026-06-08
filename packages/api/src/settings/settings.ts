@@ -95,6 +95,10 @@ export interface TenantSettings {
   // undefined; null only appears transiently in update inputs.
   businessPhone?: string | null;
   businessEmail?: string | null;
+  // P8-016 — owner's personal cell (E.164), used by vulnerability-aware
+  // emergency triage to patch a customer through to the owner. Never the
+  // same as businessPhone (which the AI answers on).
+  ownerPhone?: string | null;
   timezone: string;
   estimatePrefix: string;
   invoicePrefix: string;
@@ -195,6 +199,16 @@ export interface TenantSettings {
    */
   hourlyRateCents?: number | null;
   /**
+   * §10 onboarding identity fields. Persisted by PUT /api/onboarding/identity
+   * via a raw INSERT/UPDATE; projected here so GET /api/settings can return
+   * them for the IdentityStep re-edit pre-load (otherwise the form
+   * silently re-saves its hardcoded defaults over the operator's values).
+   */
+  serviceAreaText?: string | null;
+  serviceAreaRadius?: number | null;
+  businessHours?: Record<string, { open: string; close: string } | null> | null;
+  jobBufferMinutes?: number | null;
+  /**
    * B1 — Per-tenant voice persona. When set, the calling agent uses
    * this name in its greeting ("Hi, I'm {voiceAgentName}. How can I
    * help?"). Null = use the default generic opener.
@@ -239,6 +253,16 @@ export interface TenantSettings {
   ttsVoiceEn?: string | null;
   ttsVoiceEs?: string | null;
   spanishDispatcherUserIds?: string[];
+  /**
+   * Per-tenant AI model override. Seeded on tenant creation from
+   * `AI_DEFAULT_MODEL` so the onboarding "AI check" step finds an
+   * `aiConfigPresent` row immediately and the verify_ai worker has a
+   * model to call. The gateway already resolves overrides via its own
+   * env+config path; this column just unblocks onboarding and acts as a
+   * future per-tenant pinning surface. Column added in migration 120
+   * (`120_tenant_settings_ai_config`).
+   */
+  aiModel?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -248,12 +272,36 @@ export interface CreateSettingsInput {
   businessName: string;
   businessPhone?: string;
   businessEmail?: string;
+  ownerPhone?: string;
   timezone?: string;
   estimatePrefix?: string;
   invoicePrefix?: string;
   defaultPaymentTermDays?: number;
   terminologyPreferences?: Record<string, string>;
   activeVerticalPacks?: string[];
+  /** Per-tenant AI model override. See `TenantSettings.aiModel`. */
+  aiModel?: string | null;
+}
+
+/**
+ * Built-in safety fallback if `AI_DEFAULT_MODEL` is unset at tenant-bootstrap
+ * time. Matches the lowest-tier OpenAI model the gateway documents in
+ * `factory.ts` so a tenant created without env config still reports
+ * `aiConfigPresent` true to the onboarding wizard and the verify_ai worker
+ * has a model to attempt. The gateway's own resolution is unaffected.
+ */
+const AI_MODEL_BOOTSTRAP_FALLBACK = 'gpt-4o-mini';
+
+/**
+ * Resolve the AI model to seed onto a freshly-created tenant_settings row.
+ * Mirrors the env precedence the gateway uses (`AI_DEFAULT_MODEL`) so the
+ * onboarding "AI check" step is unblocked without coupling the settings
+ * module to the gateway's tier-resolution code.
+ */
+export function resolveBootstrapAiModel(): string {
+  const env = process.env.AI_DEFAULT_MODEL;
+  if (env && env.trim().length > 0) return env;
+  return AI_MODEL_BOOTSTRAP_FALLBACK;
 }
 
 export interface UpdateSettingsInput {
@@ -263,6 +311,7 @@ export interface UpdateSettingsInput {
   // routes through PgSettings.update's `value ?? null` to a SQL NULL.
   businessPhone?: string | null;
   businessEmail?: string | null;
+  ownerPhone?: string | null;
   timezone?: string | null;
   estimatePrefix?: string;
   invoicePrefix?: string;
@@ -311,6 +360,8 @@ export interface UpdateSettingsInput {
   ttsVoiceEn?: string | null;
   ttsVoiceEs?: string | null;
   spanishDispatcherUserIds?: string[];
+  /** Per-tenant AI model override; null clears the field. */
+  aiModel?: string | null;
 }
 
 export interface SettingsRepository {
@@ -327,11 +378,34 @@ export interface ActiveVerticalPackValidationOptions {
   knownPackIds?: string[];
 }
 
+/**
+ * Curated display list for the BusinessProfileSheet dropdown. Not used
+ * for validation — that path goes through `isValidIanaTimezone` so any
+ * runtime-recognized IANA zone (e.g. America/Adak, America/Juneau,
+ * America/North_Dakota/Center) is accepted when the browser submits it.
+ */
 export const VALID_TIMEZONES = [
   'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
   'America/Phoenix', 'America/Anchorage', 'Pacific/Honolulu', 'America/Detroit',
   'America/Indiana/Indianapolis', 'America/Boise', 'UTC',
 ];
+
+/**
+ * True iff the runtime's Intl can construct a DateTimeFormat with this
+ * timezone — i.e. it's a known IANA zone. Used by every server-side
+ * validation path so we accept anything Intl downstream will accept
+ * (preventing the "browser detected America/Juneau but onboarding 400s"
+ * gap) while still rejecting bogus values like "Foo/Bar" that would
+ * blow up board-query.ts / money-dashboard.ts at render time.
+ */
+export function isValidIanaTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export function validateSettingsInput(
   input: CreateSettingsInput,
@@ -364,7 +438,7 @@ function validateCommonSettingsFields(
   }
 ): string[] {
   const errors: string[] = [];
-  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) {
+  if (input.timezone && !isValidIanaTimezone(input.timezone)) {
     errors.push('Invalid timezone');
   }
   if (input.estimatePrefix !== undefined && input.estimatePrefix.length === 0) {
@@ -473,6 +547,7 @@ export async function createSettings(
     businessName: input.businessName,
     businessPhone: input.businessPhone,
     businessEmail: input.businessEmail,
+    ownerPhone: input.ownerPhone,
     timezone: input.timezone || 'America/New_York',
     estimatePrefix: input.estimatePrefix || 'EST-',
     invoicePrefix: input.invoicePrefix || 'INV-',
@@ -498,6 +573,21 @@ export async function getSettings(
   repository: SettingsRepository
 ): Promise<TenantSettings | null> {
   return repository.findByTenant(tenantId);
+}
+
+/**
+ * P8-016 — convenience factory matching the `OwnerPhoneResolver` shape
+ * expected by `escalate-to-human` / `owner-cell-patch`. Wire this into
+ * the voice/triage stack when the `patch_owner` branch lands so
+ * vulnerability-triggered calls patch to the owner's actual cell.
+ */
+export function createSettingsOwnerPhoneResolver(
+  repository: SettingsRepository,
+): (tenantId: string) => Promise<string | null> {
+  return async (tenantId) => {
+    const settings = await repository.findByTenant(tenantId);
+    return settings?.ownerPhone ?? null;
+  };
 }
 
 export async function updateSettings(
@@ -568,6 +658,12 @@ export async function ensureTenantSettings(
     defaultPaymentTermDays: 30,
     defaultLanguage: 'en',
     autoDetectLanguage: true,
+    // Onboarding-blocker fix: seed the platform default AI model so the
+    // onboarding "AI check" (Step 6) does not fail with `ai_config_missing`
+    // for every new tenant. The webhooks/routes.ts billing handler also
+    // backfills via COALESCE for tenants whose bootstrap predates this code,
+    // so writing here never clobbers an existing tenant's override.
+    aiModel: resolveBootstrapAiModel(),
     createdAt: new Date(),
     updatedAt: new Date(),
   };

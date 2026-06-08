@@ -111,8 +111,8 @@ export function createLLMGateway(
     defaultHeaders:
       baseURL.includes('openrouter.ai')
         ? {
-            'HTTP-Referer': 'https://serviceos.app',
-            'X-Title': 'ServiceOS',
+            'HTTP-Referer': 'https://rivet.ai',
+            'X-Title': 'Rivet',
           }
         : undefined,
   });

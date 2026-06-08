@@ -166,7 +166,7 @@ export function CalendarSyncSheet({ onClose }: CalendarSyncSheetProps) {
 
         <div className="px-5 py-5 space-y-4">
           <p className="text-xs text-slate-500">
-            Connect your Google Calendar so appointments scheduled in ServiceOS
+            Connect your Google Calendar so appointments scheduled in Rivet
             also land on your calendar. Two-way sync arrives in a follow-up
             release.
           </p>

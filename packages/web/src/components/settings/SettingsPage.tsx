@@ -197,7 +197,7 @@ export function SettingsPage() {
   const [reviewsError, setReviewsError]       = useState('');
 
   /**
-   * Tier 4 (Subscription — Fieldly billing). POST /api/billing/portal-session
+   * Tier 4 (Subscription — Rivet billing). POST /api/billing/portal-session
    * and redirect the operator to the Stripe-hosted portal where they can
    * manage card, plan, view invoices, etc. Returns to /settings on close.
    */
@@ -365,7 +365,7 @@ export function SettingsPage() {
       items: [
         { icon: CreditCard, label: 'Payment methods',        description: 'Connect Stripe to accept card + ACH', action: () => setPaymentMethodsOpen(true) },
         { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => setDepositRulesOpen(true) },
-        { icon: CreditCard, label: 'Fieldly subscription',   description: 'Manage card, plan, invoices', action: () => openBillingPortal() },
+        { icon: CreditCard, label: 'Rivet subscription',   description: 'Manage card, plan, invoices', action: () => openBillingPortal() },
       ],
     },
     {
@@ -431,7 +431,7 @@ export function SettingsPage() {
                 </span>
                 <div>
                   <p className="text-sm text-slate-900">Templates &amp; Customization</p>
-                  <p className="text-xs text-slate-400 mt-0.5">Your Fieldly learns and adapts over time</p>
+                  <p className="text-xs text-slate-400 mt-0.5">Your Rivet learns and adapts over time</p>
                 </div>
               </div>
               <div className="flex items-center gap-1.5 shrink-0">
@@ -746,7 +746,7 @@ export function SettingsPage() {
           >
             Sign out
           </button>
-          <p className="text-center text-xs text-slate-400">Fieldly v1.0 · © 2026</p>
+          <p className="text-center text-xs text-slate-400">Rivet v1.0 · © 2026</p>
         </div>
       </div>
 

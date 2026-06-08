@@ -72,7 +72,7 @@ export function QuickBooksModal({ onClose }: { onClose: () => void }) {
             <div className="flex flex-col gap-5">
               <div className="rounded-xl bg-slate-50 border border-slate-100 px-4 py-4">
                 <p className="text-sm text-slate-700 leading-relaxed">
-                  Connect Fieldly to QuickBooks Online to automatically sync invoices, payments, and customers — no double entry.
+                  Connect Rivet to QuickBooks Online to automatically sync invoices, payments, and customers — no double entry.
                 </p>
               </div>
 
@@ -96,7 +96,7 @@ export function QuickBooksModal({ onClose }: { onClose: () => void }) {
                 <div className="flex items-start gap-2">
                   <AlertCircle size={13} className="text-amber-500 shrink-0 mt-0.5" />
                   <p className="text-xs text-amber-700">
-                    You'll be redirected to QuickBooks to authorize access. This is a secure OAuth connection — Fieldly never sees your QuickBooks password.
+                    You'll be redirected to QuickBooks to authorize access. This is a secure OAuth connection — Rivet never sees your QuickBooks password.
                   </p>
                 </div>
               </div>

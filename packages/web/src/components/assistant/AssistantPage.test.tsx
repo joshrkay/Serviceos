@@ -91,7 +91,7 @@ describe('AssistantPage', () => {
 
   it('renders header with AI assistant name', () => {
     renderPage();
-    expect(screen.getByText('Fieldly AI')).toBeInTheDocument();
+    expect(screen.getByText('Rivet AI')).toBeInTheDocument();
   });
 });
 
