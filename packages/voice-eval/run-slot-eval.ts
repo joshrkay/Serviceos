@@ -68,17 +68,25 @@ function loadGold(): { gold: Record<string, string>; pred: Record<string, string
   return out;
 }
 
+// LIVE (--live) is intentionally NOT wired in this build (see run-intent-eval.ts
+// and data/VOICE-CORPUS-REPORT.md credential-gated step 3): there is no single
+// production "extract these 5 slots" function — the inbound entity resolver would
+// need adapting to the eval's slot set — and the offline harness deliberately
+// avoids importing the gateway/runtime. This is the wiring point + gate.
+const LIVE_NOT_WIRED =
+  '--live is not wired in this build.\n' +
+  '   The >=0.88 live gate needs a production slot extractor adapted to the eval\'s\n' +
+  '   5 critical slots (name, address, service_type, time_window, problem_description)\n' +
+  '   behind a constructed LLMGateway. Wire it here to enable --live.\n' +
+  '   See data/VOICE-CORPUS-REPORT.md → credential-gated step 3.';
+
 function main(): void {
   const live = process.argv.includes('--live');
   const gate = process.argv.includes('--gate');
-  if (live && !(process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY)) {
-    console.error('❌ --live requires OPENAI_API_KEY or ANTHROPIC_API_KEY (production extractor).');
-    process.exit(1);
-  }
-  if (live) {
-    console.error('ℹ️  live extractor not wired in offline sandbox; run offline or wire the gateway extractor.');
-    process.exit(1);
-  }
+
+  // Fail fast and explicitly on --live rather than starting a run that cannot
+  // evaluate the production extractor (exit 2 = not-implemented, not a gate fail).
+  if (live) { console.error(`ℹ️  ${LIVE_NOT_WIRED}`); process.exit(2); }
 
   const examples = loadGold();
   const report = slotReport(examples, CRITICAL, matchFn);

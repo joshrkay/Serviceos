@@ -28,8 +28,8 @@ in this sandbox), the tooling is delivered ready-to-run and the status is marked
 | Vocab coverage ≥ 95% | ✅ **met** | 100% of transcript domain nouns covered |
 | 36/41 behaviors validated + gaps | ✅ **met** | `behaviors.yaml` (code-synced) + `behaviors-gap-analysis.md`; each behavior has ≥ 74 utterances (> the 25/50 bars) |
 | Reddit: deduped + PII-scrubbed + embedded + searchable | ✅ **met (offline) / gated (scale)** | PII zero-leakage on 100 fixtures; offline embed + 10-query search self-test; 50k real ingest is credential-gated |
-| Intent accuracy ≥ 92% | ⏳ **gated (live)** | offline rule baseline = **74.3%**; ≥92% target enforced only in `--live` (needs key) |
-| Slot F1 ≥ 0.88 | ⏳ **gated (live)** | offline heuristic baseline = **88.5% micro-F1**; ≥0.88 enforced in `--live` |
+| Intent accuracy ≥ 92% | ⏳ **gated (live)** | offline rule baseline = **74.3%**; ≥92% target enforced in `--live` once wired (credential-gated step 3) |
+| Slot F1 ≥ 0.88 | ⏳ **gated (live)** | offline heuristic baseline = **88.5% micro-F1**; ≥0.88 enforced in `--live` once wired (credential-gated step 3) |
 
 ## What runs in this sandbox
 

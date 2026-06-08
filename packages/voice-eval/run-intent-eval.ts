@@ -37,32 +37,37 @@ function loadTestSplit(): Row[] {
   return rows.filter((r) => stableHash(r.utterance) < TEST_FRACTION);
 }
 
-async function classifyLive(utterance: string): Promise<string> {
-  // Live path: wire the production classifier. Kept thin and lazy so offline
-  // runs never import gateway/config. Requires a configured LLM gateway + key.
-  throw new Error(
-    'live mode requires OPENAI_API_KEY/ANTHROPIC_API_KEY and a configured LLM gateway. ' +
-    'Wire classifyTranscript() from packages/api/src/ai/orchestration/intent-classifier.ts here.',
-  );
-}
+// LIVE (--live) is a documented, credential-gated step that is intentionally
+// NOT wired in this build: the production classifier (classifyIntent in
+// packages/api/src/ai/orchestration/intent-classifier.ts) needs a constructed
+// LLMGateway + tenant context, which this offline harness deliberately does not
+// import. This is the single wiring point + gate description; see
+// data/VOICE-CORPUS-REPORT.md (credential-gated step 3).
+const LIVE_NOT_WIRED =
+  '--live is not wired in this build.\n' +
+  '   The >=92% live gate requires the production classifier (classifyIntent in\n' +
+  '   packages/api/src/ai/orchestration/intent-classifier.ts) behind a constructed\n' +
+  '   LLMGateway + tenant context. Wire it here to enable --live.\n' +
+  '   See data/VOICE-CORPUS-REPORT.md → credential-gated step 3.';
 
 async function main(): Promise<void> {
   const live = process.argv.includes('--live');
   const gate = process.argv.includes('--gate');
+
+  // Fail fast and explicitly on --live rather than starting a run that cannot
+  // measure live accuracy (exit 2 = not-implemented, distinct from a gate fail).
+  if (live) { console.error(`ℹ️  ${LIVE_NOT_WIRED}`); process.exit(2); }
+
   const test = loadTestSplit();
   if (test.length === 0) { console.error('❌ empty test split; run generate-utterances.ts'); process.exit(1); }
 
-  const hasKey = !!(process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY);
-  if (live && !hasKey) { console.error('❌ --live requires OPENAI_API_KEY or ANTHROPIC_API_KEY.'); process.exit(1); }
-
   const pairs: { gold: string; pred: string }[] = [];
   for (const r of test) {
-    const pred = live ? await classifyLive(r.utterance) : classifyBaseline(r.utterance);
-    pairs.push({ gold: r.intent, pred });
+    pairs.push({ gold: r.intent, pred: classifyBaseline(r.utterance) });
   }
 
   const report = classificationReport(pairs);
-  const mode = live ? 'LIVE (production model)' : 'OFFLINE (rule baseline)';
+  const mode = 'OFFLINE (rule baseline)';
   console.log(`\n🎯 Intent classification eval — ${mode}`);
   console.log(`   held-out test rows: ${report.total}`);
   console.log(`   accuracy:           ${(report.accuracy * 100).toFixed(1)}%`);
@@ -70,8 +75,8 @@ async function main(): Promise<void> {
   console.log('   worst confusions (gold ⇒ pred):');
   for (const c of report.topConfusions.slice(0, 8)) console.log(`     - ${c.gold} ⇒ ${c.pred}: ${c.count}`);
 
-  const target = live ? LIVE_TARGET : OFFLINE_FLOOR;
-  const enforce = live || gate;
+  const target = OFFLINE_FLOOR;
+  const enforce = gate;
   console.log(`   ${enforce ? 'threshold' : 'reference target'}: ${(target * 100).toFixed(0)}%  ` +
     `(LIVE target ${LIVE_TARGET * 100}% / offline floor ${OFFLINE_FLOOR * 100}%)`);
 
