@@ -220,6 +220,44 @@ describe('Feature 5 — Estimate → Job conversion', () => {
     expect(live).toHaveLength(1);
   });
 
+  it('does NOT accept the estimate when scheduling is infeasible (no technicians)', async () => {
+    const job = await jobRepo.create(makeJob());
+    const est = await seedSentEstimate(job.id);
+
+    await expect(
+      convertEstimateToScheduledJob(deps([]), { // no technicians -> infeasible
+        tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+
+    // Feasibility is validated BEFORE acceptance, so the estimate stays 'sent'
+    // (not stranded as accepted-but-unscheduled) and no money-state rollup ran.
+    const after = await estimateRepo.findById(TENANT, est.id);
+    expect(after?.status).toBe('sent');
+    expect(await appointmentRepo.findByJob(TENANT, job.id)).toHaveLength(0);
+  });
+
+  it('re-syncs job.assignedTechnicianId on an idempotent retry if a prior attempt left it stale', async () => {
+    const job = await jobRepo.create(makeJob());
+    const est = await seedSentEstimate(job.id);
+
+    const first = await convertEstimateToScheduledJob(deps([tech(TECH_1)]), {
+      tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', now: NOW,
+    });
+    expect(first.job.assignedTechnicianId).toBe(TECH_1);
+
+    // Simulate a prior attempt that assigned the tech but died before syncing
+    // the denormalized field onto the job.
+    await jobRepo.update(TENANT, job.id, { assignedTechnicianId: undefined });
+
+    // The idempotent short-circuit must complete the missing sync before return.
+    const retry = await convertEstimateToScheduledJob(deps([tech(TECH_1)]), {
+      tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', now: NOW,
+    });
+    expect(retry.appointment.id).toBe(first.appointment.id);
+    expect(retry.job.assignedTechnicianId).toBe(TECH_1);
+  });
+
   it('re-conversion is idempotent — no duplicate appointment or assignment', async () => {
     const job = await jobRepo.create(makeJob());
     const est = await seedSentEstimate(job.id);
