@@ -69,6 +69,14 @@ export const es: Record<keyof EnglishCatalog, string> = {
   'identify.greet_known': 'Hola {{name}}, bienvenido de nuevo.',
   'identify.greet_unknown':
     'Hola, gracias por llamar. Aún no le tengo registrado en nuestro sistema.',
+  // Returning customer with known last service — proactively references the
+  // prior visit so the caller feels recognized (Feature 3). Ends in a question
+  // so no separate CTA is appended.
+  'identify.returning_with_service':
+    'Hola {{name}}, bienvenido de nuevo. ¿Llama por su {{service}} de {{month}}?',
+  // Returning customer, no usable service history — name + standard CTA.
+  'identify.returning_named':
+    'Hola {{name}}, bienvenido de nuevo. ¿En qué puedo ayudarle hoy?',
 
   // ── Escalation ───────────────────────────────────────────────────────
   'escalate.transferring':

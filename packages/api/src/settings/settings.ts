@@ -209,6 +209,12 @@ export interface TenantSettings {
   businessHours?: Record<string, { open: string; close: string } | null> | null;
   jobBufferMinutes?: number | null;
   /**
+   * Feature 5 — migration 109. Number of human CSR seats the tenant staffs.
+   * When the live busy count reaches this within business hours, the AI
+   * handles overflow. NULL → undefined (treated as "no human CSRs").
+   */
+  csrSeats?: number | null;
+  /**
    * B1 — Per-tenant voice persona. When set, the calling agent uses
    * this name in its greeting ("Hi, I'm {voiceAgentName}. How can I
    * help?"). Null = use the default generic opener.

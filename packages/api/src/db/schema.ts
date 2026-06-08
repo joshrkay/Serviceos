@@ -3790,6 +3790,14 @@ export const MIGRATIONS = {
     END $$;
   `,
 
+  // Feature 5 (voice overflow) — number of human CSR seats a tenant staffs.
+  // When the live busy count reaches this within business hours, the AI
+  // handles overflow. Additive, nullable; NULL means "no human CSRs".
+  '147_tenant_settings_csr_seats': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS csr_seats INTEGER;
+  `,
+
 };
 
 function makePoliciesIdempotent(sql: string): string {

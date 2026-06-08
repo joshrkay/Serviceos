@@ -67,6 +67,14 @@ export const en = {
   'identify.greet_known': 'Hi {{name}}, welcome back.',
   'identify.greet_unknown':
     "Hi, thanks for calling. I don't have you in our system yet.",
+  // Returning customer with known last service — proactively references the
+  // prior visit so the caller feels recognized (Feature 3). Ends in a question
+  // so no separate CTA is appended.
+  'identify.returning_with_service':
+    'Hi {{name}}, welcome back. Are you calling about your {{service}} from {{month}}?',
+  // Returning customer, no usable service history — name + standard CTA.
+  'identify.returning_named':
+    'Hi {{name}}, welcome back. How can I help you today?',
 
   // ── Escalation ───────────────────────────────────────────────────────
   'escalate.transferring':
