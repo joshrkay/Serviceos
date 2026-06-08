@@ -3784,7 +3784,52 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ;
   `,
 
-  '147_tenant_settings_bill_labor_from_time_entries': `
+  '147_tenant_settings_vapi_assistant': `
+    -- Vapi voice-assistant binding. vapi_assistant_id is the assistant
+    -- created (and linked to the tenant's provisioned phone number) during
+    -- onboarding; voice_id is the chosen ElevenLabs preset voice persisted
+    -- onto that assistant. Both additive + nullable; inherit tenant_settings'
+    -- FORCE-RLS tenant_isolation policy. NULL = assistant not yet created.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS vapi_assistant_id TEXT;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS voice_id TEXT;
+  `,
+
+  '148_tenant_settings_business_profile_extras': `
+    -- Business-profile fields collected by the onboarding identity step that
+    -- weren't previously modelled: a street/service address, the list of ZIP
+    -- codes the tenant serves, and the multi-select of services offered
+    -- (catalog keys). Additive, nullable; arrays default to empty so reads
+    -- never NPE. Inherit tenant_settings' FORCE-RLS policy.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS service_address TEXT;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS service_area_zips TEXT[] NOT NULL DEFAULT '{}';
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS services_offered TEXT[] NOT NULL DEFAULT '{}';
+  `,
+
+  '149_tenant_settings_calendar_provider': `
+    -- Calendar connection chosen in the onboarding calendar step:
+    -- 'google' (OAuth) or 'builtin' (skip path / use ServiceOS scheduling).
+    -- NULL = not yet chosen. Additive; inherits the FORCE-RLS policy.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS calendar_provider TEXT
+        CHECK (calendar_provider IS NULL OR calendar_provider IN ('google', 'builtin'));
+  `,
+
+  '150_tenant_settings_availability_template': `
+    -- Tech-availability template seeded from the next 7 days of the owner's
+    -- Google Calendar free/busy on connect (see availability/seed-from-google.ts).
+    -- JSONB: { source, generatedAt, windowDays, busy: [{start,end}] }. NULL
+    -- until a Google calendar is connected + seeded. Additive; inherits the
+    -- FORCE-RLS policy.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS availability_template JSONB;
+  `,
+
+  '151_tenant_settings_bill_labor_from_time_entries': `
     -- Feature (launch): opt-in toggle to recompute an auto-drafted invoice's
     -- labor line from ACTUAL logged time entries instead of the estimated
     -- hours. Off by default — owners opt in; with no tracked time the estimate

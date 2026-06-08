@@ -183,6 +183,22 @@ export async function convertEstimateToScheduledJob(
   const job = await getJob(tenantId, estimate.jobId, deps.jobRepo);
   if (!job) throw new NotFoundError('Job', estimate.jobId);
 
+  // 2b. Pre-flight the one-accepted-estimate-per-job rule BEFORE any scheduling.
+  //     Accepting this 'sent' estimate when the job already has a different
+  //     accepted estimate would 409 on the migration-129 unique index — but that
+  //     check currently runs after the appointment + assignment are created,
+  //     leaving orphan side effects behind a failed conversion. Fail closed here,
+  //     before scheduling. The DB index remains the race-safe backstop.
+  if (estimate.status === 'sent') {
+    const jobEstimates = await deps.estimateRepo.findByJob(tenantId, job.id);
+    const otherAccepted = jobEstimates.find((e) => e.id !== estimateId && e.status === 'accepted');
+    if (otherAccepted) {
+      throw new ConflictError(
+        `Job already has an accepted estimate (${otherAccepted.id}); cannot convert estimate ${estimateId}`,
+      );
+    }
+  }
+
   // Idempotency key, computed from the REQUEST (not the chosen slot): identical
   // requests (a network retry / duplicate click) dedupe, while a deliberate
   // override (different tech or start) gets a distinct key. Auto selection uses

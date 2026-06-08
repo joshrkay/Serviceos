@@ -163,6 +163,24 @@ describe('Feature 5 — Estimate → Job conversion', () => {
     expect(result.assignment.technicianId).toBe(TECH_1);
   });
 
+  it('409s with NO orphan appointment/assignment when the job already has an accepted estimate', async () => {
+    const job = await jobRepo.create(makeJob());
+    // A sibling estimate on the same job is already accepted.
+    const accepted = await seedSentEstimate(job.id);
+    await estimateRepo.update(TENANT, accepted.id, { status: 'accepted' });
+    // A second, still-sent estimate on the same job.
+    const sent = await seedSentEstimate(job.id);
+
+    await expect(
+      convertEstimateToScheduledJob(deps([tech(TECH_1)]), {
+        tenantId: TENANT, estimateId: sent.id, actorId: 'owner-1', now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+
+    // The pre-flight check fired before scheduling — no side effects left behind.
+    expect(await appointmentRepo.findByJob(TENANT, job.id)).toHaveLength(0);
+  });
+
   it('re-conversion is idempotent — no duplicate appointment or assignment', async () => {
     const job = await jobRepo.create(makeJob());
     const est = await seedSentEstimate(job.id);
