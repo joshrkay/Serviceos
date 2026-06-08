@@ -237,6 +237,23 @@ describe('Feature 5 — Estimate → Job conversion', () => {
     expect(await appointmentRepo.findByJob(TENANT, job.id)).toHaveLength(0);
   });
 
+  it('does NOT accept the estimate when the appointment payload is invalid (bad timezone)', async () => {
+    const job = await jobRepo.create(makeJob());
+    const est = await seedSentEstimate(job.id);
+
+    await expect(
+      convertEstimateToScheduledJob(deps([tech(TECH_1)]), {
+        tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', timezone: 'Mars/Phobos', now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+
+    // Payload is validated before acceptance, so the estimate stays 'sent' with
+    // no appointment — the operator can fix the timezone and retry cleanly.
+    const after = await estimateRepo.findById(TENANT, est.id);
+    expect(after?.status).toBe('sent');
+    expect(await appointmentRepo.findByJob(TENANT, job.id)).toHaveLength(0);
+  });
+
   it('re-syncs job.assignedTechnicianId on an idempotent retry if a prior attempt left it stale', async () => {
     const job = await jobRepo.create(makeJob());
     const est = await seedSentEstimate(job.id);

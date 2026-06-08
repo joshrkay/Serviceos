@@ -21,8 +21,11 @@ import { Job, JobRepository, getJob } from './job';
 import {
   Appointment,
   AppointmentRepository,
+  CreateAppointmentInput,
   createAppointment,
+  validateAppointmentInput,
 } from '../appointments/appointment';
+import { validateAppointmentTimes } from '../appointments/validation';
 import {
   AppointmentAssignment,
   AssignmentRepository,
@@ -253,7 +256,29 @@ export async function convertEstimateToScheduledJob(
   //    transient later-step failures).
   const chosen = await chooseTechnicianAndSlot(deps, input);
 
-  // 5. Accept the estimate BEFORE creating the appointment. The
+  // 5. Validate the appointment payload the SAME way createAppointment will
+  //    (timezone in the supported set, duration <= 24h, time ordering) BEFORE
+  //    committing acceptance. These are permanent validation conflicts: if they
+  //    fired after accept, the estimate would be stranded accepted-but-
+  //    unscheduled with no clean retry. Reused verbatim as the create payload.
+  const appointmentInput: CreateAppointmentInput = {
+    tenantId,
+    jobId: job.id,
+    scheduledStart: chosen.scheduledStart,
+    scheduledEnd: chosen.scheduledEnd,
+    timezone,
+    createdBy: actorId,
+    idempotencyKey,
+  };
+  const appointmentErrors = [
+    ...validateAppointmentInput(appointmentInput),
+    ...validateAppointmentTimes(appointmentInput).errors,
+  ];
+  if (appointmentErrors.length > 0) {
+    throw new ValidationError(`Invalid appointment: ${appointmentErrors.join(', ')}`);
+  }
+
+  // 6. Accept the estimate BEFORE creating the appointment. The
   //    one-accepted-estimate-per-job DB index (migration 129) makes acceptance
   //    the atomic gate: under two concurrent conversions of different 'sent'
   //    estimates the loser throws HERE — before any appointment/assignment
@@ -263,17 +288,9 @@ export async function convertEstimateToScheduledJob(
   //    unscheduled, which a retry completes (acceptEstimate is then a no-op).
   const acceptedEstimate = await acceptEstimate();
 
-  // 6. Create the appointment.
+  // 7. Create the appointment (payload already validated above).
   let appointment = await createAppointment(
-    {
-      tenantId,
-      jobId: job.id,
-      scheduledStart: chosen.scheduledStart,
-      scheduledEnd: chosen.scheduledEnd,
-      timezone,
-      createdBy: actorId,
-      idempotencyKey,
-    },
+    appointmentInput,
     deps.appointmentRepo,
     undefined,
     deps.auditRepo,
@@ -288,7 +305,7 @@ export async function convertEstimateToScheduledJob(
     if (revived) appointment = revived;
   }
 
-  // 7. Assign the primary technician. If the appointment already carries a
+  // 8. Assign the primary technician. If the appointment already carries a
   //    primary (a completed prior attempt deduped here), reuse it — never
   //    reassign a (possibly different) chosen tech onto a pre-existing slot.
   const priorAssignments = await deps.assignmentRepo.findByAppointment(tenantId, appointment.id);
@@ -312,7 +329,7 @@ export async function convertEstimateToScheduledJob(
   } catch (err) {
     // Compensate ONLY when we created a fresh appointment (no prior assignments);
     // never cancel an appointment that already existed from a prior run. The
-    // canceled row's key is revived on a later retry (see step 6).
+    // canceled row's key is revived on a later retry (see the revive step above).
     if (priorAssignments.length === 0) {
       try {
         await deps.appointmentRepo.update(tenantId, appointment.id, { status: 'canceled' });
@@ -323,10 +340,10 @@ export async function convertEstimateToScheduledJob(
     throw err;
   }
 
-  // 8. Denormalize the primary tech onto the job.
+  // 9. Denormalize the primary tech onto the job.
   await syncJobAssignment(tenantId, job.id, appointment.id, deps.assignmentRepo, deps.jobRepo);
 
-  // 9. Audit the conversion as a single domain event.
+  // 10. Audit the conversion as a single domain event.
   if (deps.auditRepo) {
     await deps.auditRepo.create(
       createAuditEvent({
@@ -346,7 +363,7 @@ export async function convertEstimateToScheduledJob(
     );
   }
 
-  // 10. Return the job with its freshly-synced assignedTechnicianId.
+  // 11. Return the job with its freshly-synced assignedTechnicianId.
   const refreshedJob = (await getJob(tenantId, job.id, deps.jobRepo)) ?? job;
 
   return { job: refreshedJob, appointment, assignment, estimate: acceptedEstimate };
