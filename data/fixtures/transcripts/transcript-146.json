@@ -1,0 +1,15 @@
+{
+  "id": "transcript-146",
+  "type": "inbound_call",
+  "duration_seconds": 55,
+  "service_type": "plumbing",
+  "transcript": "Customer: Hi, this is James Miller. I wanted to check on the status of my faucet job and what I owe. Dispatcher: Sure James, let me pull up your account. Customer: Thank you. Dispatcher: Your faucet job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
+  "expected_entities": {
+    "customer_name": "James Miller",
+    "issue": "status check on faucet job",
+    "equipment": "faucet",
+    "address": "",
+    "appointment_window": ""
+  },
+  "source": "synthetic"
+}

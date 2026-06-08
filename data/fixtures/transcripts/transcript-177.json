@@ -1,0 +1,15 @@
+{
+  "id": "transcript-177",
+  "type": "inbound_call",
+  "duration_seconds": 80,
+  "service_type": "electrical",
+  "transcript": "Customer: This is an emergency, my breaker is hot to the touch and it's getting bad! This is Jennifer Wu at 5 River Road. Dispatcher: Okay Jennifer, stay calm. I'm getting a technician dispatched to 5 River Road right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "expected_entities": {
+    "customer_name": "Jennifer Wu",
+    "issue": "emergency: breaker is hot to the touch",
+    "equipment": "breaker",
+    "address": "5 River Road",
+    "appointment_window": "immediate dispatch"
+  },
+  "source": "synthetic"
+}

@@ -1,0 +1,182 @@
+# ServiceOS domain vocabulary — Regional terms & phrasings
+# Schema: data/vocab/schema.json
+# Terms, slang, and conditions that are strongly region-specific. The voice
+# agent must recognize these to triage and route correctly. `regions` lists the
+# region(s) where the term is common; some terms appear nationwide but carry
+# region-specific weight (e.g. "monsoon" only in the Southwest).
+domain: regional
+terms:
+  # ── Phoenix / Desert Southwest ──────────────────────────────────────────────
+  - term: swamp cooler
+    synonyms: ["evaporative cooler", "evap cooler", "the cooler on the roof", "desert cooler"]
+    category: system
+    regions: ["Phoenix"]
+  - term: monsoon season
+    synonyms: ["monsoon", "the monsoons", "monsoon humidity", "the dust storms", "haboob season"]
+    category: condition
+    regions: ["Phoenix"]
+  - term: cooler pads
+    synonyms: ["swamp cooler pads", "the pads", "aspen pads", "cooler media"]
+    category: consumable
+    regions: ["Phoenix"]
+  - term: cooler float
+    synonyms: ["the float in the swamp cooler", "cooler water valve"]
+    category: component
+    regions: ["Phoenix"]
+  - term: heat pump
+    synonyms: ["the heat pump", "the unit that heats and cools"]
+    category: system
+    regions: ["Phoenix", "Pacific NW"]
+  - term: extreme heat
+    synonyms: ["115 degrees", "it's 110 out", "dangerous heat", "the AC can't keep up", "house is 90 inside"]
+    category: condition
+    regions: ["Phoenix"]
+  - term: hard water scaling
+    synonyms: ["calcium buildup", "hard water deposits", "white crust on fixtures", "lime scale"]
+    category: condition
+    regions: ["Phoenix"]
+  - term: pool equipment
+    synonyms: ["pool pump", "pool heater", "the pool equipment"]
+    category: component
+    regions: ["Phoenix", "Florida"]
+  # ── Texas ───────────────────────────────────────────────────────────────────
+  - term: rolling brownout
+    synonyms: ["rolling blackout", "the grid is shedding load", "ercot brownout", "power conservation", "grid emergency"]
+    category: condition
+    regions: ["Texas"]
+  - term: hail damage
+    synonyms: ["hail damaged the condenser", "hail dented the unit", "storm damage to the AC", "the hail bent the fins"]
+    category: condition
+    regions: ["Texas"]
+  - term: foundation shift
+    synonyms: ["the slab moved", "foundation movement cracked a pipe", "slab leak from foundation"]
+    category: condition
+    regions: ["Texas"]
+  - term: slab leak
+    synonyms: ["leak under the slab", "leak in the foundation", "hot spot on the floor", "water under the concrete"]
+    category: condition
+    regions: ["Texas", "Phoenix"]
+  - term: freeze event
+    synonyms: ["the big freeze", "winter storm", "uri", "hard freeze", "pipes froze in the freeze"]
+    category: condition
+    regions: ["Texas"]
+  - term: well water
+    synonyms: ["on a well", "we have a well", "well system"]
+    category: condition
+    regions: ["Texas", "Northeast"]
+  # ── Northeast ───────────────────────────────────────────────────────────────
+  - term: ice dam
+    synonyms: ["ice dams", "ice on the roof edge", "icicles backing up water", "ice buildup on the gutters"]
+    category: condition
+    regions: ["Northeast"]
+  - term: frozen pipes
+    synonyms: ["pipes froze", "frozen pipe", "no water because of the cold", "pipe froze and burst"]
+    category: symptom
+    regions: ["Northeast"]
+  - term: oil heat
+    synonyms: ["oil furnace", "oil burner", "heating oil", "the oil tank", "fuel oil heat"]
+    category: system
+    regions: ["Northeast"]
+  - term: oil tank
+    synonyms: ["the oil tank", "fuel tank in the basement", "heating oil tank"]
+    category: component
+    regions: ["Northeast"]
+  - term: boiler
+    synonyms: ["the boiler", "steam boiler", "hot water boiler", "the radiator system"]
+    category: system
+    regions: ["Northeast"]
+  - term: radiator
+    synonyms: ["radiators", "the steam radiator", "cast iron radiator", "the heater under the window"]
+    category: component
+    regions: ["Northeast"]
+  - term: baseboard heat
+    synonyms: ["baseboard heaters", "hydronic baseboard", "the heaters along the floor"]
+    category: component
+    regions: ["Northeast"]
+  - term: steam trap
+    synonyms: ["the steam trap", "radiator steam trap"]
+    category: component
+    regions: ["Northeast"]
+  - term: heating season
+    synonyms: ["before winter", "fall tune up", "get the heat ready", "winterize"]
+    category: condition
+    regions: ["Northeast"]
+  - term: heat tape
+    synonyms: ["pipe heat tape", "heat cable", "the heating cable on the pipes"]
+    category: component
+    regions: ["Northeast"]
+  # ── Florida / Gulf Coast ────────────────────────────────────────────────────
+  - term: hurricane prep
+    synonyms: ["hurricane preparation", "getting ready for the storm", "storm prep", "before the hurricane"]
+    category: condition
+    regions: ["Florida"]
+  - term: condensate drain in attic
+    synonyms: ["the attic drain", "AC drain in the attic", "the air handler in the attic leaking", "attic condensate line"]
+    category: component
+    regions: ["Florida"]
+  - term: storm surge
+    synonyms: ["flooding from the storm", "surge flooded the unit", "saltwater flooding"]
+    category: condition
+    regions: ["Florida"]
+  - term: salt air corrosion
+    synonyms: ["salt corrosion", "the coastal corrosion", "salt ate the coil", "rusted from the salt air"]
+    category: condition
+    regions: ["Florida"]
+  - term: lanai
+    synonyms: ["the lanai", "screened porch", "the screened in patio"]
+    category: condition
+    regions: ["Florida"]
+  - term: humidity control
+    synonyms: ["dehumidifier", "whole house dehumidifier", "the house is too humid", "control the moisture"]
+    category: service
+    regions: ["Florida"]
+  - term: float switch trip
+    synonyms: ["the AC shut off from the float", "the safety float tripped", "drain backed up and shut off the AC"]
+    category: symptom
+    regions: ["Florida"]
+  # ── Pacific NW ──────────────────────────────────────────────────────────────
+  - term: heat pump retrofit
+    synonyms: ["adding a heat pump", "switching to a heat pump", "heat pump conversion", "ductless retrofit"]
+    category: service
+    regions: ["Pacific NW"]
+  - term: no AC traditionally
+    synonyms: ["we never had AC", "house has no air conditioning", "adding AC for the first time", "first AC in the house"]
+    category: condition
+    regions: ["Pacific NW"]
+  - term: heat dome
+    synonyms: ["the heat wave", "record heat", "the heat dome", "unusually hot"]
+    category: condition
+    regions: ["Pacific NW"]
+  - term: ductless heat pump
+    synonyms: ["mini split heat pump", "the wall units for heat", "ductless system"]
+    category: system
+    regions: ["Pacific NW"]
+  - term: oil to heat pump conversion
+    synonyms: ["getting off oil", "replacing oil with a heat pump", "electrify the heat"]
+    category: service
+    regions: ["Pacific NW", "Northeast"]
+  - term: moss buildup
+    synonyms: ["moss on the unit", "algae growth", "moss on the condenser"]
+    category: condition
+    regions: ["Pacific NW"]
+  # ── Cross-regional layman dialect / phrasings ───────────────────────────────
+  - term: commode
+    synonyms: ["the commode", "the toilet"]
+    category: dialect
+    regions: ["Texas"]
+  - term: spigot
+    synonyms: ["spicket", "the spicket", "outdoor spigot"]
+    category: dialect
+    regions: ["Northeast", "Texas"]
+  - term: water bubbler
+    synonyms: ["bubbler", "the drinking fountain"]
+    category: dialect
+    regions: ["Northeast"]
+  - term: furnace (heating, general)
+    synonyms: ["the heat", "the heater", "the furnace"]
+    category: dialect
+    regions: []
+  - term: AC unit
+    synonyms: ["the air", "the air conditioner", "the cooling", "the a/c"]
+    category: dialect
+    regions: []

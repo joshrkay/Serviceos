@@ -1,0 +1,15 @@
+{
+  "id": "transcript-222",
+  "type": "inbound_call",
+  "duration_seconds": 180,
+  "service_type": "electrical",
+  "transcript": "Customer: Hi, this is Gary Olsen. I'm calling because my breaker has no power. Dispatcher: Hi Gary, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Eaton, about 8 years old. Dispatcher: Okay, and what's the service address? Customer: 456 Oak Avenue. Dispatcher: Got it. We can send a technician out Thursday morning. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Gary Olsen",
+    "issue": "breaker has no power",
+    "equipment": "Eaton breaker, about 8 years old",
+    "address": "456 Oak Avenue",
+    "appointment_window": "Thursday morning"
+  },
+  "source": "synthetic"
+}

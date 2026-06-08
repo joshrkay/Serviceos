@@ -1,0 +1,15 @@
+{
+  "id": "transcript-235",
+  "type": "inbound_call",
+  "duration_seconds": 90,
+  "service_type": "hvac",
+  "transcript": "Customer: This is an emergency, my heat pump is leaking water and it's getting bad! This is Susan Diaz at 9 Lakeview Drive. Dispatcher: Okay Susan, stay calm. I'm getting a technician dispatched to 9 Lakeview Drive right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "expected_entities": {
+    "customer_name": "Susan Diaz",
+    "issue": "emergency: heat pump is leaking water",
+    "equipment": "heat pump",
+    "address": "9 Lakeview Drive",
+    "appointment_window": "immediate dispatch"
+  },
+  "source": "synthetic"
+}
