@@ -21,10 +21,26 @@ export default async function buildReport(): Promise<void> {
   }
 
   const manifests = loadManifests(artDir);
-  const md = renderReport(manifests, runDir, artDir);
+  const orphans = findOrphanDirs(artDir);
+  if (orphans.length) {
+    console.warn(
+      `[qa-matrix] ${orphans.length} artifact dir(s) have no matrix row: ${orphans.join(', ')} — ` +
+        'a spec wrote evidence for an id missing from e2e/qa-matrix/matrix.ts (catalog drift). Add the row(s).'
+    );
+  }
+  const md = renderReport(manifests, runDir, artDir, orphans);
   const outPath = join(runDir, 'QA-REPORT.md');
   writeFileSync(outPath, md);
   console.log(`[qa-matrix] Report written → ${outPath}`);
+}
+
+/** Artifact dirs with no MATRIX row — catalog drift detector (QA-MATRIX-catalog-drift). */
+function findOrphanDirs(artDir: string): string[] {
+  const known = new Set(MATRIX.map((r) => r.id));
+  return readdirSync(artDir, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && !known.has(e.name))
+    .map((e) => e.name)
+    .sort();
 }
 
 interface AssembledRow {
@@ -52,7 +68,7 @@ function loadManifests(artDir: string): AssembledRow[] {
   });
 }
 
-function renderReport(rows: AssembledRow[], runDir: string, artDir: string): string {
+function renderReport(rows: AssembledRow[], runDir: string, artDir: string, orphans: string[] = []): string {
   const commit = safe(() => execSync('git rev-parse HEAD', { encoding: 'utf8' }).trim());
   const branch = safe(() => execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf8' }).trim());
   const timestamp = new Date().toISOString();
@@ -119,6 +135,19 @@ function renderReport(rows: AssembledRow[], runDir: string, artDir: string): str
       const v = r.manifest?.verdict ?? 'fail';
       const reason = r.manifest?.failureReason ?? r.row.expectedReason ?? 'needs investigation';
       lines.push(`- **${r.row.id}** — ${badge(v as Verdict)} — ${reason}`);
+    }
+    lines.push('');
+  }
+
+  if (orphans.length) {
+    lines.push('## Orphan manifests (catalog drift)');
+    lines.push('');
+    lines.push(
+      'Evidence exists for these ids but `matrix.ts` has no matching row — their verdicts are NOT counted above. Add rows to restore them:'
+    );
+    lines.push('');
+    for (const id of orphans) {
+      lines.push(`- \`${id}\` → [artifacts](${relative(runDir, join(artDir, id))}/)`);
     }
     lines.push('');
   }

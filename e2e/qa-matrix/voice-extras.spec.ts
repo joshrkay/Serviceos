@@ -62,9 +62,14 @@ matrixTest('VOX-02', 'Spanish / i18n voice response', async (h) => {
   const tts = ((res.response.body as { ttsText?: string }).ttsText ?? '').toLowerCase();
   // Whole-word match on distinctive Spanish tokens (avoid short substrings
   // like "su"/"para" matching inside English words).
-  const words = new Set(tts.split(/[^a-záéíóúñ]+/).filter(Boolean));
-  const spanishMarkers = ['gracias', 'hola', 'puedo', 'ayuda', 'cita', 'podemos', 'usted', 'necesita', 'agendar', 'disculpe'];
-  const looksSpanish = spanishMarkers.some((m) => words.has(m));
+  const words = new Set(tts.split(/[^a-záéíóúñ¿¡]+/).filter(Boolean));
+  const spanishMarkers = [
+    'gracias', 'hola', 'puedo', 'pueda', 'ayuda', 'ayudarle', 'cita', 'podemos', 'usted',
+    'necesita', 'agendar', 'disculpe', 'perfecto', 'registrado', 'confirmación', 'recibirá',
+    'breve', 'correcto', 'desea',
+  ];
+  // Accented Spanish characters are unambiguous on their own.
+  const looksSpanish = spanishMarkers.some((m) => words.has(m)) || /[¿¡ñáéíóú]/.test(tts);
   if (tts && looksSpanish) {
     h.evidence.pass('Voice responded in Spanish to a Spanish utterance.');
   } else {

@@ -528,7 +528,36 @@ export async function transitionEstimateStatus(
     throw new ValidationError(`Invalid transition from ${estimate.status} to ${newStatus}`);
   }
 
-  const updated = await repository.update(tenantId, id, { status: newStatus, updatedAt: new Date() });
+  // QA-2026-06-04 (JRN-02): one accepted estimate per job is a DB rule
+  // (partial unique index uq_estimates_accepted_per_job). Surface it as a
+  // 409 with a actionable message instead of letting the unique violation
+  // escape as 500 INTERNAL_ERROR.
+  if (newStatus === 'accepted' && estimate.status !== 'accepted') {
+    const siblings = await repository.findByJob(tenantId, estimate.jobId);
+    const conflicting = siblings.find((s) => s.id !== id && s.status === 'accepted');
+    if (conflicting) {
+      throw new ConflictError(
+        `Job ${estimate.jobId} already has an accepted estimate (${conflicting.id}). ` +
+          'Only one estimate per job can be accepted — revise the existing one or use a separate job.'
+      );
+    }
+  }
+
+  let updated: Estimate | null;
+  try {
+    updated = await repository.update(tenantId, id, { status: newStatus, updatedAt: new Date() });
+  } catch (err) {
+    // Race-safety: two concurrent accepts can both pass the pre-check; the
+    // index still wins. Map that exact violation to the same 409.
+    const pgErr = err as { code?: string; constraint?: string };
+    if (pgErr.code === '23505' && pgErr.constraint === 'uq_estimates_accepted_per_job') {
+      throw new ConflictError(
+        `Job ${estimate.jobId} already has an accepted estimate. ` +
+          'Only one estimate per job can be accepted — revise the existing one or use a separate job.'
+      );
+    }
+    throw err;
+  }
 
   // §6 Time-to-Cash. Best-effort job money-state rollup.
   if (updated && moneyStateDeps) {

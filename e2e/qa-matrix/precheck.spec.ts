@@ -87,6 +87,9 @@ test('precheck — voice utterance generates proposal IDs (non-mock LLM path)', 
   const sessionId = created.id ?? created.sessionId;
   expect(sessionId, `Voice session create response did not include id/sessionId: ${JSON.stringify(created)}`).toBeTruthy();
 
+  // QA-2026-06-04: the deployed route is /input (singular turn), not
+  // /utterances — the old path 404'd on every env. Keep this aligned with
+  // e2e/qa-matrix/helpers/voice-flow.ts.
   const utter = await request.post(`${base}/api/voice/sessions/${sessionId}/input`, {
     headers: { Authorization: `Bearer ${t.token}` },
     data: {
@@ -110,13 +113,18 @@ test('precheck — approved proposal transitions to executed after undo window',
   const t = tenantA();
   const base = apiBase().replace(/\/$/, '');
 
+  // QA-2026-06-05: use the assistant's create_customer intent — the ONLY
+  // assistant path that persists a real proposal row today (estimate/invoice
+  // cards are unpersisted LLM JSON; building those is AST-04/05/07 backlog
+  // work). This test's purpose is the D9 contract: approved proposal →
+  // executed after the undo window, i.e. execution-worker liveness.
   const draft = await request.post(`${base}/api/assistant/chat`, {
     headers: { Authorization: `Bearer ${t.token}` },
     data: {
       messages: [
         {
           role: 'user',
-          content: `Draft an estimate for job ${t.jobId} with one labor item for $99 and return the proposal.`,
+          content: `Create a new customer named Undo Window QA at 555-000-1111 with email undo.window.qa@example.com.`,
         },
       ],
     },
@@ -134,7 +142,9 @@ test('precheck — approved proposal transitions to executed after undo window',
     headers: { Authorization: `Bearer ${t.token}` },
     data: {},
   });
-  expect([200, 202], `Unexpected proposal approve status: ${approve.status()}`).toContain(approve.status());
+  // 409 'approved → approved' is fine — capture-class proposals at high
+  // confidence auto-approve before our explicit approve lands.
+  expect([200, 202, 409], `Unexpected proposal approve status: ${approve.status()}`).toContain(approve.status());
 
   await new Promise((resolve) => setTimeout(resolve, 6_500));
 

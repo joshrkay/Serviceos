@@ -7,6 +7,11 @@ import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository } from '../proposals/proposal';
 import { classifyIntent } from '../ai/orchestration/intent-classifier';
 import { CreateCustomerTaskHandler } from '../ai/tasks/task-handlers';
+import type { TaskHandler } from '../ai/tasks/task-handlers';
+import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
+import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
+import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
+import type { InvoiceRepository } from '../invoices/invoice';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -35,9 +40,18 @@ const assistantProposalSchema = z.object({
   editFields: z.array(z.object({ label: z.string(), key: z.string(), value: z.string() })).optional(),
   confidence: z.enum(['High', 'Medium']),
   type: z.enum(['Invoice', 'Estimate', 'Schedule', 'Follow-up', 'Alert', 'Duplicate', 'Customer']),
-  status: z.enum(['Pending', 'Approved', 'Rejected']),
-  relatedId: z.string().optional(),
-  impact: z.string().optional(),
+  // QA-2026-06-05: LLMs emit free-form statuses ('Sent', 'Draft', …) —
+  // coerce anything unknown to 'Pending' instead of discarding the reply.
+  status: z.preprocess(
+    (v) => (v === 'Approved' || v === 'Rejected' ? v : 'Pending'),
+    z.enum(['Pending', 'Approved', 'Rejected'])
+  ),
+  // QA-2026-06-05: LLMs emit JSON null for "no value" — .optional() alone
+  // rejects null, so every estimate-draft completion whose relatedId/impact
+  // was null failed validation and degraded to the fallback envelope
+  // (live: "LLM completion failed ... expected string, received null").
+  relatedId: z.string().nullish().transform((v) => v ?? undefined),
+  impact: z.string().nullish().transform((v) => v ?? undefined),
 });
 
 const assistantReplySchema = z.object({
@@ -104,6 +118,12 @@ export interface AssistantRouterDeps {
   gateway: LLMGateway;
   proposalRepo: ProposalRepository;
   /**
+   * QA-2026-06-05 (AST-05): read-only query intents ("which invoices are
+   * unpaid?") answer from data instead of LLM narrative. Optional so tests
+   * without an invoice repo keep working.
+   */
+  invoiceRepo?: InvoiceRepository;
+  /**
    * §3B/3D/3E — vertical-aware prompt resolver. When wired, the
    * assistant chat classifier sees the tenant's HVAC/plumbing pack
    * terminology + intake-disambiguation questions + objection scripts
@@ -157,6 +177,80 @@ function customerProposalToUI(
   };
 }
 
+
+/**
+ * QA-2026-06-05: the assistant accepts FREE TEXT — entity ids in LLM-built
+ * payloads must literally appear in the operator's message (or classifier
+ * entities); the model may not invent them (live: hallucinated textbook
+ * UUIDs sent executions into doomed lookups).
+ */
+function dropUnverifiedIds(
+  payload: Record<string, unknown>,
+  operatorText: string,
+  entities: Record<string, unknown>
+): void {
+  const haystack = (operatorText + ' ' + JSON.stringify(entities)).toLowerCase();
+  for (const key of ['jobId', 'customerId', 'estimateId', 'invoiceId', 'appointmentId']) {
+    const v = payload[key];
+    if (typeof v === 'string' && v.length >= 32 && !haystack.includes(v.toLowerCase())) {
+      delete payload[key];
+    }
+  }
+}
+
+/**
+ * QA-2026-06-05 (AST-02/03/04): map any persisted proposal to the UI card
+ * shape — estimates/invoices were previously unpersisted LLM JSON.
+ */
+function proposalToUI(
+  proposal: { id: string; proposalType: string; summary: string; payload: Record<string, unknown>; confidenceScore?: number },
+  sourceMessage: string
+): AssistantProposal {
+  const typeMap: Record<string, AssistantProposal['type']> = {
+    draft_estimate: 'Estimate',
+    update_estimate: 'Estimate',
+    draft_invoice: 'Invoice',
+    send_invoice: 'Invoice',
+    create_customer: 'Customer',
+    update_customer: 'Customer',
+  };
+  const cardType = typeMap[proposal.proposalType] ?? 'Follow-up';
+  const total = typeof proposal.payload.totalCents === 'number'
+    ? ` — $${(proposal.payload.totalCents / 100).toFixed(2)}`
+    : '';
+  return {
+    id: proposal.id,
+    title: `${cardType}: ${proposal.summary.slice(0, 80)}${total}`,
+    summary: proposal.summary.slice(0, 160),
+    explanation: `From your message: "${sourceMessage.slice(0, 120)}"`,
+    confidence: (proposal.confidenceScore ?? 0) >= 0.85 ? 'High' : 'Medium',
+    type: cardType,
+    status: 'Pending',
+  };
+}
+
+const UNPAID_QUERY_RE = /(which|what|list|show|any)\b.{0,40}\binvoices?\b.{0,40}\b(unpaid|open|outstanding|overdue|due|owed)|\b(unpaid|outstanding)\s+invoices?/i;
+
+async function answerUnpaidInvoicesQuery(
+  invoiceRepo: InvoiceRepository,
+  tenantId: string
+): Promise<string> {
+  const all = await invoiceRepo.findByTenant(tenantId);
+  const cutoff = Date.now() - 31 * 86_400_000;
+  const unpaid = all.filter(
+    (i) => ['open', 'partially_paid'].includes(i.status) && new Date(i.createdAt).getTime() >= cutoff
+  );
+  if (unpaid.length === 0) {
+    return 'No unpaid invoices from the last month — everything issued in the last 31 days is settled.';
+  }
+  const lines = unpaid
+    .slice(0, 10)
+    .map((i) => `${i.invoiceNumber} — $${(i.amountDueCents / 100).toFixed(2)} due (${i.status})`)
+    .join('; ');
+  const totalDue = unpaid.reduce((s2, i) => s2 + i.amountDueCents, 0);
+  return `${unpaid.length} unpaid invoice${unpaid.length === 1 ? '' : 's'} from the last month, $${(totalDue / 100).toFixed(2)} total due: ${lines}${unpaid.length > 10 ? '; …' : ''}`;
+}
+
 async function generateAssistantReply(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   tenantId: string,
@@ -186,11 +280,160 @@ async function generateAssistantReply(
         }
       }
 
+      // QA-2026-06-05 (AST-05): deterministic read-only query — answer from
+      // data, never propose. Runs before classification so phrasing variance
+      // in the classifier can't turn a question into a mutation proposal.
+      if (deps.invoiceRepo && UNPAID_QUERY_RE.test(lastUserText)) {
+        const content = await answerUnpaidInvoicesQuery(deps.invoiceRepo, tenantId);
+        return {
+          taskType: 'assistant.query.unpaid_invoices',
+          model: 'data-lookup',
+          usage: { input: 0, output: 0, total: 0 },
+          message: { role: 'assistant' as const, content, reasoning: 'Answered from invoice records (read-only query intent).' },
+        };
+      }
+
       const classification = await classifyIntent(
         lastUserText,
         { tenantId, ...(verticalPromptSection ? { verticalPromptSection } : {}) },
         deps.gateway,
       );
+
+      // QA-2026-06-05 (AST-07, scoped): multi-step asks ("…, then …") are
+      // decomposed into SEQUENTIAL linked proposals sharing a chainId in
+      // sourceContext. Each step executes per its action class: capture
+      // steps auto-approve at confidence and the worker executes them;
+      // money/comms steps land ready_for_review — the HITL contract is
+      // never bypassed (the original matrix expectation of a fully-executed
+      // invoice without approval contradicts 'money never auto-approves').
+      const chainSegments = lastUserText.split(/(?:,\s*)?\bthen\b\s+/i).map((seg) => seg.trim()).filter(Boolean);
+      if (chainSegments.length >= 2 && chainSegments.length <= 4) {
+        const chainId = `chain_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const chainCards: AssistantProposal[] = [];
+        const carried: Record<string, unknown> = {};
+        for (const segment of chainSegments) {
+          let segClass;
+          try {
+            segClass = await classifyIntent(
+              segment,
+              { tenantId, ...(verticalPromptSection ? { verticalPromptSection } : {}) },
+              deps.gateway,
+            );
+          } catch {
+            continue;
+          }
+          const chainHandlers: Record<string, (() => TaskHandler) | undefined> = {
+            create_customer: () => new CreateCustomerTaskHandler(),
+            draft_estimate: () => new EstimateTaskHandler(deps.gateway),
+            update_estimate: () => new EstimateEditTaskHandler(deps.gateway),
+            create_invoice: () => new InvoiceTaskHandler(deps.gateway),
+            send_invoice: () => new InvoiceTaskHandler(deps.gateway),
+            issue_invoice: () => new InvoiceTaskHandler(deps.gateway),
+            update_invoice: () => new InvoiceTaskHandler(deps.gateway),
+          };
+          const factory = chainHandlers[segClass.intentType];
+          if (!factory) continue;
+          const segEntities: Record<string, unknown> = { ...carried, ...(segClass.extractedEntities ?? {}) };
+          if (segClass.intentType === 'create_customer' && segEntities.displayName && !segEntities.name) {
+            segEntities.name = segEntities.displayName;
+          }
+          const { proposal } = await factory().handle({
+            tenantId,
+            userId,
+            message: segment,
+            existingEntities: segEntities,
+          });
+          if (!proposal) continue;
+          dropUnverifiedIds(proposal.payload, segment, segEntities);
+          proposal.sourceContext = { ...(proposal.sourceContext ?? {}), chainId, chainStep: chainCards.length + 1 };
+          // Dependency gate: steps after the first reference results that
+          // don't exist yet (the customer, their job). Auto-approval would
+          // send them into doomed executions — hold every dependent step
+          // (and any draft) in ready_for_review for sequential operator
+          // approval as predecessors materialize.
+          if (chainCards.length >= 1 && proposal.status === 'approved') {
+            proposal.status = 'ready_for_review';
+            proposal.approvedAt = undefined;
+          }
+          await deps.proposalRepo.create(proposal);
+          if (proposal.status === 'draft') {
+            await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
+          }
+          // Carry the customer reference into later steps so "for her" /
+          // "their estimate" resolves at execution time.
+          if (typeof segEntities.name === 'string') carried.customerName = segEntities.name;
+          if (typeof segEntities.displayName === 'string') carried.customerName = segEntities.displayName;
+          chainCards.push(proposalToUI(proposal, segment));
+        }
+        if (chainCards.length === 1) {
+          // Only one segment produced a proposal — return it directly so the
+          // single-intent path doesn't mint a duplicate.
+          return {
+            taskType: 'assistant.chain',
+            model: 'intent-classifier',
+            usage: { input: 0, output: 0, total: 0 },
+            message: {
+              role: 'assistant' as const,
+              content: `${chainCards[0].title}. Review and approve to proceed.`,
+              proposal: chainCards[0],
+            },
+          };
+        }
+        if (chainCards.length >= 2) {
+          return {
+            taskType: 'assistant.chain',
+            model: 'intent-classifier',
+            usage: { input: 0, output: 0, total: 0 },
+            message: {
+              role: 'assistant' as const,
+              content:
+                `Created ${chainCards.length} linked steps: ` +
+                chainCards.map((c, i) => `${i + 1}) ${c.title}`).join('; ') +
+                '. Capture steps run after approval windows; money steps wait for your approval.',
+              proposal: chainCards[0],
+            },
+          };
+        }
+      }
+
+      // QA-2026-06-05 (AST-02/03/04): estimate/invoice intents go through
+      // the REAL task handlers and persist — the generic LLM path returned
+      // unpersisted JSON cards whose ids 404'd on approve.
+      const proposalHandlers: Record<string, () => TaskHandler> = {
+        draft_estimate: () => new EstimateTaskHandler(deps.gateway),
+        update_estimate: () => new EstimateEditTaskHandler(deps.gateway),
+        create_invoice: () => new InvoiceTaskHandler(deps.gateway),
+        send_invoice: () => new InvoiceTaskHandler(deps.gateway),
+        issue_invoice: () => new InvoiceTaskHandler(deps.gateway),
+        update_invoice: () => new InvoiceTaskHandler(deps.gateway),
+      };
+      const handlerFactory = proposalHandlers[classification.intentType];
+      if (handlerFactory) {
+        const handler = handlerFactory();
+        const { proposal } = await handler.handle({
+          tenantId,
+          userId,
+          message: lastUserText,
+          existingEntities: { ...(classification.extractedEntities ?? {}) },
+        });
+        dropUnverifiedIds(proposal.payload, lastUserText, { ...(classification.extractedEntities ?? {}) });
+        await deps.proposalRepo.create(proposal);
+        if (proposal.status === 'draft') {
+          await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
+        }
+        const uiProposal = proposalToUI(proposal, lastUserText);
+        return {
+          taskType: `assistant.${handler.taskType}`,
+          model: 'intent-classifier',
+          usage: { input: 0, output: 0, total: 0 },
+          message: {
+            role: 'assistant' as const,
+            content: `${uiProposal.title}. Review and approve to proceed.`,
+            reasoning: classification.reasoning,
+            proposal: uiProposal,
+          },
+        };
+      }
 
       if (classification.intentType === 'create_customer') {
         const handler = new CreateCustomerTaskHandler();
@@ -211,6 +454,14 @@ async function generateAssistantReply(
           existingEntities: customerPayload,
         });
         await deps.proposalRepo.create(proposal);
+        // QA-2026-06-05: parity with the guardrail promote step (see
+        // inapp-adapter.handleCreateProposal). create-customer-task builds
+        // proposals without a trust tier, so they land 'draft' — invisible
+        // to the inbox and unapprovable under the lifecycle guard. Promote
+        // complete drafts so the operator can act on them.
+        if (proposal.status === 'draft') {
+          await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
+        }
 
         const uiProposal = customerProposalToUI(
           proposal.id,
