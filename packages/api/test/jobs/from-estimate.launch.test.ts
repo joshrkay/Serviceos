@@ -207,6 +207,29 @@ describe('Feature 5 — Estimate → Job conversion', () => {
     expect(result.appointment.scheduledStart.toISOString()).toBe(start.toISOString());
   });
 
+  it('respects an operator override on re-conversion (not deduped to the original)', async () => {
+    const job = await jobRepo.create(makeJob());
+    const est = await seedSentEstimate(job.id);
+
+    // First, an auto conversion (picks the first available tech, tech 1).
+    const auto = await convertEstimateToScheduledJob(deps([tech(TECH_1), tech(TECH_2)]), {
+      tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', now: NOW,
+    });
+    expect(auto.assignment.technicianId).toBe(TECH_1);
+
+    // Then a deliberate re-schedule with an explicit tech + start — must NOT
+    // dedupe onto the auto appointment, and must assign the chosen tech.
+    const overrideStart = new Date('2026-06-13T14:00:00Z');
+    const override = await convertEstimateToScheduledJob(deps([tech(TECH_1), tech(TECH_2)]), {
+      tenantId: TENANT, estimateId: est.id, actorId: 'owner-1',
+      technicianId: TECH_2, scheduledStart: overrideStart, now: NOW,
+    });
+
+    expect(override.appointment.id).not.toBe(auto.appointment.id);
+    expect(override.assignment.technicianId).toBe(TECH_2);
+    expect(override.appointment.scheduledStart.toISOString()).toBe(overrideStart.toISOString());
+  });
+
   it('returns 503 when scheduling deps are not wired, and 401 unauthenticated', async () => {
     // No fromEstimateDeps -> NOT_CONFIGURED for an authenticated owner.
     const authed = express();

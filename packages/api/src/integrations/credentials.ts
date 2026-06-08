@@ -25,6 +25,11 @@ interface IntegrationRow {
 const cache = new Map<string, { creds: TenantTwilioCreds; expiresAt: number }>();
 const CACHE_TTL_MS = 60_000;
 
+// Raw NODE_ENV values that count as real deployments (where missing per-tenant
+// creds must fail closed). Covers both the normalized config values ('prod',
+// 'staging') and the canonical 'production'.
+const DEPLOYMENT_ENVS = new Set(['production', 'prod', 'staging']);
+
 export function flushCredentialCache(tenantId: string): void {
   for (const key of cache.keys()) {
     if (key.startsWith(`${tenantId}:`)) cache.delete(key);
@@ -70,7 +75,11 @@ export async function getTenantTwilioCreds(
   const READY_STATUSES = new Set(['full_readiness', 'partial_readiness']);
 
   if (rows.length === 0 || !READY_STATUSES.has(rows[0].status)) {
-    if (process.env.NODE_ENV === 'production') {
+    // Fail closed in every real deployment mode (prod AND staging) — never fall
+    // back to the global account for a tenant that lacks a provisioned
+    // integration, which would mis-attribute / cross-bill its SMS. Only explicit
+    // dev/test environments fall back to global env creds for local convenience.
+    if (DEPLOYMENT_ENVS.has(process.env.NODE_ENV ?? '')) {
       throw new Error(`No active Twilio integration for tenant ${tenantId}`);
     }
     // Dev/test fallback to global env vars

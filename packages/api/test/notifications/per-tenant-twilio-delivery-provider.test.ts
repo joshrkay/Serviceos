@@ -123,6 +123,18 @@ describe('Feature 7 — Per-tenant notification SMS', () => {
     expect(baseProvider.sendSms).not.toHaveBeenCalled();
   });
 
+  it('fails closed in staging too (not only production)', async () => {
+    process.env.NODE_ENV = 'staging'; // staging must not fall back to global creds
+    const fetchImpl = capturingFetch('SM_should_not_send', []);
+    const provider = new PerTenantTwilioDeliveryProvider({
+      pool: fakePool({}), base: baseProvider, fetchImpl,
+    });
+    await expect(provider.sendSms(msg({ tenantId: TENANT_B }))).rejects.toMatchObject({
+      name: 'DeliveryError', code: 'AUTH_FAILED',
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it('fails closed (DeliveryError) for a malformed tenant id without touching the DB', async () => {
     const pool = fakePool({});
     const provider = new PerTenantTwilioDeliveryProvider({

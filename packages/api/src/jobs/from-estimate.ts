@@ -189,9 +189,13 @@ export async function convertEstimateToScheduledJob(
   // 4. Create the appointment, then assign the primary technician (the
   //    assign step's double-booking guard + DB EXCLUDE constraint are the
   //    authoritative protections).
-  // Stable idempotency key so a client/network retry or a duplicate operator
-  // click (especially on the already-accepted path) reuses the same
-  // appointment instead of stacking another active one on the job's schedule.
+  // Idempotency key. Identical requests (a network retry or a duplicate click)
+  // dedupe to the same appointment, but it also varies by the operator's
+  // explicit overrides so a deliberate re-schedule (a different technician or
+  // start time) is NOT silently deduped onto the original appointment. Auto
+  // selection contributes a stable 'auto' token so plain retries still dedupe.
+  const techKey = input.technicianId ?? 'auto';
+  const slotKey = input.scheduledStart ? input.scheduledStart.toISOString() : 'auto';
   const appointment = await createAppointment(
     {
       tenantId,
@@ -200,7 +204,7 @@ export async function convertEstimateToScheduledJob(
       scheduledEnd: chosen.scheduledEnd,
       timezone,
       createdBy: actorId,
-      idempotencyKey: `from-estimate:${estimateId}`,
+      idempotencyKey: `from-estimate:${estimateId}:${techKey}:${slotKey}`,
     },
     deps.appointmentRepo,
     undefined,
@@ -208,13 +212,12 @@ export async function convertEstimateToScheduledJob(
     input.actorRole,
   );
 
-  // On a retry the appointment is deduped (same key) and may already carry a
-  // primary assignment for the chosen tech — reuse it rather than stacking a
-  // duplicate assignment.
+  // If the appointment was deduped (it already carries a primary technician),
+  // reuse that assignment as-is — never reassign a (possibly different) chosen
+  // tech onto a pre-existing slot. A freshly-created appointment has no
+  // assignment yet and falls through to the assign step.
   const priorAssignments = await deps.assignmentRepo.findByAppointment(tenantId, appointment.id);
-  const existing = priorAssignments.find(
-    (a) => a.isPrimary && a.technicianId === chosen.technicianId,
-  );
+  const existing = priorAssignments.find((a) => a.isPrimary);
   let assignment: AppointmentAssignment;
   if (existing) {
     assignment = existing;
