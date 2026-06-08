@@ -468,6 +468,7 @@ function transitionIntentCapture(
         ...context,
         currentIntent: event.intentType,
         extractedEntities: event.entities,
+        lastIntentConfidence: event.confidence,
         retryCount: 0,
       };
       return {
@@ -681,6 +682,9 @@ function transitionIntentConfirm(
             callSid: context.callSid,
             conversationId: context.conversationId,
             customerId: context.customerId,
+            // Real classifier confidence (caller has also explicitly
+            // confirmed the intent by this point) — see types.ts.
+            confidence: context.lastIntentConfidence,
           },
         },
       ],

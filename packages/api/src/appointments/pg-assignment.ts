@@ -12,6 +12,10 @@ function mapRow(row: Record<string, unknown>): AppointmentAssignment {
     isPrimary: row.is_primary as boolean,
     assignedBy: row.assigned_by as string,
     assignedAt: new Date(row.assigned_at as string),
+    // Denormalised window columns (added by migration 129).
+    // May be NULL for rows created before the migration.
+    scheduledStart: row.scheduled_start ? new Date(row.scheduled_start as string) : undefined,
+    scheduledEnd: row.scheduled_end ? new Date(row.scheduled_end as string) : undefined,
   };
 }
 

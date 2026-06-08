@@ -98,6 +98,8 @@ export interface Proposal {
   approvedAt?: Date;
   executedAt?: Date;
   executedBy?: string;
+  /** QA-2026-06-05: why execution failed — persisted so failed proposals are debuggable. */
+  executionError?: string;
   claimedBy?: string;
   claimedAt?: Date;
   executionRetryCount?: number;
@@ -451,6 +453,7 @@ export interface ProposalRepository {
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
       >
@@ -673,6 +676,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
       >
@@ -688,6 +692,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
       if (updates.rejectionDetails !== undefined) proposal.rejectionDetails = updates.rejectionDetails;
       if (updates.resultEntityId !== undefined) proposal.resultEntityId = updates.resultEntityId;
       if (updates.approvedAt !== undefined) proposal.approvedAt = updates.approvedAt;
+      if (updates.executionError !== undefined) proposal.executionError = updates.executionError;
       if (updates.executedAt !== undefined) proposal.executedAt = updates.executedAt;
       if (updates.executedBy !== undefined) proposal.executedBy = updates.executedBy;
       if (updates.undoneAt !== undefined) proposal.undoneAt = updates.undoneAt;

@@ -1,0 +1,538 @@
+{
+  "timestamp": "2026-06-04T12:38:54Z",
+  "api_url": "https://serviceosapi-development.up.railway.app",
+  "summary": {
+    "pass": 5,
+    "fail": 36,
+    "warn": 0,
+    "total": 41
+  },
+  "sections": {
+    "infra": {
+      "pass": 3,
+      "fail": 0
+    },
+    "auth": {
+      "pass": 0,
+      "fail": 2
+    },
+    "customers": {
+      "pass": 0,
+      "fail": 4
+    },
+    "estimates": {
+      "pass": 0,
+      "fail": 2
+    },
+    "invoices": {
+      "pass": 0,
+      "fail": 2
+    },
+    "jobs": {
+      "pass": 0,
+      "fail": 4
+    },
+    "appointments": {
+      "pass": 0,
+      "fail": 1
+    },
+    "proposals": {
+      "pass": 0,
+      "fail": 3
+    },
+    "reports": {
+      "pass": 0,
+      "fail": 3
+    },
+    "settings": {
+      "pass": 0,
+      "fail": 1
+    },
+    "catalog": {
+      "pass": 0,
+      "fail": 2
+    },
+    "leads": {
+      "pass": 0,
+      "fail": 1
+    },
+    "agreements": {
+      "pass": 0,
+      "fail": 1
+    },
+    "comms": {
+      "pass": 0,
+      "fail": 1
+    },
+    "voice": {
+      "pass": 0,
+      "fail": 1
+    },
+    "ai": {
+      "pass": 0,
+      "fail": 2
+    },
+    "notes": {
+      "pass": 0,
+      "fail": 1
+    },
+    "time": {
+      "pass": 0,
+      "fail": 1
+    },
+    "locations": {
+      "pass": 0,
+      "fail": 1
+    },
+    "portal": {
+      "pass": 2,
+      "fail": 0
+    },
+    "security": {
+      "pass": 0,
+      "fail": 2
+    },
+    "contracts": {
+      "pass": 0,
+      "fail": 1
+    }
+  },
+  "results": [
+    {
+      "id": "INFRA-01",
+      "section": "infra",
+      "desc": "Health check returns ok",
+      "method": "GET",
+      "path": "/health",
+      "status": 200,
+      "expected": 200,
+      "passed": true,
+      "body_preview": "{\"status\": \"ok\", \"version\": \"1.0.0\", \"environment\": \"development\", \"timestamp\": \"2026-06-04T19:38:49.215Z\", \"checks\": {\"database\": {\"status\": \"ok\"}}}"
+    },
+    {
+      "id": "INFRA-02",
+      "section": "infra",
+      "desc": "Readiness probe returns ok",
+      "method": "GET",
+      "path": "/ready",
+      "status": 200,
+      "expected": 200,
+      "passed": true,
+      "body_preview": "{\"status\": \"ready\"}"
+    },
+    {
+      "id": "INFRA-03",
+      "section": "infra",
+      "desc": "Unauthenticated API returns 401",
+      "method": "GET",
+      "path": "/api/me",
+      "status": 401,
+      "expected": 401,
+      "passed": true,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "AUTH-01",
+      "section": "auth",
+      "desc": "/api/me returns tenant context (A)",
+      "method": "GET",
+      "path": "/api/me",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "AUTH-02",
+      "section": "auth",
+      "desc": "/api/me returns tenant context (B)",
+      "method": "GET",
+      "path": "/api/me",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "CUS-01",
+      "section": "customers",
+      "desc": "List customers (Tenant A)",
+      "method": "GET",
+      "path": "/api/customers",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "CUS-02",
+      "section": "customers",
+      "desc": "Get seeded customer (A)",
+      "method": "GET",
+      "path": "/api/customers/ad009e33-b141-4485-9030-50c5fe016820",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "CUS-03",
+      "section": "customers",
+      "desc": "Isolation: B can't see A customer",
+      "method": "GET",
+      "path": "/api/customers/ad009e33-b141-4485-9030-50c5fe016820",
+      "status": 401,
+      "expected": 404,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "CUS-04",
+      "section": "customers",
+      "desc": "Create new customer",
+      "method": "POST",
+      "path": "/api/customers",
+      "status": 401,
+      "expected": 201,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "EST-01",
+      "section": "estimates",
+      "desc": "List estimates (Tenant A)",
+      "method": "GET",
+      "path": "/api/estimates",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "EST-02",
+      "section": "estimates",
+      "desc": "Create draft estimate",
+      "method": "POST",
+      "path": "/api/estimates",
+      "status": 401,
+      "expected": 201,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "INV-01",
+      "section": "invoices",
+      "desc": "List invoices (Tenant A)",
+      "method": "GET",
+      "path": "/api/invoices",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "INV-02",
+      "section": "invoices",
+      "desc": "Create draft invoice",
+      "method": "POST",
+      "path": "/api/invoices",
+      "status": 401,
+      "expected": 201,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "JOB-01",
+      "section": "jobs",
+      "desc": "List jobs (Tenant A)",
+      "method": "GET",
+      "path": "/api/jobs",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "JOB-02",
+      "section": "jobs",
+      "desc": "Get seeded job (A)",
+      "method": "GET",
+      "path": "/api/jobs/557ffc41-d5bc-48dc-a1a0-f7775cc6c700",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "JOB-03",
+      "section": "jobs",
+      "desc": "Isolation: B can't see A job",
+      "method": "GET",
+      "path": "/api/jobs/557ffc41-d5bc-48dc-a1a0-f7775cc6c700",
+      "status": 401,
+      "expected": 404,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "JOB-04",
+      "section": "jobs",
+      "desc": "Create new job",
+      "method": "POST",
+      "path": "/api/jobs",
+      "status": 401,
+      "expected": 201,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "APT-01",
+      "section": "appointments",
+      "desc": "List appointments (Tenant A)",
+      "method": "GET",
+      "path": "/api/appointments",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "PROP-01",
+      "section": "proposals",
+      "desc": "List proposals",
+      "method": "GET",
+      "path": "/api/proposals",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "PROP-02",
+      "section": "proposals",
+      "desc": "Proposal inbox",
+      "method": "GET",
+      "path": "/api/proposals/inbox",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "PROP-03",
+      "section": "proposals",
+      "desc": "Isolation: B can't see A proposals via list",
+      "method": "GET",
+      "path": "/api/proposals",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "RPT-01",
+      "section": "reports",
+      "desc": "Money dashboard",
+      "method": "GET",
+      "path": "/api/reports/money-dashboard",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "RPT-02",
+      "section": "reports",
+      "desc": "Revenue by source",
+      "method": "GET",
+      "path": "/api/reports/revenue-by-source",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "RPT-03",
+      "section": "reports",
+      "desc": "Time given back",
+      "method": "GET",
+      "path": "/api/reports/time-given-back",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "SET-01",
+      "section": "settings",
+      "desc": "Get tenant settings",
+      "method": "GET",
+      "path": "/api/settings",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "CAT-01",
+      "section": "catalog",
+      "desc": "List catalog items",
+      "method": "GET",
+      "path": "/api/catalog",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "CAT-02",
+      "section": "catalog",
+      "desc": "Catalog isolation: B sees only own items",
+      "method": "GET",
+      "path": "/api/catalog",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "LEAD-01",
+      "section": "leads",
+      "desc": "List leads",
+      "method": "GET",
+      "path": "/api/leads",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "AGR-01",
+      "section": "agreements",
+      "desc": "List service agreements",
+      "method": "GET",
+      "path": "/api/agreements",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "CONV-01",
+      "section": "comms",
+      "desc": "List conversations",
+      "method": "GET",
+      "path": "/api/conversations",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "VOI-01",
+      "section": "voice",
+      "desc": "Voice recordings list",
+      "method": "GET",
+      "path": "/api/voice/recordings",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "AST-01",
+      "section": "ai",
+      "desc": "Assistant context",
+      "method": "GET",
+      "path": "/api/assistant/context",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "AST-02",
+      "section": "ai",
+      "desc": "AI assistant message (basic)",
+      "method": "POST",
+      "path": "/api/assistant/message",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "NOTE-01",
+      "section": "notes",
+      "desc": "Notes on seeded job",
+      "method": "GET",
+      "path": "/api/jobs/557ffc41-d5bc-48dc-a1a0-f7775cc6c700/notes",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "TIME-01",
+      "section": "time",
+      "desc": "List time entries",
+      "method": "GET",
+      "path": "/api/time-entries",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "LOC-01",
+      "section": "locations",
+      "desc": "Service locations",
+      "method": "GET",
+      "path": "/api/service-locations",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    },
+    {
+      "id": "PORTAL-01",
+      "section": "portal",
+      "desc": "Bogus public token \u2192 404",
+      "passed": true,
+      "status": 401
+    },
+    {
+      "id": "PORTAL-02",
+      "section": "portal",
+      "desc": "Bogus invoice token",
+      "passed": true,
+      "status": 401
+    },
+    {
+      "id": "SEC-01",
+      "section": "security",
+      "desc": "/metrics auth check",
+      "passed": false,
+      "status": 200
+    },
+    {
+      "id": "SEC-02",
+      "section": "security",
+      "desc": "Cross-tenant PATCH blocked",
+      "passed": false,
+      "status": 401
+    },
+    {
+      "id": "MC-01",
+      "section": "contracts",
+      "desc": "List maintenance contracts",
+      "method": "GET",
+      "path": "/api/maintenance-contracts",
+      "status": 401,
+      "expected": 200,
+      "passed": false,
+      "body_preview": "{\"error\": \"UNAUTHORIZED\", \"message\": \"Authentication required\"}"
+    }
+  ],
+  "created_ids": {}
+}
