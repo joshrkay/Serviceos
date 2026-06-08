@@ -22,6 +22,8 @@ import {
   useActiveSessions,
 } from '../../hooks/useActiveSessions';
 import { UpgradeNudgeBanner } from '../onboarding/v2/UpgradeNudgeBanner';
+import { ActivationCelebrationBanner } from '../onboarding/v2/ActivationCelebrationBanner';
+import { PastDueBanner } from '../billing/PastDueBanner';
 import { EscalationPanelHost } from '../dispatch/EscalationPanelHost';
 import {
   usePendingProposals,
@@ -361,6 +363,14 @@ function ShellInner() {
   return (
     <ErrorBoundary>
     <div className="flex flex-col h-screen bg-slate-50 overflow-hidden">
+
+      {/* Payment problem — renders only when the Stripe subscription is
+          past_due. Blocking, not dismissible. */}
+      <PastDueBanner />
+
+      {/* Activation celebration — one-time "first real call" banner, fires
+          when tenant_settings.activated_at is set (< 7 days, not dismissed). */}
+      <ActivationCelebrationBanner />
 
       {/* §10 onboarding — early-upgrade nudge. Renders only when the
           30-minute trial threshold has fired (and onboarding is otherwise

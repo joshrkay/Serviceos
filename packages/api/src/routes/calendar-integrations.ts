@@ -15,6 +15,12 @@ import {
 } from '../integrations/google-calendar';
 import { CalendarSyncService } from '../integrations/calendar-sync';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import {
+  seedAvailabilityFromGoogle,
+  makeGoogleFreeBusyFetcher,
+  type FreeBusyFetcher,
+} from '../availability/seed-from-google';
+import type { Pool } from 'pg';
 
 /**
  * Tier 4 (Calendar sync — PR 1). Per-user Google Calendar OAuth
@@ -52,6 +58,11 @@ export interface CalendarIntegrationsRouteDeps {
    * harnesses still build.
    */
   auditRepo?: AuditRepository;
+  /** When wired, the OAuth callback seeds a 7-day availability template from
+   * the freshly-connected Google calendar (feature 5). Best-effort. */
+  pool?: Pool;
+  /** Injectable free/busy fetcher for the availability seed (tests pass a mock). */
+  googleFreeBusy?: FreeBusyFetcher;
 }
 
 /**
@@ -145,6 +156,24 @@ export function createCalendarOAuthCallbackRouter(
             },
           }),
         );
+      }
+
+      // Feature 5 — seed a 7-day availability template from the freshly
+      // connected calendar. Best-effort: a free/busy hiccup must not fail the
+      // OAuth round-trip (the connection is already persisted above).
+      if (deps.pool) {
+        try {
+          await seedAvailabilityFromGoogle(
+            {
+              pool: deps.pool,
+              freeBusy: deps.googleFreeBusy ?? makeGoogleFreeBusyFetcher(deps.googleFetch ?? fetch),
+              accessToken: tokens.accessToken,
+            },
+            { tenantId: consumed.tenantId },
+          );
+        } catch {
+          // availability seeding is best-effort; the calendar is still connected
+        }
       }
 
       // Default redirect to Settings; honor a custom redirectAfter

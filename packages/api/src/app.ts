@@ -84,6 +84,7 @@ import { createVoiceRouter } from './routes/voice';
 import { createVoiceGate } from './voice/voice-gate';
 import { checkAndFireUpgradeNudge } from './voice/check-upgrade-nudge';
 import { maybeAutoGoLiveOnInboundEnd } from './voice/go-live';
+import { maybeFireFirstRealCallActivation } from './voice/activation';
 import { createOnboardingRouter } from './routes/onboarding';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
@@ -249,6 +250,7 @@ import {
   InMemoryDeliveryProvider,
 } from './notifications/delivery-provider';
 import { TwilioDeliveryProvider } from './notifications/twilio-delivery-provider';
+import { PerTenantTwilioDeliveryProvider } from './notifications/per-tenant-twilio-delivery-provider';
 import { SendService } from './notifications/send-service';
 import {
   InMemoryDispatchRepository,
@@ -438,6 +440,11 @@ export function createApp(): express.Express {
   // svix signed, instead of re-serializing the parsed object (key order /
   // whitespace differences would fail legit webhooks and break tenant bootstrap).
   app.use('/webhooks/clerk', express.raw({ type: 'application/json' }));
+
+  // Vapi signs its server messages (serverUrlSecret). Capture the raw Buffer
+  // here so the HMAC verification in handleVapiCallEvent sees the exact bytes
+  // Vapi signed — same treatment as Stripe/Clerk.
+  app.use('/webhooks/vapi', express.raw({ type: 'application/json' }));
 
   // Twilio posts application/x-www-form-urlencoded — mount the matching parser
   // before global express.json() so /webhooks/twilio/* routes get populated
@@ -704,6 +711,9 @@ export function createApp(): express.Express {
   const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
   const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository();
   const assignmentRepo     = pool ? new PgAssignmentRepository(pool)     : new InMemoryAssignmentRepository();
+  // Declared here (ahead of its first router use) so the jobs router's
+  // from-estimate scheduling deps can reference it.
+  const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
   // Working hours are now Pg-backed in production (migration 137 added
   // technician_working_hours), so the dispatch feasibility composer and the
   // inbound-AI availability search enforce real working-hours rows instead of
@@ -913,28 +923,42 @@ export function createApp(): express.Express {
   // boots in dev without delivery credentials. Send routes return
   // 503 when sendService is undefined.
   const dispatchRepo = pool ? new PgDispatchRepository(pool) : new InMemoryDispatchRepository();
-  const messageDelivery: MessageDeliveryProvider | null =
+  let messageDelivery: MessageDeliveryProvider | null;
+  if (
     process.env.TWILIO_ACCOUNT_SID &&
     process.env.TWILIO_AUTH_TOKEN &&
     process.env.TWILIO_FROM_NUMBER &&
     process.env.SENDGRID_API_KEY &&
     process.env.SENDGRID_FROM_EMAIL
-      ? new TwilioDeliveryProvider({
-          sms: {
-            accountSid: process.env.TWILIO_ACCOUNT_SID,
-            authToken: process.env.TWILIO_AUTH_TOKEN,
-            fromNumber: process.env.TWILIO_FROM_NUMBER,
-          },
-          email: {
-            apiKey: process.env.SENDGRID_API_KEY,
-            fromEmail: process.env.SENDGRID_FROM_EMAIL,
-            fromName: process.env.SENDGRID_FROM_NAME,
-            replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
-          },
-        })
-      : config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging'
-        ? null
-        : new InMemoryDeliveryProvider();
+  ) {
+    // The global Twilio/SendGrid provider handles email and any send that
+    // carries no tenantId; the global Twilio SMS creds also serve as the
+    // dev/test fallback inside getTenantTwilioCreds.
+    const baseDelivery = new TwilioDeliveryProvider({
+      sms: {
+        accountSid: process.env.TWILIO_ACCOUNT_SID,
+        authToken: process.env.TWILIO_AUTH_TOKEN,
+        fromNumber: process.env.TWILIO_FROM_NUMBER,
+      },
+      email: {
+        apiKey: process.env.SENDGRID_API_KEY,
+        fromEmail: process.env.SENDGRID_FROM_EMAIL,
+        fromName: process.env.SENDGRID_FROM_NAME,
+        replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
+      },
+    });
+    // Feature 7 — when a Postgres pool is available, route per-tenant SMS
+    // through each tenant's own Twilio subaccount (failing closed when a
+    // tenant has no credentials). Without a pool we cannot resolve per-tenant
+    // creds, so keep the global provider.
+    messageDelivery = pool
+      ? new PerTenantTwilioDeliveryProvider({ pool, base: baseDelivery })
+      : baseDelivery;
+  } else if (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging') {
+    messageDelivery = null;
+  } else {
+    messageDelivery = new InMemoryDeliveryProvider();
+  }
   const publicBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
   const sendService = messageDelivery
     ? new SendService({
@@ -1687,6 +1711,9 @@ export function createApp(): express.Express {
     // callback uses `system:google-oauth-callback` because there is no
     // Clerk session in flight when Google redirects the browser back.
     auditRepo,
+    // Feature 5 — seed a 7-day availability template from the connected
+    // calendar in the OAuth callback. Pool-gated (skipped in-memory).
+    ...(pool ? { pool } : {}),
   };
   app.use(
     '/api/calendar-integrations',
@@ -1829,6 +1856,32 @@ export function createApp(): express.Express {
               { pool, auditRepo },
               { tenantId, channel },
             );
+            // Activation milestone — fire first_real_call_received (+ email +
+            // banner state) on the first real inbound call after go-live.
+            // Runs AFTER auto-go-live so voice_agent_live_at is already set
+            // for the test call. Failure-soft: must never block session end.
+            try {
+              await maybeFireFirstRealCallActivation(
+                {
+                  pool,
+                  auditRepo,
+                  ...(messageDelivery
+                    ? {
+                        sendEmail: (msg) =>
+                          messageDelivery.sendEmail({
+                            to: msg.to,
+                            subject: msg.subject,
+                            text: msg.text,
+                            ...(msg.html ? { html: msg.html } : {}),
+                          }),
+                      }
+                    : {}),
+                },
+                { tenantId, channel },
+              );
+            } catch {
+              // swallow — activation analytics must not break call teardown
+            }
           },
         }
       : {}),
@@ -2361,7 +2414,16 @@ export function createApp(): express.Express {
     proposalRepo,
     settingsRepo,
     auditRepo,
+    timeEntryRepo,
     scheduleRepo: invoiceScheduleRepo,
+  }, {
+    estimateRepo,
+    jobRepo,
+    appointmentRepo,
+    assignmentRepo,
+    userRepo,
+    invoiceRepo,
+    auditRepo,
   }));
   app.use(
     '/api/jobs',
@@ -2441,7 +2503,6 @@ export function createApp(): express.Express {
   // best-effort: missing CLERK_SECRET_KEY just persists the local
   // intent; the operator can still re-send via dashboard and the
   // webhook still attaches the invitee on accept (lookup is by email).
-  const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
   app.use(
     '/api/users',
     createUsersRouter(

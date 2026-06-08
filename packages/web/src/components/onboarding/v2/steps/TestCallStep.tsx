@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
+import { useAuth } from '@clerk/clerk-react';
 import { Phone, Copy, Check } from 'lucide-react';
 import { useApiClient } from '../../../../lib/apiClient';
 import { Button } from '../../../ui';
-import { track } from '../../../../lib/analytics';
+import { track, trackFunnel } from '../../../../lib/analytics';
+import { CalendarChoicePanel } from '../CalendarChoicePanel';
 import type { OnboardingStatusResponse } from '../../../../types/onboarding';
 
 interface TestCallStepProps {
@@ -27,6 +29,7 @@ function formatPhone(e164: string | null | undefined): string {
 export function TestCallStep({ status, onSkipped, onRefresh }: TestCallStepProps) {
   const apiFetch = useApiClient();
   const navigate = useNavigate();
+  const { userId } = useAuth();
   const [skipping, setSkipping] = useState(false);
   const [goingLive, setGoingLive] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -38,6 +41,30 @@ export function TestCallStep({ status, onSkipped, onRefresh }: TestCallStepProps
   const formatted = formatPhone(phoneNumber);
   const telHref = phoneNumber ? `tel:${phoneNumber.replace(/[^\d+]/g, '')}` : undefined;
   const voiceAgentLive = status.voiceAgentLive;
+
+  // test_call_initiated — the user's intent-to-call moment (tapping the
+  // tel: link or copying the number). Fired at most once per mount.
+  const initiatedRef = useRef(false);
+  function markTestCallInitiated() {
+    if (initiatedRef.current) return;
+    initiatedRef.current = true;
+    trackFunnel('test_call_initiated', { tenantId: status.tenantId, userId });
+  }
+
+  // test_call_succeeded — fires when the server detects the inbound test
+  // call and flips the step to 'done'. Seeded on first observation so a
+  // resumed (already-done) session doesn't replay the event.
+  const succeededFiredRef = useRef(false);
+  const prevStatusRef = useRef<string | null>(null);
+  useEffect(() => {
+    const s = step?.status ?? null;
+    const prev = prevStatusRef.current;
+    prevStatusRef.current = s;
+    if (s === 'done' && prev !== null && prev !== 'done' && !succeededFiredRef.current) {
+      succeededFiredRef.current = true;
+      trackFunnel('test_call_succeeded', { tenantId: status.tenantId, userId });
+    }
+  }, [step?.status, status.tenantId, userId]);
 
   // Surface a "still waiting" cue after 60s so the user knows they may
   // need to redial or skip.
@@ -65,6 +92,7 @@ export function TestCallStep({ status, onSkipped, onRefresh }: TestCallStepProps
 
   async function copy() {
     if (!phoneNumber) return;
+    markTestCallInitiated();
     try {
       await navigator.clipboard.writeText(phoneNumber);
       setCopied(true);
@@ -109,6 +137,7 @@ export function TestCallStep({ status, onSkipped, onRefresh }: TestCallStepProps
             )}
           </p>
         </div>
+        <CalendarChoicePanel tenantId={status.tenantId} onChosen={onRefresh} />
         <div className="flex flex-col items-center gap-3">
           {!voiceAgentLive && (
             <Button variant="primary" size="lg" loading={goingLive} onClick={() => void turnOnAiAnswering()}>
@@ -142,6 +171,7 @@ export function TestCallStep({ status, onSkipped, onRefresh }: TestCallStepProps
         {phoneNumber ? (
           <a
             href={telHref}
+            onClick={markTestCallInitiated}
             className="mt-3 block text-center text-3xl font-medium tracking-tight text-slate-900 hover:underline"
           >
             {formatted || phoneNumber}

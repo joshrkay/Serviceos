@@ -14,7 +14,12 @@ import {
   BusinessIdentityInputSchema,
   BusinessHoursSchema,
   PackPickInputSchema,
+  VoiceConfigInputSchema,
+  CalendarChoiceInputSchema,
 } from '../onboarding/contracts';
+import { saveVoiceConfig } from '../voice/voice-config';
+import { VOICE_PRESETS } from '../integrations/vapi/assistant-config';
+import { getVapiClient, type VapiClient } from '../integrations/vapi/client';
 import { BillingService } from '../billing/subscription';
 import type { Queue } from '../queues/queue';
 import {
@@ -44,6 +49,9 @@ export interface OnboardingRouterDeps {
    * tenants land on an empty estimate page.
    */
   packSeedDeps?: SeedPackDefaultsDeps;
+  /** Injectable Vapi client for voice-config assistant pushes. Defaults to
+   * getVapiClient() (off-by-default without VAPI_API_KEY). */
+  vapiClient?: VapiClient | null;
 }
 
 export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
@@ -209,6 +217,30 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             bootstrapAiModel,
           ]
         );
+
+        // Feature 2 extras (migration 148) — persisted in a separate additive
+        // UPDATE so the proven identity INSERT above stays untouched. Each
+        // field is COALESCE'd so an omitted value leaves the stored one intact.
+        if (
+          v.serviceAddress !== undefined ||
+          v.serviceAreaZips !== undefined ||
+          v.servicesOffered !== undefined
+        ) {
+          await db.query(
+            `UPDATE tenant_settings SET
+               service_address  = COALESCE($2, service_address),
+               service_area_zips = COALESCE($3::text[], service_area_zips),
+               services_offered  = COALESCE($4::text[], services_offered),
+               updated_at = now()
+             WHERE tenant_id = $1`,
+            [
+              tenantId,
+              v.serviceAddress ?? null,
+              v.serviceAreaZips ?? null,
+              v.servicesOffered ?? null,
+            ],
+          );
+        }
 
         await auditRepo.create(
           createAuditEvent({
@@ -759,6 +791,107 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  /**
+   * GET /api/onboarding/voice/presets — the three ElevenLabs preset voices
+   * the voice-config step offers.
+   */
+  router.get('/voice/presets', requireAuth, requireTenant, (_req: AuthenticatedRequest, res: Response) => {
+    res.json({ presets: VOICE_PRESETS });
+  });
+
+  /**
+   * PUT /api/onboarding/voice — feature 4. Persists the chosen voice + greeting
+   * and pushes them onto the tenant's Vapi assistant (if one exists). Owner-only
+   * (voice config is part of the operator-driven onboarding).
+   */
+  router.put(
+    '/voice',
+    requireAuth,
+    requireTenant,
+    requireRole('owner'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!pool) {
+          res.status(503).json({ error: 'ONBOARDING_NOT_CONFIGURED', message: 'Voice config requires a database connection' });
+          return;
+        }
+        const parsed = VoiceConfigInputSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', issues: parsed.error.issues });
+          return;
+        }
+        const tenantId = req.auth!.tenantId;
+        const userId = req.auth!.userId;
+        const db = currentTenantContext()?.client ?? pool;
+        const result = await saveVoiceConfig(
+          { pool: db as Pool, auditRepo, vapiClient: deps.vapiClient ?? getVapiClient() },
+          {
+            tenantId,
+            actorId: userId,
+            voiceId: parsed.data.voiceId,
+            ...(parsed.data.greeting !== undefined ? { greeting: parsed.data.greeting } : {}),
+          },
+        );
+        res.json(result);
+      } catch (error: unknown) {
+        res.status(500).json({
+          error: 'VOICE_CONFIG_SAVE_FAILED',
+          message: error instanceof Error ? error.message : 'Failed to save voice config',
+        });
+      }
+    },
+  );
+
+  /**
+   * POST /api/onboarding/calendar/choose — feature 5. Records the calendar
+   * provider chosen in onboarding: 'google' (the client then runs the existing
+   * OAuth connect flow) or 'builtin' (the skip path → ServiceOS scheduling).
+   * Owner-only.
+   */
+  router.post(
+    '/calendar/choose',
+    requireAuth,
+    requireTenant,
+    requireRole('owner'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!pool) {
+          res.status(503).json({ error: 'ONBOARDING_NOT_CONFIGURED', message: 'Calendar choice requires a database connection' });
+          return;
+        }
+        const parsed = CalendarChoiceInputSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', issues: parsed.error.issues });
+          return;
+        }
+        const tenantId = req.auth!.tenantId;
+        const userId = req.auth!.userId;
+        const db = currentTenantContext()?.client ?? pool;
+        await db.query(
+          `UPDATE tenant_settings SET calendar_provider = $2, updated_at = now() WHERE tenant_id = $1`,
+          [tenantId, parsed.data.provider],
+        );
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: userId,
+            actorRole: 'owner',
+            eventType: 'tenant.calendar_provider_set',
+            entityType: 'tenant_settings',
+            entityId: tenantId,
+            metadata: { provider: parsed.data.provider },
+          }),
+        );
+        res.json({ ok: true, calendarProvider: parsed.data.provider });
+      } catch (error: unknown) {
+        res.status(500).json({
+          error: 'CALENDAR_CHOICE_FAILED',
+          message: error instanceof Error ? error.message : 'Failed to set calendar provider',
+        });
       }
     },
   );
