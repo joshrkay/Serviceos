@@ -21,7 +21,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
 import { classifyIntent, isLookupIntent } from '../ai/orchestration/intent-classifier';
-import { isLanguageSupported } from '../ai/orchestration/language-detector';
 import {
   CreateCustomerVoiceTaskHandler,
   CREATE_CUSTOMER_CONFIRMATION_TTS,
@@ -569,21 +568,20 @@ export class TwilioGatherAdapter {
     if (!this.deps.settingsRepo) return { language: 'en' };
     try {
       const settings = await this.deps.settingsRepo.findByTenant(tenantId);
-      const supportedLanguages = settings?.supportedLanguages;
-      // Voice-parity — only honor an 'es' default when the tenant opted into
-      // Spanish; otherwise fall back to English so an un-opted-in tenant never
-      // greets in a language it can't sustain.
-      const wantsEs =
-        settings?.defaultLanguage === 'es' &&
-        isLanguageSupported('es', supportedLanguages);
-      const language: Language = wantsEs ? 'es' : 'en';
+      // The tenant's explicit default_language is always honored — it IS the
+      // tenant's opt-in. The supported_languages stack gates CALLER auto-
+      // detection (a Spanish-speaking caller on an English-only tenant), not
+      // the tenant's own configured greeting language.
+      const language: Language = settings?.defaultLanguage === 'es' ? 'es' : 'en';
       const ttsVoice =
         (language === 'es' ? settings?.ttsVoiceEs : settings?.ttsVoiceEn) ?? undefined;
-      return {
-        language,
-        ttsVoice,
-        ...(supportedLanguages ? { supportedLanguages } : {}),
-      };
+      // Thread the opt-in stack for the auto-detect gate, always including the
+      // pinned language so the gate can never contradict the greeting.
+      const baseStack: Language[] = settings?.supportedLanguages ?? ['en'];
+      const supportedLanguages = baseStack.includes(language)
+        ? baseStack
+        : [...baseStack, language];
+      return { language, ttsVoice, supportedLanguages };
     } catch {
       return { language: 'en' };
     }

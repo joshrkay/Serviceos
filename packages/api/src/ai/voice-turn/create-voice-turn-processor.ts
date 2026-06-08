@@ -513,6 +513,9 @@ export function createVoiceTurnProcessor(
         in_app: true,
         whisper: true,
       };
+      // Voice-parity (Feature 7) — single warm-transfer line. When configured
+      // it replaces the on-call rotation for this handoff.
+      let transferNumber: string | undefined;
       if (deps.settingsRepo) {
         try {
           const tenantSettings = await deps.settingsRepo.findByTenant(tenantId);
@@ -522,6 +525,7 @@ export function createVoiceTurnProcessor(
             in_app: escSettings.channel_in_app,
             whisper: escSettings.channel_whisper,
           };
+          transferNumber = tenantSettings?.transferNumber ?? undefined;
         } catch {
           // Best-effort: if settings lookup fails, fall back to all-enabled.
         }
@@ -551,6 +555,7 @@ export function createVoiceTurnProcessor(
         ...(deps.dispatcherPhoneResolver
           ? { dispatcherPhoneResolver: deps.dispatcherPhoneResolver }
           : {}),
+        ...(transferNumber ? { transferNumber } : {}),
         ...(session.callSid ? { callSid: session.callSid } : {}),
         dialActionUrl: dialResultUrl(session.id),
         channelPreferences,
