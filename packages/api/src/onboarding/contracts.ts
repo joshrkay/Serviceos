@@ -31,6 +31,12 @@ export const BusinessIdentityInputSchema = z.object({
   // and is normalized to E.164 server-side via normalizeMobileE164. Empty
   // string clears the value; omit to leave whatever is already stored.
   ownerPhone: z.string().max(40).optional(),
+  // Feature 2 extras — a street/service address, the ZIP codes served, and
+  // the multi-select of services offered (free-form catalog keys). All
+  // optional + additive; omit to leave unchanged.
+  serviceAddress: z.string().max(200).optional(),
+  serviceAreaZips: z.array(z.string().regex(/^\d{5}$/, 'expected a 5-digit ZIP')).max(100).optional(),
+  servicesOffered: z.array(z.string().min(1).max(60)).max(50).optional(),
 });
 export type BusinessIdentityInput = z.infer<typeof BusinessIdentityInputSchema>;
 
@@ -38,6 +44,22 @@ export const PackPickInputSchema = z.object({
   packId: z.enum(['hvac', 'plumbing']),
 });
 export type PackPickInput = z.infer<typeof PackPickInputSchema>;
+
+// Feature 4 — voice agent configuration. voiceId is a preset key (e.g.
+// 'rachel'); greeting is an optional override (empty/absent → auto-generated
+// from business name + services).
+export const VoiceConfigInputSchema = z.object({
+  voiceId: z.string().min(1).max(40),
+  greeting: z.string().max(500).optional(),
+});
+export type VoiceConfigInput = z.infer<typeof VoiceConfigInputSchema>;
+
+// Feature 5 — calendar connection. 'google' kicks off OAuth; 'builtin' uses
+// ServiceOS scheduling (the skip path).
+export const CalendarChoiceInputSchema = z.object({
+  provider: z.enum(['google', 'builtin']),
+});
+export type CalendarChoiceInput = z.infer<typeof CalendarChoiceInputSchema>;
 
 export const OnboardingStepIdSchema = z.enum(['signup', 'identity', 'pack', 'phone', 'billing', 'ai_check', 'test_call']);
 export type OnboardingStepId = z.infer<typeof OnboardingStepIdSchema>;

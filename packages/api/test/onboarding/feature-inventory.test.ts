@@ -13,7 +13,12 @@
  */
 import { describe, it, expect } from 'vitest';
 import { deriveOnboardingStatus, type OnboardingFacts } from '../../src/onboarding/derive-status';
-import { BusinessIdentityInputSchema } from '../../src/onboarding/contracts';
+import {
+  BusinessIdentityInputSchema,
+  CalendarChoiceInputSchema,
+  VoiceConfigInputSchema,
+} from '../../src/onboarding/contracts';
+import { VOICE_PRESETS } from '../../src/integrations/vapi/assistant-config';
 
 function facts(over: Partial<OnboardingFacts> = {}): OnboardingFacts {
   return {
@@ -69,6 +74,19 @@ describe('Feature 2 — Onboarding wizard: business profile step', () => {
     const r = deriveOnboardingStatus(facts({ identity: completeIdentity }));
     expect(r.steps[1].status).toBe('done');
   });
+  it('accepts the extended profile (address, ZIPs, services) and rejects malformed ZIPs', () => {
+    expect(
+      BusinessIdentityInputSchema.safeParse({
+        ...completeIdentity,
+        serviceAddress: '123 Main St',
+        serviceAreaZips: ['78701', '78702'],
+        servicesOffered: ['AC repair', 'furnace install'],
+      }).success,
+    ).toBe(true);
+    expect(
+      BusinessIdentityInputSchema.safeParse({ ...completeIdentity, serviceAreaZips: ['ABCDE'] }).success,
+    ).toBe(false);
+  });
 });
 
 describe('Feature 3 — Phone number provisioning (Twilio)', () => {
@@ -85,6 +103,14 @@ describe('Feature 3 — Phone number provisioning (Twilio)', () => {
 });
 
 describe('Feature 4 — Voice agent configuration', () => {
+  it('offers three ElevenLabs preset voices for the voice step', () => {
+    expect(VOICE_PRESETS).toHaveLength(3);
+  });
+  it('validates a voice-config save (preset + optional greeting override)', () => {
+    expect(VoiceConfigInputSchema.safeParse({ voiceId: 'adam' }).success).toBe(true);
+    expect(VoiceConfigInputSchema.safeParse({ voiceId: 'adam', greeting: 'Hi!' }).success).toBe(true);
+    expect(VoiceConfigInputSchema.safeParse({ voiceId: '' }).success).toBe(false);
+  });
   it('marks the voice (ai_check) step done once the AI self-check passes', () => {
     const r = deriveOnboardingStatus(
       facts({ identity: completeIdentity, packActivated: true, twilioStatus: 'full_readiness', subscription: { stripeSubscriptionId: 'sub_1', status: 'trialing' }, aiConfigPresent: true, aiVerificationStatus: 'passed' }),
@@ -93,10 +119,11 @@ describe('Feature 4 — Voice agent configuration', () => {
   });
 });
 
-describe('Feature 5 — Calendar connection (DEFERRED)', () => {
-  it('has no calendar wizard step — calendar is a per-user setting, not onboarding (see BLOCKED.md)', () => {
-    const r = deriveOnboardingStatus(facts());
-    expect(r.steps.map((s) => s.id)).not.toContain('calendar');
+describe('Feature 5 — Calendar connection', () => {
+  it('accepts google (OAuth) and builtin (skip) calendar choices, rejects others', () => {
+    expect(CalendarChoiceInputSchema.safeParse({ provider: 'google' }).success).toBe(true);
+    expect(CalendarChoiceInputSchema.safeParse({ provider: 'builtin' }).success).toBe(true);
+    expect(CalendarChoiceInputSchema.safeParse({ provider: 'outlook' }).success).toBe(false);
   });
 });
 
