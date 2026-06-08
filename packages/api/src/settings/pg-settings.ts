@@ -97,6 +97,8 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
       return raw;
     })(),
     jobBufferMinutes: (row.job_buffer_minutes as number | null) ?? undefined,
+    // Feature 5 — migration 109. CSR seat count for overflow routing.
+    csrSeats: (row.csr_seats as number | null) ?? undefined,
     // B1 — migration 088. NULL from DB → undefined in TS (same
     // convention as all other nullable optional columns here).
     voiceAgentName: (row.voice_agent_name as string | null) ?? undefined,

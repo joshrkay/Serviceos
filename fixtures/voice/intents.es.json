@@ -1,0 +1,102 @@
+[
+  {
+    "name": "book-clear-es",
+    "feature": "feature-2-intent-escalation",
+    "language": "es",
+    "utterance": "Quiero agendar una revisión de la calefacción para la próxima semana.",
+    "expectedIntent": "book_appointment",
+    "expectedEmergencyDial": false,
+    "confidence": 0.92,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "estimate-water-heater-es",
+    "feature": "feature-2-intent-escalation",
+    "language": "es",
+    "utterance": "¿Cuánto cuesta cambiar el calentador de agua de mi casa?",
+    "expectedIntent": "request_estimate",
+    "expectedEmergencyDial": false,
+    "confidence": 0.9,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "emergency-gas-leak-es",
+    "feature": "feature-2-intent-escalation",
+    "language": "es",
+    "utterance": "Huelo gas en la cocina y el olor es muy fuerte ahora mismo.",
+    "expectedIntent": "emergency_dispatch",
+    "expectedEmergencyDial": true,
+    "confidence": 0.96,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "emergency-flooding-es",
+    "feature": "feature-2-intent-escalation",
+    "language": "es",
+    "utterance": "Se inundó el sótano, hay agua por todas partes por una tubería rota.",
+    "expectedIntent": "emergency_dispatch",
+    "expectedEmergencyDial": true,
+    "confidence": 0.95,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "existing-customer-eta-es",
+    "feature": "feature-2-intent-escalation",
+    "language": "es",
+    "utterance": "¿A qué hora llega el técnico mañana por la mañana a mi domicilio?",
+    "expectedIntent": "lookup_appointments",
+    "expectedEmergencyDial": false,
+    "confidence": 0.86,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "billing-invoice-question-es",
+    "feature": "feature-2-intent-escalation",
+    "language": "es",
+    "utterance": "Tengo una pregunta sobre un cargo en mi última factura del servicio.",
+    "expectedIntent": "billing_question",
+    "expectedEmergencyDial": false,
+    "confidence": 0.9,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "complaint-no-show-es",
+    "feature": "feature-2-intent-escalation",
+    "language": "es",
+    "utterance": "El técnico nunca llegó hoy y la verdad estoy muy molesto con esto.",
+    "expectedIntent": "complaint",
+    "expectedEmergencyDial": false,
+    "confidence": 0.82,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "reach-human-direct-es",
+    "feature": "feature-2-intent-escalation",
+    "language": "es",
+    "utterance": "Por favor quiero hablar con una persona de verdad ahora mismo.",
+    "expectedIntent": "operator_request",
+    "expectedEmergencyDial": false,
+    "confidence": 0.95,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "unknown-noise-es",
+    "feature": "feature-2-intent-escalation",
+    "language": "es",
+    "utterance": "pues no sé, solo estaba hablando del clima de hoy y nada más",
+    "expectedIntent": "unknown",
+    "expectedEmergencyDial": false,
+    "confidence": 0.3,
+    "expectedCriticalHandoff": false
+  },
+  {
+    "name": "book-low-confidence-es",
+    "feature": "feature-2-intent-escalation",
+    "language": "es",
+    "utterance": "tal vez quiero agendar algo para la próxima semana creo que sí",
+    "expectedIntent": "book_appointment",
+    "expectedEmergencyDial": false,
+    "confidence": 0.55,
+    "expectedCriticalHandoff": true
+  }
+]

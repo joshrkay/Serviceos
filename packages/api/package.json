@@ -31,7 +31,12 @@
     "lint:log-safety": "node scripts/check-log-safety.js",
     "launch-quality-check": "tsx scripts/launch-quality-check.ts",
     "voice-load:selfcheck": "tsx scripts/voice-load-selfcheck.ts",
-    "voice-load:staging": "tsx scripts/voice-load-test.ts --max 50 --ramp 60 --hold 300"
+    "voice-load:staging": "tsx scripts/voice-load-test.ts --max 50 --ramp 60 --hold 300",
+    "bench:latency": "tsx scripts/bench-voice-latency.ts",
+    "test:voice-fixtures": "vitest run test/voice",
+    "test:booking-rate": "vitest run test/voice/booking.test.ts",
+    "test:no-double-book": "vitest run test/voice/booking.test.ts -t double-book",
+    "test:rls": "vitest run test/voice/rls-policies.test.ts"
   },
   "dependencies": {
     "@ai-service-os/shared": "*",

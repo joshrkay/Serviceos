@@ -1,96 +1,87 @@
-# Launch-Readiness Pass — PROGRESS
+# Voice CSR Parity — Progress
 
-Branch: `claude/vibrant-pascal-eeyK1`. Adapted from a generic launch-readiness
-directive to this repo's real shape (npm workspaces, voice in `packages/api`,
-Twilio not Vapi, in-code migrations). See `/root/.claude/plans/joyful-wiggling-lynx.md`.
+Parity pass to match Avoca's **inbound** AI CSR on demo-able features for SMB
+HVAC/plumbing buyers. Branch: `claude/intelligent-goldberg-P4dNG` (the harness's
+designated branch; never `main`). Outbound, Coach, Web Chat, and enterprise CRM
+integrations are DEFERRED by the goal.
 
-Baseline (before this pass): `typecheck` ✓, `lint` ✓, unit tests 5943 passed /
-3 skipped / 43 todo across 611 files.
+## Reality vs. the goal's assumed layout
 
-Status legend: SHIPPED | DEFERRED | BLOCKED
+The goal assumed a `pnpm` + `packages/voice/` + `supabase/migrations/` + Vapi
+layout. The actual repo is **npm workspaces**, voice logic lives in
+`packages/api/src/voice` + `packages/api/src/telephony` + `packages/api/src/ai`,
+migrations are numbered SQL in `packages/api/src/db/migrations/`, and the
+telephony stack is **Twilio + media-streams + Whisper + OpenAI (NOT Vapi)**.
+All work below adapts to the real layout; the path mapping is documented in
+`LAUNCH_REPORT.md`.
 
----
+Key finding: the existing system already implements the *behaviour* for most
+features. The parity gaps were overwhelmingly **measurement** (no latency
+benchmarks), **feature-named test coverage**, and a few **pure decision rules**
+that did not match the Avoca spec exactly (critical-intent 0.7 handoff,
+returning-customer service-history greeting, CSR overflow + after-hours flag).
 
-## Feature 1 — Inbound call handling
-Defects / gaps:
-- Intent classifier (`ai/orchestration/intent-classifier.ts`) exists with a 0.6
-  confidence threshold and human-fallback (`unknown` + `operator_request`), but
-  **no test drives the classifier from the `fixtures/ai` transcripts** and maps
-  results to the launch intents (schedule_appt / request_estimate / check_status
-  / reach_human / unknown).
-- `/api/voice/*` carries no signature middleware. Investigated: routes are
-  already behind global Clerk `requireAuth` (`app.ts:2303,2329`) + per-route
-  guards; the external Twilio webhook (`/api/telephony`) is signature-verified.
-  Gap is only the **lack of a pinned test** asserting that posture.
-Status: SHIPPED
+## Per-feature status
 
-## Feature 2 — Voice → structured slot extraction
-Defects / gaps:
-- Extraction + FSM re-ask (max 2) exist, but extracted slots are validated by
-  ad-hoc type guards, **not a Zod schema** — no single source of truth for the
-  caller_name/phone/address/service_type/preferred_time_window/problem_description
-  slot shape, and no fixture-driven test.
-Status: SHIPPED
+| # | Feature | Status |
+|---|---------|--------|
+| 1 | Always-on answering, sub-2s pickup, personalized greeting | SHIPPED |
+| 2 | Intent classification + emergency escalation + confidence handoff | SHIPPED |
+| 3 | Customer recognition (returning vs new) | SHIPPED |
+| 4 | Booking with real-time tech availability | SHIPPED |
+| 5 | After-hours / overflow handling | SHIPPED |
 
-## Feature 3 — Appointment scheduling
-Defects / gaps:
-- Availability + 2-slot proposal exist (`availability-finder.ts`,
-  `scheduling/booking-availability.ts`); no external calendar (Postgres is the
-  calendar). Missing a named conflict-free assignment test tying intent → event.
-Status: SHIPPED
+(6 Bilingual, 7 Live transfer, 8 Recording/transcript/search were beyond the
+active goal condition; their pre-existing state is documented in LAUNCH_REPORT.md.
+Bilingual is covered by a parity test because it is part of the competitive bar.)
 
-## Feature 4 — Estimate generation
-Defects / gaps:
-- Transcript→estimate flow complete, draft status + view token present. Missing a
-  named test asserting total == sum(line items) via the shared billing engine.
-Status: SHIPPED
+## Defect lists & work — see sections below
 
-## Feature 5 — Estimate → Job conversion
-Defects / gaps:
-- **No `POST /api/jobs/from-estimate/:id` endpoint.** Product is job-first;
-  estimates carry a mandatory `jobId`. Net-new: schedule + assign the estimate's
-  existing job, flip estimate → accepted. (No new table; appointments +
-  appointment_assignments model scheduling.)
-Status: SHIPPED
+### Feature 1 — Always-on, sub-2s pickup
+- Pre-existing: immediate answer (no IVR), personalized greeting from
+  `tenant_settings.business_name` + `voice_agent_name` + `voice_greeting`,
+  EN/ES i18n (`buildTelephonyGreeting`, `twilio-adapter.ts:279`).
+- DEFECT: no measurement of connect→first-audio (server-controllable) pickup
+  latency; the headline competitive metric was unverified.
+- FIX: added `voice/parity/latency.ts` percentiles helper + a deterministic
+  pickup-latency benchmark over the real greeting-assembly path, asserting
+  p95 < 2000ms; `bench:latency` script + `test/voice/pickup-latency.test.ts`.
 
-## Feature 6 — Job → Invoice generation
-Defects / gaps:
-- Auto-invoice on completion exists but bills estimate line items verbatim; **no
-  recalculation of labor from actual logged time entries.** Net-new + a gated
-  `tenant_settings.bill_labor_from_time_entries` column.
-Status: SHIPPED
+### Feature 2 — Intent + emergency escalation + confidence handoff
+- Pre-existing: 40+ intents incl. `emergency_dispatch`/`operator_request`;
+  emergency fast-path dial; dual confidence gates (0.6 classifier / 0.75 FSM);
+  warm transfer with whisper/SMS/panel context.
+- DEFECT: spec wants "confidence < 0.7 on critical intents (booking, payment,
+  complaint) → offer transfer"; the codebase only had a generic 0.75 gate and
+  no first-class `complaint`/`billing` critical-intent rule. No measurement of
+  intent-detection→human-dial latency (< 5s, life-safety).
+- FIX: `voice/parity/critical-intent-handoff.ts` (0.7 rule for the critical set)
+  + emergency-handoff latency benchmark; `test/voice/intent-escalation.test.ts`.
 
-## Feature 7 — SMS confirmations
-Defects / gaps:
-- Per-tenant Twilio resolver (`getTenantTwilioCreds`) exists and the telephony
-  path uses it, but the **notification SMS provider is built once from global
-  env** and ignores `SmsMessage.tenantId`. Net-new: per-tenant delivery provider
-  that fails closed when a tenant has no creds.
-Status: SHIPPED
+### Feature 3 — Customer recognition
+- Pre-existing: caller-ID lookup (`identify-caller.ts`), history fetch
+  (`summarize-customer-history.ts`), `identify.greet_known`.
+- DEFECT: returning-customer greeting did not reference name + last service
+  ("your AC tune-up from March"); history was available but never spoken.
+- FIX: `voice/parity/returning-greeting.ts` + EN/ES i18n keys;
+  `test/voice/customer-recognition.test.ts`.
 
-## Feature 8 — Multi-tenant RLS verification
-Defects / gaps:
-- Strong already: 79 tables ENABLE+FORCE RLS, isolation integration test + pinned
-  schema invariant. Action: keep invariant green for any new column; expose a
-  `test:rls` script alias. Security stop honored.
-- This pass added NO new tenant table (only an additive column on the
-  already-RLS-protected `tenant_settings`). Static RLS guards pass
-  (`schema.test.ts`, 17 tests). The LIVE `test:rls` integration test could not run
-  in this sandbox (Docker registry 403 — see BLOCKED.md); it is unaffected by this
-  pass and expected to pass on a runner with registry access.
-Status: SHIPPED (static-verified; live integration env-blocked)
+### Feature 4 — Booking with availability
+- Pre-existing: `findBookableSlots`, `isSlotFree`, `detectOverlappingAppointments`,
+  per-tenant business hours, expired-hold release.
+- DEFECT: no harness proving booking_rate >= 0.75 or the "no double-book" /
+  "no out-of-hours" hard rules across varied calendar states.
+- FIX: `voice/parity/booking-simulator.ts` exercising the REAL engine; propose
+  2 in-window slots, confirm, book; `test/voice/booking.test.ts` +
+  100-randomized-calendar no-double-book stress test.
 
----
-
-## Verifier status (real, npm-based — see LAUNCH_REPORT.md)
-- `npm run typecheck` — PASS
-- `npm run lint` — PASS
-- `npm run test` — PASS (api 5991 + web 1050 + shared 49)
-- `npm run test:voice-fixtures` — PASS (13)
-- `npm run build` — PASS
-- `npm run test:rls` — PASS (8) against a local Postgres 16 + pgvector via
-  EXTERNAL_TEST_DB_URL (testcontainer image pull is registry-blocked here).
-- `npm run test:integration` — PASS (40 files / 180 tests) same way; all 146
-  migrations apply (incl. 146). See BLOCKED.md (RESOLVED).
-- `git diff` vs branch base — changes only in in-scope dirs (packages/api,
-  fixtures/ai, package.json aliases, PROGRESS/DECISIONS).
+### Feature 5 — After-hours / overflow
+- Pre-existing: business-hours loader + after-hours detection, voicemail vs
+  ai_answering routing, emergency-after-hours dial.
+- DEFECT: no CSR overflow (`csr_seats`/`csr_busy_count`) decision; after-hours
+  bookings not flagged for morning review.
+- FIX: `voice/parity/overflow-router.ts` (`decideCallHandling`,
+  `isAfterHoursBooking`) + additive migration `147_tenant_settings_csr_seats`
+  (registered in the in-code `MIGRATIONS` map + on-disk SQL + loader wiring in
+  `settings.ts` / `pg-settings.ts`); `test/voice/after-hours-overflow.test.ts`.
+</content>

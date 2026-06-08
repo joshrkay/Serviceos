@@ -43,7 +43,12 @@
     "qa:run": "node qa-runner/src/orchestrator.mjs run",
     "qa:report": "node qa-runner/src/orchestrator.mjs summary",
     "qa:run:now": "npm run qa:doctor && npm run qa:smoke-tools && npm run qa:run && npm run qa:report",
-    "smoke": "bash scripts/smoke.sh"
+    "smoke": "bash scripts/smoke.sh",
+    "bench:latency": "npm run bench:latency --workspace=packages/api",
+    "test:voice-fixtures": "npm run test:voice-fixtures --workspace=packages/api",
+    "test:booking-rate": "npm run test:booking-rate --workspace=packages/api",
+    "test:no-double-book": "npm run test:no-double-book --workspace=packages/api",
+    "test:rls": "npm run test:rls --workspace=packages/api"
   },
   "devDependencies": {
     "@clerk/testing": "^2.0.27",
