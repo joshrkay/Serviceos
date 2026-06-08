@@ -107,6 +107,18 @@ export class PgTimeEntryRepository extends PgBaseRepository implements TimeEntry
     });
   }
 
+  async findByJob(tenantId: string, jobId: string): Promise<TimeEntry[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM time_entries
+         WHERE tenant_id = $1 AND job_id = $2
+         ORDER BY clocked_in_at ASC`,
+        [tenantId, jobId]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
   async findByTenant(
     tenantId: string,
     options?: TimeEntryListOptions

@@ -2375,6 +2375,7 @@ export function createApp(): express.Express {
     proposalRepo,
     settingsRepo,
     auditRepo,
+    timeEntryRepo,
     scheduleRepo: invoiceScheduleRepo,
   }));
   app.use(
