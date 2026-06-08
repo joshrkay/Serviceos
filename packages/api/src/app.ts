@@ -250,6 +250,7 @@ import {
   InMemoryDeliveryProvider,
 } from './notifications/delivery-provider';
 import { TwilioDeliveryProvider } from './notifications/twilio-delivery-provider';
+import { PerTenantTwilioDeliveryProvider } from './notifications/per-tenant-twilio-delivery-provider';
 import { SendService } from './notifications/send-service';
 import {
   InMemoryDispatchRepository,
@@ -710,6 +711,9 @@ export function createApp(): express.Express {
   const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
   const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository();
   const assignmentRepo     = pool ? new PgAssignmentRepository(pool)     : new InMemoryAssignmentRepository();
+  // Declared here (ahead of its first router use) so the jobs router's
+  // from-estimate scheduling deps can reference it.
+  const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
   // Working hours are now Pg-backed in production (migration 137 added
   // technician_working_hours), so the dispatch feasibility composer and the
   // inbound-AI availability search enforce real working-hours rows instead of
@@ -919,28 +923,42 @@ export function createApp(): express.Express {
   // boots in dev without delivery credentials. Send routes return
   // 503 when sendService is undefined.
   const dispatchRepo = pool ? new PgDispatchRepository(pool) : new InMemoryDispatchRepository();
-  const messageDelivery: MessageDeliveryProvider | null =
+  let messageDelivery: MessageDeliveryProvider | null;
+  if (
     process.env.TWILIO_ACCOUNT_SID &&
     process.env.TWILIO_AUTH_TOKEN &&
     process.env.TWILIO_FROM_NUMBER &&
     process.env.SENDGRID_API_KEY &&
     process.env.SENDGRID_FROM_EMAIL
-      ? new TwilioDeliveryProvider({
-          sms: {
-            accountSid: process.env.TWILIO_ACCOUNT_SID,
-            authToken: process.env.TWILIO_AUTH_TOKEN,
-            fromNumber: process.env.TWILIO_FROM_NUMBER,
-          },
-          email: {
-            apiKey: process.env.SENDGRID_API_KEY,
-            fromEmail: process.env.SENDGRID_FROM_EMAIL,
-            fromName: process.env.SENDGRID_FROM_NAME,
-            replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
-          },
-        })
-      : config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging'
-        ? null
-        : new InMemoryDeliveryProvider();
+  ) {
+    // The global Twilio/SendGrid provider handles email and any send that
+    // carries no tenantId; the global Twilio SMS creds also serve as the
+    // dev/test fallback inside getTenantTwilioCreds.
+    const baseDelivery = new TwilioDeliveryProvider({
+      sms: {
+        accountSid: process.env.TWILIO_ACCOUNT_SID,
+        authToken: process.env.TWILIO_AUTH_TOKEN,
+        fromNumber: process.env.TWILIO_FROM_NUMBER,
+      },
+      email: {
+        apiKey: process.env.SENDGRID_API_KEY,
+        fromEmail: process.env.SENDGRID_FROM_EMAIL,
+        fromName: process.env.SENDGRID_FROM_NAME,
+        replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
+      },
+    });
+    // Feature 7 — when a Postgres pool is available, route per-tenant SMS
+    // through each tenant's own Twilio subaccount (failing closed when a
+    // tenant has no credentials). Without a pool we cannot resolve per-tenant
+    // creds, so keep the global provider.
+    messageDelivery = pool
+      ? new PerTenantTwilioDeliveryProvider({ pool, base: baseDelivery })
+      : baseDelivery;
+  } else if (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging') {
+    messageDelivery = null;
+  } else {
+    messageDelivery = new InMemoryDeliveryProvider();
+  }
   const publicBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
   const sendService = messageDelivery
     ? new SendService({
@@ -2396,7 +2414,16 @@ export function createApp(): express.Express {
     proposalRepo,
     settingsRepo,
     auditRepo,
+    timeEntryRepo,
     scheduleRepo: invoiceScheduleRepo,
+  }, {
+    estimateRepo,
+    jobRepo,
+    appointmentRepo,
+    assignmentRepo,
+    userRepo,
+    invoiceRepo,
+    auditRepo,
   }));
   app.use(
     '/api/jobs',
@@ -2476,7 +2503,6 @@ export function createApp(): express.Express {
   // best-effort: missing CLERK_SECRET_KEY just persists the local
   // intent; the operator can still re-send via dashboard and the
   // webhook still attaches the invitee on accept (lookup is by email).
-  const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
   app.use(
     '/api/users',
     createUsersRouter(

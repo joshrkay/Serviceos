@@ -25,6 +25,11 @@ interface IntegrationRow {
 const cache = new Map<string, { creds: TenantTwilioCreds; expiresAt: number }>();
 const CACHE_TTL_MS = 60_000;
 
+// Raw NODE_ENV values that count as real deployments (where missing per-tenant
+// creds must fail closed). Covers both the normalized config values ('prod',
+// 'staging') and the canonical 'production'.
+const DEPLOYMENT_ENVS = new Set(['production', 'prod', 'staging']);
+
 export function flushCredentialCache(tenantId: string): void {
   for (const key of cache.keys()) {
     if (key.startsWith(`${tenantId}:`)) cache.delete(key);
@@ -35,12 +40,32 @@ export async function getTenantTwilioCreds(
   tenantId: string,
   pool: Pool
 ): Promise<TenantTwilioCreds> {
-  const { rows } = await pool.query<IntegrationRow>(
-    `SELECT subaccount_sid, auth_token_primary_enc, credential_version, provider_data, status
-     FROM tenant_integrations
-     WHERE tenant_id = $1 AND provider = 'twilio'`,
-    [tenantId]
-  );
+  // tenant_integrations is FORCE RLS (migration 074): a SELECT only returns rows
+  // when app.current_tenant_id (or app.system_lookup) is set on the connection.
+  // This resolver runs off a bare pooled connection (the notification SMS path
+  // does NOT reuse the request-scoped withTenantTransaction client), so without
+  // scoping the read even a fully-provisioned tenant resolves zero rows and
+  // fails closed. Scope a short transaction to THIS tenant before reading its
+  // own integration row.
+  const client = await pool.connect();
+  let rows: IntegrationRow[];
+  try {
+    await client.query('BEGIN');
+    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    const result = await client.query<IntegrationRow>(
+      `SELECT subaccount_sid, auth_token_primary_enc, credential_version, provider_data, status
+       FROM tenant_integrations
+       WHERE tenant_id = $1 AND provider = 'twilio'`,
+      [tenantId]
+    );
+    rows = result.rows;
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
 
   // Status values per migration 071_widen_tenant_integrations_status:
   // 'full_readiness' = fully provisioned and ready to serve traffic.
@@ -50,7 +75,11 @@ export async function getTenantTwilioCreds(
   const READY_STATUSES = new Set(['full_readiness', 'partial_readiness']);
 
   if (rows.length === 0 || !READY_STATUSES.has(rows[0].status)) {
-    if (process.env.NODE_ENV === 'production') {
+    // Fail closed in every real deployment mode (prod AND staging) — never fall
+    // back to the global account for a tenant that lacks a provisioned
+    // integration, which would mis-attribute / cross-bill its SMS. Only explicit
+    // dev/test environments fall back to global env creds for local convenience.
+    if (DEPLOYMENT_ENVS.has(process.env.NODE_ENV ?? '')) {
       throw new Error(`No active Twilio integration for tenant ${tenantId}`);
     }
     // Dev/test fallback to global env vars
