@@ -20,7 +20,11 @@ export type FunnelEvent =
   | 'signup_completed'
   | 'trial_started'
   | 'trial_to_paid'
-  | 'subscription_canceled';
+  | 'subscription_canceled'
+  // Activation milestone — the first real inbound call a tenant's voice
+  // agent handles after go-live. Emitted server-side from voice/activation.ts
+  // (idempotent once per tenant). See FUNNEL.md for the activation rule.
+  | 'first_real_call_received';
 
 interface FunnelEventPayload {
   /** Stable per-user id — the Clerk userId, matching the browser SDK. */

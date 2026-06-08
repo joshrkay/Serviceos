@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { Link } from 'react-router';
 import {
   Zap,
@@ -10,13 +11,19 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { Button } from '../ui/button';
-import { track } from '../../lib/analytics';
+import { track, trackFunnel } from '../../lib/analytics';
 
 const onCtaClick = (location: string) => () =>
   track('landing_signup_clicked', { location });
 const onPricingCtaClick = () => track('pricing_cta_clicked', { location: 'pricing_card' });
 
 export function LandingPage() {
+  // Top of the funnel. Fires once on mount. Pre-auth, so tenant_id/user_id
+  // are null until identify() binds them after signup.
+  useEffect(() => {
+    trackFunnel('view_landing');
+  }, []);
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <Header />
