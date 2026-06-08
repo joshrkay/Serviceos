@@ -1,0 +1,150 @@
+{
+  "description": "Voice-parity — 10 Spanish (es) inbound-CSR fixtures spanning the booking/capture intents an SMB HVAC/plumbing CSR handles. Each fixture is a single-turn call: the caller speaks Spanish, the (scripted) classifier returns the canned intent + entities, and the agent should draft a proposal (a 'booking/capture') and respond in Spanish. Consumed by packages/api/test/voice/spanish-booking-rate.test.ts.",
+  "fixtures": [
+    {
+      "id": "es-create-appointment-water-heater",
+      "intent": "create_appointment",
+      "expectsBooking": true,
+      "callerUtterance": "Hola, buenos días. Necesito agendar una cita porque mi calentador de agua hace un ruido raro y no calienta bien.",
+      "classifier": {
+        "intentType": "create_appointment",
+        "confidence": 0.93,
+        "extractedEntities": {
+          "customerName": "Roberto Martínez",
+          "dateTimeDescription": "mañana por la tarde",
+          "service": "reparación de calentador de agua"
+        }
+      }
+    },
+    {
+      "id": "es-create-appointment-ac-not-cooling",
+      "intent": "create_appointment",
+      "expectsBooking": true,
+      "callerUtterance": "Mi aire acondicionado no enfría desde ayer y hace mucho calor. ¿Pueden mandar a alguien a revisarlo?",
+      "classifier": {
+        "intentType": "create_appointment",
+        "confidence": 0.91,
+        "extractedEntities": {
+          "customerName": "Lucía Hernández",
+          "dateTimeDescription": "lo antes posible",
+          "service": "revisión de aire acondicionado"
+        }
+      }
+    },
+    {
+      "id": "es-create-appointment-no-heat",
+      "intent": "create_appointment",
+      "expectsBooking": true,
+      "callerUtterance": "Quisiera programar una visita. Mi calefacción dejó de funcionar y la casa está muy fría.",
+      "classifier": {
+        "intentType": "create_appointment",
+        "confidence": 0.9,
+        "extractedEntities": {
+          "customerName": "Carlos Gómez",
+          "dateTimeDescription": "esta tarde",
+          "service": "reparación de calefacción"
+        }
+      }
+    },
+    {
+      "id": "es-create-appointment-drain-clog",
+      "intent": "create_appointment",
+      "expectsBooking": true,
+      "callerUtterance": "Tengo el desagüe del fregadero tapado y se está desbordando. Necesito que venga un plomero.",
+      "classifier": {
+        "intentType": "create_appointment",
+        "confidence": 0.92,
+        "extractedEntities": {
+          "customerName": "Ana Ruiz",
+          "dateTimeDescription": "hoy si es posible",
+          "service": "destape de desagüe"
+        }
+      }
+    },
+    {
+      "id": "es-reschedule-appointment",
+      "intent": "reschedule_appointment",
+      "expectsBooking": true,
+      "callerUtterance": "Necesito cambiar mi cita del jueves para el viernes en la mañana, por favor.",
+      "classifier": {
+        "intentType": "reschedule_appointment",
+        "confidence": 0.9,
+        "extractedEntities": {
+          "appointmentReference": "APT-2031",
+          "newDateTimeDescription": "viernes en la mañana",
+          "customerName": "Pedro Sánchez"
+        }
+      }
+    },
+    {
+      "id": "es-cancel-appointment",
+      "intent": "cancel_appointment",
+      "expectsBooking": true,
+      "callerUtterance": "Hola, llamo para cancelar la cita que tengo programada para mañana.",
+      "classifier": {
+        "intentType": "cancel_appointment",
+        "confidence": 0.9,
+        "extractedEntities": {
+          "appointmentReference": "APT-2044",
+          "customerName": "María López"
+        }
+      }
+    },
+    {
+      "id": "es-confirm-appointment",
+      "intent": "confirm_appointment",
+      "expectsBooking": true,
+      "callerUtterance": "Solo quería confirmar que el técnico sigue viniendo a mi casa el jueves por la tarde.",
+      "classifier": {
+        "intentType": "confirm_appointment",
+        "confidence": 0.89,
+        "extractedEntities": {
+          "appointmentReference": "APT-2050",
+          "customerName": "Jorge Ramírez"
+        }
+      }
+    },
+    {
+      "id": "es-create-customer-new-lead",
+      "intent": "create_customer",
+      "expectsBooking": true,
+      "callerUtterance": "Soy un cliente nuevo y me gustaría registrarme para programar un servicio de plomería.",
+      "classifier": {
+        "intentType": "create_customer",
+        "confidence": 0.9,
+        "extractedEntities": {
+          "displayName": "Sofía Torres",
+          "phone": "+15125550199"
+        }
+      }
+    },
+    {
+      "id": "es-draft-estimate-thermostat",
+      "intent": "draft_estimate",
+      "expectsBooking": true,
+      "callerUtterance": "Quisiera un presupuesto para la instalación de un termostato inteligente, por favor.",
+      "classifier": {
+        "intentType": "draft_estimate",
+        "confidence": 0.88,
+        "extractedEntities": {
+          "customerName": "Diego Flores",
+          "lineItemDescriptions": ["instalación de termostato inteligente"]
+        }
+      }
+    },
+    {
+      "id": "es-update-customer-address",
+      "intent": "update_customer",
+      "expectsBooking": true,
+      "callerUtterance": "Cambié de casa y necesito actualizar mi dirección en mi cuenta, por favor.",
+      "classifier": {
+        "intentType": "update_customer",
+        "confidence": 0.88,
+        "extractedEntities": {
+          "customerName": "Valeria Castro",
+          "address": "742 Calle Roble, Austin"
+        }
+      }
+    }
+  ]
+}

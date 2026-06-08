@@ -21,6 +21,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
 import { classifyIntent, isLookupIntent } from '../ai/orchestration/intent-classifier';
+import { isLanguageSupported } from '../ai/orchestration/language-detector';
 import {
   CreateCustomerVoiceTaskHandler,
   CREATE_CUSTOMER_CONFIRMATION_TTS,
@@ -564,14 +565,25 @@ export class TwilioGatherAdapter {
    */
   private async resolveTenantLanguage(
     tenantId: string,
-  ): Promise<{ language: Language; ttsVoice?: string }> {
+  ): Promise<{ language: Language; ttsVoice?: string; supportedLanguages?: Language[] }> {
     if (!this.deps.settingsRepo) return { language: 'en' };
     try {
       const settings = await this.deps.settingsRepo.findByTenant(tenantId);
-      const language: Language = settings?.defaultLanguage === 'es' ? 'es' : 'en';
+      const supportedLanguages = settings?.supportedLanguages;
+      // Voice-parity — only honor an 'es' default when the tenant opted into
+      // Spanish; otherwise fall back to English so an un-opted-in tenant never
+      // greets in a language it can't sustain.
+      const wantsEs =
+        settings?.defaultLanguage === 'es' &&
+        isLanguageSupported('es', supportedLanguages);
+      const language: Language = wantsEs ? 'es' : 'en';
       const ttsVoice =
         (language === 'es' ? settings?.ttsVoiceEs : settings?.ttsVoiceEn) ?? undefined;
-      return { language, ttsVoice };
+      return {
+        language,
+        ttsVoice,
+        ...(supportedLanguages ? { supportedLanguages } : {}),
+      };
     } catch {
       return { language: 'en' };
     }
@@ -662,9 +674,10 @@ export class TwilioGatherAdapter {
     const from = this.callerIdBySession.get(session.id) ?? '';
 
     // P11-002: resolve + pin the spoken language + TTS voice (tenant default).
-    const { language, ttsVoice } = await this.resolveTenantLanguage(opts.tenantId);
+    const { language, ttsVoice, supportedLanguages } = await this.resolveTenantLanguage(opts.tenantId);
     session.language = language;
     session.ttsVoice = ttsVoice;
+    if (supportedLanguages) session.supportedLanguages = supportedLanguages;
 
     // 1. Recording disclosure (text only — TTS synthesizes the audio).
     const disclosure = await discloseRecording({
@@ -928,9 +941,10 @@ export class TwilioGatherAdapter {
     // P11-002: resolve spoken language + TTS voice (tenant default) and pin
     // them on the session so the greeting, disclosure, and every TwiML build
     // speak it in the right language/voice.
-    const { language, ttsVoice } = await this.resolveTenantLanguage(opts.tenantId);
+    const { language, ttsVoice, supportedLanguages } = await this.resolveTenantLanguage(opts.tenantId);
     session.language = language;
     session.ttsVoice = ttsVoice;
+    if (supportedLanguages) session.supportedLanguages = supportedLanguages;
 
     // 1. Disclose recording (text generation; no TTS — Twilio <Say> handles audio).
     const disclosure = await discloseRecording({

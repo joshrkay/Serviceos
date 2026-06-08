@@ -254,6 +254,19 @@ export interface TenantSettings {
   ttsVoiceEs?: string | null;
   spanishDispatcherUserIds?: string[];
   /**
+   * Voice-parity — opt-in language stack for the voice agent (migration 147).
+   * Defaults to ['en']; a tenant opts into Spanish with ['en', 'es']. The
+   * language detector only switches a call to 'es' when 'es' is present here,
+   * so legacy rows (or `?? ['en']` reads) stay English-only.
+   */
+  supportedLanguages?: Language[];
+  /**
+   * Voice-parity — E.164 number the inbound-CSR warm transfer dials
+   * (migration 147). When set it replaces the on-call rotation for the
+   * standard human handoff; null/undefined falls back to the rotation path.
+   */
+  transferNumber?: string | null;
+  /**
    * Per-tenant AI model override. Seeded on tenant creation from
    * `AI_DEFAULT_MODEL` so the onboarding "AI check" step finds an
    * `aiConfigPresent` row immediately and the verify_ai worker has a
@@ -360,6 +373,10 @@ export interface UpdateSettingsInput {
   ttsVoiceEn?: string | null;
   ttsVoiceEs?: string | null;
   spanishDispatcherUserIds?: string[];
+  /** Voice-parity — opt-in language stack; always includes 'en'. */
+  supportedLanguages?: Language[];
+  /** Voice-parity — E.164 warm-transfer line; null clears the field. */
+  transferNumber?: string | null;
   /** Per-tenant AI model override; null clears the field. */
   aiModel?: string | null;
 }
@@ -561,6 +578,7 @@ export async function createSettings(
     ),
     defaultLanguage: 'en',
     autoDetectLanguage: true,
+    supportedLanguages: ['en'],
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -658,6 +676,7 @@ export async function ensureTenantSettings(
     defaultPaymentTermDays: 30,
     defaultLanguage: 'en',
     autoDetectLanguage: true,
+    supportedLanguages: ['en'],
     // Onboarding-blocker fix: seed the platform default AI model so the
     // onboarding "AI check" (Step 6) does not fail with `ai_config_missing`
     // for every new tenant. The webhooks/routes.ts billing handler also
