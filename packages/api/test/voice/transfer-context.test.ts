@@ -21,6 +21,8 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { escalateToHuman } from '../../src/ai/skills/escalate-to-human';
 import { buildEscalationSummary } from '../../src/ai/agents/customer-calling/escalation-summary-builder';
 import { InMemoryCallMeBackRepository } from '../../src/voice/call-me-back/call-me-back';
+import { createVoiceTurnProcessor } from '../../src/ai/voice-turn/create-voice-turn-processor';
+import type { SideEffect } from '../../src/ai/agents/customer-calling/types';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
 
@@ -83,6 +85,61 @@ describe('Feature 7 — escalateToHuman dials tenant.transfer_number', () => {
     expect(result.transfer?.summary?.sms).toContain('María López');
     expect(result.transfer?.summary?.whisper).toContain('book the visit');
     expect(result.transfer?.escalationId).toBeDefined();
+  });
+});
+
+// ── Part 1b — context SMS goes to transfer_number BEFORE the bridge ──────────
+describe('Feature 7 — context SMS to transfer_number before the bridge', () => {
+  it('SMSes the receiving CSR (transfer_number) and queues the Dial TwiML', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const auditRepo = new InMemoryAuditRepository();
+    const onCallRepo = new InMemoryOnCallRepository();
+    const callControl = new DefaultTwilioCallControl();
+    const pendingTransferTwiml = new Map<string, string>();
+    const sent: { to: string; body: string }[] = [];
+    const deliveryProvider = {
+      sendSms: vi.fn(async (a: { to: string; body: string }) => {
+        sent.push(a);
+      }),
+    };
+    const settingsRepo = {
+      findByTenant: vi.fn(
+        async () =>
+          ({ transferNumber: TRANSFER_NUMBER, businessName: 'Acme Plumbing' } as unknown as TenantSettings),
+      ),
+    } as unknown as SettingsRepository;
+
+    const processor = createVoiceTurnProcessor({
+      store,
+      gateway: makeGateway('{}'),
+      businessName: 'Acme Plumbing',
+      systemActorId: 'test-actor',
+      auditRepo,
+      onCallRepo,
+      callControl,
+      settingsRepo,
+      deliveryProvider,
+      pendingTransferTwiml,
+      publicBaseUrl: PUBLIC_BASE_URL,
+    });
+
+    const session = store.create(TENANT_ID, 'telephony', { callSid: 'CA-notify' });
+    session.transcript.push('caller: necesito agendar una cita para mi aire acondicionado');
+
+    const notify: SideEffect = {
+      type: 'notify_oncall',
+      payload: { reason: 'operator_request', callerPhone: '+15125550142' },
+    };
+    await processor.executeSideEffects(session, [notify], TENANT_ID);
+
+    // Context SMS went to the single transfer line (the receiving CSR).
+    expect(deliveryProvider.sendSms).toHaveBeenCalledTimes(1);
+    expect(sent[0].to).toBe(TRANSFER_NUMBER);
+    expect(sent[0].body).toContain('Acme Plumbing');
+    // The bridge TwiML is queued and dials the transfer number.
+    const twiml = pendingTransferTwiml.get(session.id);
+    expect(twiml).toBeDefined();
+    expect(twiml).toContain(TRANSFER_NUMBER);
   });
 });
 
