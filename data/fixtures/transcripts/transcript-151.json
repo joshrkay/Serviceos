@@ -1,0 +1,15 @@
+{
+  "id": "transcript-151",
+  "type": "inbound_call",
+  "duration_seconds": 80,
+  "service_type": "hvac",
+  "transcript": "Customer: This is an emergency, my condenser is making a loud noise and it's getting bad! This is James Miller at 640 Willow Way. Dispatcher: Okay James, stay calm. I'm getting a technician dispatched to 640 Willow Way right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "expected_entities": {
+    "customer_name": "James Miller",
+    "issue": "emergency: condenser is making a loud noise",
+    "equipment": "condenser",
+    "address": "640 Willow Way",
+    "appointment_window": "immediate dispatch"
+  },
+  "source": "synthetic"
+}

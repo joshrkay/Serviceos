@@ -1,0 +1,15 @@
+{
+  "id": "transcript-096",
+  "type": "inbound_call",
+  "duration_seconds": 90,
+  "service_type": "electrical",
+  "transcript": "Customer: Hi, this is Linda Park. I need to reschedule my appointment for the light fixture. Dispatcher: No problem Linda. When works better for you? Customer: Could we do today if possible? Dispatcher: That works. I've moved your appointment to today if possible. Customer: Perfect, thanks.",
+  "expected_entities": {
+    "customer_name": "Linda Park",
+    "issue": "reschedule light fixture appointment",
+    "equipment": "light fixture",
+    "address": "",
+    "appointment_window": "today if possible"
+  },
+  "source": "synthetic"
+}

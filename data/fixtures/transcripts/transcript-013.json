@@ -1,0 +1,15 @@
+{
+  "id": "transcript-013",
+  "type": "inbound_call",
+  "duration_seconds": 95,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is Sarah Johnson. I wanted to check on the status of my condenser job and what I owe. Dispatcher: Sure Sarah, let me pull up your account. Customer: Thank you. Dispatcher: Your condenser job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
+  "expected_entities": {
+    "customer_name": "Sarah Johnson",
+    "issue": "status check on condenser job",
+    "equipment": "condenser",
+    "address": "",
+    "appointment_window": ""
+  },
+  "source": "synthetic"
+}

@@ -1,0 +1,15 @@
+{
+  "id": "transcript-052",
+  "type": "inbound_call",
+  "duration_seconds": 150,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is Robert Klein. I'm calling because my AC unit is making a loud noise. Dispatcher: Hi Robert, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Carrier, an older one, 15 years. Dispatcher: Okay, and what's the service address? Customer: 88 Maple Ave. Dispatcher: Got it. We can send a technician out next Monday at 9. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Robert Klein",
+    "issue": "AC unit is making a loud noise",
+    "equipment": "Carrier AC unit, an older one, 15 years",
+    "address": "88 Maple Ave",
+    "appointment_window": "next Monday at 9"
+  },
+  "source": "synthetic"
+}

@@ -1,0 +1,15 @@
+{
+  "id": "transcript-221",
+  "type": "inbound_call",
+  "duration_seconds": 165,
+  "service_type": "plumbing",
+  "transcript": "Customer: Hi, this is Tom Bradley. I'm calling because my toilet is making a gurgling sound. Dispatcher: Hi Tom, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Kohler, pretty new, 2 years. Dispatcher: Okay, and what's the service address? Customer: 9 Lakeview Drive. Dispatcher: Got it. We can send a technician out Thursday morning. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Tom Bradley",
+    "issue": "toilet is making a gurgling sound",
+    "equipment": "Kohler toilet, pretty new, 2 years",
+    "address": "9 Lakeview Drive",
+    "appointment_window": "Thursday morning"
+  },
+  "source": "synthetic"
+}

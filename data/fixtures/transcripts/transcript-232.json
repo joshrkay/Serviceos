@@ -1,0 +1,15 @@
+{
+  "id": "transcript-232",
+  "type": "inbound_call",
+  "duration_seconds": 210,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is Robert Klein. I'm calling because my condenser won't turn on. Dispatcher: Hi Robert, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Carrier, an older one, 15 years. Dispatcher: Okay, and what's the service address? Customer: 88 Maple Ave. Dispatcher: Got it. We can send a technician out first thing tomorrow. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Robert Klein",
+    "issue": "condenser won't turn on",
+    "equipment": "Carrier condenser, an older one, 15 years",
+    "address": "88 Maple Ave",
+    "appointment_window": "first thing tomorrow"
+  },
+  "source": "synthetic"
+}

@@ -1,0 +1,15 @@
+{
+  "id": "transcript-252",
+  "type": "inbound_call",
+  "duration_seconds": 90,
+  "service_type": "electrical",
+  "transcript": "Customer: Hi, this is Patricia Hall. I need to reschedule my appointment for the ceiling fan. Dispatcher: No problem Patricia. When works better for you? Customer: Could we do this afternoon between 2 and 4? Dispatcher: That works. I've moved your appointment to this afternoon between 2 and 4. Customer: Perfect, thanks.",
+  "expected_entities": {
+    "customer_name": "Patricia Hall",
+    "issue": "reschedule ceiling fan appointment",
+    "equipment": "ceiling fan",
+    "address": "",
+    "appointment_window": "this afternoon between 2 and 4"
+  },
+  "source": "synthetic"
+}

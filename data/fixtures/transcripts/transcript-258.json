@@ -1,0 +1,15 @@
+{
+  "id": "transcript-258",
+  "type": "inbound_call",
+  "duration_seconds": 240,
+  "service_type": "electrical",
+  "transcript": "Customer: Hi, this is Helen Park. I'm calling because my GFCI outlet is hot to the touch. Dispatcher: Hi Helen, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Leviton, about 8 years old. Dispatcher: Okay, and what's the service address? Customer: 314 Birch Lane. Dispatcher: Got it. We can send a technician out today if possible. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Helen Park",
+    "issue": "GFCI outlet is hot to the touch",
+    "equipment": "Leviton GFCI outlet, about 8 years old",
+    "address": "314 Birch Lane",
+    "appointment_window": "today if possible"
+  },
+  "source": "synthetic"
+}

@@ -1,0 +1,15 @@
+{
+  "id": "transcript-114",
+  "type": "inbound_call",
+  "duration_seconds": 240,
+  "service_type": "electrical",
+  "transcript": "Customer: Hi, this is David Carter. I'm calling because my ceiling fan has no power. Dispatcher: Hi David, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Square D, about 5 years old. Dispatcher: Okay, and what's the service address? Customer: 314 Birch Lane. Dispatcher: Got it. We can send a technician out today if possible. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "David Carter",
+    "issue": "ceiling fan has no power",
+    "equipment": "Square D ceiling fan, about 5 years old",
+    "address": "314 Birch Lane",
+    "appointment_window": "today if possible"
+  },
+  "source": "synthetic"
+}

@@ -1,0 +1,15 @@
+{
+  "id": "transcript-129",
+  "type": "inbound_call",
+  "duration_seconds": 60,
+  "service_type": "electrical",
+  "transcript": "Customer: This is an emergency, my electrical panel is hot to the touch and it's getting bad! This is Gary Olsen at 22 Oak Court. Dispatcher: Okay Gary, stay calm. I'm getting a technician dispatched to 22 Oak Court right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "expected_entities": {
+    "customer_name": "Gary Olsen",
+    "issue": "emergency: electrical panel is hot to the touch",
+    "equipment": "electrical panel",
+    "address": "22 Oak Court",
+    "appointment_window": "immediate dispatch"
+  },
+  "source": "synthetic"
+}

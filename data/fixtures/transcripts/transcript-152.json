@@ -1,0 +1,15 @@
+{
+  "id": "transcript-152",
+  "type": "inbound_call",
+  "duration_seconds": 90,
+  "service_type": "plumbing",
+  "transcript": "Customer: This is an emergency, my shower valve is backing up and it's getting bad! This is Maria Lopez at 88 Maple Ave. Dispatcher: Okay Maria, stay calm. I'm getting a technician dispatched to 88 Maple Ave right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "expected_entities": {
+    "customer_name": "Maria Lopez",
+    "issue": "emergency: shower valve is backing up",
+    "equipment": "shower valve",
+    "address": "88 Maple Ave",
+    "appointment_window": "immediate dispatch"
+  },
+  "source": "synthetic"
+}

@@ -1,0 +1,15 @@
+{
+  "id": "transcript-245",
+  "type": "inbound_call",
+  "duration_seconds": 165,
+  "service_type": "plumbing",
+  "transcript": "Customer: Hi, this is James Miller. I'm calling because my toilet is making a gurgling sound. Dispatcher: Hi James, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Rinnai, maybe 10 years old. Dispatcher: Okay, and what's the service address? Customer: 9 Lakeview Drive. Dispatcher: Got it. We can send a technician out Thursday morning. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "James Miller",
+    "issue": "toilet is making a gurgling sound",
+    "equipment": "Rinnai toilet, maybe 10 years old",
+    "address": "9 Lakeview Drive",
+    "appointment_window": "Thursday morning"
+  },
+  "source": "synthetic"
+}

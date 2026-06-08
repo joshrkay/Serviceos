@@ -1,0 +1,15 @@
+{
+  "id": "transcript-183",
+  "type": "inbound_call",
+  "duration_seconds": 95,
+  "service_type": "electrical",
+  "transcript": "Customer: Hi, this is David Carter. I wanted to check on the status of my electrical panel job and what I owe. Dispatcher: Sure David, let me pull up your account. Customer: Thank you. Dispatcher: Your electrical panel job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
+  "expected_entities": {
+    "customer_name": "David Carter",
+    "issue": "status check on electrical panel job",
+    "equipment": "electrical panel",
+    "address": "",
+    "appointment_window": ""
+  },
+  "source": "synthetic"
+}

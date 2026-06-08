@@ -1,0 +1,15 @@
+{
+  "id": "transcript-269",
+  "type": "inbound_call",
+  "duration_seconds": 165,
+  "service_type": "plumbing",
+  "transcript": "Customer: Hi, this is Patricia Hall. I'm calling because my toilet is making a gurgling sound. Dispatcher: Hi Patricia, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a AO Smith, about 5 years old. Dispatcher: Okay, and what's the service address? Customer: 9 Lakeview Drive. Dispatcher: Got it. We can send a technician out Thursday morning. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Patricia Hall",
+    "issue": "toilet is making a gurgling sound",
+    "equipment": "AO Smith toilet, about 5 years old",
+    "address": "9 Lakeview Drive",
+    "appointment_window": "Thursday morning"
+  },
+  "source": "synthetic"
+}

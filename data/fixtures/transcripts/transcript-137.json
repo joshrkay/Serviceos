@@ -1,0 +1,15 @@
+{
+  "id": "transcript-137",
+  "type": "inbound_call",
+  "duration_seconds": 225,
+  "service_type": "plumbing",
+  "transcript": "Customer: Hi, this is Mark Henderson. I'm calling because my shower valve keeps running. Dispatcher: Hi Mark, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Kohler, an older one, 15 years. Dispatcher: Okay, and what's the service address? Customer: 9 Lakeview Drive. Dispatcher: Got it. We can send a technician out Wednesday afternoon. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Mark Henderson",
+    "issue": "shower valve keeps running",
+    "equipment": "Kohler shower valve, an older one, 15 years",
+    "address": "9 Lakeview Drive",
+    "appointment_window": "Wednesday afternoon"
+  },
+  "source": "synthetic"
+}

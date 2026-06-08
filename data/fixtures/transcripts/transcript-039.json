@@ -1,0 +1,15 @@
+{
+  "id": "transcript-039",
+  "type": "inbound_call",
+  "duration_seconds": 55,
+  "service_type": "electrical",
+  "transcript": "Customer: Hi, this is Carlos Mendez. I wanted to check on the status of my light fixture job and what I owe. Dispatcher: Sure Carlos, let me pull up your account. Customer: Thank you. Dispatcher: Your light fixture job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
+  "expected_entities": {
+    "customer_name": "Carlos Mendez",
+    "issue": "status check on light fixture job",
+    "equipment": "light fixture",
+    "address": "",
+    "appointment_window": ""
+  },
+  "source": "synthetic"
+}

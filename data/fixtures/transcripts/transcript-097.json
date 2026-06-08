@@ -1,0 +1,15 @@
+{
+  "id": "transcript-097",
+  "type": "inbound_call",
+  "duration_seconds": 85,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is Gary Olsen. I wanted to check on the status of my AC unit job and what I owe. Dispatcher: Sure Gary, let me pull up your account. Customer: Thank you. Dispatcher: Your AC unit job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
+  "expected_entities": {
+    "customer_name": "Gary Olsen",
+    "issue": "status check on AC unit job",
+    "equipment": "AC unit",
+    "address": "",
+    "appointment_window": ""
+  },
+  "source": "synthetic"
+}

@@ -1,0 +1,15 @@
+{
+  "id": "transcript-228",
+  "type": "inbound_call",
+  "duration_seconds": 90,
+  "service_type": "electrical",
+  "transcript": "Customer: Hi, this is James Miller. I need to reschedule my appointment for the GFCI outlet. Dispatcher: No problem James. When works better for you? Customer: Could we do this afternoon between 2 and 4? Dispatcher: That works. I've moved your appointment to this afternoon between 2 and 4. Customer: Perfect, thanks.",
+  "expected_entities": {
+    "customer_name": "James Miller",
+    "issue": "reschedule GFCI outlet appointment",
+    "equipment": "GFCI outlet",
+    "address": "",
+    "appointment_window": "this afternoon between 2 and 4"
+  },
+  "source": "synthetic"
+}
