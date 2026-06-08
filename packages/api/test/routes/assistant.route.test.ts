@@ -102,7 +102,11 @@ describe('POST /api/assistant/chat — create_customer path', () => {
     const persisted = await proposalRepo.findByTenant(TEST_TENANT);
     expect(persisted).toHaveLength(1);
     expect(persisted[0].proposalType).toBe('create_customer');
-    expect(persisted[0].status).toBe('draft');
+    // QA-2026-06-05: complete assistant proposals are promoted to
+    // ready_for_review on persist — drafts are invisible to the inbox and
+    // refused by the approval guard (the old 'draft' expectation encoded the
+    // dead-end behavior the live matrix caught).
+    expect(persisted[0].status).toBe('ready_for_review');
     expect(persisted[0].id).toBe(proposal.id);
   });
 

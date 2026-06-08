@@ -445,8 +445,14 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS region TEXT,
       ADD COLUMN IF NOT EXISTS locale TEXT;
     ALTER TABLE tenant_settings DROP CONSTRAINT IF EXISTS tenant_settings_us_region_check;
+    -- QA-2026-06-04: NOT VALID — the runner re-executes every migration on
+    -- every boot (no ledger), so a validating ADD CONSTRAINT here re-checks
+    -- all rows each deploy; any tenant_settings row with a NULL region
+    -- (which the relaxed 088 constraint explicitly allows) bricked the next
+    -- deploy with 23514. NOT VALID keeps the strict intent for new writes in
+    -- the 070→088 window without re-validating existing data; 088 drops it.
     ALTER TABLE tenant_settings ADD CONSTRAINT tenant_settings_us_region_check
-      CHECK (country <> 'US' OR (region IS NOT NULL AND btrim(region) ~ '^[A-Z]{2}$'));
+      CHECK (country <> 'US' OR (region IS NOT NULL AND btrim(region) ~ '^[A-Z]{2}$')) NOT VALID;
 
     CREATE TABLE IF NOT EXISTS tenant_integrations (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -3726,7 +3732,6 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_proposals_source_recording
       ON proposals (tenant_id, (source_context->>'recordingId'));
   `,
-
   '143_tenant_settings_owner_phone': `
     -- P8-016 (forward-wiring) — the OWNER's personal cell phone used by
     -- vulnerability-aware emergency triage to patch a customer call
@@ -3766,6 +3771,25 @@ export const MIGRATIONS = {
     ALTER TABLE tenants
       ADD COLUMN IF NOT EXISTS pending_checkout_session_id TEXT;
   `,
+
+  '146_proposals_claimed_by_text': `
+    -- QA-2026-06-05: the execution worker claims proposals with a NAMED
+    -- worker id ('execution-worker'), but claimed_by was UUID — every
+    -- claimForExecution failed with 22P02 (invalid uuid) and the 1s sweep
+    -- retried the same approved proposal forever. Found live on Railway dev
+    -- (voice CUST-02: proposal auto-approved, never executed). Align the
+    -- column with executed_by/created_by, which are already TEXT.
+    -- Guarded so the every-boot migration runner doesn't rewrite the table
+    -- on each start.
+    DO $$
+    BEGIN
+      IF (SELECT data_type FROM information_schema.columns
+          WHERE table_name = 'proposals' AND column_name = 'claimed_by') = 'uuid' THEN
+        ALTER TABLE proposals ALTER COLUMN claimed_by TYPE TEXT USING claimed_by::text;
+      END IF;
+    END $$;
+  `,
+
 };
 
 function makePoliciesIdempotent(sql: string): string {
