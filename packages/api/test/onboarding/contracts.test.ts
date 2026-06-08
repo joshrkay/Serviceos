@@ -122,6 +122,8 @@ describe('OnboardingStatusResponseSchema', () => {
       currentStep: 'pack' as const,
       isComplete: false,
       voiceAgentLive: false,
+      tenantId: '00000000-0000-0000-0000-000000000001',
+      subscriptionStatus: 'trialing' as const,
     };
     expect(OnboardingStatusResponseSchema.parse(value)).toEqual(value);
   });

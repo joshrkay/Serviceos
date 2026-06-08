@@ -165,6 +165,77 @@ describe('RLS tenant isolation (DB-level enforcement)', () => {
     });
   });
 
+  describe('onboarding & provisioning table isolation', () => {
+    // Provisioning secrets a competitor tenant must never read — the Twilio
+    // number and (the spec's) assistant id live in provider_data.
+    const SECRET_A = 'asst_tenantA_secret';
+    const SECRET_B = 'asst_tenantB_secret';
+
+    beforeAll(async () => {
+      for (const [t, secret] of [
+        [tenantA, SECRET_A] as const,
+        [tenantB, SECRET_B] as const,
+      ]) {
+        await pool.query(
+          `INSERT INTO tenant_settings (id, tenant_id, business_name, activated_at, vapi_assistant_id)
+             VALUES (gen_random_uuid(), $1, 'Biz', now(), $2)
+           ON CONFLICT (tenant_id) DO UPDATE SET activated_at = EXCLUDED.activated_at, vapi_assistant_id = EXCLUDED.vapi_assistant_id`,
+          [t.tenantId, secret],
+        );
+        await pool.query(
+          `INSERT INTO tenant_integrations (id, tenant_id, provider, status, provider_data)
+             VALUES (gen_random_uuid(), $1, 'twilio', 'full_readiness', $2::jsonb)
+           ON CONFLICT (tenant_id, provider) DO NOTHING`,
+          [t.tenantId, JSON.stringify({ phoneE164: '+15125550000', vapiAssistantId: secret })],
+        );
+      }
+    });
+
+    it('tenant_settings.activated_at is visible only to its own tenant', async () => {
+      const rows = await asTenant(pool, tenantA.tenantId, async (c) => {
+        const r = await c.query<{ tenant_id: string }>(
+          'SELECT tenant_id FROM tenant_settings WHERE activated_at IS NOT NULL',
+        );
+        return r.rows.map((row) => row.tenant_id);
+      });
+      expect(rows).toContain(tenantA.tenantId);
+      expect(rows).not.toContain(tenantB.tenantId);
+    });
+
+    it('tenant A cannot read tenant B vapi_assistant_id (isolation)', async () => {
+      const seen = await asTenant(pool, tenantA.tenantId, async (c) => {
+        const r = await c.query<{ vapi_assistant_id: string | null }>(
+          'SELECT vapi_assistant_id FROM tenant_settings',
+        );
+        return r.rows.map((row) => row.vapi_assistant_id);
+      });
+      expect(seen).toContain(SECRET_A);
+      expect(seen).not.toContain(SECRET_B);
+    });
+
+    it('tenant A cannot read tenant B provisioning secrets (provider_data)', async () => {
+      const leaked = await asTenant(pool, tenantA.tenantId, async (c) => {
+        const r = await c.query(
+          'SELECT provider_data FROM tenant_integrations WHERE tenant_id = $1',
+          [tenantB.tenantId],
+        );
+        return r.rows;
+      });
+      expect(leaked).toHaveLength(0);
+    });
+
+    it('a tenant reads only its own provisioning row', async () => {
+      const secrets = await asTenant(pool, tenantB.tenantId, async (c) => {
+        const r = await c.query<{ provider_data: { vapiAssistantId?: string } }>(
+          'SELECT provider_data FROM tenant_integrations',
+        );
+        return r.rows.map((row) => row.provider_data?.vapiAssistantId);
+      });
+      expect(secrets).toContain(SECRET_B);
+      expect(secrets).not.toContain(SECRET_A);
+    });
+  });
+
   describe('schema invariant', () => {
     // Tables that carry a tenant_id but are deliberately NOT under tenant RLS.
     // Each must stay justified — anything else with a tenant_id is a leak risk.

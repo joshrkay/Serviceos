@@ -52,6 +52,12 @@ function buildStatus(state: OnboardingMockState) {
     steps,
     currentStep: firstNotDone,
     isComplete: firstNotDone === null,
+    // Fields added by the launch-readiness pass. Faithful to
+    // OnboardingStatusResponse so the funnel events fired from the shell
+    // carry a real tenant_id and the past-due/activation banners stay
+    // hidden in the happy-path journey.
+    tenantId: '00000000-0000-0000-0000-0000000000e2',
+    subscriptionStatus: null,
   };
 }
 

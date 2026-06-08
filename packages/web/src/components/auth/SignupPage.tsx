@@ -1,9 +1,16 @@
+import { useEffect } from 'react';
 import { SignUp, useAuth } from '@clerk/clerk-react';
 import { Navigate } from 'react-router';
 import { Zap } from 'lucide-react';
+import { trackFunnel } from '../../lib/analytics';
 
 export function SignupPage() {
   const { isLoaded, isSignedIn } = useAuth();
+  // Funnel step between view_landing and signup_completed. Fires once when
+  // the signup form mounts. No tenant/user yet — null context.
+  useEffect(() => {
+    trackFunnel('signup_started');
+  }, []);
   if (isLoaded && isSignedIn) return <Navigate to="/" replace />;
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">

@@ -31,7 +31,21 @@ export type AnalyticsEvent =
   | 'first_ai_call_detected'
   | 'trial_started'
   | 'pricing_cta_clicked'
-  | 'landing_signup_clicked';
+  | 'landing_signup_clicked'
+  // Launch funnel (added for the onboarding launch-readiness pass). These
+  // are emitted via trackFunnel() so they always carry tenant_id/user_id/
+  // timestamp/source. See FUNNEL.md for the trigger + payload of each.
+  | 'view_landing'
+  | 'signup_started'
+  | 'wizard_started'
+  | 'wizard_step_business'
+  | 'wizard_step_phone'
+  | 'wizard_step_voice'
+  | 'wizard_step_calendar'
+  | 'wizard_completed'
+  | 'test_call_initiated'
+  | 'test_call_succeeded'
+  | 'activation_celebrated';
 
 type Props = Record<string, string | number | boolean | null | undefined>;
 
@@ -109,6 +123,34 @@ export function track(event: AnalyticsEvent, props?: Props): void {
     } catch {
       // Never let an analytics failure surface.
     }
+  });
+}
+
+/** Context every launch-funnel event must carry. tenant_id / user_id may be
+ * null on pre-auth events (view_landing, signup_started) — PostHog stitches
+ * them to a user once identify() fires post-signup. */
+export interface FunnelContext {
+  tenantId?: string | null;
+  userId?: string | null;
+}
+
+/**
+ * Emit a launch-funnel event with the four required fields the funnel
+ * dashboards depend on — tenant_id, user_id, timestamp, source — merged in
+ * uniformly so individual call sites can't forget one. Extra event-specific
+ * props (e.g. { step }) are spread on top. Off-by-default like track().
+ */
+export function trackFunnel(
+  event: AnalyticsEvent,
+  ctx?: FunnelContext,
+  extra?: Props,
+): void {
+  track(event, {
+    tenant_id: ctx?.tenantId ?? null,
+    user_id: ctx?.userId ?? null,
+    timestamp: new Date().toISOString(),
+    source: 'web',
+    ...extra,
   });
 }
 
