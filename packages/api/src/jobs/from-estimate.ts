@@ -183,19 +183,53 @@ export async function convertEstimateToScheduledJob(
   const job = await getJob(tenantId, estimate.jobId, deps.jobRepo);
   if (!job) throw new NotFoundError('Job', estimate.jobId);
 
-  // 3. Choose a technician + conflict-free slot.
-  const chosen = await chooseTechnicianAndSlot(deps, input);
-
-  // 4. Create the appointment, then assign the primary technician (the
-  //    assign step's double-booking guard + DB EXCLUDE constraint are the
-  //    authoritative protections).
-  // Idempotency key. Identical requests (a network retry or a duplicate click)
-  // dedupe to the same appointment, but it also varies by the operator's
-  // explicit overrides so a deliberate re-schedule (a different technician or
-  // start time) is NOT silently deduped onto the original appointment. Auto
-  // selection contributes a stable 'auto' token so plain retries still dedupe.
+  // Idempotency key, computed from the REQUEST (not the chosen slot): identical
+  // requests (a network retry / duplicate click) dedupe, while a deliberate
+  // override (different tech or start) gets a distinct key. Auto selection uses
+  // stable 'auto' tokens so plain retries still dedupe.
   const techKey = input.technicianId ?? 'auto';
   const slotKey = input.scheduledStart ? input.scheduledStart.toISOString() : 'auto';
+  const idempotencyKey = `from-estimate:${estimateId}:${techKey}:${slotKey}`;
+
+  // Accept a 'sent' estimate (idempotent; no-op when already accepted), rolling
+  // up the job's money-state. Shared by the short-circuit and normal paths.
+  const acceptEstimate = async (): Promise<Estimate> => {
+    if (estimate.status !== 'sent') return estimate;
+    const moneyStateDeps: RefreshJobMoneyStateDeps = {
+      jobRepo: deps.jobRepo,
+      estimateRepo: deps.estimateRepo,
+      invoiceRepo: deps.invoiceRepo,
+      auditRepo: deps.auditRepo,
+    };
+    const updated = await transitionEstimateStatus(
+      tenantId, estimateId, 'accepted', deps.estimateRepo, moneyStateDeps,
+    );
+    return updated ?? estimate;
+  };
+
+  // 3. Idempotent short-circuit. If this exact conversion already produced a
+  //    completed appointment, return it WITHOUT re-running slot selection —
+  //    otherwise the conversion's OWN prior appointment makes isSlotFree report a
+  //    conflict on a pinned retry (and the request fails before dedup can fire).
+  const existingForKey = (await deps.appointmentRepo.findByJob(tenantId, job.id)).find(
+    (a) => a.idempotencyKey === idempotencyKey && a.status !== 'canceled',
+  );
+  if (existingForKey) {
+    const priors = await deps.assignmentRepo.findByAppointment(tenantId, existingForKey.id);
+    const primary = priors.find((a) => a.isPrimary);
+    if (primary) {
+      const acceptedEstimate = await acceptEstimate();
+      const refreshedJob = (await getJob(tenantId, job.id, deps.jobRepo)) ?? job;
+      return { job: refreshedJob, appointment: existingForKey, assignment: primary, estimate: acceptedEstimate };
+    }
+    // Prior appointment exists but its assignment didn't complete — fall through
+    // to finish it (createAppointment dedupes back to this row by key).
+  }
+
+  // 4. Choose a technician + conflict-free slot, then create the appointment and
+  //    assign the primary technician (the assign step's double-booking guard +
+  //    DB EXCLUDE constraint are the authoritative protections).
+  const chosen = await chooseTechnicianAndSlot(deps, input);
   const appointment = await createAppointment(
     {
       tenantId,
@@ -204,7 +238,7 @@ export async function convertEstimateToScheduledJob(
       scheduledEnd: chosen.scheduledEnd,
       timezone,
       createdBy: actorId,
-      idempotencyKey: `from-estimate:${estimateId}:${techKey}:${slotKey}`,
+      idempotencyKey,
     },
     deps.appointmentRepo,
     undefined,
@@ -253,22 +287,7 @@ export async function convertEstimateToScheduledJob(
   // 6. Accept the estimate (skip if already accepted). The one-accepted-per-job
   //    DB index (migration 129) is the race-safe backstop; a loser surfaces as
   //    a ConflictError from the Pg layer.
-  let acceptedEstimate = estimate;
-  if (estimate.status === 'sent') {
-    // Pass money-state deps so the job's denormalized `moneyState` rolls up to
-    // estimate_accepted — downstream auto-invoice + the invoicing queue filter
-    // on it, so skipping this leaves converted jobs stuck at estimate_sent.
-    const moneyStateDeps: RefreshJobMoneyStateDeps = {
-      jobRepo: deps.jobRepo,
-      estimateRepo: deps.estimateRepo,
-      invoiceRepo: deps.invoiceRepo,
-      auditRepo: deps.auditRepo,
-    };
-    const updated = await transitionEstimateStatus(
-      tenantId, estimateId, 'accepted', deps.estimateRepo, moneyStateDeps,
-    );
-    if (updated) acceptedEstimate = updated;
-  }
+  const acceptedEstimate = await acceptEstimate();
 
   // 7. Audit the conversion as a single domain event.
   if (deps.auditRepo) {

@@ -207,6 +207,28 @@ describe('Feature 5 — Estimate → Job conversion', () => {
     expect(result.appointment.scheduledStart.toISOString()).toBe(start.toISOString());
   });
 
+  it('pinned conversion retry is idempotent (no self-conflict on the same slot)', async () => {
+    const job = await jobRepo.create(makeJob());
+    const est = await seedSentEstimate(job.id);
+    const start = new Date('2026-06-14T16:00:00Z');
+
+    const first = await convertEstimateToScheduledJob(deps([tech(TECH_1)]), {
+      tenantId: TENANT, estimateId: est.id, actorId: 'owner-1',
+      technicianId: TECH_1, scheduledStart: start, now: NOW,
+    });
+    // Retry the SAME pinned request: the first call's own appointment occupies
+    // that slot, so without the idempotent short-circuit this would 409. It must
+    // instead dedupe to the same appointment.
+    const retry = await convertEstimateToScheduledJob(deps([tech(TECH_1)]), {
+      tenantId: TENANT, estimateId: est.id, actorId: 'owner-1',
+      technicianId: TECH_1, scheduledStart: start, now: NOW,
+    });
+
+    expect(retry.appointment.id).toBe(first.appointment.id);
+    expect(retry.assignment.technicianId).toBe(TECH_1);
+    expect(await appointmentRepo.findByJob(TENANT, job.id)).toHaveLength(1);
+  });
+
   it('respects an operator override on re-conversion (not deduped to the original)', async () => {
     const job = await jobRepo.create(makeJob());
     const est = await seedSentEstimate(job.id);
