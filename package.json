@@ -11,6 +11,8 @@
     "build": "npm run build --workspaces",
     "test": "npm run test --workspaces",
     "test:integration": "npm run test:integration --workspace=packages/api",
+    "test:rls": "npm run test:rls --workspace=packages/api",
+    "test:voice-fixtures": "npm run test:voice-fixtures --workspace=packages/api",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
     "typecheck": "cd packages/api && npx tsc --project tsconfig.build.json --noEmit",
     "lint": "npm run lint --workspaces",
