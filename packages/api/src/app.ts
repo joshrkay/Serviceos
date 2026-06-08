@@ -84,6 +84,7 @@ import { createVoiceRouter } from './routes/voice';
 import { createVoiceGate } from './voice/voice-gate';
 import { checkAndFireUpgradeNudge } from './voice/check-upgrade-nudge';
 import { maybeAutoGoLiveOnInboundEnd } from './voice/go-live';
+import { maybeFireFirstRealCallActivation } from './voice/activation';
 import { createOnboardingRouter } from './routes/onboarding';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
@@ -1828,6 +1829,32 @@ export function createApp(): express.Express {
               { pool, auditRepo },
               { tenantId, channel },
             );
+            // Activation milestone — fire first_real_call_received (+ email +
+            // banner state) on the first real inbound call after go-live.
+            // Runs AFTER auto-go-live so voice_agent_live_at is already set
+            // for the test call. Failure-soft: must never block session end.
+            try {
+              await maybeFireFirstRealCallActivation(
+                {
+                  pool,
+                  auditRepo,
+                  ...(messageDelivery
+                    ? {
+                        sendEmail: (msg) =>
+                          messageDelivery.sendEmail({
+                            to: msg.to,
+                            subject: msg.subject,
+                            text: msg.text,
+                            ...(msg.html ? { html: msg.html } : {}),
+                          }),
+                      }
+                    : {}),
+                },
+                { tenantId, channel },
+              );
+            } catch {
+              // swallow — activation analytics must not break call teardown
+            }
           },
         }
       : {}),

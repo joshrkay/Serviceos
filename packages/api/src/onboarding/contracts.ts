@@ -53,12 +53,24 @@ export const OnboardingStepSchema = z.object({
 });
 export type OnboardingStep = z.infer<typeof OnboardingStepSchema>;
 
+export const SubscriptionStatusSchema = z
+  .enum(['trialing', 'active', 'past_due', 'canceled', 'incomplete'])
+  .nullable();
+export type SubscriptionStatusValue = z.infer<typeof SubscriptionStatusSchema>;
+
 export const OnboardingStatusResponseSchema = z.object({
   steps: z.array(OnboardingStepSchema).length(7),
   currentStep: OnboardingStepIdSchema.nullable(),
   isComplete: z.boolean(),
   voiceAgentLive: z.boolean(),
+  /** The tenant id — lets the web client stamp tenant_id onto funnel events. */
+  tenantId: z.string(),
+  /** Mirror of tenants.subscription_status. Drives the past-due payment banner. */
+  subscriptionStatus: SubscriptionStatusSchema,
   /** ISO-8601 timestamp of the 30-minute upgrade nudge fire-event. Drives the in-app banner. */
   upgradePromptShownAt: z.string().datetime().optional(),
+  /** ISO-8601 timestamp of the activation milestone (first real inbound call).
+   * Drives the one-time celebration banner. Absent until activation fires. */
+  activatedAt: z.string().datetime().optional(),
 });
 export type OnboardingStatusResponse = z.infer<typeof OnboardingStatusResponseSchema>;

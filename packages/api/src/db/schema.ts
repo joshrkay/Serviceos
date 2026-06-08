@@ -3766,6 +3766,18 @@ export const MIGRATIONS = {
     ALTER TABLE tenants
       ADD COLUMN IF NOT EXISTS pending_checkout_session_id TEXT;
   `,
+
+  '146_tenant_settings_activated_at': `
+    -- Activation marker — stamped exactly once, the first time a tenant
+    -- receives a "real" inbound call after the voice agent goes live (see
+    -- voice/activation.ts for the count-based rule). Drives the
+    -- first_real_call_received funnel event's once-per-tenant idempotency
+    -- and the in-app celebration banner. Additive, nullable, no default:
+    -- NULL means "not yet activated". Inherits tenant_settings' existing
+    -- FORCE-RLS tenant_isolation policy — no new policy required.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
