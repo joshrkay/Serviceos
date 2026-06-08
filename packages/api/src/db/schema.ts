@@ -3772,22 +3772,16 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS pending_checkout_session_id TEXT;
   `,
 
-  '146_proposals_claimed_by_text': `
-    -- QA-2026-06-05: the execution worker claims proposals with a NAMED
-    -- worker id ('execution-worker'), but claimed_by was UUID — every
-    -- claimForExecution failed with 22P02 (invalid uuid) and the 1s sweep
-    -- retried the same approved proposal forever. Found live on Railway dev
-    -- (voice CUST-02: proposal auto-approved, never executed). Align the
-    -- column with executed_by/created_by, which are already TEXT.
-    -- Guarded so the every-boot migration runner doesn't rewrite the table
-    -- on each start.
-    DO $$
-    BEGIN
-      IF (SELECT data_type FROM information_schema.columns
-          WHERE table_name = 'proposals' AND column_name = 'claimed_by') = 'uuid' THEN
-        ALTER TABLE proposals ALTER COLUMN claimed_by TYPE TEXT USING claimed_by::text;
-      END IF;
-    END $$;
+  '146_tenant_settings_activated_at': `
+    -- Activation marker — stamped exactly once, the first time a tenant
+    -- receives a "real" inbound call after the voice agent goes live (see
+    -- voice/activation.ts for the count-based rule). Drives the
+    -- first_real_call_received funnel event's once-per-tenant idempotency
+    -- and the in-app celebration banner. Additive, nullable, no default:
+    -- NULL means "not yet activated". Inherits tenant_settings' existing
+    -- FORCE-RLS tenant_isolation policy — no new policy required.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ;
   `,
 
   '147_tenant_settings_bill_labor_from_time_entries': `

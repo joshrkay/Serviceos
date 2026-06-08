@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Check } from 'lucide-react';
 import { useApiClient } from '../../../../lib/apiClient';
 import { Button } from '../../../ui';
+import { VoiceConfigPanel } from '../VoiceConfigPanel';
 import type { OnboardingStatusResponse } from '../../../../types/onboarding';
 
 interface AiCheckStepProps {
@@ -38,6 +39,7 @@ export function AiCheckStep({ status, onRetryComplete }: AiCheckStepProps) {
             Your AI assistant answered the test prompt correctly. Ready to take real calls.
           </p>
         </div>
+        <VoiceConfigPanel />
       </div>
     );
   }
@@ -98,6 +100,7 @@ export function AiCheckStep({ status, onRetryComplete }: AiCheckStepProps) {
         <p className="text-sm text-slate-700">Running the check… usually a few seconds.</p>
       </div>
       <p className="text-xs text-slate-500">This page refreshes automatically when the check completes.</p>
+      <VoiceConfigPanel />
     </div>
   );
 }
