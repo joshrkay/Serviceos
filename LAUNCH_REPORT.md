@@ -12,23 +12,28 @@ all within in-scope dirs. Analytics changes are additive and off-by-default.
 
 ## SHIPPED (with commit SHAs)
 
+> Two phases. **Phase 1** (instrumentation + activation, mapped to the real stack).
+> **Phase 2** (after the "go fully literal" decision, DECISIONS.md D9): the literal
+> Vapi / voice / calendar / business-profile features built end-to-end.
+
 | Feature | What shipped | Commit |
 |---|---|---|
-| 7. Activation milestone | migration `146_tenant_settings_activated_at`; `voice/activation.ts` (count-based rule, idempotent check-and-set, `first_real_call_received` + `tenant.activated` audit + activation email); wired into `app.ts onSessionEnded`; status contract surfaces `tenantId`/`subscriptionStatus`/`activatedAt` | `c458b3d` |
-| 1,2,4,6,8 + abandonment | client funnel events (`view_landing`, `signup_started`, `wizard_started`, `wizard_step_*`, `wizard_completed`, `test_call_initiated/_succeeded`), `onboarding_step_viewed/_completed` abandonment, `trackFunnel` helper, `ActivationCelebrationBanner`, `PastDueBanner` | `5300a2e` |
-| Test coverage (unit) | activation (10), posthog union, web funnel contract + 3 component tests | `6a270f1` |
-| Test coverage (integration) + scripts | `onboarding-activation` + RLS isolation integration tests; `test:funnel/webhooks/provisioning/rls/activation/e2e:onboarding` npm scripts | `3712570` |
+| 7. Activation milestone | migration `146` `activated_at`; `voice/activation.ts` (idempotent check-and-set, `first_real_call_received` + audit + email); `app.ts onSessionEnded`; status contract surfaces `tenantId`/`subscriptionStatus`/`activatedAt` | `c458b3d` |
+| 1,2,4,6,8 + abandonment | client funnel events, `onboarding_step_viewed/_completed` abandonment, `trackFunnel`, `ActivationCelebrationBanner`, `PastDueBanner` | `5300a2e` |
+| Test coverage | activation, posthog union, web funnel contract + components; integration tests + npm scripts; per-feature inventory tests | `6a270f1`, `3712570`, `0ccc03d` |
+| **3. Vapi provisioning** | `integrations/vapi/*` (fetch client, assistant-config + 3 presets, HMAC/shared-secret webhook sig, idempotent webhook, identity activation); assistant create+link wired into provisioning; migrations 147–149; 25 tests | `d1c0f63` |
+| **4. Voice config** | `voice/voice-config.ts` + `PUT /api/onboarding/voice` + `/voice/presets` (persist + push to assistant); `VoiceConfigPanel` UI | `ae1951b`, `596c8fc` |
+| **2. Business profile** | `serviceAddress` / `serviceAreaZips` / `servicesOffered` (contract + `/identity` persistence + `IdentityStep` inputs) | `ae1951b`, `596c8fc` |
+| **5. Calendar** | `calendar_provider` (migration 149) + `POST /calendar/choose` + `CalendarChoicePanel` (Google OAuth / built-in) + `wizard_step_calendar` | `ae1951b`, `596c8fc` |
 
-Per-feature detail in PROGRESS.md. Features 1–4, 6, 8 were already implemented
-upstream; this pass closed their **instrumentation** gaps. Feature 7 (activation)
-was net-new.
+All 8 inventory features now ship. Diff vs branch base: **54 files, +3694/−9**.
 
 ## DEFERRED (reason + effort)
 
 | Item | Reason | Effort |
 |---|---|---|
-| Feature 5 — calendar wizard step / `wizard_step_calendar` | No calendar step exists in the real wizard (calendar is per-user Google OAuth in settings; no built-in fallback / availability seeding). Out of scope for an instrumentation pass. | ~1–2 days |
-| Identity-based activation | `onSessionEnded` lacks the caller `From`; `voice_sessions` doesn't store it. Count-based rule ships now. | ~0.5–1 day |
+| Google next-7-days availability seeding | The calendar provider choice + OAuth handoff ship; pulling busy-blocks into a tech-availability template on connect is a small follow-up. | ~0.5 day |
+| Framework re-platform (Next.js/Supabase) | Intentionally NOT done — would delete the working 6000-test Express/Vite app + existing tests. "Fully literal" applied to features, not the framework (DECISIONS.md D9). | N/A (by design) |
 
 ## BLOCKED (diagnosis)
 
@@ -54,8 +59,8 @@ signup_completed        srv  Clerk user.created → bootstrapTenant      (existi
 wizard_started          web  OnboardingShell first incomplete load     { + base }
 wizard_step_business    web  reach identity step                       { base, step }
 wizard_step_phone       web  reach phone step                          { base, step }
-wizard_step_voice       web  reach ai_check step                       { base, step }
-wizard_step_calendar    —    DEFERRED (no calendar wizard step)
+wizard_step_voice       web  reach ai_check (voice) step               { base, step }
+wizard_step_calendar    web  calendar provider chosen (CalendarChoicePanel) { base, provider }
 wizard_completed        web  isComplete flips true                     { base, voice_agent_live }
 test_call_initiated     web  tap/copy number (call intent)             { + base }
 test_call_succeeded     web  test_call step → done                     { + base }

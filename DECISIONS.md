@@ -64,6 +64,28 @@ All work reuses packages already in the tree: `posthog-node` / `posthog-js`
 `MessageDeliveryProvider` (activation email), `pg`, `vitest`, `@playwright/test`.
 **Zero new dependencies added**, so there is nothing to justify here beyond this note.
 
+## D9. "Go fully literal" — build Vapi + voice + calendar for real (constraints lifted)
+After the launch gate rejected the Twilio-only mapping, the requester chose to **go
+fully literal** and explicitly lifted the spec's "no new dependencies" and
+"Vapi/Twilio account-config out of scope" constraints. Consequences:
+
+- **Vapi built for real**, but via the **REST API over `fetch`** (no SDK) — so it
+  remains technically zero-new-npm-dependency, off-by-default without `VAPI_API_KEY`,
+  and injectable for mock-only tests. Assistant is created + linked to the
+  provisioned Twilio number; `vapi_assistant_id` stored; a signature-verified,
+  idempotent `/webhooks/vapi/:tenantId` route drives identity-based activation.
+- **Voice config + calendar choice + business-profile extras** built end-to-end
+  (server endpoints + persistence + web UI + tests).
+- **The framework was deliberately NOT rewritten** to Next.js/Supabase. That would
+  delete the working, 6000-test Express/Vite app (and the spec's "no deletion of
+  existing tests" rule). "Fully literal" was interpreted as "build the literal
+  FEATURES on the proven stack", not "re-platform". This is the one place the
+  literal architecture was intentionally not matched; documented here and in
+  LAUNCH_REPORT.md.
+- Identity-based activation (caller ≠ verified phone) is now the **primary** path
+  (Vapi webhook); the count-based heuristic remains as the Twilio-only fallback.
+  Both share the `activated_at` check-and-set, so no double-fire.
+
 ## D8. npm script mapping (the spec's `pnpm test:*` don't exist)
 `test:funnel`/`test:webhooks`/`test:provisioning` map to **unit** targets so they
 run without Docker in any environment. `test:rls`/`test:activation` map to the

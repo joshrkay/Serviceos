@@ -13,7 +13,7 @@
     "test:integration": "npm run test:integration --workspace=packages/api",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
     "test:funnel": "npm run test --workspace=packages/web -- analytics.funnel && npm run test --workspace=packages/api -- analytics/posthog test/voice/activation.test.ts",
-    "test:webhooks": "npm run test --workspace=packages/api -- test/webhooks test/telephony/twilio-signature.test.ts",
+    "test:webhooks": "npm run test --workspace=packages/api -- test/webhooks test/telephony/twilio-signature.test.ts test/integrations/vapi",
     "test:provisioning": "npm run test --workspace=packages/api -- twilio-provisioning",
     "test:rls": "npm run test:integration --workspace=packages/api -- rls-tenant-isolation",
     "test:activation": "npm run test:integration --workspace=packages/api -- onboarding-activation",

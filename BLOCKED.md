@@ -43,34 +43,27 @@ covered by component unit tests that run here (`LandingPage.funnel.test.tsx`,
 (`e2e/helpers/onboarding-v2-mock.ts`) was updated to the new contract shape so the
 journey runs faithfully wherever Clerk creds + DB are available.
 
-## DEFERRED (product) — `wizard_step_calendar` / calendar wizard step
+## SHIPPED (was deferred) — calendar choice + identity-based activation + Vapi
 
-**What:** The spec's funnel includes `wizard_step_calendar` and a calendar
-connection step (Google OAuth or built-in, with 7-day availability seeding).
+After the "go fully literal" decision (DECISIONS.md D9), the items previously
+deferred were built:
 
-**Why deferred:** The real onboarding wizard has **no calendar step** — calendar is a
-per-user Google Calendar OAuth in *settings* (`routes/calendar-integrations.ts`), and
-there is no built-in-calendar fallback or availability seeding. Inventing a calendar
-wizard step is net-new product surface, out of scope for an instrumentation/activation
-pass.
+- **`wizard_step_calendar` / calendar connection** — SHIPPED. `calendar_provider`
+  column (migration 149), `POST /api/onboarding/calendar/choose` (google/builtin),
+  `CalendarChoicePanel` UI (Google OAuth handoff / built-in skip), `wizard_step_calendar`
+  emit + test. (Next-7-days availability *seeding* on Google connect remains a small
+  follow-up — the provider choice + OAuth handoff ship now.)
+- **Identity-based activation** — SHIPPED as the primary path
+  (`maybeFireActivationForInboundCall`, driven by the Vapi webhook's caller number;
+  caller ≠ verified phone ⇒ activation). The count-based rule remains the Twilio-only
+  fallback. No new `test_call_from_e164` column was needed — `owner_phone` +
+  `business_phone` are the verified set.
+- **Vapi integration** — SHIPPED (`integrations/vapi/*`): assistant create/link,
+  signature-verified idempotent webhook, provisioning wiring. Off-by-default without
+  `VAPI_API_KEY`.
 
-**Effort to ship:** ~1–2 days — a wizard step component, OAuth-in-wizard flow (reuse
-`calendar-integrations.ts`), a built-in-calendar skip path, next-7-days availability
-import into a tech-availability template, and the `wizard_step_calendar` emit + test.
+## REMAINING follow-up (small) — Google availability seeding
 
-## DEFERRED (engineering) — identity-based activation detection
-
-**What:** Exclude the owner's *own* real calls from activation by comparing the
-caller against the owner's verified phone (`tenant_settings.owner_phone`), instead of
-the count-based heuristic.
-
-**Why deferred:** `onSessionEnded` does not receive the caller's `From`, and
-`voice_sessions` does not persist it. Identity-based detection needs the telephony
-adapter to thread `From` into the session-end callback (and likely a
-`tenant_settings.test_call_from_e164` column to remember the test caller). That's a
-larger telephony change than an instrumentation pass should carry.
-
-**Effort to ship:** ~0.5–1 day — thread `From` through the media-stream / Gather
-adapters into `onSessionEnded`, add an additive `test_call_from_e164` column
-(migration 147), and switch `voice/activation.ts` to identity comparison with the
-count-based rule as fallback.
+Pulling the next 7 days of Google Calendar busy-blocks into a tech-availability
+template on connect is not yet wired (the OAuth handoff + provider persistence are).
+Effort: ~0.5 day, reusing `routes/calendar-integrations.ts` token storage.

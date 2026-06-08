@@ -29,30 +29,34 @@ no Next.js/Supabase/Vapi).
   and mapped `wizard_step_business` (= identity), `wizard_completed` in
   `OnboardingShell.tsx`. Tests: `analytics.funnel.test.ts`.
 
-## 3. Phone provisioning — **SHIPPED**
+## 3. Phone provisioning — **SHIPPED** (incl. real Vapi)
 - Already implemented: Twilio subaccount + number purchase worker
   (`workers/provision-twilio.ts`), stored in `tenant_integrations` (RLS-isolated).
-- Defect found: `wizard_step_phone` not emitted; provisioning isolation had no
-  explicit RLS test on `tenant_integrations.provider_data`.
-- Fix: `wizard_step_phone` (= phone step) in `OnboardingShell.tsx`; RLS isolation
-  assertions in `rls-tenant-isolation.test.ts` (tenant A cannot read tenant B's
-  provider_data secrets). (Vapi = Twilio per mapping.)
+- Built (literal pass): a real **Vapi integration** — `integrations/vapi/client.ts`
+  (fetch-based, no SDK dep, off-by-default) creates the assistant and links it to
+  the provisioned number; `vapi_assistant_id` persisted to `tenant_settings`
+  (migration 147). Wired into the provisioning worker (best-effort).
+- `wizard_step_phone` emitted; provisioning isolation RLS-tested
+  (`rls-tenant-isolation.test.ts` — tenant A cannot read tenant B's provider_data /
+  vapi_assistant_id).
 
-## 4. Voice agent configuration — **SHIPPED** (mapped) / partial upstream
-- Real model: voice = Twilio + ElevenLabs TTS + `tenant_settings` voice metadata;
-  the `ai_check` step is the "voice agent works" gate. No Vapi assistant object.
-- Defect found: `wizard_step_voice` not emitted.
-- Fix: `wizard_step_voice` (= `ai_check` step) in `OnboardingShell.tsx`. The
-  existing `voice_agent_turned_on` event (go-live) is retained.
+## 4. Voice agent configuration — **SHIPPED** (literal)
+- Built: `integrations/vapi/assistant-config.ts` (3 ElevenLabs presets + greeting
+  auto-generation), `voice/voice-config.ts` + `PUT /api/onboarding/voice` (persist
+  voice + greeting and push onto the Vapi assistant), `VoiceConfigPanel` web UI
+  (preset picker + greeting override) mounted in the voice (ai_check) step.
+- `wizard_step_voice` emitted; `voice_agent_turned_on` (go-live) retained.
+- Tests: `voice-config.test.ts`, `assistant-config.test.ts`, `VoiceConfigPanel.test.tsx`.
 
-## 5. Calendar connection — **DEFERRED** (no wizard step)
-- Real model: calendar is a per-user Google Calendar OAuth in **settings**
-  (`routes/calendar-integrations.ts`), not a wizard step. There is no
-  `wizard_step_calendar` analog in the onboarding flow.
-- Decision: do **not** invent a calendar wizard step for launch. `wizard_step_calendar`
-  is documented as N/A in FUNNEL.md. Estimated effort to add a real calendar
-  wizard step + availability seeding: ~1–2 days (UI step + OAuth-in-wizard +
-  7-day availability import). See LAUNCH_REPORT.md.
+## 5. Calendar connection — **SHIPPED** (literal)
+- Built: `calendar_provider` column (migration 149), `POST /api/onboarding/calendar/choose`
+  (google OAuth / builtin skip), `CalendarChoicePanel` web UI mounted in the
+  test-call completion screen; Google choice kicks off the existing
+  `calendar-integrations` OAuth connect flow.
+- `wizard_step_calendar` emitted on choice. Tests: `CalendarChoicePanel.funnel.test.tsx`,
+  `feature-inventory.test.ts` (choice validation).
+- Next-7-days availability seeding on Google connect remains a follow-up (the
+  provider choice + OAuth handoff ship now).
 
 ## 6. Test call flow — **SHIPPED**
 - Already implemented: number display, inbound detection via `voice_sessions`,
