@@ -35,7 +35,7 @@ except Exception:  # pragma: no cover - optional dependency
 # only in annotations (PEP 563 via `from __future__ import annotations`), so it
 # is never evaluated at runtime and needs no module-level import.
 from corpus_classification import classify_record, clean_for_corpus
-from scrub_pii import scrub_pii
+from scrub_pii import KnownEntities, extract_self_identified_names, scrub_pii
 
 if False:  # type-checking only; never executed
     from supabase import Client  # noqa: F401
@@ -152,11 +152,19 @@ def classify_row(
     # PERSIST only PII-scrubbed text. Drop the row entirely if any residual PII
     # signal remains after scrubbing, so nothing leaks into the corpus.
     cls = classify_record(cleaned_text=cleaned, subreddit=subreddit)
-    scrub = scrub_pii(cleaned)
-    if scrub.has_residual_pii:
+    # Derive self-identified names from BOTH fields and pass them as known
+    # entities so bare names ("this is John Smith") are redacted — the regex
+    # sweep alone does not catch them.
+    known = KnownEntities(names=extract_self_identified_names(f"{cleaned}\n{raw_text}"))
+    scrub = scrub_pii(cleaned, known=known)
+    raw_scrub = scrub_pii(raw_text, known=known)
+    # Gate BOTH fields: raw_text was previously persisted without a residual
+    # check, so PII stripped from cleaned (e.g. a digit-run inside a markdown
+    # link URL) could survive in raw. Drop the row if either still has residue.
+    if scrub.has_residual_pii or raw_scrub.has_residual_pii:
         return None
     cleaned_scrubbed = scrub.scrubbed
-    raw_scrubbed = scrub_pii(raw_text).scrubbed
+    raw_scrubbed = raw_scrub.scrubbed
     row: dict[str, Any] = {
         "source_id": source_id,
         "source_type": source_type,

@@ -19,7 +19,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scrub_pii import KnownEntities, has_pii_leak, scrub_pii  # noqa: E402
+from scrub_pii import (  # noqa: E402
+    KnownEntities,
+    extract_self_identified_names,
+    has_pii_leak,
+    scrub_pii,
+)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURES = os.path.join(HERE, "fixtures", "pii_fixtures.jsonl")
@@ -84,9 +89,34 @@ def test_redacts_lowercase_addresses():
         assert not has_pii_leak(result.scrubbed), f"residual leak: {raw!r} -> {result.scrubbed!r}"
 
 
+def test_extract_self_identified_names():
+    # Cue-based self-identification is captured; stopwords / bare text are not.
+    cases = {
+        "Hi, I'm John, my furnace is out": ["John"],
+        "This is John Smith, my AC died": ["John Smith"],
+        "my name is Maria Lopez and the heater broke": ["Maria Lopez"],
+        "I'm sorry but this is great": [],
+        "the compressor is leaking refrigerant": [],
+    }
+    for text, expected in cases.items():
+        got = extract_self_identified_names(text)
+        assert got == expected, f"{text!r} -> {got!r} (expected {expected!r})"
+
+
+def test_self_identified_name_redaction_end_to_end():
+    # Mirrors the ingestion path: derive names, pass as known entities, and
+    # confirm the name is gone (and no address/phone/email residue remains).
+    text = "This is John Smith, my furnace is out at 123 main st"
+    known = KnownEntities(names=extract_self_identified_names(text))
+    result = scrub_pii(text, known=known)
+    assert "John Smith" not in result.scrubbed, result.scrubbed
+    assert "[CALLER_NAME]" in result.scrubbed, result.scrubbed
+    assert not has_pii_leak(result.scrubbed), result.scrubbed
+
+
 def _run_as_script() -> int:
     failures = 0
-    for fn in (test_regex_zero_leakage, test_known_entity_redaction, test_does_not_overscrub_clean_text, test_redacts_lowercase_addresses):
+    for fn in (test_regex_zero_leakage, test_known_entity_redaction, test_does_not_overscrub_clean_text, test_redacts_lowercase_addresses, test_extract_self_identified_names, test_self_identified_name_redaction_end_to_end):
         try:
             fn()
             print(f"  ✅ {fn.__name__}")
