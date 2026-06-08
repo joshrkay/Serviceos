@@ -37,7 +37,6 @@ export function detectLanguage(utterance: string): SessionLanguage {
   }
   return 'en';
 }
-}
 
 const INTENT_LABELS: Record<SessionLanguage, Record<string, string>> = {
   en: {
