@@ -3778,6 +3778,41 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ;
   `,
+
+  '147_tenant_settings_vapi_assistant': `
+    -- Vapi voice-assistant binding. vapi_assistant_id is the assistant
+    -- created (and linked to the tenant's provisioned phone number) during
+    -- onboarding; voice_id is the chosen ElevenLabs preset voice persisted
+    -- onto that assistant. Both additive + nullable; inherit tenant_settings'
+    -- FORCE-RLS tenant_isolation policy. NULL = assistant not yet created.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS vapi_assistant_id TEXT;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS voice_id TEXT;
+  `,
+
+  '148_tenant_settings_business_profile_extras': `
+    -- Business-profile fields collected by the onboarding identity step that
+    -- weren't previously modelled: a street/service address, the list of ZIP
+    -- codes the tenant serves, and the multi-select of services offered
+    -- (catalog keys). Additive, nullable; arrays default to empty so reads
+    -- never NPE. Inherit tenant_settings' FORCE-RLS policy.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS service_address TEXT;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS service_area_zips TEXT[] NOT NULL DEFAULT '{}';
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS services_offered TEXT[] NOT NULL DEFAULT '{}';
+  `,
+
+  '149_tenant_settings_calendar_provider': `
+    -- Calendar connection chosen in the onboarding calendar step:
+    -- 'google' (OAuth) or 'builtin' (skip path / use ServiceOS scheduling).
+    -- NULL = not yet chosen. Additive; inherits the FORCE-RLS policy.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS calendar_provider TEXT
+        CHECK (calendar_provider IS NULL OR calendar_provider IN ('google', 'builtin'));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

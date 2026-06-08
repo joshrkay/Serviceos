@@ -190,3 +190,109 @@ export async function maybeFireFirstRealCallActivation(
 
   return { fired: true };
 }
+
+/** E.164-ish digit comparison (ignores formatting / leading +). */
+function samePhone(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  const da = a.replace(/\D/g, '');
+  const db = b.replace(/\D/g, '');
+  if (!da || !db) return false;
+  // Compare on the last 10 digits so +1XXXXXXXXXX and XXXXXXXXXX match.
+  return da.slice(-10) === db.slice(-10);
+}
+
+/**
+ * Identity-based activation (the literal spec rule, used by the Vapi webhook).
+ *
+ * Fires on the first inbound call from a number that is NOT one of the
+ * tenant's verified phones — a real customer, not the owner's test call.
+ * Verified phones = the owner's cell (`tenant_settings.owner_phone`) and the
+ * tenant's own business number (`tenant_settings.business_phone`). Shares the
+ * same once-per-tenant `activated_at` check-and-set as the count-based path,
+ * so the two can never double-fire.
+ */
+export async function maybeFireActivationForInboundCall(
+  deps: MaybeFireFirstRealCallActivationDeps,
+  input: { tenantId: string; fromE164: string | null | undefined },
+): Promise<{ fired: boolean; reason?: string }> {
+  const { pool } = deps;
+  const { tenantId, fromE164 } = input;
+
+  const tenantRes = await pool.query<TenantRow>(
+    `SELECT owner_id, owner_email, subscription_status FROM tenants WHERE id = $1`,
+    [tenantId],
+  );
+  const tenant = tenantRes.rows[0];
+  if (!tenant) return { fired: false, reason: 'no_tenant' };
+  if (tenant.subscription_status !== 'trialing' && tenant.subscription_status !== 'active') {
+    return { fired: false, reason: 'subscription_inactive' };
+  }
+
+  const settingsRes = await pool.query<{
+    owner_phone: string | null;
+    business_phone: string | null;
+    activated_at: Date | null;
+  }>(
+    `SELECT owner_phone, business_phone, activated_at FROM tenant_settings WHERE tenant_id = $1`,
+    [tenantId],
+  );
+  const settings = settingsRes.rows[0];
+  if (!settings) return { fired: false, reason: 'no_settings' };
+  if (settings.activated_at) return { fired: false, reason: 'already_activated' };
+
+  // Verified callers (owner's cell, the tenant's own number) are the test
+  // call — never the activation event.
+  if (samePhone(fromE164, settings.owner_phone) || samePhone(fromE164, settings.business_phone)) {
+    return { fired: false, reason: 'verified_caller' };
+  }
+
+  const updateRes = await pool.query(
+    `UPDATE tenant_settings
+        SET activated_at = now(), updated_at = now()
+      WHERE tenant_id = $1 AND activated_at IS NULL`,
+    [tenantId],
+  );
+  if ((updateRes.rowCount ?? 0) === 0) return { fired: false, reason: 'raced' };
+
+  const ts = new Date().toISOString();
+  if (tenant.owner_id) {
+    recordFunnelEvent({
+      distinctId: tenant.owner_id,
+      event: 'first_real_call_received',
+      properties: {
+        tenant_id: tenantId,
+        user_id: tenant.owner_id,
+        timestamp: ts,
+        source: 'server',
+        detection: 'caller_identity',
+        from: fromE164 ?? null,
+      },
+    });
+  }
+  await deps.auditRepo.create(
+    createAuditEvent({
+      tenantId,
+      actorId: 'system',
+      actorRole: 'system',
+      eventType: 'tenant.activated',
+      entityType: 'tenant_settings',
+      entityId: tenantId,
+      metadata: { milestone: 'first_real_call_received', detection: 'caller_identity' },
+    }),
+  );
+  if (deps.sendEmail && tenant.owner_email) {
+    try {
+      const webUrl = deps.webUrl ?? process.env.WEB_URL ?? '';
+      await deps.sendEmail({
+        to: tenant.owner_email,
+        subject: 'Your AI agent just handled its first real call 🎉',
+        text:
+          'Great news — your AI agent just answered its first real customer ' +
+          `call. See it in your dashboard: ${webUrl}/dashboard`,
+      });
+    } catch {
+      // best effort
+    }
+  }
+  return { fired: true };
+}

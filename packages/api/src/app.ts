@@ -440,6 +440,11 @@ export function createApp(): express.Express {
   // whitespace differences would fail legit webhooks and break tenant bootstrap).
   app.use('/webhooks/clerk', express.raw({ type: 'application/json' }));
 
+  // Vapi signs its server messages (serverUrlSecret). Capture the raw Buffer
+  // here so the HMAC verification in handleVapiCallEvent sees the exact bytes
+  // Vapi signed — same treatment as Stripe/Clerk.
+  app.use('/webhooks/vapi', express.raw({ type: 'application/json' }));
+
   // Twilio posts application/x-www-form-urlencoded — mount the matching parser
   // before global express.json() so /webhooks/twilio/* routes get populated
   // req.body fields (used for signature verification + AccountSid match).
