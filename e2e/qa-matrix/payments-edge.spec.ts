@@ -219,7 +219,9 @@ matrixTest('PAY-04', 'Overdue invoice money-state', async (h) => {
 
   // The overdue sweep is worker-driven (no HTTP trigger). Poll this job's money_state.
   let moneyState = 'unknown';
-  for (let i = 0; i < 6; i++) {
+  // Dev runs the sweep every OVERDUE_SWEEP_INTERVAL_MS (15s); cover a full
+  // interval plus margin.
+  for (let i = 0; i < 10; i++) {
     await new Promise((r) => setTimeout(r, 2500));
     const res = await h.db.query({
       label: `04-money-state-${i}`,

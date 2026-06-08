@@ -44,6 +44,9 @@ export interface AppointmentAssignment {
   isPrimary: boolean;
   assignedBy: string;
   assignedAt: Date;
+  /** Denormalised from the parent appointment for the double-booking trigger. */
+  scheduledStart?: Date;
+  scheduledEnd?: Date;
 }
 
 export interface CreateAssignmentInput {
@@ -157,6 +160,15 @@ export async function assignTechnician(
     isPrimary,
     assignedBy: input.assignedBy,
     assignedAt: new Date(),
+    // Denormalise the appointment's time window into the assignment row so
+    // the DB-level double-booking trigger (migration 129) can enforce the
+    // no-overlap constraint without a cross-table join in the trigger body.
+    scheduledStart: deps.appointmentRepo
+      ? (await deps.appointmentRepo.findById(input.tenantId, input.appointmentId))?.scheduledStart
+      : undefined,
+    scheduledEnd: deps.appointmentRepo
+      ? (await deps.appointmentRepo.findById(input.tenantId, input.appointmentId))?.scheduledEnd
+      : undefined,
   };
 
   const created = await repository.create(assignment);

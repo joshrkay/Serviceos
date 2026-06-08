@@ -1532,6 +1532,7 @@ export function createApp(): express.Express {
   // the Stripe-Account header. Without it, payments stay on the
   // legacy platform path.
   const publicInvoiceService = new PublicInvoiceService({
+    paymentLinkProvider,
     invoiceRepo,
     jobRepo,
     customerRepo,
@@ -2697,6 +2698,8 @@ export function createApp(): express.Express {
     createAssistantRouter({
       gateway: llmGateway,
       proposalRepo,
+      // QA-2026-06-05 (AST-05): read-only query intents answer from data.
+      invoiceRepo,
       // §3B/3D/3E — assistant chat shares the operator-side resolver
       // shim with the voice-action-router so the same vertical context
       // reaches both text and voice classification paths.
@@ -2879,7 +2882,9 @@ export function createApp(): express.Express {
         error: err instanceof Error ? err.message : String(err),
       });
     });
-  }, 60 * 60_000));
+  }, Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) > 0 ? Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) : 60 * 60_000));
+  // QA-2026-06-05: interval is env-tunable (OVERDUE_SWEEP_INTERVAL_MS) so dev/QA
+  // can observe the sweep inside a test window; default stays hourly.
 
   const appointmentReminderLogger = createLogger({
     service: 'appointment-reminder-worker',

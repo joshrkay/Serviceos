@@ -1,4 +1,5 @@
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
+import { seedFreshJob } from './helpers/seed-entities';
 
 /**
  * PORT-01 — customer-facing public estimate approval via the view token.
@@ -29,10 +30,17 @@ async function readToken(
 }
 
 matrixTest('PORT-01', 'Public estimate approval via view token', async (h) => {
+  // QA-2026-06-05: own consenting customer/job — the shared fixture customer
+  // has sms_consent=false and no email, so EVERY channel was suppressed and
+  // no view token was ever minted ('send failed on all channels'). Dev uses
+  // the InMemoryDeliveryProvider, so a consenting customer sends fine. A
+  // fresh job also avoids the one-accepted-estimate-per-job conflict on the
+  // public approve step.
+  const { jobId } = await seedFreshJob(h, '01-seed', h.tenantA, { smsConsent: true, email: 'qa.port01@example.com' });
   const created = await h.api.call({
     method: 'POST',
     path: '/api/estimates',
-    body: { jobId: h.tenantA.jobId, lineItems: LINE, discountCents: 0, taxRateBps: 0 },
+    body: { jobId, lineItems: LINE, discountCents: 0, taxRateBps: 0 },
     token: h.tenantA.token,
     label: '01-create',
     expectStatus: 201,
@@ -47,8 +55,12 @@ matrixTest('PORT-01', 'Public estimate approval via view token', async (h) => {
     label: '01-send',
     expectStatus: [200, 202, 400, 503],
   });
+  // QA-2026-06-05: read the token from the DB — the captured response body
+  // is redaction-scrubbed (viewToken comes back literally '<redacted>').
+  const respToken = (send.response.body as { viewToken?: string }).viewToken;
   const token =
-    (send.response.body as { viewToken?: string }).viewToken ?? (await readToken(h, 'estimates', estimateId));
+    (await readToken(h, 'estimates', estimateId)) ??
+    (respToken && !respToken.includes('redacted') ? respToken : undefined);
 
   if (!token) {
     h.evidence.partial('No public view token (send service likely unwired on dev); cannot exercise the public estimate page.');
@@ -98,10 +110,11 @@ matrixTest('PORT-01', 'Public estimate approval via view token', async (h) => {
 });
 
 matrixTest('PORT-02', 'Public invoice view + checkout via view token', async (h) => {
+  const { jobId } = await seedFreshJob(h, '02-seed', h.tenantA, { smsConsent: true, email: 'qa.port02@example.com' });
   const created = await h.api.call({
     method: 'POST',
     path: '/api/invoices',
-    body: { jobId: h.tenantA.jobId, lineItems: LINE, discountCents: 0, taxRateBps: 0 },
+    body: { jobId, lineItems: LINE, discountCents: 0, taxRateBps: 0 },
     token: h.tenantA.token,
     label: '02-create',
     expectStatus: 201,
@@ -125,8 +138,10 @@ matrixTest('PORT-02', 'Public invoice view + checkout via view token', async (h)
     label: '02-send',
     expectStatus: [200, 202, 400, 503],
   });
+  const respToken = (send.response.body as { viewToken?: string }).viewToken;
   const token =
-    (send.response.body as { viewToken?: string }).viewToken ?? (await readToken(h, 'invoices', invoiceId));
+    (await readToken(h, 'invoices', invoiceId)) ??
+    (respToken && !respToken.includes('redacted') ? respToken : undefined);
 
   if (!token) {
     h.evidence.partial('No public view token (send service likely unwired on dev); cannot exercise the public invoice page.');

@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ServiceOS — You learned the trade. We'll run the business.</title>
+<style>
+  :root {
+    --navy: #0f1729;
+    --navy-2: #1a2744;
+    --navy-3: #243358;
+    --slate: #334155;
+    --amber: #f59e0b;
+    --amber-light: #fbbf24;
+    --amber-dim: #92400e;
+    --white: #f8fafc;
+    --muted: #94a3b8;
+    --text: #e2e8f0;
+    --border: #1e3a5f;
+    --green: #10b981;
+    --red: #ef4444;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--navy); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; }
+
+  /* NAV */
+  nav { display: flex; justify-content: space-between; align-items: center; padding: 20px 5%; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--navy); z-index: 100; }
+  .logo { font-size: 1.4rem; font-weight: 800; color: var(--white); letter-spacing: -0.5px; }
+  .logo span { color: var(--amber); }
+  nav a { color: var(--muted); text-decoration: none; margin-right: 24px; font-size: 0.9rem; }
+  nav a:hover { color: var(--white); }
+  .nav-cta { background: var(--amber); color: #000; padding: 10px 20px; border-radius: 6px; font-weight: 700; font-size: 0.9rem; text-decoration: none; }
+  .nav-cta:hover { background: var(--amber-light); color: #000; }
+
+  /* HERO */
+  .hero { padding: 100px 5% 80px; text-align: center; max-width: 900px; margin: 0 auto; }
+  .hero-badge { display: inline-block; background: rgba(245,158,11,0.15); border: 1px solid var(--amber-dim); color: var(--amber); padding: 6px 14px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; margin-bottom: 28px; }
+  .hero h1 { font-size: clamp(2.2rem, 5vw, 3.8rem); font-weight: 900; color: var(--white); line-height: 1.1; margin-bottom: 24px; letter-spacing: -1px; }
+  .hero h1 em { color: var(--amber); font-style: normal; }
+  .hero p { font-size: clamp(1rem, 2vw, 1.25rem); color: var(--muted); max-width: 640px; margin: 0 auto 40px; }
+  .hero-ctas { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+  .btn-primary { background: var(--amber); color: #000; padding: 16px 32px; border-radius: 8px; font-weight: 800; font-size: 1rem; text-decoration: none; transition: transform 0.15s, background 0.15s; }
+  .btn-primary:hover { background: var(--amber-light); transform: translateY(-1px); }
+  .btn-secondary { background: transparent; color: var(--text); padding: 16px 32px; border-radius: 8px; font-weight: 600; font-size: 1rem; text-decoration: none; border: 1px solid var(--border); }
+  .btn-secondary:hover { border-color: var(--muted); }
+
+  /* SMS MOCKUP */
+  .sms-preview { background: var(--navy-2); border: 1px solid var(--border); border-radius: 16px; max-width: 380px; margin: 60px auto 0; padding: 20px; text-align: left; }
+  .sms-header { font-size: 0.75rem; color: var(--muted); text-align: center; margin-bottom: 12px; }
+  .sms-bubble { background: #1c3a5e; border-radius: 14px 14px 14px 4px; padding: 12px 16px; font-size: 0.9rem; color: var(--text); line-height: 1.5; margin-bottom: 10px; }
+  .sms-bubble strong { color: var(--amber); }
+  .sms-actions { display: flex; gap: 8px; margin-top: 12px; }
+  .sms-btn { flex: 1; padding: 10px; border-radius: 8px; text-align: center; font-size: 0.8rem; font-weight: 700; cursor: pointer; }
+  .sms-approve { background: var(--green); color: #000; }
+  .sms-edit { background: var(--navy-3); color: var(--text); }
+  .sms-reject { background: rgba(239,68,68,0.2); color: var(--red); }
+
+  /* STATS BAR */
+  .stats { background: var(--navy-2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); padding: 40px 5%; }
+  .stats-grid { display: flex; justify-content: center; gap: 60px; flex-wrap: wrap; max-width: 800px; margin: 0 auto; text-align: center; }
+  .stat-num { font-size: 2.2rem; font-weight: 900; color: var(--amber); }
+  .stat-label { font-size: 0.85rem; color: var(--muted); margin-top: 4px; }
+
+  /* SECTION COMMONS */
+  section { padding: 80px 5%; }
+  .section-label { font-size: 0.75rem; color: var(--amber); font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 12px; }
+  h2 { font-size: clamp(1.8rem, 3.5vw, 2.8rem); font-weight: 800; color: var(--white); line-height: 1.2; letter-spacing: -0.5px; }
+  .section-sub { color: var(--muted); font-size: 1.05rem; margin-top: 12px; max-width: 520px; }
+
+  /* PROBLEM TABLE */
+  .problem { background: var(--navy); }
+  .problem-header { text-align: center; margin-bottom: 48px; }
+  .compare-table { width: 100%; max-width: 900px; margin: 0 auto; border-collapse: collapse; }
+  .compare-table th { padding: 16px 24px; font-size: 0.8rem; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
+  .compare-table th:first-child { color: var(--muted); text-align: left; width: 12%; }
+  .compare-table th:nth-child(2) { color: var(--red); background: rgba(239,68,68,0.06); border-radius: 8px 8px 0 0; }
+  .compare-table th:nth-child(3) { color: var(--green); background: rgba(16,185,129,0.06); border-radius: 8px 8px 0 0; }
+  .compare-table td { padding: 16px 24px; font-size: 0.9rem; vertical-align: top; border-top: 1px solid var(--border); }
+  .compare-table td:first-child { color: var(--amber); font-weight: 700; font-size: 0.85rem; }
+  .compare-table td:nth-child(2) { background: rgba(239,68,68,0.04); color: #fca5a5; }
+  .compare-table td:nth-child(3) { background: rgba(16,185,129,0.04); color: #6ee7b7; }
+
+  /* HOW IT WORKS */
+  .how { background: var(--navy-2); }
+  .steps { display: flex; gap: 32px; max-width: 900px; margin: 48px auto 0; flex-wrap: wrap; }
+  .step { flex: 1; min-width: 240px; position: relative; }
+  .step-num { width: 40px; height: 40px; background: var(--amber); color: #000; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 900; font-size: 1.1rem; margin-bottom: 16px; }
+  .step h3 { color: var(--white); font-size: 1.1rem; font-weight: 700; margin-bottom: 8px; }
+  .step p { color: var(--muted); font-size: 0.9rem; }
+  .step-connector { position: absolute; top: 20px; right: -16px; color: var(--border); font-size: 1.5rem; }
+
+  /* FEATURES */
+  .features { background: var(--navy); }
+  .features-header { text-align: center; margin-bottom: 56px; }
+  .features-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; max-width: 1000px; margin: 0 auto; }
+  .feature-card { background: var(--navy-2); border: 1px solid var(--border); border-radius: 12px; padding: 28px; transition: border-color 0.2s; }
+  .feature-card:hover { border-color: var(--amber-dim); }
+  .feature-icon { font-size: 1.8rem; margin-bottom: 16px; }
+  .feature-card h3 { color: var(--white); font-size: 1.05rem; font-weight: 700; margin-bottom: 8px; }
+  .feature-card p { color: var(--muted); font-size: 0.88rem; line-height: 1.6; }
+
+  /* PRICING */
+  .pricing { background: var(--navy-2); }
+  .pricing-header { text-align: center; margin-bottom: 56px; }
+  .pricing-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 24px; max-width: 900px; margin: 0 auto; }
+  .pricing-card { background: var(--navy); border: 1px solid var(--border); border-radius: 12px; padding: 32px; }
+  .pricing-card.featured { border-color: var(--amber); position: relative; }
+  .featured-badge { position: absolute; top: -12px; left: 50%; transform: translateX(-50%); background: var(--amber); color: #000; padding: 4px 16px; border-radius: 20px; font-size: 0.75rem; font-weight: 800; white-space: nowrap; }
+  .pricing-name { font-size: 0.8rem; font-weight: 700; color: var(--amber); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 8px; }
+  .pricing-price { font-size: 2.4rem; font-weight: 900; color: var(--white); line-height: 1; }
+  .pricing-price span { font-size: 1rem; font-weight: 400; color: var(--muted); }
+  .pricing-desc { color: var(--muted); font-size: 0.85rem; margin: 12px 0 24px; }
+  .pricing-features { list-style: none; margin-bottom: 28px; }
+  .pricing-features li { padding: 6px 0; font-size: 0.875rem; color: var(--text); display: flex; align-items: flex-start; gap: 8px; }
+  .pricing-features li::before { content: '✓'; color: var(--green); font-weight: 700; flex-shrink: 0; }
+  .pricing-cta { display: block; text-align: center; padding: 14px; border-radius: 8px; font-weight: 700; font-size: 0.9rem; text-decoration: none; background: var(--navy-2); color: var(--white); border: 1px solid var(--border); transition: all 0.15s; }
+  .pricing-card.featured .pricing-cta { background: var(--amber); color: #000; border: none; }
+  .pricing-cta:hover { transform: translateY(-1px); }
+
+  /* ROI CALLOUT */
+  .roi { background: linear-gradient(135deg, var(--amber-dim) 0%, #1a3a5f 100%); padding: 60px 5%; text-align: center; }
+  .roi h2 { color: var(--white); font-size: 1.8rem; font-weight: 800; margin-bottom: 16px; }
+  .roi p { color: rgba(255,255,255,0.8); font-size: 1rem; max-width: 600px; margin: 0 auto 32px; }
+  .roi-numbers { display: flex; gap: 40px; justify-content: center; flex-wrap: wrap; margin-bottom: 40px; }
+  .roi-num { text-align: center; }
+  .roi-num .num { font-size: 2rem; font-weight: 900; color: var(--amber); }
+  .roi-num .label { font-size: 0.8rem; color: rgba(255,255,255,0.7); }
+
+  /* FINAL CTA */
+  .final-cta { background: var(--navy); text-align: center; padding: 100px 5%; }
+  .final-cta h2 { font-size: clamp(1.8rem, 4vw, 3rem); font-weight: 900; color: var(--white); margin-bottom: 16px; }
+  .final-cta p { color: var(--muted); font-size: 1rem; margin-bottom: 40px; }
+  .trial-note { color: var(--muted); font-size: 0.8rem; margin-top: 16px; }
+
+  /* FOOTER */
+  footer { background: var(--navy-2); border-top: 1px solid var(--border); padding: 40px 5%; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }
+  footer .logo { font-size: 1.1rem; }
+  .footer-links { display: flex; gap: 24px; }
+  .footer-links a { color: var(--muted); text-decoration: none; font-size: 0.85rem; }
+  .footer-links a:hover { color: var(--white); }
+  .footer-copy { color: var(--muted); font-size: 0.8rem; }
+
+  @media (max-width: 600px) {
+    nav a { display: none; }
+    .stats-grid { gap: 30px; }
+    .compare-table { font-size: 0.82rem; }
+    .compare-table td, .compare-table th { padding: 12px 14px; }
+    .step-connector { display: none; }
+    footer { flex-direction: column; text-align: center; }
+  }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="logo">Service<span>OS</span></div>
+  <div>
+    <a href="#how">How it works</a>
+    <a href="#features">Features</a>
+    <a href="#pricing">Pricing</a>
+    <a href="#" class="nav-cta">Start free trial</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<div class="hero">
+  <div class="hero-badge">🔧 For HVAC & Plumbing Owner-Operators</div>
+  <h1>You learned the trade.<br><em>We'll run the business.</em></h1>
+  <p>AI answers your phone, books your jobs, sends your estimates, and chases your invoices. You approve what matters in 30 seconds a day. Built for the shop with 2&nbsp;trucks and no&nbsp;office.</p>
+  <div class="hero-ctas">
+    <a href="#" class="btn-primary">Start free 14-day trial →</a>
+    <a href="#" class="btn-secondary">▶ Watch 90-second demo</a>
+  </div>
+
+  <div class="sms-preview">
+    <div class="sms-header">M&R Mechanical • 7:14 AM</div>
+    <div class="sms-bubble">
+      <strong>Good morning, Mike.</strong> 6 calls overnight.<br><br>
+      ✅ 4 booked (Tue &amp; Wed)<br>
+      🤔 1 needs you — Mrs. Alvarez, no AC, 2 kids, your customer since May. Reply <strong>CALL</strong> to patch her through.<br>
+      ✅ 1 out-of-area, declined politely.<br><br>
+      3 estimates in your queue. 2 look right — tap to approve.<br>
+      One has a part I wasn't sure about — flagged for your review.
+    </div>
+    <div class="sms-actions">
+      <div class="sms-btn sms-approve">Approve all ✓</div>
+      <div class="sms-btn sms-edit">Edit one ✏️</div>
+      <div class="sms-btn sms-reject">Skip</div>
+    </div>
+  </div>
+</div>
+
+<!-- STATS -->
+<div class="stats">
+  <div class="stats-grid">
+    <div>
+      <div class="stat-num">47,000+</div>
+      <div class="stat-label">Jobs booked by AI</div>
+    </div>
+    <div>
+      <div class="stat-num">$6.2M</div>
+      <div class="stat-label">In estimates sent</div>
+    </div>
+    <div>
+      <div class="stat-num">14 hrs</div>
+      <div class="stat-label">Returned per week, per owner</div>
+    </div>
+    <div>
+      <div class="stat-num">94%</div>
+      <div class="stat-label">Customer booking rate</div>
+    </div>
+  </div>
+</div>
+
+<!-- PROBLEM -->
+<section class="problem" id="problem">
+  <div class="problem-header">
+    <div class="section-label">The 10pm problem</div>
+    <h2>Mike's Tuesday.<br>Without us vs. with us.</h2>
+    <p class="section-sub" style="margin: 12px auto 0; text-align:center;">Real owner. Real day. The only thing that changes is the back office.</p>
+  </div>
+  <table class="compare-table">
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>❌ Without ServiceOS</th>
+        <th>✅ With ServiceOS</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>5:45am</td>
+        <td>6 missed calls overnight. 3 from the same number — job probably lost to a competitor. Stomach drops.</td>
+        <td>One text: "7 calls overnight. 4 booked. 1 needs you — Mrs. Alvarez, no AC, 2 small kids." Mike taps Yes to call her.</td>
+      </tr>
+      <tr>
+        <td>6:15am</td>
+        <td>Typing apology texts one-handed while making lunches. Writing an estimate from memory. Gets the labor rate wrong.</td>
+        <td>3 drafted estimates waiting, each with a confidence note. Two look right — taps Approve & Send. Third has a flag: "I used last year's rate." He updates it in 10 seconds.</td>
+      </tr>
+      <tr>
+        <td>11am</td>
+        <td>9 missed calls. Eats a gas station burrito listening to voicemails. Two callers already booked someone else.</td>
+        <td>Eats a real lunch. Opens ServiceOS: "3 jobs booked this morning. 2 estimates sent. $4,200 in approved invoices. 1 question for you."</td>
+      </tr>
+      <tr>
+        <td>2pm</td>
+        <td>Carlos calls: "Customer says we quoted $400 but the invoice is $650." Mike can't find the original quote. Eats the $250.</td>
+        <td>Mike asks ServiceOS: "What did we quote the Patel job?" Reply in 4 seconds with the original scope. Problem solved before it becomes one.</td>
+      </tr>
+      <tr>
+        <td>7:30pm</td>
+        <td>Kids in bed. Opens laptop. 3 estimates, 4 invoices, 2 unpaid follow-ups, tomorrow's schedule. The second shift begins.</td>
+        <td>Kids in bed. End-of-day digest: "4 jobs done, $3,840 invoiced, $2,100 already paid. 3 follow-ups sent — 1 paid, 1 promised, 1 silent. Nothing else needs your approval."</td>
+      </tr>
+      <tr>
+        <td>10:30pm</td>
+        <td>Closes laptop. Lies awake thinking about the call he didn't return.</td>
+        <td>In bed at 9:45 with his wife.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- HOW IT WORKS -->
+<section class="how" id="how">
+  <div class="section-label" style="text-align:center">How it works</div>
+  <h2 style="text-align:center">Three steps. No dashboard required.</h2>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <h3>We answer the phone</h3>
+      <p>AI picks up every call in your shop's voice, books jobs, triages urgency, and flags anything that needs you — all before you finish the current job.</p>
+      <div class="step-connector">→</div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <h3>You approve in 30 seconds</h3>
+      <p>Every proposal — estimate, invoice, reschedule, review response — arrives as an SMS. Approve, edit with a voice note, or reject. That's the whole interface.</p>
+      <div class="step-connector">→</div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <h3>The digest tells the truth</h3>
+      <p>Every night at 7pm: what got done, what's owed, what the AI wasn't sure about. Includes "what I learned today." No other AI does this.</p>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section class="features" id="features">
+  <div class="features-header">
+    <div class="section-label">What it does</div>
+    <h2>The full back office.<br>Not just an answering service.</h2>
+  </div>
+  <div class="features-grid">
+    <div class="feature-card">
+      <div class="feature-icon">📞</div>
+      <h3>Answers Every Call</h3>
+      <p>Never miss a job because you were under a condenser unit. AI answers in your shop's voice, books the job, and knows when to call you instead.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">📋</div>
+      <h3>Builds Your Estimates</h3>
+      <p>Pulls from the call recording, your customer's history, and your price book. Flags when it's uncertain on a part or price — before the quote goes out.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">💵</div>
+      <h3>Chases Every Invoice</h3>
+      <p>Friendly, on-brand follow-ups with Stripe payment links. One-click payment for the customer. No awkward calls from you.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🌙</div>
+      <h3>The Honest Digest</h3>
+      <p>Every night at 7pm: what got done, what's owed, and what the AI wasn't sure about. The only AI back office that tells you what it got wrong.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🔧</div>
+      <h3>Knows Your Vertical</h3>
+      <p>HVAC: equipment history, seasonal load, model numbers. Plumbing: photo-to-quote, severity triage ("active leak > frozen no leak"). Not generic AI.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">⚡</div>
+      <h3>One-Tap Approvals</h3>
+      <p>Approve a $1,400 estimate from your truck. 30 seconds. Edit with a voice note if needed. No laptop, no login, no dashboard.</p>
+    </div>
+  </div>
+</section>
+
+<!-- PRICING -->
+<section class="pricing" id="pricing">
+  <div class="pricing-header">
+    <div class="section-label">Pricing</div>
+    <h2>Priced for the trade, not for tech companies.</h2>
+    <p class="section-sub" style="text-align:center; margin: 12px auto 0;">Mike recovers 15 hours/week at $100/hr = $1,500/week. The Shop plan costs $499/month. That's a 12× return.</p>
+  </div>
+  <div class="pricing-grid">
+    <div class="pricing-card">
+      <div class="pricing-name">Solo</div>
+      <div class="pricing-price">$299<span>/mo</span></div>
+      <div class="pricing-desc">One truck. No employees. Full back office.</div>
+      <ul class="pricing-features">
+        <li>AI call answering (unlimited)</li>
+        <li>Estimate drafting + approval</li>
+        <li>Invoice + payment chasing</li>
+        <li>End-of-day digest</li>
+        <li>1 vertical pack (HVAC or plumbing)</li>
+        <li>SMS approvals</li>
+      </ul>
+      <a href="#" class="pricing-cta">Start free trial</a>
+    </div>
+    <div class="pricing-card featured">
+      <div class="featured-badge">Most popular</div>
+      <div class="pricing-name">Shop</div>
+      <div class="pricing-price">$499<span>/mo</span></div>
+      <div class="pricing-desc">2–3 trucks. 1–2 techs. Built for Mike Rivera.</div>
+      <ul class="pricing-features">
+        <li>Everything in Solo</li>
+        <li>Up to 3 technicians</li>
+        <li>Multi-tech scheduling + dispatch</li>
+        <li>B2B account recognition</li>
+        <li>Both vertical packs</li>
+        <li>Google review monitoring</li>
+        <li>Supervisor AI review pass</li>
+      </ul>
+      <a href="#" class="pricing-cta">Start free trial</a>
+    </div>
+    <div class="pricing-card">
+      <div class="pricing-name">Pro</div>
+      <div class="pricing-price">$799<span>/mo</span></div>
+      <div class="pricing-desc">4–6 trucks. Growing fast. High volume.</div>
+      <ul class="pricing-features">
+        <li>Everything in Shop</li>
+        <li>Up to 6 technicians</li>
+        <li>Priority AI capacity</li>
+        <li>Advanced reports</li>
+        <li>Dedicated onboarding</li>
+        <li>SLA support</li>
+      </ul>
+      <a href="#" class="pricing-cta">Start free trial</a>
+    </div>
+  </div>
+  <p style="text-align:center; color: var(--muted); font-size:0.85rem; margin-top:32px;">14-day free trial. No credit card required. Concierge onboarding included — we set it up with you.</p>
+</section>
+
+<!-- ROI -->
+<div class="roi">
+  <h2>The math is simple.</h2>
+  <p>Mike loses 15–20 hours a week to admin. At $100/hr of billable potential, that's $1,500–$2,000 a week walking out the door.</p>
+  <div class="roi-numbers">
+    <div class="roi-num"><div class="num">15 hrs</div><div class="label">Admin time returned per week</div></div>
+    <div class="roi-num"><div class="num">$1,500</div><div class="label">Weekly value recovered</div></div>
+    <div class="roi-num"><div class="num">÷ $499</div><div class="label">Monthly cost (Shop plan)</div></div>
+    <div class="roi-num"><div class="num">= 12×</div><div class="label">Return on investment</div></div>
+  </div>
+  <a href="#" class="btn-primary">Start your free trial →</a>
+</div>
+
+<!-- FINAL CTA -->
+<section class="final-cta">
+  <h2>Ready to stop working two jobs?</h2>
+  <p>You didn't get into the trades to answer emails at 10pm.<br>14-day free trial. We set it up with you. Cancel anytime.</p>
+  <a href="#" class="btn-primary" style="font-size:1.1rem; padding:18px 40px;">Start free trial — no card required →</a>
+  <p class="trial-note">Questions? Text us at (555) 000-0000 — we'll respond like our product does.</p>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="logo">Service<span>OS</span></div>
+  <div class="footer-links">
+    <a href="#">Privacy</a>
+    <a href="#">Terms</a>
+    <a href="#">HVAC</a>
+    <a href="#">Plumbing</a>
+    <a href="#">Support</a>
+  </div>
+  <div class="footer-copy">© 2026 ServiceOS. Built for the trade.</div>
+</footer>
+
+</body>
+</html>

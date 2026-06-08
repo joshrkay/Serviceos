@@ -1,4 +1,5 @@
 import { Invoice, InvoiceRepository } from './invoice';
+import type { PaymentLinkProvider } from '../payments/payment-link-provider';
 import { PaymentRepository } from './payment';
 import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
@@ -63,6 +64,14 @@ export interface ConnectAccountResolver {
 }
 
 export interface PublicInvoiceServiceDeps {
+  /**
+   * QA-2026-06-05 (PORT-02): dev-grade fallback. When Stripe isn't
+   * configured (no STRIPE_SECRET_KEY) the checkout leg used to 400 —
+   * route through the PaymentLinkProvider abstraction instead, which is
+   * the mock on dev and Stripe-backed in prod. The direct Stripe +
+   * Connect-account path below remains primary whenever apiKey exists.
+   */
+  paymentLinkProvider?: PaymentLinkProvider;
   invoiceRepo: InvoiceRepository;
   jobRepo: JobRepository;
   customerRepo: CustomerRepository;
@@ -126,7 +135,7 @@ export class PublicInvoiceService {
   async getOrCreateCheckoutUrl(token: string): Promise<{ url: string }> {
     const invoice = await this.lookupByToken(token);
 
-    if (!this.deps.stripeConfig?.apiKey) {
+    if (!this.deps.stripeConfig?.apiKey && !this.deps.paymentLinkProvider) {
       throw new ValidationError('Payment processing is not configured');
     }
 
@@ -144,6 +153,23 @@ export class PublicInvoiceService {
     // Return existing link if already created.
     if (invoice.stripePaymentLinkUrl) {
       return { url: invoice.stripePaymentLinkUrl };
+    }
+
+    // Provider fallback (no direct Stripe key): mint via the abstraction —
+    // mock URLs on dev, Stripe-backed where the provider is configured.
+    if (!this.deps.stripeConfig?.apiKey && this.deps.paymentLinkProvider) {
+      const link = await this.deps.paymentLinkProvider.generateLink({
+        tenantId: invoice.tenantId,
+        invoiceId: invoice.id,
+        amountCents: invoice.amountDueCents,
+        currency: 'usd',
+        description: `Invoice ${invoice.invoiceNumber}`,
+      });
+      await this.deps.invoiceRepo.update(invoice.tenantId, invoice.id, {
+        stripePaymentLinkUrl: link.linkUrl,
+        updatedAt: new Date(),
+      });
+      return { url: link.linkUrl };
     }
 
     const job = await this.deps.jobRepo.findById(invoice.tenantId, invoice.jobId);
@@ -171,7 +197,7 @@ export class PublicInvoiceService {
     const useConnect = connect && connect.chargesEnabled;
 
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.deps.stripeConfig.apiKey}`,
+      Authorization: `Bearer ${this.deps.stripeConfig!.apiKey}`,
       'Content-Type': 'application/x-www-form-urlencoded',
     };
     if (useConnect && connect) {
