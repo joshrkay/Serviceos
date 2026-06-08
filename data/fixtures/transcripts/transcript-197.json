@@ -1,15 +1,15 @@
 {
   "id": "transcript-197",
   "type": "inbound_call",
-  "duration_seconds": 165,
+  "duration_seconds": 150,
   "service_type": "plumbing",
-  "transcript": "Customer: Hi, this is Mark Henderson. I'm calling because my toilet is making a gurgling sound. Dispatcher: Hi Mark, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Moen, an older one, 15 years. Dispatcher: Okay, and what's the service address? Customer: 9 Lakeview Drive. Dispatcher: Got it. We can send a technician out Thursday morning. Does that work? Customer: Yes, that would be great. Thank you.",
+  "transcript": "Customer: Hi, this is Helen Park. I'm calling because my faucet is leaking. Dispatcher: Hi Helen, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Rinnai, maybe 10 years old. Dispatcher: Okay, and what's the service address? Customer: 101 Pine Street. Dispatcher: Got it. We can send a technician out next Monday at 9. Does that work? Customer: Yes, that would be great. Thank you.",
   "expected_entities": {
-    "customer_name": "Mark Henderson",
-    "issue": "toilet is making a gurgling sound",
-    "equipment": "Moen toilet, an older one, 15 years",
-    "address": "9 Lakeview Drive",
-    "appointment_window": "Thursday morning"
+    "customer_name": "Helen Park",
+    "issue": "faucet is leaking",
+    "equipment": "Rinnai faucet, maybe 10 years old",
+    "address": "101 Pine Street",
+    "appointment_window": "next Monday at 9"
   },
   "source": "synthetic"
 }

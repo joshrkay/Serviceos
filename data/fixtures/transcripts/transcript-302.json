@@ -1,13 +1,13 @@
 {
   "id": "transcript-302",
   "type": "inbound_call",
-  "duration_seconds": 85,
+  "duration_seconds": 65,
   "service_type": "plumbing",
-  "transcript": "Customer: Hi, this is Linda Park. I wanted to check on the status of my shower valve job and what I owe. Dispatcher: Sure Linda, let me pull up your account. Customer: Thank you. Dispatcher: Your shower valve job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
+  "transcript": "Customer: Hi, this is Robert Klein. I wanted to check on the status of my water heater job and what I owe. Dispatcher: Sure Robert, let me pull up your account. Customer: Thank you. Dispatcher: Your water heater job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
   "expected_entities": {
-    "customer_name": "Linda Park",
-    "issue": "status check on shower valve job",
-    "equipment": "shower valve",
+    "customer_name": "Robert Klein",
+    "issue": "status check on water heater job",
+    "equipment": "water heater",
     "address": "",
     "appointment_window": ""
   },

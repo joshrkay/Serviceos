@@ -22,14 +22,14 @@ in this sandbox), the tooling is delivered ready-to-run and the status is marked
 
 | Target | Status | Evidence |
 |---|---|---|
-| Transcripts → 300+ | ✅ **met** | 305 files; `generate-transcripts.ts` |
+| Transcripts → 300+ | ✅ **met** | 305 distinct files (PRNG-varied values, 0 duplicate bodies); `generate-transcripts.ts` |
 | Utterances → 3,000+ | ✅ **met** | 3,034 rows; every intent ≥ 50; 20.7% human-reviewed; 0 dup |
 | Vocabulary ≥ 1,500 terms | ✅ **met** | 1,610 unique surface forms across 4 YAML files |
 | Vocab coverage ≥ 95% | ✅ **met** | 100% of transcript domain nouns covered |
 | 36/41 behaviors validated + gaps | ✅ **met** | `behaviors.yaml` (code-synced) + `behaviors-gap-analysis.md`; each behavior has ≥ 74 utterances (> the 25/50 bars) |
 | Reddit: deduped + PII-scrubbed + embedded + searchable | ✅ **met (offline) / gated (scale)** | PII zero-leakage on 100 fixtures; offline embed + 10-query search self-test; 50k real ingest is credential-gated |
 | Intent accuracy ≥ 92% | ⏳ **gated (live)** | offline rule baseline = **74.3%**; ≥92% target enforced only in `--live` (needs key) |
-| Slot F1 ≥ 0.88 | ⏳ **gated (live)** | offline heuristic baseline = **87.5% micro-F1**; ≥0.88 enforced in `--live` |
+| Slot F1 ≥ 0.88 | ⏳ **gated (live)** | offline heuristic baseline = **88.5% micro-F1**; ≥0.88 enforced in `--live` |
 
 ## What runs in this sandbox
 
@@ -42,7 +42,7 @@ npx tsx scripts/data-pipeline/validate-utterances.ts   # 3,034 / ≥50 each / 20
 npx tsx scripts/data-pipeline/dedup-utterances.ts      # 0 exact + 0 near ✅
 # Eval harness (offline baselines)
 npx tsx packages/voice-eval/run-intent-eval.ts         # 74.3% acc (floor 50%) ✅
-npx tsx packages/voice-eval/run-slot-eval.ts           # 87.5% micro-F1 (floor 50%) ✅
+npx tsx packages/voice-eval/run-slot-eval.ts           # 88.5% micro-F1 (floor 50%) ✅
 # Reddit pipeline (offline)
 cd serviceos_training && python3 -m pytest -q          # 26 passed (incl. PII + search) ✅
 # Production build untouched
@@ -81,6 +81,7 @@ out-of-scope with not-understood.
   marked reviewed.
 - Offline near-dup uses a local char-ngram cosine (lexical), not a semantic
   embedding; the real `cosine > 0.95` semantic check uses text-embedding-3-small
-  when keyed.
+  when keyed. The lexical check compares every pair globally (no prefix bucket),
+  so opener/closer-only variants cannot slip past the `cosine > 0.95` invariant.
 - Offline eval numbers come from non-ML rule/heuristic baselines; the ≥92% /
   ≥0.88 goals are LIVE-mode targets and are NOT claimed as achieved.

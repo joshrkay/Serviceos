@@ -3,12 +3,12 @@
   "type": "inbound_call",
   "duration_seconds": 60,
   "service_type": "hvac",
-  "transcript": "Customer: This is an emergency, my AC unit won't turn on and it's getting bad! This is Linda Park at 640 Willow Way. Dispatcher: Okay Linda, stay calm. I'm getting a technician dispatched to 640 Willow Way right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "transcript": "Customer: This is an emergency, my thermostat is leaking water and it's getting bad! This is Helen Park at 88 Maple Ave. Dispatcher: Okay Helen, stay calm. I'm getting a technician dispatched to 88 Maple Ave right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
   "expected_entities": {
-    "customer_name": "Linda Park",
-    "issue": "emergency: AC unit won't turn on",
-    "equipment": "AC unit",
-    "address": "640 Willow Way",
+    "customer_name": "Helen Park",
+    "issue": "emergency: thermostat is leaking water",
+    "equipment": "thermostat",
+    "address": "88 Maple Ave",
     "appointment_window": "immediate dispatch"
   },
   "source": "synthetic"

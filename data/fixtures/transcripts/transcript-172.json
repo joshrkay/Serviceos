@@ -1,15 +1,15 @@
 {
   "id": "transcript-172",
   "type": "inbound_call",
-  "duration_seconds": 150,
+  "duration_seconds": 240,
   "service_type": "hvac",
-  "transcript": "Customer: Hi, this is Robert Klein. I'm calling because my AC unit is making a loud noise. Dispatcher: Hi Robert, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Carrier, an older one, 15 years. Dispatcher: Okay, and what's the service address? Customer: 88 Maple Ave. Dispatcher: Got it. We can send a technician out next Monday at 9. Does that work? Customer: Yes, that would be great. Thank you.",
+  "transcript": "Customer: Hi, this is David Carter. I'm calling because my mini split is blowing cold air instead of heat. Dispatcher: Hi David, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a York, an older one, 15 years. Dispatcher: Okay, and what's the service address? Customer: 22 Oak Court. Dispatcher: Got it. We can send a technician out this afternoon between 2 and 4. Does that work? Customer: Yes, that would be great. Thank you.",
   "expected_entities": {
-    "customer_name": "Robert Klein",
-    "issue": "AC unit is making a loud noise",
-    "equipment": "Carrier AC unit, an older one, 15 years",
-    "address": "88 Maple Ave",
-    "appointment_window": "next Monday at 9"
+    "customer_name": "David Carter",
+    "issue": "mini split is blowing cold air instead of heat",
+    "equipment": "York mini split, an older one, 15 years",
+    "address": "22 Oak Court",
+    "appointment_window": "this afternoon between 2 and 4"
   },
   "source": "synthetic"
 }

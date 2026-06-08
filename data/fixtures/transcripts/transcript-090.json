@@ -3,13 +3,13 @@
   "type": "inbound_call",
   "duration_seconds": 240,
   "service_type": "electrical",
-  "transcript": "Customer: Hi, this is Carlos Mendez. I'm calling because my GFCI outlet is hot to the touch. Dispatcher: Hi Carlos, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Siemens, maybe 10 years old. Dispatcher: Okay, and what's the service address? Customer: 314 Birch Lane. Dispatcher: Got it. We can send a technician out today if possible. Does that work? Customer: Yes, that would be great. Thank you.",
+  "transcript": "Customer: Hi, this is Mark Henderson. I'm calling because my sub-panel is flickering. Dispatcher: Hi Mark, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Eaton, about 5 years old. Dispatcher: Okay, and what's the service address? Customer: 22 Oak Court. Dispatcher: Got it. We can send a technician out Thursday morning. Does that work? Customer: Yes, that would be great. Thank you.",
   "expected_entities": {
-    "customer_name": "Carlos Mendez",
-    "issue": "GFCI outlet is hot to the touch",
-    "equipment": "Siemens GFCI outlet, maybe 10 years old",
-    "address": "314 Birch Lane",
-    "appointment_window": "today if possible"
+    "customer_name": "Mark Henderson",
+    "issue": "sub-panel is flickering",
+    "equipment": "Eaton sub-panel, about 5 years old",
+    "address": "22 Oak Court",
+    "appointment_window": "Thursday morning"
   },
   "source": "synthetic"
 }

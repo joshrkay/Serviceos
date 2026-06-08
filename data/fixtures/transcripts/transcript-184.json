@@ -1,15 +1,15 @@
 {
   "id": "transcript-184",
   "type": "inbound_call",
-  "duration_seconds": 210,
+  "duration_seconds": 240,
   "service_type": "hvac",
-  "transcript": "Customer: Hi, this is Sarah Johnson. I'm calling because my condenser won't turn on. Dispatcher: Hi Sarah, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Carrier, about 5 years old. Dispatcher: Okay, and what's the service address? Customer: 88 Maple Ave. Dispatcher: Got it. We can send a technician out first thing tomorrow. Does that work? Customer: Yes, that would be great. Thank you.",
+  "transcript": "Customer: Hi, this is James Miller. I'm calling because my heat pump is blowing cold air instead of heat. Dispatcher: Hi James, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Rheem, an older one, 15 years. Dispatcher: Okay, and what's the service address? Customer: 1500 Sunset Blvd. Dispatcher: Got it. We can send a technician out tomorrow between 8 and 10 AM. Does that work? Customer: Yes, that would be great. Thank you.",
   "expected_entities": {
-    "customer_name": "Sarah Johnson",
-    "issue": "condenser won't turn on",
-    "equipment": "Carrier condenser, about 5 years old",
-    "address": "88 Maple Ave",
-    "appointment_window": "first thing tomorrow"
+    "customer_name": "James Miller",
+    "issue": "heat pump is blowing cold air instead of heat",
+    "equipment": "Rheem heat pump, an older one, 15 years",
+    "address": "1500 Sunset Blvd",
+    "appointment_window": "tomorrow between 8 and 10 AM"
   },
   "source": "synthetic"
 }

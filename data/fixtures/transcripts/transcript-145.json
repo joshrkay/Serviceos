@@ -1,13 +1,13 @@
 {
   "id": "transcript-145",
   "type": "inbound_call",
-  "duration_seconds": 65,
+  "duration_seconds": 75,
   "service_type": "hvac",
-  "transcript": "Customer: Hi, this is Susan Diaz. I wanted to check on the status of my AC unit job and what I owe. Dispatcher: Sure Susan, let me pull up your account. Customer: Thank you. Dispatcher: Your AC unit job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
+  "transcript": "Customer: Hi, this is Mark Henderson. I wanted to check on the status of my air handler job and what I owe. Dispatcher: Sure Mark, let me pull up your account. Customer: Thank you. Dispatcher: Your air handler job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
   "expected_entities": {
-    "customer_name": "Susan Diaz",
-    "issue": "status check on AC unit job",
-    "equipment": "AC unit",
+    "customer_name": "Mark Henderson",
+    "issue": "status check on air handler job",
+    "equipment": "air handler",
     "address": "",
     "appointment_window": ""
   },

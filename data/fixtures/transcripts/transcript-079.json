@@ -1,14 +1,14 @@
 {
   "id": "transcript-079",
   "type": "inbound_call",
-  "duration_seconds": 60,
+  "duration_seconds": 100,
   "service_type": "hvac",
-  "transcript": "Customer: This is an emergency, my condenser is making a loud noise and it's getting bad! This is Linda Park at 640 Willow Way. Dispatcher: Okay Linda, stay calm. I'm getting a technician dispatched to 640 Willow Way right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "transcript": "Customer: This is an emergency, my air handler keeps short cycling and it's getting bad! This is Angela Reed at 1500 Sunset Blvd. Dispatcher: Okay Angela, stay calm. I'm getting a technician dispatched to 1500 Sunset Blvd right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
   "expected_entities": {
-    "customer_name": "Linda Park",
-    "issue": "emergency: condenser is making a loud noise",
-    "equipment": "condenser",
-    "address": "640 Willow Way",
+    "customer_name": "Angela Reed",
+    "issue": "emergency: air handler keeps short cycling",
+    "equipment": "air handler",
+    "address": "1500 Sunset Blvd",
     "appointment_window": "immediate dispatch"
   },
   "source": "synthetic"

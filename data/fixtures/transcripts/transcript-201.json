@@ -1,14 +1,14 @@
 {
   "id": "transcript-201",
   "type": "inbound_call",
-  "duration_seconds": 80,
+  "duration_seconds": 100,
   "service_type": "electrical",
-  "transcript": "Customer: This is an emergency, my GFCI outlet is buzzing and it's getting bad! This is Angela Reed at 22 Oak Court. Dispatcher: Okay Angela, stay calm. I'm getting a technician dispatched to 22 Oak Court right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "transcript": "Customer: This is an emergency, my GFCI outlet is not working and it's getting bad! This is Tom Bradley at 101 Pine Street. Dispatcher: Okay Tom, stay calm. I'm getting a technician dispatched to 101 Pine Street right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
   "expected_entities": {
-    "customer_name": "Angela Reed",
-    "issue": "emergency: GFCI outlet is buzzing",
+    "customer_name": "Tom Bradley",
+    "issue": "emergency: GFCI outlet is not working",
     "equipment": "GFCI outlet",
-    "address": "22 Oak Court",
+    "address": "101 Pine Street",
     "appointment_window": "immediate dispatch"
   },
   "source": "synthetic"

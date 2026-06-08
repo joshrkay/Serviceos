@@ -1,15 +1,15 @@
 {
   "id": "transcript-066",
   "type": "inbound_call",
-  "duration_seconds": 240,
+  "duration_seconds": 195,
   "service_type": "electrical",
-  "transcript": "Customer: Hi, this is Maria Lopez. I'm calling because my sub-panel is buzzing. Dispatcher: Hi Maria, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Generac, pretty new, 2 years. Dispatcher: Okay, and what's the service address? Customer: 314 Birch Lane. Dispatcher: Got it. We can send a technician out today if possible. Does that work? Customer: Yes, that would be great. Thank you.",
+  "transcript": "Customer: Hi, this is Susan Diaz. I'm calling because my GFCI outlet is flickering. Dispatcher: Hi Susan, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Leviton, about 5 years old. Dispatcher: Okay, and what's the service address? Customer: 9 Lakeview Drive. Dispatcher: Got it. We can send a technician out tomorrow between 8 and 10 AM. Does that work? Customer: Yes, that would be great. Thank you.",
   "expected_entities": {
-    "customer_name": "Maria Lopez",
-    "issue": "sub-panel is buzzing",
-    "equipment": "Generac sub-panel, pretty new, 2 years",
-    "address": "314 Birch Lane",
-    "appointment_window": "today if possible"
+    "customer_name": "Susan Diaz",
+    "issue": "GFCI outlet is flickering",
+    "equipment": "Leviton GFCI outlet, about 5 years old",
+    "address": "9 Lakeview Drive",
+    "appointment_window": "tomorrow between 8 and 10 AM"
   },
   "source": "synthetic"
 }

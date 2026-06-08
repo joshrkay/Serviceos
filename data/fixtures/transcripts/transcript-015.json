@@ -1,13 +1,13 @@
 {
   "id": "transcript-015",
   "type": "inbound_call",
-  "duration_seconds": 65,
+  "duration_seconds": 55,
   "service_type": "electrical",
-  "transcript": "Customer: Hi, this is Maria Lopez. I wanted to check on the status of my electrical panel job and what I owe. Dispatcher: Sure Maria, let me pull up your account. Customer: Thank you. Dispatcher: Your electrical panel job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
+  "transcript": "Customer: Hi, this is Mark Henderson. I wanted to check on the status of my sub-panel job and what I owe. Dispatcher: Sure Mark, let me pull up your account. Customer: Thank you. Dispatcher: Your sub-panel job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
   "expected_entities": {
-    "customer_name": "Maria Lopez",
-    "issue": "status check on electrical panel job",
-    "equipment": "electrical panel",
+    "customer_name": "Mark Henderson",
+    "issue": "status check on sub-panel job",
+    "equipment": "sub-panel",
     "address": "",
     "appointment_window": ""
   },

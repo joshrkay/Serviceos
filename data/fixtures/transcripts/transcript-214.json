@@ -3,11 +3,11 @@
   "type": "inbound_call",
   "duration_seconds": 70,
   "service_type": "hvac",
-  "transcript": "Customer: Hi, this is Maria Lopez. I need to reschedule my appointment for the condenser. Dispatcher: No problem Maria. When works better for you? Customer: Could we do next Monday at 9? Dispatcher: That works. I've moved your appointment to next Monday at 9. Customer: Perfect, thanks.",
+  "transcript": "Customer: Hi, this is Helen Park. I need to reschedule my appointment for the heat pump. Dispatcher: No problem Helen. When works better for you? Customer: Could we do next Monday at 9? Dispatcher: That works. I've moved your appointment to next Monday at 9. Customer: Perfect, thanks.",
   "expected_entities": {
-    "customer_name": "Maria Lopez",
-    "issue": "reschedule condenser appointment",
-    "equipment": "condenser",
+    "customer_name": "Helen Park",
+    "issue": "reschedule heat pump appointment",
+    "equipment": "heat pump",
     "address": "",
     "appointment_window": "next Monday at 9"
   },

@@ -1,13 +1,13 @@
 {
   "id": "transcript-020",
   "type": "inbound_call",
-  "duration_seconds": 70,
+  "duration_seconds": 100,
   "service_type": "plumbing",
-  "transcript": "Customer: This is an emergency, my toilet is clogged and it's getting bad! This is David Carter at 88 Maple Ave. Dispatcher: Okay David, stay calm. I'm getting a technician dispatched to 88 Maple Ave right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "transcript": "Customer: This is an emergency, my main sewer line is leaking and it's getting bad! This is Maria Lopez at 88 Maple Ave. Dispatcher: Okay Maria, stay calm. I'm getting a technician dispatched to 88 Maple Ave right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
   "expected_entities": {
-    "customer_name": "David Carter",
-    "issue": "emergency: toilet is clogged",
-    "equipment": "toilet",
+    "customer_name": "Maria Lopez",
+    "issue": "emergency: main sewer line is leaking",
+    "equipment": "main sewer line",
     "address": "88 Maple Ave",
     "appointment_window": "immediate dispatch"
   },

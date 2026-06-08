@@ -1,14 +1,14 @@
 {
   "id": "transcript-153",
   "type": "inbound_call",
-  "duration_seconds": 100,
+  "duration_seconds": 70,
   "service_type": "electrical",
-  "transcript": "Customer: This is an emergency, my light fixture keeps tripping the breaker and it's getting bad! This is Robert Klein at 22 Oak Court. Dispatcher: Okay Robert, stay calm. I'm getting a technician dispatched to 22 Oak Court right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "transcript": "Customer: This is an emergency, my outlet is flickering and it's getting bad! This is Robert Klein at 7 River Road. Dispatcher: Okay Robert, stay calm. I'm getting a technician dispatched to 7 River Road right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
   "expected_entities": {
     "customer_name": "Robert Klein",
-    "issue": "emergency: light fixture keeps tripping the breaker",
-    "equipment": "light fixture",
-    "address": "22 Oak Court",
+    "issue": "emergency: outlet is flickering",
+    "equipment": "outlet",
+    "address": "7 River Road",
     "appointment_window": "immediate dispatch"
   },
   "source": "synthetic"

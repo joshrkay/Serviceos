@@ -3,11 +3,11 @@
   "type": "inbound_call",
   "duration_seconds": 65,
   "service_type": "hvac",
-  "transcript": "Customer: Hi, this is Susan Diaz. I wanted to check on the status of my AC unit job and what I owe. Dispatcher: Sure Susan, let me pull up your account. Customer: Thank you. Dispatcher: Your AC unit job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
+  "transcript": "Customer: Hi, this is Patricia Hall. I wanted to check on the status of my furnace job and what I owe. Dispatcher: Sure Patricia, let me pull up your account. Customer: Thank you. Dispatcher: Your furnace job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
   "expected_entities": {
-    "customer_name": "Susan Diaz",
-    "issue": "status check on AC unit job",
-    "equipment": "AC unit",
+    "customer_name": "Patricia Hall",
+    "issue": "status check on furnace job",
+    "equipment": "furnace",
     "address": "",
     "appointment_window": ""
   },

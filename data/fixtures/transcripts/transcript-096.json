@@ -3,13 +3,13 @@
   "type": "inbound_call",
   "duration_seconds": 90,
   "service_type": "electrical",
-  "transcript": "Customer: Hi, this is Linda Park. I need to reschedule my appointment for the light fixture. Dispatcher: No problem Linda. When works better for you? Customer: Could we do today if possible? Dispatcher: That works. I've moved your appointment to today if possible. Customer: Perfect, thanks.",
+  "transcript": "Customer: Hi, this is Susan Diaz. I need to reschedule my appointment for the GFCI outlet. Dispatcher: No problem Susan. When works better for you? Customer: Could we do this afternoon between 2 and 4? Dispatcher: That works. I've moved your appointment to this afternoon between 2 and 4. Customer: Perfect, thanks.",
   "expected_entities": {
-    "customer_name": "Linda Park",
-    "issue": "reschedule light fixture appointment",
-    "equipment": "light fixture",
+    "customer_name": "Susan Diaz",
+    "issue": "reschedule GFCI outlet appointment",
+    "equipment": "GFCI outlet",
     "address": "",
-    "appointment_window": "today if possible"
+    "appointment_window": "this afternoon between 2 and 4"
   },
   "source": "synthetic"
 }

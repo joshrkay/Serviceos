@@ -1,15 +1,15 @@
 {
   "id": "transcript-077",
   "type": "inbound_call",
-  "duration_seconds": 165,
+  "duration_seconds": 255,
   "service_type": "plumbing",
-  "transcript": "Customer: Hi, this is Mark Henderson. I'm calling because my toilet is making a gurgling sound. Dispatcher: Hi Mark, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Rinnai, an older one, 15 years. Dispatcher: Okay, and what's the service address? Customer: 9 Lakeview Drive. Dispatcher: Got it. We can send a technician out Thursday morning. Does that work? Customer: Yes, that would be great. Thank you.",
+  "transcript": "Customer: Hi, this is David Carter. I'm calling because my main sewer line won't drain. Dispatcher: Hi David, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Delta, an older one, 15 years. Dispatcher: Okay, and what's the service address? Customer: 88 Maple Ave. Dispatcher: Got it. We can send a technician out tomorrow between 8 and 10 AM. Does that work? Customer: Yes, that would be great. Thank you.",
   "expected_entities": {
-    "customer_name": "Mark Henderson",
-    "issue": "toilet is making a gurgling sound",
-    "equipment": "Rinnai toilet, an older one, 15 years",
-    "address": "9 Lakeview Drive",
-    "appointment_window": "Thursday morning"
+    "customer_name": "David Carter",
+    "issue": "main sewer line won't drain",
+    "equipment": "Delta main sewer line, an older one, 15 years",
+    "address": "88 Maple Ave",
+    "appointment_window": "tomorrow between 8 and 10 AM"
   },
   "source": "synthetic"
 }

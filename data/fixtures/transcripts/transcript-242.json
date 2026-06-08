@@ -1,13 +1,13 @@
 {
   "id": "transcript-242",
   "type": "inbound_call",
-  "duration_seconds": 85,
+  "duration_seconds": 95,
   "service_type": "plumbing",
-  "transcript": "Customer: Hi, this is Linda Park. I wanted to check on the status of my toilet job and what I owe. Dispatcher: Sure Linda, let me pull up your account. Customer: Thank you. Dispatcher: Your toilet job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
+  "transcript": "Customer: Hi, this is Robert Klein. I wanted to check on the status of my sump pump job and what I owe. Dispatcher: Sure Robert, let me pull up your account. Customer: Thank you. Dispatcher: Your sump pump job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
   "expected_entities": {
-    "customer_name": "Linda Park",
-    "issue": "status check on toilet job",
-    "equipment": "toilet",
+    "customer_name": "Robert Klein",
+    "issue": "status check on sump pump job",
+    "equipment": "sump pump",
     "address": "",
     "appointment_window": ""
   },

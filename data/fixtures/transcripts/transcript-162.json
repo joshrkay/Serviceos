@@ -1,15 +1,15 @@
 {
   "id": "transcript-162",
   "type": "inbound_call",
-  "duration_seconds": 240,
+  "duration_seconds": 210,
   "service_type": "electrical",
-  "transcript": "Customer: Hi, this is Jennifer Wu. I'm calling because my outlet is sparking. Dispatcher: Hi Jennifer, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Eaton, an older one, 15 years. Dispatcher: Okay, and what's the service address? Customer: 314 Birch Lane. Dispatcher: Got it. We can send a technician out today if possible. Does that work? Customer: Yes, that would be great. Thank you.",
+  "transcript": "Customer: Hi, this is Patricia Hall. I'm calling because my sub-panel is flickering. Dispatcher: Hi Patricia, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Siemens, about 5 years old. Dispatcher: Okay, and what's the service address? Customer: 88 Maple Ave. Dispatcher: Got it. We can send a technician out Wednesday afternoon. Does that work? Customer: Yes, that would be great. Thank you.",
   "expected_entities": {
-    "customer_name": "Jennifer Wu",
-    "issue": "outlet is sparking",
-    "equipment": "Eaton outlet, an older one, 15 years",
-    "address": "314 Birch Lane",
-    "appointment_window": "today if possible"
+    "customer_name": "Patricia Hall",
+    "issue": "sub-panel is flickering",
+    "equipment": "Siemens sub-panel, about 5 years old",
+    "address": "88 Maple Ave",
+    "appointment_window": "Wednesday afternoon"
   },
   "source": "synthetic"
 }

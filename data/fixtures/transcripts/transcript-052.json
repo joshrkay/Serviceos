@@ -1,15 +1,15 @@
 {
   "id": "transcript-052",
   "type": "inbound_call",
-  "duration_seconds": 150,
+  "duration_seconds": 240,
   "service_type": "hvac",
-  "transcript": "Customer: Hi, this is Robert Klein. I'm calling because my AC unit is making a loud noise. Dispatcher: Hi Robert, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Carrier, an older one, 15 years. Dispatcher: Okay, and what's the service address? Customer: 88 Maple Ave. Dispatcher: Got it. We can send a technician out next Monday at 9. Does that work? Customer: Yes, that would be great. Thank you.",
+  "transcript": "Customer: Hi, this is Sarah Johnson. I'm calling because my AC unit froze up with ice on the lines. Dispatcher: Hi Sarah, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Bryant, about 5 years old. Dispatcher: Okay, and what's the service address? Customer: 101 Pine Street. Dispatcher: Got it. We can send a technician out tomorrow between 8 and 10 AM. Does that work? Customer: Yes, that would be great. Thank you.",
   "expected_entities": {
-    "customer_name": "Robert Klein",
-    "issue": "AC unit is making a loud noise",
-    "equipment": "Carrier AC unit, an older one, 15 years",
-    "address": "88 Maple Ave",
-    "appointment_window": "next Monday at 9"
+    "customer_name": "Sarah Johnson",
+    "issue": "AC unit froze up with ice on the lines",
+    "equipment": "Bryant AC unit, about 5 years old",
+    "address": "101 Pine Street",
+    "appointment_window": "tomorrow between 8 and 10 AM"
   },
   "source": "synthetic"
 }

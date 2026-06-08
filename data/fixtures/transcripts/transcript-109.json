@@ -1,13 +1,13 @@
 {
   "id": "transcript-109",
   "type": "inbound_call",
-  "duration_seconds": 55,
+  "duration_seconds": 95,
   "service_type": "hvac",
-  "transcript": "Customer: Hi, this is Angela Reed. I wanted to check on the status of my condenser job and what I owe. Dispatcher: Sure Angela, let me pull up your account. Customer: Thank you. Dispatcher: Your condenser job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
+  "transcript": "Customer: Hi, this is Maria Lopez. I wanted to check on the status of my mini split job and what I owe. Dispatcher: Sure Maria, let me pull up your account. Customer: Thank you. Dispatcher: Your mini split job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
   "expected_entities": {
-    "customer_name": "Angela Reed",
-    "issue": "status check on condenser job",
-    "equipment": "condenser",
+    "customer_name": "Maria Lopez",
+    "issue": "status check on mini split job",
+    "equipment": "mini split",
     "address": "",
     "appointment_window": ""
   },

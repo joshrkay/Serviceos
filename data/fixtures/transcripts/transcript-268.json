@@ -3,13 +3,13 @@
   "type": "inbound_call",
   "duration_seconds": 150,
   "service_type": "hvac",
-  "transcript": "Customer: Hi, this is Gary Olsen. I'm calling because my AC unit is making a loud noise. Dispatcher: Hi Gary, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Carrier, about 8 years old. Dispatcher: Okay, and what's the service address? Customer: 88 Maple Ave. Dispatcher: Got it. We can send a technician out next Monday at 9. Does that work? Customer: Yes, that would be great. Thank you.",
+  "transcript": "Customer: Hi, this is Mark Henderson. I'm calling because my thermostat won't turn on. Dispatcher: Hi Mark, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Rheem, pretty new, 2 years. Dispatcher: Okay, and what's the service address? Customer: 200 Market Street. Dispatcher: Got it. We can send a technician out Wednesday afternoon. Does that work? Customer: Yes, that would be great. Thank you.",
   "expected_entities": {
-    "customer_name": "Gary Olsen",
-    "issue": "AC unit is making a loud noise",
-    "equipment": "Carrier AC unit, about 8 years old",
-    "address": "88 Maple Ave",
-    "appointment_window": "next Monday at 9"
+    "customer_name": "Mark Henderson",
+    "issue": "thermostat won't turn on",
+    "equipment": "Rheem thermostat, pretty new, 2 years",
+    "address": "200 Market Street",
+    "appointment_window": "Wednesday afternoon"
   },
   "source": "synthetic"
 }

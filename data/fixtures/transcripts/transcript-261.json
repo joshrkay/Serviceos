@@ -1,13 +1,13 @@
 {
   "id": "transcript-261",
   "type": "inbound_call",
-  "duration_seconds": 80,
+  "duration_seconds": 100,
   "service_type": "electrical",
-  "transcript": "Customer: This is an emergency, my sub-panel is not working and it's getting bad! This is Angela Reed at 22 Oak Court. Dispatcher: Okay Angela, stay calm. I'm getting a technician dispatched to 22 Oak Court right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "transcript": "Customer: This is an emergency, my GFCI outlet is hot to the touch and it's getting bad! This is Angela Reed at 22 Oak Court. Dispatcher: Okay Angela, stay calm. I'm getting a technician dispatched to 22 Oak Court right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
   "expected_entities": {
     "customer_name": "Angela Reed",
-    "issue": "emergency: sub-panel is not working",
-    "equipment": "sub-panel",
+    "issue": "emergency: GFCI outlet is hot to the touch",
+    "equipment": "GFCI outlet",
     "address": "22 Oak Court",
     "appointment_window": "immediate dispatch"
   },

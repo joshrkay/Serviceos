@@ -44,36 +44,49 @@ export function cosine(a: SparseVec, b: SparseVec): number {
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
+function norm2(v: SparseVec): number {
+  let s = 0;
+  for (const x of v.values()) s += x * x;
+  return Math.sqrt(s);
+}
+
 /**
- * Bucketed near-dup index. Bucketing by normalized prefix keeps the O(n^2)
- * comparison tractable for a few thousand rows. Returns true if `text` is a
- * near-duplicate (cosine > threshold) of anything already added.
+ * Near-dup index. Returns true if `text` is a near-duplicate (cosine >
+ * threshold) of anything already added.
+ *
+ * Comparison is GLOBAL across every stored vector — not bucketed by prefix.
+ * A prefix bucket (e.g. first 4 normalized chars) produces false negatives:
+ * adding an opener like "Hi, " to an otherwise identical utterance keeps
+ * cosine > 0.95 yet lands the variant in a different bucket, so the pair is
+ * never compared and the gate silently passes a corpus that violates the
+ * near-duplicate invariant. Precomputed vector norms keep the O(n^2) scan
+ * fast enough for the few-thousand-row corpus.
  */
 export class NearDupIndex {
-  private buckets = new Map<string, SparseVec[]>();
+  private entries: { vec: SparseVec; norm: number }[] = [];
   constructor(private threshold = 0.95) {}
-
-  private bucketKey(text: string): string {
-    const norm = text.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
-    return norm.slice(0, 4); // first 4 chars of normalized text
-  }
 
   isNearDup(text: string): boolean {
     const vec = vectorize(text);
-    // Compare against same bucket and adjacent (loose) — here just same bucket,
-    // plus a global fallback for very short strings.
-    const key = this.bucketKey(text);
-    const candidates = this.buckets.get(key) ?? [];
-    for (const c of candidates) if (cosine(vec, c) > this.threshold) return true;
+    const vn = norm2(vec);
+    if (vn === 0) return false;
+    for (const e of this.entries) {
+      if (e.norm === 0) continue;
+      // dot product over the smaller map
+      let dot = 0;
+      const [small, large] = vec.size < e.vec.size ? [vec, e.vec] : [e.vec, vec];
+      for (const [k, a] of small) {
+        const b = large.get(k);
+        if (b) dot += a * b;
+      }
+      if (dot / (vn * e.norm) > this.threshold) return true;
+    }
     return false;
   }
 
   add(text: string): void {
     const vec = vectorize(text);
-    const key = this.bucketKey(text);
-    const arr = this.buckets.get(key);
-    if (arr) arr.push(vec);
-    else this.buckets.set(key, [vec]);
+    this.entries.push({ vec, norm: norm2(vec) });
   }
 
   /** Convenience: returns true if added, false if rejected as near-dup. */

@@ -1,15 +1,15 @@
 {
   "id": "transcript-108",
   "type": "inbound_call",
-  "duration_seconds": 90,
+  "duration_seconds": 70,
   "service_type": "electrical",
-  "transcript": "Customer: Hi, this is James Miller. I need to reschedule my appointment for the breaker. Dispatcher: No problem James. When works better for you? Customer: Could we do this afternoon between 2 and 4? Dispatcher: That works. I've moved your appointment to this afternoon between 2 and 4. Customer: Perfect, thanks.",
+  "transcript": "Customer: Hi, this is Patricia Hall. I need to reschedule my appointment for the outlet. Dispatcher: No problem Patricia. When works better for you? Customer: Could we do next Monday at 9? Dispatcher: That works. I've moved your appointment to next Monday at 9. Customer: Perfect, thanks.",
   "expected_entities": {
-    "customer_name": "James Miller",
-    "issue": "reschedule breaker appointment",
-    "equipment": "breaker",
+    "customer_name": "Patricia Hall",
+    "issue": "reschedule outlet appointment",
+    "equipment": "outlet",
     "address": "",
-    "appointment_window": "this afternoon between 2 and 4"
+    "appointment_window": "next Monday at 9"
   },
   "source": "synthetic"
 }

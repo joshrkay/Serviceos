@@ -1,14 +1,14 @@
 {
   "id": "transcript-068",
   "type": "inbound_call",
-  "duration_seconds": 100,
+  "duration_seconds": 90,
   "service_type": "plumbing",
-  "transcript": "Customer: This is an emergency, my toilet is clogged and it's getting bad! This is Jennifer Wu at 88 Maple Ave. Dispatcher: Okay Jennifer, stay calm. I'm getting a technician dispatched to 88 Maple Ave right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "transcript": "Customer: This is an emergency, my sump pump is backing up and it's getting bad! This is Robert Klein at 22 Oak Court. Dispatcher: Okay Robert, stay calm. I'm getting a technician dispatched to 22 Oak Court right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
   "expected_entities": {
-    "customer_name": "Jennifer Wu",
-    "issue": "emergency: toilet is clogged",
-    "equipment": "toilet",
-    "address": "88 Maple Ave",
+    "customer_name": "Robert Klein",
+    "issue": "emergency: sump pump is backing up",
+    "equipment": "sump pump",
+    "address": "22 Oak Court",
     "appointment_window": "immediate dispatch"
   },
   "source": "synthetic"

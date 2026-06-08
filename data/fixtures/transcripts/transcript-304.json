@@ -1,15 +1,15 @@
 {
   "id": "transcript-304",
   "type": "inbound_call",
-  "duration_seconds": 210,
+  "duration_seconds": 240,
   "service_type": "hvac",
-  "transcript": "Customer: Hi, this is Sarah Johnson. I'm calling because my condenser won't turn on. Dispatcher: Hi Sarah, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Carrier, about 5 years old. Dispatcher: Okay, and what's the service address? Customer: 88 Maple Ave. Dispatcher: Got it. We can send a technician out first thing tomorrow. Does that work? Customer: Yes, that would be great. Thank you.",
+  "transcript": "Customer: Hi, this is Gary Olsen. I'm calling because my package unit is making a loud noise. Dispatcher: Hi Gary, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a York, about 5 years old. Dispatcher: Okay, and what's the service address? Customer: 200 Market Street. Dispatcher: Got it. We can send a technician out Wednesday afternoon. Does that work? Customer: Yes, that would be great. Thank you.",
   "expected_entities": {
-    "customer_name": "Sarah Johnson",
-    "issue": "condenser won't turn on",
-    "equipment": "Carrier condenser, about 5 years old",
-    "address": "88 Maple Ave",
-    "appointment_window": "first thing tomorrow"
+    "customer_name": "Gary Olsen",
+    "issue": "package unit is making a loud noise",
+    "equipment": "York package unit, about 5 years old",
+    "address": "200 Market Street",
+    "appointment_window": "Wednesday afternoon"
   },
   "source": "synthetic"
 }

@@ -3,11 +3,11 @@
   "type": "inbound_call",
   "duration_seconds": 80,
   "service_type": "plumbing",
-  "transcript": "Customer: Hi, this is Gary Olsen. I need to reschedule my appointment for the shower valve. Dispatcher: No problem Gary. When works better for you? Customer: Could we do Saturday between 10 and 12? Dispatcher: That works. I've moved your appointment to Saturday between 10 and 12. Customer: Perfect, thanks.",
+  "transcript": "Customer: Hi, this is Mark Henderson. I need to reschedule my appointment for the shutoff valve. Dispatcher: No problem Mark. When works better for you? Customer: Could we do Saturday between 10 and 12? Dispatcher: That works. I've moved your appointment to Saturday between 10 and 12. Customer: Perfect, thanks.",
   "expected_entities": {
-    "customer_name": "Gary Olsen",
-    "issue": "reschedule shower valve appointment",
-    "equipment": "shower valve",
+    "customer_name": "Mark Henderson",
+    "issue": "reschedule shutoff valve appointment",
+    "equipment": "shutoff valve",
     "address": "",
     "appointment_window": "Saturday between 10 and 12"
   },

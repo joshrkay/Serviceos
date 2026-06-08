@@ -1,13 +1,13 @@
 {
   "id": "transcript-106",
   "type": "inbound_call",
-  "duration_seconds": 70,
+  "duration_seconds": 100,
   "service_type": "hvac",
-  "transcript": "Customer: Hi, this is Helen Park. I need to reschedule my appointment for the AC unit. Dispatcher: No problem Helen. When works better for you? Customer: Could we do first thing tomorrow? Dispatcher: That works. I've moved your appointment to first thing tomorrow. Customer: Perfect, thanks.",
+  "transcript": "Customer: Hi, this is Gary Olsen. I need to reschedule my appointment for the thermostat. Dispatcher: No problem Gary. When works better for you? Customer: Could we do first thing tomorrow? Dispatcher: That works. I've moved your appointment to first thing tomorrow. Customer: Perfect, thanks.",
   "expected_entities": {
-    "customer_name": "Helen Park",
-    "issue": "reschedule AC unit appointment",
-    "equipment": "AC unit",
+    "customer_name": "Gary Olsen",
+    "issue": "reschedule thermostat appointment",
+    "equipment": "thermostat",
     "address": "",
     "appointment_window": "first thing tomorrow"
   },

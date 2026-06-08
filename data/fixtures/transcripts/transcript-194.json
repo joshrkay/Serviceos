@@ -1,11 +1,11 @@
 {
   "id": "transcript-194",
   "type": "inbound_call",
-  "duration_seconds": 55,
+  "duration_seconds": 75,
   "service_type": "plumbing",
-  "transcript": "Customer: Hi, this is James Miller. I wanted to check on the status of my toilet job and what I owe. Dispatcher: Sure James, let me pull up your account. Customer: Thank you. Dispatcher: Your toilet job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
+  "transcript": "Customer: Hi, this is David Carter. I wanted to check on the status of my toilet job and what I owe. Dispatcher: Sure David, let me pull up your account. Customer: Thank you. Dispatcher: Your toilet job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
   "expected_entities": {
-    "customer_name": "James Miller",
+    "customer_name": "David Carter",
     "issue": "status check on toilet job",
     "equipment": "toilet",
     "address": "",

@@ -1,15 +1,15 @@
 {
   "id": "transcript-088",
   "type": "inbound_call",
-  "duration_seconds": 210,
+  "duration_seconds": 225,
   "service_type": "hvac",
-  "transcript": "Customer: Hi, this is Gary Olsen. I'm calling because my condenser won't turn on. Dispatcher: Hi Gary, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Carrier, about 8 years old. Dispatcher: Okay, and what's the service address? Customer: 88 Maple Ave. Dispatcher: Got it. We can send a technician out first thing tomorrow. Does that work? Customer: Yes, that would be great. Thank you.",
+  "transcript": "Customer: Hi, this is Susan Diaz. I'm calling because my air handler froze up with ice on the lines. Dispatcher: Hi Susan, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Lennox, maybe 10 years old. Dispatcher: Okay, and what's the service address? Customer: 101 Pine Street. Dispatcher: Got it. We can send a technician out Wednesday afternoon. Does that work? Customer: Yes, that would be great. Thank you.",
   "expected_entities": {
-    "customer_name": "Gary Olsen",
-    "issue": "condenser won't turn on",
-    "equipment": "Carrier condenser, about 8 years old",
-    "address": "88 Maple Ave",
-    "appointment_window": "first thing tomorrow"
+    "customer_name": "Susan Diaz",
+    "issue": "air handler froze up with ice on the lines",
+    "equipment": "Lennox air handler, maybe 10 years old",
+    "address": "101 Pine Street",
+    "appointment_window": "Wednesday afternoon"
   },
   "source": "synthetic"
 }

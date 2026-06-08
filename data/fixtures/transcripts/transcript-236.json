@@ -1,14 +1,14 @@
 {
   "id": "transcript-236",
   "type": "inbound_call",
-  "duration_seconds": 80,
+  "duration_seconds": 70,
   "service_type": "plumbing",
-  "transcript": "Customer: This is an emergency, my toilet is clogged and it's getting bad! This is Carlos Mendez at 88 Maple Ave. Dispatcher: Okay Carlos, stay calm. I'm getting a technician dispatched to 88 Maple Ave right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "transcript": "Customer: This is an emergency, my faucet keeps running and it's getting bad! This is Mark Henderson at 1500 Sunset Blvd. Dispatcher: Okay Mark, stay calm. I'm getting a technician dispatched to 1500 Sunset Blvd right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
   "expected_entities": {
-    "customer_name": "Carlos Mendez",
-    "issue": "emergency: toilet is clogged",
-    "equipment": "toilet",
-    "address": "88 Maple Ave",
+    "customer_name": "Mark Henderson",
+    "issue": "emergency: faucet keeps running",
+    "equipment": "faucet",
+    "address": "1500 Sunset Blvd",
     "appointment_window": "immediate dispatch"
   },
   "source": "synthetic"

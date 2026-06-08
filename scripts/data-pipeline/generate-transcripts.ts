@@ -8,9 +8,15 @@
  *     flow templates × trade × equipment/symptom (drawn from data/vocab) ×
  *     name/address/time pools. Marked "source":"synthetic".
  *
+ * Field values are drawn with a per-transcript seeded PRNG (mulberry32) so the
+ * output is reproducible yet every transcript is distinct — earlier index-linear
+ * picks repeated with a period of 120, producing exact duplicates. A uniqueness
+ * guard rerolls on the rare collision. The call-flow skeletons (and therefore
+ * the slot-extractor cue phrasings) are kept fixed so the files still double as
+ * gold data for the slot-extraction eval.
+ *
  * Each transcript keeps the existing fixture schema (id, type, duration_seconds,
- * service_type, transcript, expected_entities) so the files double as gold data
- * for the slot-extraction eval.
+ * service_type, transcript, expected_entities).
  *
  * Run: npx tsx scripts/data-pipeline/generate-transcripts.ts
  */
@@ -67,17 +73,36 @@ const TRADES: TradeSpec[] = [
   },
 ];
 
-function pick<T>(arr: T[], i: number): T { return arr[i % arr.length]; }
+/** mulberry32 — small deterministic PRNG seeded per transcript. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function pickR<T>(arr: T[], rnd: () => number): T { return arr[Math.floor(rnd() * arr.length)]; }
 function firstName(full: string): string { return full.split(' ')[0]; }
 
-function booking(t: TradeSpec, i: number): Transcript {
-  const name = pick(NAMES, i);
-  const addr = pick(ADDRESSES, i * 3 + 1);
-  const equip = pick(t.equipment, i);
-  const brand = pick(t.brands, i * 2);
-  const sym = pick(t.symptoms, i * 5 + 2);
-  const age = pick(AGES, i);
-  const win = pick(WINDOWS, i * 7 + 3);
+/**
+ * Avoid template artifacts like "my breaker keeps tripping the breaker": when
+ * the equipment is itself the breaker/panel, drop the redundant " the breaker".
+ */
+function cleanSymptom(equip: string, sym: string): string {
+  if (/breaker|panel/i.test(equip) && sym.includes('tripping the breaker')) return 'keeps tripping';
+  return sym;
+}
+
+function booking(t: TradeSpec, rnd: () => number): Transcript {
+  const name = pickR(NAMES, rnd);
+  const addr = pickR(ADDRESSES, rnd);
+  const equip = pickR(t.equipment, rnd);
+  const brand = pickR(t.brands, rnd);
+  const sym = cleanSymptom(equip, pickR(t.symptoms, rnd));
+  const age = pickR(AGES, rnd);
+  const win = pickR(WINDOWS, rnd);
   const transcript =
     `Customer: Hi, this is ${name}. I'm calling because my ${equip} ${sym}. ` +
     `Dispatcher: Hi ${firstName(name)}, I'm sorry to hear that. Can you tell me what brand it is? ` +
@@ -87,7 +112,7 @@ function booking(t: TradeSpec, i: number): Transcript {
     `Dispatcher: Got it. We can send a technician out ${win}. Does that work? ` +
     `Customer: Yes, that would be great. Thank you.`;
   return {
-    id: '', type: 'inbound_call', duration_seconds: 150 + (i % 8) * 15, service_type: t.service_type,
+    id: '', type: 'inbound_call', duration_seconds: 150 + Math.floor(rnd() * 8) * 15, service_type: t.service_type,
     transcript,
     expected_entities: {
       customer_name: name, issue: `${equip} ${sym}`, equipment: `${brand} ${equip}, ${age}`,
@@ -97,18 +122,18 @@ function booking(t: TradeSpec, i: number): Transcript {
   };
 }
 
-function emergency(t: TradeSpec, i: number): Transcript {
-  const name = pick(NAMES, i + 4);
-  const addr = pick(ADDRESSES, i * 2 + 5);
-  const equip = pick(t.equipment, i + 1);
-  const sym = pick(t.symptoms, i * 3 + 1);
+function emergency(t: TradeSpec, rnd: () => number): Transcript {
+  const name = pickR(NAMES, rnd);
+  const addr = pickR(ADDRESSES, rnd);
+  const equip = pickR(t.equipment, rnd);
+  const sym = cleanSymptom(equip, pickR(t.symptoms, rnd));
   const transcript =
     `Customer: This is an emergency, my ${equip} ${sym} and it's getting bad! This is ${name} at ${addr}. ` +
     `Dispatcher: Okay ${firstName(name)}, stay calm. I'm getting a technician dispatched to ${addr} right now. ` +
     `Customer: Please hurry. ` +
     `Dispatcher: A tech is on the way, they'll call you when they're close.`;
   return {
-    id: '', type: 'inbound_call', duration_seconds: 60 + (i % 5) * 10, service_type: t.service_type,
+    id: '', type: 'inbound_call', duration_seconds: 60 + Math.floor(rnd() * 5) * 10, service_type: t.service_type,
     transcript,
     expected_entities: {
       customer_name: name, issue: `emergency: ${equip} ${sym}`, equipment: equip,
@@ -118,10 +143,10 @@ function emergency(t: TradeSpec, i: number): Transcript {
   };
 }
 
-function reschedule(t: TradeSpec, i: number): Transcript {
-  const name = pick(NAMES, i + 2);
-  const win = pick(WINDOWS, i + 1);
-  const equip = pick(t.equipment, i + 2);
+function reschedule(t: TradeSpec, rnd: () => number): Transcript {
+  const name = pickR(NAMES, rnd);
+  const win = pickR(WINDOWS, rnd);
+  const equip = pickR(t.equipment, rnd);
   const transcript =
     `Customer: Hi, this is ${name}. I need to reschedule my appointment for the ${equip}. ` +
     `Dispatcher: No problem ${firstName(name)}. When works better for you? ` +
@@ -129,7 +154,7 @@ function reschedule(t: TradeSpec, i: number): Transcript {
     `Dispatcher: That works. I've moved your appointment to ${win}. ` +
     `Customer: Perfect, thanks.`;
   return {
-    id: '', type: 'inbound_call', duration_seconds: 70 + (i % 6) * 10, service_type: t.service_type,
+    id: '', type: 'inbound_call', duration_seconds: 70 + Math.floor(rnd() * 6) * 10, service_type: t.service_type,
     transcript,
     expected_entities: {
       customer_name: name, issue: `reschedule ${equip} appointment`, equipment: equip,
@@ -139,9 +164,9 @@ function reschedule(t: TradeSpec, i: number): Transcript {
   };
 }
 
-function lookup(t: TradeSpec, i: number): Transcript {
-  const name = pick(NAMES, i + 6);
-  const equip = pick(t.equipment, i + 3);
+function lookup(t: TradeSpec, rnd: () => number): Transcript {
+  const name = pickR(NAMES, rnd);
+  const equip = pickR(t.equipment, rnd);
   const transcript =
     `Customer: Hi, this is ${name}. I wanted to check on the status of my ${equip} job and what I owe. ` +
     `Dispatcher: Sure ${firstName(name)}, let me pull up your account. ` +
@@ -149,7 +174,7 @@ function lookup(t: TradeSpec, i: number): Transcript {
     `Dispatcher: Your ${equip} job is scheduled and your balance is on file. Anything else? ` +
     `Customer: No, that's all.`;
   return {
-    id: '', type: 'inbound_call', duration_seconds: 55 + (i % 5) * 10, service_type: t.service_type,
+    id: '', type: 'inbound_call', duration_seconds: 55 + Math.floor(rnd() * 5) * 10, service_type: t.service_type,
     transcript,
     expected_entities: {
       customer_name: name, issue: `status check on ${equip} job`, equipment: equip,
@@ -172,13 +197,24 @@ function main(): void {
     }
   } catch { /* seed dir optional */ }
 
-  // 2. Synthetic, round-robin across trades and templates
+  // 2. Synthetic, round-robin across trades and templates. Values are drawn with
+  //    a per-index seeded PRNG; a uniqueness guard rerolls (new seed) on the rare
+  //    duplicate so every transcript is distinct yet the run stays reproducible.
   const generators = [booking, emergency, reschedule, lookup];
+  const seenText = new Set(out.map((tr) => tr.transcript));
   let i = 0;
   while (out.length < TARGET) {
     const t = TRADES[i % TRADES.length];
     const gen = generators[Math.floor(i / TRADES.length) % generators.length];
-    out.push(gen(t, i));
+    let tr: Transcript | undefined;
+    for (let attempt = 0; attempt < 64; attempt++) {
+      const rnd = mulberry32((Math.imul(i + 1, 2654435761) ^ Math.imul(attempt + 1, 0x9e3779b1)) >>> 0);
+      const candidate = gen(t, rnd);
+      if (!seenText.has(candidate.transcript)) { tr = candidate; break; }
+    }
+    if (!tr) throw new Error(`could not generate a unique transcript at index ${i}`);
+    seenText.add(tr.transcript);
+    out.push(tr);
     i++;
   }
 

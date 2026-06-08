@@ -3,12 +3,12 @@
   "type": "inbound_call",
   "duration_seconds": 80,
   "service_type": "plumbing",
-  "transcript": "Customer: This is an emergency, my shower valve is backing up and it's getting bad! This is Carlos Mendez at 88 Maple Ave. Dispatcher: Okay Carlos, stay calm. I'm getting a technician dispatched to 88 Maple Ave right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "transcript": "Customer: This is an emergency, my main sewer line won't drain and it's getting bad! This is Carlos Mendez at 9 Lakeview Drive. Dispatcher: Okay Carlos, stay calm. I'm getting a technician dispatched to 9 Lakeview Drive right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
   "expected_entities": {
     "customer_name": "Carlos Mendez",
-    "issue": "emergency: shower valve is backing up",
-    "equipment": "shower valve",
-    "address": "88 Maple Ave",
+    "issue": "emergency: main sewer line won't drain",
+    "equipment": "main sewer line",
+    "address": "9 Lakeview Drive",
     "appointment_window": "immediate dispatch"
   },
   "source": "synthetic"

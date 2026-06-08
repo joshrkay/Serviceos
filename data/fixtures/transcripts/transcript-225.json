@@ -3,12 +3,12 @@
   "type": "inbound_call",
   "duration_seconds": 70,
   "service_type": "electrical",
-  "transcript": "Customer: This is an emergency, my ceiling fan has no power and it's getting bad! This is Sarah Johnson at 22 Oak Court. Dispatcher: Okay Sarah, stay calm. I'm getting a technician dispatched to 22 Oak Court right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "transcript": "Customer: This is an emergency, my outlet keeps tripping the breaker and it's getting bad! This is Mark Henderson at 9 Lakeview Drive. Dispatcher: Okay Mark, stay calm. I'm getting a technician dispatched to 9 Lakeview Drive right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
   "expected_entities": {
-    "customer_name": "Sarah Johnson",
-    "issue": "emergency: ceiling fan has no power",
-    "equipment": "ceiling fan",
-    "address": "22 Oak Court",
+    "customer_name": "Mark Henderson",
+    "issue": "emergency: outlet keeps tripping the breaker",
+    "equipment": "outlet",
+    "address": "9 Lakeview Drive",
     "appointment_window": "immediate dispatch"
   },
   "source": "synthetic"
