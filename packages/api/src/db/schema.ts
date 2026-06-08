@@ -2284,6 +2284,17 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
+  // Blocker 3 RLS exception: oauth_states has tenant_id for the binding
+  // record but is INTENTIONALLY NOT row-level-security protected. The
+  // /callback path calls consume(stateId) BEFORE any tenant context is
+  // set — recovering the tenant_id from the state row is the entire point
+  // of the lookup. RLS would force the row to be invisible to the very
+  // call that needs it. Safety: the id is a 128-bit random UUID acting as
+  // a single-use nonce (consumed_at flips on read), expires_at enforces a
+  // 5-minute window, and the row is created server-side bound to the
+  // already-authenticated tenant/user. The schema-guard test
+  // (every-table-with-tenant_id-has-FORCE) explicitly allowlists this
+  // table; any change should be reviewed alongside that test.
   '085_create_oauth_states': `
     -- Tier 4 (Calendar sync — PR 1). Short-lived nonces for the
     -- Google OAuth flow. The /connect route mints a state, persists
@@ -3068,7 +3079,10 @@ export const MIGRATIONS = {
   // no FK to tenants (the tenant row is gone by the time we write this) and
   // NO row-level security, so it survives the purge and remains readable
   // cross-tenant by ops. This is the only audit trail of a deprovision, since
-  // the tenant's audit_events rows are themselves purged.
+  // the tenant's audit_events rows are themselves purged. The schema-guard
+  // test (every-table-with-tenant_id-has-FORCE) explicitly allowlists this
+  // table; the tenant_id column is denormalized identity for the purged row,
+  // not a tenancy boundary.
   '123_platform_deprovision_log': `
     CREATE TABLE IF NOT EXISTS platform_deprovision_log (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -3711,6 +3725,46 @@ export const MIGRATIONS = {
     -- branch so the whole lookup is indexed instead of a full-tenant scan.
     CREATE INDEX IF NOT EXISTS idx_proposals_source_recording
       ON proposals (tenant_id, (source_context->>'recordingId'));
+  `,
+
+  '143_tenant_settings_owner_phone': `
+    -- P8-016 (forward-wiring) — the OWNER's personal cell phone used by
+    -- vulnerability-aware emergency triage to patch a customer call
+    -- directly to the owner with a 5-second context preface. Stored in
+    -- E.164 (+15551234567). Distinct from business_phone (the public number
+    -- the AI answers on) and from users.mobile_number (per-team-member
+    -- binding, multi-user model). For V1 solo operators there is one owner
+    -- per tenant, so settings is the natural home.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS owner_phone TEXT;
+  `,
+
+  '144_tenants_pending_checkout_at': `
+    -- Trial-checkout dedup. When a tenant opens Stripe Checkout, we
+    -- stamp pending_checkout_at = NOW() inside the same advisory-lock
+    -- transaction that mints the session. A second checkout request
+    -- that arrives BEFORE Stripe's subscription.created webhook has
+    -- flipped subscription_status to 'trialing' sees the pending
+    -- timestamp inside its own gate check and refuses — closing the
+    -- residual race the in-process advisory lock alone could not
+    -- cover (lock-release vs webhook-delivery window). Cleared by
+    -- the subscription.created webhook handler; a 30-minute timeout
+    -- in the gate handles abandoned checkouts.
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS pending_checkout_at TIMESTAMPTZ;
+  `,
+
+  '145_tenants_pending_checkout_session_id': `
+    -- Pair the pending_checkout_at marker with the Stripe session id
+    -- so cancellation can actively EXPIRE the open session at Stripe
+    -- before reopening the gate. Earlier attempts to round-trip the
+    -- id via cancel_url interpolation failed — Stripe only expands
+    -- {CHECKOUT_SESSION_ID} in success_url. Persisting it server-side
+    -- on creation is the supported path. Cleared together with
+    -- pending_checkout_at when the subscription.created webhook lands
+    -- or when the cancel endpoint runs.
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS pending_checkout_session_id TEXT;
   `,
 };
 

@@ -51,12 +51,41 @@ describe('BusinessProfileSheet — Tier 4 settings stub closure', () => {
 
     const nameInput = (await screen.findByLabelText(/Business name/i)) as HTMLInputElement;
     expect(nameInput.value).toBe('Ortega HVAC');
-    expect((screen.getByLabelText(/Phone/i) as HTMLInputElement).value).toBe('+15125550100');
+    expect((screen.getByLabelText(/Business phone/i) as HTMLInputElement).value).toBe('+15125550100');
     expect((screen.getByLabelText(/Email/i) as HTMLInputElement).value).toBe(
       'hello@ortega-hvac.com',
     );
     expect((screen.getByLabelText(/Timezone/i) as HTMLSelectElement).value).toBe('America/Chicago');
     expect(apiFetchMock).toHaveBeenCalledWith('/api/settings');
+  });
+
+  it('loads and formats a saved owner phone', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        businessName: 'Ortega HVAC',
+        ownerPhone: '+15125550199',
+      }),
+    );
+    render(<BusinessProfileSheet onClose={vi.fn()} />);
+    await screen.findByLabelText(/Business name/i);
+    expect((screen.getByLabelText(/Your cell phone/i) as HTMLInputElement).value).toBe(
+      '(512) 555-0199',
+    );
+  });
+
+  it('sends owner phone in the PUT body so it round-trips to the API', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ businessName: 'Ortega HVAC' }));
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ businessName: 'Ortega HVAC' }));
+    render(<BusinessProfileSheet onClose={vi.fn()} />);
+    const ownerInput = (await screen.findByLabelText(/Your cell phone/i)) as HTMLInputElement;
+    fireEvent.change(ownerInput, { target: { value: '(512) 555-1234' } });
+    fireEvent.click(screen.getByText('Save'));
+    await waitFor(() => expect(apiFetchMock).toHaveBeenCalledWith('/api/settings', expect.objectContaining({ method: 'PUT' })));
+    const putCall = apiFetchMock.mock.calls.find(
+      (c) => c[1] && (c[1] as RequestInit).method === 'PUT',
+    );
+    const body = JSON.parse((putCall![1] as RequestInit).body as string);
+    expect(body.ownerPhone).toBe('(512) 555-1234');
   });
 
   it('saves edits via PUT /api/settings and closes on success', async () => {
@@ -136,6 +165,7 @@ describe('BusinessProfileSheet — Tier 4 settings stub closure', () => {
     // values couldn't actually be deleted.
     expect(body.businessPhone).toBeNull();
     expect(body.businessEmail).toBeNull();
+    expect(body.ownerPhone).toBeNull();
     expect(body.timezone).toBeNull();
   });
 });

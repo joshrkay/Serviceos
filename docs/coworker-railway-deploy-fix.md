@@ -106,7 +106,7 @@ Variables. **AI is the critical one** — if missing, the system runs against a 
 
 ## Step 5 — End-to-end smoke (optional, if you have time)
 
-- [ ] Open the web URL → you should see the Fieldly login page (not a white screen).
+- [ ] Open the web URL → you should see the Rivet login page (not a white screen).
 - [ ] Sign up / log in and confirm you land inside the app.
 - [ ] If the QA harness can reach Railway from your machine, run it against the
       deploy (see `qa/README.md`):

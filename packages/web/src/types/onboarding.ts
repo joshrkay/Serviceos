@@ -53,6 +53,14 @@ export interface BusinessIdentityInput {
   businessHours: BusinessHours;
   jobBufferMinutes: number;
   hourlyRateCents: number;
+  /** IANA timezone name (e.g. "America/Phoenix"). Browser-detected on submit. */
+  timezone?: string;
+  /**
+   * Owner's personal cell, normalized server-side to E.164. Used for
+   * emergency vulnerability-triage patch-through. Empty string clears
+   * the value; omit to leave unchanged.
+   */
+  ownerPhone?: string;
 }
 
 export type PackId = 'hvac' | 'plumbing';

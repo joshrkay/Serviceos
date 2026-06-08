@@ -57,7 +57,7 @@ const INITIAL_SUGGESTIONS: AISuggestion[] = [
     title: 'Add diagnostic fee line item by default',
     before: 'Estimate starts with Labor and Parts only',
     after: 'Estimate starts with: Diagnostic Fee ($85), then Labor, then Parts',
-    reason: 'You\'ve manually added a diagnostic fee to 9 of your last 11 estimates. Fieldly can add it automatically.',
+    reason: 'You\'ve manually added a diagnostic fee to 9 of your last 11 estimates. Rivet can add it automatically.',
     source: 'usage',
     confidence: 'High',
     status: 'pending',
@@ -91,7 +91,7 @@ const INITIAL_SUGGESTIONS: AISuggestion[] = [
     title: 'Add refrigerant R-410A to default HVAC parts list',
     before: 'HVAC estimates start with no default parts',
     after: 'HVAC estimates include: R-410A Refrigerant (up to 2 lbs) as a common line item option',
-    reason: '67% of HVAC businesses on Fieldly include refrigerant as a common estimate line item.',
+    reason: '67% of HVAC businesses on Rivet include refrigerant as a common estimate line item.',
     source: 'community',
     tradeCount: 67,
     confidence: 'Medium',
@@ -194,7 +194,7 @@ const TEMPLATES: Template[] = [
     icon: Users,
     iconBg: 'bg-rose-100',
     iconColor: 'text-rose-600',
-    description: 'How Fieldly writes messages to your customers on your behalf',
+    description: 'How Rivet writes messages to your customers on your behalf',
     seededFrom: 'Onboarding · Step 2',
     lastRefined: 'Never',
     refinementCount: 0,
@@ -252,7 +252,7 @@ const COMMUNITY_INSIGHTS = [
 function LoopDiagram() {
   const steps = [
     { icon: Sparkles,   label: 'Onboarding\nseeds templates',  color: 'bg-indigo-100 text-indigo-600' },
-    { icon: BarChart2,  label: 'Fieldly\nwatches usage',       color: 'bg-blue-100   text-blue-600'   },
+    { icon: BarChart2,  label: 'Rivet\nwatches usage',       color: 'bg-blue-100   text-blue-600'   },
     { icon: Zap,        label: 'AI proposes\nrefinements',      color: 'bg-violet-100 text-violet-600' },
     { icon: Check,      label: 'You accept\nor tweak',          color: 'bg-green-100  text-green-600'  },
     { icon: RefreshCw,  label: 'Templates\nimprove',            color: 'bg-slate-100  text-slate-600'  },
@@ -482,7 +482,7 @@ function TemplateDetailModal({ template, onClose }: { template: Template; onClos
             <div className="flex items-start gap-2">
               <Info size={13} className="text-indigo-500 shrink-0 mt-0.5" />
               <p className="text-xs text-indigo-700 leading-relaxed">
-                These values were set during onboarding and refined by Fieldly based on your usage.
+                These values were set during onboarding and refined by Rivet based on your usage.
                 Edits here update your live templates immediately — the AI will use them as the new baseline.
               </p>
             </div>
@@ -519,7 +519,7 @@ function TemplateDetailModal({ template, onClose }: { template: Template; onClos
           <div className="rounded-xl border border-dashed border-slate-200 px-4 py-3.5 flex items-center gap-3">
             <RotateCcw size={13} className="text-slate-400 shrink-0" />
             <p className="text-xs text-slate-500 flex-1">
-              After saving, Fieldly will use these as the new baseline in the refinement loop.
+              After saving, Rivet will use these as the new baseline in the refinement loop.
             </p>
             <button className="text-xs text-slate-400 hover:text-slate-600 transition-colors shrink-0">
               Reset to defaults
@@ -614,7 +614,7 @@ function DigestModal({ settings, onChange, onClose }: {
                 <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100 overflow-hidden">
                   {[
                     { key: 'includeStats',           label: 'Your week in numbers',        desc: 'Jobs completed, revenue, estimates sent' },
-                    { key: 'includeAiSuggestions',   label: 'AI template suggestions',     desc: 'Refinements Fieldly noticed from your usage' },
+                    { key: 'includeAiSuggestions',   label: 'AI template suggestions',     desc: 'Refinements Rivet noticed from your usage' },
                     { key: 'includeCommunityTips',   label: 'Tips from similar businesses',desc: 'Anonymous insights from HVAC, plumbing & painting trades' },
                   ].map(({ key, label, desc }) => (
                     <div key={key} className="flex items-center justify-between px-4 py-3.5">
@@ -643,7 +643,7 @@ function DigestModal({ settings, onChange, onClose }: {
                       <Zap size={12} className="text-white" />
                     </div>
                     <div>
-                      <p className="text-xs text-white">Fieldly Weekly · Mar 10, 2026</p>
+                      <p className="text-xs text-white">Rivet Weekly · Mar 10, 2026</p>
                       <p className="text-xs text-slate-400 mt-0.5">To: mike@ortegarv.com</p>
                     </div>
                   </div>
@@ -651,7 +651,7 @@ function DigestModal({ settings, onChange, onClose }: {
                   <div className="bg-white px-4 py-4 flex flex-col gap-3">
                     <p className="text-sm text-slate-900">Hey Mike 👋</p>
                     <p className="text-xs text-slate-600 leading-relaxed">
-                      Here's your Fieldly summary for the week of March 4–10.
+                      Here's your Rivet summary for the week of March 4–10.
                     </p>
 
                     {settings.includeStats && (
@@ -678,7 +678,7 @@ function DigestModal({ settings, onChange, onClose }: {
                           <Sparkles size={10} /> AI noticed
                         </p>
                         <p className="text-xs text-slate-600">
-                          You added a diagnostic fee to 9 of 11 estimates this week. Want Fieldly to add it by default?
+                          You added a diagnostic fee to 9 of 11 estimates this week. Want Rivet to add it by default?
                         </p>
                         <div className="flex gap-2 mt-2">
                           <button className="text-xs bg-blue-600 text-white rounded-md px-2.5 py-1">Yes, add it</button>
@@ -698,7 +698,7 @@ function DigestModal({ settings, onChange, onClose }: {
                       </div>
                     )}
 
-                    <p className="text-xs text-slate-400">— The Fieldly team</p>
+                    <p className="text-xs text-slate-400">— The Rivet team</p>
                   </div>
                 </div>
               </div>
@@ -1242,7 +1242,7 @@ export function TemplatesPage() {
             ))}
           </div>
           <p className="text-xs text-slate-400 mt-2 px-1">
-            Insights are shared anonymously across Fieldly tenants in the same trade. No identifying information is shared.
+            Insights are shared anonymously across Rivet tenants in the same trade. No identifying information is shared.
           </p>
         </div>
 
@@ -1258,7 +1258,7 @@ export function TemplatesPage() {
             </span>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
-                <p className="text-sm text-slate-900">Weekly Fieldly Digest</p>
+                <p className="text-sm text-slate-900">Weekly Rivet Digest</p>
                 {digest.enabled && (
                   <span className="text-xs bg-green-100 text-green-700 rounded-full px-2 py-0.5">On · {digest.day}</span>
                 )}

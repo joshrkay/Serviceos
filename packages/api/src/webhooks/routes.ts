@@ -26,6 +26,7 @@ import {
 } from '../workers/deprovision-tenant';
 import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
 import { VERIFY_AI_JOB_TYPE, type VerifyAiPayload } from '../workers/verify-ai';
+import { recordFunnelEvent } from '../analytics/posthog';
 import { verifyTwilioSignature, reconstructWebhookUrl } from '../telephony/twilio-signature';
 import { verifySendGridSignature } from './sendgrid-signature';
 import { createAuditEvent, AuditRepository } from '../audit/audit';
@@ -115,7 +116,7 @@ export interface WebhookRouterDeps {
    */
   pendingInvitationRepo?: PendingInvitationRepository;
   /**
-   * Tier 4 (Subscription — Fieldly billing). When wired, the Stripe
+   * Tier 4 (Subscription — Rivet billing). When wired, the Stripe
    * webhook applies customer.subscription.* events onto tenants
    * (cached subscription_status). Optional so legacy harnesses
    * without Stripe configured still build the router.
@@ -470,6 +471,21 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             signupCorrelationId,
           });
 
+          // Server-side funnel: every Clerk userId here matches the
+          // distinctId the browser SDK identifies with, so this single
+          // event closes the gap between the page load that fires
+          // landing_signup_clicked and the onboarding the user starts.
+          if (result.created) {
+            recordFunnelEvent({
+              distinctId: userId,
+              event: 'signup_completed',
+              properties: {
+                tenantId: result.tenantId,
+                emailDomain: primaryEmail.split('@')[1] ?? null,
+              },
+            });
+          }
+
           // Enqueue Twilio subaccount provisioning for new tenants only.
           // Idempotent — the worker checks tenant_integrations.status and
           // skips if already active, so safe to re-enqueue on webhook replay.
@@ -751,6 +767,32 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     logger.info('Stripe webhook received', { eventId: event.id, type: event.type });
 
     try {
+      // Trial-checkout marker clear on the ABANDONED path only.
+      // checkout.session.expired fires when the session times out
+      // without completion or when /v1/checkout/sessions/:id/expire
+      // runs from clearPendingCheckout — no subscription will arrive
+      // for this session, so the marker can clear immediately.
+      //
+      // We do NOT clear on checkout.session.completed: that event
+      // can be delivered BEFORE customer.subscription.created, and
+      // clearing here would reopen the gate while subscription_status
+      // is still null, letting the operator mint a SECOND completable
+      // session in the gap. The subscription.created branch below
+      // does the clear once subscription_status is actually live.
+      if (event.type === 'checkout.session.expired') {
+        const expiredSessionId = (event.data.object as { id?: string }).id;
+        if (expiredSessionId && deps.pool) {
+          await deps.pool.query(
+            `UPDATE tenants
+                SET pending_checkout_at = NULL,
+                    pending_checkout_session_id = NULL,
+                    updated_at = NOW()
+              WHERE pending_checkout_session_id = $1`,
+            [expiredSessionId],
+          );
+        }
+      }
+
       if (event.type === 'checkout.session.completed') {
         const session = event.data.object as {
           metadata?: {
@@ -1100,7 +1142,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         }
       }
 
-      // Tier 4 (Subscription — Fieldly billing). customer.subscription.*
+      // Tier 4 (Subscription — Rivet billing). customer.subscription.*
       // events update the tenant's cached subscription status. Match
       // by stripe_customer_id (the BillingService persists it on
       // first portal-open). Idempotent — we just write the latest
@@ -1117,16 +1159,176 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           id?: string;
           customer?: string;
           status?: string;
+          metadata?: { tenant_id?: string };
         };
         if (sub.id && sub.customer && sub.status) {
-          await deps.billingService.applySubscriptionEvent({
-            customerId: sub.customer,
-            subscriptionId: sub.id,
-            status: sub.status,
-          });
+          // Trial-checkout sessions stamp subscription.metadata.tenant_id
+          // (see createTrialCheckoutSession), but Stripe doesn't echo our
+          // tenants.stripe_customer_id back to us — so for a brand-new
+          // trial subscription, the WHERE stripe_customer_id = $customer
+          // lookup below returns zero rows, applySubscriptionEvent is a
+          // silent no-op, and the funnel event never fires. Resolve the
+          // tenant by metadata first when present, fall back to the
+          // persisted customer-id mapping for billing-portal-managed
+          // subscriptions where the trial metadata wasn't set.
+          const tenantIdFromMeta = sub.metadata?.tenant_id?.trim() || null;
+
+          let priorStatus: string | null = null;
+          let ownerClerkId: string | null = null;
+          let funnelTenantId: string | null = null;
+
+          if (deps.pool) {
+            // The entire read + mirror happens inside a transaction
+            // with SELECT ... FOR UPDATE on the tenants row so two
+            // concurrent webhook events for the same transition
+            // (e.g. customer.subscription.created AND a
+            // customer.subscription.updated both reporting trialing)
+            // serialize through this critical section. The second
+            // handler reads the FIRST handler's just-committed
+            // subscription_status, so the funnel-event check
+            // (priorStatus !== 'trialing') correctly returns false
+            // for it — closing the double-fire race that the prior
+            // commit only documented.
+            const client = await deps.pool.connect();
+            try {
+              await client.query('BEGIN');
+              const tenantRow = tenantIdFromMeta
+                ? await client.query<{
+                    id: string;
+                    owner_id: string | null;
+                    subscription_status: string | null;
+                    stripe_customer_id: string | null;
+                  }>(
+                    `SELECT id, owner_id, subscription_status, stripe_customer_id
+                       FROM tenants WHERE id = $1 LIMIT 1
+                       FOR UPDATE`,
+                    [tenantIdFromMeta],
+                  )
+                : await client.query<{
+                    id: string;
+                    owner_id: string | null;
+                    subscription_status: string | null;
+                    stripe_customer_id: string | null;
+                  }>(
+                    `SELECT id, owner_id, subscription_status, stripe_customer_id
+                       FROM tenants WHERE stripe_customer_id = $1 LIMIT 1
+                       FOR UPDATE`,
+                    [sub.customer],
+                  );
+              const row = tenantRow.rows[0];
+              if (row) {
+                funnelTenantId = row.id;
+                ownerClerkId = row.owner_id;
+                priorStatus = row.subscription_status;
+                // Claim the Stripe customer for this tenant on first
+                // sight. Idempotent — only writes when the column is
+                // null, never clobbers an existing mapping.
+                if (!row.stripe_customer_id) {
+                  await client.query(
+                    `UPDATE tenants
+                        SET stripe_customer_id = $1, updated_at = NOW()
+                      WHERE id = $2 AND stripe_customer_id IS NULL`,
+                    [sub.customer, row.id],
+                  );
+                }
+                // Clear the pending-checkout marker only on
+                // customer.subscription.created (see prior commit for
+                // the full rationale on why created vs. completed
+                // is the right surface).
+                if (event.type === 'customer.subscription.created') {
+                  await client.query(
+                    `UPDATE tenants
+                        SET pending_checkout_at = NULL,
+                            pending_checkout_session_id = NULL,
+                            updated_at = NOW()
+                      WHERE id = $1
+                        AND (pending_checkout_at IS NOT NULL OR pending_checkout_session_id IS NOT NULL)`,
+                    [row.id],
+                  );
+                }
+                // Mirror the subscription state INSIDE the lock.
+                // Replaces deps.billingService.applySubscriptionEvent
+                // for the webhook path — that method is intentionally
+                // kept on BillingService for any future callers that
+                // don't need the atomic-transition semantics.
+                await client.query(
+                  `UPDATE tenants
+                      SET stripe_subscription_id = $1,
+                          subscription_status = $2,
+                          updated_at = NOW()
+                    WHERE id = $3`,
+                  [sub.id, sub.status, row.id],
+                );
+              }
+              await client.query('COMMIT');
+            } catch (err) {
+              try {
+                await client.query('ROLLBACK');
+              } catch {
+                /* best-effort */
+              }
+              throw err;
+            } finally {
+              client.release();
+            }
+          } else {
+            // No pool wired (in-memory dev mode). Fall back to the
+            // BillingService method so existing behavior is preserved.
+            // Funnel events stay off in this path because we have no
+            // way to read prior status.
+            await deps.billingService.applySubscriptionEvent({
+              customerId: sub.customer,
+              subscriptionId: sub.id,
+              status: sub.status,
+            });
+          }
+
           logger.info('Subscription status mirrored from Stripe', {
             customerId: sub.customer, subscriptionId: sub.id, status: sub.status,
           });
+
+          // Server-side funnel events. Off when POSTHOG_API_KEY is unset.
+          if (ownerClerkId) {
+            const properties = {
+              tenantId: funnelTenantId,
+              subscriptionId: sub.id,
+              priorStatus,
+              newStatus: sub.status,
+            };
+            // KNOWN LIMITATION (deferred post-soft-launch): the
+            // priorStatus → newStatus check is non-atomic. If two
+            // distinct Stripe events for the same transition arrive
+            // concurrently (e.g., customer.subscription.created AND a
+            // customer.subscription.updated that both report
+            // trialing), both handlers can read the same non-live
+            // priorStatus before either applySubscriptionEvent
+            // commits, and both emit trial_started. The proper fix is
+            // to wrap the SELECT prior + applySubscriptionEvent in a
+            // single transaction with SELECT … FOR UPDATE on the
+            // tenants row so the second handler reads the first's
+            // committed status. Impact is metric inflation only — no
+            // user-facing harm, no duplicate Stripe charges. Tracked
+            // as post-launch follow-up.
+            if (sub.status === 'trialing' && priorStatus !== 'trialing') {
+              recordFunnelEvent({
+                distinctId: ownerClerkId,
+                event: 'trial_started',
+                properties,
+              });
+            } else if (sub.status === 'active' && priorStatus === 'trialing') {
+              recordFunnelEvent({
+                distinctId: ownerClerkId,
+                event: 'trial_to_paid',
+                properties,
+              });
+            } else if (sub.status === 'canceled' && priorStatus !== 'canceled') {
+              recordFunnelEvent({
+                distinctId: ownerClerkId,
+                event: 'subscription_canceled',
+                properties,
+              });
+            }
+          }
 
           // Once billing reaches a live state, seed the tenant's AI model from
           // the platform default and enqueue the onboarding AI self-check.
