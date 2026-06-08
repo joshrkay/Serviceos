@@ -18,17 +18,16 @@ Critical slots: `name, address, service_type, time_window, problem_description`.
 - **OFFLINE (default)** — deterministic baselines (`baseline-classifier.ts`,
   `slot-extractor.ts`). No network, no keys, always runs in CI. Reports the real
   numbers and enforces only a low regression floor (50%) unless `--gate`.
-- **LIVE (`--live`)** — routes through the production classifier/extractor via
-  the LLM gateway. Requires `OPENAI_API_KEY`/`ANTHROPIC_API_KEY`. Enforces the
-  goal thresholds (92% / 0.88). Not runnable in the offline sandbox; the wiring
-  point is marked in `run-intent-eval.ts` (`classifyLive`).
+- **LIVE (`--live`)** — currently a fail-fast placeholder. It exits with code 2
+  and explains the missing wiring to the production classifier/extractor via the
+  LLM gateway. Do not treat it as an enforcing gate until that wiring exists.
 
 ## Run
 
 ```bash
 npx tsx packages/voice-eval/run-intent-eval.ts          # offline, report
 npx tsx packages/voice-eval/run-intent-eval.ts --gate   # offline, enforce floor
-npx tsx packages/voice-eval/run-intent-eval.ts --live   # production model (needs key)
+npx tsx packages/voice-eval/run-intent-eval.ts --live   # fail-fast placeholder (exit 2 until wired)
 npx tsx packages/voice-eval/run-slot-eval.ts
 ```
 
@@ -38,5 +37,6 @@ npx tsx packages/voice-eval/run-slot-eval.ts
 - Slot: ~87.5% micro-F1 across 305 transcripts (heuristic baseline).
 
 These are honest baseline numbers from non-ML rules/heuristics. The production
-LLM model is expected to clear 92% / 0.88 in `--live` mode; those numbers are NOT
-reported as achieved here because the live path cannot run without a key.
+LLM model is expected to clear 92% / 0.88 after a real live path is wired; those
+numbers are NOT reported as achieved here, and current `--live` commands fail
+fast with exit code 2 instead of silently pretending to gate production.

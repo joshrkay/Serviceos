@@ -28,8 +28,8 @@ in this sandbox), the tooling is delivered ready-to-run and the status is marked
 | Vocab coverage ≥ 95% | ✅ **met** | 100% of transcript domain nouns covered |
 | 36/41 behaviors validated + gaps | ✅ **met** | `behaviors.yaml` (code-synced) + `behaviors-gap-analysis.md`; each behavior has ≥ 74 utterances (> the 25/50 bars) |
 | Reddit: deduped + PII-scrubbed + embedded + searchable | ✅ **met (offline) / gated (scale)** | PII zero-leakage on 100 fixtures; offline embed + 10-query search self-test; 50k real ingest is credential-gated |
-| Intent accuracy ≥ 92% | ⏳ **gated (live)** | offline rule baseline = **74.3%**; ≥92% target enforced in `--live` once wired (credential-gated step 3) |
-| Slot F1 ≥ 0.88 | ⏳ **gated (live)** | offline heuristic baseline = **88.5% micro-F1**; ≥0.88 enforced in `--live` once wired (credential-gated step 3) |
+| Intent accuracy ≥ 92% | ⏳ **not wired (live)** | offline rule baseline = **74.3%**; current `--live` fails fast with exit 2 until production classifier wiring is added (credential-gated step 3) |
+| Slot F1 ≥ 0.88 | ⏳ **not wired (live)** | offline heuristic baseline = **88.5% micro-F1**; current `--live` fails fast with exit 2 until production extractor wiring is added (credential-gated step 3) |
 
 ## What runs in this sandbox
 
@@ -57,9 +57,11 @@ and `academictorrents.com` return HTTP 403; no DB.
 1. **50k-row Reddit ingest** — download the Academic Torrents Pushshift dump →
    `python3 serviceos_training/02_reddit_processor.py` with Supabase creds.
 2. **Real embeddings** — `OPENAI_API_KEY=… python3 serviceos_training/embed_corpus.py --live`.
-3. **Live intent/slot eval (≥92% / ≥0.88)** —
-   `npx tsx packages/voice-eval/run-intent-eval.ts --live` (wire `classifyLive`
-   to `intent-classifier.ts`) and `run-slot-eval.ts --live`.
+3. **Live intent/slot eval (≥92% / ≥0.88)** — first wire
+   `run-intent-eval.ts --live` to `intent-classifier.ts` behind a constructed
+   `LLMGateway` + tenant context, and wire `run-slot-eval.ts --live` to a
+   production slot extractor. Until then, both `--live` commands fail fast with
+   exit code 2 and are not enforcement gates.
 4. **LLM-paraphrase utterance augmentation** — `claude-sonnet-4-5` path
    documented at the bottom of `generate-utterances.ts`; ≥20% human review before
    rows enter the eval split.

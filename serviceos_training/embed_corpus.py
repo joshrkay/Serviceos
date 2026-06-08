@@ -59,9 +59,10 @@ def main(argv: list[str] | None = None) -> int:
     rows = load_sample()
     texts = [r["text"] for r in rows]
 
-    live = args.live and bool(os.environ.get("OPENAI_API_KEY"))
-    if args.live and not os.environ.get("OPENAI_API_KEY"):
-        print("⚠️  --live requested but OPENAI_API_KEY is not set; falling back to offline.")
+    live = args.live
+    if live and not os.environ.get("OPENAI_API_KEY"):
+        print("❌ --live requires OPENAI_API_KEY; refusing to fall back to offline embeddings.")
+        return 2
 
     if live:
         vectors = embed_live(texts)
