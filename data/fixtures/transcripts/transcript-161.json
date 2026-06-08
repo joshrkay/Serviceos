@@ -1,0 +1,15 @@
+{
+  "id": "transcript-161",
+  "type": "inbound_call",
+  "duration_seconds": 180,
+  "service_type": "plumbing",
+  "transcript": "Customer: Hi, this is Maria Lopez. I'm calling because my toilet is leaking. Dispatcher: Hi Maria, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Moen, maybe 10 years old. Dispatcher: Okay, and what's the service address? Customer: 456 Oak Avenue. Dispatcher: Got it. We can send a technician out Wednesday afternoon. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Maria Lopez",
+    "issue": "toilet is leaking",
+    "equipment": "Moen toilet, maybe 10 years old",
+    "address": "456 Oak Avenue",
+    "appointment_window": "Wednesday afternoon"
+  },
+  "source": "synthetic"
+}
