@@ -69,9 +69,24 @@ def test_does_not_overscrub_clean_text():
     assert not result.has_residual_pii
 
 
+def test_redacts_lowercase_addresses():
+    # Real user-written text frequently lowercases (or upper-cases) addresses.
+    # The regex sweep AND the residual gate must catch them regardless of case
+    # (Codex P1: a case-sensitive pattern let "123 main st" through).
+    for raw in (
+        "i live at 123 main st",
+        "ship the part to 456 elm street please",
+        "456 ELM STREET",
+        "789 oak ave",
+    ):
+        result = scrub_pii(raw)
+        assert "[ADDRESS]" in result.scrubbed, f"not redacted: {raw!r} -> {result.scrubbed!r}"
+        assert not has_pii_leak(result.scrubbed), f"residual leak: {raw!r} -> {result.scrubbed!r}"
+
+
 def _run_as_script() -> int:
     failures = 0
-    for fn in (test_regex_zero_leakage, test_known_entity_redaction, test_does_not_overscrub_clean_text):
+    for fn in (test_regex_zero_leakage, test_known_entity_redaction, test_does_not_overscrub_clean_text, test_redacts_lowercase_addresses):
         try:
             fn()
             print(f"  ✅ {fn.__name__}")

@@ -47,9 +47,15 @@ _STREET_SUFFIXES = [
     "Ter", "Terrace", "Way", "Pkwy", "Parkway", "Hwy", "Highway",
     "Cir", "Circle", "Trl", "Trail",
 ]
+# Case-insensitive (re.IGNORECASE): real user-written text frequently lowercases
+# addresses ("123 main st", "456 elm street"). Both the street-name words and the
+# suffix must match regardless of case — detect_residual_pii() and has_pii_leak()
+# reuse this regex, so a case-sensitive pattern would let lowercase addresses slip
+# past the zero-PII gate.
 ADDRESS_REGEX = re.compile(
-    r"\b\d+\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\s+(?:%s)\b\.?"
-    % "|".join(_STREET_SUFFIXES)
+    r"\b\d+\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,3})\s+(?:%s)\b\.?"
+    % "|".join(_STREET_SUFFIXES),
+    re.IGNORECASE,
 )
 
 # ── Residual heuristics (the fail-loud gate) ────────────────────────────────
