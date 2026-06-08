@@ -55,6 +55,48 @@ describe('BusinessIdentityInputSchema', () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it('accepts an optional timezone', () => {
+    const result = BusinessIdentityInputSchema.safeParse({
+      businessName: 'A',
+      businessHours: {},
+      jobBufferMinutes: 30,
+      hourlyRateCents: 10000,
+      timezone: 'America/Phoenix',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts an optional ownerPhone in any human format', () => {
+    // The schema stays liberal in what it accepts — normalization to
+    // E.164 happens in the route handler via normalizeMobileE164.
+    for (const phone of [
+      '(512) 555-1234',
+      '512-555-1234',
+      '+15125551234',
+      '5125551234',
+    ]) {
+      const result = BusinessIdentityInputSchema.safeParse({
+        businessName: 'A',
+        businessHours: {},
+        jobBufferMinutes: 30,
+        hourlyRateCents: 10000,
+        ownerPhone: phone,
+      });
+      expect(result.success, `expected ${phone} to parse`).toBe(true);
+    }
+  });
+
+  it('rejects an absurdly long ownerPhone', () => {
+    const result = BusinessIdentityInputSchema.safeParse({
+      businessName: 'A',
+      businessHours: {},
+      jobBufferMinutes: 30,
+      hourlyRateCents: 10000,
+      ownerPhone: '+1' + '5'.repeat(60),
+    });
+    expect(result.success).toBe(false);
+  });
 });
 
 describe('PackPickInputSchema', () => {

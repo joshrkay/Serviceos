@@ -285,6 +285,10 @@ export const updateSettingsSchema = z.object({
   // so an explicit null is the only path to "clear this field".
   businessPhone: z.string().nullable().optional(),
   businessEmail: z.union([z.string().email(), z.null()]).optional(),
+  // P8-016 — owner's personal cell for emergency triage. Accepts any
+  // human format; normalized to E.164 server-side. Empty string or
+  // explicit null clears the value; omit to leave untouched.
+  ownerPhone: z.string().max(40).nullable().optional(),
   timezone: z.string().nullable().optional(),
   estimatePrefix: z.string().min(1).optional(),
   invoicePrefix: z.string().min(1).optional(),

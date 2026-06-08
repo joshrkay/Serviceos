@@ -3,8 +3,8 @@ import { ValidationError, NotFoundError } from '../shared/errors';
 
 /**
  * Tier 4 (Payment methods — PR 1). Stripe Connect onboarding service.
- * Distinct from BillingService (the Fieldly subscription portal):
- *   - BillingService bills the TENANT for the Fieldly SaaS subscription.
+ * Distinct from BillingService (the Rivet subscription portal):
+ *   - BillingService bills the TENANT for the Rivet SaaS subscription.
  *   - StripeConnectService onboards the tenant as a CONNECTED ACCOUNT
  *     so we can route their customer-facing payments through Stripe
  *     directly into their bank.

@@ -350,7 +350,7 @@ function AIResultCard({ result, editable, onToggleEdit, onUpdateItems }: {
           <Sparkles size={12} className="text-white" />
         </div>
         <div className="flex-1 bg-indigo-50 border border-indigo-100 rounded-2xl rounded-tl-sm px-4 py-3">
-          <p className="text-xs text-indigo-400 mb-1">Fieldly AI</p>
+          <p className="text-xs text-indigo-400 mb-1">Rivet AI</p>
           <p className="text-sm text-indigo-900 leading-relaxed">{result.explanation}</p>
         </div>
       </div>
@@ -1069,8 +1069,8 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
   const stepOrder: FlowStep[] = ['describe', 'review'];
   const dotIndex = stepOrder.indexOf(step === 'send' ? 'review' : step);
 
-  const smsMsg   = `Hi ${firstName},\n\nEstimate for ${aiResult?.description ?? 'your job'} is ready.\n\nTotal: $${total.toLocaleString()}\n\nReview here:\nfieldly.app/e/${estNum.toLowerCase().replace('-','')}\n\n– Mike, Fieldly Pro`;
-  const emailMsg = `Hi ${firstName},\n\n${estNum} is ready for your review.\n\nService: ${aiResult?.description}\nTotal: $${total.toLocaleString()}\n\nfieldly.app/e/${estNum.toLowerCase().replace('-','')}\n\nThank you,\nMike\nFieldly Pro Services`;
+  const smsMsg   = `Hi ${firstName},\n\nEstimate for ${aiResult?.description ?? 'your job'} is ready.\n\nTotal: $${total.toLocaleString()}\n\nReview here:\nrivet.ai/e/${estNum.toLowerCase().replace('-','')}\n\n– Mike, Rivet Pro`;
+  const emailMsg = `Hi ${firstName},\n\n${estNum} is ready for your review.\n\nService: ${aiResult?.description}\nTotal: $${total.toLocaleString()}\n\nrivet.ai/e/${estNum.toLowerCase().replace('-','')}\n\nThank you,\nMike\nRivet Pro Services`;
 
   function handleSend() {
     setSending(true);
@@ -1270,7 +1270,7 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
                       <div className="size-6 rounded-lg bg-white/10 flex items-center justify-center">
                         <span className="text-white" style={{ fontSize: 11 }}>F</span>
                       </div>
-                      <p className="text-sm text-white">Fieldly Pro</p>
+                      <p className="text-sm text-white">Rivet Pro</p>
                     </div>
                     <span className="text-xs text-slate-400">{estNum}</span>
                   </div>

@@ -64,7 +64,7 @@ function Section({
 }
 
 /**
- * Living style guide for the Fieldly design system. Mounted at `/design`
+ * Living style guide for the Rivet design system. Mounted at `/design`
  * so the team can see every primitive, variant, and state in one place
  * while adoption rolls out across the app.
  */
@@ -78,7 +78,7 @@ export function Showcase() {
         <header>
           <h1 className="text-slate-900">Design system</h1>
           <p className="mt-1 text-sm text-slate-400">
-            Fieldly UI primitives — token-driven, dependency-free building
+            Rivet UI primitives — token-driven, dependency-free building
             blocks. Import from{' '}
             <code className="rounded bg-slate-100 px-1 py-0.5 text-xs">
               components/ui

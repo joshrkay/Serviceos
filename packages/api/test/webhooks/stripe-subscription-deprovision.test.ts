@@ -18,10 +18,20 @@ const STRIPE_SECRET = 'whsec_test_sub';
 const TENANT = '22222222-2222-2222-2222-222222222222';
 
 function buildApp(send: ReturnType<typeof vi.fn>, tenantExists = true) {
+  const queryMock = vi.fn(async () => ({
+    rowCount: tenantExists ? 1 : 0,
+    rows: tenantExists ? [{ id: TENANT }] : [],
+  }));
   const pool = {
-    query: vi.fn(async () => ({
-      rowCount: tenantExists ? 1 : 0,
-      rows: tenantExists ? [{ id: TENANT }] : [],
+    query: queryMock,
+    // The subscription webhook handler now wraps its read+mirror in a
+    // transaction via pool.connect() so SELECT ... FOR UPDATE
+    // serializes concurrent events. Return a client that shares the
+    // same query mock so BEGIN / COMMIT / SELECT / UPDATE all flow
+    // through it.
+    connect: vi.fn(async () => ({
+      query: queryMock,
+      release: vi.fn(),
     })),
   };
   const deps = {

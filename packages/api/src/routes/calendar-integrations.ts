@@ -337,9 +337,9 @@ export function createCalendarIntegrationsRouter(
             scheduledStart: start,
             scheduledEnd: end,
             timezone: 'UTC',
-            summary: 'ServiceOS test event',
+            summary: 'Rivet test event',
             description:
-              'This is a test event from ServiceOS confirming your calendar is connected.',
+              'This is a test event from Rivet confirming your calendar is connected.',
           },
           { persist: false },
         );

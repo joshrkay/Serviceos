@@ -609,7 +609,7 @@ export function createApp(): express.Express {
   const pendingInvitationRepo = pool
     ? new PgPendingInvitationRepository(pool)
     : new InMemoryPendingInvitationRepository();
-  // Tier 4 (Subscription — Fieldly billing). Hoisted up so the Stripe
+  // Tier 4 (Subscription — Rivet billing). Hoisted up so the Stripe
   // webhook can update the cached subscription status when
   // customer.subscription.* events arrive. Single instance shared
   // with the /api/billing route. Requires both Pg pool + Stripe key
@@ -2668,7 +2668,18 @@ export function createApp(): express.Express {
     '/api/voice',
     createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger, pool ? { pool } : undefined),
   );
-  app.use('/api/onboarding', createOnboardingRouter({ settingsRepo, packActivationRepo, auditRepo, pool, billingService, queue }));
+  app.use(
+    '/api/onboarding',
+    createOnboardingRouter({
+      settingsRepo,
+      packActivationRepo,
+      auditRepo,
+      pool,
+      billingService,
+      queue,
+      packSeedDeps: { catalogRepo, templateRepo },
+    }),
+  );
   app.use(
     '/api/technician-location',
     createTechnicianLocationRouter({
@@ -3163,6 +3174,13 @@ export function createApp(): express.Express {
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();
+      // Flush any queued PostHog server-side funnel events before the
+      // process exits so Railway shutdown doesn't drop in-flight
+      // signup/trial/conversion captures.
+      {
+        const { shutdownAnalytics } = await import('./analytics/posthog');
+        await shutdownAnalytics();
+      }
       // Disconnect Redis cache store(s) before draining the DB pool so Railway
       // shutdown is not slowed by lingering Redis connections.
       await shutdownCacheStores();

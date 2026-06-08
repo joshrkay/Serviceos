@@ -226,7 +226,7 @@ export interface EscalateToHumanInput {
   /**
    * Public web app base URL used to build the SMS short-link in the
    * escalation summary. Passed through to `EscalationContext.publicWebBaseUrl`.
-   * Defaults to `process.env.PUBLIC_WEB_URL` (or `app.serviceos.app` as last resort).
+   * Defaults to `process.env.PUBLIC_WEB_URL` (or `app.rivet.ai` as last resort).
    */
   publicWebBaseUrl?: string;
 }
