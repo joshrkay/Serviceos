@@ -1,0 +1,14 @@
+{
+  "id": "transcript-007",
+  "type": "inbound_call",
+  "duration_seconds": 140,
+  "service_type": "electrical",
+  "transcript": "Customer: Hi, my name is Tomas Reyes, you can reach me at 555-0142. I need to upgrade my electrical panel — the breakers keep tripping when we run the dryer and the microwave together. Dispatcher: Thanks Tomas. What's the service address? Customer: 88 Birch Lane, Eugene. Dispatcher: Got it. When works for you? Customer: Sometime Friday morning would be ideal.",
+  "expected_entities": {
+    "customer_name": "Tomas Reyes",
+    "phone": "555-0142",
+    "issue": "Panel upgrade - breakers trip when dryer and microwave run together",
+    "address": "88 Birch Lane, Eugene",
+    "appointment_window": "Friday morning"
+  }
+}

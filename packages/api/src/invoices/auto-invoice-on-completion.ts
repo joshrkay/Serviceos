@@ -20,6 +20,8 @@ import { EstimateRepository } from '../estimates/estimate';
 import { SettingsRepository } from '../settings/settings';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { resolveSelectedLineItems } from '../shared/billing-engine';
+import { TimeEntryRepository } from '../time-tracking/time-entry';
+import { recalculateLaborFromTimeEntries } from './labor-from-time-entries';
 
 const AUTO_INVOICE_ACTOR = 'system:auto_invoice';
 
@@ -37,6 +39,12 @@ export interface AutoInvoiceOnCompletionDeps {
   proposalRepo: ProposalRepository;
   settingsRepo: SettingsRepository;
   auditRepo?: AuditRepository;
+  /**
+   * Feature (launch) — when present AND the tenant opted into
+   * `billLaborFromTimeEntries`, the labor line is recomputed from actual logged
+   * time before the draft is raised.
+   */
+  timeEntryRepo?: TimeEntryRepository;
 }
 
 /**
@@ -66,10 +74,24 @@ export async function maybeAutoInvoiceOnCompletion(
   //    billable lines → nothing to invoice; bail rather than draft an empty one.
   const estimates = await deps.estimateRepo.findByJob(job.tenantId, job.id);
   const accepted = estimates.find((e) => e.status === 'accepted');
-  const billed = accepted
+  let billed = accepted
     ? resolveSelectedLineItems(accepted.lineItems, accepted.acceptedSelection)
     : [];
   if (billed.length === 0) return null;
+
+  // 4b. Feature (launch) — recompute the labor line from ACTUAL logged time
+  //     when the tenant opted in and any time was tracked for the job. With no
+  //     tracked time (or no single labor line) the accepted estimate is billed
+  //     as-is, so this never zeroes out or invents labor.
+  let laborHoursBilled: number | undefined;
+  if (settings.billLaborFromTimeEntries && deps.timeEntryRepo) {
+    const timeEntries = await deps.timeEntryRepo.findByJob(job.tenantId, job.id);
+    const recalc = recalculateLaborFromTimeEntries(billed, timeEntries);
+    if (recalc.adjusted) {
+      billed = recalc.lineItems;
+      laborHoursBilled = recalc.laborHoursBilled;
+    }
+  }
 
   // The execution handler consumes billing-engine LineItems (unitPriceCents);
   // add a `unitPrice` alias so the payload also satisfies the draft_invoice
@@ -121,7 +143,12 @@ export async function maybeAutoInvoiceOnCompletion(
         eventType: 'invoice.auto_drafted',
         entityType: 'proposal',
         entityId: persisted.id,
-        metadata: { jobId: job.id, estimateId: accepted?.id, lineItemCount: lineItems.length },
+        metadata: {
+          jobId: job.id,
+          estimateId: accepted?.id,
+          lineItemCount: lineItems.length,
+          ...(laborHoursBilled !== undefined ? { laborHoursBilled } : {}),
+        },
       }),
     );
   }
