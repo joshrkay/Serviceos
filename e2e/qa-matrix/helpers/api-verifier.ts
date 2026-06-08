@@ -50,6 +50,9 @@ export class ApiVerifier {
         method: opts.method,
         headers,
         data: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+        // QA-2026-06-05: LLM-backed routes (assistant chains classify + run a
+        // handler per segment) legitimately exceed the 10s default.
+        timeout: 30_000,
       });
     } catch (err) {
       const capture: CapturedCall = {

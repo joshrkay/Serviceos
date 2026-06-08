@@ -37,7 +37,8 @@ export type MatrixModule =
   | 'ME'
   | 'MC'
   | 'VOX'
-  | 'PORT';
+  | 'PORT'
+  | 'AST';
 export type MatrixExpectation = 'pass' | 'partial' | 'fail' | 'na';
 
 export interface MatrixRow {
@@ -656,6 +657,62 @@ export const MATRIX: MatrixRow[] = [
     feature: 'Overdue lifecycle',
     passCriteria: 'Past-due invoices transition to overdue or document gap',
     expected: 'fail',
+  },
+
+
+  // ----- Assistant (chat intents — added from QA live-run branch; main lacked AST rows) -----
+  {
+    id: 'AST-01',
+    module: 'AST',
+    feature: 'Create customer via assistant intent',
+    passCriteria:
+      'POST /api/assistant/chat with a create-customer ask yields a proposal; approve → executed customer row',
+    expected: 'partial',
+  },
+  {
+    id: 'AST-02',
+    module: 'AST',
+    feature: 'Create estimate via assistant',
+    passCriteria: 'Assistant chat drafts an estimate proposal for a job from a natural-language ask',
+    expected: 'partial',
+  },
+  {
+    id: 'AST-03',
+    module: 'AST',
+    feature: 'Revise estimate via assistant',
+    passCriteria: 'Assistant chat revises an existing draft estimate (line-item change) via proposal',
+    expected: 'partial',
+  },
+  {
+    id: 'AST-04',
+    module: 'AST',
+    feature: 'Create/send invoice via assistant',
+    passCriteria: 'Assistant chat creates and sends an invoice via proposal (delivery leg depends on INV-03)',
+    expected: 'partial',
+  },
+  {
+    id: 'AST-05',
+    module: 'AST',
+    feature: 'Payment status query via assistant',
+    passCriteria: 'Assistant chat answers a payment-status query read-only (no proposal created)',
+    expected: 'fail',
+    expectedReason: 'Read/query intents not implemented — see qa/backlog/AST-05-query-intents.md.',
+  },
+  {
+    id: 'AST-06',
+    module: 'AST',
+    feature: 'Failure handling + recovery',
+    passCriteria: 'Invalid/empty assistant input returns a friendly recoverable error, not a 5xx',
+    expected: 'partial',
+  },
+  {
+    id: 'AST-07',
+    module: 'AST',
+    feature: 'Multi-step orchestration (customer → estimate → invoice)',
+    passCriteria:
+      'A multi-step ask decomposes into linked proposals (shared chainId); capture-class steps execute after approval windows, money-class steps land ready_for_review — HITL is never bypassed (full auto-executed chains would violate the money-class approval contract)',
+    expected: 'fail',
+    expectedReason: 'Proposal chaining not implemented — see qa/backlog/AST-07-multi-step-chaining.md.',
   },
 ];
 

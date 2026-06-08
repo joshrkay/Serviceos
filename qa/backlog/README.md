@@ -66,6 +66,217 @@ tier, parallel-safe stories are grouped.
 
 ## Observed verdicts (live)
 
-_This section gets filled in after the first real matrix run against Railway
-dev (blocked on `.env.qa` + password rotation as of 2026-04-22). Update the
-predicted column in each story if live verdicts differ._
+**First live run: 2026-06-04** against Railway dev
+(`serviceosapi-development`, deployed from PR #470 merge; local repo at
+`3a0ff1e8`). Full report: [`qa/reports/2026-06-04/QA-REPORT.md`](../reports/2026-06-04/QA-REPORT.md).
+
+Raw report counts: **40 pass · 7 partial · 26 fail · 1 n/a** (74 catalog
+rows). The fail count overstates product defects — see the two harness
+issues below before reading the table.
+
+### Run prerequisites discovered (runbook corrections)
+
+1. **`CLERK_DEV_HMAC_TOKENS=true` must be set on the dev API service.**
+   The runbook claims matching `CLERK_SECRET_KEY` is sufficient; it is not —
+   since P0-033 the API verifies RS256/JWKS by default and refuses minted
+   HMAC tokens without this flag (every row 401s). Set on Railway dev
+   2026-06-04; keep it out of prod (schema + runtime both refuse it there).
+2. **Appendix C's quick fix breaks ISO-01.** Pointing `E2E_DB_URL_READONLY`
+   at the default Railway `postgres` user means Agent C connects as a
+   superuser with `rolbypassrls` — the no-GUC RLS check then always sees
+   rows and ISO-01 false-fails. Verified manually 2026-06-04: RLS is
+   enabled + FORCED on customers/jobs/estimates/invoices/notes, and a
+   non-superuser role with no GUC **fails closed** (policy errors on the
+   missing `app.current_tenant_id` parameter; per-tenant scoping correct
+   with the GUC set). Fix tracked in
+   [ISO-01-rls-probe-role](./ISO-01-rls-probe-role.md).
+3. **node-pg vs Railway's self-signed cert:** use `?sslmode=no-verify` in
+   both DB URLs (the runbook's `?sslmode=require` makes node-pg verify the
+   chain and fail).
+
+### Story-by-story: predicted vs live
+
+| Story | Predicted | Live 2026-06-04 | Status |
+|---|---|---|---|
+| EST-03 PATCH alias | partial | **partial** (PUT-only confirmed; [artifact](../reports/2026-06-04/artifacts/EST-03/)) | Confirmed — story stands |
+| INV-02 list endpoint | fail | **pass** ("List/filter invoices" green) | **Gap closed since 2026-04-22** — story can be archived |
+| INV-05 stripe webhook | fail | not executed | Blocked by catalog drift (below); also needs `stripe listen` |
+| INV-04 payment link | fail | not executed | Blocked by catalog drift |
+| INV-03 invoice delivery | partial | not executed | Blocked by catalog drift; corroborating signal: PORT-01/02 `POST /:id/send` → 400, send service unwired on dev |
+| AST-01/04/05/06/07 assistant intents | partial/fail | not executed | Blocked by catalog drift; classifier itself works (see CUST-02 note below) |
+| INV-07 overdue cron | fail | **partial** under new id PAY-04: `money_state` stays `invoiced` after backdated `due_date` — overdue sweep not running on dev | Confirmed — story stands |
+| EST-05 (note-only) | n/a | conversion path exercised by JRN-03 → **pass** | Resolution holds |
+| INV-06 (note-only) | n/a | equivalent new row PAY-01 (idempotent webhook handling) → **pass** | Resolution holds — close once INV-05 wires the route |
+
+### New defects found by the live run (stories created 2026-06-04)
+
+| Story | Row | What broke |
+|---|---|---|
+| [PROP-01-reject-guard](./PROP-01-reject-guard.md) | PROP-01 | `POST /api/proposals/:id/reject` on a **draft** returns 200 + `status=rejected`; expected 409 (approval-state guard). Human-in-the-loop contract violation. |
+| [JRN-02-estimate-accept-500](./JRN-02-estimate-accept-500.md) | JRN-02 | `POST /api/estimates/:id/transition {status:"accepted"}` → 500 INTERNAL_ERROR on JRN-02's estimate while JRN-01's identical transition passes. |
+| [PROV-01-onboarding-configure-route](./PROV-01-onboarding-configure-route.md) | PROV-01/02 | `POST /api/onboarding/configure` → Express 404; route exists nowhere in `packages/api/src`. Matrix expectation vs API reality — decide build-or-rewrite. |
+| [QA-MATRIX-catalog-drift](./QA-MATRIX-catalog-drift.md) | 15 tests | `matrix.ts` lacks rows EST-04..06, INV-03..07, AST-01..07 → those tests die on `Unknown matrix row` before producing evidence; 13 legacy rows (CUS/BILL/VOICE/PORTAL/ISO-02/LEGACY-…) have no implementing spec and always report fail/no-manifest. |
+| [VOICE-intent-confirm-drift](./VOICE-intent-confirm-drift.md) | CUST-02, SCH-02, SCH-03 | Voice rows fail "no proposal", but evidence shows the LLM classified `create_customer` at 0.9 confidence and the session parked in `intent_confirm` awaiting caller confirmation. Harness sends one utterance and never confirms. Product contract changed or harness must drive the confirm turn. Report's "AI key unset" hypothesis is wrong — AI provider is live on dev. |
+| [ISO-01-rls-probe-role](./ISO-01-rls-probe-role.md) | ISO-01 | Agent C must use a non-superuser probe role (or accept error-as-suppressed); with the superuser conn the no-GUC check can never pass. API-side isolation (B→A 404s, cross-tenant write blocked) passed. |
+
+### Fifth pass — full green board (2026-06-05)
+
+**Final: 68 pass · 0 partial · 0 fail · 1 n/a** (VOX-04, telephony-only by
+definition). Every executable matrix row passes against Railway dev.
+
+Built this pass:
+- **SMS-01 → pass**: row drives the proposal path the confirmation
+  notifier is actually wired to — voice booking executes and the
+  appointment_confirmation dispatch row appears (REST appointments don't
+  notify by design; product decision still open for that trigger).
+- **VOX-02 → pass**: TTS template keys are now RENDERED (callers literally
+  heard 'intent_confirm' in every language) and localized en/es via sticky
+  per-session language detection, plus an es catalog for the FSM's fixed
+  closing/ack sentences.
+- **PORT-02 → pass**: public checkout falls back to the
+  PaymentLinkProvider when STRIPE_SECRET_KEY is absent (direct
+  Stripe + Connect path unchanged when it exists).
+- **AST-02/03 → pass**: assistant estimate intents route through the real
+  task handlers and persist (the generic path returned unpersisted JSON
+  whose ids 404'd on approve).
+- **AST-04 → pass**: full loop — free-text ask → invoice proposal →
+  operator approval (money-class HITL) → executed → real invoice. Fixed en
+  route: LLM payload hardening (ids must appear in operator text;
+  unitPrice→unitPriceCents normalization — executions were NaN-ing;
+  category vocabulary mapped onto the DB CHECK).
+- **AST-05 → pass**: deterministic read-only query intent — "which
+  invoices are unpaid?" answers from invoice records (count cross-checked
+  against DB truth in the spec), no proposal created.
+- **AST-07 → pass (scoped)**: multi-step asks decompose into linked
+  proposals (shared chainId); dependent steps hold in ready_for_review —
+  the as-written expectation (fully auto-executed invoice) contradicted
+  the money-class approval contract and the row now asserts the
+  design-conforming behavior.
+- **AST-06 → pass**: spec false-positive fixed (before/after delta instead
+  of a 30s window that caught the serial neighbor's seed).
+
+Verification: tsc production build clean; **2391 unit tests green** across
+routes/ai/proposals/invoices. Dev deploy loop closed and the temp Railway
+token revoked.
+
+Open product decisions recorded, not blocked on: REST-appointment
+confirmation trigger (SMS-01 note), full FSM sentence i18n catalog,
+chain-step dependency execution (step N consuming step N-1's executed
+result), real Stripe test keys for a non-mock public checkout.
+
+### Fourth pass — "run all of these until everything is fixed" (2026-06-05)
+
+**Final: 61 pass · 5 partial · 2 fail · 1 n/a.** Every remaining non-pass is
+a documented design decision, env choice, or explicitly deferred feature:
+
+Built this pass:
+- **INV-04 → pass**: route existed; spec now exercises issue → payment-link
+  (mock provider on dev, draft 409 guard verified).
+- **INV-05/06 → pass**: shared dev `STRIPE_WEBHOOK_SECRET`; the harness
+  signs `checkout.session.completed` exactly like Stripe — signature
+  verification, payment application, and event dedup verified end-to-end.
+- **INV-03 + PORT-01 → pass**: the "unwired send service" was actually the
+  fixture customer's missing sms_consent/email suppressing every channel;
+  dev's InMemoryDeliveryProvider works. Rows seed consenting customers;
+  view tokens read from the DB (captured responses are redaction-scrubbed).
+- **PAY-04 + INV-07 → pass**: `OVERDUE_SWEEP_INTERVAL_MS` makes the hourly
+  sweep observable (15s on dev); INV-07 aligned with the real model (job
+  money_state + invoice.overdue audit; invoices have no overdue status).
+- **SCH-02/03 → pass**: REAL voice entity resolution
+  (`customer-calling/entity-resolution.ts`): NL datetimes parse
+  deterministically (7 unit tests), customerName → tenant-scoped customer,
+  create intents resolve the customer's latest active job,
+  cancel/reschedule resolve by recency, default cancellation reason.
+  Full loops verified live: schedule-by-voice creates a real appointment;
+  cancel-by-voice cancels the right one.
+
+Remaining (all storied/explained): SMS-01 partial (REST appointments don't
+send confirmations BY DESIGN — proposal path only; product decision
+pending), PORT-02 partial (public checkout needs real Stripe keys),
+VOX-02 partial (confirm prompt not localized), VOX-04 n/a (telephony-only),
+AST-02/03 partial + AST-05/07 fail (assistant estimate persistence, query
+intents, multi-step chaining — the explicitly deferred Tier 3/4 stories).
+
+Build verification: `tsc --project tsconfig.build.json` clean; 584 unit
+tests green across the touched areas. Dev config added:
+`STRIPE_WEBHOOK_SECRET`, `OVERDUE_SWEEP_INTERVAL_MS=15000`.
+
+### Third pass — branch deployed to Railway dev via `railway up` (2026-06-05)
+
+**Final: 52 pass · 11 partial · 5 fail · 1 n/a** (report:
+`qa/reports/2026-06-05/QA-REPORT.md`, 20 commits on the branch). Every
+deploy-gated row flipped after deploying the branch to dev. Five MORE live
+defects were found and fixed during the deploy-verify loop:
+
+1. **Deploys were bricked**: the every-boot migration runner re-validated
+   070's strict region CHECK; any `tenant_settings` row with NULL region
+   (legal under 088's relaxed final constraint) failed boot with 23514.
+   Fix: `NOT VALID` + dev data backfill (1 row).
+2. **The execution worker could never claim**: `proposals.claimed_by` was
+   UUID; the worker claims with the name 'execution-worker' → 22P02 every
+   second, forever, on every approved proposal. Migration 130 → TEXT.
+3. **Voice/assistant proposals were unapprovable**: no trust tier or
+   confidence was threaded (calling-agent + assistant paths), so all
+   landed 'draft' — invisible to the inbox and 409 under the approval
+   guard. Confidence now flows from the classifier; complete drafts get
+   the guardrail-parity promote to ready_for_review.
+4. **Voice executions failed handler validation**: the adapter nested raw
+   classifier entities while handlers read the flat task contract
+   (payload.name / payload.jobId …). Primitives are now promoted; and the
+   executor finally **persists execution_error** (it was dropped — failed
+   proposals were undebuggable, which is why all of this hid for so long).
+5. **Assistant completions were discarded**: the proposal schema rejected
+   JSON null for relatedId/impact, degrading valid LLM replies to the
+   fallback envelope.
+
+Verified green end-to-end after the fixes: full voice loop (CUST-02:
+utterance → proposal → auto-approve → undo window → worker executes →
+customer row), voice scheduling proposal flow (SCH-02 through approval),
+voice cancel (SCH-03 through approval), PROV-01/02, PROP-01..04, and the
+D9 undo-window precheck via the assistant's persisted create_customer.
+
+**Remaining 5 fail / 11 partial are all feature/env gaps with stories —
+no unexplained failures**: voice entity resolution can't yet turn "next
+Tuesday at 2 PM" + "our customer" into jobId+timestamps (SCH-02/03
+partial; see the voice-scheduling-robustness effort), delivery/send
+service unwired on dev (INV-03, PORT-01/02), payment-link route unmounted
+(INV-04), STRIPE_WEBHOOK_SECRET unset (INV-05/06), no invoice 'overdue'
+status (INV-07) and job money_state sweep (PAY-04), SMS confirmation
+trigger (SMS-01), i18n confirm prompt (VOX-02), assistant
+estimate-persistence/query/chaining (AST-02/03/05/07), telephony-only
+cases (VOX-04 n/a).
+
+**Deploy-source caution**: dev currently runs CLI deploys of this branch;
+the service still *tracks GitHub main*, so the next push to main will
+replace dev with a build that lacks these fixes until the branch is
+merged. Push + merge promptly.
+
+### Second pass — after fixes on `fix/qa-matrix-live-run-findings` (2026-06-04)
+
+All six new stories plus the catalog restoration were built the same day;
+counts moved **40/7/26/1 → 44 pass · 9 partial · 15 fail · 1 n/a**, with
+zero harness-noise rows left (69 catalog rows, no orphans, every verdict
+evidence-backed). Flipped live: ISO-01, JRN-02, EST-03..06, EST-05/06 +
+INV-03..07 + AST-01..07 all produce real verdicts now (AST-01/03/06 and
+INV row passes include: assistant create-customer proposal works with HITL
+preserved; payment-link provider exists but is unmounted → INV-04 story
+confirmed precise).
+
+Still failing, **deploy-gated** (fixes are on this branch; dev runs
+`cursor/qa-matrix-voice-gates-b78e` which predates them AND main's proposal
+gate): PROV-01/02 (re-activation 500 → idempotent fix here), CUST-02 +
+SCH-02/03 (voice `ai_run_id` FK fix here), PROP-01..04 (gate on main,
+regression tests here). Merge + redeploy dev from main lineage, re-run
+those rows, and the expected state is ~55+ pass with the remaining
+fails/partials being real env/feature gaps (Stripe webhook secret, delivery
+wiring, overdue sweep worker, AST-04/05/07 features).
+
+### Remaining live partials (no story yet — verify on dev config first)
+
+- SMS-01: no `appointment_confirmation` dispatch row from a REST-created
+  appointment — confirmation may only fire via the `create_booking`
+  proposal path, or Twilio is unconfigured on dev.
+- VOX-02: Spanish utterance answered with canned `intent_confirm` prompt —
+  i18n of the confirm turn.
+- PORT-01/02: `send` → 400 (no view token mintable) — send service unwired
+  on dev; same root cause as INV-03's delivery leg.

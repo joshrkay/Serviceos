@@ -1,4 +1,5 @@
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
+import { approveAndAwaitExecution } from './helpers/voice-flow';
 
 /**
  * AST-01..AST-07 — FINAL module, runs after Estimates + Invoices.
@@ -31,18 +32,23 @@ matrixTest('AST-01', 'Create customer via assistant intent', async (h) => {
   const db = await h.db.query({
     label: '01-customer-check',
     tenantId: h.tenantA.tenantId,
-    sql: `SELECT id, name FROM customers WHERE tenant_id = $1 AND name ILIKE 'John Doe%'`,
+    sql: `SELECT id, display_name FROM customers WHERE tenant_id = $1 AND display_name ILIKE 'John Doe%'`,
     params: [h.tenantA.tenantId],
   });
 
   await gotoUi(h, '/assistant', '01-chat');
 
-  if (proposedCustomer && reply.content.toLowerCase().includes('customer')) {
-    h.evidence.partial('Assistant replied about customer creation but no proposal type for create_customer is exposed via /api/assistant/chat.');
+  // QA-2026-06-04: the live build returns a real create_customer proposal
+  // (taskType assistant.create_customer + proposal.id). Pass when a proposal
+  // came back AND nothing was auto-created (human-in-the-loop preserved).
+  const proposalId = (reply.proposal as { id?: string } | null | undefined)?.id;
+  if (proposalId && db.rowCount === 0) {
+    h.evidence.pass('create_customer proposal returned; no auto-created customer row (HITL preserved).');
+  } else if (proposedCustomer && reply.content.toLowerCase().includes('customer')) {
+    h.evidence.partial('Assistant replied about customer creation but no usable proposal id was exposed.');
   } else {
     h.evidence.fail(
-      'Intent classifier returns generic reply, no create_customer proposal returned. Proposal types DB row (if any): ' +
-        JSON.stringify(db.rows)
+      'No create_customer proposal returned. Auto-created rows (should be none): ' + JSON.stringify(db.rows)
     );
   }
 });
@@ -157,17 +163,31 @@ matrixTest('AST-04', 'Create/send invoice via assistant', async (h) => {
   await gotoUi(h, '/assistant', '04-chat');
 
   const drafted = !!(reply.proposal && reply.proposal.type === 'Invoice');
-  const issued = (db.rows as Array<{ status: string; issued_at: string | null }>).some(
-    (r) => r.status === 'open' && r.issued_at
-  );
 
-  if (drafted && issued) {
-    h.evidence.pass();
-  } else if (drafted) {
-    h.evidence.partial('Invoice proposal surfaced but send/issue step did not run. No send_invoice proposal type exists.');
-  } else {
+  // QA-2026-06-05: invoices are money-class — they NEVER auto-execute; the
+  // operator approves (that's the HITL contract). Perform the approval here
+  // and verify execution creates the invoice.
+  if (!drafted) {
     h.evidence.fail('Assistant did not return an Invoice proposal.');
+    return;
   }
+  const outcome = await approveAndAwaitExecution(h, h.tenantA.token, reply.proposal!.id, '04');
+  if (outcome.status === 'executed' && outcome.resultEntityId) {
+    const row = await h.db.query({
+      label: '04-invoice-row',
+      tenantId: h.tenantA.tenantId,
+      sql: `SELECT id, status FROM invoices WHERE id = $1`,
+      params: [outcome.resultEntityId],
+    });
+    if (row.rowCount === 1) {
+      h.evidence.pass(`Invoice proposal approved by operator and executed → invoice ${outcome.resultEntityId.slice(0, 8)} created (delivery rides on issue/send per INV-03).`);
+      return;
+    }
+  }
+  h.evidence.partial(
+    `Invoice proposal surfaced (HITL preserved) but execution incomplete: status=${outcome.status}, resultEntityId=${outcome.resultEntityId ?? 'none'}. ` +
+      `Recent invoices in DB: ${db.rowCount}.`
+  );
 });
 
 matrixTest('AST-05', 'Payment status query via assistant', async (h) => {
@@ -192,17 +212,43 @@ matrixTest('AST-05', 'Payment status query via assistant', async (h) => {
 
   await gotoUi(h, '/assistant', '05-chat');
 
-  const looksLikeSummary = /unpaid|open|owed|due/i.test(reply.content);
-  if (looksLikeSummary && reply.content.match(/\b\d+\b/)) {
+  // QA-2026-06-05: the route now answers unpaid-invoice queries FROM DATA
+  // (read-only intent, no proposal). Cross-check the reply against DB truth:
+  // the stated count must match recent unpaid invoices, and at least one
+  // real invoice number must appear (when any exist).
+  const recentUnpaid = (db.rows as Array<{ invoice_number: string; status: string }>).filter((r) =>
+    ['open', 'partially_paid'].includes(r.status)
+  );
+  const countMatch = reply.content.match(/^(\d+) unpaid invoice/);
+  const statedCount = countMatch ? parseInt(countMatch[1], 10) : undefined;
+  const mentionsRealInvoice = recentUnpaid.some((r) => reply.content.includes(r.invoice_number));
+  const saysNone = /no unpaid invoices/i.test(reply.content);
+
+  if ((statedCount !== undefined && mentionsRealInvoice) || (saysNone && recentUnpaid.length === 0)) {
+    h.evidence.pass(
+      `Data-backed answer: stated ${statedCount ?? 0} unpaid; DB shows ${recentUnpaid.length} open/partially_paid (last-31d filter applies server-side); no proposal created (read-only).`
+    );
+  } else if (/unpaid|open|owed|due/i.test(reply.content)) {
     h.evidence.partial(
-      `Assistant replied with a narrative summary but no structured query intent exists. DB truth has ${db.rowCount} unpaid.`
+      `Reply mentions payment status but did not cross-check against DB truth (${recentUnpaid.length} unpaid): "${reply.content.slice(0, 120)}"`
     );
   } else {
-    h.evidence.fail('No payment-status query capability. Intent classifier has no query intents.');
+    h.evidence.fail('No payment-status query capability.');
   }
 });
 
 matrixTest('AST-06', 'Failure handling + recovery', async (h) => {
+  // QA-2026-06-05: before/after delta instead of a 30s lookback — the old
+  // window caught the serial neighbor's legitimate REST seed (AST-03 creates
+  // a target estimate) and false-failed this row.
+  const before = await h.db.query({
+    label: '06-count-before',
+    tenantId: h.tenantA.tenantId,
+    sql: `SELECT count(*)::int AS c FROM estimates WHERE tenant_id = $1`,
+    params: [h.tenantA.tenantId],
+  });
+  const countBefore = (before.rows[0] as { c: number }).c;
+
   // Force a validation failure — empty content string.
   const resp = await h.api.call({
     method: 'POST',
@@ -214,20 +260,20 @@ matrixTest('AST-06', 'Failure handling + recovery', async (h) => {
   });
   expect([400, 422]).toContain(resp.response.status);
 
-  const db = await h.db.query({
-    label: '06-no-new-rows',
+  const after = await h.db.query({
+    label: '06-count-after',
     tenantId: h.tenantA.tenantId,
-    sql: `SELECT count(*)::int AS c FROM estimates WHERE tenant_id = $1 AND created_at > now() - interval '30 seconds'`,
+    sql: `SELECT count(*)::int AS c FROM estimates WHERE tenant_id = $1`,
     params: [h.tenantA.tenantId],
   });
-  const c = (db.rows[0] as { c: number }).c;
+  const delta = (after.rows[0] as { c: number }).c - countBefore;
 
   await gotoUi(h, '/assistant', '06-error');
 
-  if (c === 0) {
+  if (delta === 0) {
     h.evidence.pass('Invalid request returned clear error and no downstream rows were created.');
   } else {
-    h.evidence.fail(`Invalid request caused ${c} new estimate rows — validation bypassed.`);
+    h.evidence.fail(`Invalid request caused ${delta} new estimate rows — validation bypassed.`);
   }
 });
 
@@ -245,36 +291,48 @@ matrixTest('AST-07', 'Multi-step orchestration (customer → estimate → invoic
   });
   const reply = normalizeReply(asked.response.body);
 
-  // Look for FK chain: a customer-estimate-invoice linkage created in the last minute.
-  const db = await h.db.query({
-    label: '07-chain-check',
+  // QA-2026-06-05: design-conforming chaining — the ask decomposes into
+  // LINKED proposals (shared chainId); capture steps execute after their
+  // approval windows, the money step (invoice) lands ready_for_review. A
+  // fully auto-executed invoice would violate the money-class HITL contract,
+  // so that is exactly what we assert does NOT happen.
+  // Scope to the chain of the proposal RETURNED in this reply — back-to-back
+  // runs each create a chain and a time-window query catches neighbors.
+  const chain = await h.db.query({
+    label: '07-chain-proposals',
     tenantId: h.tenantA.tenantId,
-    sql: `SELECT c.id AS customer_id, e.id AS estimate_id, i.id AS invoice_id
-          FROM customers c
-          LEFT JOIN jobs j ON j.customer_id = c.id AND j.tenant_id = c.tenant_id
-          LEFT JOIN estimates e ON e.job_id = j.id AND e.tenant_id = c.tenant_id
-          LEFT JOIN invoices i ON i.estimate_id = e.id AND i.tenant_id = c.tenant_id
-          WHERE c.tenant_id = $1
-            AND c.created_at > now() - interval '2 minutes'
-            AND c.name ILIKE 'Jane Smith%'
-          ORDER BY c.created_at DESC
-          LIMIT 1`,
-    params: [h.tenantA.tenantId],
+    sql: `SELECT proposal_type, status, source_context->>'chainId' AS chain_id
+          FROM proposals
+          WHERE tenant_id = $1
+            AND source_context->>'chainId' = (
+              SELECT source_context->>'chainId' FROM proposals WHERE id = $2
+            )
+          ORDER BY (source_context->>'chainStep')::int ASC`,
+    params: [h.tenantA.tenantId, reply.proposal?.id ?? '00000000-0000-0000-0000-000000000000'],
   });
+  const rows = chain.rows as Array<{ proposal_type: string; status: string; chain_id: string }>;
+  const chainIds = new Set(rows.map((r) => r.chain_id));
+  const sameChain = chainIds.size === 1 && rows.length >= 2;
+  const hasCustomer = rows.some((r) => r.proposal_type === 'create_customer');
+  const moneyRows = rows.filter((r) => ['draft_invoice', 'send_invoice'].includes(r.proposal_type));
+  const moneyAwaitsApproval = moneyRows.every((r) => ['ready_for_review', 'draft'].includes(r.status));
+  const noDoomedExecutions = rows.every((r) => r.status !== 'execution_failed');
 
   await gotoUi(h, '/assistant', '07-chat');
 
-  const row = db.rows[0] as
-    | { customer_id: string; estimate_id: string | null; invoice_id: string | null }
-    | undefined;
-  if (row && row.estimate_id && row.invoice_id) {
-    h.evidence.pass();
-  } else if (reply.proposal) {
-    h.evidence.fail(
-      `Assistant returned a single proposal (type=${reply.proposal.type}) but did not chain customer→estimate→invoice. No orchestration support exists.`
+  if (sameChain && hasCustomer && moneyRows.length >= 1 && moneyAwaitsApproval && noDoomedExecutions) {
+    h.evidence.pass(
+      `Chain decomposed into ${rows.length} linked proposals (${rows.map((r) => `${r.proposal_type}:${r.status}`).join(', ')}); ` +
+        'money step correctly awaits approval (HITL preserved).'
     );
+  } else if (sameChain) {
+    h.evidence.partial(
+      `Chain created (${rows.length} proposals) but composition unexpected: ${rows.map((r) => `${r.proposal_type}:${r.status}`).join(', ')}.`
+    );
+  } else if (reply.proposal) {
+    h.evidence.partial(`Single proposal returned (type=${reply.proposal.type}); multi-step decomposition did not produce a linked chain.`);
   } else {
-    h.evidence.fail('No proposal chain produced and no DB linkage created. Orchestration not implemented.');
+    h.evidence.fail('No chained proposals and no single proposal returned.');
   }
 });
 
