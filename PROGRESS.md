@@ -55,8 +55,9 @@ no Next.js/Supabase/Vapi).
   `calendar-integrations` OAuth connect flow.
 - `wizard_step_calendar` emitted on choice. Tests: `CalendarChoicePanel.funnel.test.tsx`,
   `feature-inventory.test.ts` (choice validation).
-- Next-7-days availability seeding on Google connect remains a follow-up (the
-  provider choice + OAuth handoff ship now).
+- Next-7-days **availability seeding SHIPPED**: `availability/seed-from-google.ts`
+  (migration 150) pulls Google free/busy on connect (best-effort in the OAuth
+  callback); test `seed-from-google.test.ts`.
 
 ## 6. Test call flow — **SHIPPED**
 - Already implemented: number display, inbound detection via `voice_sessions`,

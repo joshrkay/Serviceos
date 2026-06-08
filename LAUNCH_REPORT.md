@@ -28,11 +28,16 @@ all within in-scope dirs. Analytics changes are additive and off-by-default.
 
 All 8 inventory features now ship. Diff vs branch base: **54 files, +3694/−9**.
 
+Per-feature named tests added this pass: `signup-fixtures.test.ts` (email / Google /
+duplicate — feature 1), `IdentityStep.profile.test.tsx` (feature 2),
+`onboarding-vapi.test.ts` (features 3/6/7, Docker-gated — Vapi end-of-call →
+session + activation + isolation in real DB), `seed-from-google.test.ts` (feature 5),
+plus the voice/calendar/activation/funnel suites.
+
 ## DEFERRED (reason + effort)
 
 | Item | Reason | Effort |
 |---|---|---|
-| Google next-7-days availability seeding | The calendar provider choice + OAuth handoff ship; pulling busy-blocks into a tech-availability template on connect is a small follow-up. | ~0.5 day |
 | Framework re-platform (Next.js/Supabase) | Intentionally NOT done — would delete the working 6000-test Express/Vite app + existing tests. "Fully literal" applied to features, not the framework (DECISIONS.md D9). | N/A (by design) |
 
 ## BLOCKED (diagnosis)

@@ -62,8 +62,10 @@ deferred were built:
   signature-verified idempotent webhook, provisioning wiring. Off-by-default without
   `VAPI_API_KEY`.
 
-## REMAINING follow-up (small) — Google availability seeding
+## SHIPPED (was follow-up) — Google availability seeding
 
-Pulling the next 7 days of Google Calendar busy-blocks into a tech-availability
-template on connect is not yet wired (the OAuth handoff + provider persistence are).
-Effort: ~0.5 day, reusing `routes/calendar-integrations.ts` token storage.
+Pulling the next 7 days of Google Calendar free/busy into a tenant availability
+template on connect is now built: `availability/seed-from-google.ts` (migration 150
+`availability_template`), wired best-effort into the Google OAuth callback, with a
+unit test (`test/availability/seed-from-google.test.ts`). All 8 inventory features
+are now feature-complete.
