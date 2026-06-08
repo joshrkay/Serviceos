@@ -1,0 +1,44 @@
+{"id":"slot_phone_0001","text":"five five five, one two three, four five six seven","slot_type":"phone","expected":{"kind":"digits","value":"5551234567"},"lang":"en"}
+{"id":"slot_phone_0002","text":"555 123 4567","slot_type":"phone","expected":{"kind":"digits","value":"5551234567"},"lang":"en"}
+{"id":"slot_phone_0003","text":"my number is 555-867-5309","slot_type":"phone","expected":{"kind":"digits","value":"5558675309"},"lang":"en"}
+{"id":"slot_phone_0004","text":"it's five five five eight six seven five three oh nine","slot_type":"phone","expected":{"kind":"digits","value":"5558675309"},"lang":"en"}
+{"id":"slot_phone_0005","text":"area code 415, then 555 0123","slot_type":"phone","expected":{"kind":"digits","value":"4155550123"},"lang":"en"}
+{"id":"slot_phone_0006","text":"four one five, five five five, oh one two three","slot_type":"phone","expected":{"kind":"digits","value":"4155550123"},"lang":"en"}
+{"id":"slot_phone_0007","text":"you can reach me at 312 555 7788","slot_type":"phone","expected":{"kind":"digits","value":"3125557788"},"lang":"en"}
+{"id":"slot_phone_0008","text":"three one two five five five seven seven eight eight","slot_type":"phone","expected":{"kind":"digits","value":"3125557788"},"lang":"en"}
+{"id":"slot_phone_0009","text":"call me at 555 4321, no area code needed","slot_type":"phone","expected":{"kind":"digits","value":"5554321"},"lang":"en"}
+{"id":"slot_phone_0010","text":"five five five four three two one","slot_type":"phone","expected":{"kind":"digits","value":"5554321"},"lang":"en"}
+{"id":"slot_phone_0011","text":"my cell is 646 555 9090","slot_type":"phone","expected":{"kind":"digits","value":"6465559090"},"lang":"en"}
+{"id":"slot_phone_0012","text":"six four six five five five nine oh nine oh","slot_type":"phone","expected":{"kind":"digits","value":"6465559090"},"lang":"en"}
+{"id":"slot_phone_0013","text":"it's 207 555 1212","slot_type":"phone","expected":{"kind":"digits","value":"2075551212"},"lang":"en"}
+{"id":"slot_phone_0014","text":"two oh seven, five five five, one two one two","slot_type":"phone","expected":{"kind":"digits","value":"2075551212"},"lang":"en"}
+{"id":"slot_phone_0015","text":"718 555 0147","slot_type":"phone","expected":{"kind":"digits","value":"7185550147"},"lang":"en"}
+{"id":"slot_phone_0016","text":"seven one eight five five five oh one four seven","slot_type":"phone","expected":{"kind":"digits","value":"7185550147"},"lang":"en"}
+{"id":"slot_phone_0017","text":"number is nine one seven five five five two three four five","slot_type":"phone","expected":{"kind":"digits","value":"9175552345"},"lang":"en"}
+{"id":"slot_phone_0018","text":"917 555 2345","slot_type":"phone","expected":{"kind":"digits","value":"9175552345"},"lang":"en"}
+{"id":"slot_phone_0019","text":"my number's 503 555 6789","slot_type":"phone","expected":{"kind":"digits","value":"5035556789"},"lang":"en"}
+{"id":"slot_phone_0020","text":"five oh three five five five six seven eight nine","slot_type":"phone","expected":{"kind":"digits","value":"5035556789"},"lang":"en"}
+{"id":"slot_phone_0021","text":"617 555 4400","slot_type":"phone","expected":{"kind":"digits","value":"6175554400"},"lang":"en"}
+{"id":"slot_phone_0022","text":"six one seven, five five five, four four zero zero","slot_type":"phone","expected":{"kind":"digits","value":"6175554400"},"lang":"en"}
+{"id":"slot_phone_0023","text":"it is 305 555 8123","slot_type":"phone","expected":{"kind":"digits","value":"3055558123"},"lang":"en"}
+{"id":"slot_phone_0024","text":"three oh five five five five eight one two three","slot_type":"phone","expected":{"kind":"digits","value":"3055558123"},"lang":"en"}
+{"id":"slot_phone_0025","text":"you can reach me at the same number","slot_type":"phone","expected":{"kind":"reference","value":"same_as_on_file"},"lang":"en"}
+{"id":"slot_phone_0026","text":"same number you have on file","slot_type":"phone","expected":{"kind":"reference","value":"same_as_on_file"},"lang":"en"}
+{"id":"slot_phone_0027","text":"call the number on my account","slot_type":"phone","expected":{"kind":"reference","value":"same_as_on_file"},"lang":"en"}
+{"id":"slot_phone_0028","text":"the cell you already have","slot_type":"phone","expected":{"kind":"reference","value":"same_as_on_file"},"lang":"en"}
+{"id":"slot_phone_0029","text":"it's the same as before","slot_type":"phone","expected":{"kind":"reference","value":"same_as_on_file"},"lang":"en"}
+{"id":"slot_phone_0030","text":"use the number I called from","slot_type":"phone","expected":{"kind":"reference","value":"same_as_caller_id"},"lang":"en"}
+{"id":"slot_phone_0031","text":"this number I'm calling from is fine","slot_type":"phone","expected":{"kind":"reference","value":"same_as_caller_id"},"lang":"en"}
+{"id":"slot_phone_0032","text":"just call back this line","slot_type":"phone","expected":{"kind":"reference","value":"same_as_caller_id"},"lang":"en"}
+{"id":"slot_phone_0033","text":"my number is 480 555 0199","slot_type":"phone","expected":{"kind":"digits","value":"4805550199"},"lang":"en"}
+{"id":"slot_phone_0034","text":"four eight zero five five five zero one nine nine","slot_type":"phone","expected":{"kind":"digits","value":"4805550199"},"lang":"en"}
+{"id":"slot_phone_0035","text":"it's 615 555 7000","slot_type":"phone","expected":{"kind":"digits","value":"6155557000"},"lang":"en"}
+{"id":"slot_phone_0036","text":"six one five five five five seven thousand","slot_type":"phone","expected":{"kind":"digits","value":"6155557000"},"lang":"en"}
+{"id":"slot_phone_0037","text":"872 555 3311","slot_type":"phone","expected":{"kind":"digits","value":"8725553311"},"lang":"en"}
+{"id":"slot_phone_0038","text":"eight seven two, triple five, three three one one","slot_type":"phone","expected":{"kind":"digits","value":"8725553311"},"lang":"en"}
+{"id":"slot_phone_0039","text":"reach me on 206 555 4646","slot_type":"phone","expected":{"kind":"digits","value":"2065554646"},"lang":"en"}
+{"id":"slot_phone_0040","text":"two oh six five five five forty six forty six","slot_type":"phone","expected":{"kind":"digits","value":"2065554646"},"lang":"en"}
+{"id":"slot_phone_0041","text":"my home phone, 559 555 8080","slot_type":"phone","expected":{"kind":"digits","value":"5595558080"},"lang":"en"}
+{"id":"slot_phone_0042","text":"five five nine five five five eighty eighty","slot_type":"phone","expected":{"kind":"digits","value":"5595558080"},"lang":"en"}
+{"id":"slot_phone_0043","text":"the number ending in 4567, the one on file","slot_type":"phone","expected":{"kind":"reference","value":"same_as_on_file"},"lang":"en"}
+{"id":"slot_phone_0044","text":"just use my cell on the account","slot_type":"phone","expected":{"kind":"reference","value":"same_as_on_file"},"lang":"en"}
