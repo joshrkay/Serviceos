@@ -22,6 +22,7 @@ import {
 } from './delivery-provider';
 import { DeliveryError } from './notification-errors';
 import { getTenantTwilioCreds, TenantTwilioCreds } from '../integrations/credentials';
+import { isValidTenantId } from '../db/schema';
 
 interface TwilioMessageResponse {
   sid: string;
@@ -58,6 +59,13 @@ export class PerTenantTwilioDeliveryProvider implements MessageDeliveryProvider 
     // global account so existing non-tenant flows are unaffected.
     if (!message.tenantId) {
       return this.base.sendSms(message);
+    }
+
+    // Validate the tenant id up front: getTenantTwilioCreds sets it as the RLS
+    // GUC (cast to uuid by the policy), so a malformed id would otherwise blow
+    // up mid-query. Fail closed rather than acquire a DB connection for junk.
+    if (!isValidTenantId(message.tenantId)) {
+      throw new DeliveryError('AUTH_FAILED', `Invalid tenant ID format: ${message.tenantId}`);
     }
 
     let creds: TenantTwilioCreds;

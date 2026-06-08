@@ -35,12 +35,32 @@ export async function getTenantTwilioCreds(
   tenantId: string,
   pool: Pool
 ): Promise<TenantTwilioCreds> {
-  const { rows } = await pool.query<IntegrationRow>(
-    `SELECT subaccount_sid, auth_token_primary_enc, credential_version, provider_data, status
-     FROM tenant_integrations
-     WHERE tenant_id = $1 AND provider = 'twilio'`,
-    [tenantId]
-  );
+  // tenant_integrations is FORCE RLS (migration 074): a SELECT only returns rows
+  // when app.current_tenant_id (or app.system_lookup) is set on the connection.
+  // This resolver runs off a bare pooled connection (the notification SMS path
+  // does NOT reuse the request-scoped withTenantTransaction client), so without
+  // scoping the read even a fully-provisioned tenant resolves zero rows and
+  // fails closed. Scope a short transaction to THIS tenant before reading its
+  // own integration row.
+  const client = await pool.connect();
+  let rows: IntegrationRow[];
+  try {
+    await client.query('BEGIN');
+    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    const result = await client.query<IntegrationRow>(
+      `SELECT subaccount_sid, auth_token_primary_enc, credential_version, provider_data, status
+       FROM tenant_integrations
+       WHERE tenant_id = $1 AND provider = 'twilio'`,
+      [tenantId]
+    );
+    rows = result.rows;
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
 
   // Status values per migration 071_widen_tenant_integrations_status:
   // 'full_readiness' = fully provisioned and ready to serve traffic.

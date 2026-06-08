@@ -30,9 +30,12 @@ import {
   syncJobAssignment,
 } from '../appointments/assignment';
 import { UserRepository, User } from '../users/user';
+import { InvoiceRepository } from '../invoices/invoice';
+import { RefreshJobMoneyStateDeps } from './job-money-state';
 import { findBookableSlots, isSlotFree } from '../scheduling/booking-availability';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { NotFoundError, ConflictError, ValidationError } from '../shared/errors';
+import { isValidTenantId } from '../db/schema';
 
 const DEFAULT_DURATION_MIN = 60;
 const DEFAULT_TIMEZONE = 'UTC';
@@ -44,6 +47,8 @@ export interface ConvertEstimateToScheduledJobDeps {
   appointmentRepo: AppointmentRepository;
   assignmentRepo: AssignmentRepository;
   userRepo: UserRepository;
+  /** Needed to roll up job.money_state when the estimate is accepted. */
+  invoiceRepo: InvoiceRepository;
   auditRepo?: AuditRepository;
 }
 
@@ -152,6 +157,14 @@ export async function convertEstimateToScheduledJob(
   const { tenantId, estimateId, actorId } = input;
   const timezone = input.timezone ?? DEFAULT_TIMEZONE;
 
+  // 0. Validate UUIDs up front so a malformed id can't reach a tenant-scoped
+  //    query / setTenantContext (which casts to uuid) before failing.
+  if (!isValidTenantId(tenantId)) throw new ValidationError('Invalid tenant ID format');
+  if (!isValidTenantId(estimateId)) throw new ValidationError('Invalid estimate ID format');
+  if (input.technicianId && !isValidTenantId(input.technicianId)) {
+    throw new ValidationError('Invalid technician ID format');
+  }
+
   // 1. Load + guard the estimate. Only a 'sent' estimate can be accepted; an
   //    already-'accepted' one is idempotent-safe (we just (re)schedule).
   const estimate = await deps.estimateRepo.findById(tenantId, estimateId);
@@ -221,7 +234,18 @@ export async function convertEstimateToScheduledJob(
   //    a ConflictError from the Pg layer.
   let acceptedEstimate = estimate;
   if (estimate.status === 'sent') {
-    const updated = await transitionEstimateStatus(tenantId, estimateId, 'accepted', deps.estimateRepo);
+    // Pass money-state deps so the job's denormalized `moneyState` rolls up to
+    // estimate_accepted — downstream auto-invoice + the invoicing queue filter
+    // on it, so skipping this leaves converted jobs stuck at estimate_sent.
+    const moneyStateDeps: RefreshJobMoneyStateDeps = {
+      jobRepo: deps.jobRepo,
+      estimateRepo: deps.estimateRepo,
+      invoiceRepo: deps.invoiceRepo,
+      auditRepo: deps.auditRepo,
+    };
+    const updated = await transitionEstimateStatus(
+      tenantId, estimateId, 'accepted', deps.estimateRepo, moneyStateDeps,
+    );
     if (updated) acceptedEstimate = updated;
   }
 

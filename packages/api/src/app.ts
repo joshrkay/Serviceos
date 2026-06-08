@@ -2387,6 +2387,7 @@ export function createApp(): express.Express {
     appointmentRepo,
     assignmentRepo,
     userRepo,
+    invoiceRepo,
     auditRepo,
   }));
   app.use(

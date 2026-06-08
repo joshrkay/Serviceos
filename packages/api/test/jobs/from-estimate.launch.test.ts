@@ -17,11 +17,15 @@ import { InMemoryEstimateRepository, createEstimate } from '../../src/estimates/
 import { InMemoryAppointmentRepository } from '../../src/appointments/appointment';
 import { InMemoryAssignmentRepository } from '../../src/appointments/assignment';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
 import { User, UserRepository } from '../../src/users/user';
 import { buildLineItem } from '../../src/shared/billing-engine';
 import { createJobRouter } from '../../src/routes/jobs';
 
-const TENANT = 'tenant-from-estimate';
+// Real UUIDs: the conversion path now validates tenant/estimate/technician ids.
+const TENANT = uuidv4();
+const TECH_1 = uuidv4();
+const TECH_2 = uuidv4();
 const NOW = new Date('2026-06-10T00:00:00Z');
 
 function tech(id: string): User {
@@ -56,6 +60,7 @@ describe('Feature 5 — Estimate → Job conversion', () => {
   let appointmentRepo: InMemoryAppointmentRepository;
   let assignmentRepo: InMemoryAssignmentRepository;
   let auditRepo: InMemoryAuditRepository;
+  let invoiceRepo: InMemoryInvoiceRepository;
 
   beforeEach(() => {
     estimateRepo = new InMemoryEstimateRepository();
@@ -63,10 +68,11 @@ describe('Feature 5 — Estimate → Job conversion', () => {
     appointmentRepo = new InMemoryAppointmentRepository();
     assignmentRepo = new InMemoryAssignmentRepository();
     auditRepo = new InMemoryAuditRepository();
+    invoiceRepo = new InMemoryInvoiceRepository();
   });
 
   function deps(users: User[]) {
-    return { estimateRepo, jobRepo, appointmentRepo, assignmentRepo, userRepo: fakeUserRepo(users), auditRepo };
+    return { estimateRepo, jobRepo, appointmentRepo, assignmentRepo, userRepo: fakeUserRepo(users), invoiceRepo, auditRepo };
   }
 
   async function seedSentEstimate(jobId: string) {
@@ -87,7 +93,7 @@ describe('Feature 5 — Estimate → Job conversion', () => {
     const job = await jobRepo.create(makeJob());
     const est = await seedSentEstimate(job.id);
 
-    const result = await convertEstimateToScheduledJob(deps([tech('tech-1')]), {
+    const result = await convertEstimateToScheduledJob(deps([tech(TECH_1)]), {
       tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', actorRole: 'owner', now: NOW,
     });
 
@@ -98,10 +104,12 @@ describe('Feature 5 — Estimate → Job conversion', () => {
     expect(result.estimate.lineItems).toHaveLength(2);
     // An appointment + primary assignment now exist for the chosen tech.
     expect(result.appointment.jobId).toBe(job.id);
-    expect(result.assignment.technicianId).toBe('tech-1');
+    expect(result.assignment.technicianId).toBe(TECH_1);
     expect(result.assignment.isPrimary).toBe(true);
     // Tech is denormalized onto the job.
-    expect(result.job.assignedTechnicianId).toBe('tech-1');
+    expect(result.job.assignedTechnicianId).toBe(TECH_1);
+    // Job money-state rolls up to estimate_accepted (so downstream billing sees it).
+    expect(result.job.moneyState).toBe('estimate_accepted');
     // Conversion is audited.
     expect(auditRepo.getAll().some((e) => e.eventType === 'job.created_from_estimate')).toBe(true);
   });
@@ -111,12 +119,12 @@ describe('Feature 5 — Estimate → Job conversion', () => {
     const est = await seedSentEstimate(job.id);
     const start = new Date('2026-06-12T15:00:00Z');
 
-    const result = await convertEstimateToScheduledJob(deps([tech('tech-1'), tech('tech-2')]), {
+    const result = await convertEstimateToScheduledJob(deps([tech(TECH_1), tech(TECH_2)]), {
       tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', actorRole: 'owner',
-      technicianId: 'tech-2', scheduledStart: start, durationMin: 90, now: NOW,
+      technicianId: TECH_2, scheduledStart: start, durationMin: 90, now: NOW,
     });
 
-    expect(result.assignment.technicianId).toBe('tech-2');
+    expect(result.assignment.technicianId).toBe(TECH_2);
     expect(result.appointment.scheduledStart.toISOString()).toBe(start.toISOString());
     expect(result.appointment.scheduledEnd.getTime() - result.appointment.scheduledStart.getTime()).toBe(90 * 60_000);
   });
@@ -129,7 +137,7 @@ describe('Feature 5 — Estimate → Job conversion', () => {
     );
 
     await expect(
-      convertEstimateToScheduledJob(deps([tech('tech-1')]), {
+      convertEstimateToScheduledJob(deps([tech(TECH_1)]), {
         tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', now: NOW,
       }),
     ).rejects.toMatchObject({ code: 'CONFLICT' });
@@ -137,7 +145,7 @@ describe('Feature 5 — Estimate → Job conversion', () => {
 
   it('throws NotFoundError for a missing estimate', async () => {
     await expect(
-      convertEstimateToScheduledJob(deps([tech('tech-1')]), {
+      convertEstimateToScheduledJob(deps([tech(TECH_1)]), {
         tenantId: TENANT, estimateId: uuidv4(), actorId: 'owner-1', now: NOW,
       }),
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
@@ -148,11 +156,11 @@ describe('Feature 5 — Estimate → Job conversion', () => {
     const est = await seedSentEstimate(job.id);
     await estimateRepo.update(TENANT, est.id, { status: 'accepted' });
 
-    const result = await convertEstimateToScheduledJob(deps([tech('tech-1')]), {
+    const result = await convertEstimateToScheduledJob(deps([tech(TECH_1)]), {
       tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', now: NOW,
     });
     expect(result.estimate.status).toBe('accepted');
-    expect(result.assignment.technicianId).toBe('tech-1');
+    expect(result.assignment.technicianId).toBe(TECH_1);
   });
 
   it('returns 503 when scheduling deps are not wired, and 401 unauthenticated', async () => {
