@@ -17,11 +17,28 @@ from typing import Any, Iterator
 
 import zstandard as zstd
 from dotenv import load_dotenv
-from langdetect import LangDetectException, detect
-from supabase import Client, create_client
 from tqdm import tqdm
 
+# langdetect is optional: when absent, language is reported as "unknown" so the
+# module stays importable for offline parse/classify/scrub testing.
+try:
+    from langdetect import LangDetectException, detect
+except Exception:  # pragma: no cover - optional dependency
+    class LangDetectException(Exception):
+        pass
+
+    def detect(_text: str) -> str:  # type: ignore[misc]
+        raise LangDetectException("langdetect not installed")
+
+# `supabase` is imported lazily inside get_supabase() — it is only needed for the
+# actual DB upsert, not for parsing/classification/scrubbing. `Client` appears
+# only in annotations (PEP 563 via `from __future__ import annotations`), so it
+# is never evaluated at runtime and needs no module-level import.
 from corpus_classification import classify_record, clean_for_corpus
+from scrub_pii import scrub_pii
+
+if False:  # type-checking only; never executed
+    from supabase import Client  # noqa: F401
 
 DEFAULT_BATCH_SIZE = 400
 MIN_TEXT_LEN = 15
@@ -34,7 +51,9 @@ def load_env() -> None:
     load_dotenv()
 
 
-def get_supabase() -> Client:
+def get_supabase() -> "Client":
+    from supabase import create_client  # lazy: only needed for DB writes
+
     url = os.environ.get("SUPABASE_URL", "").strip()
     key = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
     if not url or not key or "YOUR_PROJECT" in url:
@@ -129,15 +148,23 @@ def classify_row(
     if english_only and lang not in ("en", "unknown"):
         return None
 
+    # Classify on the original cleaned text (rule-based; unaffected by PII), but
+    # PERSIST only PII-scrubbed text. Drop the row entirely if any residual PII
+    # signal remains after scrubbing, so nothing leaks into the corpus.
     cls = classify_record(cleaned_text=cleaned, subreddit=subreddit)
+    scrub = scrub_pii(cleaned)
+    if scrub.has_residual_pii:
+        return None
+    cleaned_scrubbed = scrub.scrubbed
+    raw_scrubbed = scrub_pii(raw_text).scrubbed
     row: dict[str, Any] = {
         "source_id": source_id,
         "source_type": source_type,
         "source_subreddit": subreddit or None,
         "reddit_permalink": permalink,
         "created_utc": created_iso,
-        "raw_text": raw_text[:50000],
-        "cleaned_text": cleaned[:50000],
+        "raw_text": raw_scrubbed[:50000],
+        "cleaned_text": cleaned_scrubbed[:50000],
         "language": lang,
         "triage_label": cls["triage_label"],
         "trade": cls["trade"],
