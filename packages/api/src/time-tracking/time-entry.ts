@@ -83,6 +83,8 @@ export interface TimeEntryRepository {
   findById(tenantId: string, id: string): Promise<TimeEntry | null>;
   findActiveByUser(tenantId: string, userId: string): Promise<TimeEntry | null>;
   findByTenant(tenantId: string, options?: TimeEntryListOptions): Promise<TimeEntry[]>;
+  /** All time entries logged against a job (any user, any entry type). */
+  findByJob(tenantId: string, jobId: string): Promise<TimeEntry[]>;
   /**
    * Closes an entry by id. Returns the updated row or null if no row
    * with that id exists in the tenant. Idempotent: a closed entry is
@@ -159,6 +161,13 @@ export class InMemoryTimeEntryRepository implements TimeEntryRepository {
       results = results.slice(0, options.limit);
     }
     return results.map((r) => ({ ...r }));
+  }
+
+  async findByJob(tenantId: string, jobId: string): Promise<TimeEntry[]> {
+    return Array.from(this.rows.values())
+      .filter((r) => r.tenantId === tenantId && r.jobId === jobId)
+      .sort((a, b) => a.clockedInAt.getTime() - b.clockedInAt.getTime())
+      .map((r) => ({ ...r }));
   }
 
   async close(

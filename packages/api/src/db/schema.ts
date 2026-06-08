@@ -3828,6 +3828,16 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS availability_template JSONB;
   `,
+
+  '151_tenant_settings_bill_labor_from_time_entries': `
+    -- Feature (launch): opt-in toggle to recompute an auto-drafted invoice's
+    -- labor line from ACTUAL logged time entries instead of the estimated
+    -- hours. Off by default — owners opt in; with no tracked time the estimate
+    -- is billed as-is. tenant_settings already carries RLS, so this additive
+    -- column needs no policy change.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS bill_labor_from_time_entries BOOLEAN NOT NULL DEFAULT false;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

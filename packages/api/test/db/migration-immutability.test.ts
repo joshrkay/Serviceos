@@ -210,6 +210,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['148_tenant_settings_business_profile_extras', '0b9f55aedb42e1a503aa1fc7338fa790a11be08d4bf3eca26cf205da582c9002'],
   ['149_tenant_settings_calendar_provider', '1ef4dcbef697bb3e060f0a3ba3102381631c053d0c696131623a63c6d0d03440'],
   ['150_tenant_settings_availability_template', 'c05e63c2025ecc6fd69cf4fdbee4ac447cda294f65f8e9efb77532c37cfe1175'],
+  ['151_tenant_settings_bill_labor_from_time_entries', 'a33ab626d1b807c19dfd62180a9462c7cbdb41c8b358e89249fb2213f93ac145'],
 ];
 
 function hashMigration(value: string): string {

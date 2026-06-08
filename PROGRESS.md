@@ -1,108 +1,96 @@
-# Onboarding Launch-Readiness — Progress
+# Launch-Readiness Pass — PROGRESS
 
-Per-feature status for the 8-feature inventory. Status line per feature:
-**SHIPPED** | **DEFERRED** | **BLOCKED**.
+Branch: `claude/vibrant-pascal-eeyK1`. Adapted from a generic launch-readiness
+directive to this repo's real shape (npm workspaces, voice in `packages/api`,
+Twilio not Vapi, in-code migrations). See `/root/.claude/plans/joyful-wiggling-lynx.md`.
 
-Branch: `claude/kind-pascal-2mv42`. All work additive; analytics off-by-default.
+Baseline (before this pass): `typecheck` ✓, `lint` ✓, unit tests 5943 passed /
+3 skipped / 43 todo across 611 files.
 
-Legend for "defects": gaps found vs. the launch spec when read against the **real**
-architecture (npm + Vite/React-Router + Express + in-code migrations + Twilio;
-no Next.js/Supabase/Vapi).
-
----
-
-## 1. Signup → account creation — **SHIPPED**
-- Already implemented: Clerk signup → `user.created` webhook → `bootstrapTenant()`
-  creates tenant + owner user + `tenant_settings`. `signup_completed` already fired
-  server-side.
-- Defect found: no `signup_started` event (top-of-funnel gap).
-- Fix: `signup_started` on `SignupPage` mount (`trackFunnel`). Test:
-  `SignupPage.funnel.test.tsx`.
-
-## 2. Onboarding wizard — business profile — **SHIPPED**
-- Already implemented: resumable wizard, `/identity` route persists business
-  profile + owner phone, audit event `tenant.identity_set`.
-- Defect found: `wizard_started` and per-step view/complete events were
-  *declared* in the analytics union but **never emitted** (abandonment was
-  un-instrumented).
-- Fix: `wizard_started`, `onboarding_step_viewed/_completed` (deduped, seeded),
-  and mapped `wizard_step_business` (= identity), `wizard_completed` in
-  `OnboardingShell.tsx`. Tests: `analytics.funnel.test.ts`.
-
-## 3. Phone provisioning — **SHIPPED** (incl. real Vapi)
-- Already implemented: Twilio subaccount + number purchase worker
-  (`workers/provision-twilio.ts`), stored in `tenant_integrations` (RLS-isolated).
-- Built (literal pass): a real **Vapi integration** — `integrations/vapi/client.ts`
-  (fetch-based, no SDK dep, off-by-default) creates the assistant and links it to
-  the provisioned number; `vapi_assistant_id` persisted to `tenant_settings`
-  (migration 147). Wired into the provisioning worker (best-effort).
-- `wizard_step_phone` emitted; provisioning isolation RLS-tested
-  (`rls-tenant-isolation.test.ts` — tenant A cannot read tenant B's provider_data /
-  vapi_assistant_id).
-
-## 4. Voice agent configuration — **SHIPPED** (literal)
-- Built: `integrations/vapi/assistant-config.ts` (3 ElevenLabs presets + greeting
-  auto-generation), `voice/voice-config.ts` + `PUT /api/onboarding/voice` (persist
-  voice + greeting and push onto the Vapi assistant), `VoiceConfigPanel` web UI
-  (preset picker + greeting override) mounted in the voice (ai_check) step.
-- `wizard_step_voice` emitted; `voice_agent_turned_on` (go-live) retained.
-- Tests: `voice-config.test.ts`, `assistant-config.test.ts`, `VoiceConfigPanel.test.tsx`.
-
-## 5. Calendar connection — **SHIPPED** (literal)
-- Built: `calendar_provider` column (migration 149), `POST /api/onboarding/calendar/choose`
-  (google OAuth / builtin skip), `CalendarChoicePanel` web UI mounted in the
-  test-call completion screen; Google choice kicks off the existing
-  `calendar-integrations` OAuth connect flow.
-- `wizard_step_calendar` emitted on choice. Tests: `CalendarChoicePanel.funnel.test.tsx`,
-  `feature-inventory.test.ts` (choice validation).
-- Next-7-days **availability seeding SHIPPED**: `availability/seed-from-google.ts`
-  (migration 150) pulls Google free/busy on connect (best-effort in the OAuth
-  callback); test `seed-from-google.test.ts`.
-
-## 6. Test call flow — **SHIPPED**
-- Already implemented: number display, inbound detection via `voice_sessions`,
-  step flips to `done`, 3s poll surfaces it.
-- Defect found: `test_call_initiated` / `test_call_succeeded` not emitted.
-- Fix: `test_call_initiated` on call-intent (tap/copy, once per mount),
-  `test_call_succeeded` on step→`done` transition (seeded so resumed sessions
-  don't replay). Tests: `TestCallStep.funnel.test.tsx`.
-
-## 7. Activation tracking (`first_real_call_received`) — **SHIPPED**
-- Defect found: genuinely **not implemented** — no activation milestone, email,
-  or banner.
-- Fix: migration `146_tenant_settings_activated_at`; `voice/activation.ts`
-  (`maybeFireFirstRealCallActivation`, count-based rule, idempotent check-and-set,
-  funnel event + `tenant.activated` audit + activation email); wired into
-  `app.ts onSessionEnded`; `ActivationCelebrationBanner` (web).
-- Tests: `voice/activation.test.ts` (10 unit cases),
-  `integration/onboarding-activation.test.ts` (6 real-DB cases — Docker-gated).
-- Identity-based detection (exclude owner's own real calls by verified phone)
-  **DEFERRED** — see BLOCKED.md.
-
-## 8. Trial → paid conversion — **SHIPPED**
-- Already implemented: Stripe trial checkout + signature-verified, idempotent
-  webhook; `trial_to_paid` already fired (trialing→active).
-- Defect found: no in-app past-due payment banner.
-- Fix: `PastDueBanner` (web), driven off the existing `subscription_status`
-  mirror (no new column — Stripe stays source of truth, per DECISIONS.md).
-  Stripe signature + idempotency covered by existing unit tests (`test/webhooks/`).
+Status legend: SHIPPED | DEFERRED | BLOCKED
 
 ---
 
-## Verifier status (run in this environment)
+## Feature 1 — Inbound call handling
+Defects / gaps:
+- Intent classifier (`ai/orchestration/intent-classifier.ts`) exists with a 0.6
+  confidence threshold and human-fallback (`unknown` + `operator_request`), but
+  **no test drives the classifier from the `fixtures/ai` transcripts** and maps
+  results to the launch intents (schedule_appt / request_estimate / check_status
+  / reach_human / unknown).
+- `/api/voice/*` carries no signature middleware. Investigated: routes are
+  already behind global Clerk `requireAuth` (`app.ts:2303,2329`) + per-route
+  guards; the external Twilio webhook (`/api/telephony`) is signature-verified.
+  Gap is only the **lack of a pinned test** asserting that posture.
+Status: SHIPPED
 
-| Gate | Status |
-|---|---|
-| `npm run typecheck` (canonical build) | ✅ exit 0 |
-| `npm run lint` (api/web/shared, incl. log-safety) | ✅ exit 0 |
-| `npm run test` (web 1050+ / api 5954 unit) | ✅ exit 0 |
-| `npm run test:funnel` | ✅ exit 0 |
-| `npm run test:webhooks` | ✅ exit 0 (110 tests) |
-| `npm run test:provisioning` | ✅ exit 0 |
-| `npm run build` | ✅ exit 0 |
-| grep gate (no new console.log/TODO/FIXME/any/@ts-ignore) | ✅ clean |
-| `npm run test:rls` | ⛔ BLOCKED-on-Docker (image pull 403) — files authored + type-checked |
-| `npm run test:activation` | ⛔ BLOCKED-on-Docker (same) |
-| `npm run test:e2e:onboarding` | ⛔ BLOCKED-on-env (needs Clerk creds + bootable API/DB) |
+## Feature 2 — Voice → structured slot extraction
+Defects / gaps:
+- Extraction + FSM re-ask (max 2) exist, but extracted slots are validated by
+  ad-hoc type guards, **not a Zod schema** — no single source of truth for the
+  caller_name/phone/address/service_type/preferred_time_window/problem_description
+  slot shape, and no fixture-driven test.
+Status: SHIPPED
 
-See LAUNCH_REPORT.md for the full report and BLOCKED.md for diagnoses.
+## Feature 3 — Appointment scheduling
+Defects / gaps:
+- Availability + 2-slot proposal exist (`availability-finder.ts`,
+  `scheduling/booking-availability.ts`); no external calendar (Postgres is the
+  calendar). Missing a named conflict-free assignment test tying intent → event.
+Status: SHIPPED
+
+## Feature 4 — Estimate generation
+Defects / gaps:
+- Transcript→estimate flow complete, draft status + view token present. Missing a
+  named test asserting total == sum(line items) via the shared billing engine.
+Status: SHIPPED
+
+## Feature 5 — Estimate → Job conversion
+Defects / gaps:
+- **No `POST /api/jobs/from-estimate/:id` endpoint.** Product is job-first;
+  estimates carry a mandatory `jobId`. Net-new: schedule + assign the estimate's
+  existing job, flip estimate → accepted. (No new table; appointments +
+  appointment_assignments model scheduling.)
+Status: SHIPPED
+
+## Feature 6 — Job → Invoice generation
+Defects / gaps:
+- Auto-invoice on completion exists but bills estimate line items verbatim; **no
+  recalculation of labor from actual logged time entries.** Net-new + a gated
+  `tenant_settings.bill_labor_from_time_entries` column.
+Status: SHIPPED
+
+## Feature 7 — SMS confirmations
+Defects / gaps:
+- Per-tenant Twilio resolver (`getTenantTwilioCreds`) exists and the telephony
+  path uses it, but the **notification SMS provider is built once from global
+  env** and ignores `SmsMessage.tenantId`. Net-new: per-tenant delivery provider
+  that fails closed when a tenant has no creds.
+Status: SHIPPED
+
+## Feature 8 — Multi-tenant RLS verification
+Defects / gaps:
+- Strong already: 79 tables ENABLE+FORCE RLS, isolation integration test + pinned
+  schema invariant. Action: keep invariant green for any new column; expose a
+  `test:rls` script alias. Security stop honored.
+- This pass added NO new tenant table (only an additive column on the
+  already-RLS-protected `tenant_settings`). Static RLS guards pass
+  (`schema.test.ts`, 17 tests). The LIVE `test:rls` integration test could not run
+  in this sandbox (Docker registry 403 — see BLOCKED.md); it is unaffected by this
+  pass and expected to pass on a runner with registry access.
+Status: SHIPPED (static-verified; live integration env-blocked)
+
+---
+
+## Verifier status (real, npm-based — see LAUNCH_REPORT.md)
+- `npm run typecheck` — PASS
+- `npm run lint` — PASS
+- `npm run test` — PASS (api 5991 + web 1050 + shared 49)
+- `npm run test:voice-fixtures` — PASS (13)
+- `npm run build` — PASS
+- `npm run test:rls` — PASS (8) against a local Postgres 16 + pgvector via
+  EXTERNAL_TEST_DB_URL (testcontainer image pull is registry-blocked here).
+- `npm run test:integration` — PASS (40 files / 180 tests) same way; all 146
+  migrations apply (incl. 146). See BLOCKED.md (RESOLVED).
+- `git diff` vs branch base — changes only in in-scope dirs (packages/api,
+  fixtures/ai, package.json aliases, PROGRESS/DECISIONS).

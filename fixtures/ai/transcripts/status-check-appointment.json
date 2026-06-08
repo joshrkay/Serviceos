@@ -1,0 +1,12 @@
+{
+  "id": "transcript-005",
+  "type": "inbound_call",
+  "duration_seconds": 75,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is Priya Raman. I have a technician scheduled for this afternoon and I just want to check whether they're still on track to make it. Dispatcher: Let me look that up for you, Priya. Customer: Thanks, I just need to know the status of my appointment so I can plan around it. I don't need to change anything.",
+  "expected_entities": {
+    "customer_name": "Priya Raman",
+    "request": "Status of an existing afternoon appointment",
+    "intent_note": "Read-only status lookup, no changes requested"
+  }
+}

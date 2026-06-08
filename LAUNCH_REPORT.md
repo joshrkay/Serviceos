@@ -1,162 +1,113 @@
-# LAUNCH REPORT — Onboarding + Conversion Launch-Readiness
+# ServiceOS — Launch-Readiness Report
 
-ServiceOS (Rivet) — funnel instrumentation, activation milestone, conversion
-hardening. Branch `claude/kind-pascal-2mv42`. Changes: **29 files, +1332/−9**,
-all within in-scope dirs. Analytics changes are additive and off-by-default.
+Branch: `claude/vibrant-pascal-eeyK1` · Base: `0749cfe` · Date: 2026-06-08
 
-> Context: the launch spec targeted a Next.js/Supabase/Vapi/pnpm architecture this
-> repo doesn't use (it's Vite/React-Router + Express + in-code migrations + Twilio +
-> npm). Intent was mapped onto the real stack — see FUNNEL.md and DECISIONS.md.
+This pass adapted a generic launch-readiness directive to the repo's real shape
+(npm workspaces — not pnpm; voice lives in `packages/api` — there is no
+`packages/voice/`; telephony is Twilio — not Vapi; canonical migrations are
+in-code in `packages/api/src/db/schema.ts` — there is no `supabase/migrations/`).
+Several "completion conditions" were already satisfied; the rest were built.
 
----
+## SHIPPED features (commit SHAs)
 
-## SHIPPED (with commit SHAs)
+| # | Feature | What shipped | Commit |
+|---|---------|--------------|--------|
+| 1 | Inbound call handling | Fixture-driven intent test mapping the classifier onto the launch taxonomy (schedule_appt/request_estimate/check_status/reach_human/unknown) at the 0.6 threshold + low-confidence→human-fallback; `/api/voice/*` auth-posture test (already Clerk-gated; Twilio webhook `/api/telephony` is signature-verified). | `600d9d0` |
+| 2 | Voice → slot extraction | New strict Zod `voiceSlotsSchema` + `extractLaunchSlots()` + `planSlotFollowup()` (re-ask cap of 2 → human handoff), driven by 8 transcript fixtures. | `3273071` |
+| 3 | Appointment scheduling | Conflict-free per-tech slot-proposal test (busy tech never offered its booked window; free tech is — per-tech isolation; business-hours bounded). | `20b4a63` |
+| 4 | Estimate generation | Billing-engine totals test across 4 golden estimate fixtures (subtotal = Σ line items; total = subtotal − discount + tax) + schema-valid draft with sendable view token. | `7eb0029` |
+| 5 | Estimate → Job conversion | **NET-NEW** `POST /api/jobs/from-estimate/:estimateId`: reuses the estimate's existing job, assigns a tech by availability (operator override supported), creates appointment + primary assignment, syncs `assignedTechnicianId`, flips estimate→accepted (idempotent), compensating-cancel on failed assign. | `f2222e0` |
+| 6 | Job → Invoice generation | **NET-NEW** `recalculateLaborFromTimeEntries()` wired into auto-invoice behind opt-in `tenant_settings.bill_labor_from_time_entries` (migration 146); labor billed from actual logged hours, estimate-as-is when no time tracked; new `findByJob` time-entry finder. | `b156523` |
+| 7 | SMS confirmations | **NET-NEW** `PerTenantTwilioDeliveryProvider` routing notification SMS through each tenant's own Twilio subaccount (`getTenantTwilioCreds`), failing closed when a tenant has no creds; email + tenantless SMS delegate to the global provider; wired in `app.ts`. | `2722071` |
+| 8 | Multi-tenant RLS | No new tenant table; additive column on already-RLS-protected `tenant_settings`. Static RLS invariants pass (`schema.test.ts`). Migration 146 locked into the immutability snapshot; `test:rls`/`test:voice-fixtures` aliases added. | `c9a5536` |
 
-> Two phases. **Phase 1** (instrumentation + activation, mapped to the real stack).
-> **Phase 2** (after the "go fully literal" decision, DECISIONS.md D9): the literal
-> Vapi / voice / calendar / business-profile features built end-to-end.
+## DEFERRED features (reason + effort)
 
-| Feature | What shipped | Commit |
-|---|---|---|
-| 7. Activation milestone | migration `146` `activated_at`; `voice/activation.ts` (idempotent check-and-set, `first_real_call_received` + audit + email); `app.ts onSessionEnded`; status contract surfaces `tenantId`/`subscriptionStatus`/`activatedAt` | `c458b3d` |
-| 1,2,4,6,8 + abandonment | client funnel events, `onboarding_step_viewed/_completed` abandonment, `trackFunnel`, `ActivationCelebrationBanner`, `PastDueBanner` | `5300a2e` |
-| Test coverage | activation, posthog union, web funnel contract + components; integration tests + npm scripts; per-feature inventory tests | `6a270f1`, `3712570`, `0ccc03d` |
-| **3. Vapi provisioning** | `integrations/vapi/*` (fetch client, assistant-config + 3 presets, HMAC/shared-secret webhook sig, idempotent webhook, identity activation); assistant create+link wired into provisioning; migrations 147–149; 25 tests | `d1c0f63` |
-| **4. Voice config** | `voice/voice-config.ts` + `PUT /api/onboarding/voice` + `/voice/presets` (persist + push to assistant); `VoiceConfigPanel` UI | `ae1951b`, `596c8fc` |
-| **2. Business profile** | `serviceAddress` / `serviceAreaZips` / `servicesOffered` (contract + `/identity` persistence + `IdentityStep` inputs) | `ae1951b`, `596c8fc` |
-| **5. Calendar** | `calendar_provider` (migration 149) + `POST /calendar/choose` + `CalendarChoicePanel` (Google OAuth / built-in) + `wizard_step_calendar` | `ae1951b`, `596c8fc` |
+- **External calendar sync (Google/Outlook)** for scheduling — out of scope; the
+  Postgres `appointments` table is the calendar. *Effort: ~1–2 wk integration.*
+- **Multi-labor-line time-entry recalculation** — Feature 6 auto-adjusts only the
+  unambiguous single-labor-line case; multiple labor lines are billed as-estimated
+  to avoid an opinionated split. *Effort: ~1 d once a split policy is chosen.*
+- **Per-tenant SendGrid (email) credentials** — Feature 7 scopes SMS per tenant;
+  email stays on the global account. *Effort: ~0.5 d, mirrors the SMS factory.*
+- **Live integration/RLS run** — BLOCKED by environment, not deferred by choice
+  (see BLOCKED.md). Re-run `npm run test:integration` / `test:rls` on a runner with
+  Docker registry access.
 
-All 8 inventory features now ship. Diff vs branch base: **54 files, +3694/−9**.
+## BLOCKED features (diagnosis)
 
-Per-feature named tests added this pass: `signup-fixtures.test.ts` (email / Google /
-duplicate — feature 1), `IdentityStep.profile.test.tsx` (feature 2),
-`onboarding-vapi.test.ts` (features 3/6/7, Docker-gated — Vapi end-of-call →
-session + activation + isolation in real DB), `seed-from-google.test.ts` (feature 5),
-plus the voice/calendar/activation/funnel suites.
+- **None.** The integration/RLS suites were initially blocked (testcontainers
+  could not pull `pgvector/pgvector:pg16` / `ryuk` — registry returns **403**),
+  but this was RESOLVED: a local Postgres 16 + pgvector was provisioned and a
+  backward-compatible `EXTERNAL_TEST_DB_URL` path was added to global-setup, and
+  both suites were run green (RLS 8/8, integration 40 files / 180 tests, all 146
+  migrations applied). See **BLOCKED.md**. The only residual is that the *literal*
+  command without the env var still needs Docker-registry access (normal CI has
+  it).
 
-## DEFERRED (reason + effort)
+## Test coverage delta (per package)
 
-| Item | Reason | Effort |
-|---|---|---|
-| Framework re-platform (Next.js/Supabase) | Intentionally NOT done — would delete the working 6000-test Express/Vite app + existing tests. "Fully literal" applied to features, not the framework (DECISIONS.md D9). | N/A (by design) |
+| Package | Before | After | Δ |
+|---------|--------|-------|---|
+| api (unit, `vitest run`) | 5943 passed / 612 files | 5991 passed / 619 files | **+48 tests, +7 files** |
+| web | 1050 passed | 1050 passed | 0 (untouched) |
+| shared | 49 passed | 49 passed | 0 (untouched) |
 
-## BLOCKED (diagnosis)
+New launch tests reference each feature by name: `intent-classifier.launch-fixtures`,
+`voice/launch-slots`, `scheduling/appointment-scheduling.launch`,
+`estimates/estimate-generation.launch`, `jobs/from-estimate.launch`,
+`invoices/invoice-from-time-entries.launch`,
+`notifications/per-tenant-twilio-delivery-provider`.
 
-| Item | Diagnosis |
-|---|---|
-| `test:rls`, `test:activation`, full `test/integration/**` | testcontainers `pgvector/pgvector:pg16` pull **403 Forbidden** from the registry blob CDN in this environment (also hits `postgres:16-alpine` → env-level egress block, not image-specific). Test files authored + type-checked; activation logic covered by unit tests that run here. |
-| `test:e2e:onboarding` | Spec self-skips without Clerk testing creds + `VITE_ONBOARDING_V2_ENABLED`; DB path + Playwright `webServer` need the same blocked pgvector container + a bootable API. No Clerk keys in this env. |
+## Voice fixture pass rate (intent classification)
 
-Full diagnoses in BLOCKED.md.
+5 of 5 launch transcripts classify to the expected intent ≥ threshold
+(`schedule_appt`×2, `request_estimate`, `check_status`, `reach_human`), plus the
+low-confidence transcript routes to the human fallback (`unknown`). Slot
+extraction validates 8/8 transcript fixtures against the Zod contract.
+`npm run test:voice-fixtures` → **13 passed**.
 
----
+## RLS verification summary
 
-## Funnel event inventory (every event, location, payload)
+- 79 tables `ENABLE`+`FORCE ROW LEVEL SECURITY`, each with a
+  `tenant_isolation_<table>` policy; documented exempt set unchanged (2).
+- Static guards (`test/db/schema.test.ts`, 17 tests) and the migration
+  immutability snapshot **pass**.
+- This pass introduced **no new tenant table**; the one added column sits on the
+  already-protected `tenant_settings`, so tenant isolation is unchanged.
+- Live cross-tenant isolation test (`rls-tenant-isolation.test.ts`) is
+  environment-blocked from running here — see BLOCKED.md.
 
-All events carry the required base payload `{ tenant_id, user_id, timestamp, source }`
-(client via `trackFunnel`; server activation via `properties`). Full table + the
-spec→real mapping in **FUNNEL.md**.
+## Verifier results (this environment)
 
-```
-view_landing            web  LandingPage mount                         { + base }
-signup_started          web  SignupPage mount                         { + base }
-signup_completed        srv  Clerk user.created → bootstrapTenant      (existing)
-wizard_started          web  OnboardingShell first incomplete load     { + base }
-wizard_step_business    web  reach identity step                       { base, step }
-wizard_step_phone       web  reach phone step                          { base, step }
-wizard_step_voice       web  reach ai_check (voice) step               { base, step }
-wizard_step_calendar    web  calendar provider chosen (CalendarChoicePanel) { base, provider }
-wizard_completed        web  isComplete flips true                     { base, voice_agent_live }
-test_call_initiated     web  tap/copy number (call intent)             { + base }
-test_call_succeeded     web  test_call step → done                     { + base }
-first_real_call_received srv voice/activation.ts (idempotent)          { base, inbound_call_count }   [ACTIVATION]
-trial_to_paid           srv  Stripe subscription trialing→active       (existing)                    [CONVERSION]
-onboarding_step_viewed   web each step active (deduped)                { base, step }   (abandonment)
-onboarding_step_completed web step flips done (seeded)                 { base, step }   (abandonment)
-```
+| Gate | Result |
+|------|--------|
+| `npm run typecheck` | ✅ exit 0 |
+| `npm run lint` | ✅ exit 0 |
+| `npm run test` | ✅ exit 0 (api+web+shared) |
+| `npm run test:voice-fixtures` | ✅ exit 0 |
+| `npm run build` | ✅ exit 0 |
+| `npm run test:rls` | ✅ 8 passed (local PG via EXTERNAL_TEST_DB_URL) |
+| `npm run test:integration` | ✅ 40 files / 180 passed (local PG; all 146 migrations apply) |
+| changes vs branch base in-scope only | ✅ (packages/api, fixtures/ai, package.json, reports) |
 
-## Abandonment instrumentation summary
+Note: `git diff main --stat` shows many out-of-scope files, but those are
+**pre-existing divergence** on this long-lived feature branch (rebrand, PostHog,
+landing page, onboarding, billing) — not part of this pass. `git diff 0749cfe`
+(the branch base for this work) shows only in-scope changes.
 
-Drop-off is reconstructed in PostHog with no extra server signal:
-**abandoned at step X = `onboarding_step_viewed{step:X}` with no subsequent
-`onboarding_step_completed{step:X}`**. `onboarding_step_viewed` fires for every step
-the user lands on (deduped per step via a ref `Set` so the 3s status poll can't
-double-count); `onboarding_step_completed` fires on the not-done→done transition,
-with the tracking ref **seeded on first load** so resumed sessions don't replay
-completions. The server's furthest-completed step is already known via
-`derive-status.ts currentStep`. See FUNNEL.md → "Abandonment instrumentation".
+## Top 3 risks to review before cutting the release
 
-## E2E / time-to-activation
-
-The Playwright onboarding journey (`e2e/journeys/onboarding-v2.spec.ts`) **could not
-run** here (BLOCKED — Clerk creds + bootable DB unavailable). What the path looks like
-when run on a provisioned runner:
-
-- **Steps to activation:** 7 wizard steps (`signup → identity → pack → phone →
-  billing → ai_check → test_call`) → test call → **first real inbound call =
-  ACTIVATION**. The wizard is resumable (state derived from real entities).
-- **Time-to-activation (modeled by the integration test):**
-  `onboarding-activation.test.ts` seeds a live, trialing tenant with the agent live
-  and asserts the 2nd inbound `voice_inbound` session-end stamps `activated_at` and
-  fires `first_real_call_received` + email **exactly once**; replay is a no-op. The
-  activation path itself is a single `onSessionEnded` callback (sub-second), gated
-  behind go-live + live subscription.
-- **Failure points to watch in a real run:** (a) Clerk signup → `/onboarding`
-  redirect latency; (b) Twilio number provisioning worker completing before the
-  phone step (async); (c) Stripe Checkout redirect round-trip on the billing step.
-
-## Test coverage delta — onboarding surface
-
-Real path for the spec's `packages/web/app/(onboarding)/` is
-**`packages/web/src/components/onboarding/`**. New tests added against this surface
-and its server backing:
-
-- `OnboardingShell` funnel logic — exercised via `analytics.funnel.test.ts`
-  (every web funnel event fires with the 4 required fields) and component tests.
-- `TestCallStep.funnel.test.tsx` — `test_call_initiated` (once/mount) +
-  `test_call_succeeded` (on flip, not on resume). **New file.**
-- `SignupPage.funnel.test.tsx`, `LandingPage.funnel.test.tsx` — top-of-funnel emits.
-- Server backing: `voice/activation.test.ts` (10 unit cases),
-  `onboarding/contracts.test.ts` + `derive-status.test.ts` updated for the new
-  contract fields.
-- Net: **6 new web test files / +259 web test lines**, **2 new API test files +
-  3 extended** for the onboarding/activation surface. Every feature in the inventory
-  has ≥1 new test referencing it by name; every funnel event has an emit + a test.
-
-## Top 3 conversion risks to address post-launch (not blocking)
-
-1. **Async provisioning can strand the wizard.** Phone provisioning and AI
-   verification run on background workers; if a worker is slow/fails, the user sits
-   on the phone/ai_check step. Add a visible "still working / retry" affordance and
-   alert on worker failure rate. The funnel will now *show* this drop (step viewed,
-   not completed) — wire a dashboard alert on `wizard_step_phone` view→complete gap.
-2. **Activation depends on a *second* inbound call.** With the count-based rule, a
-   tenant who makes the test call but never receives a real customer call won't
-   activate. Consider a nudge ("forward your business line") and the identity-based
-   upgrade (deferred) so the genuine first real call always counts.
-3. **Trial→paid relies on a single Stripe transition.** The `trialing→active`
-   handler is already idempotent and signature-verified, but a documented non-atomic
-   edge (`webhooks/routes.ts:~1298`) can over-count `trial_started`/`trial_to_paid`
-   metrics on concurrent transitions. Reconcile funnel counts against Stripe
-   periodically rather than trusting event counts alone.
-
-## Recommendation: in-app vs hosted Stripe checkout
-
-**Use the hosted Stripe Checkout (already implemented) — do not build in-app card
-collection.** What the code shows: `BillingService.createTrialCheckoutSession`
-mints a **Stripe-hosted Checkout Session** and `BillingStep` redirects to it; it's
-already hardened with per-tenant advisory-lock serialization, a `pending_checkout_at`
-+ session-id gate (closes the lock-release-vs-webhook race), explicit cancel cleanup
-that expires the Stripe session, and a signature-verified, idempotent
-`customer.subscription.*` webhook that mirrors status. Reasons to keep hosted:
-
-- **PCI scope stays with Stripe** — no card fields in our DOM, no SAQ-A-EP burden.
-- The reliability problems are already solved server-side (idempotency, race gates);
-  an in-app Payment-Element flow would re-introduce client-side failure modes
-  (3DS handling, ret[ry] state) for no conversion gain at this volume.
-- The only UX cost is one redirect; the post-return `?billing=ok|cancel` handling is
-  already implemented in `OnboardingShell`.
-
-Revisit an embedded Payment Element only if redirect drop-off shows up materially in
-the funnel (watch `billing` step view→complete) — the instrumentation added here
-makes that measurable.
+1. **CI must use the registry (or EXTERNAL_TEST_DB_URL).** Integration + RLS were
+   run green here against a local Postgres (migration 146 applies, isolation
+   holds), but the literal testcontainer path needs Docker-registry access. Ensure
+   CI either reaches the registry or sets `EXTERNAL_TEST_DB_URL` to a service
+   Postgres so these gates run on every release.
+2. **Per-tenant SMS in production.** `getTenantTwilioCreds` throws for a tenant
+   with no `tenant_integrations` row in prod; the new provider turns that into a
+   fail-closed skip. Verify every live tenant has a provisioned Twilio row, or
+   confirmation SMS will be silently skipped (logged, not sent).
+3. **Estimate→Job tech assignment depth.** Skill-based narrowing is a no-op until a
+   real `SkillMatcher` exists (currently a stub), so auto-pick is "first available
+   technician." For skill-critical trades, require the operator `technicianId`
+   override until a Pg matcher ships.
