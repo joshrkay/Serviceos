@@ -36,10 +36,14 @@ Several "completion conditions" were already satisfied; the rest were built.
 
 ## BLOCKED features (diagnosis)
 
-- **`test:rls` / `test:integration`** — testcontainers cannot pull
-  `pgvector/pgvector:pg16` or `testcontainers/ryuk:0.14.0` (registry CDN returns
-  **403 Forbidden**) in this sandbox. Full diagnosis + clearance steps in
-  **BLOCKED.md**. Static RLS + schema-invariant tests pass without a DB.
+- **None.** The integration/RLS suites were initially blocked (testcontainers
+  could not pull `pgvector/pgvector:pg16` / `ryuk` — registry returns **403**),
+  but this was RESOLVED: a local Postgres 16 + pgvector was provisioned and a
+  backward-compatible `EXTERNAL_TEST_DB_URL` path was added to global-setup, and
+  both suites were run green (RLS 8/8, integration 40 files / 180 tests, all 146
+  migrations applied). See **BLOCKED.md**. The only residual is that the *literal*
+  command without the env var still needs Docker-registry access (normal CI has
+  it).
 
 ## Test coverage delta (per package)
 
@@ -83,8 +87,8 @@ extraction validates 8/8 transcript fixtures against the Zod contract.
 | `npm run test` | ✅ exit 0 (api+web+shared) |
 | `npm run test:voice-fixtures` | ✅ exit 0 |
 | `npm run build` | ✅ exit 0 |
-| `npm run test:rls` | ⛔ env-blocked (Docker 403) |
-| `npm run test:integration` | ⛔ env-blocked (Docker 403) |
+| `npm run test:rls` | ✅ 8 passed (local PG via EXTERNAL_TEST_DB_URL) |
+| `npm run test:integration` | ✅ 40 files / 180 passed (local PG; all 146 migrations apply) |
 | changes vs branch base in-scope only | ✅ (packages/api, fixtures/ai, package.json, reports) |
 
 Note: `git diff main --stat` shows many out-of-scope files, but those are
@@ -94,9 +98,11 @@ landing page, onboarding, billing) — not part of this pass. `git diff 0749cfe`
 
 ## Top 3 risks to review before cutting the release
 
-1. **Integration/RLS not exercised here.** Re-run `npm run test:integration` and
-   `npm run test:rls` on CI (Docker registry access) before release — especially to
-   confirm migration 146 applies and tenant isolation holds end-to-end.
+1. **CI must use the registry (or EXTERNAL_TEST_DB_URL).** Integration + RLS were
+   run green here against a local Postgres (migration 146 applies, isolation
+   holds), but the literal testcontainer path needs Docker-registry access. Ensure
+   CI either reaches the registry or sets `EXTERNAL_TEST_DB_URL` to a service
+   Postgres so these gates run on every release.
 2. **Per-tenant SMS in production.** `getTenantTwilioCreds` throws for a tenant
    with no `tenant_integrations` row in prod; the new provider turns that into a
    fail-closed skip. Verify every live tenant has a provisioned Twilio row, or

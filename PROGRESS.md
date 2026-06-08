@@ -88,7 +88,9 @@ Status: SHIPPED (static-verified; live integration env-blocked)
 - `npm run test` — PASS (api 5991 + web 1050 + shared 49)
 - `npm run test:voice-fixtures` — PASS (13)
 - `npm run build` — PASS
-- `npm run test:rls` / `npm run test:integration` — BLOCKED by env (Docker
-  registry 403); static RLS/schema invariants PASS. See BLOCKED.md.
+- `npm run test:rls` — PASS (8) against a local Postgres 16 + pgvector via
+  EXTERNAL_TEST_DB_URL (testcontainer image pull is registry-blocked here).
+- `npm run test:integration` — PASS (40 files / 180 tests) same way; all 146
+  migrations apply (incl. 146). See BLOCKED.md (RESOLVED).
 - `git diff` vs branch base — changes only in in-scope dirs (packages/api,
   fixtures/ai, package.json aliases, PROGRESS/DECISIONS).

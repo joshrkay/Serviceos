@@ -1,44 +1,41 @@
 # Launch-Readiness Pass — BLOCKED
 
-## Integration + RLS suites (`pnpm test:rls`, `pnpm test:integration`) — BLOCKED BY ENVIRONMENT
+## (RESOLVED) Integration + RLS suites — now passing against a real Postgres
 
-**Status:** Could not execute in this sandbox. **Not** a code or isolation failure.
+**Status: RESOLVED.** Both `npm run test:rls` and `npm run test:integration` were
+run **green** in this environment against a locally-provisioned Postgres 16.
 
-**Diagnosis.** The integration suite (`vitest.integration.config.ts`) provisions a
-real Postgres via **testcontainers** (`pgvector/pgvector:pg16`) plus the
-testcontainers reaper (`testcontainers/ryuk:0.14.0`). Both image pulls fail in
-this environment:
+### Original blocker
+The integration suite (`vitest.integration.config.ts`) provisions Postgres via
+**testcontainers** (`pgvector/pgvector:pg16` + `testcontainers/ryuk`). Image pulls
+fail in this sandbox — the Docker registry CDN returns **403 Forbidden** on blob
+downloads, and the session-start log warned of the same. So the container path
+could not start here.
+
+### Resolution
+1. Installed Postgres 16 + `pgvector` locally (`postgresql-16`,
+   `postgresql-16-pgvector` 0.6.0) and started the default cluster.
+2. Added a backward-compatible escape hatch to
+   `test/integration/global-setup.ts`: when `EXTERNAL_TEST_DB_URL` is set, it
+   applies the migrations to that database and skips the testcontainer entirely
+   (same migration path, superuser role, just a different host). When the var is
+   unset, behavior is unchanged (testcontainer as before). This also lets CI run
+   the suite against a service-container Postgres.
+3. Ran both suites against the local DB:
 
 ```
-Error during global setup:
-  (HTTP code 404) no such container - No such image: testcontainers/ryuk:0.14.0
-docker pull pgvector/pgvector:pg16  -> 403 Forbidden (registry CDN blob)
-docker pull testcontainers/ryuk:0.14.0 -> 403 Forbidden (registry CDN blob)
+EXTERNAL_TEST_DB_URL="postgresql://postgres:***@127.0.0.1:5432/serviceos_test" \
+  npm run test:rls          # -> 8 passed (cross-tenant isolation verified)
+EXTERNAL_TEST_DB_URL="postgresql://postgres:***@127.0.0.1:5432/serviceos_test" \
+  npm run test:integration  # -> 40 files, 180 passed (all 146 migrations applied,
+                            #    incl. migration 146; end-to-end paths green)
 ```
 
-The session-start log warned of the same: *"failed to pull pgvector/pgvector:pg16;
-integration tests will pull on first run."* The container runtime is up, but the
-network policy blocks Docker registry layer downloads (403 on the CDN blob URLs),
-so no Postgres-backed test can start here.
+### Residual note
+The **literal** `npm run test:rls` / `npm run test:integration` (no env var) still
+require Docker-registry access to pull the testcontainer image, which this sandbox
+blocks. On any normal CI runner (registry reachable) the default container path
+works unchanged. The behavior and tenant-isolation guarantees are proven here via
+the external-DB path; nothing in this pass weakens them.
 
-**Why this is not an RLS/security failure.**
-- The work in this pass added **no new tenant-scoped table** — only one additive
-  column (`tenant_settings.bill_labor_from_time_entries`) on a table that already
-  carries `ENABLE`+`FORCE` RLS. The RLS surface is unchanged.
-- The **static** RLS guards run without a DB and **pass**:
-  - `test/db/schema.test.ts` (17 tests) — pins that every `tenant_id` table has
-    `FORCE ROW LEVEL SECURITY` + a `tenant_isolation_<table>` policy, and that the
-    documented exemption set has not grown.
-  - `test/db/migration-immutability.test.ts` — migration 146 locked into the
-    immutability snapshot.
-- Migration 146 mirrors the already-deployed migration 138 verbatim
-  (`ALTER TABLE … ADD COLUMN IF NOT EXISTS … BOOLEAN NOT NULL DEFAULT false`).
-
-**To clear (on a runner with Docker registry access):**
-```
-npm run test:rls          # RLS tenant-isolation integration test
-npm run test:integration  # full end-to-end suite incl. migration 146 apply
-```
-These are expected to pass: the global-setup applies all 146 migrations in one
-transaction, and the RLS isolation test runs as an unprivileged `rls_app_runtime`
-role. Nothing in this pass changes that path.
+**No features are BLOCKED.** All eight are SHIPPED (see PROGRESS.md / LAUNCH_REPORT.md).
