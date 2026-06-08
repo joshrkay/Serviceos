@@ -73,4 +73,22 @@ Defects / gaps:
 - Strong already: 79 tables ENABLE+FORCE RLS, isolation integration test + pinned
   schema invariant. Action: keep invariant green for any new column; expose a
   `test:rls` script alias. Security stop honored.
-Status: SHIPPED
+- This pass added NO new tenant table (only an additive column on the
+  already-RLS-protected `tenant_settings`). Static RLS guards pass
+  (`schema.test.ts`, 17 tests). The LIVE `test:rls` integration test could not run
+  in this sandbox (Docker registry 403 — see BLOCKED.md); it is unaffected by this
+  pass and expected to pass on a runner with registry access.
+Status: SHIPPED (static-verified; live integration env-blocked)
+
+---
+
+## Verifier status (real, npm-based — see LAUNCH_REPORT.md)
+- `npm run typecheck` — PASS
+- `npm run lint` — PASS
+- `npm run test` — PASS (api 5991 + web 1050 + shared 49)
+- `npm run test:voice-fixtures` — PASS (13)
+- `npm run build` — PASS
+- `npm run test:rls` / `npm run test:integration` — BLOCKED by env (Docker
+  registry 403); static RLS/schema invariants PASS. See BLOCKED.md.
+- `git diff` vs branch base — changes only in in-scope dirs (packages/api,
+  fixtures/ai, package.json aliases, PROGRESS/DECISIONS).
