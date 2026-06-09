@@ -216,6 +216,9 @@ import { PgQualityMetricsRepository } from './quality/pg-metrics';
 import { PgVoiceRepository } from './voice/pg-voice';
 import { InMemoryVoiceSessionRepository } from './voice/voice-session';
 import { PgVoiceSessionRepository } from './voice/pg-voice-session';
+import { InMemoryCallMeBackRepository } from './voice/call-me-back/call-me-back';
+import { PgCallMeBackRepository } from './voice/call-me-back/pg-call-me-back';
+import { runCallMeBackSweep } from './workers/call-me-back-worker';
 import { PgTechnicianLocationPingRepository } from './telemetry/pg-technician-location-ping';
 import { PgApprovalRepository } from './estimates/pg-approval';
 import { PgEditDeltaRepository } from './estimates/pg-edit-delta';
@@ -743,6 +746,8 @@ export function createApp(): express.Express {
   const noteRepo           = pool ? new PgNoteRepository(pool)           : new InMemoryNoteRepository();
   const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
   const settingsRepo       = pool ? new PgSettingsRepository(pool)       : new InMemorySettingsRepository();
+  // Voice-parity (Feature 7) — call_me_back tasks (failed-transfer callbacks).
+  const callMeBackRepo     = pool ? new PgCallMeBackRepository(pool)     : new InMemoryCallMeBackRepository();
   // PR B (Tier 4 / AI approval rules) — shared per-tenant
   // auto-approve threshold resolver. One cached instance for all
   // entry points (twilio adapter, inapp adapter, voice-action-router
@@ -1327,6 +1332,7 @@ export function createApp(): express.Express {
     estimateExpiry: 590005,
     googleReviews: 590006,
     batchInvoice: 590007,
+    callMeBack: 590008,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -2094,6 +2100,7 @@ export function createApp(): express.Express {
       settingsRepo,
       leadRepo,
       auditRepo,
+      callMeBackRepo,
       businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
     }),
   );
@@ -2882,6 +2889,41 @@ export function createApp(): express.Express {
     });
   }, 60_000));
 
+  // Voice-parity (Feature 7) — call_me_back sweep. Notifies the CSR
+  // (transfer_number) of callbacks captured when a warm transfer failed. Runs
+  // every 60s; in-memory dev returns no tenants so it no-ops locally.
+  const callMeBackLogger = createLogger({
+    service: 'call-me-back-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.callMeBack, async () => {
+      await runCallMeBackSweep({
+        callMeBackRepo,
+        settingsRepo,
+        ...(messageDelivery
+          ? {
+              deliveryProvider: {
+                sendSms: (args: { to: string; body: string }) =>
+                  messageDelivery.sendSms({ to: args.to, body: args.body }),
+              },
+            }
+          : {}),
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        auditRepo,
+        logger: callMeBackLogger,
+      });
+    }).catch((err) => {
+      callMeBackLogger.error('call_me_back sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 60_000));
+
   // P21-003 — batch-invoice sweep. Daily-grained work; an hourly tick surfaces
   // newly-completed jobs promptly. Opt-in per tenant (settings.batchInvoiceEnabled);
   // in-memory dev returns no tenants so it no-ops locally.
@@ -3126,6 +3168,13 @@ export function createApp(): express.Express {
     repairTemplatesResolver,
     voiceSessionRepo,
     voicePersonaResolver,
+    // Voice-parity (Feature 6) — gate Spanish auto-detection on the tenant's
+    // opt-in stack (supported_languages). Without this the in-app path would
+    // treat any Spanish utterance as allowed and ignore the Settings toggle.
+    supportedLanguagesResolver: async (tenantId: string) => {
+      const s = await settingsRepo.findByTenant(tenantId);
+      return s?.supportedLanguages;
+    },
   });
   app.use(
     '/api/voice/sessions',

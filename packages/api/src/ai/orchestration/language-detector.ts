@@ -26,6 +26,27 @@ export interface DetectLanguageInput {
   tenantDefaultLanguage?: Language | null;
   /** Raw transcript text for heuristic fallback (cheap token overlap). */
   transcript?: string;
+  /**
+   * Voice-parity — the tenant's opt-in language stack (`tenant_settings
+   * .supported_languages`). When a detected/preferred language is NOT in this
+   * set the resolver downgrades it to a supported fallback ('en' is always
+   * supported). Defaults to `['en']` so a tenant that never opted into Spanish
+   * always runs English even when the caller speaks Spanish.
+   */
+  supportedLanguages?: Language[] | null;
+}
+
+/**
+ * True when `lang` is in the tenant's opt-in stack. 'en' is always supported
+ * (the universal fallback) even if the stack is empty/malformed, so the agent
+ * can never be stranded without a usable language.
+ */
+export function isLanguageSupported(
+  lang: Language,
+  supportedLanguages?: Language[] | null,
+): boolean {
+  if (lang === 'en') return true;
+  return Array.isArray(supportedLanguages) && supportedLanguages.includes(lang);
 }
 
 /** Common Spanish stop-words / function-words. Kept short — false-positives on
@@ -86,6 +107,34 @@ export function detectLanguageFromTranscript(transcript: string): Language | nul
  * available signals. See module header for resolution order.
  */
 export function detectLanguage(input: DetectLanguageInput): Language {
+  const supported = input.supportedLanguages;
+  // Resolve the raw candidate via the precedence order, then gate it on the
+  // tenant's opt-in stack. Gating the *final* candidate (rather than each
+  // signal) keeps the precedence intact while guaranteeing we never honor a
+  // language the tenant hasn't enabled — e.g. a Spanish-speaking caller on a
+  // tenant that only supports English still gets the English agent.
+  const candidate = resolveCandidateLanguage(input);
+  // The gate is opt-in: callers that don't pass an explicit stack keep the
+  // pre-parity permissive behavior (any detected language is honored).
+  if (!Array.isArray(supported) || supported.length === 0) {
+    return candidate;
+  }
+  if (isLanguageSupported(candidate, supported)) {
+    return candidate;
+  }
+  // Candidate unsupported (only 'es' can be, since 'en' is always supported).
+  // Fall back to the tenant default when it's supported, else English.
+  if (
+    (input.tenantDefaultLanguage === 'en' || input.tenantDefaultLanguage === 'es') &&
+    isLanguageSupported(input.tenantDefaultLanguage, supported)
+  ) {
+    return input.tenantDefaultLanguage;
+  }
+  return 'en';
+}
+
+/** Raw candidate per the precedence order, before the supported-stack gate. */
+function resolveCandidateLanguage(input: DetectLanguageInput): Language {
   if (input.customerPreferredLanguage === 'en' || input.customerPreferredLanguage === 'es') {
     return input.customerPreferredLanguage;
   }

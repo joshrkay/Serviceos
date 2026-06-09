@@ -165,6 +165,15 @@ export interface EscalateToHumanInput {
    */
   dispatcherPhoneResolver?: DispatcherPhoneResolver;
   /**
+   * Voice-parity (Feature 7) — single E.164 warm-transfer line
+   * (`tenant_settings.transfer_number`). When set on the telephony channel it
+   * REPLACES the on-call rotation: the skill builds a single-target transfer to
+   * this number (summary + SMS + `<Dial>`) and does NOT walk the rotation. The
+   * rotation branch is only used when this is absent (legacy tenants), so
+   * existing rotation behavior/tests are preserved.
+   */
+  transferNumber?: string;
+  /**
    * P8-016 — telephony only. Resolves the tenant OWNER's cell for a
    * `vulnerability_patch`. Optional; consumed by `owner-cell-patch`, not by
    * the default escalation branches. Present here so the input shape stays the
@@ -341,6 +350,110 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
   } = input;
   const lang: Language = input.language ?? 'en';
   const transferringText = t('escalate.transferring', lang);
+  const transferNumber = input.transferNumber?.trim();
+
+  // Voice-parity (Feature 7) — single-line warm transfer.
+  // ────────────────────────────────────────────────────
+  // When the tenant configured a `transfer_number`, the inbound-CSR handoff
+  // dials that one number instead of walking the on-call rotation. We still
+  // build the dispatcher summary + escalationId so the processor can SMS the
+  // receiving CSR BEFORE the bridge, and we still emit the <Dial> TwiML via
+  // callControl. On no-answer/busy the /dial-result route takes the
+  // call_me_back path (there is no "next" rotation entry to cascade to).
+  if (channel === 'telephony' && transferNumber) {
+    let summary: EscalationSummary | undefined;
+    let escalationId: string | undefined;
+    if (buildSummary && callerContext) {
+      escalationId = `esc_${uuidv4()}`;
+      const ctx: EscalationContext = {
+        shopName: shopName ?? 'Our shop',
+        caller: callerContext.caller,
+        customer: callerContext.customer,
+        intent: callerContext.intent,
+        reason: mapSkillReasonToBuilderReason(reason),
+        transcriptSnapshot: callerContext.transcriptSnapshot,
+        ...(publicWebBaseUrl !== undefined ? { publicWebBaseUrl } : {}),
+      };
+      try {
+        summary = buildSummary(ctx);
+      } catch (err) {
+        // Degrade gracefully — the transfer still happens; only the
+        // dispatcher context is lost. Mirror the rotation branch.
+        // eslint-disable-next-line no-console
+        console.warn('[escalate] buildSummary threw — proceeding without summary', {
+          tenantId,
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        escalationId = undefined;
+      }
+    }
+
+    const channelPrefs = input.channelPreferences ?? {
+      sms: true,
+      in_app: true,
+      whisper: true,
+    };
+    const baseUrl = publicWebBaseUrl?.replace(/\/$/, '');
+    const whisperUrl =
+      escalationId && summary && channelPrefs.whisper && baseUrl
+        ? `${baseUrl}/api/telephony/whisper/${escalationId}`
+        : undefined;
+
+    const fallbackTwiml: string | undefined = callControl
+      ? callControl.dialDispatcher(callSid ?? sessionId, transferNumber, {
+          actionUrl:
+            dialActionUrl ??
+            `/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`,
+          ...(whisperUrl ? { whisperUrl } : {}),
+        })
+      : undefined;
+
+    if (auditRepo) {
+      await auditRepo.create(
+        buildEscalationAudit({
+          tenantId,
+          sessionId,
+          reason,
+          // No rotation user — the number IS the destination.
+          assignedUserId: null,
+          outcome: 'transfer_initiated',
+          rotationIndex: 0,
+        }),
+      );
+    }
+
+    let message = transferringText;
+    if (reason === 'emergency_dispatch') {
+      const desc = emergencyDescription ? ` regarding: ${emergencyDescription}` : '';
+      message =
+        lang === 'es'
+          ? `Escalamiento de emergencia en curso${desc}. Le voy a conectar con un despachador de inmediato.`
+          : `Emergency escalation in progress${desc}. Connecting you with a dispatcher immediately.`;
+    }
+
+    if (session) {
+      session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(reason));
+    }
+
+    return {
+      escalated: true,
+      message,
+      transfer: {
+        dispatcherPhone: transferNumber,
+        fallbackTwiml,
+        // Sentinel values — there is no rotation entry/user behind a
+        // single transfer line. The processor's SMS fan-out keys off
+        // dispatcherPhone (the transfer number), not these.
+        rotationEntryId: 'transfer_number',
+        dispatcherUserId: 'transfer_number',
+        rotationIndex: 0,
+        summary,
+        escalationId,
+        channelPreferences: channelPrefs,
+      },
+    };
+  }
 
   // Telephony branch with `<Dial>` support.
   // ────────────────────────────────────────
