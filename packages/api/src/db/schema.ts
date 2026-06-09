@@ -3889,6 +3889,17 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_cmb_pending
       ON call_me_back_tasks (tenant_id) WHERE status = 'pending';
   `,
+
+  // Idempotency for the failed-transfer callback. A Twilio retry of
+  // /callback-message carries the same session id (?sid), so one pending
+  // callback per session lets create() no-op + return the existing row
+  // instead of inserting a duplicate that would notify the CSR twice. Partial
+  // (session_id IS NOT NULL) so non-session-originated rows are unconstrained.
+  '154_call_me_back_session_idempotency': `
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_cmb_session_unique
+      ON call_me_back_tasks (tenant_id, session_id)
+      WHERE session_id IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

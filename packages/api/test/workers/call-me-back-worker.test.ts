@@ -153,4 +153,23 @@ describe('InMemoryCallMeBackRepository — pending semantics', () => {
     // Status stays completed — not reverted to notified.
     expect(await repo.listPending('T1')).toHaveLength(0);
   });
+
+  it('create is idempotent per session (Twilio webhook retry → one callback)', async () => {
+    const repo = new InMemoryCallMeBackRepository();
+    const first = await repo.create({
+      tenantId: 'T1',
+      sessionId: 'sess-1',
+      callerPhone: '+15125550142',
+      callbackMessage: 'AC broken',
+    });
+    // Retry of the same /callback-message webhook for the same session.
+    const second = await repo.create({
+      tenantId: 'T1',
+      sessionId: 'sess-1',
+      callerPhone: '+15125550142',
+    });
+
+    expect(second.id).toBe(first.id); // returned the existing task
+    expect(await repo.listPending('T1')).toHaveLength(1);
+  });
 });

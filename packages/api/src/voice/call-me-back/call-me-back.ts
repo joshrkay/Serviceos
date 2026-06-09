@@ -86,6 +86,14 @@ export class InMemoryCallMeBackRepository implements CallMeBackRepository {
   private readonly rows = new Map<string, CallMeBackTask>();
 
   async create(input: CreateCallMeBackInput): Promise<CallMeBackTask> {
+    // Idempotent on (tenantId, sessionId) — mirrors the pg unique index so a
+    // retried /callback-message returns the existing callback instead of a dup.
+    if (input.sessionId != null) {
+      const existing = Array.from(this.rows.values()).find(
+        (r) => r.tenantId === input.tenantId && r.sessionId === input.sessionId,
+      );
+      if (existing) return { ...existing };
+    }
     const task = buildCallMeBackTask(input);
     this.rows.set(task.id, task);
     return { ...task };

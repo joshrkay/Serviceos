@@ -43,12 +43,18 @@ export class PgCallMeBackRepository
   async create(input: CreateCallMeBackInput): Promise<CallMeBackTask> {
     const task = buildCallMeBackTask(input);
     return this.withTenant(input.tenantId, async (client) => {
+      // Idempotent on (tenant_id, session_id): a Twilio retry of
+      // /callback-message must not insert a second pending callback for the
+      // same call (which would notify the CSR twice). On conflict we DO
+      // NOTHING and read the existing row back below.
       const result = await client.query(
         `INSERT INTO call_me_back_tasks
             (id, tenant_id, session_id, call_sid, caller_phone, caller_name,
              callback_message, intent_summary, reason, status, scheduled_for,
              created_at, updated_at)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+          ON CONFLICT (tenant_id, session_id) WHERE session_id IS NOT NULL
+            DO NOTHING
           RETURNING *`,
         [
           task.id,
@@ -64,7 +70,16 @@ export class PgCallMeBackRepository
           task.scheduledFor,
         ],
       );
-      return mapRow(result.rows[0]);
+      if (result.rows.length > 0) return mapRow(result.rows[0]);
+      // Conflict — a callback already exists for this session; return it so
+      // the caller (and audit) reference the original task, not a new one.
+      const existing = await client.query(
+        `SELECT * FROM call_me_back_tasks
+          WHERE tenant_id = $1 AND session_id = $2
+          LIMIT 1`,
+        [task.tenantId, task.sessionId],
+      );
+      return mapRow(existing.rows[0]);
     });
   }
 
