@@ -39,6 +39,15 @@ export const appointmentSchema = z.object({
 });
 export type Appointment = z.infer<typeof appointmentSchema>;
 
+/** Schedule view row: appointment joined with its job and customer. */
+export const scheduleEntrySchema = appointmentSchema.extend({
+  jobTitle: z.string(),
+  jobStatus: z.enum(JOB_STATUSES),
+  customerName: z.string(),
+  customerPhone: z.string(),
+});
+export type ScheduleEntry = z.infer<typeof scheduleEntrySchema>;
+
 export const estimateSchema = documentTotalsSchema.extend({
   id: z.string().uuid(),
   customerId: z.string().uuid(),

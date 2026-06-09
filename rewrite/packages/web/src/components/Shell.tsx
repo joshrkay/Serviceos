@@ -4,6 +4,7 @@ import { api, clearDevUserId, getDevUserId } from '../lib/api';
 
 const NAV = [
   { to: '/inbox', label: 'Inbox', icon: '◉' },
+  { to: '/schedule', label: 'Schedule', icon: '▦' },
   { to: '/money', label: 'Money', icon: '$' },
   { to: '/customers', label: 'Customers', icon: '☰' },
   { to: '/audit', label: 'Audit log', icon: '≡' },

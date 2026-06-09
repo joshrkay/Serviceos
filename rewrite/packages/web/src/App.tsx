@@ -5,6 +5,7 @@ import CustomersPage from './pages/CustomersPage';
 import InboxPage from './pages/InboxPage';
 import LoginPage from './pages/LoginPage';
 import MoneyPage from './pages/MoneyPage';
+import SchedulePage from './pages/SchedulePage';
 import SettingsPage from './pages/SettingsPage';
 
 export default function App() {
@@ -14,6 +15,7 @@ export default function App() {
       <Route element={<Shell />}>
         <Route path="/" element={<Navigate to="/inbox" replace />} />
         <Route path="/inbox" element={<InboxPage />} />
+        <Route path="/schedule" element={<SchedulePage />} />
         <Route path="/money" element={<MoneyPage />} />
         <Route path="/customers" element={<CustomersPage />} />
         <Route path="/audit" element={<AuditPage />} />

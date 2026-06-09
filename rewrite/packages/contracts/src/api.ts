@@ -9,6 +9,7 @@ import {
   jobSchema,
   meSchema,
   moneySummarySchema,
+  scheduleEntrySchema,
   tenantSettingsSchema,
 } from './entities';
 import { lineItemInputSchema, taxRateBpsSchema } from './money';
@@ -89,6 +90,23 @@ export const apiContract = c.router(
           durationMinutes: z.number().int().min(15).max(720),
         }),
         responses: { 201: appointmentSchema, 400: errorSchema, 404: errorSchema },
+      },
+    }),
+    appointments: c.router({
+      list: {
+        method: 'GET',
+        path: '/api/appointments',
+        query: z.object({
+          from: z.string().optional(),
+        }),
+        responses: { 200: z.object({ appointments: z.array(scheduleEntrySchema) }) },
+      },
+      complete: {
+        method: 'POST',
+        path: '/api/appointments/:id/complete',
+        pathParams: idParam,
+        body: z.object({}),
+        responses: { 200: scheduleEntrySchema, 404: errorSchema, 409: errorSchema },
       },
     }),
     estimates: c.router({

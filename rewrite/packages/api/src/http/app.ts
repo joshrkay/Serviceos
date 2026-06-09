@@ -9,7 +9,13 @@ import { CommandError, type CommandBus } from '../core/commands';
 import type { Db } from '../core/db';
 import type { JobRunner } from '../core/jobs';
 import { listCustomers, createCustomerCommand } from '../modules/crm/customers';
-import { createJobCommand, listJobs, scheduleAppointmentCommand } from '../modules/money/jobs';
+import {
+  completeAppointmentCommand,
+  createJobCommand,
+  listJobs,
+  listSchedule,
+  scheduleAppointmentCommand,
+} from '../modules/money/jobs';
 import {
   createEstimateCommand,
   decideEstimateCommand,
@@ -160,6 +166,26 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         } catch (err) {
           if (err instanceof CommandError) {
             return { status: err.code === 'not_found' ? 404 : 400, body: errorBody(err) };
+          }
+          throw err;
+        }
+      },
+    },
+
+    appointments: {
+      list: async ({ request, query }) => ({
+        status: 200,
+        body: { appointments: await listSchedule(db, request.auth.tenantId, query.from) },
+      }),
+      complete: async ({ request, params }) => {
+        try {
+          const entry = await bus.execute(completeAppointmentCommand, userActor(request), {
+            appointmentId: params.id,
+          });
+          return { status: 200, body: entry };
+        } catch (err) {
+          if (err instanceof CommandError) {
+            return { status: err.code === 'not_found' ? 404 : 409, body: errorBody(err) };
           }
           throw err;
         }
