@@ -1,0 +1,15 @@
+{
+  "id": "transcript-048",
+  "type": "inbound_call",
+  "duration_seconds": 80,
+  "service_type": "electrical",
+  "transcript": "Customer: Hi, this is Angela Reed. I need to reschedule my appointment for the outlet. Dispatcher: No problem Angela. When works better for you? Customer: Could we do Wednesday afternoon? Dispatcher: That works. I've moved your appointment to Wednesday afternoon. Customer: Perfect, thanks.",
+  "expected_entities": {
+    "customer_name": "Angela Reed",
+    "issue": "reschedule outlet appointment",
+    "equipment": "outlet",
+    "address": "",
+    "appointment_window": "Wednesday afternoon"
+  },
+  "source": "synthetic"
+}

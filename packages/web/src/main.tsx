@@ -21,6 +21,11 @@ if (!CLERK_PUBLISHABLE_KEY) {
 // Warm the analytics bundle if a key is configured. No-op when not.
 initAnalytics();
 
+// Boot Pendo SDK with an anonymous visitor. The SDK resolves the previous
+// visitor from cookies/localStorage if available, otherwise falls back to
+// a new anonymous visitor. Called exactly once per page lifecycle.
+pendo.initialize({ visitor: { id: '' } });
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ClerkProvider

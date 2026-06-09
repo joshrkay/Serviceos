@@ -1,0 +1,15 @@
+{
+  "id": "transcript-239",
+  "type": "inbound_call",
+  "duration_seconds": 90,
+  "service_type": "plumbing",
+  "transcript": "Customer: Hi, this is David Carter. I need to reschedule my appointment for the faucet. Dispatcher: No problem David. When works better for you? Customer: Could we do first thing tomorrow? Dispatcher: That works. I've moved your appointment to first thing tomorrow. Customer: Perfect, thanks.",
+  "expected_entities": {
+    "customer_name": "David Carter",
+    "issue": "reschedule faucet appointment",
+    "equipment": "faucet",
+    "address": "",
+    "appointment_window": "first thing tomorrow"
+  },
+  "source": "synthetic"
+}

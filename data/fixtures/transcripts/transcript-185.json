@@ -1,0 +1,15 @@
+{
+  "id": "transcript-185",
+  "type": "inbound_call",
+  "duration_seconds": 180,
+  "service_type": "plumbing",
+  "transcript": "Customer: Hi, this is Patricia Hall. I'm calling because my shutoff valve has no hot water. Dispatcher: Hi Patricia, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Rinnai, pretty new, 2 years. Dispatcher: Okay, and what's the service address? Customer: 9 Lakeview Drive. Dispatcher: Got it. We can send a technician out tomorrow between 8 and 10 AM. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Patricia Hall",
+    "issue": "shutoff valve has no hot water",
+    "equipment": "Rinnai shutoff valve, pretty new, 2 years",
+    "address": "9 Lakeview Drive",
+    "appointment_window": "tomorrow between 8 and 10 AM"
+  },
+  "source": "synthetic"
+}

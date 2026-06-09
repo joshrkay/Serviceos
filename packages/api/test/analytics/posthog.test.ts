@@ -39,6 +39,25 @@ describe('server-side PostHog wrapper', () => {
     expect(isFunnelAnalyticsEnabled()).toBe(true);
   });
 
+  it('accepts the first_real_call_received activation event (off-by-default, no throw)', () => {
+    // The activation milestone is emitted from voice/activation.ts. Assert
+    // the union member is wired through recordFunnelEvent and stays a silent
+    // no-op when analytics is disabled (so it can never break call teardown).
+    expect(isFunnelAnalyticsEnabled()).toBe(false);
+    expect(() =>
+      recordFunnelEvent({
+        distinctId: 'clerk_owner',
+        event: 'first_real_call_received',
+        properties: {
+          tenant_id: 't_1',
+          user_id: 'clerk_owner',
+          source: 'server',
+          timestamp: new Date().toISOString(),
+        },
+      }),
+    ).not.toThrow();
+  });
+
   it('does not throw on shutdown when the client was never instantiated', async () => {
     await expect(shutdownAnalytics()).resolves.not.toThrow();
   });

@@ -3,6 +3,7 @@ import { deriveOnboardingStatus, type OnboardingFacts } from '../../src/onboardi
 
 function facts(overrides: Partial<OnboardingFacts> = {}): OnboardingFacts {
   return {
+    tenantId: '00000000-0000-0000-0000-000000000001',
     tenantExists: true,
     identity: { businessName: null, businessHours: null, jobBufferMinutes: null, hourlyRateCents: null },
     packActivated: false,
@@ -11,6 +12,7 @@ function facts(overrides: Partial<OnboardingFacts> = {}): OnboardingFacts {
     inboundCallCount: 0,
     testCallSkippedAt: null,
     voiceAgentLiveAt: null,
+    activatedAt: null,
     aiConfigPresent: false,
     aiVerificationStatus: null,
     aiVerificationError: null,

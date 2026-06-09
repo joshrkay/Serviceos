@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
+import { useAuth } from '@clerk/clerk-react';
 import { toast } from 'sonner';
 import { Zap } from 'lucide-react';
 import { useApiClient } from '../../../lib/apiClient';
 import { useOnboardingStatus } from '../../../hooks/useOnboardingStatus';
-import { track } from '../../../lib/analytics';
+import { track, trackFunnel, type AnalyticsEvent } from '../../../lib/analytics';
 import { Button, Spinner } from '../../ui';
 import { Sidebar } from './Sidebar';
 import { MobileProgress } from './MobileProgress';
@@ -15,6 +16,21 @@ import { BillingStep } from './steps/BillingStep';
 import { AiCheckStep } from './steps/AiCheckStep';
 import { TestCallStep } from './steps/TestCallStep';
 import type { OnboardingStepId } from '../../../types/onboarding';
+
+/**
+ * Maps the real wizard steps onto the launch-funnel's spec step names.
+ * The real wizard has no standalone "voice" or "calendar" step: the AI
+ * self-check (`ai_check`) is the "voice agent works" gate, and calendar is
+ * a per-user Google OAuth in settings (no wizard step → wizard_step_calendar
+ * is intentionally not emitted; documented in FUNNEL.md). The `pack` and
+ * `billing` steps have no spec analog and ride the generic
+ * onboarding_step_viewed/completed events with a `step` prop.
+ */
+const WIZARD_STEP_EVENT: Partial<Record<OnboardingStepId, AnalyticsEvent>> = {
+  identity: 'wizard_step_business',
+  phone: 'wizard_step_phone',
+  ai_check: 'wizard_step_voice',
+};
 
 /**
  * §10 onboarding shell — sidebar + main pane.
@@ -28,9 +44,17 @@ export function OnboardingShell() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const apiFetch = useApiClient();
+  const { userId } = useAuth();
   const { data, isLoading, error, refetch } = useOnboardingStatus(3000);
   const [override, setOverride] = useState<OnboardingStepId | null>(null);
   const billingToastShown = useRef(false);
+
+  // The step the user is currently looking at. Derived the same way as the
+  // render-time activeId below, but computed up here (before the early
+  // returns) so the funnel effects can depend on it without breaking the
+  // rules-of-hooks ordering. null until the first status load.
+  const activeStepId: OnboardingStepId | null = override ?? data?.currentStep ?? null;
+  const tenantId = data?.tenantId ?? null;
 
   useEffect(() => {
     const billing = searchParams.get('billing');
@@ -86,9 +110,59 @@ export function OnboardingShell() {
     }
     if (data?.isComplete && wasIncompleteRef.current) {
       wasIncompleteRef.current = false;
+      // Keep the original event firing (downstream dashboards key off it)
+      // and add the spec-named wizard_completed alongside it.
       track('onboarding_completed', { voiceAgentLive: data.voiceAgentLive });
+      trackFunnel('wizard_completed', { tenantId, userId }, {
+        voice_agent_live: data.voiceAgentLive,
+      });
     }
-  }, [data?.isComplete, data?.voiceAgentLive]);
+  }, [data?.isComplete, data?.voiceAgentLive, tenantId, userId]);
+
+  // wizard_started — fire once, the first time the wizard loads in an
+  // incomplete state. Ref-guarded so the 3s poll can't re-fire it.
+  const wizardStartedRef = useRef(false);
+  useEffect(() => {
+    if (!data || data.isComplete) return;
+    if (wizardStartedRef.current) return;
+    wizardStartedRef.current = true;
+    trackFunnel('wizard_started', { tenantId, userId });
+  }, [data, tenantId, userId]);
+
+  // Per-step VIEW — fire onboarding_step_viewed (drives abandonment: the
+  // last step viewed without a matching completed event is the drop point)
+  // plus the mapped spec event (wizard_step_*) when the step has one.
+  // Deduped per step id so polling re-renders don't re-fire.
+  const viewedStepsRef = useRef<Set<OnboardingStepId>>(new Set());
+  useEffect(() => {
+    if (!data || !activeStepId) return;
+    if (viewedStepsRef.current.has(activeStepId)) return;
+    viewedStepsRef.current.add(activeStepId);
+    trackFunnel('onboarding_step_viewed', { tenantId, userId }, { step: activeStepId });
+    const mapped = WIZARD_STEP_EVENT[activeStepId];
+    if (mapped) trackFunnel(mapped, { tenantId, userId }, { step: activeStepId });
+  }, [activeStepId, data, tenantId, userId]);
+
+  // Per-step COMPLETION — fire onboarding_step_completed when a step flips
+  // to 'done'. The ref is seeded (without firing) on the first observation
+  // so a resumed session doesn't replay completions for steps already done
+  // before this page load — only genuine in-session transitions emit.
+  const completedStepsRef = useRef<Set<OnboardingStepId> | null>(null);
+  useEffect(() => {
+    if (!data) return;
+    if (completedStepsRef.current === null) {
+      completedStepsRef.current = new Set(
+        data.steps.filter((s) => s.status === 'done').map((s) => s.id),
+      );
+      return;
+    }
+    for (const s of data.steps) {
+      if (s.status === 'done' && !completedStepsRef.current.has(s.id)) {
+        completedStepsRef.current.add(s.id);
+        trackFunnel('onboarding_step_completed', { tenantId, userId }, { step: s.id });
+      }
+    }
+  }, [data, tenantId, userId]);
 
   if (isLoading && !data) {
     return (
@@ -129,7 +203,7 @@ export function OnboardingShell() {
     return null;
   }
 
-  const activeId: OnboardingStepId = override ?? data.currentStep ?? 'test_call';
+  const activeId: OnboardingStepId = activeStepId ?? 'test_call';
 
   return (
     <div className="flex min-h-screen bg-white">

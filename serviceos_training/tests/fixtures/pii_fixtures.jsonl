@@ -1,0 +1,100 @@
+{"id": "pii-001", "text": "My AC stopped cooling. Call me back at (602) 555-0123.", "pii": {"phones": ["(602) 555-0123"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-002", "text": "This is Maria Lopez at 5 River Road, the water heater is leaking.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Maria Lopez"]}}
+{"id": "pii-003", "text": "Please email the quote to service@acme-hvac.com.", "pii": {"phones": [], "emails": ["service@acme-hvac.com"], "addresses": [], "names": []}}
+{"id": "pii-004", "text": "Reach me at 206.555.0121 or sarah_h@gmail.com about the furnace.", "pii": {"phones": ["206.555.0121"], "emails": ["sarah_h@gmail.com"], "addresses": [], "names": []}}
+{"id": "pii-005", "text": "I'm at 456 Oak Avenue and my number is 1-480-555-0142.", "pii": {"phones": ["1-480-555-0142"], "emails": [], "addresses": ["456 Oak Avenue"], "names": []}}
+{"id": "pii-006", "text": "Hi, Robert Klein here. The toilet at 5 River Road keeps running, call (212) 555-0144.", "pii": {"phones": ["(212) 555-0144"], "emails": [], "addresses": ["5 River Road"], "names": ["Robert Klein"]}}
+{"id": "pii-007", "text": "Send the invoice to mike.jones@yahoo.com, the panel job is done.", "pii": {"phones": [], "emails": ["mike.jones@yahoo.com"], "addresses": [], "names": []}}
+{"id": "pii-008", "text": "Gary Olsen requested a tech for the drain at 5 River Road.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Gary Olsen"]}}
+{"id": "pii-009", "text": "Text me at 415.555.0177, the breaker keeps tripping.", "pii": {"phones": ["415.555.0177"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-010", "text": "Estimate for 5 River Road? Contact Carlos Mendez at linda.park@outlook.com.", "pii": {"phones": [], "emails": ["linda.park@outlook.com"], "addresses": ["5 River Road"], "names": ["Carlos Mendez"]}}
+{"id": "pii-011", "text": "My AC stopped cooling. Call me back at (602) 555-0123.", "pii": {"phones": ["(602) 555-0123"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-012", "text": "This is Maria Lopez at 5 River Road, the water heater is leaking.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Maria Lopez"]}}
+{"id": "pii-013", "text": "Please email the quote to service@acme-hvac.com.", "pii": {"phones": [], "emails": ["service@acme-hvac.com"], "addresses": [], "names": []}}
+{"id": "pii-014", "text": "Reach me at 206.555.0121 or sarah_h@gmail.com about the furnace.", "pii": {"phones": ["206.555.0121"], "emails": ["sarah_h@gmail.com"], "addresses": [], "names": []}}
+{"id": "pii-015", "text": "I'm at 456 Oak Avenue and my number is 1-480-555-0142.", "pii": {"phones": ["1-480-555-0142"], "emails": [], "addresses": ["456 Oak Avenue"], "names": []}}
+{"id": "pii-016", "text": "Hi, Robert Klein here. The toilet at 5 River Road keeps running, call (212) 555-0144.", "pii": {"phones": ["(212) 555-0144"], "emails": [], "addresses": ["5 River Road"], "names": ["Robert Klein"]}}
+{"id": "pii-017", "text": "Send the invoice to mike.jones@yahoo.com, the panel job is done.", "pii": {"phones": [], "emails": ["mike.jones@yahoo.com"], "addresses": [], "names": []}}
+{"id": "pii-018", "text": "Gary Olsen requested a tech for the drain at 5 River Road.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Gary Olsen"]}}
+{"id": "pii-019", "text": "Text me at 415.555.0177, the breaker keeps tripping.", "pii": {"phones": ["415.555.0177"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-020", "text": "Estimate for 5 River Road? Contact Carlos Mendez at linda.park@outlook.com.", "pii": {"phones": [], "emails": ["linda.park@outlook.com"], "addresses": ["5 River Road"], "names": ["Carlos Mendez"]}}
+{"id": "pii-021", "text": "My AC stopped cooling. Call me back at (602) 555-0123.", "pii": {"phones": ["(602) 555-0123"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-022", "text": "This is Maria Lopez at 5 River Road, the water heater is leaking.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Maria Lopez"]}}
+{"id": "pii-023", "text": "Please email the quote to service@acme-hvac.com.", "pii": {"phones": [], "emails": ["service@acme-hvac.com"], "addresses": [], "names": []}}
+{"id": "pii-024", "text": "Reach me at 206.555.0121 or sarah_h@gmail.com about the furnace.", "pii": {"phones": ["206.555.0121"], "emails": ["sarah_h@gmail.com"], "addresses": [], "names": []}}
+{"id": "pii-025", "text": "I'm at 456 Oak Avenue and my number is 1-480-555-0142.", "pii": {"phones": ["1-480-555-0142"], "emails": [], "addresses": ["456 Oak Avenue"], "names": []}}
+{"id": "pii-026", "text": "Hi, Robert Klein here. The toilet at 5 River Road keeps running, call (212) 555-0144.", "pii": {"phones": ["(212) 555-0144"], "emails": [], "addresses": ["5 River Road"], "names": ["Robert Klein"]}}
+{"id": "pii-027", "text": "Send the invoice to mike.jones@yahoo.com, the panel job is done.", "pii": {"phones": [], "emails": ["mike.jones@yahoo.com"], "addresses": [], "names": []}}
+{"id": "pii-028", "text": "Gary Olsen requested a tech for the drain at 5 River Road.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Gary Olsen"]}}
+{"id": "pii-029", "text": "Text me at 415.555.0177, the breaker keeps tripping.", "pii": {"phones": ["415.555.0177"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-030", "text": "Estimate for 5 River Road? Contact Carlos Mendez at linda.park@outlook.com.", "pii": {"phones": [], "emails": ["linda.park@outlook.com"], "addresses": ["5 River Road"], "names": ["Carlos Mendez"]}}
+{"id": "pii-031", "text": "My AC stopped cooling. Call me back at (602) 555-0123.", "pii": {"phones": ["(602) 555-0123"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-032", "text": "This is Maria Lopez at 5 River Road, the water heater is leaking.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Maria Lopez"]}}
+{"id": "pii-033", "text": "Please email the quote to service@acme-hvac.com.", "pii": {"phones": [], "emails": ["service@acme-hvac.com"], "addresses": [], "names": []}}
+{"id": "pii-034", "text": "Reach me at 206.555.0121 or sarah_h@gmail.com about the furnace.", "pii": {"phones": ["206.555.0121"], "emails": ["sarah_h@gmail.com"], "addresses": [], "names": []}}
+{"id": "pii-035", "text": "I'm at 456 Oak Avenue and my number is 1-480-555-0142.", "pii": {"phones": ["1-480-555-0142"], "emails": [], "addresses": ["456 Oak Avenue"], "names": []}}
+{"id": "pii-036", "text": "Hi, Robert Klein here. The toilet at 5 River Road keeps running, call (212) 555-0144.", "pii": {"phones": ["(212) 555-0144"], "emails": [], "addresses": ["5 River Road"], "names": ["Robert Klein"]}}
+{"id": "pii-037", "text": "Send the invoice to mike.jones@yahoo.com, the panel job is done.", "pii": {"phones": [], "emails": ["mike.jones@yahoo.com"], "addresses": [], "names": []}}
+{"id": "pii-038", "text": "Gary Olsen requested a tech for the drain at 5 River Road.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Gary Olsen"]}}
+{"id": "pii-039", "text": "Text me at 415.555.0177, the breaker keeps tripping.", "pii": {"phones": ["415.555.0177"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-040", "text": "Estimate for 5 River Road? Contact Carlos Mendez at linda.park@outlook.com.", "pii": {"phones": [], "emails": ["linda.park@outlook.com"], "addresses": ["5 River Road"], "names": ["Carlos Mendez"]}}
+{"id": "pii-041", "text": "My AC stopped cooling. Call me back at (602) 555-0123.", "pii": {"phones": ["(602) 555-0123"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-042", "text": "This is Maria Lopez at 5 River Road, the water heater is leaking.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Maria Lopez"]}}
+{"id": "pii-043", "text": "Please email the quote to service@acme-hvac.com.", "pii": {"phones": [], "emails": ["service@acme-hvac.com"], "addresses": [], "names": []}}
+{"id": "pii-044", "text": "Reach me at 206.555.0121 or sarah_h@gmail.com about the furnace.", "pii": {"phones": ["206.555.0121"], "emails": ["sarah_h@gmail.com"], "addresses": [], "names": []}}
+{"id": "pii-045", "text": "I'm at 456 Oak Avenue and my number is 1-480-555-0142.", "pii": {"phones": ["1-480-555-0142"], "emails": [], "addresses": ["456 Oak Avenue"], "names": []}}
+{"id": "pii-046", "text": "Hi, Robert Klein here. The toilet at 5 River Road keeps running, call (212) 555-0144.", "pii": {"phones": ["(212) 555-0144"], "emails": [], "addresses": ["5 River Road"], "names": ["Robert Klein"]}}
+{"id": "pii-047", "text": "Send the invoice to mike.jones@yahoo.com, the panel job is done.", "pii": {"phones": [], "emails": ["mike.jones@yahoo.com"], "addresses": [], "names": []}}
+{"id": "pii-048", "text": "Gary Olsen requested a tech for the drain at 5 River Road.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Gary Olsen"]}}
+{"id": "pii-049", "text": "Text me at 415.555.0177, the breaker keeps tripping.", "pii": {"phones": ["415.555.0177"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-050", "text": "Estimate for 5 River Road? Contact Carlos Mendez at linda.park@outlook.com.", "pii": {"phones": [], "emails": ["linda.park@outlook.com"], "addresses": ["5 River Road"], "names": ["Carlos Mendez"]}}
+{"id": "pii-051", "text": "My AC stopped cooling. Call me back at (602) 555-0123.", "pii": {"phones": ["(602) 555-0123"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-052", "text": "This is Maria Lopez at 5 River Road, the water heater is leaking.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Maria Lopez"]}}
+{"id": "pii-053", "text": "Please email the quote to service@acme-hvac.com.", "pii": {"phones": [], "emails": ["service@acme-hvac.com"], "addresses": [], "names": []}}
+{"id": "pii-054", "text": "Reach me at 206.555.0121 or sarah_h@gmail.com about the furnace.", "pii": {"phones": ["206.555.0121"], "emails": ["sarah_h@gmail.com"], "addresses": [], "names": []}}
+{"id": "pii-055", "text": "I'm at 456 Oak Avenue and my number is 1-480-555-0142.", "pii": {"phones": ["1-480-555-0142"], "emails": [], "addresses": ["456 Oak Avenue"], "names": []}}
+{"id": "pii-056", "text": "Hi, Robert Klein here. The toilet at 5 River Road keeps running, call (212) 555-0144.", "pii": {"phones": ["(212) 555-0144"], "emails": [], "addresses": ["5 River Road"], "names": ["Robert Klein"]}}
+{"id": "pii-057", "text": "Send the invoice to mike.jones@yahoo.com, the panel job is done.", "pii": {"phones": [], "emails": ["mike.jones@yahoo.com"], "addresses": [], "names": []}}
+{"id": "pii-058", "text": "Gary Olsen requested a tech for the drain at 5 River Road.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Gary Olsen"]}}
+{"id": "pii-059", "text": "Text me at 415.555.0177, the breaker keeps tripping.", "pii": {"phones": ["415.555.0177"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-060", "text": "Estimate for 5 River Road? Contact Carlos Mendez at linda.park@outlook.com.", "pii": {"phones": [], "emails": ["linda.park@outlook.com"], "addresses": ["5 River Road"], "names": ["Carlos Mendez"]}}
+{"id": "pii-061", "text": "My AC stopped cooling. Call me back at (602) 555-0123.", "pii": {"phones": ["(602) 555-0123"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-062", "text": "This is Maria Lopez at 5 River Road, the water heater is leaking.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Maria Lopez"]}}
+{"id": "pii-063", "text": "Please email the quote to service@acme-hvac.com.", "pii": {"phones": [], "emails": ["service@acme-hvac.com"], "addresses": [], "names": []}}
+{"id": "pii-064", "text": "Reach me at 206.555.0121 or sarah_h@gmail.com about the furnace.", "pii": {"phones": ["206.555.0121"], "emails": ["sarah_h@gmail.com"], "addresses": [], "names": []}}
+{"id": "pii-065", "text": "I'm at 456 Oak Avenue and my number is 1-480-555-0142.", "pii": {"phones": ["1-480-555-0142"], "emails": [], "addresses": ["456 Oak Avenue"], "names": []}}
+{"id": "pii-066", "text": "Hi, Robert Klein here. The toilet at 5 River Road keeps running, call (212) 555-0144.", "pii": {"phones": ["(212) 555-0144"], "emails": [], "addresses": ["5 River Road"], "names": ["Robert Klein"]}}
+{"id": "pii-067", "text": "Send the invoice to mike.jones@yahoo.com, the panel job is done.", "pii": {"phones": [], "emails": ["mike.jones@yahoo.com"], "addresses": [], "names": []}}
+{"id": "pii-068", "text": "Gary Olsen requested a tech for the drain at 5 River Road.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Gary Olsen"]}}
+{"id": "pii-069", "text": "Text me at 415.555.0177, the breaker keeps tripping.", "pii": {"phones": ["415.555.0177"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-070", "text": "Estimate for 5 River Road? Contact Carlos Mendez at linda.park@outlook.com.", "pii": {"phones": [], "emails": ["linda.park@outlook.com"], "addresses": ["5 River Road"], "names": ["Carlos Mendez"]}}
+{"id": "pii-071", "text": "My AC stopped cooling. Call me back at (602) 555-0123.", "pii": {"phones": ["(602) 555-0123"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-072", "text": "This is Maria Lopez at 5 River Road, the water heater is leaking.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Maria Lopez"]}}
+{"id": "pii-073", "text": "Please email the quote to service@acme-hvac.com.", "pii": {"phones": [], "emails": ["service@acme-hvac.com"], "addresses": [], "names": []}}
+{"id": "pii-074", "text": "Reach me at 206.555.0121 or sarah_h@gmail.com about the furnace.", "pii": {"phones": ["206.555.0121"], "emails": ["sarah_h@gmail.com"], "addresses": [], "names": []}}
+{"id": "pii-075", "text": "I'm at 456 Oak Avenue and my number is 1-480-555-0142.", "pii": {"phones": ["1-480-555-0142"], "emails": [], "addresses": ["456 Oak Avenue"], "names": []}}
+{"id": "pii-076", "text": "Hi, Robert Klein here. The toilet at 5 River Road keeps running, call (212) 555-0144.", "pii": {"phones": ["(212) 555-0144"], "emails": [], "addresses": ["5 River Road"], "names": ["Robert Klein"]}}
+{"id": "pii-077", "text": "Send the invoice to mike.jones@yahoo.com, the panel job is done.", "pii": {"phones": [], "emails": ["mike.jones@yahoo.com"], "addresses": [], "names": []}}
+{"id": "pii-078", "text": "Gary Olsen requested a tech for the drain at 5 River Road.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Gary Olsen"]}}
+{"id": "pii-079", "text": "Text me at 415.555.0177, the breaker keeps tripping.", "pii": {"phones": ["415.555.0177"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-080", "text": "Estimate for 5 River Road? Contact Carlos Mendez at linda.park@outlook.com.", "pii": {"phones": [], "emails": ["linda.park@outlook.com"], "addresses": ["5 River Road"], "names": ["Carlos Mendez"]}}
+{"id": "pii-081", "text": "My AC stopped cooling. Call me back at (602) 555-0123.", "pii": {"phones": ["(602) 555-0123"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-082", "text": "This is Maria Lopez at 5 River Road, the water heater is leaking.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Maria Lopez"]}}
+{"id": "pii-083", "text": "Please email the quote to service@acme-hvac.com.", "pii": {"phones": [], "emails": ["service@acme-hvac.com"], "addresses": [], "names": []}}
+{"id": "pii-084", "text": "Reach me at 206.555.0121 or sarah_h@gmail.com about the furnace.", "pii": {"phones": ["206.555.0121"], "emails": ["sarah_h@gmail.com"], "addresses": [], "names": []}}
+{"id": "pii-085", "text": "I'm at 456 Oak Avenue and my number is 1-480-555-0142.", "pii": {"phones": ["1-480-555-0142"], "emails": [], "addresses": ["456 Oak Avenue"], "names": []}}
+{"id": "pii-086", "text": "Hi, Robert Klein here. The toilet at 5 River Road keeps running, call (212) 555-0144.", "pii": {"phones": ["(212) 555-0144"], "emails": [], "addresses": ["5 River Road"], "names": ["Robert Klein"]}}
+{"id": "pii-087", "text": "Send the invoice to mike.jones@yahoo.com, the panel job is done.", "pii": {"phones": [], "emails": ["mike.jones@yahoo.com"], "addresses": [], "names": []}}
+{"id": "pii-088", "text": "Gary Olsen requested a tech for the drain at 5 River Road.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Gary Olsen"]}}
+{"id": "pii-089", "text": "Text me at 415.555.0177, the breaker keeps tripping.", "pii": {"phones": ["415.555.0177"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-090", "text": "Estimate for 5 River Road? Contact Carlos Mendez at linda.park@outlook.com.", "pii": {"phones": [], "emails": ["linda.park@outlook.com"], "addresses": ["5 River Road"], "names": ["Carlos Mendez"]}}
+{"id": "pii-091", "text": "My AC stopped cooling. Call me back at (602) 555-0123.", "pii": {"phones": ["(602) 555-0123"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-092", "text": "This is Maria Lopez at 5 River Road, the water heater is leaking.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Maria Lopez"]}}
+{"id": "pii-093", "text": "Please email the quote to service@acme-hvac.com.", "pii": {"phones": [], "emails": ["service@acme-hvac.com"], "addresses": [], "names": []}}
+{"id": "pii-094", "text": "Reach me at 206.555.0121 or sarah_h@gmail.com about the furnace.", "pii": {"phones": ["206.555.0121"], "emails": ["sarah_h@gmail.com"], "addresses": [], "names": []}}
+{"id": "pii-095", "text": "I'm at 456 Oak Avenue and my number is 1-480-555-0142.", "pii": {"phones": ["1-480-555-0142"], "emails": [], "addresses": ["456 Oak Avenue"], "names": []}}
+{"id": "pii-096", "text": "Hi, Robert Klein here. The toilet at 5 River Road keeps running, call (212) 555-0144.", "pii": {"phones": ["(212) 555-0144"], "emails": [], "addresses": ["5 River Road"], "names": ["Robert Klein"]}}
+{"id": "pii-097", "text": "Send the invoice to mike.jones@yahoo.com, the panel job is done.", "pii": {"phones": [], "emails": ["mike.jones@yahoo.com"], "addresses": [], "names": []}}
+{"id": "pii-098", "text": "Gary Olsen requested a tech for the drain at 5 River Road.", "pii": {"phones": [], "emails": [], "addresses": ["5 River Road"], "names": ["Gary Olsen"]}}
+{"id": "pii-099", "text": "Text me at 415.555.0177, the breaker keeps tripping.", "pii": {"phones": ["415.555.0177"], "emails": [], "addresses": [], "names": []}}
+{"id": "pii-100", "text": "Estimate for 5 River Road? Contact Carlos Mendez at linda.park@outlook.com.", "pii": {"phones": [], "emails": ["linda.park@outlook.com"], "addresses": ["5 River Road"], "names": ["Carlos Mendez"]}}

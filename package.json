@@ -11,6 +11,8 @@
     "build": "npm run build --workspaces",
     "test": "npm run test --workspaces",
     "test:integration": "npm run test:integration --workspace=packages/api",
+    "test:rls": "npm run test:rls --workspace=packages/api",
+    "test:voice-fixtures": "npm run test:voice-fixtures --workspace=packages/api",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
     "typecheck": "npm run typecheck:api && npm run typecheck:corpus",
     "typecheck:api": "cd packages/api && npx tsc --project tsconfig.build.json --noEmit",
@@ -47,7 +49,16 @@
     "qa:run": "node qa-runner/src/orchestrator.mjs run",
     "qa:report": "node qa-runner/src/orchestrator.mjs summary",
     "qa:run:now": "npm run qa:doctor && npm run qa:smoke-tools && npm run qa:run && npm run qa:report",
-    "smoke": "bash scripts/smoke.sh"
+    "smoke": "bash scripts/smoke.sh",
+    "corpus:vocab": "tsx scripts/data-pipeline/validate-vocab.ts",
+    "corpus:behaviors": "tsx scripts/data-pipeline/validate-behaviors.ts",
+    "corpus:coverage": "tsx scripts/data-pipeline/vocab-coverage.ts",
+    "corpus:generate": "tsx scripts/data-pipeline/generate-utterances.ts && tsx scripts/data-pipeline/generate-transcripts.ts",
+    "corpus:utterances": "tsx scripts/data-pipeline/validate-utterances.ts",
+    "corpus:dedup": "tsx scripts/data-pipeline/dedup-utterances.ts",
+    "corpus:verify": "npm run corpus:vocab && npm run corpus:behaviors && npm run corpus:coverage && npm run corpus:utterances && npm run corpus:dedup",
+    "voice-eval:intent": "tsx packages/voice-eval/run-intent-eval.ts",
+    "voice-eval:slot": "tsx packages/voice-eval/run-slot-eval.ts"
   },
   "devDependencies": {
     "@clerk/testing": "^2.0.27",
