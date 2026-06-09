@@ -1,0 +1,15 @@
+{
+  "id": "transcript-248",
+  "type": "inbound_call",
+  "duration_seconds": 90,
+  "service_type": "plumbing",
+  "transcript": "Customer: This is an emergency, my water heater keeps running and it's getting bad! This is Robert Klein at 5 River Road. Dispatcher: Okay Robert, stay calm. I'm getting a technician dispatched to 5 River Road right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "expected_entities": {
+    "customer_name": "Robert Klein",
+    "issue": "emergency: water heater keeps running",
+    "equipment": "water heater",
+    "address": "5 River Road",
+    "appointment_window": "immediate dispatch"
+  },
+  "source": "synthetic"
+}

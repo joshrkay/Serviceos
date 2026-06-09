@@ -130,6 +130,14 @@ function mapNotifyReasonToSkillReason(
   return 'low_confidence';
 }
 
+/**
+ * Voice-parity (Feature 7): the receiving CSR must get the context SMS BEFORE
+ * the call bridges. We await provider acceptance of the SMS, but bound the wait
+ * so a slow/hung provider can never exceed Twilio's webhook budget — past this
+ * deadline we bridge anyway (a late text beats a dropped transfer).
+ */
+const SMS_BEFORE_BRIDGE_TIMEOUT_MS = 4000;
+
 function xmlEscape(s: string): string {
   return s
     .replace(/&/g, '&amp;')
@@ -513,6 +521,9 @@ export function createVoiceTurnProcessor(
         in_app: true,
         whisper: true,
       };
+      // Voice-parity (Feature 7) — single warm-transfer line. When configured
+      // it replaces the on-call rotation for this handoff.
+      let transferNumber: string | undefined;
       if (deps.settingsRepo) {
         try {
           const tenantSettings = await deps.settingsRepo.findByTenant(tenantId);
@@ -522,6 +533,7 @@ export function createVoiceTurnProcessor(
             in_app: escSettings.channel_in_app,
             whisper: escSettings.channel_whisper,
           };
+          transferNumber = tenantSettings?.transferNumber ?? undefined;
         } catch {
           // Best-effort: if settings lookup fails, fall back to all-enabled.
         }
@@ -551,6 +563,7 @@ export function createVoiceTurnProcessor(
         ...(deps.dispatcherPhoneResolver
           ? { dispatcherPhoneResolver: deps.dispatcherPhoneResolver }
           : {}),
+        ...(transferNumber ? { transferNumber } : {}),
         ...(session.callSid ? { callSid: session.callSid } : {}),
         dialActionUrl: dialResultUrl(session.id),
         channelPreferences,
@@ -585,7 +598,11 @@ export function createVoiceTurnProcessor(
           summary
         ) {
           const smsBody = summary.sms.replace('<escalationId>', escalationId ?? '');
-          void deps.deliveryProvider
+          // Deliver the context SMS to the CSR BEFORE bridging — await provider
+          // acceptance so the <Dial> TwiML isn't exposed first, but bound the
+          // wait so a slow/hung provider can't hang the webhook. A send
+          // failure (or the deadline) never blocks the transfer itself.
+          const smsSend = deps.deliveryProvider
             .sendSms({ to: transfer.dispatcherPhone, body: smsBody })
             .catch((err) => {
               logger.warn('notify_oncall: SMS dispatch failed', {
@@ -593,6 +610,12 @@ export function createVoiceTurnProcessor(
                 error: err instanceof Error ? err.message : String(err),
               });
             });
+          await Promise.race([
+            smsSend,
+            new Promise<void>((resolve) =>
+              setTimeout(resolve, SMS_BEFORE_BRIDGE_TIMEOUT_MS),
+            ),
+          ]);
         }
 
         if (channelPreferences.in_app && escalationId && summary) {

@@ -1,0 +1,15 @@
+{
+  "id": "transcript-059",
+  "type": "inbound_call",
+  "duration_seconds": 90,
+  "service_type": "plumbing",
+  "transcript": "Customer: Hi, this is Robert Klein. I need to reschedule my appointment for the shutoff valve. Dispatcher: No problem Robert. When works better for you? Customer: Could we do Wednesday afternoon? Dispatcher: That works. I've moved your appointment to Wednesday afternoon. Customer: Perfect, thanks.",
+  "expected_entities": {
+    "customer_name": "Robert Klein",
+    "issue": "reschedule shutoff valve appointment",
+    "equipment": "shutoff valve",
+    "address": "",
+    "appointment_window": "Wednesday afternoon"
+  },
+  "source": "synthetic"
+}
