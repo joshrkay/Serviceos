@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import type { AppDeps } from './app';
+import type { AppDeps } from './deps';
 import { defineCommand } from '../core/commands';
 import {
   ingestWebhook,

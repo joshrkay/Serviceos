@@ -1,8 +1,7 @@
 import type { EventRecord, Me, TenantSettings } from '@rivet/contracts';
 import { withTenantTransaction, type Db } from '../../core/db';
-import type { AuthContext } from '../../http/auth';
 
-export async function getMe(db: Db, auth: AuthContext): Promise<Me> {
+export async function getMe(db: Db, auth: { userId: string; tenantId: string }): Promise<Me> {
   return withTenantTransaction(db, auth.tenantId, async (client) => {
     const user = await client.query(
       `SELECT u.name AS user_name, u.role, t.name AS tenant_name, t.phone, t.timezone
