@@ -127,6 +127,27 @@ describe('the loop, end to end', () => {
     });
   }, 60_000);
 
+  it('outbound provider message ids never collide with the inbound dedup index', async () => {
+    // Regression: the dedup index used to constrain outbound rows too, so a
+    // provider reusing an external id (e.g. dev provider across restarts)
+    // crashed the notify worker after the SMS was already sent.
+    const { recordOutboundMessageCommand } = await import('../../src/modules/comms/messages');
+    const scope = { tenantId, actor: { type: 'system' as const, id: 'test' } };
+    for (const body of ['ping one', 'ping two']) {
+      await runtime.bus.execute(recordOutboundMessageCommand, scope, {
+        channel: 'sms' as const,
+        to: OWNER_PHONE,
+        from: TENANT_PHONE,
+        body,
+        externalId: 'reused-provider-sid',
+      });
+    }
+    const recorded = await env.db.admin.query(
+      `SELECT COUNT(*) FROM messages WHERE direction = 'outbound' AND external_id = 'reused-provider-sid'`,
+    );
+    expect(Number(recorded.rows[0].count)).toBe(2);
+  });
+
   it('redelivered inbound SMS does not duplicate proposals', async () => {
     const before = await api('GET', '/api/proposals');
     const countBefore = (before.json() as { proposals: unknown[] }).proposals.length;

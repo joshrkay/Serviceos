@@ -32,7 +32,7 @@ export const recordInboundMessageCommand = defineCommand({
     const { rows } = await ctx.client.query<{ id: string }>(
       `INSERT INTO messages (tenant_id, conversation_id, direction, body, from_number, to_number, external_id)
        VALUES ($1, $2, 'inbound', $3, $4, $5, $6)
-       ON CONFLICT (tenant_id, external_id) WHERE external_id IS NOT NULL DO NOTHING
+       ON CONFLICT (tenant_id, external_id) WHERE external_id IS NOT NULL AND direction = 'inbound' DO NOTHING
        RETURNING id`,
       [ctx.tenantId, conversationId, input.body, input.from, input.to, input.externalId ?? null],
     );

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 export interface SmsSendRequest {
   to: string;
   from: string;
@@ -17,7 +19,7 @@ export class ConsoleSmsProvider implements SmsProvider {
   async send(request: SmsSendRequest): Promise<{ externalId: string | null }> {
     this.sent.push(request);
     console.log('[sms] outbound', { to: request.to, from: request.from, chars: request.body.length });
-    return { externalId: `console-${this.sent.length}` };
+    return { externalId: `console-${randomUUID()}` };
   }
 }
 
