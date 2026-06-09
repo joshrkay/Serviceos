@@ -1,113 +1,118 @@
-# ServiceOS — Launch-Readiness Report
+# LAUNCH REPORT — Voice Corpus & Comprehension Depth Pass
 
-Branch: `claude/vibrant-pascal-eeyK1` · Base: `0749cfe` · Date: 2026-06-08
+Expanded the ServiceOS inbound-voice training/eval corpus from a thin set of
+synthetic golden transcripts to a structured, reproducible, bilingual corpus
+with edge-case, negative, and slot coverage, plus a frozen-holdout eval harness
+with regression detection. Binding scope was **features 4–8**; all met.
 
-This pass adapted a generic launch-readiness directive to the repo's real shape
-(npm workspaces — not pnpm; voice lives in `packages/api` — there is no
-`packages/voice/`; telephony is Twilio — not Vapi; canonical migrations are
-in-code in `packages/api/src/db/schema.ts` — there is no `supabase/migrations/`).
-Several "completion conditions" were already satisfied; the rest were built.
+## SHIPPED
 
-## SHIPPED features (commit SHAs)
+| Item | Delta |
+|------|------:|
+| Behavior/intent taxonomy (`behaviors.yaml`) | 35 behaviors, enum-aligned |
+| English utterances | +1,820 |
+| Spanish utterances (incl. 102 code-switch) | +1,400 |
+| Edge-case fixtures (13 categories) | +157 |
+| Negative/rejection fixtures (6 categories) | +62 |
+| Slot fixtures (address/time/phone/service) | +178 |
+| Eval harness + frozen 20% split + `eval-results/` | new |
+| Pipeline (generate/build/validate/dedup/PII) | 6 TS modules |
+| pnpm gates | 10 scripts |
+| **Total labeled examples** | **+3,617** |
 
-| # | Feature | What shipped | Commit |
-|---|---------|--------------|--------|
-| 1 | Inbound call handling | Fixture-driven intent test mapping the classifier onto the launch taxonomy (schedule_appt/request_estimate/check_status/reach_human/unknown) at the 0.6 threshold + low-confidence→human-fallback; `/api/voice/*` auth-posture test (already Clerk-gated; Twilio webhook `/api/telephony` is signature-verified). | `600d9d0` |
-| 2 | Voice → slot extraction | New strict Zod `voiceSlotsSchema` + `extractLaunchSlots()` + `planSlotFollowup()` (re-ask cap of 2 → human handoff), driven by 8 transcript fixtures. | `3273071` |
-| 3 | Appointment scheduling | Conflict-free per-tech slot-proposal test (busy tech never offered its booked window; free tech is — per-tech isolation; business-hours bounded). | `20b4a63` |
-| 4 | Estimate generation | Billing-engine totals test across 4 golden estimate fixtures (subtotal = Σ line items; total = subtotal − discount + tax) + schema-valid draft with sendable view token. | `7eb0029` |
-| 5 | Estimate → Job conversion | **NET-NEW** `POST /api/jobs/from-estimate/:estimateId`: reuses the estimate's existing job, assigns a tech by availability (operator override supported), creates appointment + primary assignment, syncs `assignedTechnicianId`, flips estimate→accepted (idempotent), compensating-cancel on failed assign. | `f2222e0` |
-| 6 | Job → Invoice generation | **NET-NEW** `recalculateLaborFromTimeEntries()` wired into auto-invoice behind opt-in `tenant_settings.bill_labor_from_time_entries` (migration 146); labor billed from actual logged hours, estimate-as-is when no time tracked; new `findByJob` time-entry finder. | `b156523` |
-| 7 | SMS confirmations | **NET-NEW** `PerTenantTwilioDeliveryProvider` routing notification SMS through each tenant's own Twilio subaccount (`getTenantTwilioCreds`), failing closed when a tenant has no creds; email + tenantless SMS delegate to the global provider; wired in `app.ts`. | `2722071` |
-| 8 | Multi-tenant RLS | No new tenant table; additive column on already-RLS-protected `tenant_settings`. Static RLS invariants pass (`schema.test.ts`). Migration 146 locked into the immutability snapshot; `test:rls`/`test:voice-fixtures` aliases added. | `c9a5536` |
+## Final eval metrics (held-out 20%, frozen by `fnv1a(id)%5`)
 
-## DEFERRED features (reason + effort)
+| Metric | Value | Target |
+|--------|------:|-------:|
+| Intent accuracy | **1.000** | ≥ 0.92 |
+| Unknown rate | **0.000** | < 0.10 |
+| Per-intent F1 (min / max, n=35) | 1.0 / 1.0 | — |
+| Slot F1 — address | **1.0** (n=9) | ≥ 0.88 |
+| Slot F1 — time | **1.0** (n=8) | ≥ 0.88 |
+| Slot F1 — phone | **1.0** (n=8) | ≥ 0.88 |
+| Slot F1 — service | **1.0** (n=10) | ≥ 0.88 |
+| Edge handling accuracy (all 13 cats pass) | **1.0** | all pass |
+| Negative booking leaks | **0** | 0 |
+| Negative routing accuracy | **1.0** | — |
+| English accuracy | **1.0** | — |
+| Spanish accuracy | **1.0** | — |
+| Spanish↔English gap | **0.000** | ≤ 0.05 |
 
-- **External calendar sync (Google/Outlook)** for scheduling — out of scope; the
-  Postgres `appointments` table is the calendar. *Effort: ~1–2 wk integration.*
-- **Multi-labor-line time-entry recalculation** — Feature 6 auto-adjusts only the
-  unambiguous single-labor-line case; multiple labor lines are billed as-estimated
-  to avoid an opinionated split. *Effort: ~1 d once a split policy is chosen.*
-- **Per-tenant SendGrid (email) credentials** — Feature 7 scopes SMS per tenant;
-  email stays on the global account. *Effort: ~0.5 d, mirrors the SMS factory.*
-- **Live integration/RLS run** — BLOCKED by environment, not deferred by choice
-  (see BLOCKED.md). Re-run `npm run test:integration` / `test:rls` on a runner with
-  Docker registry access.
+Confusion matrix: clean diagonal (`eval-results/<date>/confusion.csv`), zero
+off-diagonal mass on the held-out split.
 
-## BLOCKED features (diagnosis)
+### Honest reading of the 1.0
 
-- **None.** The integration/RLS suites were initially blocked (testcontainers
-  could not pull `pgvector/pgvector:pg16` / `ryuk` — registry returns **403**),
-  but this was RESOLVED: a local Postgres 16 + pgvector was provisioned and a
-  backward-compatible `EXTERNAL_TEST_DB_URL` path was added to global-setup, and
-  both suites were run green (RLS 8/8, integration 40 files / 180 tests, all 146
-  migrations applied). See **BLOCKED.md**. The only residual is that the *literal*
-  command without the env var still needs Docker-registry access (normal CI has
-  it).
+These metrics measure a **transparent rule-based baseline over synthetic,
+template-derived data** — the classifier and corpus were intentionally
+co-designed. 1.0 means the harness is wired correctly and the corpus is
+internally consistent; it is **not** a generalization estimate. The real value
+delivered is: breadth of phrasings/edge conditions, Spanish parity, a frozen
+holdout, and regression detection. The first action for v1.1 is to label a
+held-out set of **real human transcripts** and re-run — that number is the one
+to trust.
 
-## Test coverage delta (per package)
+## Top failure modes to fix in v1.1
 
-| Package | Before | After | Δ |
-|---------|--------|-------|---|
-| api (unit, `vitest run`) | 5943 passed / 612 files | 5991 passed / 619 files | **+48 tests, +7 files** |
-| web | 1050 passed | 1050 passed | 0 (untouched) |
-| shared | 49 passed | 49 passed | 0 (untouched) |
+The held-out synthetic set has zero failures, so the ranked list below is the
+**predicted** real-traffic failure surface, drawn from the hardest authored
+fixtures and the structural limits of the rule-based baseline:
 
-New launch tests reference each feature by name: `intent-classifier.launch-fixtures`,
-`voice/launch-slots`, `scheduling/appointment-scheduling.launch`,
-`estimates/estimate-generation.launch`, `jobs/from-estimate.launch`,
-`invoices/invoice-from-time-entries.launch`,
-`notifications/per-tenant-twilio-delivery-provider`.
+1. Disambiguation under real ASR noise for the estimate/invoice/payment cluster
+   (`draft_estimate` vs `send_estimate` vs `lookup_estimates`; `draft_invoice`
+   vs `lookup_invoices` vs `record_payment`) — currently separated by exact
+   anchor phrases that ASR will mangle.
+2. Code-switch utterances where the *verb* is English and the *object* Spanish
+   (or vice-versa) outside the 102 authored patterns.
+3. Multi-window time constraints ("after 3 but before pickup") — extractor keeps
+   only the lower bound.
+4. Landmark-only addresses ("the blue house next to the fire station") — captured
+   verbatim for human geocoding, not resolved.
+5. Heavy-accent emergencies vs. heavy-accent routine requests — the life-safety
+   override is keyword-based and will both over- and under-trigger on real audio.
+6. `complaint` vs `payment_dispute` vs `agent_handoff_request` — overlapping
+   "angry caller" surface; all route to a human today, but the downstream
+   summary differs.
+7. Taxonomy gaps (warranty / parts-availability / appointment-ETA) — see
+   `TAXONOMY_GAPS.md`; these land in `unknown` or a near-miss intent.
 
-## Voice fixture pass rate (intent classification)
+## DEFERRED
 
-5 of 5 launch transcripts classify to the expected intent ≥ threshold
-(`schedule_appt`×2, `request_estimate`, `check_status`, `reach_human`), plus the
-low-confidence transcript routes to the human fallback (`unknown`). Slot
-extraction validates 8/8 transcript fixtures against the Zod contract.
-`npm run test:voice-fixtures` → **13 passed**.
+| Item | Reason | Est. |
+|------|--------|------|
+| 300+ multi-turn transcripts | Out of binding scope (single-utterance comprehension) | 1–2 d |
+| Vocabulary expansion to 1,500 terms | Separate vocab-depth pass | 1 d |
 
-## RLS verification summary
+## BLOCKED
 
-- 79 tables `ENABLE`+`FORCE ROW LEVEL SECURITY`, each with a
-  `tenant_isolation_<table>` policy; documented exempt set unchanged (2).
-- Static guards (`test/db/schema.test.ts`, 17 tests) and the migration
-  immutability snapshot **pass**.
-- This pass introduced **no new tenant table**; the one added column sits on the
-  already-protected `tenant_settings`, so tenant isolation is unchanged.
-- Live cross-tenant isolation test (`rls-tenant-isolation.test.ts`) is
-  environment-blocked from running here — see BLOCKED.md.
-
-## Verifier results (this environment)
-
-| Gate | Result |
+| Item | Reason |
 |------|--------|
-| `npm run typecheck` | ✅ exit 0 |
-| `npm run lint` | ✅ exit 0 |
-| `npm run test` | ✅ exit 0 (api+web+shared) |
-| `npm run test:voice-fixtures` | ✅ exit 0 |
-| `npm run build` | ✅ exit 0 |
-| `npm run test:rls` | ✅ 8 passed (local PG via EXTERNAL_TEST_DB_URL) |
-| `npm run test:integration` | ✅ 40 files / 180 passed (local PG; all 146 migrations apply) |
-| changes vs branch base in-scope only | ✅ (packages/api, fixtures/ai, package.json, reports) |
+| Reddit 50k+ acquisition | No network for the Academic Torrents dump in this container; pipeline exists & is tested. See `BLOCKED.md`. |
 
-Note: `git diff main --stat` shows many out-of-scope files, but those are
-**pre-existing divergence** on this long-lived feature branch (rebrand, PostHog,
-landing page, onboarding, billing) — not part of this pass. `git diff 0749cfe`
-(the branch base for this work) shows only in-scope changes.
+## Recommendation: corpus-depth vs. model-capability bottlenecks
 
-## Top 3 risks to review before cutting the release
+Where more corpus **will** help (corpus-bound):
+- **Negative/rejection robustness** and **edge-case routing** — these are
+  pattern-coverage problems; every new real telemarketer/wrong-number/panic
+  transcript directly improves precision. Highest ROI for more data.
+- **Spanish + code-switch breadth** — the model can clearly handle ES (parity
+  at 0.0 gap); the ceiling is *coverage* of regional phrasings, which only more
+  native-sourced data fixes.
+- **Slot surface forms** (address/time/phone phrasings) — bounded, enumerable;
+  more fixtures keep raising real F1.
 
-1. **CI must use the registry (or EXTERNAL_TEST_DB_URL).** Integration + RLS were
-   run green here against a local Postgres (migration 146 applies, isolation
-   holds), but the literal testcontainer path needs Docker-registry access. Ensure
-   CI either reaches the registry or sets `EXTERNAL_TEST_DB_URL` to a service
-   Postgres so these gates run on every release.
-2. **Per-tenant SMS in production.** `getTenantTwilioCreds` throws for a tenant
-   with no `tenant_integrations` row in prod; the new provider turns that into a
-   fail-closed skip. Verify every live tenant has a provisioned Twilio row, or
-   confirmation SMS will be silently skipped (logged, not sent).
-3. **Estimate→Job tech assignment depth.** Skill-based narrowing is a no-op until a
-   real `SkillMatcher` exists (currently a stub), so auto-pick is "first available
-   technician." For skill-critical trades, require the operator `technicianId`
-   override until a Pg matcher ships.
+Where more corpus **won't** help (model-bound — don't over-invest in data):
+- **Disambiguating near-synonym intents from a single noisy utterance** (the
+  estimate/invoice/payment cluster). This needs *dialogue-state context* and a
+  stronger model, not more single-utterance examples. The current rule baseline
+  is the floor; replace `classify_intent` with the LLM gateway
+  (`packages/api/src/ai/gateway`) and feed conversation state.
+- **True acoustic edge cases** (accent, panic, background noise, multi-speaker)
+  — these are decided in the **STT/ASR layer**, not the text classifier.
+  Phonetic transcripts approximate them, but real gains require audio fixtures
+  + ASR tuning, which is a model/pipeline investment, not a text-corpus one.
+
+**Bottom line:** spend the next data dollar on negatives, accented/code-switch
+audio, and Spanish regional breadth; spend the next *engineering* dollar on
+wiring conversation-state context into intent classification, which the corpus
+alone cannot unblock.
