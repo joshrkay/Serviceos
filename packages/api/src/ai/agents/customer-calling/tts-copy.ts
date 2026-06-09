@@ -28,11 +28,11 @@ const ES_CHARS = /[ñáéíóú¿¡]/i;
 
 /** Deterministic, dependency-free: ≥1 accented char or ≥2 marker words → es. */
 export function detectLanguage(utterance: string): SessionLanguage {
-  const text = ` ${utterance.toLowerCase()} `;
-  if (ES_CHARS.test(text)) return 'es';
+  const cleanText = ` ${utterance.toLowerCase().replace(/[.,\\/#!$%\\^&\\*;:{}=\\-_`~()!?¿¡]/g, " ").replace(/\\s+/g, " ")} `;
+  if (ES_CHARS.test(cleanText)) return 'es';
   let hits = 0;
   for (const m of ES_MARKERS) {
-    if (text.includes(` ${m} `) || text.includes(` ${m},`) || text.includes(` ${m}.`)) hits++;
+    if (cleanText.includes(` ${m} `)) hits++;
     if (hits >= 2) return 'es';
   }
   return 'en';

@@ -1,5 +1,6 @@
 import { createBrowserRouter } from 'react-router';
 import { Shell } from './components/layout/Shell';
+import { RouteErrorElement } from './components/layout/RouteErrorElement';
 import { HomePage } from './components/home/HomePage';
 import { AssistantPage } from './components/assistant/AssistantPage';
 import { JobsPage } from './components/jobs/JobsPage';
@@ -17,6 +18,7 @@ import { OnboardingShell } from './components/onboarding/v2/OnboardingShell';
 import { EstimateApprovalPage } from './components/customer/EstimateApprovalPage';
 import { InvoicePaymentPage } from './components/customer/InvoicePaymentPage';
 import { IntakeFormPage } from './components/customer/IntakeFormPage';
+import { BookingPage } from './components/customer/BookingPage';
 import { FeedbackPage } from './components/customer/FeedbackPage';
 import { InteractionsPage } from './components/interactions/InteractionsPage';
 import { DispatchLogPage } from './components/interactions/DispatchLogPage';
@@ -34,6 +36,7 @@ import { MoneyDashboardPage } from './components/reports/MoneyDashboardPage';
 import { RevenueBySourcePage } from './components/reports/RevenueBySourcePage';
 import { InboxPage } from './components/inbox/InboxPage';
 import { PortalShell } from './pages/portal/PortalShell';
+import { Showcase } from './pages/design/Showcase';
 import { InvoiceCreate } from './pages/invoices/InvoiceCreate';
 import { EstimateCreate } from './pages/estimates/EstimateCreate';
 import { JobCreate } from './pages/jobs/JobCreate';
@@ -118,27 +121,36 @@ function InvoiceDetailRoute() {
   return React.createElement(InvoicesPage as React.ComponentType<{ defaultSelectedId?: string }>, { defaultSelectedId: params.id });
 }
 
+// Every top-level route gets `ErrorBoundary: RouteErrorElement` so an
+// uncaught render/loader error renders the user-friendly fallback (with
+// "Try again" / "Go back") instead of a blank white page. Errors thrown
+// deeper in a subtree bubble up to the nearest route with an ErrorBoundary,
+// so attaching it once at the outermost layer of the authenticated branch
+// covers every nested page below.
 export const router = createBrowserRouter([
   // ── Auth (fullscreen, no Shell) ───────────────────────────────────────────
-  { path: '/login',  Component: LoginPage  },
-  { path: '/signup', Component: SignupPage },
+  { path: '/login',  Component: LoginPage,  ErrorBoundary: RouteErrorElement },
+  { path: '/signup', Component: SignupPage, ErrorBoundary: RouteErrorElement },
 
   // ── Fullscreen flows (no Shell chrome) ─────────────────────────────────
   // §10 onboarding — v2 sidebar shell (the legacy v1 wizard was retired).
   {
     path: '/onboarding',
     Component: OnboardingShell,
+    ErrorBoundary: RouteErrorElement,
   },
-  { path: '/e/:id',      Component: EstimateApprovalPage },
-  { path: '/pay/:id',    Component: InvoicePaymentPage },
-  { path: '/intake',     Component: IntakeFormPage },
-  { path: '/public/feedback/:token', Component: FeedbackPage },
-  { path: '/portal/:token',          Component: PortalShell },
+  { path: '/e/:id',      Component: EstimateApprovalPage, ErrorBoundary: RouteErrorElement },
+  { path: '/pay/:id',    Component: InvoicePaymentPage,   ErrorBoundary: RouteErrorElement },
+  { path: '/intake',     Component: IntakeFormPage,       ErrorBoundary: RouteErrorElement },
+  { path: '/book',       Component: BookingPage,          ErrorBoundary: RouteErrorElement },
+  { path: '/public/feedback/:token', Component: FeedbackPage, ErrorBoundary: RouteErrorElement },
+  { path: '/portal/:token',          Component: PortalShell,  ErrorBoundary: RouteErrorElement },
 
   // ── App (with Shell nav, auth-gated) ───────────────────────────────────
   {
     path: '/',
     Component: ProtectedRoute,
+    ErrorBoundary: RouteErrorElement,
     children: [{
       path: '/',
       Component: Shell,
@@ -176,6 +188,7 @@ export const router = createBrowserRouter([
       { path: 'reports/money', Component: MoneyDashboardPage },
       { path: 'reports/revenue-by-source', Component: RevenueBySourcePage },
       { path: 'technician/day', Component: TechnicianDayPage },
+      { path: 'design',         Component: Showcase },
     ],
     }],
   },

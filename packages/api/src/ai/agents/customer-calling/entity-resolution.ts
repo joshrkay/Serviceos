@@ -80,7 +80,7 @@ export function parseNaturalDatetime(desc: string, now: Date = new Date(), durat
   }
 
   const start = new Date(Date.UTC(
-    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + (dayOffset ?? (timeMatch ? 1 : 0)),
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + (dayOffset ?? 0),
     hour, minute, 0, 0,
   ));
   if (start.getTime() <= now.getTime()) start.setUTCDate(start.getUTCDate() + 1);

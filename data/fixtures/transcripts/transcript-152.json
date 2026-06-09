@@ -1,0 +1,15 @@
+{
+  "id": "transcript-152",
+  "type": "inbound_call",
+  "duration_seconds": 60,
+  "service_type": "plumbing",
+  "transcript": "Customer: This is an emergency, my faucet won't drain and it's getting bad! This is Mark Henderson at 7 River Road. Dispatcher: Okay Mark, stay calm. I'm getting a technician dispatched to 7 River Road right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "expected_entities": {
+    "customer_name": "Mark Henderson",
+    "issue": "emergency: faucet won't drain",
+    "equipment": "faucet",
+    "address": "7 River Road",
+    "appointment_window": "immediate dispatch"
+  },
+  "source": "synthetic"
+}

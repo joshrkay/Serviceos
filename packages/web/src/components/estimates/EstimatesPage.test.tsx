@@ -13,13 +13,24 @@ vi.mock('./ConvertToInvoiceSheet', () => ({ ConvertToInvoiceSheet: () => null })
 import { useListQuery } from '../../hooks/useListQuery';
 import { useMutation } from '../../hooks/useMutation';
 
+// Money lives under nested `totals` to match the API's serialized Estimate
+// entity (GET /api/estimates returns estimate.totals.totalCents, not a flat
+// top-level totalCents — flat fixtures masked a real rendering bug).
+const totalsOf = (totalCents: number) => ({
+  subtotalCents: totalCents,
+  discountCents: 0,
+  taxRateBps: 0,
+  taxableSubtotalCents: totalCents,
+  taxCents: 0,
+  totalCents,
+});
+
 const mockEstimates = [
   {
     id: 'e1',
     estimateNumber: 'EST-001',
     status: 'sent',
-    totalCents: 150000,
-    subtotalCents: 150000,
+    totals: totalsOf(150000),
     createdAt: '2026-03-01T00:00:00Z',
     customer: { id: 'c1', displayName: 'Alice Smith', firstName: 'Alice', lastName: 'Smith' },
   },
@@ -27,8 +38,7 @@ const mockEstimates = [
     id: 'e2',
     estimateNumber: 'EST-002',
     status: 'accepted',
-    totalCents: 280000,
-    subtotalCents: 280000,
+    totals: totalsOf(280000),
     createdAt: '2026-03-02T00:00:00Z',
     customer: { id: 'c2', displayName: 'Bob Jones', firstName: 'Bob', lastName: 'Jones' },
   },
@@ -36,8 +46,7 @@ const mockEstimates = [
     id: 'e3',
     estimateNumber: 'EST-003',
     status: 'draft',
-    totalCents: 50000,
-    subtotalCents: 50000,
+    totals: totalsOf(50000),
     createdAt: '2026-03-03T00:00:00Z',
     customer: { id: 'c3', displayName: 'Carol White', firstName: 'Carol', lastName: 'White' },
   },
@@ -83,10 +92,10 @@ describe('EstimatesPage', () => {
     expect(screen.getByText('EST-002')).toBeInTheDocument();
   });
 
-  it('formats totalCents as dollars', () => {
+  it('formats totalCents as dollars (with thousands separator)', () => {
     renderPage();
-    expect(screen.getByText('$1500.00')).toBeInTheDocument();
-    expect(screen.getByText('$2800.00')).toBeInTheDocument();
+    expect(screen.getByText('$1,500.00')).toBeInTheDocument();
+    expect(screen.getByText('$2,800.00')).toBeInTheDocument();
   });
 
   it('normalizes API statuses to UI labels', () => {
@@ -135,7 +144,7 @@ describe('EstimatesPage', () => {
       data: [
         {
           id: 'e9', estimateNumber: 'EST-009', status: 'expired',
-          totalCents: 99000, subtotalCents: 99000, createdAt: '2026-03-09T00:00:00Z',
+          totals: totalsOf(99000), createdAt: '2026-03-09T00:00:00Z',
           customer: { id: 'c9', displayName: 'Dana Lee', firstName: 'Dana', lastName: 'Lee' },
         },
       ],

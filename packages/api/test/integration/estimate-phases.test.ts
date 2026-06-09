@@ -264,6 +264,31 @@ describe('Postgres integration — estimate phases (real DB effects)', () => {
     });
   });
 
+  describe('Phase 3 — one accepted estimate per job (atomic)', () => {
+    it('two concurrent approvals on the same job yield exactly one accepted', async () => {
+      const jobId = await newJob();
+      const tokenA = `acc-a-${crypto.randomUUID()}`;
+      const tokenB = `acc-b-${crypto.randomUUID()}`;
+      await seedEstimate(jobId, [buildLineItem(crypto.randomUUID(), 'Repair', 1, 10000, 0, true)], { status: 'sent', viewToken: tokenA, sentAt: new Date() });
+      await seedEstimate(jobId, [buildLineItem(crypto.randomUUID(), 'Repair', 1, 12000, 0, true)], { status: 'sent', viewToken: tokenB, sentAt: new Date() });
+
+      const service = new PublicEstimateService({
+        estimateRepo, jobRepo, customerRepo, locationRepo, settingsRepo,
+        auditRepo: new InMemoryAuditRepository(),
+      });
+
+      const results = await Promise.allSettled([
+        service.approve({ token: tokenA, acceptedByName: 'Customer A' }),
+        service.approve({ token: tokenB, acceptedByName: 'Customer B' }),
+      ]);
+      const fulfilled = results.filter((r) => r.status === 'fulfilled');
+      expect(fulfilled).toHaveLength(1);
+
+      const onJob = await estimateRepo.findByJob(tenant.tenantId, jobId);
+      expect(onJob.filter((e) => e.status === 'accepted')).toHaveLength(1);
+    });
+  });
+
   describe('Phase 4 — public view reflects validity expiry', () => {
     it('marks a lapsed sent estimate as expired and non-actionable on GET', async () => {
       const jobId = await newJob();

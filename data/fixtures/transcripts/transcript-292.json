@@ -1,0 +1,15 @@
+{
+  "id": "transcript-292",
+  "type": "inbound_call",
+  "duration_seconds": 195,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is Carlos Mendez. I'm calling because my heat pump is blowing warm air. Dispatcher: Hi Carlos, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Bryant, maybe 10 years old. Dispatcher: Okay, and what's the service address? Customer: 200 Market Street. Dispatcher: Got it. We can send a technician out tomorrow between 8 and 10 AM. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Carlos Mendez",
+    "issue": "heat pump is blowing warm air",
+    "equipment": "Bryant heat pump, maybe 10 years old",
+    "address": "200 Market Street",
+    "appointment_window": "tomorrow between 8 and 10 AM"
+  },
+  "source": "synthetic"
+}

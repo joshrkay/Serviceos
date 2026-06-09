@@ -1,0 +1,15 @@
+{
+  "id": "transcript-008",
+  "type": "inbound_call",
+  "duration_seconds": 70,
+  "service_type": "plumbing",
+  "transcript": "Customer: This is an emergency, my toilet is backing up and it's getting bad! This is Helen Park at 314 Birch Lane. Dispatcher: Okay Helen, stay calm. I'm getting a technician dispatched to 314 Birch Lane right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "expected_entities": {
+    "customer_name": "Helen Park",
+    "issue": "emergency: toilet is backing up",
+    "equipment": "toilet",
+    "address": "314 Birch Lane",
+    "appointment_window": "immediate dispatch"
+  },
+  "source": "synthetic"
+}

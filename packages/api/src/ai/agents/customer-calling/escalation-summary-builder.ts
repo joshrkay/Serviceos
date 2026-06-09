@@ -49,7 +49,7 @@ export interface EscalationContext {
   transcriptSnapshot: ReadonlyArray<TranscriptTurn>;
   /**
    * Public web app base URL (no trailing slash). Used to construct the
-   * SMS short-link. Defaults to `app.serviceos.app` if not provided.
+   * SMS short-link. Defaults to `app.rivet.ai` if not provided.
    * Pass `process.env.PUBLIC_WEB_URL` or equivalent at the call site.
    */
   publicWebBaseUrl?: string;
@@ -207,7 +207,7 @@ export function buildEscalationSummary(ctx: EscalationContext): EscalationSummar
   }
 
   // SMS: target ≤160 chars. Always reserve space for the link; truncate core at word boundary.
-  const baseUrl = (ctx.publicWebBaseUrl ?? 'app.serviceos.app')
+  const baseUrl = (ctx.publicWebBaseUrl ?? 'app.rivet.ai')
     .replace(/^https?:\/\//, '')
     .replace(/\/$/, '');
   const linkPlaceholder = `${baseUrl}/c/<escalationId>`;

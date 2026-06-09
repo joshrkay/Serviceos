@@ -1,5 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { InvoiceLineItem, InvoiceProposalData } from './InvoiceProposalReview';
+import { formatCurrency } from '../../utils/currency';
 
 export interface EditedFields {
   lineItemsModified: string[];
@@ -155,7 +156,7 @@ export function InvoiceProposalEditor({
           />
         </div>
         <div data-testid="calculated-total">
-          Total: ${(totals.totalCents / 100).toFixed(2)}
+          Total: {formatCurrency(totals.totalCents)}
         </div>
       </div>
 

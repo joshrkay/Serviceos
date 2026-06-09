@@ -178,6 +178,69 @@ describe('SlotConflictChecker (P0-035)', () => {
     });
   });
 
+  it('expired hold does not block — an overlapping but expired tentative hold is treated as free', async () => {
+    const expiredHold = makeAppointment({
+      id: 'appt-expired-hold',
+      jobId: 'job-other',
+      scheduledStart: new Date('2026-04-21T10:30:00Z'),
+      scheduledEnd: new Date('2026-04-21T11:30:00Z'),
+      holdPendingApproval: true,
+      holdExpiryAt: new Date('2000-01-01T00:00:00Z'), // long past → released
+    });
+    const { appointmentRepo, assignmentRepo, jobRepo } = buildStubs({
+      appointments: [expiredHold],
+      assignmentsByAppt: new Map([
+        ['appt-expired-hold', [makeAssignment({ appointmentId: 'appt-expired-hold', technicianId })]],
+      ]),
+      jobsById: new Map([['job-other', makeJob({ id: 'job-other', customerId })]]),
+    });
+    const checker = new DefaultSlotConflictChecker({ appointmentRepo, assignmentRepo, jobRepo });
+
+    const result = await checker.check({
+      tenantId,
+      windowStart: new Date('2026-04-21T11:00:00Z'),
+      windowEnd: new Date('2026-04-21T12:00:00Z'),
+      technicianId,
+      customerId,
+    });
+
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('live hold still blocks — an unexpired tentative hold for the same tech returns technician_busy', async () => {
+    const liveHold = makeAppointment({
+      id: 'appt-live-hold',
+      jobId: 'job-other',
+      scheduledStart: new Date('2026-04-21T10:30:00Z'),
+      scheduledEnd: new Date('2026-04-21T11:30:00Z'),
+      holdPendingApproval: true,
+      holdExpiryAt: new Date(Date.now() + 60 * 60 * 1000), // future → still held
+    });
+    const { appointmentRepo, assignmentRepo, jobRepo } = buildStubs({
+      appointments: [liveHold],
+      assignmentsByAppt: new Map([
+        ['appt-live-hold', [makeAssignment({ appointmentId: 'appt-live-hold', technicianId })]],
+      ]),
+      jobsById: new Map([['job-other', makeJob({ id: 'job-other', customerId: otherCustomerId })]]),
+    });
+    const checker = new DefaultSlotConflictChecker({ appointmentRepo, assignmentRepo, jobRepo });
+
+    const result = await checker.check({
+      tenantId,
+      windowStart: new Date('2026-04-21T11:00:00Z'),
+      windowEnd: new Date('2026-04-21T12:00:00Z'),
+      technicianId,
+      customerId,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      conflict: 'technician_busy',
+      appointmentId: 'appt-live-hold',
+      conflictWindow: { start: liveHold.scheduledStart, end: liveHold.scheduledEnd },
+    });
+  });
+
   it('customer busy — overlapping appointment for same customer (different tech) returns customer_busy', async () => {
     const existing = makeAppointment({
       id: 'appt-existing',

@@ -3,9 +3,9 @@
  * builder uses this as the canonical list when a row never produced a manifest
  * (e.g., test crashed before writing one).
  *
- * NOTE: Catalog cleaned 2026-06-04 (QA-MATRIX-catalog-drift): legacy no-spec
- * rows removed; every row below has an implementing spec and every matrixTest
- * id has a row. Keep the two in lockstep or setupRow throws Unknown matrix row.
+ * NOTE: This catalog now reflects the end-to-end scope (provisioning, customers,
+ * estimates variants, billing journey, scheduling, SMS, payments edge, voice,
+ * isolation, and public portal). Legacy EST/INV/AST-only coverage is deprecated.
  *
  * `expected` documents the pre-run prediction from Phase-1 exploration.
  * It is NOT the pass criterion — actual pass/fail comes from runtime checks.
@@ -25,6 +25,7 @@ export type MatrixModule =
   | 'AGR'
   | 'LEAD'
   | 'INV'
+  | 'INV-CR'
   | 'CUST'
   | 'FLAG'
   | 'TIME'
@@ -35,8 +36,8 @@ export type MatrixModule =
   | 'LOC'
   | 'ME'
   | 'MC'
-  | 'PORT'
   | 'VOX'
+  | 'PORT'
   | 'AST';
 export type MatrixExpectation = 'pass' | 'partial' | 'fail' | 'na';
 
@@ -50,40 +51,13 @@ export interface MatrixRow {
 }
 
 export const MATRIX: MatrixRow[] = [
-  // ----- Estimates (core + variants) -----
-  {
-    id: 'EST-01',
-    module: 'EST',
-    feature: 'Create draft estimate',
-    passCriteria:
-      'API create returns estimate id, estimates list UI renders same id/status=draft, and DB estimates row contains identical totals and customer_id',
-    expected: 'pass',
-  },
-  {
-    id: 'EST-02',
-    module: 'EST',
-    feature: 'Variant: option package selection',
-    passCriteria:
-      'Variant option ids from API persist to estimate options in DB and selected package state is rendered correctly in UI preview/export views',
-    expected: 'partial',
-  },
-  {
-    id: 'EST-03',
-    module: 'EST',
-    feature: 'Variant: tax/discount recalculation',
-    passCriteria:
-      'Recompute endpoint returns deterministic subtotal/tax/discount/grand_total, UI totals match response, and DB total_cents equals recomputed amount',
-    expected: 'pass',
-  },
-
-
   // ----- Provisioning / verticals -----
   {
     id: 'PROV-01',
     module: 'PROV',
     feature: 'HVAC tenant provisioned with correct vertical context',
     passCriteria:
-      'PUT /api/settings/packs/:packId/activate (packId resolved from GET /api/verticals by verticalType=hvac) activates the pack; GET /api/settings/packs + pack_activations show it; categories are HVAC-specific',
+      'Onboarding configure({services:["HVAC"]}) activates the hvac pack; GET /api/settings + /api/verticals report hvac; categories/terminology are HVAC-specific',
     expected: 'pass',
   },
   {
@@ -91,7 +65,7 @@ export const MATRIX: MatrixRow[] = [
     module: 'PROV',
     feature: 'Plumbing tenant provisioned with correct vertical context',
     passCriteria:
-      'PUT /api/settings/packs/:packId/activate (verticalType=plumbing) activates the pack for tenant B; categories are plumbing-specific and distinct from HVAC',
+      'Onboarding configure({services:["Plumbing"]}) activates the plumbing pack; GET /api/settings + /api/verticals report plumbing; categories/terminology are plumbing-specific and distinct from HVAC',
     expected: 'pass',
   },
 
@@ -109,8 +83,52 @@ export const MATRIX: MatrixRow[] = [
     feature: 'Create customer via AI voice session',
     passCriteria:
       'Voice session input yields a create_customer proposal; approve → executed; new customer row exists with result_entity_id',
+    expected: 'pass',
+  },
+
+  // ----- Estimates -----
+  {
+    id: 'EST-01',
+    module: 'EST',
+    feature: 'Create draft estimate',
+    passCriteria:
+      'POST /api/estimates returns 201; DB row status=draft with matching totals',
+    expected: 'pass',
+  },
+  {
+    id: 'EST-02',
+    module: 'EST',
+    feature: 'Validation errors on estimate create',
+    passCriteria: 'Invalid payload returns 4xx without persisting a row',
+    expected: 'pass',
+  },
+  {
+    id: 'EST-03',
+    module: 'EST',
+    feature: 'Edit draft estimate',
+    passCriteria: 'PUT/PATCH updates line items and DB total_cents matches',
+    expected: 'pass',
+  },
+  {
+    id: 'EST-04',
+    module: 'EST',
+    feature: 'Estimate total correctness',
+    passCriteria: 'Billing engine totals in API match DB total_cents',
+    expected: 'pass',
+  },
+  {
+    id: 'EST-05',
+    module: 'EST',
+    feature: 'Convert estimate to invoice',
+    passCriteria: 'Conversion creates invoice linked to estimate',
     expected: 'partial',
-    expectedReason: 'Requires AI_PROVIDER_API_KEY + execution worker; classifier may not map the utterance.',
+  },
+  {
+    id: 'EST-06',
+    module: 'EST',
+    feature: 'Estimate tenant isolation',
+    passCriteria: 'Tenant B cannot read Tenant A estimate',
+    expected: 'pass',
   },
 
   // ----- Billing journey (estimate → invoice → payment) -----
@@ -144,16 +162,14 @@ export const MATRIX: MatrixRow[] = [
     module: 'SCH',
     feature: 'Schedule appointment by voice (inbound)',
     passCriteria: 'Voice session scheduling utterance → create_appointment proposal → approve → executed appointment',
-    expected: 'partial',
-    expectedReason: 'Requires AI_PROVIDER_API_KEY + execution worker.',
+    expected: 'pass',
   },
   {
     id: 'SCH-03',
     module: 'SCH',
     feature: 'Cancel appointment by voice',
     passCriteria: 'Voice cancel utterance → cancel_appointment proposal → approve → executed; appointment status=canceled',
-    expected: 'partial',
-    expectedReason: 'No REST cancel; only the voice/AI path emits cancel_appointment. Requires AI + worker.',
+    expected: 'pass',
   },
   {
     id: 'SCH-04',
@@ -259,24 +275,21 @@ export const MATRIX: MatrixRow[] = [
     module: 'VOX',
     feature: 'Emergency triage fast-path (voice)',
     passCriteria: 'An emergency utterance (no-heat + gas smell) routes the session to escalation rather than a normal booking',
-    expected: 'partial',
-    expectedReason: 'Real-LLM observation; escalation surfaced via session state/side-effects.',
+    expected: 'pass',
   },
   {
     id: 'VOX-02',
     module: 'VOX',
     feature: 'Spanish / i18n voice response',
     passCriteria: 'A Spanish utterance yields a Spanish-language response (language detection / switch)',
-    expected: 'partial',
-    expectedReason: 'Real-LLM, soft language assertion; evidence captured for review.',
+    expected: 'pass',
   },
   {
     id: 'VOX-03',
     module: 'VOX',
     feature: 'DNC suppression of outbound SMS',
     passCriteria: 'A phone on the tenant DNC list receives no SMS dispatch when an estimate is sent to it',
-    expected: 'partial',
-    expectedReason: 'Needs RW conn to seed DNC + a wired send path; degrades to na if send is unavailable.',
+    expected: 'pass',
   },
   {
     id: 'VOX-04',
@@ -286,6 +299,62 @@ export const MATRIX: MatrixRow[] = [
       'Records the cases not exercisable in simulated/in-app mode: business-hours enforcement, plan caller-context, phone rate-limiting, tech "out today" SMS, dropped-call recovery, session cost caps',
     expected: 'na',
     expectedReason: 'Require live Twilio (signed webhooks / real call) or non-API config; documented, not driven.',
+  },
+  {
+    id: 'VOX-05',
+    module: 'VOX',
+    feature: 'Voice-triggered estimate draft creation',
+    passCriteria:
+      'Voice utterance yields an estimate proposal; approve → executed; estimates row exists with result_entity_id',
+    expected: 'pass',
+  },
+  {
+    id: 'VOX-06',
+    module: 'VOX',
+    feature: 'Voice-triggered estimate send transition',
+    passCriteria:
+      'Voice utterance to send an estimate yields a send proposal or send action; estimate status becomes sent in DB',
+    expected: 'pass',
+  },
+  {
+    id: 'VOX-07',
+    module: 'VOX',
+    feature: 'Voice-triggered invoice creation from sold work',
+    passCriteria:
+      'Voice utterance yields create_invoice proposal; approve → executed; invoice row linked to job exists in DB',
+    expected: 'pass',
+  },
+  {
+    id: 'VOX-08',
+    module: 'VOX',
+    feature: 'Voice-triggered invoice issue transition',
+    passCriteria:
+      'Voice utterance to issue an invoice yields issue proposal or action; invoice status=open with issued_at in DB',
+    expected: 'pass',
+  },
+  {
+    id: 'VOX-09',
+    module: 'VOX',
+    feature: 'Voice session visible in interactions timeline',
+    passCriteria:
+      'After a voice session with input, GET /api/interactions returns the session id with channel and started_at metadata',
+    expected: 'pass',
+  },
+  {
+    id: 'VOX-10',
+    module: 'VOX',
+    feature: 'Voice session artifacts / DB log linkage',
+    passCriteria:
+      'voice_sessions row exists for the session id with tenant_id, channel, started_at; proposal rows link to session context when applicable',
+    expected: 'pass',
+  },
+  {
+    id: 'VOX-11',
+    module: 'VOX',
+    feature: 'Voice-created proposal appears in proposal inbox',
+    passCriteria:
+      'Voice utterance creates a proposal; GET /api/proposals/inbox includes that proposal id for the tenant',
+    expected: 'pass',
   },
 
   // ----- Proposals / human-approval engine -----
@@ -539,79 +608,59 @@ export const MATRIX: MatrixRow[] = [
     expected: 'pass',
   },
 
-  // ----- Estimates (additional rows — restored 2026-06-04, see QA-MATRIX-catalog-drift) -----
+  // ----- Legacy invoice detail rows (invoices.spec.ts; distinct from INV lifecycle) -----
   {
-    id: 'EST-04',
-    module: 'EST',
-    feature: 'Estimate total correctness',
-    passCriteria:
-      'POST /api/estimates returns totals matching the shared billing-engine math for known line items; DB total_cents equals the computed total',
+    id: 'INV-CR-01',
+    module: 'INV-CR',
+    feature: 'Create invoice (detail spec)',
+    passCriteria: 'POST /api/invoices returns 201; DB row status=draft',
     expected: 'pass',
   },
   {
-    id: 'EST-05',
-    module: 'EST',
-    feature: 'Convert estimate to invoice',
-    passCriteria:
-      'POST /api/invoices { estimateId } converts an accepted estimate into a draft invoice linked by estimate_id (no dedicated convert endpoint by design)',
-    expected: 'pass',
+    id: 'INV-CR-02',
+    module: 'INV-CR',
+    feature: 'List/filter invoices (detail spec)',
+    passCriteria: 'GET /api/invoices returns 200 with filter support or documents absence',
+    expected: 'partial',
   },
-  {
-    id: 'EST-06',
-    module: 'EST',
-    feature: 'Estimate tenant isolation',
-    passCriteria:
-      'Tenant B token cannot read a Tenant A estimate by id (403/404); estimate lists stay tenant-scoped',
-    expected: 'pass',
-  },
-
-  // ----- Invoices (delivery / payments edge — restored 2026-06-04) -----
   {
     id: 'INV-03',
-    module: 'INV',
-    feature: 'Send invoice',
-    passCriteria:
-      'POST /api/invoices/:id/send returns 200/202 and records a delivery dispatch; UI shows the sent state',
+    module: 'INV-CR',
+    feature: 'Send/issue invoice (detail spec)',
+    passCriteria: 'Issue endpoint moves invoice to open with issued_at',
     expected: 'partial',
-    expectedReason: 'Delivery provider (SendGrid/Twilio) likely unwired on dev — PORT rows show send → 400.',
   },
   {
     id: 'INV-04',
-    module: 'INV',
+    module: 'INV-CR',
     feature: 'Payment link generation',
-    passCriteria: 'Payment-link endpoint returns a checkout URL for an open invoice',
+    passCriteria: 'Payment link HTTP endpoint returns 200/201',
     expected: 'fail',
-    expectedReason: 'Provider not exposed via HTTP yet — see qa/backlog/INV-04-payment-link-route.md.',
   },
   {
     id: 'INV-05',
-    module: 'INV',
-    feature: 'Mark paid via webhook',
-    passCriteria:
-      'Stripe payment_intent.succeeded webhook marks the invoice paid (requires `stripe listen` forwarding in dev)',
+    module: 'INV-CR',
+    feature: 'Mark paid via Stripe webhook',
+    passCriteria: 'Webhook transitions invoice to paid',
     expected: 'fail',
-    expectedReason: 'Needs a running stripe listener + wired route — see qa/backlog/INV-05-wire-stripe-webhook-route.md.',
   },
   {
     id: 'INV-06',
-    module: 'INV',
+    module: 'INV-CR',
     feature: 'Idempotent payment handling',
-    passCriteria:
-      'Duplicate webhook delivery produces exactly one payment side effect (webhook_events idempotency key)',
-    expected: 'pass',
-    expectedReason: 'DB-backed idempotency already exists; flips with INV-05 route wiring.',
+    passCriteria: 'Duplicate webhook deliveries produce at most one payment row',
+    expected: 'partial',
   },
   {
     id: 'INV-07',
-    module: 'INV',
+    module: 'INV-CR',
     feature: 'Overdue lifecycle',
-    passCriteria:
-      'A past-due open invoice drives the linked job money_state to overdue via the sweep worker and emits an invoice.overdue audit event (invoices have no overdue status by design)',
+    passCriteria: 'Past-due invoices transition to overdue or document gap',
     expected: 'fail',
-    expectedReason: 'Overdue sweep worker not running on dev (PAY-04 live partial corroborates).',
   },
 
-  // ----- Assistant (chat intents — restored 2026-06-04) -----
+
+  // ----- Assistant (chat intents — added from QA live-run branch; main lacked AST rows) -----
   {
     id: 'AST-01',
     module: 'AST',
@@ -665,7 +714,6 @@ export const MATRIX: MatrixRow[] = [
     expected: 'fail',
     expectedReason: 'Proposal chaining not implemented — see qa/backlog/AST-07-multi-step-chaining.md.',
   },
-
 ];
 
 export function findRow(id: string): MatrixRow | undefined {

@@ -5,6 +5,9 @@ import type {
 } from './contracts';
 
 export interface OnboardingFacts {
+  /** The tenant these facts belong to — surfaced so the client can stamp
+   * tenant_id onto funnel events without a separate /me round-trip. */
+  tenantId: string;
   tenantExists: boolean;
   identity: {
     businessName: string | null;
@@ -25,6 +28,9 @@ export interface OnboardingFacts {
   /** Timestamp of the one-time 30-minute upgrade prompt (when shown). null until trial usage crosses the threshold. */
   upgradePromptShownAt?: Date | null;
   voiceAgentLiveAt: Date | null;
+  /** Timestamp of the first real inbound call (activation milestone). null
+   * until first_real_call_received fires. Drives the celebration banner. */
+  activatedAt: Date | null;
   /** True once a model is configured for the tenant (ai_model is non-null). */
   aiConfigPresent: boolean;
   /** State of the onboarding AI self-check written by the verify_ai worker. */
@@ -103,8 +109,11 @@ export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResp
     currentStep: firstNotDone,
     isComplete: firstNotDone === null,
     voiceAgentLive: f.voiceAgentLiveAt != null,
+    tenantId: f.tenantId,
+    subscriptionStatus: f.subscription.status,
     ...(f.upgradePromptShownAt
       ? { upgradePromptShownAt: f.upgradePromptShownAt.toISOString() }
       : {}),
+    ...(f.activatedAt ? { activatedAt: f.activatedAt.toISOString() } : {}),
   };
 }

@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router';
 import { ChevronLeft, Star, MessageSquare } from 'lucide-react';
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts';
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '../ui/chart';
+import { Spinner, EmptyState } from '../ui';
+import { ErrorState } from '../ErrorState';
 import { apiFetch } from '../../utils/api-fetch';
 
 type FeedbackResponse = {
@@ -101,23 +103,21 @@ export function FeedbackDashboard() {
         <p className="text-sm text-slate-500 mb-6">Customer ratings and comments from recent jobs.</p>
 
         {loading && (
-          <div className="rounded-2xl bg-white border border-slate-200 px-5 py-8 text-center text-sm text-slate-500">
-            Loading feedback…
+          <div className="flex items-center justify-center py-12">
+            <Spinner size="md" className="text-slate-900" label="Loading feedback" />
           </div>
         )}
 
         {!loading && error && (
-          <div className="rounded-2xl bg-red-50 border border-red-200 px-5 py-4 text-sm text-red-700">
-            {error}
-          </div>
+          <ErrorState message={error} />
         )}
 
         {!loading && !error && total === 0 && (
-          <div className="rounded-2xl bg-white border border-slate-200 px-5 py-12 text-center">
-            <MessageSquare size={28} className="mx-auto text-slate-300 mb-3" />
-            <p className="text-sm text-slate-600">No feedback yet</p>
-            <p className="text-xs text-slate-400 mt-1">Ratings and comments from customers will appear here.</p>
-          </div>
+          <EmptyState
+            icon={<MessageSquare size={20} />}
+            title="No feedback yet"
+            description="Ratings and comments from customers will appear here."
+          />
         )}
 
         {!loading && !error && total > 0 && (

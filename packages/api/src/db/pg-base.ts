@@ -16,11 +16,15 @@ export class PgBaseRepository {
    * P0-024: when invoked from inside a request that owns a transaction-
    * scoped client (set up by the `withTenantTransaction` middleware),
    * we reuse that client so every query in the request runs inside the
-   * same transaction with the same `SET LOCAL` GUC. When invoked
-   * outside that scope (workers, public flows, tests), we fall back to
-   * the original per-call connection acquisition. The fallback uses
-   * the existing `setTenantContext` helper — preserving exact pre-PR
-   * behavior so non-request callers see no functional change.
+   * same transaction with the same `SET LOCAL` GUC. When invoked outside
+   * that scope (workers, public flows, tests), we fall back to the
+   * original per-call connection acquisition.
+   *
+   * GUC leak fix: before releasing the connection back to the pool we
+   * issue `RESET app.current_tenant_id`. Without it, the plain `SET`
+   * persists on the underlying connection and the next checkout would
+   * inherit this tenant's context — silently bypassing RLS for any
+   * unscoped query until something else overwrites the GUC.
    */
   protected async withTenant<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
     const ctx = tenantContextStore.getStore();
@@ -35,6 +39,16 @@ export class PgBaseRepository {
       await client.query(setTenantContext(tenantId));
       return await fn(client);
     } finally {
+      // GUC leak fix: plain `SET` persists on the underlying connection
+      // past COMMIT/ROLLBACK. Clear it explicitly before release so the
+      // next pool checkout doesn't inherit this tenant's context. Tolerant
+      // of mocks that return non-promises and of broken connections.
+      try {
+        await client.query('RESET app.current_tenant_id');
+      } catch {
+        // ignore — the connection is being released; a broken client
+        // will be discarded by pg itself when it sees the error.
+      }
       client.release();
     }
   }
@@ -75,9 +89,26 @@ export class PgBaseRepository {
       await client.query('COMMIT');
       return result;
     } catch (err) {
-      await client.query('ROLLBACK');
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // best-effort rollback
+      }
       throw err;
     } finally {
+      // GUC leak fix: plain `SET` persists past COMMIT/ROLLBACK on the
+      // underlying connection. Clear it explicitly before release so the
+      // next pool checkout doesn't inherit this tenant's context.
+      // GUC leak fix: plain `SET` persists on the underlying connection
+      // past COMMIT/ROLLBACK. Clear it explicitly before release so the
+      // next pool checkout doesn't inherit this tenant's context. Tolerant
+      // of mocks that return non-promises and of broken connections.
+      try {
+        await client.query('RESET app.current_tenant_id');
+      } catch {
+        // ignore — the connection is being released; a broken client
+        // will be discarded by pg itself when it sees the error.
+      }
       client.release();
     }
   }

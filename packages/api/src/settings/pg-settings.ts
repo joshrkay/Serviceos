@@ -28,6 +28,7 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     businessName: row.business_name as string,
     businessPhone: (row.business_phone as string) ?? undefined,
     businessEmail: (row.business_email as string) ?? undefined,
+    ownerPhone: (row.owner_phone as string) ?? undefined,
     timezone: row.timezone as string,
     estimatePrefix: row.estimate_prefix as string,
     invoicePrefix: row.invoice_prefix as string,
@@ -49,6 +50,10 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // DEFAULT value.
     autoApplyInternalUpdates: row.auto_apply_internal_updates as boolean | undefined,
     autoSendAppointmentReminders: row.auto_send_appointment_reminders as boolean | undefined,
+    autoInvoiceOnCompletion: row.auto_invoice_on_completion as boolean | undefined,
+    billLaborFromTimeEntries: row.bill_labor_from_time_entries as boolean | undefined,
+    batchInvoiceEnabled: row.batch_invoice_enabled as boolean | undefined,
+    milestoneBillingEnabled: row.milestone_billing_enabled as boolean | undefined,
     // Tier 4 — migration 076. JSONB column; pg returns the parsed
     // object directly. Empty object means "no overrides" — surface as
     // undefined so consumers can rely on the same shape across both
@@ -77,6 +82,21 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
       (row.deposit_timing_policy as 'before_approval' | 'after_approval' | null) ?? undefined,
     // §9 — migration 098. Owner's hourly rate (integer cents).
     hourlyRateCents: (row.hourly_rate_cents as number | null) ?? undefined,
+    // §10 — identity fields persisted by PUT /api/onboarding/identity.
+    // Projected here so GET /api/settings returns them for the
+    // IdentityStep re-edit pre-load. NULL → undefined per the rest of
+    // this mapper's convention.
+    serviceAreaText: (row.service_area_text as string | null) ?? undefined,
+    serviceAreaRadius: (row.service_area_radius as number | null) ?? undefined,
+    businessHours: (() => {
+      const raw = row.business_hours as
+        | Record<string, { open: string; close: string } | null>
+        | null
+        | undefined;
+      if (!raw || typeof raw !== 'object') return undefined;
+      return raw;
+    })(),
+    jobBufferMinutes: (row.job_buffer_minutes as number | null) ?? undefined,
     // B1 — migration 088. NULL from DB → undefined in TS (same
     // convention as all other nullable optional columns here).
     voiceAgentName: (row.voice_agent_name as string | null) ?? undefined,
@@ -108,6 +128,10 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     ttsVoiceEs: (row.tts_voice_es as string | null) ?? undefined,
     spanishDispatcherUserIds:
       (row.spanish_dispatcher_user_ids as string[] | null) ?? undefined,
+    // Migration 120 (`120_tenant_settings_ai_config`). NULL → undefined to
+    // match the InMemory repo shape; consumers (onboarding's
+    // `aiConfigPresent`, verify_ai worker) treat undefined as "not seeded".
+    aiModel: (row.ai_model as string | null) ?? undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -147,10 +171,10 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
       const result = await client.query(
         `INSERT INTO tenant_settings (
           id, tenant_id, business_name, business_phone, business_email,
-          timezone, estimate_prefix, invoice_prefix, next_estimate_number,
+          owner_phone, timezone, estimate_prefix, invoice_prefix, next_estimate_number,
           next_invoice_number, default_payment_term_days, terminology_preferences,
-          created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+          ai_model, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         RETURNING *`,
         [
           settings.id,
@@ -158,6 +182,7 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           settings.businessName,
           settings.businessPhone ?? null,
           settings.businessEmail ?? null,
+          settings.ownerPhone ?? null,
           settings.timezone,
           settings.estimatePrefix,
           settings.invoicePrefix,
@@ -165,6 +190,11 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           settings.nextInvoiceNumber,
           settings.defaultPaymentTermDays,
           terminologyJson ? JSON.stringify(terminologyJson) : null,
+          // Onboarding-blocker fix: persist the seeded ai_model so the
+          // verify_ai worker finds a model on the very first tenant_settings
+          // row. The COALESCE backfill in webhooks/routes.ts is kept as a
+          // safety net for tenants whose bootstrap predates this code.
+          settings.aiModel ?? null,
           settings.createdAt,
           settings.updatedAt,
         ]
@@ -216,6 +246,7 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         businessName: 'business_name',
         businessPhone: 'business_phone',
         businessEmail: 'business_email',
+        ownerPhone: 'owner_phone',
         timezone: 'timezone',
         estimatePrefix: 'estimate_prefix',
         invoicePrefix: 'invoice_prefix',
@@ -228,6 +259,10 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         // Tier 4 — migration 075.
         autoApplyInternalUpdates: 'auto_apply_internal_updates',
         autoSendAppointmentReminders: 'auto_send_appointment_reminders',
+        autoInvoiceOnCompletion: 'auto_invoice_on_completion',
+        billLaborFromTimeEntries: 'bill_labor_from_time_entries',
+        batchInvoiceEnabled: 'batch_invoice_enabled',
+        milestoneBillingEnabled: 'milestone_billing_enabled',
         // Tier 4 — migration 077. Deposit rules. Each accepts an
         // explicit `null` to clear the value (vs `undefined` which
         // means "don't touch this field on update").
@@ -252,6 +287,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         ttsVoiceEn: 'tts_voice_en',
         ttsVoiceEs: 'tts_voice_es',
         spanishDispatcherUserIds: 'spanish_dispatcher_user_ids',
+        // Migration 120 — per-tenant AI model override.
+        aiModel: 'ai_model',
         updatedAt: 'updated_at',
       };
 

@@ -14,7 +14,7 @@ import { rwAvailable, rwExec } from './helpers/rw-db';
 
 test.describe.configure({ mode: 'serial' });
 
-matrixTest('INV-01', 'Create invoice', async (h) => {
+matrixTest('INV-CR-01', 'Create invoice', async (h) => {
   const apiResp = await h.api.call({
     method: 'POST',
     path: '/api/invoices',
@@ -38,7 +38,7 @@ matrixTest('INV-01', 'Create invoice', async (h) => {
   h.evidence.pass();
 });
 
-matrixTest('INV-02', 'List/filter invoices', async (h) => {
+matrixTest('INV-CR-02', 'List/filter invoices', async (h) => {
   // Expect 404/405 — endpoint is not implemented.
   const apiResp = await h.api.call({
     method: 'GET',

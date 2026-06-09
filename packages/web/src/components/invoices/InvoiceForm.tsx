@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { FileText, Loader } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
+import { formatCurrency } from '../../utils/currency';
 import {
   LineItemEditor,
   LineItemDraft,
@@ -212,7 +213,7 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
   );
 
   const total = totalCents(form.items);
-  const totalDisplay = `$${(total / 100).toFixed(2)}`;
+  const totalDisplay = formatCurrency(total);
 
   return (
     <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-3xl mx-auto">
@@ -240,7 +241,7 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
             <option value="">— create from scratch —</option>
             {eligibleEstimates.map(e => (
               <option key={e.id} value={e.id}>
-                {e.estimateNumber} (${e.totals ? (e.totals.totalCents / 100).toFixed(2) : '—'}) — {e.status}
+                {e.estimateNumber} ({e.totals ? formatCurrency(e.totals.totalCents) : '—'}) — {e.status}
               </option>
             ))}
           </select>
