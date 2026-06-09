@@ -1,6 +1,6 @@
 /**
  * Voice-parity (Feature 7) — Postgres-backed `call_me_back` repository.
- * Tenant-scoped via RLS (`call_me_back_tasks`, migration 148).
+ * Tenant-scoped via RLS (`call_me_back_tasks`, migration 153).
  */
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../../db/pg-base';

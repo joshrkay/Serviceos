@@ -1,0 +1,326 @@
+# ServiceOS domain vocabulary — Electrical
+# Schema: data/vocab/schema.json
+# Sources: NEC terminology, InterNACHI electrical inspection guide,
+# r/electricians + r/askanelectrician common phrasings.
+domain: electrical
+terms:
+  # ── Panel / distribution ────────────────────────────────────────────────────
+  - term: electrical panel
+    synonyms: ["the panel", "breaker box", "fuse box", "the electrical box", "load center", "service panel", "the box with the breakers"]
+    category: component
+    regions: []
+  - term: main breaker
+    synonyms: ["the main", "the big breaker", "main disconnect", "the master switch"]
+    category: component
+    regions: []
+  - term: circuit breaker
+    synonyms: ["breaker", "the switch in the panel", "the breaker that trips", "circuit"]
+    category: component
+    regions: []
+  - term: sub-panel
+    synonyms: ["subpanel", "sub panel", "the second panel", "the smaller panel", "the garage panel"]
+    category: component
+    regions: []
+  - term: GFCI
+    synonyms: ["gfci", "ground fault outlet", "the outlet with the buttons", "the test reset outlet", "bathroom outlet", "gfi"]
+    category: component
+    regions: []
+  - term: AFCI
+    synonyms: ["afci", "arc fault breaker", "the arc fault", "combination breaker"]
+    category: component
+    regions: []
+  - term: bus bar
+    synonyms: ["busbar", "the bus", "the metal bars in the panel"]
+    category: component
+    regions: []
+  - term: fuse
+    synonyms: ["the fuse", "screw in fuse", "blown fuse", "cartridge fuse"]
+    category: component
+    regions: []
+  - term: knob-and-tube
+    synonyms: ["knob and tube", "the old wiring", "knob n tube", "ceramic knob wiring"]
+    category: material
+    regions: ["Northeast", "Pacific NW"]
+  - term: aluminum wiring
+    synonyms: ["aluminum wire", "the aluminum branch wiring", "the bad aluminum wire"]
+    category: material
+    regions: []
+  - term: copper wiring
+    synonyms: ["copper wire", "copper romex", "the copper wiring"]
+    category: material
+    regions: []
+  - term: romex
+    synonyms: ["nm cable", "the white wire", "the plastic sheathed wire", "non metallic cable"]
+    category: material
+    regions: []
+  - term: conduit
+    synonyms: ["the metal pipe for wires", "EMT", "electrical conduit", "the wire pipe"]
+    category: material
+    regions: []
+  # ── Devices / fixtures ──────────────────────────────────────────────────────
+  - term: outlet
+    synonyms: ["receptacle", "the plug", "wall outlet", "the socket", "power outlet", "plug-in"]
+    category: component
+    regions: []
+  - term: switch
+    synonyms: ["light switch", "the wall switch", "toggle switch"]
+    category: component
+    regions: []
+  - term: dimmer switch
+    synonyms: ["dimmer", "the dimmer switch", "the sliding switch"]
+    category: component
+    regions: []
+  - term: three-way switch
+    synonyms: ["3 way switch", "the switch with two locations", "two switches one light"]
+    category: component
+    regions: []
+  - term: light fixture
+    synonyms: ["the light", "ceiling light", "the fixture", "overhead light"]
+    category: component
+    regions: []
+  - term: recessed light
+    synonyms: ["can light", "canned lights", "pot lights", "recessed can", "downlight"]
+    category: component
+    regions: []
+  - term: ceiling fan
+    synonyms: ["the fan", "ceiling fan", "paddle fan"]
+    category: component
+    regions: ["Texas", "Florida"]
+  - term: junction box
+    synonyms: ["j-box", "junction box", "the electrical box in the wall", "the box where wires connect"]
+    category: component
+    regions: []
+  - term: doorbell transformer
+    synonyms: ["the doorbell transformer", "the chime transformer"]
+    category: component
+    regions: []
+  # ── Service / backup ────────────────────────────────────────────────────────
+  - term: electrical service
+    synonyms: ["the service", "100 amp service", "200 amp service", "the amperage", "how much power comes in"]
+    category: spec
+    regions: []
+  - term: service entrance
+    synonyms: ["the weatherhead", "where the power comes in", "service drop", "the mast"]
+    category: component
+    regions: []
+  - term: meter base
+    synonyms: ["the meter", "electric meter", "the meter can", "meter socket"]
+    category: component
+    regions: []
+  - term: transfer switch
+    synonyms: ["generator transfer switch", "the switch for the generator", "automatic transfer switch", "ATS"]
+    category: component
+    regions: ["Northeast", "Texas", "Florida"]
+  - term: generator interlock
+    synonyms: ["interlock kit", "the generator interlock", "panel interlock"]
+    category: component
+    regions: ["Texas", "Northeast"]
+  - term: standby generator
+    synonyms: ["whole house generator", "backup generator", "the generator", "generac", "permanent generator"]
+    category: component
+    regions: ["Texas", "Florida", "Northeast"]
+  - term: portable generator
+    synonyms: ["the portable generator", "the gas generator", "the generator I roll out"]
+    category: component
+    regions: ["Texas", "Florida"]
+  - term: surge protector
+    synonyms: ["whole house surge protector", "surge suppressor", "the surge device", "spd"]
+    category: component
+    regions: ["Texas", "Florida"]
+  - term: EV charger
+    synonyms: ["car charger", "electric car charger", "the charger for my tesla", "level 2 charger", "EVSE"]
+    category: component
+    regions: ["Pacific NW"]
+  - term: grounding rod
+    synonyms: ["ground rod", "the grounding stake", "the copper rod in the ground"]
+    category: component
+    regions: []
+  - term: neutral wire
+    synonyms: ["the neutral", "the white wire", "neutral conductor"]
+    category: component
+    regions: []
+  - term: hot wire
+    synonyms: ["the hot", "the black wire", "the live wire", "energized conductor"]
+    category: component
+    regions: []
+  - term: ground wire
+    synonyms: ["the ground", "the bare wire", "the green wire", "equipment ground"]
+    category: component
+    regions: []
+  # ── Symptoms ────────────────────────────────────────────────────────────────
+  - term: tripping breaker
+    synonyms: ["breaker keeps tripping", "breaker trips", "keeps popping", "breaker won't stay on", "loses power to a room"]
+    category: symptom
+    regions: []
+  - term: flickering lights
+    synonyms: ["lights flicker", "lights dim", "lights blink", "lights pulsing", "lights flickering"]
+    category: symptom
+    regions: []
+  - term: burning smell
+    synonyms: ["smells like burning", "electrical burning smell", "hot plastic smell", "smells like something's burning"]
+    category: symptom
+    regions: []
+  - term: hot outlet
+    synonyms: ["outlet is hot", "warm outlet", "outlet is warm to the touch", "the plug is hot"]
+    category: symptom
+    regions: []
+  - term: dead circuit
+    synonyms: ["no power", "outlets don't work", "dead outlet", "lost power to part of the house", "half the house has no power"]
+    category: symptom
+    regions: []
+  - term: buzzing sound
+    synonyms: ["buzzing outlet", "humming panel", "the panel buzzes", "buzzing from the switch"]
+    category: symptom
+    regions: []
+  - term: sparking outlet
+    synonyms: ["outlet sparks", "sparks when I plug in", "arcing", "sparking when I flip the switch"]
+    category: symptom
+    regions: []
+  - term: scorched outlet
+    synonyms: ["burnt outlet", "black marks on the outlet", "melted outlet", "scorch marks"]
+    category: symptom
+    regions: []
+  - term: shock
+    synonyms: ["got shocked", "tingle when I touch it", "mild shock", "zapped me"]
+    category: symptom
+    regions: []
+  - term: lights dim when appliance starts
+    synonyms: ["lights dim when the AC kicks on", "lights flicker when the fridge starts", "dimming when the dryer runs"]
+    category: symptom
+    regions: []
+  # ── Services / actions ──────────────────────────────────────────────────────
+  - term: panel upgrade
+    synonyms: ["upgrade the panel", "new breaker box", "200 amp upgrade", "service upgrade", "replace the fuse box"]
+    category: service
+    regions: []
+  - term: rewire
+    synonyms: ["rewire the house", "new wiring", "replace the wiring", "whole house rewire"]
+    category: service
+    regions: []
+  - term: add a circuit
+    synonyms: ["new circuit", "dedicated circuit", "add an outlet", "run a new line", "new dedicated line"]
+    category: service
+    regions: []
+  - term: generator install
+    synonyms: ["install a generator", "generator hookup", "wire in a generator"]
+    category: service
+    regions: ["Texas", "Florida"]
+  - term: EV charger install
+    synonyms: ["install a car charger", "EV charger installation", "wire up the tesla charger"]
+    category: service
+    regions: []
+  - term: troubleshoot
+    synonyms: ["find the problem", "diagnose the electrical issue", "figure out why the breaker trips"]
+    category: service
+    regions: []
+  # ── Additional devices / components ──────────────────────────────────────────
+  - term: smoke detector
+    synonyms: ["smoke alarm", "the smoke detector chirping", "hardwired smoke detector", "the beeping detector"]
+    category: component
+    regions: []
+  - term: carbon monoxide detector
+    synonyms: ["co detector", "carbon monoxide alarm", "the co alarm"]
+    category: component
+    regions: []
+  - term: USB outlet
+    synonyms: ["outlet with usb ports", "the usb charging outlet"]
+    category: component
+    regions: []
+  - term: smart switch
+    synonyms: ["wifi switch", "the app controlled switch", "smart light switch"]
+    category: component
+    regions: []
+  - term: under cabinet lighting
+    synonyms: ["under counter lights", "the lights under the cabinets"]
+    category: component
+    regions: []
+  - term: landscape lighting
+    synonyms: ["outdoor lighting", "yard lights", "low voltage lighting"]
+    category: component
+    regions: ["Florida", "Phoenix"]
+  - term: motion sensor light
+    synonyms: ["the motion light", "security light", "motion activated light"]
+    category: component
+    regions: []
+  - term: panel directory
+    synonyms: ["the breaker labels", "the legend on the panel", "circuit labels"]
+    category: component
+    regions: []
+  - term: arc fault outlet
+    synonyms: ["afci outlet", "arc fault receptacle"]
+    category: component
+    regions: []
+  - term: tamper resistant outlet
+    synonyms: ["tr outlet", "child safe outlet", "the outlet with shutters"]
+    category: component
+    regions: []
+  - term: weatherproof outlet
+    synonyms: ["outdoor outlet", "the outlet with the bubble cover", "exterior outlet"]
+    category: component
+    regions: []
+  - term: range outlet
+    synonyms: ["the stove outlet", "240 volt outlet", "dryer outlet", "the big outlet"]
+    category: component
+    regions: []
+  - term: low voltage transformer
+    synonyms: ["the transformer for the lights", "landscape transformer"]
+    category: component
+    regions: []
+  - term: panel breaker tie
+    synonyms: ["the breaker handle tie", "double pole breaker"]
+    category: component
+    regions: []
+  # ── Additional brands ───────────────────────────────────────────────────────
+  - term: Square D
+    synonyms: ["square d", "qo breakers", "homeline panel"]
+    category: brand
+    regions: []
+  - term: Eaton
+    synonyms: ["eaton", "eaton breakers", "cutler hammer"]
+    category: brand
+    regions: []
+  - term: Siemens
+    synonyms: ["siemens", "siemens panel"]
+    category: brand
+    regions: []
+  - term: Generac
+    synonyms: ["generac", "the generac generator"]
+    category: brand
+    regions: ["Texas", "Florida"]
+  - term: Leviton
+    synonyms: ["leviton", "leviton outlet"]
+    category: brand
+    regions: []
+  - term: Federal Pacific
+    synonyms: ["federal pacific panel", "fpe panel", "the dangerous old panel", "stab lok"]
+    category: brand
+    regions: ["Northeast"]
+  - term: Zinsco
+    synonyms: ["zinsco panel", "the old zinsco"]
+    category: brand
+    regions: []
+  # ── Additional symptoms ─────────────────────────────────────────────────────
+  - term: half outlet not working
+    synonyms: ["top of the outlet works but not the bottom", "only half the outlet works"]
+    category: symptom
+    regions: []
+  - term: gfci won't reset
+    synonyms: ["reset button won't stay in", "gfci keeps tripping", "bathroom outlets are dead", "can't reset the gfci"]
+    category: symptom
+    regions: []
+  - term: lights out in one room
+    synonyms: ["one room has no power", "lights won't come on in the bedroom", "lost power to one room"]
+    category: symptom
+    regions: []
+  - term: panel making noise
+    synonyms: ["the breaker box is buzzing", "crackling in the panel", "humming from the panel"]
+    category: symptom
+    regions: []
+  - term: warm breaker
+    synonyms: ["breaker is hot", "the breaker feels warm", "hot spot in the panel"]
+    category: symptom
+    regions: []
+  - term: outlet not working
+    synonyms: ["dead outlet", "outlet has no power", "nothing works in that outlet", "the plug is dead"]
+    category: symptom
+    regions: []

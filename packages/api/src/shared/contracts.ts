@@ -305,6 +305,8 @@ export const updateSettingsSchema = z.object({
   autoSendAppointmentReminders: z.boolean().optional(),
   // P20-001 — opt into auto-drafting an invoice (as a proposal) on job completion.
   autoInvoiceOnCompletion: z.boolean().optional(),
+  // Feature (launch) — opt into recomputing auto-invoice labor from actual time entries.
+  billLaborFromTimeEntries: z.boolean().optional(),
   // P21-003 — opt into the daily batch-invoice proposal sweep.
   batchInvoiceEnabled: z.boolean().optional(),
   // P21 — opt into minting on_completion milestone invoices. Without this in
@@ -370,7 +372,7 @@ export const updateSettingsSchema = z.object({
   ttsVoiceEn: ttsVoiceField,
   ttsVoiceEs: ttsVoiceField,
   spanishDispatcherUserIds: z.array(z.string().uuid()).optional(),
-  // Voice-parity (migration 147) — E.164 warm-transfer line. Normalized to
+  // Voice-parity (migration 152) — E.164 warm-transfer line. Normalized to
   // E.164 (or null to clear) at the route boundary, mirroring ownerPhone.
   transferNumber: z.string().max(40).nullable().optional(),
 }).superRefine((val, ctx) => {

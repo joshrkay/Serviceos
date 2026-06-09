@@ -28,7 +28,9 @@ import type { SettingsRepository, TenantSettings } from '../../src/settings/sett
 
 const AUTH_TOKEN = 'test-tw-token-xyz';
 const PUBLIC_BASE_URL = 'https://api.test';
-const TENANT_ID = 'tenant-transfer-test';
+// A real UUID — /callback-message validates the resolved tenant id before any
+// tenant-scoped work (see isValidTenantId), so a placeholder string is rejected.
+const TENANT_ID = '11111111-1111-4111-8111-111111111111';
 const TRANSFER_NUMBER = '+15125557000';
 
 function makeGateway(content: string): LLMGateway {

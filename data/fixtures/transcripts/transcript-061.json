@@ -1,0 +1,15 @@
+{
+  "id": "transcript-061",
+  "type": "inbound_call",
+  "duration_seconds": 65,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is Robert Klein. I wanted to check on the status of my heat pump job and what I owe. Dispatcher: Sure Robert, let me pull up your account. Customer: Thank you. Dispatcher: Your heat pump job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
+  "expected_entities": {
+    "customer_name": "Robert Klein",
+    "issue": "status check on heat pump job",
+    "equipment": "heat pump",
+    "address": "",
+    "appointment_window": ""
+  },
+  "source": "synthetic"
+}

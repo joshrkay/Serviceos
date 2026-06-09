@@ -8,7 +8,7 @@
  *
  * This is a first-class operational TASK, not a proposal: a callback is work a
  * human must do, not an AI mutation requiring approval. Backed by the
- * `call_me_back_tasks` table (migration 148), tenant-scoped via RLS.
+ * `call_me_back_tasks` table (migration 153), tenant-scoped via RLS.
  */
 import { v4 as uuidv4 } from 'uuid';
 

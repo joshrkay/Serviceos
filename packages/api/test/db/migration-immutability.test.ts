@@ -205,9 +205,14 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['143_tenant_settings_owner_phone', 'af5c290ac32a8e6eb099212d29275aef11dff43f2a197a79865cbb7b8bc9c953'],
   ['144_tenants_pending_checkout_at', '93cb5302caca35e6587b01d97151e8424e554a6ec90c08274d67c81eb436f2b2'],
   ['145_tenants_pending_checkout_session_id', '2f4d5f3c8be0510bfbc1490192810d65358632d0bcc2540f116d77e5233eed36'],
-  ['146_proposals_claimed_by_text', 'e82ae5ebe8476850f5aae1354088820ea462f94247ffad5c37b474c1205e9b6b'],
-  ['147_voice_parity_transfer_and_languages', '437c19e7db82a2a1ec8c04d62d433b13ec609dd55315b3fe859fee39bad680a0'],
-  ['148_create_call_me_back_tasks', '9b9d430535e2f9d35c71de35e7389198a71ed8946f8262527ed9378535952abe'],
+  ['146_tenant_settings_activated_at', 'b1851a3b18b950f29de1e2df64e26e882a8096d4ef5916adb1bd127b5af12e34'],
+  ['147_tenant_settings_vapi_assistant', '8e59538f846f9de4d53577e5fafbc0c3327b3e823c7907a2f6bc21290eae8a7a'],
+  ['148_tenant_settings_business_profile_extras', '0b9f55aedb42e1a503aa1fc7338fa790a11be08d4bf3eca26cf205da582c9002'],
+  ['149_tenant_settings_calendar_provider', '1ef4dcbef697bb3e060f0a3ba3102381631c053d0c696131623a63c6d0d03440'],
+  ['150_tenant_settings_availability_template', 'c05e63c2025ecc6fd69cf4fdbee4ac447cda294f65f8e9efb77532c37cfe1175'],
+  ['151_tenant_settings_bill_labor_from_time_entries', 'a33ab626d1b807c19dfd62180a9462c7cbdb41c8b358e89249fb2213f93ac145'],
+  ['152_voice_parity_transfer_and_languages', '437c19e7db82a2a1ec8c04d62d433b13ec609dd55315b3fe859fee39bad680a0'],
+  ['153_create_call_me_back_tasks', '9b9d430535e2f9d35c71de35e7389198a71ed8946f8262527ed9378535952abe'],
 ];
 
 function hashMigration(value: string): string {

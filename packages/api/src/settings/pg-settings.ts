@@ -51,6 +51,7 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     autoApplyInternalUpdates: row.auto_apply_internal_updates as boolean | undefined,
     autoSendAppointmentReminders: row.auto_send_appointment_reminders as boolean | undefined,
     autoInvoiceOnCompletion: row.auto_invoice_on_completion as boolean | undefined,
+    billLaborFromTimeEntries: row.bill_labor_from_time_entries as boolean | undefined,
     batchInvoiceEnabled: row.batch_invoice_enabled as boolean | undefined,
     milestoneBillingEnabled: row.milestone_billing_enabled as boolean | undefined,
     // Tier 4 — migration 076. JSONB column; pg returns the parsed
@@ -127,7 +128,7 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     ttsVoiceEs: (row.tts_voice_es as string | null) ?? undefined,
     spanishDispatcherUserIds:
       (row.spanish_dispatcher_user_ids as string[] | null) ?? undefined,
-    // Voice-parity (migration 147). supported_languages is NOT NULL with a
+    // Voice-parity (migration 152). supported_languages is NOT NULL with a
     // DEFAULT ARRAY['en'], so a pre-migration row still reads ['en'].
     // transfer_number is nullable → undefined when unset.
     supportedLanguages:
@@ -265,6 +266,7 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         autoApplyInternalUpdates: 'auto_apply_internal_updates',
         autoSendAppointmentReminders: 'auto_send_appointment_reminders',
         autoInvoiceOnCompletion: 'auto_invoice_on_completion',
+        billLaborFromTimeEntries: 'bill_labor_from_time_entries',
         batchInvoiceEnabled: 'batch_invoice_enabled',
         milestoneBillingEnabled: 'milestone_billing_enabled',
         // Tier 4 — migration 077. Deposit rules. Each accepts an
@@ -291,7 +293,7 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         ttsVoiceEn: 'tts_voice_en',
         ttsVoiceEs: 'tts_voice_es',
         spanishDispatcherUserIds: 'spanish_dispatcher_user_ids',
-        // Voice-parity — migration 147. transfer_number is plain TEXT and
+        // Voice-parity — migration 152. transfer_number is plain TEXT and
         // flows through the generic handler; supported_languages is text[]
         // and is special-cased below (like spanish_dispatcher_user_ids).
         transferNumber: 'transfer_number',
@@ -353,7 +355,7 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           paramIndex++;
           continue;
         }
-        // Voice-parity (migration 147) — supported_languages is a native
+        // Voice-parity (migration 152) — supported_languages is a native
         // Postgres text[] column (NOT NULL DEFAULT ARRAY['en']). Cast the param
         // explicitly and default a cleared/empty write back to ['en'] so the
         // column never goes empty and reads stay English-safe.

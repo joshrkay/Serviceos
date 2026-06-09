@@ -55,6 +55,7 @@ import type { GateReason } from '../voice/trial-limits';
 import { t, type Language } from '../ai/i18n/i18n';
 import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
 import { createAuditEvent } from '../audit/audit';
+import { isValidTenantId } from '../db/schema';
 
 const logger = createLogger({
   service: 'routes.telephony',
@@ -709,7 +710,12 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       res.status(503).type('text/plain').send('Service temporarily unavailable');
       return;
     }
-    if (!tenantId) {
+    // Validate the resolved tenant id is a well-formed UUID before any
+    // tenant-scoped DB work (setTenantContext throws on a malformed id, and we
+    // don't want to acquire a pool client for a junk request). 200 + graceful
+    // hangup so Twilio doesn't 5xx-retry a permanently-bad request.
+    if (!tenantId || !isValidTenantId(tenantId)) {
+      logger.error('telephony/callback-message: no/invalid tenant resolved', { sessionId });
       res.status(200).type('text/xml').send(technicalDifficultiesTwiml());
       return;
     }
@@ -717,10 +723,13 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     const adapterDeps = deps.adapter.getDeps();
     const session = adapterDeps.store.get(sessionId);
     const lang: Language = session?.language === 'es' ? 'es' : 'en';
-    const callerPhone = (body.From && body.From.trim()) || 'unknown';
+    // Empty string (not a synthetic 'unknown') when the carrier didn't send a
+    // From — keeps the stored value honest; caller_phone is TEXT NOT NULL.
+    const callerPhone = (body.From ?? '').trim();
     const message = (body.SpeechResult ?? '').trim();
 
     if (deps.callMeBackRepo) {
+      let taskId: string;
       try {
         const task = await deps.callMeBackRepo.create({
           tenantId,
@@ -732,7 +741,22 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
           ...(message ? { callbackMessage: message } : {}),
           reason: 'transfer_failed',
         });
-        if (deps.auditRepo) {
+        taskId = task.id;
+      } catch (err) {
+        // The callback is the whole point of this turn. If we can't persist it
+        // (e.g. transient DB outage), DON'T finalize + tell the caller we'll
+        // ring back — that would silently drop the request. Return 503 so
+        // Twilio retries the webhook.
+        logger.error('telephony/callback-message: failed to schedule call_me_back', {
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        res.status(503).type('text/plain').send('Service temporarily unavailable');
+        return;
+      }
+      // Audit is best-effort — never block the ack on it.
+      if (deps.auditRepo) {
+        try {
           await deps.auditRepo.create(
             createAuditEvent({
               tenantId,
@@ -740,7 +764,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
               actorRole: 'system',
               eventType: 'call_me_back.scheduled',
               entityType: 'call_me_back_task',
-              entityId: task.id,
+              entityId: taskId,
               correlationId: sessionId,
               metadata: {
                 callSid: session?.callSid ?? body.CallSid ?? null,
@@ -749,18 +773,18 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
               },
             }),
           );
+        } catch (err) {
+          logger.warn('telephony/callback-message: audit persist failed', {
+            sessionId,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
-        logger.info('telephony/callback-message: call_me_back task scheduled', {
-          sessionId,
-          taskId: task.id,
-          hasMessage: message.length > 0,
-        });
-      } catch (err) {
-        logger.warn('telephony/callback-message: failed to schedule call_me_back', {
-          sessionId,
-          error: err instanceof Error ? err.message : String(err),
-        });
       }
+      logger.info('telephony/callback-message: call_me_back task scheduled', {
+        sessionId,
+        taskId,
+        hasMessage: message.length > 0,
+      });
     } else {
       logger.warn('telephony/callback-message: callMeBackRepo not wired', { sessionId });
     }

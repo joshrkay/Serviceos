@@ -1,0 +1,15 @@
+{
+  "id": "transcript-072",
+  "type": "inbound_call",
+  "duration_seconds": 110,
+  "service_type": "electrical",
+  "transcript": "Customer: Hi, this is Robert Klein. I need to reschedule my appointment for the electrical panel. Dispatcher: No problem Robert. When works better for you? Customer: Could we do this afternoon between 2 and 4? Dispatcher: That works. I've moved your appointment to this afternoon between 2 and 4. Customer: Perfect, thanks.",
+  "expected_entities": {
+    "customer_name": "Robert Klein",
+    "issue": "reschedule electrical panel appointment",
+    "equipment": "electrical panel",
+    "address": "",
+    "appointment_window": "this afternoon between 2 and 4"
+  },
+  "source": "synthetic"
+}

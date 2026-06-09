@@ -1,0 +1,15 @@
+{
+  "id": "transcript-115",
+  "type": "inbound_call",
+  "duration_seconds": 70,
+  "service_type": "hvac",
+  "transcript": "Customer: This is an emergency, my thermostat won't turn on and it's getting bad! This is Linda Park at 7 River Road. Dispatcher: Okay Linda, stay calm. I'm getting a technician dispatched to 7 River Road right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "expected_entities": {
+    "customer_name": "Linda Park",
+    "issue": "emergency: thermostat won't turn on",
+    "equipment": "thermostat",
+    "address": "7 River Road",
+    "appointment_window": "immediate dispatch"
+  },
+  "source": "synthetic"
+}

@@ -1,0 +1,15 @@
+{
+  "id": "transcript-136",
+  "type": "inbound_call",
+  "duration_seconds": 195,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is James Miller. I'm calling because my thermostat stopped cooling. Dispatcher: Hi James, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Goodman, about 5 years old. Dispatcher: Okay, and what's the service address? Customer: 22 Oak Court. Dispatcher: Got it. We can send a technician out first thing tomorrow. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "James Miller",
+    "issue": "thermostat stopped cooling",
+    "equipment": "Goodman thermostat, about 5 years old",
+    "address": "22 Oak Court",
+    "appointment_window": "first thing tomorrow"
+  },
+  "source": "synthetic"
+}

@@ -137,6 +137,12 @@ export interface TenantSettings {
    */
   autoInvoiceOnCompletion?: boolean;
   /**
+   * Feature (launch) — when true, an auto-drafted invoice recomputes its labor
+   * line from ACTUAL logged time entries instead of the estimated hours.
+   * Default false (opt-in); with no tracked time the estimate is billed as-is.
+   */
+  billLaborFromTimeEntries?: boolean;
+  /**
    * P21-003 — when true, a daily sweep proposes a batch invoice for all
    * completed-but-uninvoiced jobs. Default false (opt-in).
    */
@@ -254,7 +260,7 @@ export interface TenantSettings {
   ttsVoiceEs?: string | null;
   spanishDispatcherUserIds?: string[];
   /**
-   * Voice-parity — opt-in language stack for the voice agent (migration 147).
+   * Voice-parity — opt-in language stack for the voice agent (migration 152).
    * Defaults to ['en']; a tenant opts into Spanish with ['en', 'es']. The
    * language detector only switches a call to 'es' when 'es' is present here,
    * so legacy rows (or `?? ['en']` reads) stay English-only.
@@ -262,7 +268,7 @@ export interface TenantSettings {
   supportedLanguages?: Language[];
   /**
    * Voice-parity — E.164 number the inbound-CSR warm transfer dials
-   * (migration 147). When set it replaces the on-call rotation for the
+   * (migration 152). When set it replaces the on-call rotation for the
    * standard human handoff; null/undefined falls back to the rotation path.
    */
   transferNumber?: string | null;
@@ -341,6 +347,8 @@ export interface UpdateSettingsInput {
   autoSendAppointmentReminders?: boolean;
   /** P20-001 — auto-draft an invoice (as a proposal) on job completion. */
   autoInvoiceOnCompletion?: boolean;
+  /** Feature (launch) — recompute auto-invoice labor from actual time entries. */
+  billLaborFromTimeEntries?: boolean;
   /** P21-003 — opt into the daily batch-invoice proposal sweep. */
   batchInvoiceEnabled?: boolean;
   /** P21 — opt into / kill-switch on-completion milestone minting. */

@@ -1,0 +1,13 @@
+{
+  "id": "transcript-004",
+  "type": "inbound_call",
+  "duration_seconds": 120,
+  "service_type": "roofing",
+  "transcript": "Customer: Hi, this is Dana Whitfield. I'm not looking to book anything yet — I just want a price to replace the shingles on my detached garage. It's about 400 square feet, asphalt. Can you put together a written estimate I can review? Dispatcher: Absolutely, Dana. We can prepare a quote for a 400 square foot asphalt shingle replacement and send it over for you to look at. Customer: Perfect, no need to schedule a visit yet, just the estimate please.",
+  "expected_entities": {
+    "customer_name": "Dana Whitfield",
+    "issue": "Shingle replacement quote for detached garage",
+    "equipment": "Asphalt shingles, approximately 400 square feet",
+    "request": "Written estimate only, no appointment yet"
+  }
+}
