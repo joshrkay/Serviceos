@@ -143,6 +143,62 @@ describe('Feature 7 — context SMS to transfer_number before the bridge', () =>
     expect(twiml).toBeDefined();
     expect(twiml).toContain(TRANSFER_NUMBER);
   });
+
+  it('does not expose the bridge TwiML until the context SMS resolves', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const auditRepo = new InMemoryAuditRepository();
+    const onCallRepo = new InMemoryOnCallRepository();
+    const callControl = new DefaultTwilioCallControl();
+    const pendingTransferTwiml = new Map<string, string>();
+    // Gate the SMS so we can observe ordering: the Dial TwiML must not be
+    // exposed until provider acceptance resolves.
+    let releaseSms: () => void = () => {};
+    const smsGate = new Promise<void>((resolve) => {
+      releaseSms = resolve;
+    });
+    const deliveryProvider = { sendSms: vi.fn(async () => smsGate) };
+    const settingsRepo = {
+      findByTenant: vi.fn(
+        async () =>
+          ({ transferNumber: TRANSFER_NUMBER, businessName: 'Acme Plumbing' } as unknown as TenantSettings),
+      ),
+    } as unknown as SettingsRepository;
+
+    const processor = createVoiceTurnProcessor({
+      store,
+      gateway: makeGateway('{}'),
+      businessName: 'Acme Plumbing',
+      systemActorId: 'test-actor',
+      auditRepo,
+      onCallRepo,
+      callControl,
+      settingsRepo,
+      deliveryProvider,
+      pendingTransferTwiml,
+      publicBaseUrl: PUBLIC_BASE_URL,
+    });
+
+    const session = store.create(TENANT_ID, 'telephony', { callSid: 'CA-order' });
+    session.transcript.push('caller: necesito una cita');
+
+    const notify: SideEffect = {
+      type: 'notify_oncall',
+      payload: { reason: 'operator_request', callerPhone: '+15125550142' },
+    };
+    const pending = processor.executeSideEffects(session, [notify], TENANT_ID);
+
+    // SMS is in flight but not yet accepted → the bridge must NOT be exposed.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(deliveryProvider.sendSms).toHaveBeenCalledTimes(1);
+    expect(pendingTransferTwiml.get(session.id)).toBeUndefined();
+
+    // Provider accepts the SMS → the handler proceeds to expose the bridge.
+    releaseSms();
+    await pending;
+    expect(pendingTransferTwiml.get(session.id)).toContain(TRANSFER_NUMBER);
+
+    store.dispose();
+  });
 });
 
 // ── Part 2 — failed transfer → call_me_back ──────────────────────────────────
