@@ -3116,7 +3116,11 @@ export const MIGRATIONS = {
           'estimate', 'invoice', 'appointment_confirmation',
           'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
           'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route'
-        ));
+        )) NOT VALID;
+    -- NOT VALID: skips re-scanning existing rows on every re-deploy.
+    -- The constraint still enforces for all new inserts/updates; existing
+    -- rows with stale entity_type values (written while no constraint was
+    -- active between failed deploys) won't block startup.
   `,
 
   '125_estimates_deleted_at': `
