@@ -1,0 +1,50 @@
+/**
+ * curated-seed-supplement2.ts — one more HAND-AUTHORED utterance per intent, to
+ * push the curated (reviewed) portion comfortably above 20% of the corpus.
+ * Same provenance/semantics as curated-seed.ts (source="curated", reviewed=true).
+ */
+import type { Seed } from './curated-seed';
+
+export const CURATED_SUPPLEMENT2: Record<string, Seed[]> = {
+  create_appointment: [['Get a tech out to 7 River Road, the AC is blowing warm.', { address: '7 River Road', service_type: 'hvac', problem_description: 'AC blowing warm' }]],
+  draft_estimate: ['Can you work up a quote for a sump pump and battery backup?'],
+  create_invoice: ['Bill the customer for the after-hours diagnostic, that\'s it.'],
+  update_invoice: ['Add the second trip to that invoice please.'],
+  update_estimate: ['Revise the quote, they downsized to a 2.5 ton.'],
+  issue_invoice: ['That invoice is good, go ahead and send it out.'],
+  create_customer: [['New customer, Angela Reed, 18 Cedar Court.', { name: 'Angela Reed', address: '18 Cedar Court' }]],
+  create_job: ['Open a job for the sump pump install at Cedar Court.'],
+  reschedule_appointment: [['Can you bump me to Wednesday afternoon?', { time_window: 'Wednesday afternoon' }]],
+  cancel_appointment: ['Cancel the Wednesday visit, we sold the place.'],
+  reassign_appointment: ['Reassign the Cedar Court job to Tony.'],
+  add_note: ['Note that there\'s a lockbox on the side door.'],
+  send_invoice: ['Email the invoice to Angela Reed please.'],
+  send_estimate: ['Text the sump pump quote to the customer.'],
+  record_payment: [['Record 75 dollars cash for the trip charge.', { amount: '$75', payment_method: 'cash' }]],
+  emergency_dispatch: [['There\'s a sewage smell and the toilet is overflowing all over the bathroom!', { problem_description: 'toilet overflowing, sewage smell', service_type: 'plumbing' }]],
+  update_customer: ['Update Angela Reed\'s email on the account.'],
+  log_expense: [['Log 95 for the sump pump check valve.', { amount: '$95', expense_category: 'parts' }]],
+  convert_lead: ['Convert the Cedar Court lead, deposit\'s in.'],
+  confirm_appointment: ['Just confirming my Wednesday afternoon slot.'],
+  mark_lead_lost: ['Mark the lead lost, they DIY\'d it.'],
+  add_service_location: [['Add 18 Cedar Court as a second service address.', { address: '18 Cedar Court' }]],
+  log_time_entry: [['Log two hours forty-five on the Cedar Court job.', { duration: '2h45m' }]],
+  notify_delay: ['Tell Angela I\'m running 25 minutes behind.'],
+  request_feedback: ['Send Angela a review link after the install.'],
+  lookup_appointments: [['What\'s on my schedule Wednesday?', { time_window: 'Wednesday' }]],
+  lookup_invoices: ['Show me Angela Reed\'s open invoices.'],
+  lookup_balance: ['What\'s Angela Reed\'s balance?'],
+  lookup_jobs: ['Which jobs are still open at Cedar Court?'],
+  lookup_agreements: ['Does Angela Reed have a service plan?'],
+  lookup_account_summary: ['Pull the account summary for Angela Reed.'],
+  lookup_customer: [['Look up the customer at 18 Cedar Court.', { address: '18 Cedar Court' }]],
+  lookup_estimates: ['What estimates are open for the Cedar Court account?'],
+  lookup_availability: [['Any plumber openings Wednesday afternoon?', { time_window: 'Wednesday afternoon', service_type: 'plumbing' }]],
+  lookup_leads: ['Show me leads I haven\'t called back yet.'],
+  lookup_revenue: [['How much revenue did we book yesterday?', { time_window: 'yesterday' }]],
+  lookup_catalog: ['What\'s the price on a battery backup sump pump?'],
+  language_switch: ['¿Me puede atender en español?'],
+  operator_request: ['I\'d like to talk to a person, not the robot.'],
+  confirm: ['Yep, that\'s correct.'],
+  unknown: ['Do you all do roofing or just plumbing?'],
+};

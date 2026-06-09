@@ -28,6 +28,8 @@ import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/pr
 import { VERIFY_AI_JOB_TYPE, type VerifyAiPayload } from '../workers/verify-ai';
 import { recordFunnelEvent } from '../analytics/posthog';
 import { verifyTwilioSignature, reconstructWebhookUrl } from '../telephony/twilio-signature';
+import { handleVapiCallEvent } from '../integrations/vapi/webhook';
+import type { SendEmailFn } from '../voice/check-upgrade-nudge';
 import { verifySendGridSignature } from './sendgrid-signature';
 import { createAuditEvent, AuditRepository } from '../audit/audit';
 import { EstimateRepository } from '../estimates/estimate';
@@ -159,6 +161,9 @@ export interface WebhookRouterDeps {
   };
   /** §7 Layer A — payment receipt SMS/email after Stripe checkout completes. */
   paymentReceiptNotifier?: PaymentReceiptNotifier;
+  /** Activation email sender for the Vapi inbound-call webhook. Optional —
+   * when absent, activation still fires (funnel event + banner), just no email. */
+  sendEmail?: SendEmailFn;
   /**
    * Blocker 1 — durable idempotency store backing the Stripe/Clerk dedup
    * (`handleWebhookEvent`). MUST be supplied in production: the in-memory
@@ -1946,6 +1951,47 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
   router.post('/twilio/voice/:tenantId', (req: Request, res: Response) => void recordTwilio('voice', req, res));
   router.post('/twilio/sms/:tenantId', (req: Request, res: Response) => void recordTwilio('sms', req, res));
   router.post('/twilio/status/:tenantId', (req: Request, res: Response) => void recordTwilio('status', req, res));
+
+  // Vapi inbound-call webhook. Signature-verified (fails closed → 403),
+  // idempotent on call id, records the inbound session (drives test-call
+  // detection) and runs identity-based activation. Mounted with
+  // express.raw() in app.ts so the HMAC sees the exact bytes.
+  router.post('/vapi/:tenantId', async (req: Request, res: Response) => {
+    const tenantId = req.params.tenantId;
+    if (!isValidTenantId(tenantId)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    if (!deps.pool || !deps.auditRepo || !deps.webhookEventRepo) {
+      return res.status(503).json({ error: 'VAPI_WEBHOOK_NOT_CONFIGURED' });
+    }
+    const rawBody = Buffer.isBuffer(req.body)
+      ? req.body.toString('utf8')
+      : JSON.stringify(req.body ?? {});
+    try {
+      const result = await handleVapiCallEvent(
+        {
+          pool: deps.pool,
+          auditRepo: deps.auditRepo,
+          webhookRepo: deps.webhookEventRepo,
+          secret: process.env.VAPI_WEBHOOK_SECRET ?? '',
+          ...(deps.sendEmail ? { sendEmail: deps.sendEmail } : {}),
+        },
+        {
+          tenantId,
+          rawBody,
+          signatureHeader: req.header('x-vapi-signature') ?? null,
+          sharedSecretHeader: req.header('x-vapi-secret') ?? null,
+        },
+      );
+      return res.status(result.status).json(result.body);
+    } catch (err) {
+      logger.error('Vapi webhook handler error', {
+        tenantId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return res.status(500).json({ error: 'VAPI_WEBHOOK_FAILED' });
+    }
+  });
 
   router.post('/sendgrid/:tenantId', async (req: Request, res: Response) => {
     const tenantId = req.params.tenantId;

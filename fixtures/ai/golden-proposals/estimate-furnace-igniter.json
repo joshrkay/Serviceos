@@ -1,0 +1,20 @@
+{
+  "id": "golden-002",
+  "description": "Furnace igniter replacement estimate — golden proposal",
+  "input": {
+    "job_summary": "Furnace short cycling, no consistent ignition",
+    "equipment": "Goodman 80% gas furnace, 7 years old",
+    "customer_name": "Mike Anderson",
+    "service_history": []
+  },
+  "expected_output": {
+    "proposal_type": "draft_estimate",
+    "line_items": [
+      { "description": "Diagnostic service call - heating system", "category": "labor", "quantity": 1, "unit_price_cents": 8900, "taxable": true },
+      { "description": "Hot surface igniter replacement", "category": "material", "quantity": 1, "unit_price_cents": 9500, "taxable": true },
+      { "description": "Labor - igniter install", "category": "labor", "quantity": 1.5, "unit_price_cents": 12000, "taxable": false }
+    ],
+    "confidence_score_min": 0.7,
+    "must_include_categories": ["labor", "material"]
+  }
+}

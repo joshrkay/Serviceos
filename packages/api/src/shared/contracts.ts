@@ -305,6 +305,8 @@ export const updateSettingsSchema = z.object({
   autoSendAppointmentReminders: z.boolean().optional(),
   // P20-001 — opt into auto-drafting an invoice (as a proposal) on job completion.
   autoInvoiceOnCompletion: z.boolean().optional(),
+  // Feature (launch) — opt into recomputing auto-invoice labor from actual time entries.
+  billLaborFromTimeEntries: z.boolean().optional(),
   // P21-003 — opt into the daily batch-invoice proposal sweep.
   batchInvoiceEnabled: z.boolean().optional(),
   // P21 — opt into minting on_completion milestone invoices. Without this in

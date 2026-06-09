@@ -1,0 +1,11 @@
+{
+  "id": "transcript-008",
+  "type": "inbound_call",
+  "duration_seconds": 40,
+  "service_type": "appliance",
+  "transcript": "Customer: Yeah, hi, um, something's wrong with one of my appliances I think. It's been acting up. Dispatcher: I can help with that — can I get your name and the service address? Customer: Oh, uh, hang on, my other line is ringing, can you just figure it out? [call quality degrades]",
+  "expected_entities": {
+    "issue": "Unspecified appliance malfunction",
+    "intent_note": "Caller did not provide name, phone, or address; needs clarifying turns"
+  }
+}

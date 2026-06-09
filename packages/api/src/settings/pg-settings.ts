@@ -51,6 +51,7 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     autoApplyInternalUpdates: row.auto_apply_internal_updates as boolean | undefined,
     autoSendAppointmentReminders: row.auto_send_appointment_reminders as boolean | undefined,
     autoInvoiceOnCompletion: row.auto_invoice_on_completion as boolean | undefined,
+    billLaborFromTimeEntries: row.bill_labor_from_time_entries as boolean | undefined,
     batchInvoiceEnabled: row.batch_invoice_enabled as boolean | undefined,
     milestoneBillingEnabled: row.milestone_billing_enabled as boolean | undefined,
     // Tier 4 — migration 076. JSONB column; pg returns the parsed
@@ -265,6 +266,7 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         autoApplyInternalUpdates: 'auto_apply_internal_updates',
         autoSendAppointmentReminders: 'auto_send_appointment_reminders',
         autoInvoiceOnCompletion: 'auto_invoice_on_completion',
+        billLaborFromTimeEntries: 'bill_labor_from_time_entries',
         batchInvoiceEnabled: 'batch_invoice_enabled',
         milestoneBillingEnabled: 'milestone_billing_enabled',
         // Tier 4 — migration 077. Deposit rules. Each accepts an

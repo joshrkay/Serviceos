@@ -137,6 +137,12 @@ export interface TenantSettings {
    */
   autoInvoiceOnCompletion?: boolean;
   /**
+   * Feature (launch) — when true, an auto-drafted invoice recomputes its labor
+   * line from ACTUAL logged time entries instead of the estimated hours.
+   * Default false (opt-in); with no tracked time the estimate is billed as-is.
+   */
+  billLaborFromTimeEntries?: boolean;
+  /**
    * P21-003 — when true, a daily sweep proposes a batch invoice for all
    * completed-but-uninvoiced jobs. Default false (opt-in).
    */
@@ -341,6 +347,8 @@ export interface UpdateSettingsInput {
   autoSendAppointmentReminders?: boolean;
   /** P20-001 — auto-draft an invoice (as a proposal) on job completion. */
   autoInvoiceOnCompletion?: boolean;
+  /** Feature (launch) — recompute auto-invoice labor from actual time entries. */
+  billLaborFromTimeEntries?: boolean;
   /** P21-003 — opt into the daily batch-invoice proposal sweep. */
   batchInvoiceEnabled?: boolean;
   /** P21 — opt into / kill-switch on-completion milestone minting. */
