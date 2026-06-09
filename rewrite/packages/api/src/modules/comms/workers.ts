@@ -103,6 +103,35 @@ async function registerInvoiceSmsWorker(deps: CommsDeps): Promise<void> {
   });
 }
 
+/** SMS the customer when an estimate is sent. */
+async function registerEstimateSmsWorker(deps: CommsDeps): Promise<void> {
+  const dataSchema = z.object({ tenantId: z.string().uuid(), estimateId: z.string().uuid() });
+  await deps.jobs.work('comms.estimate-sms', async (raw) => {
+    const { tenantId, estimateId } = dataSchema.parse(raw);
+    const details = await withTenantTransaction(deps.db, tenantId, async (client) => {
+      const { rows } = await client.query(
+        `SELECT e.total_cents, c.phone AS customer_phone, t.name AS tenant_name, t.phone AS tenant_phone
+         FROM estimates e
+         JOIN customers c ON c.id = e.customer_id
+         JOIN tenants t ON t.id = e.tenant_id
+         WHERE e.tenant_id = $1 AND e.id = $2 AND e.status = 'sent'`,
+        [tenantId, estimateId],
+      );
+      return rows[0] as
+        | { total_cents: string; customer_phone: string; tenant_name: string; tenant_phone: string | null }
+        | undefined;
+    });
+    if (!details || !details.tenant_phone) return;
+    await sendAndRecordSms(
+      deps,
+      tenantId,
+      details.customer_phone,
+      details.tenant_phone,
+      `${details.tenant_name}: your estimate for ${formatCents(Number(details.total_cents))} is ready. Reference ${estimateId.slice(0, 8)}.`,
+    );
+  });
+}
+
 /** Daily digest: pending approvals + yesterday's money, per tenant. */
 async function registerDailyDigestWorker(deps: CommsDeps): Promise<void> {
   await deps.jobs.work('comms.daily-digest', async () => {
@@ -144,5 +173,6 @@ export async function registerCommsWorkers(deps: CommsDeps): Promise<void> {
   await registerProposalNotifyWorker(deps);
   await registerNotifyOwnerWorker(deps);
   await registerInvoiceSmsWorker(deps);
+  await registerEstimateSmsWorker(deps);
   await registerDailyDigestWorker(deps);
 }

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   ACTOR_TYPES,
   APPOINTMENT_STATUSES,
+  ESTIMATE_STATUSES,
   INVOICE_STATUSES,
   JOB_STATUSES,
   ROLES,
@@ -37,6 +38,19 @@ export const appointmentSchema = z.object({
   status: z.enum(APPOINTMENT_STATUSES),
 });
 export type Appointment = z.infer<typeof appointmentSchema>;
+
+export const estimateSchema = documentTotalsSchema.extend({
+  id: z.string().uuid(),
+  customerId: z.string().uuid(),
+  customerName: z.string(),
+  jobId: z.string().uuid().nullable(),
+  status: z.enum(ESTIMATE_STATUSES),
+  lineItems: z.array(lineItemSchema),
+  sentAt: z.string().datetime().nullable(),
+  decidedAt: z.string().datetime().nullable(),
+  createdAt: z.string().datetime(),
+});
+export type Estimate = z.infer<typeof estimateSchema>;
 
 export const invoiceSchema = documentTotalsSchema.extend({
   id: z.string().uuid(),

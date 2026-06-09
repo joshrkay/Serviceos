@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   appointmentSchema,
   customerSchema,
+  estimateSchema,
   eventSchema,
   invoiceSchema,
   jobSchema,
@@ -88,6 +89,38 @@ export const apiContract = c.router(
           durationMinutes: z.number().int().min(15).max(720),
         }),
         responses: { 201: appointmentSchema, 400: errorSchema, 404: errorSchema },
+      },
+    }),
+    estimates: c.router({
+      list: {
+        method: 'GET',
+        path: '/api/estimates',
+        responses: { 200: z.object({ estimates: z.array(estimateSchema) }) },
+      },
+      create: {
+        method: 'POST',
+        path: '/api/estimates',
+        body: z.object({
+          customerId: z.string().uuid(),
+          jobId: z.string().uuid().optional(),
+          lineItems: z.array(lineItemInputSchema).min(1).max(50),
+          taxRateBps: taxRateBpsSchema.optional(),
+        }),
+        responses: { 201: estimateSchema, 400: errorSchema },
+      },
+      send: {
+        method: 'POST',
+        path: '/api/estimates/:id/send',
+        pathParams: idParam,
+        body: z.object({}),
+        responses: { 200: estimateSchema, 400: errorSchema, 404: errorSchema },
+      },
+      decide: {
+        method: 'POST',
+        path: '/api/estimates/:id/decide',
+        pathParams: idParam,
+        body: z.object({ decision: z.enum(['approved', 'declined']) }),
+        responses: { 200: estimateSchema, 400: errorSchema, 404: errorSchema },
       },
     }),
     invoices: c.router({

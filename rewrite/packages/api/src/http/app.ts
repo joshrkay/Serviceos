@@ -11,6 +11,12 @@ import type { JobRunner } from '../core/jobs';
 import { listCustomers, createCustomerCommand } from '../modules/crm/customers';
 import { createJobCommand, listJobs, scheduleAppointmentCommand } from '../modules/money/jobs';
 import {
+  createEstimateCommand,
+  decideEstimateCommand,
+  listEstimates,
+  sendEstimateCommand,
+} from '../modules/money/estimates';
+import {
   createInvoiceCommand,
   getInvoice,
   getMoneySummary,
@@ -26,7 +32,8 @@ import {
 } from '../modules/proposals/engine';
 import { getMe, getTenantSettings, listEvents } from '../modules/platform/queries';
 import { updateTenantSettingsCommand } from '../modules/platform/tenants';
-import type { AuthContext, AuthService } from './auth';
+import type { AuthContext } from './auth';
+import type { AppDeps } from './deps';
 import { registerWebhookRoutes } from './webhooks';
 
 declare module 'fastify' {
@@ -36,13 +43,7 @@ declare module 'fastify' {
   }
 }
 
-export interface AppDeps {
-  config: Config;
-  db: Db;
-  bus: CommandBus;
-  jobs: JobRunner;
-  auth: AuthService;
-}
+export type { AppDeps } from './deps';
 
 function errorBody(err: unknown): { message: string } {
   return { message: err instanceof Error ? err.message : 'unexpected error' };
@@ -156,6 +157,49 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
             ...body,
           });
           return { status: 201, body: appointment };
+        } catch (err) {
+          if (err instanceof CommandError) {
+            return { status: err.code === 'not_found' ? 404 : 400, body: errorBody(err) };
+          }
+          throw err;
+        }
+      },
+    },
+
+    estimates: {
+      list: async ({ request }) => ({
+        status: 200,
+        body: { estimates: await listEstimates(db, request.auth.tenantId) },
+      }),
+      create: async ({ request, body }) => {
+        try {
+          const estimate = await bus.execute(createEstimateCommand, userActor(request), body);
+          return { status: 201, body: estimate };
+        } catch (err) {
+          if (err instanceof CommandError) return { status: 400, body: errorBody(err) };
+          throw err;
+        }
+      },
+      send: async ({ request, params }) => {
+        try {
+          const estimate = await bus.execute(sendEstimateCommand, userActor(request), {
+            estimateId: params.id,
+          });
+          return { status: 200, body: estimate };
+        } catch (err) {
+          if (err instanceof CommandError) {
+            return { status: err.code === 'not_found' ? 404 : 400, body: errorBody(err) };
+          }
+          throw err;
+        }
+      },
+      decide: async ({ request, params, body }) => {
+        try {
+          const estimate = await bus.execute(decideEstimateCommand, userActor(request), {
+            estimateId: params.id,
+            decision: body.decision,
+          });
+          return { status: 200, body: estimate };
         } catch (err) {
           if (err instanceof CommandError) {
             return { status: err.code === 'not_found' ? 404 : 400, body: errorBody(err) };
