@@ -1,0 +1,15 @@
+{
+  "id": "transcript-055",
+  "type": "inbound_call",
+  "duration_seconds": 80,
+  "service_type": "hvac",
+  "transcript": "Customer: This is an emergency, my heat pump stopped cooling and it's getting bad! This is David Carter at 7 River Road. Dispatcher: Okay David, stay calm. I'm getting a technician dispatched to 7 River Road right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "expected_entities": {
+    "customer_name": "David Carter",
+    "issue": "emergency: heat pump stopped cooling",
+    "equipment": "heat pump",
+    "address": "7 River Road",
+    "appointment_window": "immediate dispatch"
+  },
+  "source": "synthetic"
+}

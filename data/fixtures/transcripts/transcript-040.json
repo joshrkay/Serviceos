@@ -1,0 +1,15 @@
+{
+  "id": "transcript-040",
+  "type": "inbound_call",
+  "duration_seconds": 150,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is Tom Bradley. I'm calling because my thermostat keeps short cycling. Dispatcher: Hi Tom, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Trane, an older one, 15 years. Dispatcher: Okay, and what's the service address? Customer: 22 Oak Court. Dispatcher: Got it. We can send a technician out tomorrow between 8 and 10 AM. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Tom Bradley",
+    "issue": "thermostat keeps short cycling",
+    "equipment": "Trane thermostat, an older one, 15 years",
+    "address": "22 Oak Court",
+    "appointment_window": "tomorrow between 8 and 10 AM"
+  },
+  "source": "synthetic"
+}

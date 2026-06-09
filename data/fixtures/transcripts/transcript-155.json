@@ -1,0 +1,15 @@
+{
+  "id": "transcript-155",
+  "type": "inbound_call",
+  "duration_seconds": 110,
+  "service_type": "plumbing",
+  "transcript": "Customer: Hi, this is Linda Park. I need to reschedule my appointment for the faucet. Dispatcher: No problem Linda. When works better for you? Customer: Could we do Wednesday afternoon? Dispatcher: That works. I've moved your appointment to Wednesday afternoon. Customer: Perfect, thanks.",
+  "expected_entities": {
+    "customer_name": "Linda Park",
+    "issue": "reschedule faucet appointment",
+    "equipment": "faucet",
+    "address": "",
+    "appointment_window": "Wednesday afternoon"
+  },
+  "source": "synthetic"
+}

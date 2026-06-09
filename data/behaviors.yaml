@@ -1,0 +1,230 @@
+# ServiceOS voice-agent behavior taxonomy
+#
+# PROVENANCE: this file is derived directly from the production intent model —
+# `SUPPORTED_INTENTS` in packages/api/src/ai/orchestration/intent-classifier.ts
+# (the IntentType union). It is a documentation/data artifact, NOT a competing
+# code module. The goal referenced `packages/intent-classifier/behaviors.yaml`;
+# no such package exists, so the canonical file lives here at data/behaviors.yaml.
+#
+# The goal assumed "36 behaviors"; the production taxonomy actually has 41
+# intents (40 actionable + `unknown`). See data/behaviors-gap-analysis.md.
+#
+# Schema per behavior:
+#   id            canonical IntentType string (must match SUPPORTED_INTENTS)
+#   category      proposal-driving | lookup | conversational | signal
+#   description   what the caller is trying to do
+#   critical_slots  slots the agent must extract for this behavior
+#   min_examples  target distinct utterances in data/corpus/utterances.jsonl
+version: 1
+source_of_truth: packages/api/src/ai/orchestration/intent-classifier.ts
+min_examples_default: 50
+behaviors:
+  # ── Proposal-driving (mutations; require human approval before execution) ────
+  - id: create_invoice
+    category: proposal-driving
+    description: Caller/operator wants a new invoice drafted for a customer or job.
+    critical_slots: [name, service_type, amount, line_items]
+    min_examples: 50
+  - id: draft_estimate
+    category: proposal-driving
+    description: Caller wants a price estimate/quote drafted for work.
+    critical_slots: [name, service_type, problem_description, address]
+    min_examples: 50
+  - id: create_appointment
+    category: proposal-driving
+    description: Book a new service visit.
+    critical_slots: [name, address, service_type, time_window, problem_description]
+    min_examples: 50
+  - id: update_invoice
+    category: proposal-driving
+    description: Add/remove a line item or change an existing invoice.
+    critical_slots: [invoice_ref, line_items, amount]
+    min_examples: 50
+  - id: update_estimate
+    category: proposal-driving
+    description: Modify an existing estimate (scope, price, line items).
+    critical_slots: [estimate_ref, line_items, amount]
+    min_examples: 50
+  - id: issue_invoice
+    category: proposal-driving
+    description: Finalize/send a drafted invoice to the customer.
+    critical_slots: [invoice_ref, name]
+    min_examples: 50
+  - id: create_customer
+    category: proposal-driving
+    description: Create a new customer record.
+    critical_slots: [name, phone, address, email]
+    min_examples: 50
+  - id: create_job
+    category: proposal-driving
+    description: Open a new job/work order.
+    critical_slots: [name, address, service_type, problem_description]
+    min_examples: 50
+  - id: reschedule_appointment
+    category: proposal-driving
+    description: Move an existing appointment to a new time.
+    critical_slots: [name, appointment_ref, time_window]
+    min_examples: 50
+  - id: cancel_appointment
+    category: proposal-driving
+    description: Cancel an existing appointment.
+    critical_slots: [name, appointment_ref]
+    min_examples: 50
+  - id: reassign_appointment
+    category: proposal-driving
+    description: Assign an appointment to a different technician.
+    critical_slots: [appointment_ref, technician]
+    min_examples: 50
+  - id: add_note
+    category: proposal-driving
+    description: Attach a note to a customer, job, or appointment.
+    critical_slots: [name, note_text]
+    min_examples: 50
+  - id: send_invoice
+    category: proposal-driving
+    description: Send an existing invoice (sms/email) to the customer.
+    critical_slots: [invoice_ref, name, channel]
+    min_examples: 50
+  - id: send_estimate
+    category: proposal-driving
+    description: Send an existing estimate to the customer.
+    critical_slots: [estimate_ref, name, channel]
+    min_examples: 50
+  - id: record_payment
+    category: proposal-driving
+    description: Record a payment against an invoice/balance.
+    critical_slots: [name, amount, payment_method, invoice_ref]
+    min_examples: 50
+  - id: emergency_dispatch
+    category: proposal-driving
+    description: Urgent/emergency situation requiring immediate dispatch (gas leak, flooding, no heat in freeze).
+    critical_slots: [name, address, problem_description, service_type]
+    min_examples: 50
+  - id: update_customer
+    category: proposal-driving
+    description: Update an existing customer's details.
+    critical_slots: [name, phone, address, email]
+    min_examples: 50
+  - id: log_expense
+    category: proposal-driving
+    description: Operator logs a job/material expense.
+    critical_slots: [amount, expense_category, job_ref]
+    min_examples: 50
+  - id: convert_lead
+    category: proposal-driving
+    description: Convert a lead into a customer/job.
+    critical_slots: [name, service_type]
+    min_examples: 50
+  - id: confirm_appointment
+    category: proposal-driving
+    description: Confirm an upcoming appointment is still happening.
+    critical_slots: [name, appointment_ref, time_window]
+    min_examples: 50
+  - id: mark_lead_lost
+    category: proposal-driving
+    description: Mark a lead as lost/dead.
+    critical_slots: [name, reason]
+    min_examples: 50
+  - id: add_service_location
+    category: proposal-driving
+    description: Add an additional service address for a customer.
+    critical_slots: [name, address]
+    min_examples: 50
+  - id: log_time_entry
+    category: proposal-driving
+    description: Operator logs labor time against a job.
+    critical_slots: [job_ref, duration, technician]
+    min_examples: 50
+  - id: notify_delay
+    category: proposal-driving
+    description: Notify a customer the technician is running late.
+    critical_slots: [name, appointment_ref, time_window]
+    min_examples: 50
+  - id: request_feedback
+    category: proposal-driving
+    description: Request a review/feedback from a customer.
+    critical_slots: [name, channel]
+    min_examples: 50
+  # ── Lookup (read-only; routed straight to lookup_* skill) ────────────────────
+  - id: lookup_appointments
+    category: lookup
+    description: Read upcoming/past appointments.
+    critical_slots: [name, time_window]
+    min_examples: 50
+  - id: lookup_invoices
+    category: lookup
+    description: Read invoices for a customer.
+    critical_slots: [name, invoice_ref]
+    min_examples: 50
+  - id: lookup_balance
+    category: lookup
+    description: Read a customer's outstanding balance.
+    critical_slots: [name]
+    min_examples: 50
+  - id: lookup_jobs
+    category: lookup
+    description: Read jobs/work orders.
+    critical_slots: [name, job_ref]
+    min_examples: 50
+  - id: lookup_agreements
+    category: lookup
+    description: Read service agreements/contracts.
+    critical_slots: [name]
+    min_examples: 50
+  - id: lookup_account_summary
+    category: lookup
+    description: Read an overall account summary for a customer.
+    critical_slots: [name]
+    min_examples: 50
+  - id: lookup_customer
+    category: lookup
+    description: Find a customer record.
+    critical_slots: [name, phone, address]
+    min_examples: 50
+  - id: lookup_estimates
+    category: lookup
+    description: Read estimates for a customer.
+    critical_slots: [name, estimate_ref]
+    min_examples: 50
+  - id: lookup_availability
+    category: lookup
+    description: Read open scheduling slots / technician availability.
+    critical_slots: [time_window, service_type]
+    min_examples: 50
+  - id: lookup_leads
+    category: lookup
+    description: Read leads in the pipeline.
+    critical_slots: [name, time_window]
+    min_examples: 50
+  - id: lookup_revenue
+    category: lookup
+    description: Read revenue/financial totals (owner-scoped).
+    critical_slots: [time_window]
+    min_examples: 50
+  - id: lookup_catalog
+    category: lookup
+    description: Read the service/price-book catalog.
+    critical_slots: [service_type]
+    min_examples: 50
+  # ── Signal (session control; NOT proposal-driving) ──────────────────────────
+  - id: language_switch
+    category: signal
+    description: Caller asks to switch the call language (English/Spanish).
+    critical_slots: [language]
+    min_examples: 50
+  - id: operator_request
+    category: signal
+    description: Caller explicitly asks to speak with a human (seamless handoff).
+    critical_slots: []
+    min_examples: 50
+  # ── Conversational (turn-level; non-proposal) ───────────────────────────────
+  - id: confirm
+    category: conversational
+    description: Caller confirms/agrees to a pending action the agent proposed.
+    critical_slots: []
+    min_examples: 50
+  - id: unknown
+    category: conversational
+    description: Fallback — intent not understood or out of scope. Used as the negative class in eval.
+    critical_slots: []
+    min_examples: 50

@@ -1,0 +1,15 @@
+{
+  "id": "transcript-174",
+  "type": "inbound_call",
+  "duration_seconds": 255,
+  "service_type": "electrical",
+  "transcript": "Customer: Hi, this is James Miller. I'm calling because my GFCI outlet is flickering. Dispatcher: Hi James, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Generac, about 8 years old. Dispatcher: Okay, and what's the service address? Customer: 1500 Sunset Blvd. Dispatcher: Got it. We can send a technician out this afternoon between 2 and 4. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "James Miller",
+    "issue": "GFCI outlet is flickering",
+    "equipment": "Generac GFCI outlet, about 8 years old",
+    "address": "1500 Sunset Blvd",
+    "appointment_window": "this afternoon between 2 and 4"
+  },
+  "source": "synthetic"
+}
