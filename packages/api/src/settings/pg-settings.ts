@@ -128,6 +128,12 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     ttsVoiceEs: (row.tts_voice_es as string | null) ?? undefined,
     spanishDispatcherUserIds:
       (row.spanish_dispatcher_user_ids as string[] | null) ?? undefined,
+    // Voice-parity (migration 152). supported_languages is NOT NULL with a
+    // DEFAULT ARRAY['en'], so a pre-migration row still reads ['en'].
+    // transfer_number is nullable → undefined when unset.
+    supportedLanguages:
+      (row.supported_languages as ('en' | 'es')[] | null) ?? ['en'],
+    transferNumber: (row.transfer_number as string | null) ?? undefined,
     // Migration 120 (`120_tenant_settings_ai_config`). NULL → undefined to
     // match the InMemory repo shape; consumers (onboarding's
     // `aiConfigPresent`, verify_ai worker) treat undefined as "not seeded".
@@ -287,6 +293,10 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         ttsVoiceEn: 'tts_voice_en',
         ttsVoiceEs: 'tts_voice_es',
         spanishDispatcherUserIds: 'spanish_dispatcher_user_ids',
+        // Voice-parity — migration 152. transfer_number is plain TEXT and
+        // flows through the generic handler; supported_languages is text[]
+        // and is special-cased below (like spanish_dispatcher_user_ids).
+        transferNumber: 'transfer_number',
         // Migration 120 — per-tenant AI model override.
         aiModel: 'ai_model',
         updatedAt: 'updated_at',
@@ -342,6 +352,17 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           setClauses.push(`spanish_dispatcher_user_ids = $${paramIndex}::uuid[]`);
           const v = value as string[] | undefined | null;
           params.push(Array.isArray(v) ? v : null);
+          paramIndex++;
+          continue;
+        }
+        // Voice-parity (migration 152) — supported_languages is a native
+        // Postgres text[] column (NOT NULL DEFAULT ARRAY['en']). Cast the param
+        // explicitly and default a cleared/empty write back to ['en'] so the
+        // column never goes empty and reads stay English-safe.
+        if (key === 'supportedLanguages') {
+          setClauses.push(`supported_languages = $${paramIndex}::text[]`);
+          const v = value as string[] | undefined | null;
+          params.push(Array.isArray(v) && v.length > 0 ? v : ['en']);
           paramIndex++;
           continue;
         }

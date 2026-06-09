@@ -20,6 +20,7 @@ const DEFAULTS: LanguageSettings = {
   ttsVoiceEs: null,
   autoDetectLanguage: true,
   spanishDispatcherUserIds: [],
+  supportedLanguages: ['en'],
 };
 
 export function LanguageSettingsPage() {
@@ -82,6 +83,27 @@ export function LanguageSettingsPage() {
           <option value="en">English</option>
           <option value="es">Español</option>
         </select>
+      </label>
+
+      <label className="flex items-center gap-2">
+        <input
+          type="checkbox"
+          aria-label="Enable Spanish"
+          checked={settings.supportedLanguages?.includes('es') ?? false}
+          disabled={saving}
+          onChange={(e) =>
+            handleSave({
+              supportedLanguages: e.target.checked ? ['en', 'es'] : ['en'],
+            })
+          }
+        />
+        <span>
+          Enable Spanish
+          <span className="block text-xs text-gray-500">
+            Let the AI detect Spanish-speaking callers and run the whole call in
+            Spanish.
+          </span>
+        </span>
       </label>
 
       <label className="flex items-center gap-2">

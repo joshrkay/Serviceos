@@ -52,6 +52,10 @@ import type { SettingsRepository } from '../settings/settings';
 import { resolveEscalationSettings } from '../settings/settings';
 import type { LeadRepository } from '../leads/lead';
 import type { GateReason } from '../voice/trial-limits';
+import { t, type Language } from '../ai/i18n/i18n';
+import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
+import { createAuditEvent } from '../audit/audit';
+import { isValidTenantId } from '../db/schema';
 
 const logger = createLogger({
   service: 'routes.telephony',
@@ -169,6 +173,13 @@ export interface TelephonyRouterDeps {
   settingsRepo?: SettingsRepository;
   leadRepo?: LeadRepository;
   auditRepo?: import('../audit/audit').AuditRepository;
+  /**
+   * Voice-parity (Feature 7) — when a warm transfer to `tenant.transfer_number`
+   * fails (no-answer/busy), the AI takes a callback message and creates a
+   * `call_me_back` task here. When unwired, the route falls back to the legacy
+   * rotation-cascade + voicemail behavior.
+   */
+  callMeBackRepo?: CallMeBackRepository;
 }
 
 export interface TelephonyHealthReport {
@@ -564,6 +575,34 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
+    // Voice-parity (Feature 7) — single-line transfer model. When the tenant
+    // configured a `transfer_number`, the transfer dialed that one line; a
+    // no-answer/busy does NOT cascade a rotation. Instead the AI returns to the
+    // caller, takes a callback message, and schedules a `call_me_back` task.
+    let transferNumber: string | undefined;
+    if (deps.settingsRepo) {
+      try {
+        const s = await deps.settingsRepo.findByTenant(tenantId);
+        transferNumber = s?.transferNumber ?? undefined;
+      } catch {
+        // Best-effort — fall through to the legacy rotation path on lookup error.
+      }
+    }
+    if (transferNumber) {
+      const lang: Language = session.language === 'es' ? 'es' : 'en';
+      const base = (deps.publicBaseUrl ?? '').replace(/\/+$/, '');
+      const action = `${base}/api/telephony/callback-message?sid=${encodeURIComponent(sessionId)}`;
+      logger.info('telephony/dial-result: transfer_number unreachable — taking callback message', {
+        sessionId,
+        previousStatus: dialStatus,
+      });
+      res
+        .status(200)
+        .type('text/xml')
+        .send(buildCallbackGatherTwiml({ promptText: t('callback.prompt', lang), actionUrl: action, lang }));
+      return;
+    }
+
     // Cascade: dispatcher didn't pick up. The cursor is already past the
     // just-attempted entry (escalateToHuman calls setCursorAfter when it
     // picks). Re-invoking escalateToHuman walks forward from there to
@@ -639,7 +678,158 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       .send(buildVoicemailTwiml({ shopName: businessName, recordingStatusCallback: callback }));
   });
 
+  /**
+   * POST /api/telephony/callback-message
+   *
+   * Voice-parity (Feature 7). The caller leaves a callback message after a
+   * failed warm transfer (see /dial-result transfer_number branch). We capture
+   * `SpeechResult` as the callback message, create a `call_me_back` task, emit
+   * a `call_me_back.scheduled` audit event, acknowledge the caller, and hang up.
+   *
+   * Query: ?sid=<sessionId>
+   */
+  router.post('/callback-message', async (req: Request, res: Response) => {
+    const body = req.body as Record<string, string | undefined>;
+    const sessionId = (req.query.sid as string | undefined) ?? '';
+    if (!sessionId) {
+      logger.warn('telephony/callback-message: missing sid');
+      res.status(400).type('text/plain').send('Missing sid');
+      return;
+    }
+
+    let tenantId: string | undefined;
+    try {
+      tenantId = await Promise.resolve(
+        deps.resolveTenantId({ to: body.To ?? '', from: body.From ?? '' }),
+      );
+    } catch (err) {
+      logger.error('telephony/callback-message: tenant lookup failed', {
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      res.status(503).type('text/plain').send('Service temporarily unavailable');
+      return;
+    }
+    // Validate the resolved tenant id is a well-formed UUID before any
+    // tenant-scoped DB work (setTenantContext throws on a malformed id, and we
+    // don't want to acquire a pool client for a junk request). 200 + graceful
+    // hangup so Twilio doesn't 5xx-retry a permanently-bad request.
+    if (!tenantId || !isValidTenantId(tenantId)) {
+      logger.error('telephony/callback-message: no/invalid tenant resolved', { sessionId });
+      res.status(200).type('text/xml').send(technicalDifficultiesTwiml());
+      return;
+    }
+
+    const adapterDeps = deps.adapter.getDeps();
+    const session = adapterDeps.store.get(sessionId);
+    const lang: Language = session?.language === 'es' ? 'es' : 'en';
+    // Empty string (not a synthetic 'unknown') when the carrier didn't send a
+    // From — keeps the stored value honest; caller_phone is TEXT NOT NULL.
+    const callerPhone = (body.From ?? '').trim();
+    const message = (body.SpeechResult ?? '').trim();
+
+    if (deps.callMeBackRepo) {
+      let taskId: string;
+      try {
+        const task = await deps.callMeBackRepo.create({
+          tenantId,
+          sessionId,
+          ...(session?.callSid ?? body.CallSid
+            ? { callSid: session?.callSid ?? body.CallSid }
+            : {}),
+          callerPhone,
+          ...(message ? { callbackMessage: message } : {}),
+          reason: 'transfer_failed',
+        });
+        taskId = task.id;
+      } catch (err) {
+        // The callback is the whole point of this turn. If we can't persist it
+        // (e.g. transient DB outage), DON'T finalize + tell the caller we'll
+        // ring back — that would silently drop the request. Return 503 so
+        // Twilio retries the webhook.
+        logger.error('telephony/callback-message: failed to schedule call_me_back', {
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        res.status(503).type('text/plain').send('Service temporarily unavailable');
+        return;
+      }
+      // Audit is best-effort — never block the ack on it.
+      if (deps.auditRepo) {
+        try {
+          await deps.auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: 'calling-agent',
+              actorRole: 'system',
+              eventType: 'call_me_back.scheduled',
+              entityType: 'call_me_back_task',
+              entityId: taskId,
+              correlationId: sessionId,
+              metadata: {
+                callSid: session?.callSid ?? body.CallSid ?? null,
+                hasMessage: message.length > 0,
+                reason: 'transfer_failed',
+              },
+            }),
+          );
+        } catch (err) {
+          logger.warn('telephony/callback-message: audit persist failed', {
+            sessionId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      logger.info('telephony/callback-message: call_me_back task scheduled', {
+        sessionId,
+        taskId,
+        hasMessage: message.length > 0,
+      });
+    } else {
+      logger.warn('telephony/callback-message: callMeBackRepo not wired', { sessionId });
+    }
+
+    if (session) {
+      session.ended = true;
+      deps.adapter.finalizeTerminatedSession(session, [], 'callback_required');
+    }
+
+    const businessName = deps.businessName ?? 'our team';
+    res
+      .status(200)
+      .type('text/xml')
+      .send(
+        `<?xml version="1.0" encoding="UTF-8"?><Response><Say>${xmlEscape(
+          t('callback.ack', lang, { business: businessName }),
+        )}</Say><Hangup/></Response>`,
+      );
+  });
+
   return router;
+}
+
+/**
+ * Voice-parity (Feature 7) — TwiML that prompts the caller for a callback
+ * message and gathers their speech to /callback-message. A trailing
+ * `<Redirect>` re-POSTs to the same action on silence so a `call_me_back` task
+ * is still scheduled (with an empty message) rather than dropping the caller.
+ */
+function buildCallbackGatherTwiml(opts: {
+  promptText: string;
+  actionUrl: string;
+  lang: Language;
+}): string {
+  const locale = opts.lang === 'es' ? 'es-MX' : 'en-US';
+  const action = xmlEscape(opts.actionUrl);
+  const prompt = xmlEscape(opts.promptText);
+  return (
+    `<?xml version="1.0" encoding="UTF-8"?><Response>` +
+    `<Gather input="speech" action="${action}" method="POST" speechTimeout="auto" language="${locale}">` +
+    `<Say>${prompt}</Say>` +
+    `</Gather>` +
+    `<Redirect method="POST">${action}</Redirect>` +
+    `</Response>`
+  );
 }
 
 /**
