@@ -1,0 +1,486 @@
+# ServiceOS domain vocabulary — Plumbing
+# Schema: data/vocab/schema.json
+# Sources: ASSE International Plumbing Dictionary, IPC/UPC terminology,
+# manufacturer literature, r/Plumbing + r/Plumbingrepair common phrasings,
+# JustAnswer plumbing archives.
+domain: plumbing
+terms:
+  # ── Under-sink / supply ─────────────────────────────────────────────────────
+  - term: shutoff valve
+    synonyms: ["angle stop", "angle stop valve", "the knob under the sink", "supply valve", "stop valve", "the water shutoff", "shut-off valve"]
+    category: component
+    regions: []
+  - term: main water shutoff
+    synonyms: ["the main valve", "main shutoff", "the water main valve", "where you turn off the water to the house", "street shutoff"]
+    category: component
+    regions: []
+  - term: supply line
+    synonyms: ["supply lines", "braided supply hose", "the flexible tubes to the faucet", "braided lines", "flex hose", "water line to the toilet"]
+    category: component
+    regions: []
+  - term: P-trap
+    synonyms: ["the trap", "p trap", "the curved pipe under the drain", "U-bend", "U-pipe", "the bendy pipe under the sink"]
+    category: component
+    regions: []
+  - term: S-trap
+    synonyms: ["s trap", "the old style trap"]
+    category: component
+    regions: []
+  - term: tailpiece
+    synonyms: ["the pipe from the drain", "sink tailpiece", "first piece of pipe under the drain"]
+    category: component
+    regions: []
+  - term: basket strainer
+    synonyms: ["the strainer", "drain strainer", "sink strainer", "the strainer basket", "the drain basket"]
+    category: component
+    regions: []
+  - term: drain flange
+    synonyms: ["the drain ring", "sink flange", "the thing that screws on the drain hole"]
+    category: component
+    regions: []
+  - term: garbage disposal
+    synonyms: ["the disposal", "disposer", "garburator", "the grinder under the sink", "insinkerator"]
+    category: component
+    regions: []
+  - term: dishwasher air gap
+    synonyms: ["the air gap", "the little chrome thing on the sink", "the bump on the counter"]
+    category: component
+    regions: ["Pacific NW"]
+  # ── Faucets / fixtures ──────────────────────────────────────────────────────
+  - term: faucet
+    synonyms: ["the tap", "the spigot inside", "sink faucet", "the handle and spout"]
+    category: component
+    regions: []
+  - term: cartridge
+    synonyms: ["faucet cartridge", "the inside of the faucet", "valve cartridge"]
+    category: component
+    regions: []
+  - term: aerator
+    synonyms: ["the screen on the faucet", "faucet tip", "the end of the faucet"]
+    category: component
+    regions: []
+  - term: hose bib
+    synonyms: ["the outdoor faucet", "spigot", "outside faucet", "hose faucet", "sillcock", "garden faucet"]
+    category: component
+    regions: []
+  - term: frost-free hose bib
+    synonyms: ["frost free spigot", "freeze proof faucet", "frost proof hose bib"]
+    category: component
+    regions: ["Northeast"]
+  - term: showerhead
+    synonyms: ["shower head", "the shower nozzle"]
+    category: component
+    regions: []
+  - term: shower valve
+    synonyms: ["the shower mixing valve", "shower cartridge", "the thing behind the shower handle", "mixing valve"]
+    category: component
+    regions: []
+  - term: tub spout
+    synonyms: ["the bathtub faucet", "tub faucet", "the spout in the tub"]
+    category: component
+    regions: []
+  - term: diverter
+    synonyms: ["the shower diverter", "the pull thing on the tub spout", "diverter valve"]
+    category: component
+    regions: []
+  # ── Toilet ──────────────────────────────────────────────────────────────────
+  - term: wax ring
+    synonyms: ["the wax seal", "toilet wax ring", "the seal under the toilet", "wax gasket"]
+    category: component
+    regions: []
+  - term: toilet flange
+    synonyms: ["the flange", "closet flange", "the ring the toilet bolts to", "floor flange"]
+    category: component
+    regions: []
+  - term: fill valve
+    synonyms: ["the float valve", "ballcock", "the thing that fills the tank", "toilet fill valve"]
+    category: component
+    regions: []
+  - term: flapper
+    synonyms: ["the rubber flap", "tank flapper", "the flapper valve", "the flush valve seal"]
+    category: component
+    regions: []
+  - term: flush valve
+    synonyms: ["the flush mechanism", "the big hole in the tank"]
+    category: component
+    regions: []
+  - term: toilet tank
+    synonyms: ["the tank", "the back of the toilet", "the water tank"]
+    category: component
+    regions: []
+  - term: wax-free seal
+    synonyms: ["rubber toilet seal", "waxless seal", "the foam seal"]
+    category: component
+    regions: []
+  - term: closet bolts
+    synonyms: ["toilet bolts", "the bolts that hold the toilet", "flange bolts"]
+    category: component
+    regions: []
+  - term: supply stop
+    synonyms: ["toilet shutoff", "the valve behind the toilet", "the toilet supply valve"]
+    category: component
+    regions: []
+  # ── Water heater ────────────────────────────────────────────────────────────
+  - term: water heater
+    synonyms: ["the hot water tank", "the water tank", "hot water heater", "the heater in the garage", "the tank in the closet"]
+    category: component
+    regions: []
+  - term: tankless water heater
+    synonyms: ["tankless", "on demand water heater", "the wall mounted heater", "instant hot water"]
+    category: component
+    regions: []
+  - term: heat pump water heater
+    synonyms: ["hybrid water heater", "the efficient water heater"]
+    category: component
+    regions: []
+  - term: anode rod
+    synonyms: ["the sacrificial rod", "the rod in the water heater"]
+    category: component
+    regions: []
+  - term: dip tube
+    synonyms: ["the tube inside the water heater"]
+    category: component
+    regions: []
+  - term: TPR valve
+    synonyms: ["temperature pressure relief valve", "the safety valve on the water heater", "pop off valve", "T and P valve", "relief valve"]
+    category: component
+    regions: []
+  - term: expansion tank
+    synonyms: ["the little tank on top", "thermal expansion tank", "the ball on the water heater"]
+    category: component
+    regions: []
+  - term: thermocouple
+    synonyms: ["the sensor on the water heater", "the pilot sensor"]
+    category: component
+    regions: []
+  - term: drain valve
+    synonyms: ["water heater drain", "the valve at the bottom of the tank"]
+    category: component
+    regions: []
+  - term: sediment
+    synonyms: ["buildup in the tank", "crud in the water heater", "scale", "rumbling sediment"]
+    category: condition
+    regions: []
+  # ── Drains / sewer ──────────────────────────────────────────────────────────
+  - term: cleanout
+    synonyms: ["the cleanout", "sewer cleanout", "the capped pipe outside", "the access pipe"]
+    category: component
+    regions: []
+  - term: sewer main
+    synonyms: ["the main line", "the sewer line", "main sewer", "the big drain line", "the line to the street"]
+    category: component
+    regions: []
+  - term: sewer lateral
+    synonyms: ["the lateral", "the pipe from the house to the street"]
+    category: component
+    regions: []
+  - term: vent stack
+    synonyms: ["the plumbing vent", "the pipe on the roof", "vent pipe", "the breather pipe"]
+    category: component
+    regions: []
+  - term: floor drain
+    synonyms: ["the drain in the floor", "basement floor drain", "garage drain"]
+    category: component
+    regions: ["Northeast"]
+  - term: sump pump
+    synonyms: ["the sump", "basement pump", "the pump in the pit", "the water pump in the basement"]
+    category: component
+    regions: ["Northeast", "Pacific NW"]
+  - term: sump pit
+    synonyms: ["the sump basin", "the pit in the basement", "crock"]
+    category: component
+    regions: ["Northeast"]
+  - term: ejector pump
+    synonyms: ["sewage ejector", "the basement bathroom pump", "grinder pump", "sewer ejector"]
+    category: component
+    regions: []
+  - term: backflow preventer
+    synonyms: ["backflow device", "the anti-siphon valve", "RPZ", "the backflow thing"]
+    category: component
+    regions: []
+  - term: pressure regulator
+    synonyms: ["PRV", "pressure reducing valve", "the water pressure valve", "the regulator"]
+    category: component
+    regions: []
+  - term: water meter
+    synonyms: ["the meter", "the meter at the street", "the water meter box"]
+    category: component
+    regions: []
+  - term: pressure tank
+    synonyms: ["the well tank", "well pressure tank", "the bladder tank"]
+    category: component
+    regions: []
+  - term: well pump
+    synonyms: ["the well pump", "submersible pump", "the pump in the well"]
+    category: component
+    regions: ["Northeast"]
+  # ── Pipe types ──────────────────────────────────────────────────────────────
+  - term: PEX
+    synonyms: ["pex", "pex tubing", "the plastic flexible pipe", "the red and blue tubing"]
+    category: material
+    regions: []
+  - term: copper pipe
+    synonyms: ["copper", "copper lines", "the copper plumbing"]
+    category: material
+    regions: []
+  - term: PVC
+    synonyms: ["pvc", "the white pipe", "white plastic pipe"]
+    category: material
+    regions: []
+  - term: ABS
+    synonyms: ["abs", "the black pipe", "black drain pipe"]
+    category: material
+    regions: ["Pacific NW"]
+  - term: cast iron pipe
+    synonyms: ["cast iron", "the old metal drain pipe", "the heavy drain pipe"]
+    category: material
+    regions: ["Northeast"]
+  - term: galvanized pipe
+    synonyms: ["galvanized", "the old steel pipe", "the rusty pipe"]
+    category: material
+    regions: []
+  - term: polybutylene
+    synonyms: ["poly b", "the gray pipe", "the bad plastic pipe", "polybutylene pipe"]
+    category: material
+    regions: []
+  # ── Symptoms ────────────────────────────────────────────────────────────────
+  - term: slow drain
+    synonyms: ["draining slow", "water won't go down", "sink backing up", "slow draining sink", "drains slowly"]
+    category: symptom
+    regions: []
+  - term: clogged drain
+    synonyms: ["clogged", "stopped up", "backed up", "blocked drain", "won't drain at all", "completely plugged"]
+    category: symptom
+    regions: []
+  - term: gurgling
+    synonyms: ["gurgling sound", "the drain gurgles", "bubbling in the toilet", "glug glug noise"]
+    category: symptom
+    regions: []
+  - term: sewer smell
+    synonyms: ["smells like sewage", "rotten egg smell from drain", "sewer gas smell", "smells like poop", "stinky drain"]
+    category: symptom
+    regions: []
+  - term: low water pressure
+    synonyms: ["low pressure", "weak water", "barely any water", "trickle", "water pressure dropped", "no pressure"]
+    category: symptom
+    regions: []
+  - term: water hammer
+    synonyms: ["hammering pipes", "banging pipes", "the pipes knock", "loud thump when water shuts off", "pipes rattle"]
+    category: symptom
+    regions: []
+  - term: no hot water
+    synonyms: ["no hot water", "only cold water", "ran out of hot water", "water won't get hot", "lukewarm water"]
+    category: symptom
+    regions: []
+  - term: pilot won't light
+    synonyms: ["pilot won't stay lit", "can't light the pilot", "the pilot keeps going out", "water heater won't light"]
+    category: symptom
+    regions: []
+  - term: running toilet
+    synonyms: ["toilet keeps running", "toilet won't stop running", "water keeps running", "phantom flush", "toilet runs constantly"]
+    category: symptom
+    regions: []
+  - term: leaking pipe
+    synonyms: ["pipe is leaking", "water leak", "dripping pipe", "leak under the sink", "water spot on the ceiling", "pinhole leak"]
+    category: symptom
+    regions: []
+  - term: burst pipe
+    synonyms: ["pipe burst", "broken pipe", "pipe broke", "water spraying everywhere", "flooding"]
+    category: symptom
+    regions: ["Northeast", "Texas"]
+  - term: frozen pipes
+    synonyms: ["pipes froze", "frozen pipe", "no water because it's cold", "pipes are frozen"]
+    category: symptom
+    regions: ["Northeast", "Texas"]
+  - term: dripping faucet
+    synonyms: ["faucet drips", "leaky faucet", "the tap won't stop dripping", "drip drip"]
+    category: symptom
+    regions: []
+  - term: toilet won't flush
+    synonyms: ["toilet not flushing", "weak flush", "have to flush twice", "clogged toilet", "toilet overflowing"]
+    category: symptom
+    regions: []
+  - term: discolored water
+    synonyms: ["brown water", "rusty water", "yellow water", "cloudy water", "dirty water from the tap"]
+    category: symptom
+    regions: []
+  # ── Services / actions ──────────────────────────────────────────────────────
+  - term: drain cleaning
+    synonyms: ["snake the drain", "clear the clog", "unclog the drain", "rooter service", "auger the drain"]
+    category: service
+    regions: []
+  - term: hydro jetting
+    synonyms: ["jet the line", "hydrojet", "high pressure cleaning", "water jet the sewer"]
+    category: service
+    regions: []
+  - term: sewer camera inspection
+    synonyms: ["camera the line", "scope the sewer", "video inspection", "run a camera down the drain"]
+    category: service
+    regions: []
+  - term: repipe
+    synonyms: ["re-pipe", "replace the pipes", "new plumbing", "whole house repipe"]
+    category: service
+    regions: []
+  - term: water heater flush
+    synonyms: ["flush the water heater", "drain the tank", "descale the tankless"]
+    category: service
+    regions: []
+  - term: leak repair
+    synonyms: ["fix the leak", "repair the leak", "stop the leak"]
+    category: service
+    regions: []
+  # ── Additional fixtures / components ─────────────────────────────────────────
+  - term: bidet
+    synonyms: ["the bidet", "bidet seat", "washlet"]
+    category: component
+    regions: []
+  - term: utility sink
+    synonyms: ["laundry sink", "the basement sink", "slop sink", "mop sink"]
+    category: component
+    regions: []
+  - term: laundry box
+    synonyms: ["washing machine box", "the box behind the washer", "washer hookup box"]
+    category: component
+    regions: []
+  - term: washing machine hose
+    synonyms: ["washer hoses", "the rubber hoses on the washer", "burst washer hose"]
+    category: component
+    regions: []
+  - term: ice maker line
+    synonyms: ["fridge water line", "the line to the ice maker", "refrigerator water line"]
+    category: component
+    regions: []
+  - term: water softener
+    synonyms: ["the softener", "softener system", "the salt tank"]
+    category: component
+    regions: ["Phoenix", "Texas"]
+  - term: water filtration system
+    synonyms: ["whole house filter", "the water filter", "reverse osmosis", "under sink filter", "RO system"]
+    category: component
+    regions: []
+  - term: recirculation pump
+    synonyms: ["recirc pump", "hot water recirculating pump", "the pump for instant hot water"]
+    category: component
+    regions: []
+  - term: mixing valve
+    synonyms: ["thermostatic mixing valve", "tempering valve", "the anti scald valve"]
+    category: component
+    regions: []
+  - term: gas line
+    synonyms: ["the gas pipe", "natural gas line", "the gas supply", "gas piping"]
+    category: component
+    regions: []
+  - term: water main
+    synonyms: ["the main", "the incoming water line", "the main supply", "service line"]
+    category: component
+    regions: []
+  - term: stop and waste valve
+    synonyms: ["the irrigation shutoff", "sprinkler shutoff valve"]
+    category: component
+    regions: ["Pacific NW"]
+  - term: cleanout cap
+    synonyms: ["the cap on the cleanout", "the white cap in the yard"]
+    category: component
+    regions: []
+  - term: trap primer
+    synonyms: ["the trap primer", "floor drain primer"]
+    category: component
+    regions: []
+  - term: shower pan
+    synonyms: ["the shower base", "shower floor pan", "the shower liner"]
+    category: component
+    regions: []
+  - term: caulk seal
+    synonyms: ["the caulking", "the seal around the tub", "grout and caulk"]
+    category: consumable
+    regions: []
+  # ── Additional brands ───────────────────────────────────────────────────────
+  - term: Kohler
+    synonyms: ["kohler"]
+    category: brand
+    regions: []
+  - term: Moen
+    synonyms: ["moen", "moen faucet"]
+    category: brand
+    regions: []
+  - term: Delta
+    synonyms: ["delta faucet", "delta"]
+    category: brand
+    regions: []
+  - term: American Standard plumbing
+    synonyms: ["american standard toilet"]
+    category: brand
+    regions: []
+  - term: Rinnai
+    synonyms: ["rinnai", "rinnai tankless"]
+    category: brand
+    regions: []
+  - term: Navien
+    synonyms: ["navien", "navien tankless"]
+    category: brand
+    regions: []
+  - term: Bradford White
+    synonyms: ["bradford white water heater"]
+    category: brand
+    regions: []
+  - term: AO Smith
+    synonyms: ["a o smith", "ao smith water heater"]
+    category: brand
+    regions: []
+  - term: Toto
+    synonyms: ["toto toilet", "toto"]
+    category: brand
+    regions: []
+  - term: InSinkErator
+    synonyms: ["insinkerator disposal", "badger disposal"]
+    category: brand
+    regions: []
+  # ── Additional symptoms ─────────────────────────────────────────────────────
+  - term: sewage backup
+    synonyms: ["sewage coming up", "sewer backing up into the house", "toilet overflowing with sewage", "basement flooded with sewage", "black water backup"]
+    category: symptom
+    regions: []
+  - term: main line clog
+    synonyms: ["everything is backing up", "all the drains are slow", "the whole house is clogged", "main sewer clog"]
+    category: symptom
+    regions: []
+  - term: water heater leaking
+    synonyms: ["water heater is leaking", "water around the water heater", "tank is leaking", "puddle under the water heater"]
+    category: symptom
+    regions: []
+  - term: toilet rocking
+    synonyms: ["toilet is loose", "the toilet wobbles", "toilet moves when I sit"]
+    category: symptom
+    regions: []
+  - term: faucet low flow
+    synonyms: ["faucet barely trickles", "weak faucet", "low flow at the sink", "clogged aerator"]
+    category: symptom
+    regions: []
+  - term: smelly water
+    synonyms: ["water smells like rotten eggs", "sulfur smell in the water", "stinky hot water"]
+    category: symptom
+    regions: ["Texas"]
+  - term: garbage disposal jammed
+    synonyms: ["disposal is stuck", "disposal won't turn", "disposal humming", "disposal jammed"]
+    category: symptom
+    regions: []
+  - term: garbage disposal leaking
+    synonyms: ["disposal leaking", "water under the disposal", "leak from the disposal"]
+    category: symptom
+    regions: []
+  - term: pipe knocking
+    synonyms: ["pipes knock when hot water runs", "ticking pipes", "knocking in the walls"]
+    category: symptom
+    regions: []
+  - term: shower no pressure
+    synonyms: ["weak shower", "shower barely dribbles", "low pressure in the shower"]
+    category: symptom
+    regions: []
+  - term: outdoor faucet leaking
+    synonyms: ["hose bib leaking", "spigot drips", "outside faucet won't shut off"]
+    category: symptom
+    regions: []
+  - term: sump pump not working
+    synonyms: ["sump pump won't turn on", "sump pump running constantly", "water in the basement", "pump didn't kick on"]
+    category: symptom
+    regions: ["Northeast"]

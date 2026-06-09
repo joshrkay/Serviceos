@@ -1,0 +1,15 @@
+{
+  "id": "transcript-100",
+  "type": "inbound_call",
+  "duration_seconds": 255,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is Sarah Johnson. I'm calling because my condenser stopped cooling. Dispatcher: Hi Sarah, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Rheem, maybe 10 years old. Dispatcher: Okay, and what's the service address? Customer: 5 River Road. Dispatcher: Got it. We can send a technician out Thursday morning. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Sarah Johnson",
+    "issue": "condenser stopped cooling",
+    "equipment": "Rheem condenser, maybe 10 years old",
+    "address": "5 River Road",
+    "appointment_window": "Thursday morning"
+  },
+  "source": "synthetic"
+}

@@ -1,0 +1,15 @@
+{
+  "id": "transcript-282",
+  "type": "inbound_call",
+  "duration_seconds": 165,
+  "service_type": "electrical",
+  "transcript": "Customer: Hi, this is David Carter. I'm calling because my sub-panel is flickering. Dispatcher: Hi David, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Leviton, about 8 years old. Dispatcher: Okay, and what's the service address? Customer: 640 Willow Way. Dispatcher: Got it. We can send a technician out Wednesday afternoon. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "David Carter",
+    "issue": "sub-panel is flickering",
+    "equipment": "Leviton sub-panel, about 8 years old",
+    "address": "640 Willow Way",
+    "appointment_window": "Wednesday afternoon"
+  },
+  "source": "synthetic"
+}

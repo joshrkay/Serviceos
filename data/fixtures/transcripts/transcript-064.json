@@ -1,0 +1,15 @@
+{
+  "id": "transcript-064",
+  "type": "inbound_call",
+  "duration_seconds": 165,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is Carlos Mendez. I'm calling because my thermostat is blowing warm air. Dispatcher: Hi Carlos, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Daikin, about 8 years old. Dispatcher: Okay, and what's the service address? Customer: 1500 Sunset Blvd. Dispatcher: Got it. We can send a technician out Wednesday afternoon. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Carlos Mendez",
+    "issue": "thermostat is blowing warm air",
+    "equipment": "Daikin thermostat, about 8 years old",
+    "address": "1500 Sunset Blvd",
+    "appointment_window": "Wednesday afternoon"
+  },
+  "source": "synthetic"
+}

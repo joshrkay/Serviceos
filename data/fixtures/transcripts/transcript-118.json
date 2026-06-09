@@ -1,0 +1,15 @@
+{
+  "id": "transcript-118",
+  "type": "inbound_call",
+  "duration_seconds": 110,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is David Carter. I need to reschedule my appointment for the thermostat. Dispatcher: No problem David. When works better for you? Customer: Could we do first thing tomorrow? Dispatcher: That works. I've moved your appointment to first thing tomorrow. Customer: Perfect, thanks.",
+  "expected_entities": {
+    "customer_name": "David Carter",
+    "issue": "reschedule thermostat appointment",
+    "equipment": "thermostat",
+    "address": "",
+    "appointment_window": "first thing tomorrow"
+  },
+  "source": "synthetic"
+}

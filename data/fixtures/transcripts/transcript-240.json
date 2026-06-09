@@ -1,0 +1,15 @@
+{
+  "id": "transcript-240",
+  "type": "inbound_call",
+  "duration_seconds": 80,
+  "service_type": "electrical",
+  "transcript": "Customer: Hi, this is Helen Park. I need to reschedule my appointment for the electrical panel. Dispatcher: No problem Helen. When works better for you? Customer: Could we do first thing tomorrow? Dispatcher: That works. I've moved your appointment to first thing tomorrow. Customer: Perfect, thanks.",
+  "expected_entities": {
+    "customer_name": "Helen Park",
+    "issue": "reschedule electrical panel appointment",
+    "equipment": "electrical panel",
+    "address": "",
+    "appointment_window": "first thing tomorrow"
+  },
+  "source": "synthetic"
+}
