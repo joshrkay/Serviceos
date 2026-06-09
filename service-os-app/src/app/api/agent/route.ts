@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { auth } from '@clerk/nextjs/server';
 import { getTenantId } from '@/lib/tenant';
 import { createServerClient } from '@/lib/supabase';
 
@@ -14,12 +15,29 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Agent not configured' }, { status: 500 });
   }
 
+  // The agent's /process endpoint is gated behind a shared service token
+  // (AGENT_SERVICE_TOKEN, fail-closed) and expects the per-tenant `auth_token`
+  // it forwards to the Service OS API. Send both, or /process returns 503/401/422.
+  const agentServiceToken = process.env.AGENT_SERVICE_TOKEN;
+  if (!agentServiceToken) {
+    return NextResponse.json({ error: 'Agent service token not configured' }, { status: 500 });
+  }
+  const { getToken } = await auth();
+  const tenantToken = await getToken();
+  if (!tenantToken) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   // 1. Call the LangGraph agent directly (no n8n in Sprint 1)
   const agentRes = await fetch(`${agentUrl}/process`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${agentServiceToken}`,
+    },
     body: JSON.stringify({
       tenant_id: tenantId,
+      auth_token: tenantToken,
       transcript,
       input_method: input_method || 'text',
     }),
