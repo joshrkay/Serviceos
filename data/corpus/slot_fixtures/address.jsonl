@@ -1,0 +1,45 @@
+{"id":"slot_addr_0001","text":"123 Main","slot_type":"address","expected":{"kind":"street_address","value":"123 main"},"lang":"en"}
+{"id":"slot_addr_0002","text":"123 Main Street","slot_type":"address","expected":{"kind":"street_address","value":"123 main street"},"lang":"en"}
+{"id":"slot_addr_0003","text":"one twenty three Main Street","slot_type":"address","expected":{"kind":"street_address","value":"123 main street"},"lang":"en"}
+{"id":"slot_addr_0004","text":"456 Oak Avenue","slot_type":"address","expected":{"kind":"street_address","value":"456 oak avenue"},"lang":"en"}
+{"id":"slot_addr_0005","text":"four fifty six Oak Ave","slot_type":"address","expected":{"kind":"street_address","value":"456 oak ave"},"lang":"en"}
+{"id":"slot_addr_0006","text":"789 Elm Road","slot_type":"address","expected":{"kind":"street_address","value":"789 elm road"},"lang":"en"}
+{"id":"slot_addr_0007","text":"seven eighty nine Elm","slot_type":"address","expected":{"kind":"street_address","value":"789 elm"},"lang":"en"}
+{"id":"slot_addr_0008","text":"it's 12 Cedar Lane","slot_type":"address","expected":{"kind":"street_address","value":"12 cedar lane"},"lang":"en"}
+{"id":"slot_addr_0009","text":"twelve Cedar Lane","slot_type":"address","expected":{"kind":"street_address","value":"12 cedar lane"},"lang":"en"}
+{"id":"slot_addr_0010","text":"2200 Washington Boulevard","slot_type":"address","expected":{"kind":"street_address","value":"2200 washington boulevard"},"lang":"en"}
+{"id":"slot_addr_0011","text":"twenty two hundred Washington","slot_type":"address","expected":{"kind":"street_address","value":"2200 washington"},"lang":"en"}
+{"id":"slot_addr_0012","text":"90 Pine Court","slot_type":"address","expected":{"kind":"street_address","value":"90 pine court"},"lang":"en"}
+{"id":"slot_addr_0013","text":"ninety Pine Court","slot_type":"address","expected":{"kind":"street_address","value":"90 pine court"},"lang":"en"}
+{"id":"slot_addr_0014","text":"345 Maple Drive apartment 2B","slot_type":"address","expected":{"kind":"street_address","value":"345 maple drive"},"lang":"en"}
+{"id":"slot_addr_0015","text":"three forty five Maple","slot_type":"address","expected":{"kind":"street_address","value":"345 maple"},"lang":"en"}
+{"id":"slot_addr_0016","text":"67 Lincoln Way","slot_type":"address","expected":{"kind":"street_address","value":"67 lincoln way"},"lang":"en"}
+{"id":"slot_addr_0017","text":"sixty seven Lincoln Way","slot_type":"address","expected":{"kind":"street_address","value":"67 lincoln way"},"lang":"en"}
+{"id":"slot_addr_0018","text":"1500 Park Street","slot_type":"address","expected":{"kind":"street_address","value":"1500 park street"},"lang":"en"}
+{"id":"slot_addr_0019","text":"fifteen hundred Park","slot_type":"address","expected":{"kind":"street_address","value":"1500 park"},"lang":"en"}
+{"id":"slot_addr_0020","text":"8 Hill Road","slot_type":"address","expected":{"kind":"street_address","value":"8 hill road"},"lang":"en"}
+{"id":"slot_addr_0021","text":"123 Main, by the gas station","slot_type":"address","expected":{"kind":"street_address","value":"123 main"},"lang":"en"}
+{"id":"slot_addr_0022","text":"456 Oak, right next to the school","slot_type":"address","expected":{"kind":"street_address","value":"456 oak"},"lang":"en"}
+{"id":"slot_addr_0023","text":"it's 78 Lake Drive, the blue house","slot_type":"address","expected":{"kind":"street_address","value":"78 lake drive"},"lang":"en"}
+{"id":"slot_addr_0024","text":"200 River Road, across from the park","slot_type":"address","expected":{"kind":"street_address","value":"200 river road"},"lang":"en"}
+{"id":"slot_addr_0025","text":"the house on the corner of Main and Oak","slot_type":"address","expected":{"kind":"intersection","value":"main and oak"},"lang":"en"}
+{"id":"slot_addr_0026","text":"corner of Elm and Cedar","slot_type":"address","expected":{"kind":"intersection","value":"elm and cedar"},"lang":"en"}
+{"id":"slot_addr_0027","text":"where Pine meets Washington","slot_type":"address","expected":{"kind":"intersection","value":"pine and washington"},"lang":"en"}
+{"id":"slot_addr_0028","text":"it's at Lincoln and Park","slot_type":"address","expected":{"kind":"intersection","value":"lincoln and park"},"lang":"en"}
+{"id":"slot_addr_0029","text":"the corner of Hill and Lake","slot_type":"address","expected":{"kind":"intersection","value":"hill and lake"},"lang":"en"}
+{"id":"slot_addr_0030","text":"Bridge and Sunset, the gray duplex","slot_type":"address","expected":{"kind":"intersection","value":"bridge and sunset"},"lang":"en"}
+{"id":"slot_addr_0031","text":"the place by the water tower on Cedar","slot_type":"address","expected":{"kind":"landmark","value":"place by the water tower on cedar"},"lang":"en"}
+{"id":"slot_addr_0032","text":"the blue house next to the fire station","slot_type":"address","expected":{"kind":"landmark","value":"blue house next to the fire station"},"lang":"en"}
+{"id":"slot_addr_0033","text":"behind the strip mall on Maple","slot_type":"address","expected":{"kind":"landmark","value":"behind the strip mall on maple"},"lang":"en"}
+{"id":"slot_addr_0034","text":"the property across from the high school","slot_type":"address","expected":{"kind":"landmark","value":"property across from the high school"},"lang":"en"}
+{"id":"slot_addr_0035","text":"same address as last time","slot_type":"address","expected":{"kind":"reference","value":"same_as_on_file"},"lang":"en"}
+{"id":"slot_addr_0036","text":"the same place you came before","slot_type":"address","expected":{"kind":"reference","value":"same_as_on_file"},"lang":"en"}
+{"id":"slot_addr_0037","text":"it's the address you have on file","slot_type":"address","expected":{"kind":"reference","value":"same_as_on_file"},"lang":"en"}
+{"id":"slot_addr_0038","text":"same as my account","slot_type":"address","expected":{"kind":"reference","value":"same_as_on_file"},"lang":"en"}
+{"id":"slot_addr_0039","text":"the usual address","slot_type":"address","expected":{"kind":"reference","value":"same_as_on_file"},"lang":"en"}
+{"id":"slot_addr_0040","text":"my home address you already have","slot_type":"address","expected":{"kind":"reference","value":"same_as_on_file"},"lang":"en"}
+{"id":"slot_addr_0041","text":"the rental, same as before","slot_type":"address","expected":{"kind":"reference","value":"same_as_on_file"},"lang":"en"}
+{"id":"slot_addr_0042","text":"33 Drive","slot_type":"address","expected":{"kind":"street_address","value":"33 drive"},"lang":"en"}
+{"id":"slot_addr_0043","text":"341 Sunset Lane near the cul de sac","slot_type":"address","expected":{"kind":"street_address","value":"341 sunset lane"},"lang":"en"}
+{"id":"slot_addr_0044","text":"nine ninety nine Bridge Street","slot_type":"address","expected":{"kind":"street_address","value":"999 bridge street"},"lang":"en"}
+{"id":"slot_addr_0045","text":"100 Lake Ave unit 4","slot_type":"address","expected":{"kind":"street_address","value":"100 lake ave"},"lang":"en"}

@@ -26,6 +26,9 @@ interface LanguageSettings {
   ttsVoiceEs: string | null;
   autoDetectLanguage: boolean;
   spanishDispatcherUserIds: string[];
+  // Voice-parity — opt-in language stack; always includes 'en'. The Spanish
+  // toggle in Settings flips this between ['en'] and ['en','es'].
+  supportedLanguages: Language[];
 }
 
 const DEFAULT_LANGUAGE_SETTINGS: LanguageSettings = {
@@ -34,6 +37,7 @@ const DEFAULT_LANGUAGE_SETTINGS: LanguageSettings = {
   ttsVoiceEs: null,
   autoDetectLanguage: true,
   spanishDispatcherUserIds: [],
+  supportedLanguages: ['en'],
 };
 
 // P11-002 — project the persisted tenant_settings language columns into
@@ -48,7 +52,19 @@ function projectLanguageSettings(
     ttsVoiceEs: settings.ttsVoiceEs ?? null,
     autoDetectLanguage: settings.autoDetectLanguage ?? true,
     spanishDispatcherUserIds: settings.spanishDispatcherUserIds ?? [],
+    supportedLanguages: normalizeSupportedLanguages(settings.supportedLanguages),
   };
+}
+
+// 'en' is always supported (the universal fallback); the toggle only adds or
+// removes 'es'. Dedupe + force-include 'en' so a malformed/empty array can
+// never strand the agent without a usable language.
+function normalizeSupportedLanguages(input?: Language[] | null): Language[] {
+  const set = new Set<Language>(['en']);
+  for (const lang of input ?? []) {
+    if (lang === 'en' || lang === 'es') set.add(lang);
+  }
+  return Array.from(set);
 }
 
 // Polly voice id; constrained so a stored value can't inject XML
@@ -66,6 +82,9 @@ const languagePatchSchema = z.object({
   ttsVoiceEs: ttsVoicePatchField,
   autoDetectLanguage: z.boolean().optional(),
   spanishDispatcherUserIds: z.array(z.string().uuid()).optional(),
+  // Voice-parity — opt-in language stack. 'en' is always force-included on
+  // persist so the agent can never be left without a fallback language.
+  supportedLanguages: z.array(z.enum(['en', 'es'])).optional(),
 });
 
 interface SettingsRouterDependencies {
@@ -132,6 +151,13 @@ export function createSettingsRouter(
       try {
         const tenantId = req.auth!.tenantId;
         const patch = languagePatchSchema.parse(req.body ?? {});
+        // Force-include 'en' (and dedupe) before persisting so the toggle can
+        // never store a stack the agent can't fall back from.
+        if (patch.supportedLanguages !== undefined) {
+          patch.supportedLanguages = normalizeSupportedLanguages(
+            patch.supportedLanguages,
+          );
+        }
         const changedKeys = Object.keys(patch);
 
         // Ensure the row exists so a first-time PATCH persists rather
@@ -186,6 +212,25 @@ export function createSettingsRouter(
               throw new ValidationError(
                 err instanceof Error ? err.message : 'Invalid owner phone number',
                 { field: 'ownerPhone' },
+              );
+            }
+          }
+        }
+
+        // Voice-parity — normalize transfer_number to E.164 (or null to
+        // clear) at the boundary so the escalation/dial code can trust the
+        // stored shape, exactly like owner_phone above.
+        if (parsed.transferNumber !== undefined && parsed.transferNumber !== null) {
+          const trimmed = parsed.transferNumber.trim();
+          if (trimmed === '') {
+            parsed.transferNumber = null;
+          } else {
+            try {
+              parsed.transferNumber = normalizeMobileE164(trimmed);
+            } catch (err) {
+              throw new ValidationError(
+                err instanceof Error ? err.message : 'Invalid transfer number',
+                { field: 'transferNumber' },
               );
             }
           }

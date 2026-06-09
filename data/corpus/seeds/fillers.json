@@ -1,0 +1,70 @@
+{
+  "_meta": {
+    "description": "Slot-filler banks for deterministic corpus generation. All names are synthetic personas; no real PII. Service terms are drawn from corpus/data/vocabulary.json lay language.",
+    "license": "internal-synthetic",
+    "pii": "none — synthetic personas only"
+  },
+  "service_en": [
+    "water heater", "hot water tank", "tankless water heater", "garbage disposal",
+    "toilet", "running toilet", "kitchen sink", "bathroom sink", "shower",
+    "shower valve", "bathtub", "faucet", "leaky faucet", "main line",
+    "sewer line", "drain", "clogged drain", "sump pump", "well pump",
+    "furnace", "AC", "air conditioner", "heat pump", "thermostat",
+    "boiler", "ductwork", "condenser", "gas line", "water softener",
+    "pressure regulator", "outdoor spigot", "hose bib", "P-trap", "garbage disposal"
+  ],
+  "service_es": [
+    "calentador de agua", "calentador", "el inodoro", "el escusado",
+    "la regadera", "el lavabo", "el fregadero", "la llave del agua",
+    "el triturador de basura", "la tina", "el drenaje", "la tubería",
+    "la bomba de sumidero", "el calentón", "el aire acondicionado",
+    "el aire", "la calefacción", "el termostato", "la línea de gas",
+    "el ablandador de agua"
+  ],
+  "symptom_en": [
+    "is leaking", "won't stop running", "is clogged", "is backed up",
+    "stopped working", "is making a weird noise", "isn't heating",
+    "isn't cooling", "is dripping", "has no water", "is rattling",
+    "smells funny", "is leaking from the bottom", "keeps shutting off",
+    "won't turn on", "is overflowing", "has low pressure"
+  ],
+  "symptom_es": [
+    "está goteando", "no para de correr", "está tapado", "se tapó",
+    "no funciona", "hace un ruido raro", "no calienta", "no enfría",
+    "está chorreando", "no tiene agua", "se está saliendo el agua",
+    "tiene poca presión", "se apaga solo"
+  ],
+  "time_phrase_en": [
+    "tomorrow morning", "tomorrow afternoon", "first thing tomorrow",
+    "this afternoon", "today if you can", "as soon as possible", "ASAP",
+    "sometime this week", "this weekend", "Monday morning",
+    "Tuesday afternoon", "next Thursday", "any time today",
+    "whenever you can get here", "after three", "before noon",
+    "early next week", "end of the week", "Friday at nine"
+  ],
+  "time_phrase_es": [
+    "mañana en la mañana", "mañana por la tarde", "hoy mismo",
+    "lo antes posible", "esta semana", "este fin de semana",
+    "el lunes en la mañana", "cuando puedan", "hoy si se puede",
+    "el martes", "pasado mañana", "en la tarde"
+  ],
+  "first_name": [
+    "Jordan", "Sam", "Alex", "Casey", "Morgan", "Riley", "Taylor",
+    "Maria", "Carlos", "Sofia", "Diego", "Lucia", "Mateo", "Valentina",
+    "Dana", "Pat", "Chris", "Robin", "Jamie", "Quinn"
+  ],
+  "last_name": [
+    "Johnson", "Garcia", "Nguyen", "Smith", "Martinez", "Lee", "Brown",
+    "Rivera", "Patel", "OBrien", "Kowalski", "Torres", "Adams", "Reyes"
+  ],
+  "street_name": [
+    "Main", "Oak", "Maple", "Elm", "Cedar", "Pine", "Washington",
+    "Lincoln", "Park", "Hill", "Lake", "River", "Sunset", "Bridge"
+  ],
+  "street_suffix": ["Street", "Avenue", "Road", "Lane", "Drive", "Court", "Way"],
+  "job_ref_en": [
+    "the Johnson job", "the Maple Street job", "the job on Oak",
+    "the ten o'clock", "the Garcia job", "yesterday's job",
+    "the rental on Cedar", "my last appointment"
+  ]
+}

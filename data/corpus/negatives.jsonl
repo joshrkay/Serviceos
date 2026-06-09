@@ -1,0 +1,62 @@
+{"id":"neg_0001","text":"Hi, we're reaching out about your business's eligibility for a lower merchant processing rate.","category":"telemarketer","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0002","text":"This is an important message regarding your Google business listing, press one to continue.","category":"telemarketer","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0003","text":"Congratulations! You've been selected for a complimentary marketing consultation.","category":"telemarketer","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0004","text":"We can get your company on the first page of search results guaranteed, interested?","category":"telemarketer","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0005","text":"I'm calling about extending the warranty on your company vehicle fleet.","category":"telemarketer","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0006","text":"Your business may qualify for up to fifty thousand dollars in working capital.","category":"telemarketer","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0007","text":"We noticed your business doesn't have a verified profile, I can fix that today.","category":"telemarketer","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0008","text":"This is a courtesy call about your current credit card processing terms.","category":"telemarketer","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0009","text":"Hi there, do you have a moment to talk about solar for your facility?","category":"telemarketer","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0010","text":"We're offering a special rate on commercial insurance for contractors like you.","category":"telemarketer","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0011","text":"Press one to speak with a representative about your SEO ranking.","category":"telemarketer","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0012","text":"I'd love to tell you about our lead generation service for home service businesses.","category":"telemarketer","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0013","text":"Hi, are you guys hiring? I'm a licensed plumber looking for work.","category":"employment","not_intent":true,"expected_routing":"route_to_careers","lang":"en"}
+{"id":"neg_0014","text":"I saw you might need techs, do you have any openings?","category":"employment","not_intent":true,"expected_routing":"route_to_careers","lang":"en"}
+{"id":"neg_0015","text":"I wanted to drop off my resume, who handles hiring there?","category":"employment","not_intent":true,"expected_routing":"route_to_careers","lang":"en"}
+{"id":"neg_0016","text":"Do you take apprentices? I just finished my HVAC certification.","category":"employment","not_intent":true,"expected_routing":"route_to_careers","lang":"en"}
+{"id":"neg_0017","text":"Are you looking for help? I've got fifteen years in the trade.","category":"employment","not_intent":true,"expected_routing":"route_to_careers","lang":"en"}
+{"id":"neg_0018","text":"My son needs a job, do you hire helpers with no experience?","category":"employment","not_intent":true,"expected_routing":"route_to_careers","lang":"en"}
+{"id":"neg_0019","text":"Is there a manager I can talk to about a job application?","category":"employment","not_intent":true,"expected_routing":"route_to_careers","lang":"en"}
+{"id":"neg_0020","text":"I applied online last week, just checking if you're still hiring.","category":"employment","not_intent":true,"expected_routing":"route_to_careers","lang":"en"}
+{"id":"neg_0021","text":"Do you offer any kind of paid training program for new techs?","category":"employment","not_intent":true,"expected_routing":"route_to_careers","lang":"en"}
+{"id":"neg_0022","text":"Hey, what's the pay like for a service tech with you guys?","category":"employment","not_intent":true,"expected_routing":"route_to_careers","lang":"en"}
+{"id":"neg_0023","text":"Is this Joe's Pizza? I want to place an order.","category":"wrong_number","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0024","text":"Hi, I'm trying to reach the orthodontist's office.","category":"wrong_number","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0025","text":"Did I call the towing company? My car broke down.","category":"wrong_number","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0026","text":"Is this the vet? My dog needs an appointment.","category":"wrong_number","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0027","text":"Sorry, I was trying to call my insurance agent.","category":"wrong_number","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0028","text":"Is this the courthouse? I have jury duty questions.","category":"wrong_number","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0029","text":"I'm looking for the pharmacy refill line.","category":"wrong_number","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0030","text":"Wrong number, I meant to dial the gas company.","category":"wrong_number","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0031","text":"Is this the hair salon? I need to book a cut.","category":"wrong_number","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0032","text":"Hello, is this the locksmith? I'm locked out of my car.","category":"wrong_number","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0033","text":"Hi, I'm with a uniform supply company, can I send you a catalog?","category":"vendor_cold_call","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0034","text":"We supply wholesale fittings and want to set up an account with your shop.","category":"vendor_cold_call","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0035","text":"This is about your business listing in our local directory.","category":"vendor_cold_call","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0036","text":"I represent a fleet GPS tracking company, do you manage vehicles?","category":"vendor_cold_call","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0037","text":"We do branded apparel and truck wraps, who handles your marketing?","category":"vendor_cold_call","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0038","text":"Hi, calling from a payroll services provider, got a quick minute?","category":"vendor_cold_call","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0039","text":"Can I speak to whoever buys your tools and equipment?","category":"vendor_cold_call","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0040","text":"We offer discounted commercial fuel cards for service fleets.","category":"vendor_cold_call","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0041","text":"I'd like to talk about advertising your business on our radio spots.","category":"vendor_cold_call","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0042","text":"This is regarding your eligibility for a new business phone system.","category":"vendor_cold_call","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0043","text":"Hi, we're conducting a brief survey about local service providers.","category":"survey","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0044","text":"Do you have two minutes to answer questions about customer satisfaction?","category":"survey","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0045","text":"This is a research call, we're not selling anything, just a few questions.","category":"survey","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0046","text":"On a scale of one to ten, how likely are you to recommend us?","category":"survey","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0047","text":"We're polling small businesses about economic conditions this quarter.","category":"survey","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0048","text":"Would you participate in a short study about contractor software?","category":"survey","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0049","text":"Press one if you'd like to take a brief automated survey.","category":"survey","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0050","text":"We're gathering feedback for a university research project, interested?","category":"survey","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0051","text":"Quick question for our market research: how many trucks do you run?","category":"survey","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0052","text":"This call may be used for quality and research purposes, may we begin?","category":"survey","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0053","text":"hi hi hi hi mommy's phone hello hello","category":"kids_playing","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0054","text":"[child] poop! hahaha poopy phone! [giggles]","category":"kids_playing","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0055","text":"is this a dinosaur? rawr! are you a dinosaur?","category":"kids_playing","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0056","text":"[toddler mashing buttons] aaaaah beep beep beep","category":"kids_playing","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0057","text":"my daddy has a truck. it's red. do you have a truck?","category":"kids_playing","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0058","text":"[singing] twinkle twinkle little star... hi!","category":"kids_playing","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0059","text":"i'm not supposed to use the phone bye bye [hangs up sounds]","category":"kids_playing","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0060","text":"[baby] gaaaa baaa daaa [breathing into receiver]","category":"kids_playing","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0061","text":"do you like cookies? i like cookies. mommy! mommy!","category":"kids_playing","not_intent":true,"expected_routing":"ignore","lang":"en"}
+{"id":"neg_0062","text":"[kid] hewwo? hewwo? is anybody dere? hehehe","category":"kids_playing","not_intent":true,"expected_routing":"ignore","lang":"en"}

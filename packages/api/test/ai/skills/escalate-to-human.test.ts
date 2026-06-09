@@ -49,8 +49,9 @@ describe('escalateToHuman — successful escalation', () => {
       new Map([[TENANT_ID, [entry]]])
     );
     const result = await escalateToHuman(makeInput({ onCallRepo, reason: 'low_confidence' }));
-    // P11-002 i18n catalog rephrased "connecting you" → "transferring you".
-    expect(result.message).toMatch(/transferring/i);
+    // Voice-parity (Feature 7) — the transfer line speaks the spec phrasing
+    // "let me get someone on the line for you" (escalate.transferring catalog key).
+    expect(result.message).toMatch(/someone on the line/i);
   });
 
   it('emits an escalation.requested audit event when auditRepo is provided', async () => {

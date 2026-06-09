@@ -372,6 +372,9 @@ export const updateSettingsSchema = z.object({
   ttsVoiceEn: ttsVoiceField,
   ttsVoiceEs: ttsVoiceField,
   spanishDispatcherUserIds: z.array(z.string().uuid()).optional(),
+  // Voice-parity (migration 152) — E.164 warm-transfer line. Normalized to
+  // E.164 (or null to clear) at the route boundary, mirroring ownerPhone.
+  transferNumber: z.string().max(40).nullable().optional(),
 }).superRefine((val, ctx) => {
   if (val.depositStrategy === 'percentage') {
     if (val.depositPercentageBps == null) {

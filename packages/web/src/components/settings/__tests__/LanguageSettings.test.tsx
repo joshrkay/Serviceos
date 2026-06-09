@@ -54,6 +54,34 @@ describe('P11-002 LanguageSettings page', () => {
     );
   });
 
+  it('Bilingual: PATCHes supported_languages when the operator enables Spanish', async () => {
+    (fetchLanguageSettings as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      defaultLanguage: 'en',
+      ttsVoiceEn: null,
+      ttsVoiceEs: null,
+      autoDetectLanguage: true,
+      spanishDispatcherUserIds: [],
+      supportedLanguages: ['en'],
+    });
+    (updateLanguageSettings as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      defaultLanguage: 'en',
+      ttsVoiceEn: null,
+      ttsVoiceEs: null,
+      autoDetectLanguage: true,
+      spanishDispatcherUserIds: [],
+      supportedLanguages: ['en', 'es'],
+    });
+    render(<LanguageSettingsPage />);
+    const toggle = (await screen.findByLabelText('Enable Spanish')) as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(updateLanguageSettings).toHaveBeenCalledWith({
+        supportedLanguages: ['en', 'es'],
+      }),
+    );
+  });
+
   it('Multilingual: surfaces an error when the API rejects the load', async () => {
     (fetchLanguageSettings as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error('boom'),
