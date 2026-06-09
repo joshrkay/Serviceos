@@ -50,11 +50,13 @@ export class StubProvider implements LLMProvider {
   readonly name = 'stub';
 
   async complete(_model: string, request: LLMRequest): Promise<LLMCompletion> {
-    const messageMatch = /MESSAGE:\s*([\s\S]*?)\s*(?:CALLER:|$)/.exec(request.prompt);
+    const messageMatch = /MESSAGE:\s*([\s\S]*?)\s*(?:CALLER:|NOW:|$)/.exec(request.prompt);
     const callerMatch = /CALLER:\s*(\S+)/.exec(request.prompt);
+    const nowMatch = /NOW:\s*(\S+)/.exec(request.prompt);
     const message = (messageMatch?.[1] ?? '').trim();
     const caller = callerMatch?.[1];
-    const intent = extractStubIntent(message, caller);
+    const now = nowMatch ? new Date(nowMatch[1]!) : new Date();
+    const intent = extractStubIntent(message, caller, now);
     return { text: JSON.stringify(intent), inputTokens: 50, outputTokens: 50 };
   }
 }
@@ -70,14 +72,80 @@ function parseMoney(raw: string): number {
   return Math.round(Number(raw.replace(/[$,]/g, '')) * 100);
 }
 
-function nextBusinessMorning(): string {
-  const date = new Date();
-  date.setUTCDate(date.getUTCDate() + 1);
-  date.setUTCHours(13, 0, 0, 0); // 9am ET
-  return date.toISOString();
+// The stub treats clock times as US Eastern (UTC-4), matching the demo
+// tenant. The real provider resolves times against TENANT_TIMEZONE from the
+// prompt context.
+const ET_OFFSET_HOURS = 4;
+const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+export interface RequestedTime {
+  iso: string;
+  label: string;
 }
 
-function extractStubIntent(message: string, caller?: string): StubIntent {
+/**
+ * Derives the caller's requested visit time from the message. Understands
+ * relative days (today / tomorrow / weekday names), parts of day
+ * (morning 9am, afternoon 1pm, evening 5pm, noon) and explicit clock times
+ * ("at 3pm", "around 10:30 am"). Defaults to tomorrow morning.
+ */
+export function parseRequestedTime(message: string, now: Date = new Date()): RequestedTime {
+  const lower = message.toLowerCase();
+
+  let dayOffset = 1;
+  let dayLabel = 'tomorrow';
+  if (/\btoday\b/.test(lower)) {
+    dayOffset = 0;
+    dayLabel = 'today';
+  } else if (/\btomorrow\b/.test(lower)) {
+    dayOffset = 1;
+    dayLabel = 'tomorrow';
+  } else {
+    for (let day = 0; day < WEEKDAYS.length; day += 1) {
+      if (new RegExp(`\\b${WEEKDAYS[day]}\\b`).test(lower)) {
+        const todayDow = new Date(now.getTime() - ET_OFFSET_HOURS * 3_600_000).getUTCDay();
+        dayOffset = (day - todayDow + 7) % 7 || 7;
+        dayLabel = WEEKDAYS[day]!.charAt(0).toUpperCase() + WEEKDAYS[day]!.slice(1);
+        break;
+      }
+    }
+  }
+
+  let hour = 9;
+  let minute = 0;
+  let timeLabel = 'morning';
+  const explicit = /\b(?:at|around|by)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/.exec(lower);
+  if (explicit) {
+    hour = (Number(explicit[1]) % 12) + (explicit[3] === 'pm' ? 12 : 0);
+    minute = Number(explicit[2] ?? 0);
+    timeLabel = `${explicit[1]}${explicit[2] ? `:${explicit[2]}` : ''}${explicit[3]}`;
+  } else if (/\bnoon\b/.test(lower)) {
+    hour = 12;
+    timeLabel = 'noon';
+  } else if (/\bafternoon\b/.test(lower)) {
+    hour = 13;
+    timeLabel = 'afternoon';
+  } else if (/\b(evening|tonight|after work)\b/.test(lower)) {
+    hour = 17;
+    timeLabel = 'evening';
+  } else if (/\bmorning\b/.test(lower)) {
+    hour = 9;
+    timeLabel = 'morning';
+  }
+
+  const etNow = new Date(now.getTime() - ET_OFFSET_HOURS * 3_600_000);
+  const date = new Date(Date.UTC(etNow.getUTCFullYear(), etNow.getUTCMonth(), etNow.getUTCDate() + dayOffset));
+  date.setUTCHours(hour + ET_OFFSET_HOURS, minute, 0, 0);
+  return { iso: date.toISOString(), label: `${dayLabel} ${timeLabel}` };
+}
+
+/** "Hi, this is Janet Miller" -> "Janet Miller" */
+export function parseCallerName(message: string): string | null {
+  const match = /\b(?:this is|my name is|it'?s)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b/.exec(message);
+  return match ? match[1]! : null;
+}
+
+function extractStubIntent(message: string, caller?: string, now: Date = new Date()): StubIntent {
   const invoice = /invoice\s+(.+?)\s+\$?([\d,]+(?:\.\d{1,2})?)\s+for\s+(.+)/i.exec(message);
   if (invoice) {
     const [, name, amount, description] = invoice;
@@ -107,16 +175,17 @@ function extractStubIntent(message: string, caller?: string): StubIntent {
   const booking = /(?:book|schedule)\s+(.+?)\s+for\s+(.+)/i.exec(message);
   if (booking) {
     const [, name, work] = booking;
+    const requested = parseRequestedTime(message, now);
     return {
       type: 'schedule_job',
       payload: {
         customerName: name!.trim(),
         customerPhone: caller,
         title: work!.trim(),
-        startsAt: nextBusinessMorning(),
+        startsAt: requested.iso,
         durationMinutes: 60,
       },
-      summary: `Book ${name!.trim()} tomorrow 9am: ${work!.trim()}`,
+      summary: `Book ${name!.trim()} ${requested.label}: ${work!.trim()}`,
       confidence: 0.85,
     };
   }
@@ -124,17 +193,19 @@ function extractStubIntent(message: string, caller?: string): StubIntent {
   // A customer describing a problem -> propose booking them in.
   const trouble = /(broken|leaking|leak|not working|no heat|no cooling|repair|fix|quote)/i.exec(message);
   if (trouble && caller) {
+    const requested = parseRequestedTime(message, now);
+    const callerName = parseCallerName(message);
     return {
       type: 'schedule_job',
       payload: {
-        customerName: `Caller ${caller}`,
+        customerName: callerName ?? `Caller ${caller}`,
         customerPhone: caller,
         title: `Service call: ${message.slice(0, 120)}`,
-        startsAt: nextBusinessMorning(),
+        startsAt: requested.iso,
         durationMinutes: 60,
       },
-      summary: `Book caller ${caller} tomorrow 9am (${trouble[1]!.toLowerCase()} reported)`,
-      confidence: 0.7,
+      summary: `Book ${callerName ?? `caller ${caller}`} ${requested.label} (${trouble[1]!.toLowerCase()} reported)`,
+      confidence: callerName ? 0.8 : 0.7,
     };
   }
 

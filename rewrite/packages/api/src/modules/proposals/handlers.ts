@@ -3,7 +3,7 @@ import type { ProposalPayloads, ProposalType } from '@rivet/contracts';
 import { proposalPayloadSchemas } from '@rivet/contracts';
 import { defineCommand, type CommandCtx } from '../../core/commands';
 import { resolveOrCreateCustomer, createCustomerCommand } from '../crm/customers';
-import { createJobCommand, scheduleAppointmentCommand } from '../money/jobs';
+import { createJobCommand, findNextAvailableSlot, scheduleAppointmentCommand } from '../money/jobs';
 import { createInvoiceCommand, sendInvoiceCommand } from '../money/invoices';
 
 /**
@@ -38,12 +38,33 @@ const handlers: { [T in ProposalType]: Handler<T> } = {
       title: payload.title,
       description: payload.description,
     });
+    // One crew: never double-book. Slide past conflicts from the caller's
+    // requested time.
+    const slot = await findNextAvailableSlot(
+      ctx.client,
+      ctx.tenantId,
+      new Date(payload.startsAt),
+      payload.durationMinutes,
+    );
     const appointment = await ctx.invoke(scheduleAppointmentCommand, {
       jobId: job.id,
-      startsAt: payload.startsAt,
+      startsAt: slot.startsAt.toISOString(),
       durationMinutes: payload.durationMinutes,
     });
-    return { customerId: customer.id, jobId: job.id, appointmentId: appointment.id };
+    // Close the loop with the caller: confirm the booked time by SMS.
+    ctx.enqueue({
+      topic: 'comms.booking-confirmation',
+      payload: { appointmentId: appointment.id },
+      dedupeKey: `booking-confirmation:${appointment.id}`,
+    });
+    return {
+      customerId: customer.id,
+      jobId: job.id,
+      appointmentId: appointment.id,
+      scheduledFor: appointment.startsAt,
+      requestedFor: payload.startsAt,
+      adjustedForConflict: slot.adjusted,
+    };
   },
 
   draft_invoice: async (ctx, payload) => {

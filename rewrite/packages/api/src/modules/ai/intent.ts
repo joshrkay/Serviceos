@@ -12,7 +12,12 @@ return STRICT JSON: {"type": <one of "create_customer" | "schedule_job" |
 "draft_invoice" | "send_invoice" | null>, "payload": <object matching the
 action contract>, "summary": <one human sentence>, "confidence": <0..1>}.
 Return {"type": null} when no action is clear. Never invent prices or
-customer details that are not in the message.`;
+customer details that are not in the message.
+For schedule_job: set payload.startsAt (ISO 8601 UTC) to the caller's
+requested time, resolving relative phrases ("tomorrow afternoon", "Friday
+morning", "at 3pm") against NOW in TENANT_TIMEZONE; default to the next
+morning at 9am when no time is given. Use the caller's stated name as
+customerName when they introduce themselves.`;
 
 const intentSchema = z.object({
   type: z.enum(PROPOSAL_TYPES).nullable(),
@@ -57,7 +62,15 @@ export function registerIntentExtractionWorker(deps: IntentDeps): Promise<void> 
         `SELECT name, phone FROM customers WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 20`,
         [tenantId],
       );
-      return { message: message.rows[0], customers: customers.rows };
+      const tenant = await client.query<{ timezone: string }>(
+        `SELECT timezone FROM tenants WHERE id = $1`,
+        [tenantId],
+      );
+      return {
+        message: message.rows[0],
+        customers: customers.rows,
+        timezone: tenant.rows[0]?.timezone ?? 'America/New_York',
+      };
     });
     if (!context.message) return;
 
@@ -67,6 +80,8 @@ export function registerIntentExtractionWorker(deps: IntentDeps): Promise<void> 
       '',
       `MESSAGE: ${context.message.body}`,
       `CALLER: ${context.message.from_number}`,
+      `NOW: ${new Date().toISOString()}`,
+      `TENANT_TIMEZONE: ${context.timezone}`,
     ].join('\n');
 
     const completion = await deps.gateway.run(

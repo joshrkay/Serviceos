@@ -162,7 +162,7 @@ describe('the loop, end to end', () => {
     expect((after.json() as { proposals: unknown[] }).proposals.length).toBe(countBefore);
   }, 30_000);
 
-  it('runs voice transcript -> schedule_job proposal -> web approval -> job + appointment', async () => {
+  it('runs voice transcript -> schedule_job proposal (caller name + requested time) -> approval -> scheduled + customer confirmation SMS', async () => {
     const call = await app.inject({
       method: 'POST',
       url: '/webhooks/voice/completed',
@@ -170,7 +170,8 @@ describe('the loop, end to end', () => {
         callId: 'CALL_loop_1',
         to: TENANT_PHONE,
         from: '+15557770222',
-        transcript: 'Hi, my AC is broken and the house is heating up, can someone come look at it?',
+        transcript:
+          'Hi, this is Frank Castle. My AC is broken and the house is heating up, could someone come tomorrow afternoon?',
       },
       headers: { 'content-type': 'application/json' },
     });
@@ -182,6 +183,12 @@ describe('the loop, end to end', () => {
       return proposals.find((p) => p.type === 'schedule_job');
     });
     expect(proposal.source).toBe('voice');
+    // The AI honored the caller's introduction and requested window.
+    expect(proposal.summary).toContain('Frank Castle');
+    expect(proposal.summary).toContain('tomorrow afternoon');
+    const payload = proposal.payload as { customerName: string; startsAt: string };
+    expect(payload.customerName).toBe('Frank Castle');
+    expect(new Date(payload.startsAt).getUTCHours()).toBe(17); // 1pm ET
 
     const approve = await api('POST', `/api/proposals/${proposal.id}/approve`, {});
     expect(approve.statusCode).toBe(200);
@@ -191,13 +198,27 @@ describe('the loop, end to end', () => {
       const { proposals } = response.json() as { proposals: Array<Record<string, unknown>> };
       return proposals.find((p) => p.id === proposal.id);
     });
-    const result = executed.result as { jobId: string; appointmentId: string };
+    const result = executed.result as {
+      jobId: string;
+      appointmentId: string;
+      scheduledFor: string;
+      adjustedForConflict: boolean;
+    };
+    expect(result.scheduledFor).toBe(payload.startsAt);
+    expect(result.adjustedForConflict).toBe(false);
 
     const jobsList = await api('GET', '/api/jobs');
     const jobs = (jobsList.json() as { jobs: Array<Record<string, unknown>> }).jobs;
     const job = jobs.find((j) => j.id === result.jobId);
     expect(job).toBeDefined();
     expect(job!.status).toBe('scheduled');
+    expect(job!.customerName).toBe('Frank Castle');
+
+    // The caller hears back: booking confirmation in the tenant's timezone.
+    const confirmation = await waitFor(async () =>
+      sms.sent.find((m) => m.to === '+15557770222' && m.body.includes("you're booked for")),
+    );
+    expect(confirmation.body).toMatch(/1:00\u202fPM|1:00 PM/);
   }, 60_000);
 
   it('NO n rejects a proposal from SMS', async () => {

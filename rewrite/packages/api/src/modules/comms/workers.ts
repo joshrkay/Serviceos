@@ -132,6 +132,56 @@ async function registerEstimateSmsWorker(deps: CommsDeps): Promise<void> {
   });
 }
 
+/**
+ * Booking confirmation to the customer after an approved schedule_job
+ * executes: the caller hears back with the actual booked time, rendered in
+ * the tenant's timezone.
+ */
+async function registerBookingConfirmationWorker(deps: CommsDeps): Promise<void> {
+  const dataSchema = z.object({ tenantId: z.string().uuid(), appointmentId: z.string().uuid() });
+  await deps.jobs.work('comms.booking-confirmation', async (raw) => {
+    const { tenantId, appointmentId } = dataSchema.parse(raw);
+    const details = await withTenantTransaction(deps.db, tenantId, async (client) => {
+      const { rows } = await client.query(
+        `SELECT a.starts_at, a.ends_at, c.phone AS customer_phone,
+                t.name AS tenant_name, t.phone AS tenant_phone, t.timezone
+         FROM appointments a
+         JOIN jobs j ON j.id = a.job_id
+         JOIN customers c ON c.id = j.customer_id
+         JOIN tenants t ON t.id = a.tenant_id
+         WHERE a.tenant_id = $1 AND a.id = $2 AND a.status = 'scheduled'`,
+        [tenantId, appointmentId],
+      );
+      return rows[0] as
+        | {
+            starts_at: Date;
+            ends_at: Date;
+            customer_phone: string;
+            tenant_name: string;
+            tenant_phone: string | null;
+            timezone: string;
+          }
+        | undefined;
+    });
+    if (!details || !details.tenant_phone) return;
+    const when = new Intl.DateTimeFormat('en-US', {
+      timeZone: details.timezone,
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    }).format(details.starts_at);
+    await sendAndRecordSms(
+      deps,
+      tenantId,
+      details.customer_phone,
+      details.tenant_phone,
+      `${details.tenant_name}: you're booked for ${when}. Reply to this number if you need to change it.`,
+    );
+  });
+}
+
 /** Daily digest: pending approvals + yesterday's money, per tenant. */
 async function registerDailyDigestWorker(deps: CommsDeps): Promise<void> {
   await deps.jobs.work('comms.daily-digest', async () => {
@@ -174,5 +224,6 @@ export async function registerCommsWorkers(deps: CommsDeps): Promise<void> {
   await registerNotifyOwnerWorker(deps);
   await registerInvoiceSmsWorker(deps);
   await registerEstimateSmsWorker(deps);
+  await registerBookingConfirmationWorker(deps);
   await registerDailyDigestWorker(deps);
 }

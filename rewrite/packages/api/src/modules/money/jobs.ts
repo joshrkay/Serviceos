@@ -118,6 +118,38 @@ export const scheduleAppointmentCommand = defineCommand({
 });
 
 /**
+ * Slot resolution for a 1-truck shop: one crew, so visits must not overlap.
+ * Starting from the requested time, slides past any conflicting scheduled
+ * visits (search capped at 14 days). Full feasibility scoring stays out of
+ * scope per the rewrite plan.
+ */
+export async function findNextAvailableSlot(
+  client: import('pg').PoolClient,
+  tenantId: string,
+  requestedStart: Date,
+  durationMinutes: number,
+): Promise<{ startsAt: Date; adjusted: boolean }> {
+  const durationMs = durationMinutes * 60_000;
+  const horizon = new Date(requestedStart.getTime() + 14 * 86_400_000);
+  let candidate = new Date(requestedStart);
+  for (let i = 0; i < 100 && candidate < horizon; i += 1) {
+    const conflict = await client.query<{ ends_at: Date }>(
+      `SELECT ends_at FROM appointments
+       WHERE tenant_id = $1 AND status = 'scheduled'
+         AND starts_at < $3 AND ends_at > $2
+       ORDER BY ends_at DESC
+       LIMIT 1`,
+      [tenantId, candidate, new Date(candidate.getTime() + durationMs)],
+    );
+    if (!conflict.rows[0]) {
+      return { startsAt: candidate, adjusted: candidate.getTime() !== requestedStart.getTime() };
+    }
+    candidate = new Date(conflict.rows[0].ends_at);
+  }
+  return { startsAt: candidate, adjusted: true };
+}
+
+/**
  * Dispatch action for a 1-truck shop: the visit happened. Marks the
  * appointment completed and the job done, which is what makes the job
  * invoiceable in the time-to-cash flow.

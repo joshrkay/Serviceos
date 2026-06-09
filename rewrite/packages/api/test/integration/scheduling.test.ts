@@ -106,6 +106,42 @@ describe('scheduling and dispatch flow', () => {
     expect(jobRow.rows[0].status).toBe('scheduled');
   });
 
+  it('never double-books: a conflicting AI booking slides to the next free slot and confirms the customer', async () => {
+    const startsAt = new Date(Date.now() + 5 * 86_400_000);
+    startsAt.setUTCMinutes(0, 0, 0);
+    const bookTwice = async (phone: string) =>
+      env.bus.execute(executeProposalPayloadCommand, systemScope, {
+        type: 'schedule_job',
+        payload: {
+          customerName: `Caller ${phone}`,
+          customerPhone: phone,
+          title: 'Same-slot request',
+          startsAt: startsAt.toISOString(),
+          durationMinutes: 60,
+        },
+      });
+
+    const first = await bookTwice('+15554201');
+    const second = await bookTwice('+15554202');
+
+    expect(first.adjustedForConflict).toBe(false);
+    expect(first.scheduledFor).toBe(startsAt.toISOString());
+    // Second request for the identical slot slides to the end of the first.
+    expect(second.adjustedForConflict).toBe(true);
+    expect(second.scheduledFor).toBe(new Date(startsAt.getTime() + 3_600_000).toISOString());
+
+    // Both customers get a booking-confirmation side effect, atomically.
+    const outbox = await withTenantTransaction(env.db, tenantId, (client) =>
+      client.query(
+        `SELECT dedupe_key FROM outbox WHERE tenant_id = $1 AND topic = 'comms.booking-confirmation'`,
+        [tenantId],
+      ),
+    );
+    const keys = outbox.rows.map((row) => row.dedupe_key);
+    expect(keys).toContain(`booking-confirmation:${first.appointmentId}`);
+    expect(keys).toContain(`booking-confirmation:${second.appointmentId}`);
+  });
+
   it('AI dispatch path: approved schedule_job proposal lands on the schedule view', async () => {
     const approve = makeApproveProposalCommand(0);
     const startsAt = new Date(Date.now() + 2 * 86_400_000).toISOString();
