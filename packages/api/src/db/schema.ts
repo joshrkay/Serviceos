@@ -3842,6 +3842,68 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS bill_labor_from_time_entries BOOLEAN NOT NULL DEFAULT false;
   `,
+
+  // Voice CSR parity — bilingual opt-in + single-line human transfer.
+  // (Renumbered to 152/153 on merge: main landed 147–151 first; migrations
+  // are append-only and ordered, so these slot in after.)
+  //   * transfer_number: E.164 line the inbound-CSR warm transfer dials. When
+  //     set it REPLACES the on-call rotation for the standard human handoff
+  //     (low-confidence / caller-requested). Nullable — tenants without it fall
+  //     back to the rotation path.
+  //   * supported_languages: opt-in language stack for the voice agent. Defaults
+  //     to ['en']; a tenant opts into Spanish by storing ARRAY['en','es']. The
+  //     language detector only switches a call to 'es' when 'es' is present here.
+  // App/Zod layer constrains values to the {en,es} subset; the DB keeps the
+  // permissive TEXT[] so a future language add doesn't need a CHECK rewrite.
+  '152_voice_parity_transfer_and_languages': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS transfer_number TEXT,
+      ADD COLUMN IF NOT EXISTS supported_languages TEXT[] NOT NULL DEFAULT ARRAY['en']::TEXT[];
+  `,
+
+  // call_me_back_tasks — first-class follow-up captured when a warm transfer to
+  // transfer_number fails (no-answer/busy). The AI takes a callback message from
+  // the caller; the async sweep (call-me-back-worker, P0-009 pattern) notifies
+  // the CSR. Distinct from proposals: a callback is an operational task, not an
+  // AI mutation requiring approval.
+  '153_create_call_me_back_tasks': `
+    CREATE TABLE IF NOT EXISTS call_me_back_tasks (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      session_id TEXT,
+      call_sid TEXT,
+      caller_phone TEXT NOT NULL,
+      caller_name TEXT,
+      callback_message TEXT,
+      intent_summary TEXT,
+      reason TEXT NOT NULL DEFAULT 'transfer_failed',
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'notified', 'completed', 'cancelled')),
+      scheduled_for TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE call_me_back_tasks ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE call_me_back_tasks FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_call_me_back ON call_me_back_tasks;
+    CREATE POLICY tenant_isolation_call_me_back ON call_me_back_tasks
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+    CREATE INDEX IF NOT EXISTS idx_cmb_tenant
+      ON call_me_back_tasks (tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_cmb_pending
+      ON call_me_back_tasks (tenant_id) WHERE status = 'pending';
+  `,
+
+  // Idempotency for the failed-transfer callback. A Twilio retry of
+  // /callback-message carries the same session id (?sid), so one pending
+  // callback per session lets create() no-op + return the existing row
+  // instead of inserting a duplicate that would notify the CSR twice. Partial
+  // (session_id IS NOT NULL) so non-session-originated rows are unconstrained.
+  '154_call_me_back_session_idempotency': `
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_cmb_session_unique
+      ON call_me_back_tasks (tenant_id, session_id)
+      WHERE session_id IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

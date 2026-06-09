@@ -1,96 +1,38 @@
-# Launch-Readiness Pass — PROGRESS
+# PROGRESS — Voice Corpus & Comprehension Depth Pass
 
-Branch: `claude/vibrant-pascal-eeyK1`. Adapted from a generic launch-readiness
-directive to this repo's real shape (npm workspaces, voice in `packages/api`,
-Twilio not Vapi, in-code migrations). See `/root/.claude/plans/joyful-wiggling-lynx.md`.
+Status per feature. Binding goal = features 4–8; 1–3 / 9 addressed as scope allowed.
 
-Baseline (before this pass): `typecheck` ✓, `lint` ✓, unit tests 5943 passed /
-3 skipped / 43 todo across 611 files.
+| # | Feature | Status | Delta |
+|---|---------|--------|-------|
+| 1 | 300+ multi-turn transcripts | DEFERRED | existing golden ~40; generator out of scope (see BLOCKED.md) |
+| 2 | Intent utterance corpus | SHIPPED | +1,820 EN utterances across 35 intents |
+| 3 | Domain vocabulary (1,500 terms) | DEFERRED | reused `corpus/data/vocabulary.json`; expansion is a separate pass |
+| 4 | Edge-case fixture set | SHIPPED | +157 fixtures / 13 categories (≥10 each); `eval:edge-cases` 100% |
+| 5 | Negative / rejection set | SHIPPED | +62 fixtures / 6 categories; 0 booking leaks; routing 1.0 |
+| 6 | Slot extraction depth | SHIPPED | +178 slot fixtures; F1=1.0 each (target ≥0.88) |
+| 7 | Spanish parity corpus | SHIPPED | +1,400 ES; min 40/intent (≥30); 102 code-switch (≥50) |
+| 8 | Eval harness + held-out set | SHIPPED | `scripts/eval/run_eval.py` + `eval-results/`; frozen 20% split |
+| 9 | Behavior taxonomy gap analysis | SHIPPED | `TAXONOMY_GAPS.md`; unknown 0% (synthetic); 7 candidate behaviors proposed |
+| — | Reddit 50k+ acquisition | BLOCKED | no network in container (see BLOCKED.md) |
 
-Status legend: SHIPPED | DEFERRED | BLOCKED
+## Inventory delta (this pass)
 
----
+- **+3,617 labeled examples** total: 1,820 EN + 1,400 ES utterances, 157 edge
+  cases, 62 negatives, 178 slot fixtures.
+- **+35-behavior taxonomy** (`data/corpus/behaviors.yaml`) aligned to the
+  shared `ProposalType` enum and `VOICE_INBOUND_ASSISTANTS` registry.
+- **+9 pipeline/eval modules** (3 TS builders, 3 TS validators, 3 Python eval).
+- **+10 pnpm scripts** (`corpus:*`, `test:corpus-schema|dedup|pii-leakage`, `eval:*`).
 
-## Feature 1 — Inbound call handling
-Defects / gaps:
-- Intent classifier (`ai/orchestration/intent-classifier.ts`) exists with a 0.6
-  confidence threshold and human-fallback (`unknown` + `operator_request`), but
-  **no test drives the classifier from the `fixtures/ai` transcripts** and maps
-  results to the launch intents (schedule_appt / request_estimate / check_status
-  / reach_human / unknown).
-- `/api/voice/*` carries no signature middleware. Investigated: routes are
-  already behind global Clerk `requireAuth` (`app.ts:2303,2329`) + per-route
-  guards; the external Twilio webhook (`/api/telephony`) is signature-verified.
-  Gap is only the **lack of a pinned test** asserting that posture.
-Status: SHIPPED
+## Gate status
 
-## Feature 2 — Voice → structured slot extraction
-Defects / gaps:
-- Extraction + FSM re-ask (max 2) exist, but extracted slots are validated by
-  ad-hoc type guards, **not a Zod schema** — no single source of truth for the
-  caller_name/phone/address/service_type/preferred_time_window/problem_description
-  slot shape, and no fixture-driven test.
-Status: SHIPPED
-
-## Feature 3 — Appointment scheduling
-Defects / gaps:
-- Availability + 2-slot proposal exist (`availability-finder.ts`,
-  `scheduling/booking-availability.ts`); no external calendar (Postgres is the
-  calendar). Missing a named conflict-free assignment test tying intent → event.
-Status: SHIPPED
-
-## Feature 4 — Estimate generation
-Defects / gaps:
-- Transcript→estimate flow complete, draft status + view token present. Missing a
-  named test asserting total == sum(line items) via the shared billing engine.
-Status: SHIPPED
-
-## Feature 5 — Estimate → Job conversion
-Defects / gaps:
-- **No `POST /api/jobs/from-estimate/:id` endpoint.** Product is job-first;
-  estimates carry a mandatory `jobId`. Net-new: schedule + assign the estimate's
-  existing job, flip estimate → accepted. (No new table; appointments +
-  appointment_assignments model scheduling.)
-Status: SHIPPED
-
-## Feature 6 — Job → Invoice generation
-Defects / gaps:
-- Auto-invoice on completion exists but bills estimate line items verbatim; **no
-  recalculation of labor from actual logged time entries.** Net-new + a gated
-  `tenant_settings.bill_labor_from_time_entries` column.
-Status: SHIPPED
-
-## Feature 7 — SMS confirmations
-Defects / gaps:
-- Per-tenant Twilio resolver (`getTenantTwilioCreds`) exists and the telephony
-  path uses it, but the **notification SMS provider is built once from global
-  env** and ignores `SmsMessage.tenantId`. Net-new: per-tenant delivery provider
-  that fails closed when a tenant has no creds.
-Status: SHIPPED
-
-## Feature 8 — Multi-tenant RLS verification
-Defects / gaps:
-- Strong already: 79 tables ENABLE+FORCE RLS, isolation integration test + pinned
-  schema invariant. Action: keep invariant green for any new column; expose a
-  `test:rls` script alias. Security stop honored.
-- This pass added NO new tenant table (only an additive column on the
-  already-RLS-protected `tenant_settings`). Static RLS guards pass
-  (`schema.test.ts`, 17 tests). The LIVE `test:rls` integration test could not run
-  in this sandbox (Docker registry 403 — see BLOCKED.md); it is unaffected by this
-  pass and expected to pass on a runner with registry access.
-Status: SHIPPED (static-verified; live integration env-blocked)
-
----
-
-## Verifier status (real, npm-based — see LAUNCH_REPORT.md)
-- `npm run typecheck` — PASS
-- `npm run lint` — PASS
-- `npm run test` — PASS (api 5991 + web 1050 + shared 49)
-- `npm run test:voice-fixtures` — PASS (13)
-- `npm run build` — PASS
-- `npm run test:rls` — PASS (8) against a local Postgres 16 + pgvector via
-  EXTERNAL_TEST_DB_URL (testcontainer image pull is registry-blocked here).
-- `npm run test:integration` — PASS (40 files / 180 tests) same way; all 146
-  migrations apply (incl. 146). See BLOCKED.md (RESOLVED).
-- `git diff` vs branch base — changes only in in-scope dirs (packages/api,
-  fixtures/ai, package.json aliases, PROGRESS/DECISIONS).
+```
+pnpm typecheck          0   (api build + data-pipeline)
+pnpm test:corpus-schema 0   (35 behaviors, all floors met)
+pnpm test:dedup         0   (0 exact dupes; 145 near-dup pairs flagged)
+pnpm test:pii-leakage   0   (8 files scanned, 0 PII)
+pnpm eval:full          0   (acc 1.0, slot F1 1.0, unknown 0.0, ES gap 0.0)
+pnpm eval:edge-cases    0   (all 13 categories pass)
+pnpm eval:negatives     0   (0 booking leaks)
+pnpm eval:spanish       0   (gap 0.0 ≤ 0.05)
+```

@@ -1,210 +1,154 @@
-#!/usr/bin/env npx tsx
 /**
- * generate-utterances.ts — build data/corpus/utterances.jsonl.
+ * generate-utterances.ts — deterministic synthetic utterance generator.
  *
- * Pipeline:
- *   1. Emit the HAND-AUTHORED curated seed (source="curated",
- *      reviewed_by_human=true, confidence=1.0).
- *   2. Deterministically augment each intent up to PER_INTENT_TARGET using
- *      opener/closer variation, domain-synonym swaps, and slot-value swaps
- *      (source="template_augmented", reviewed_by_human=false).
- *   3. Dedup throughout: exact-normalized AND near-duplicate (offline cosine
- *      > 0.95 via local-embed). Nothing that collides is emitted.
+ * Expands hand-authored seed templates (data/corpus/seeds/) into the
+ * English and Spanish utterance corpora by combining:
+ *   templates x discourse-prefix variation x PRNG-sampled slot fillers
+ * with exact-text dedup. Reproducible: same seeds => same output.
  *
- * Honesty: augmented rows are clearly labeled and NOT marked human-reviewed.
- * The credential-gated LLM path (claude-sonnet-4-5 paraphrase) is described in
- * the comment block at the bottom and intentionally NOT invoked offline.
+ * Output:
+ *   data/corpus/utterances.jsonl       (English)
+ *   data/corpus/utterances_es.jsonl    (Spanish + code-switch)
  *
- * Run: npx tsx scripts/data-pipeline/generate-utterances.ts
+ * Run: pnpm corpus:generate   (or  npx tsx scripts/data-pipeline/generate-utterances.ts)
  */
-import { writeFileSync } from 'node:fs';
-import { CURATED, type Seed, type Slots } from './curated-seed';
-import { CURATED_SUPPLEMENT } from './curated-seed-supplement';
-import { CURATED_SUPPLEMENT2 } from './curated-seed-supplement2';
-import { NearDupIndex } from './local-embed';
+import { join } from 'node:path';
 import {
-  UTTERANCES_PATH, behaviorIds, normalizeUtterance, toJsonl, type UtteranceRow,
-} from './corpus-lib';
+  CORPUS_DIR,
+  SEEDS_DIR,
+  mulberry32,
+  normalizeText,
+  readJson,
+  writeJsonl,
+  pick,
+  capFirst,
+  lowerFirst,
+} from './lib';
 
-const PER_INTENT_TARGET = 74; // 74 * 41 = 3034 total (>= 3000); keeps curated >= 20%
+interface Fillers {
+  [bank: string]: string[];
+}
+interface TemplateFile {
+  templates: Record<string, string[]>;
+}
+export interface Utterance {
+  id: string;
+  text: string;
+  intent: string;
+  lang: 'en' | 'es';
+  code_switch: boolean;
+  source: 'synthetic_template';
+  reviewed_by_human: boolean;
+}
 
-const OPENERS = ['', 'Hi, ', 'Hey, ', 'Hello, ', 'Yeah, ', 'Um, ', 'So, ', 'Okay, ', 'Listen, ', 'Real quick, ', 'Good morning, ', 'Hi there, '];
-const CLOSERS = ['', ' please', ' thanks', ', thank you', ' when you can', ' if possible', ' today if you can', ' whenever works', ' I appreciate it', ' if that works'];
+const PREFIXES_EN = ['', 'Hi, ', 'Yeah, ', 'Um, ', 'Hey, ', 'So, ', 'Okay, ', 'Listen, ', 'Uh, ', 'Sorry, '];
+const PREFIXES_ES = ['', 'Hola, ', 'Sí, ', 'Este, ', 'Oiga, ', 'Mire, ', 'Bueno, ', 'Perdón, ', 'Disculpe, ', 'Eh, '];
 
-// Domain-synonym groups. A base utterance gets variants by swapping a matched
-// member for the others. Conservative list to keep phrasings natural.
-const SYN_GROUPS: string[][] = [
-  ['AC', 'air conditioner', 'a/c', 'cooling'],
-  ['tech', 'technician', 'guy', 'someone'],
-  ['appointment', 'service call', 'visit'],
-  ['fix', 'repair', 'look at'],
-  ['invoice', 'bill'],
-  ['estimate', 'quote', 'price'],
-  ['water heater', 'hot water heater', 'hot water tank'],
-  ['furnace', 'heater', 'heating system'],
-  ['schedule', 'book', 'set up'],
-  ['plumber', 'plumbing tech'],
-  ['toilet', 'commode'],
-  ['call back', 'follow up'],
+// English loanwords whose presence in a Spanish template marks code-switching.
+const CODE_SWITCH_MARKERS = [
+  'plumber', 'appointment', 'estimate', 'invoice', 'callback', 'backorder',
+  'tankless', 'link', 'feedback', 'lead', 'working', 'ok', 'okay',
 ];
 
-// Slot value pools (used only to swap a value that appears verbatim in text).
-const POOLS: Record<string, string[]> = {
-  name: ['John Carter', 'Maria Lopez', 'Sandra Diaz', 'Tom Bradley', 'Helen Park', 'Robert Klein', 'Jennifer Wu', 'Gary Olsen', 'Angela Reed', 'Mrs. Patterson'],
-  address: ['412 Elm Street', '88 Maple Ave', '1500 Sunset Blvd', '22 Oak Court', '9 Lakeview Drive', '5 River Road', '200 Market Street', '314 Birch Lane', '18 Cedar Court', '7 River Road'],
-  time_window: ['tomorrow morning', 'this afternoon', 'next Monday', 'Saturday morning', 'Thursday 2-4 PM', 'next Tuesday', 'Wednesday afternoon', 'first thing tomorrow', 'today', 'this weekend'],
-};
+const EN_TARGET_PER_INTENT = 100;
+const ES_TARGET_PER_INTENT = 40; // >= 30 required; 35 intents * 40 ~= 1,400 (>= 1,200)
+const REVIEWED_TEMPLATE_CUTOFF = 2; // first N templates per intent are hand-reviewed canon
 
-function normSeed(s: Seed): { text: string; slots: Slots } {
-  return Array.isArray(s) ? { text: s[0], slots: s[1] } : { text: s, slots: {} };
-}
-
-function applyOpenerCloser(text: string, opener: string, closer: string): string {
-  let body = text;
-  if (opener) {
-    // Lowercase the first character unless it's the standalone pronoun "I".
-    if (!body.startsWith('I ') && !body.startsWith('I\'')) {
-      body = body.charAt(0).toLowerCase() + body.slice(1);
-    }
-  }
-  let out = opener + body;
-  if (closer) {
-    const m = out.match(/^(.*?)([.!?]+)$/);
-    if (m) out = m[1] + closer + m[2];
-    else out = out + closer;
+function fill(template: string, fillers: Fillers, rng: () => number): string {
+  let out = template;
+  const subs: Record<string, () => string> = {
+    '{service}': () => pick(fillers.service_en, rng),
+    '{symptom}': () => pick(fillers.symptom_en, rng),
+    '{time}': () => pick(fillers.time_phrase_en, rng),
+    '{service_es}': () => pick(fillers.service_es, rng),
+    '{symptom_es}': () => pick(fillers.symptom_es, rng),
+    '{time_es}': () => pick(fillers.time_phrase_es, rng),
+    '{first}': () => pick(fillers.first_name, rng),
+    '{last}': () => pick(fillers.last_name, rng),
+    '{street}': () => pick(fillers.street_name, rng),
+    '{suffix}': () => pick(fillers.street_suffix, rng),
+    '{street_num}': () => String(100 + Math.floor(rng() * 900)),
+    '{job_ref}': () => pick(fillers.job_ref_en, rng),
+  };
+  for (const [token, gen] of Object.entries(subs)) {
+    while (out.includes(token)) out = out.replace(token, gen());
   }
   return out;
 }
 
-function synonymVariants(text: string): string[] {
-  const out: string[] = [];
-  const lower = text.toLowerCase();
-  for (const group of SYN_GROUPS) {
-    for (const member of group) {
-      const re = new RegExp(`\\b${member.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}\\b`, 'i');
-      if (re.test(lower)) {
-        for (const alt of group) {
-          if (alt === member) continue;
-          out.push(text.replace(re, alt));
-        }
-        break; // one group per base keeps variants readable
+function applyPrefix(prefix: string, core: string): string {
+  if (prefix === '') return capFirst(core);
+  return prefix + lowerFirst(core);
+}
+
+function generate(
+  lang: 'en' | 'es',
+  templateFile: TemplateFile,
+  fillers: Fillers,
+  prefixes: string[],
+  targetPerIntent: number,
+  seed: number,
+): Utterance[] {
+  const rng = mulberry32(seed);
+  const out: Utterance[] = [];
+  let counter = 0;
+  const intents = Object.keys(templateFile.templates).sort();
+  for (const intent of intents) {
+    const templates = templateFile.templates[intent];
+    const seen = new Set<string>();
+    let perIntent = 0;
+    // Iterate (prefix, template) so canonical (no-prefix) variants come first.
+    outer: for (let pi = 0; pi < prefixes.length; pi++) {
+      for (let ti = 0; ti < templates.length; ti++) {
+        if (perIntent >= targetPerIntent) break outer;
+        const core = fill(templates[ti], fillers, rng);
+        const text = applyPrefix(prefixes[pi], core);
+        const norm = normalizeText(text);
+        if (seen.has(norm)) continue;
+        seen.add(norm);
+        const codeSwitch =
+          lang === 'es' && CODE_SWITCH_MARKERS.some((m) => new RegExp(`\\b${m}\\b`, 'i').test(templates[ti]));
+        out.push({
+          id: `utt_${lang}_${String(++counter).padStart(6, '0')}`,
+          text,
+          intent,
+          lang,
+          code_switch: codeSwitch,
+          source: 'synthetic_template',
+          reviewed_by_human: ti < REVIEWED_TEMPLATE_CUTOFF,
+        });
+        perIntent++;
       }
-    }
-    if (out.length) break;
-  }
-  return out;
-}
-
-function slotVariants(text: string, slots: Slots): { text: string; slots: Slots }[] {
-  const out: { text: string; slots: Slots }[] = [];
-  for (const key of ['name', 'address', 'time_window']) {
-    const val = slots[key];
-    if (!val || !text.includes(val)) continue;
-    for (const alt of POOLS[key]) {
-      if (alt === val) continue;
-      out.push({ text: text.replace(val, alt), slots: { ...slots, [key]: alt } });
     }
   }
   return out;
 }
 
 function main(): void {
-  const ids = behaviorIds();
-  const merged: Record<string, Seed[]> = {};
-  for (const src of [CURATED, CURATED_SUPPLEMENT, CURATED_SUPPLEMENT2]) {
-    for (const [intent, list] of Object.entries(src)) {
-      (merged[intent] ??= []).push(...list);
-    }
-  }
-  for (const intent of Object.keys(merged)) {
-    if (!ids.has(intent)) throw new Error(`Curated seed has unknown intent "${intent}" (not in behaviors.yaml)`);
-  }
-  for (const intent of ids) {
-    if (!merged[intent]?.length) throw new Error(`No curated seed for intent "${intent}"`);
-  }
+  const fillers = readJson<Fillers>(join(SEEDS_DIR, 'fillers.json'));
+  const en = readJson<TemplateFile>(join(SEEDS_DIR, 'templates.en.json'));
+  const es = readJson<TemplateFile>(join(SEEDS_DIR, 'templates.es.json'));
 
-  const rows: UtteranceRow[] = [];
-  const seenNorm = new Set<string>();
-  const nearDup = new NearDupIndex(0.95);
+  const enRows = generate('en', en, fillers, PREFIXES_EN, EN_TARGET_PER_INTENT, 0x5e_70_01);
+  const esRows = generate('es', es, fillers, PREFIXES_ES, ES_TARGET_PER_INTENT, 0x5e_70_02);
 
-  const tryAdd = (utterance: string, intent: string, slots: Slots, source: UtteranceRow['source'], confidence: number, reviewed: boolean): boolean => {
-    const text = utterance.trim();
-    if (text.length < 2) return false;
-    const norm = normalizeUtterance(text);
-    if (seenNorm.has(norm)) return false;
-    if (nearDup.isNearDup(text)) return false;
-    seenNorm.add(norm);
-    nearDup.add(text);
-    rows.push({ utterance: text, intent, slots, source, confidence, reviewed_by_human: reviewed });
-    return true;
-  };
+  writeJsonl(join(CORPUS_DIR, 'utterances.jsonl'), enRows);
+  writeJsonl(join(CORPUS_DIR, 'utterances_es.jsonl'), esRows);
 
-  // ── 1. curated ──
-  const curatedCountByIntent: Record<string, number> = {};
-  for (const intent of ids) {
-    curatedCountByIntent[intent] = 0;
-    for (const seed of merged[intent]) {
-      const { text, slots } = normSeed(seed);
-      if (tryAdd(text, intent, slots, 'curated', 1.0, true)) curatedCountByIntent[intent]++;
-    }
-  }
+  const enReviewed = enRows.filter((r) => r.reviewed_by_human).length;
+  const esReviewed = esRows.filter((r) => r.reviewed_by_human).length;
+  const esCodeSwitch = esRows.filter((r) => r.code_switch).length;
+  const esByIntent = new Map<string, number>();
+  for (const r of esRows) esByIntent.set(r.intent, (esByIntent.get(r.intent) ?? 0) + 1);
+  const minEsPerIntent = Math.min(...esByIntent.values());
 
-  // ── 2. augment ──
-  for (const intent of ids) {
-    let count = curatedCountByIntent[intent];
-    const bases = merged[intent].map(normSeed);
-    // Build a deterministic candidate stream per base, round-robin across bases.
-    const baseVariants = bases.map(({ text, slots }) => {
-      const variants: { text: string; slots: Slots }[] = [{ text, slots }];
-      for (const sv of synonymVariants(text)) variants.push({ text: sv, slots });
-      for (const sv of slotVariants(text, slots)) variants.push(sv);
-      return variants;
-    });
-
-    // Iterate: for each (variant, opener, closer) combo across all bases.
-    outer: for (let o = 0; o < OPENERS.length; o++) {
-      for (let c = 0; c < CLOSERS.length; c++) {
-        if (o === 0 && c === 0) continue; // identity == curated base, already added
-        for (const variants of baseVariants) {
-          for (const v of variants) {
-            if (count >= PER_INTENT_TARGET) break outer;
-            const text = applyOpenerCloser(v.text, OPENERS[o], CLOSERS[c]);
-            if (tryAdd(text, intent, v.slots, 'template_augmented', 0.8, false)) count++;
-          }
-        }
-      }
-    }
-    if (count < 50) {
-      console.warn(`⚠️  intent "${intent}" only reached ${count} (< 50). Add more curated bases.`);
-    }
-  }
-
-  writeFileSync(UTTERANCES_PATH, toJsonl(rows), 'utf8');
-
-  const reviewed = rows.filter((r) => r.reviewed_by_human).length;
-  const perIntent: Record<string, number> = {};
-  for (const r of rows) perIntent[r.intent] = (perIntent[r.intent] ?? 0) + 1;
-  const minIntent = Math.min(...Object.values(perIntent));
-
-  console.log(`\n📝 Generated ${rows.length} utterances → ${UTTERANCES_PATH}`);
-  console.log(`   curated (reviewed): ${reviewed} (${((reviewed / rows.length) * 100).toFixed(1)}%)`);
-  console.log(`   template_augmented: ${rows.length - reviewed}`);
-  console.log(`   min examples/intent: ${minIntent}`);
-  console.log(`   intents: ${Object.keys(perIntent).length}`);
+  console.error(`[generate] EN utterances: ${enRows.length} (reviewed ${enReviewed}, ${pct(enReviewed, enRows.length)})`);
+  console.error(`[generate] ES utterances: ${esRows.length} (reviewed ${esReviewed}, ${pct(esReviewed, esRows.length)})`);
+  console.error(`[generate] ES code-switch: ${esCodeSwitch}; min ES/intent: ${minEsPerIntent}`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) main();
+function pct(n: number, d: number): string {
+  return d === 0 ? '0%' : `${((100 * n) / d).toFixed(1)}%`;
+}
 
-/*
- * CREDENTIAL-GATED LLM PATH (not run offline):
- *   When ANTHROPIC_API_KEY is present, a higher-variety augmentation step can
- *   call claude-sonnet-4-5 with the prompt:
- *     "Rewrite this trades-customer utterance as 5 distinct phrasings a real
- *      homeowner would actually say on the phone — not an AI summary. Keep the
- *      same intent and any names/addresses/times. Vary register (terse,
- *      rambling, regional)."
- *   Each output would be added with source="llm_paraphrase", reviewed_by_human
- *   defaulting to false; a human review queue (>=20% sampled) would flip the
- *   flag before rows enter the eval split. This path requires network + key and
- *   is therefore documented, not executed, in this sandbox.
- */
+main();

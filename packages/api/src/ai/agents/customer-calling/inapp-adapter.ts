@@ -43,6 +43,8 @@ import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
 import { resolveSchedulingEntities } from './entity-resolution';
 import { detectLanguage, renderTtsText } from './tts-copy';
+import type { Language } from '../../i18n/i18n';
+import { isLanguageSupported } from '../../orchestration/language-detector';
 import type { VoicePersona, VoicePersonaResolver } from '../../../settings/voice-persona-resolver';
 import type { RepairTemplate } from '../../../verticals/registry';
 import type { DroppedCallScheduler } from '../../../sms/recovery/scheduler';
@@ -131,6 +133,15 @@ export interface InAppAdapterDeps {
    * recovery is silently skipped — there is no one to text.
    */
   callerPhoneResolver?: (session: VoiceSession) => string | undefined;
+  /**
+   * Voice-parity — resolves the tenant's opt-in language stack
+   * (`tenant_settings.supported_languages`). When wired, the result is stored
+   * on the session and the first-utterance language gate only switches a call
+   * to Spanish if 'es' is in the stack. Optional: when absent, the session's
+   * `supportedLanguages` stays undefined and Spanish detection is permissive
+   * (legacy behavior), so existing fixtures keep working unchanged.
+   */
+  supportedLanguagesResolver?: (tenantId: string) => Promise<Language[] | undefined>;
 }
 
 export interface StartSessionResult {
@@ -270,6 +281,17 @@ export class InAppVoiceAdapter {
     });
     const convId = conversationId ?? session.id;
 
+    // Voice-parity — resolve the tenant's opt-in language stack so the
+    // first-utterance gate (below in handleInput) can honor it. Best-effort:
+    // a resolver failure leaves the stack undefined (permissive legacy
+    // behavior) rather than blocking the call.
+    if (this.deps.supportedLanguagesResolver) {
+      const stack = await this.deps
+        .supportedLanguagesResolver(tenantId)
+        .catch(() => undefined);
+      if (stack && stack.length > 0) session.supportedLanguages = stack;
+    }
+
     // B2: persist a voice_sessions row at session start. Fire-and-forget
     // so a transient repo error never blocks the call.
     if (this.deps.voiceSessionRepo) {
@@ -352,8 +374,17 @@ export class InAppVoiceAdapter {
 
     session.transcript.push(`caller: ${text}`);
     // VOX-02: sticky language detection from the caller's own words.
-    if (detectLanguage(text) === 'es') session.language = 'es';
-    else if (!session.language) session.language = 'en';
+    // Voice-parity — only switch to Spanish when the tenant opted into 'es'
+    // (session.supportedLanguages). When the stack is unresolved (undefined),
+    // treat it as permissive so legacy sessions keep auto-detecting Spanish.
+    if (
+      detectLanguage(text) === 'es' &&
+      isLanguageSupported('es', session.supportedLanguages ?? ['en', 'es'])
+    ) {
+      session.language = 'es';
+    } else if (!session.language) {
+      session.language = 'en';
+    }
 
     // §3B + §3D: vertical + intake-question prompt section.
     // §3C: caller-plan prompt section (only when caller is identified).

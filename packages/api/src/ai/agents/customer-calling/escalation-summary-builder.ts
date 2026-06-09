@@ -120,6 +120,40 @@ function intentShort(intent: EscalationContext['intent']): string {
   }
 }
 
+/**
+ * Voice-parity (Feature 7) — a short imperative "what to do next" derived from
+ * the caller's intent, so the receiving CSR sees a suggested next action in the
+ * whisper / SMS / panel without parsing the transcript.
+ */
+function nextActionShort(intent: EscalationContext['intent']): string {
+  switch (intent.type) {
+    case 'create_appointment':
+    case 'create_booking':
+      return 'book the visit';
+    case 'reschedule_appointment':
+      return 'reschedule the visit';
+    case 'cancel_appointment':
+      return 'cancel the visit';
+    case 'confirm_appointment':
+      return 'confirm the visit';
+    case 'create_invoice':
+    case 'lookup_invoices':
+      return 'pull up the invoice';
+    case 'lookup_balance':
+      return 'check the balance';
+    case 'create_customer':
+      return 'set up the new customer';
+    case 'draft_estimate':
+      return 'prepare the estimate';
+    case 'emergency_dispatch':
+      return 'dispatch a tech now';
+    case 'reassign_appointment':
+      return 'assign a different tech';
+    default:
+      return 'help the caller';
+  }
+}
+
 function membershipPhrase(customer?: EscalationContext['customer']): string {
   if (!customer?.isMember) return '';
   return customer.memberTier ? `${customer.memberTier} member.` : 'Member.';
@@ -190,15 +224,16 @@ export function buildEscalationSummary(ctx: EscalationContext): EscalationSummar
   const intent = intentShort(ctx.intent);
   const member = membershipPhrase(ctx.customer);
   const reasonText = reasonShort(ctx.reason);
+  const nextAction = nextActionShort(ctx.intent);
 
   // Whisper: target ≤25 words. Drop membership phrase if needed, then smart-truncate.
-  const whisperFull = buildWhisperString(callerName, intent, member, reasonText);
+  const whisperFull = `${buildWhisperString(callerName, intent, member, reasonText)} Suggested: ${nextAction}.`;
   let whisper: string;
   if (whisperFull.split(/\s+/).length <= 25) {
     whisper = whisperFull;
   } else {
-    // Try dropping the membership phrase first.
-    const withoutMember = buildWhisperString(callerName, intent, '', reasonText);
+    // Try dropping the membership phrase first (keep the suggested action).
+    const withoutMember = `${buildWhisperString(callerName, intent, '', reasonText)} Suggested: ${nextAction}.`;
     if (withoutMember.split(/\s+/).length <= 25) {
       whisper = withoutMember;
     } else {
@@ -214,7 +249,7 @@ export function buildEscalationSummary(ctx: EscalationContext): EscalationSummar
   const linkBudget = linkPlaceholder.length + 1; // space before link
   const coreBudget = 160 - linkBudget;
 
-  let smsCore = `${ctx.shopName}: Incoming call from ${callerName} (${phoneReadable}). Re: ${intent}.${member ? ' ' + member : ''} Reason: ${reasonText}.`;
+  let smsCore = `${ctx.shopName}: Incoming call from ${callerName} (${phoneReadable}). Re: ${intent}.${member ? ' ' + member : ''} Reason: ${reasonText}. Next: ${nextAction}.`;
 
   if (smsCore.length > coreBudget) {
     // Truncate at last word boundary within budget, append ellipsis.
@@ -237,7 +272,7 @@ export function buildEscalationSummary(ctx: EscalationContext): EscalationSummar
     },
     lastInteraction: lastInteractionText(ctx.customer, ctx.tenantTimezone),
     intent: {
-      summary: `Calling about: ${intent}`,
+      summary: `Calling about: ${intent}. Suggested next: ${nextAction}`,
       entities: entitiesAsList(ctx.intent.entities),
     },
     reason: {
