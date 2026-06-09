@@ -71,8 +71,10 @@ export class PgCallMeBackRepository
   async listPending(tenantId: string): Promise<CallMeBackTask[]> {
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
+        // Only callbacks that are due now — a future scheduled_for stays out of
+        // the sweep until its time arrives.
         `SELECT * FROM call_me_back_tasks
-          WHERE tenant_id = $1 AND status = 'pending'
+          WHERE tenant_id = $1 AND status = 'pending' AND scheduled_for <= NOW()
           ORDER BY scheduled_for ASC`,
         [tenantId],
       );
@@ -81,25 +83,29 @@ export class PgCallMeBackRepository
   }
 
   async markNotified(tenantId: string, id: string): Promise<CallMeBackTask | null> {
-    return this.transition(tenantId, id, 'notified');
+    // Only pending → notified. Guards against a stale pending list clobbering a
+    // row a CSR completed/cancelled between listPending and here.
+    return this.transition(tenantId, id, 'notified', ['pending']);
   }
 
   async markCompleted(tenantId: string, id: string): Promise<CallMeBackTask | null> {
-    return this.transition(tenantId, id, 'completed');
+    // A callback can be completed whether or not the CSR was notified first.
+    return this.transition(tenantId, id, 'completed', ['pending', 'notified']);
   }
 
   private async transition(
     tenantId: string,
     id: string,
     status: CallMeBackStatus,
+    fromStatuses: CallMeBackStatus[],
   ): Promise<CallMeBackTask | null> {
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
         `UPDATE call_me_back_tasks
             SET status = $3, updated_at = NOW()
-          WHERE tenant_id = $1 AND id = $2
+          WHERE tenant_id = $1 AND id = $2 AND status = ANY($4::text[])
           RETURNING *`,
-        [tenantId, id, status],
+        [tenantId, id, status, fromStatuses],
       );
       return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
     });

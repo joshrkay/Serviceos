@@ -92,27 +92,36 @@ export class InMemoryCallMeBackRepository implements CallMeBackRepository {
   }
 
   async listPending(tenantId: string): Promise<CallMeBackTask[]> {
+    const now = Date.now();
     return Array.from(this.rows.values())
-      .filter((r) => r.tenantId === tenantId && r.status === 'pending')
+      .filter(
+        (r) =>
+          r.tenantId === tenantId &&
+          r.status === 'pending' &&
+          r.scheduledFor.getTime() <= now,
+      )
       .sort((a, b) => a.scheduledFor.getTime() - b.scheduledFor.getTime())
       .map((r) => ({ ...r }));
   }
 
   async markNotified(tenantId: string, id: string): Promise<CallMeBackTask | null> {
-    return this.transition(tenantId, id, 'notified');
+    // Only pending → notified, so a stale list can't clobber a terminal row.
+    return this.transition(tenantId, id, 'notified', ['pending']);
   }
 
   async markCompleted(tenantId: string, id: string): Promise<CallMeBackTask | null> {
-    return this.transition(tenantId, id, 'completed');
+    return this.transition(tenantId, id, 'completed', ['pending', 'notified']);
   }
 
   private transition(
     tenantId: string,
     id: string,
     status: CallMeBackStatus,
+    fromStatuses: CallMeBackStatus[],
   ): CallMeBackTask | null {
     const row = this.rows.get(id);
     if (!row || row.tenantId !== tenantId) return null;
+    if (!fromStatuses.includes(row.status)) return null;
     row.status = status;
     row.updatedAt = new Date();
     this.rows.set(id, row);

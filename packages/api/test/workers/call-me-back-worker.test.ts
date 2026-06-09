@@ -125,3 +125,32 @@ describe('runCallMeBackSweep', () => {
     expect(sms).toContain('Water heater leaking');
   });
 });
+
+describe('InMemoryCallMeBackRepository — pending semantics', () => {
+  it('listPending excludes callbacks scheduled in the future', async () => {
+    const repo = new InMemoryCallMeBackRepository();
+    await repo.create({ tenantId: 'T1', callerPhone: '+15125550142' }); // due now
+    await repo.create({
+      tenantId: 'T1',
+      callerPhone: '+15125550143',
+      scheduledFor: new Date(Date.now() + 60 * 60 * 1000), // 1h out
+    });
+
+    const pending = await repo.listPending('T1');
+    expect(pending).toHaveLength(1);
+    expect(pending[0].callerPhone).toBe('+15125550142');
+  });
+
+  it('markNotified only transitions pending rows (no clobbering terminal status)', async () => {
+    const repo = new InMemoryCallMeBackRepository();
+    const task = await repo.create({ tenantId: 'T1', callerPhone: '+15125550142' });
+
+    // CSR completed it before the sweep got to markNotified.
+    await repo.markCompleted('T1', task.id);
+    const result = await repo.markNotified('T1', task.id);
+
+    expect(result).toBeNull(); // no-op
+    // Status stays completed — not reverted to notified.
+    expect(await repo.listPending('T1')).toHaveLength(0);
+  });
+});
