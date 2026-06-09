@@ -73,6 +73,21 @@ with an `x-dev-user-id` header (the seed prints user ids). Without
 `OPENAI_API_KEY` the LLM gateway uses a deterministic stub provider. Without
 Twilio credentials outbound SMS logs to stdout (`ConsoleSmsProvider`).
 
+## Deploying
+
+One Docker image (see `Dockerfile`): the API serves the built SPA from
+`WEB_DIST_PATH`. Run `node packages/api/dist/db/migrate.js` as the
+pre-deploy command and start `node packages/api/dist/index.js`; health
+check is `GET /health`. Because all background work runs on pg-boss,
+two or more instances are safe from day one — there is no
+"single instance only" constraint.
+
+## Architectural boundaries
+
+`npm run lint:boundaries -w packages/api` (dependency-cruiser) enforces:
+core never imports modules/http, modules never import http, nothing imports
+the composition root, and no circular dependencies.
+
 ## Tests
 
 ```bash
