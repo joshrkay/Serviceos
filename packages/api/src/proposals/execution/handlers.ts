@@ -29,7 +29,7 @@ import { ServiceCreditRepository } from '../../reputation/service-credit';
 import { NoteRepository } from '../../notes/note';
 import { PaymentRepository } from '../../invoices/payment';
 import { ExpenseRepository } from '../../expenses/expense';
-import { AuditRepository } from '../../audit/audit';
+import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { ConflictError } from '../../shared/errors';
 import { JobRepository, createJob } from '../../jobs/job';
 import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
@@ -331,11 +331,40 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
         // as a ConflictError from assignTechnician. The repositories don't
         // share a client/transaction, so we compensate instead: cancel the
         // appointment we just created so a failed booking never leaves an
-        // orphan unassigned appointment behind.
-        await this.appointmentRepo.update(context.tenantId, appointment.id, {
-          status: 'canceled',
-          updatedAt: new Date(),
-        });
+        // orphan unassigned appointment behind. The compensation itself must
+        // never mask the original failure, and its outcome is audited so an
+        // operator can find any orphan it failed to clean up.
+        let compensated = true;
+        try {
+          await this.appointmentRepo.update(context.tenantId, appointment.id, {
+            status: 'canceled',
+            updatedAt: new Date(),
+          });
+        } catch {
+          compensated = false;
+        }
+        if (this.auditRepo) {
+          try {
+            await this.auditRepo.create(
+              createAuditEvent({
+                tenantId: context.tenantId,
+                actorId: context.executedBy,
+                actorRole: 'system',
+                eventType: compensated
+                  ? 'appointment.compensation_canceled'
+                  : 'appointment.compensation_failed',
+                entityType: 'appointment',
+                entityId: appointment.id,
+                metadata: {
+                  reason: 'assignment_failed_after_create',
+                  conflict: err instanceof ConflictError,
+                },
+              }),
+            );
+          } catch {
+            // Audit emission is best-effort here; the original error wins.
+          }
+        }
         if (err instanceof ConflictError) {
           return { success: false, error: err.message };
         }

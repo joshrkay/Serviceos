@@ -142,3 +142,73 @@ describe('P22-001 catalog-resolution', () => {
     });
   });
 });
+
+// Review hardening (PR #525 senior review): degenerate-name and edge cases.
+describe('catalog-resolution — degenerate and edge inputs', () => {
+  const gasket = { id: 'c1', name: 'Gasket', unitPriceCents: 450 };
+  const serviceCall = { id: 'c2', name: 'Plumbing Service Call', unitPriceCents: 12500 };
+
+  it('a punctuation-only catalog name never matches anything', () => {
+    const junk = { id: 'junk', name: '###', unitPriceCents: 1 };
+    const { resolved, unresolved } = resolveSpokenLineItems(
+      [{ description: 'gasket' }],
+      [junk, gasket],
+    );
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].catalogItemId).toBe('c1');
+    expect(unresolved).toHaveLength(0);
+  });
+
+  it('an emoji-only catalog name never matches and never causes false ambiguity', () => {
+    const emoji = { id: 'emoji', name: '🔥🔥', unitPriceCents: 1 };
+    const { resolved } = resolveSpokenLineItems(
+      [{ description: 'plumbing service call' }],
+      [emoji, serviceCall],
+    );
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].catalogItemId).toBe('c2');
+  });
+
+  it('punctuation-only spoken description goes to unresolved, not a match-everything query', () => {
+    const { resolved, unresolved } = resolveSpokenLineItems(
+      [{ description: '!!!' }],
+      [gasket, serviceCall],
+    );
+    expect(resolved).toHaveLength(0);
+    expect(unresolved).toHaveLength(1);
+  });
+
+  it('duplicate catalog names stay ambiguous (never guess between equal-priced dupes)', () => {
+    const dupeA = { id: 'a', name: 'Gasket', unitPriceCents: 450 };
+    const dupeB = { id: 'b', name: 'Gasket', unitPriceCents: 500 };
+    const { resolved, unresolved } = resolveSpokenLineItems(
+      [{ description: 'gasket' }],
+      [dupeA, dupeB],
+    );
+    expect(resolved).toHaveLength(0);
+    expect(unresolved).toHaveLength(1);
+  });
+
+  it('accented characters strip to ascii skeleton and still resolve deterministically', () => {
+    // normalizeForMatch strips non a-z0-9: "Café Valve" -> "caf valve".
+    const accented = { id: 'acc', name: 'Café Valve', unitPriceCents: 700 };
+    const { resolved } = resolveSpokenLineItems([{ description: 'café valve' }], [accented]);
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].catalogItemId).toBe('acc');
+  });
+
+  it('whitespace-only spoken description is unresolved', () => {
+    const { resolved, unresolved } = resolveSpokenLineItems(
+      [{ description: '   ' }],
+      [gasket],
+    );
+    expect(resolved).toHaveLength(0);
+    expect(unresolved).toHaveLength(1);
+  });
+
+  it('short real names (cap, fan) still resolve — no over-aggressive min-length filter', () => {
+    const fan = { id: 'fan', name: 'Fan', unitPriceCents: 9900 };
+    const { resolved } = resolveSpokenLineItems([{ description: 'fan' }], [fan]);
+    expect(resolved).toHaveLength(1);
+  });
+});

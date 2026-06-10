@@ -164,5 +164,45 @@ describe('CreateAppointmentExecutionHandler', () => {
     expect(all).toHaveLength(1);
     expect(all[0].status).toBe('canceled');
   });
-});
 
+  it('a failing compensation never masks the original conflict, and is audited', async () => {
+    const racingAssignmentRepo = new InMemoryAssignmentRepository();
+    racingAssignmentRepo.create = vi.fn(async () => {
+      throw new ConflictError('Technician is already booked at this time.');
+    });
+    // Compensation itself fails (e.g. connection dropped mid-cleanup).
+    const originalUpdate = appointmentRepo.update.bind(appointmentRepo);
+    appointmentRepo.update = vi.fn(async () => {
+      throw new Error('connection terminated during compensation');
+    });
+    const { InMemoryAuditRepository } = await import('../../../src/audit/audit');
+    const auditRepo = new InMemoryAuditRepository();
+
+    const handler = new CreateAppointmentExecutionHandler(
+      appointmentRepo,
+      racingAssignmentRepo,
+      { enqueue },
+      auditRepo,
+    );
+
+    const proposal = makeProposal({
+      jobId: '66666666-6666-4666-8666-666666666666',
+      scheduledStart: '2026-04-23T09:00:00Z',
+      scheduledEnd: '2026-04-23T10:00:00Z',
+      technicianId: techId,
+    });
+
+    // The ORIGINAL conflict result is returned even though cleanup failed.
+    const result = await handler.execute(proposal, context);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/already booked/i);
+
+    // The failed compensation is audited so operators can find the orphan.
+    const events = auditRepo.events.filter(
+      (e: any) => e.eventType === 'appointment.compensation_failed',
+    );
+    expect(events).toHaveLength(1);
+
+    appointmentRepo.update = originalUpdate;
+  });
+});

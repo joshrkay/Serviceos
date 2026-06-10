@@ -97,10 +97,14 @@ export function resolveSpokenLineItems(
   const resolved: ResolvedLineItem[] = [];
   const unresolved: SpokenLineItem[] = [];
 
-  const normalizedCatalog = catalogItems.map((item) => ({
-    item,
-    norm: normalizeForMatch(item.name),
-  }));
+  const normalizedCatalog = catalogItems
+    .map((item) => ({
+      item,
+      norm: normalizeForMatch(item.name),
+    }))
+    // A name that normalizes to nothing (punctuation/emoji-only) would
+    // containment-match every query via `includes('')` — exclude it.
+    .filter((c) => c.norm.length > 0);
 
   for (const spoken of spokenItems) {
     const spokenNorm = normalizeForMatch(spoken.description ?? '');
