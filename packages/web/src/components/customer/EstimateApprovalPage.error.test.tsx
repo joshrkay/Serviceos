@@ -1,5 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter, Routes, Route } from 'react-router';
 
@@ -34,6 +33,37 @@ function errResponse(status: number): Response {
   } as unknown as Response;
 }
 
+function okResponse(body: unknown): Response {
+  return {
+    ok: true,
+    status: 200,
+    statusText: 'OK',
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  } as unknown as Response;
+}
+
+/** A real public-API estimate view, distinct from any fixture data. */
+const REAL_VIEW = {
+  id: 'est_1',
+  estimateNumber: 'EST-2042',
+  status: 'sent',
+  customerName: 'Dana Realuser',
+  customerAddress: '42 Real St, Austin, TX',
+  businessName: 'Acme Plumbing',
+  lineItems: [
+    { id: 'li_1', description: 'Drain repair', quantity: 1, unitPriceCents: 25000, totalCents: 25000 },
+  ],
+  totalCents: 25000,
+  subtotalCents: 25000,
+  taxCents: 0,
+  discountCents: 0,
+  isActionable: true,
+  isExpired: false,
+  version: 1,
+  customerMessage: 'Drain repair',
+};
+
 /**
  * Blocker 8 — the public estimate page must never fall back to fixture
  * data. A failed load used to render `estimates[0]` from mock-data, leaking
@@ -55,7 +85,7 @@ describe('EstimateApprovalPage — Blocker 8: no fixture-data leak on failure', 
     );
     // No fixture customer should ever surface here.
     expect(screen.queryByText(/Sarah Johnson/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Rivet Pro Services/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Fieldly Pro Services/i)).not.toBeInTheDocument();
   });
 
   it('shows an error screen on a non-OK (500) response', async () => {
@@ -69,51 +99,56 @@ describe('EstimateApprovalPage — Blocker 8: no fixture-data leak on failure', 
     );
   });
 
-  it('shows "Link not found" on a 404', async () => {
+  it('shows "Link not found" on a 404 (no retry button)', async () => {
     apiFetchMock.mockResolvedValue(errResponse(404));
     renderPageAtToken('missing-token');
 
     await waitFor(() =>
       expect(screen.getByRole('heading', { name: /Link not found/i })).toBeInTheDocument(),
     );
-    // No retry button on 404 — the link is dead, retrying won't help.
-    expect(screen.queryByTestId('estimate-load-retry')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Try again/i })).not.toBeInTheDocument();
   });
 
-  it('offers a Retry button on a transient error and recovers when the API succeeds', async () => {
-    // First call fails, second call returns a real estimate.
-    apiFetchMock
-      .mockResolvedValueOnce(errResponse(500))
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          id: 'est_1',
-          estimateNumber: 'EST-001',
-          status: 'sent',
-          customerName: 'Real Customer',
-          businessName: 'Real Business',
-          lineItems: [],
-          totalCents: 0,
-          subtotalCents: 0,
-          taxCents: 0,
-          discountCents: 0,
-          version: 1,
-          isExpired: false,
-        }),
-      } as unknown as Response)
-      // The component fires a fire-and-forget /view ping after a
-      // successful load; mock it as a no-op so we don't see an
-      // unexpected-call error.
-      .mockResolvedValue({ ok: true, status: 204, json: async () => ({}) } as unknown as Response);
-
-    renderPageAtToken('some-token');
-
-    const retry = await screen.findByTestId('estimate-load-retry');
-    await userEvent.click(retry);
+  it('retry button refetches and renders the real estimate on success', async () => {
+    apiFetchMock.mockRejectedValueOnce(new Error('network down'));
+    renderPageAtToken('real-token');
 
     await waitFor(() =>
-      expect(screen.getByRole('heading', { name: /Hi, Real!/i })).toBeInTheDocument(),
+      expect(
+        screen.getByRole('heading', { name: /Couldn’t load this estimate/i }),
+      ).toBeInTheDocument(),
     );
+
+    apiFetchMock.mockImplementation((path: string) =>
+      Promise.resolve(
+        typeof path === 'string' && path === '/public/estimates/real-token'
+          ? okResponse(REAL_VIEW)
+          : okResponse({}),
+      ),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Try again/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/Hi, Dana!/i)).toBeInTheDocument(),
+    );
+    expect(screen.getAllByText(/Acme Plumbing/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Sarah Johnson/i)).not.toBeInTheDocument();
+  });
+
+  it('success path renders the API estimate (unchanged)', async () => {
+    apiFetchMock.mockImplementation((path: string) =>
+      Promise.resolve(
+        typeof path === 'string' && path === '/public/estimates/real-token'
+          ? okResponse(REAL_VIEW)
+          : okResponse({}),
+      ),
+    );
+    renderPageAtToken('real-token');
+
+    await waitFor(() => expect(screen.getByText(/Hi, Dana!/i)).toBeInTheDocument());
+    expect(screen.getByText('EST-2042')).toBeInTheDocument();
+    expect(screen.getAllByText(/Drain repair/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Sarah Johnson/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Fieldly Pro Services/i)).not.toBeInTheDocument();
   });
 });
