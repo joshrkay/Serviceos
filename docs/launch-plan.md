@@ -30,6 +30,7 @@ story + addendum + conventions, which the dispatch skill assembles).
 | 4 | Truck & equipment | P14-001 → P14-002 + P14-003; P13-002 anytime | `docs/stories/phase-14-gap-stories.md`, `phase-13-gap-stories.md` |
 | 5 | Accountant & found money | P15-001 (QuickBooks); P8-015 → …→ P8-027 (follow-up agent, ordered) | `docs/stories/phase-15-gap-stories.md`, `docs/superpowers/agents/customer-followup/implementation-roadmap.md` |
 | 6 | Cash collects itself | P20-001 → P20-003 → P20-004; P21-001..003 | `docs/stories/phase-20-stories.md` |
+| 7 | Jobber parity closure | 23A: P23-002, P23-003, P23-005 (parallel) → P23-004; P23-001 last (needs 22B); marketing breadth via P16-001 → P16-003 | `docs/stories/phase-23-gap-stories.md`, `phase-16-gap-stories.md` |
 
 ## Why these lanes (ICP rationale)
 
@@ -55,6 +56,14 @@ story + addendum + conventions, which the dispatch skill assembles).
   owner never would (follow-up agent).
 - **Lane 6** finishes dunning/auto-invoice so receivables don't depend on the
   owner's evenings.
+- **Lane 7** closes the "where Jobber still wins" list from the gap analysis
+  §5: native iOS/Android via a Capacitor wrap of the PWA (P23-001 — no UI
+  rewrite), Wisetack-style financing as a prequal link on big estimates
+  (P23-002), canned voice-fillable checklists instead of a form builder
+  (P23-003/004), and signed outbound webhooks for Zapier-class ecosystem
+  reach (P23-005). Marketing breadth needs no new spec — P16-001/003
+  (segmented campaign engine) + P8 + P15-005 cover it. Lane 7 runs after the
+  launch-critical lanes; only P23-001 has a hard dependency (22B).
 
 ## Cross-lane dependency notes (the only ones that exist)
 
