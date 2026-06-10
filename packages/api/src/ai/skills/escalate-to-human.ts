@@ -705,3 +705,86 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
 
   return result;
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Phase 12 (P12-004) — emergency-intent immediate-Dial.
+//
+// When an emergency intent arrives AND the tenant is unsupervised AND the
+// channel is inbound voice (telephony), skip AI booking entirely and Dial
+// the on-call rotation immediately via the existing `escalateToHuman` path
+// (reason='emergency_dispatch', existing on-call lookup). Every immediate
+// Dial emits an `emergency_immediate_dial` audit event (story item 6).
+// ───────────────────────────────────────────────────────────────────────────
+
+import { isSupervisorPresent } from '../supervisor-presence';
+
+export interface EmergencyImmediateDialInput
+  extends Omit<EscalateToHumanInput, 'reason'> {
+  /** Free-form intent string from the classifier. */
+  intent: string;
+  /**
+   * Presence checker seam — defaults to the cached `isSupervisorPresent`.
+   * Tests inject a stub.
+   */
+  presenceChecker?: (tenantId: string) => Promise<boolean>;
+}
+
+export interface EmergencyImmediateDialResult {
+  /** True when the AI path was bypassed and an immediate Dial was initiated. */
+  dialed: boolean;
+  /** Present when dialed === true. */
+  escalation?: EscalationResult;
+}
+
+/**
+ * Entry-point branch for the emergency-intent immediate-Dial. Returns
+ * `{ dialed: false }` when the normal AI path should proceed (non-emergency
+ * intent, supervisor present, or non-telephony channel).
+ */
+export async function emergencyImmediateDial(
+  input: EmergencyImmediateDialInput,
+): Promise<EmergencyImmediateDialResult> {
+  const { intent, presenceChecker, ...escalateInput } = input;
+
+  if (!EMERGENCY_INTENTS.has(intent)) return { dialed: false };
+  if (escalateInput.channel !== 'telephony') return { dialed: false };
+
+  const present = await (presenceChecker ?? isSupervisorPresent)(input.tenantId);
+  if (
+    !shouldImmediatelyDialOnEmergency({
+      intent,
+      supervisorPresent: present,
+      channel: escalateInput.channel,
+    })
+  ) {
+    return { dialed: false };
+  }
+
+  const escalation = await escalateToHuman({
+    ...escalateInput,
+    reason: 'emergency_dispatch',
+  });
+
+  // Audit — every immediate-Dial decision is recorded, regardless of
+  // whether a dispatcher was ultimately reachable.
+  if (input.auditRepo) {
+    await input.auditRepo.create(
+      createAuditEvent({
+        tenantId: input.tenantId,
+        actorId: input.sessionId,
+        actorRole: 'system',
+        eventType: 'emergency_immediate_dial',
+        entityType: 'session',
+        entityId: input.sessionId,
+        metadata: {
+          intent,
+          channel: escalateInput.channel,
+          escalated: escalation.escalated,
+          transferInitiated: escalation.transfer !== undefined,
+        },
+      }),
+    );
+  }
+
+  return { dialed: true, escalation };
+}
