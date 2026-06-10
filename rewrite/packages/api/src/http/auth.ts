@@ -54,8 +54,11 @@ export class AuthService {
   }
 
   private async lookup(column: 'id' | 'clerk_user_id', value: string): Promise<AuthContext | null> {
+    if (column === 'id' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+      return null;
+    }
     const { rows } = await this.db.admin.query<UserRow>(
-      `SELECT id, tenant_id, role FROM users WHERE ${column} = $1`,
+      'SELECT id, tenant_id, role FROM users WHERE ' + column + ' = $1',
       [value],
     );
     const row = rows[0];
