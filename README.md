@@ -17,16 +17,21 @@ monorepo deployed on **Railway**.
 - `railway.toml`, `Dockerfile` — the live Railway deployment.
 - `docs/deployment.md` — deployment runbook.
 
-**Not deployed / experimental (see each directory's README before touching):**
+**Not deployed / experimental — quarantined under
+[`experiments/`](experiments/README.md) (see each directory's README before
+touching):**
 
-- `infra/` — AWS CDK stacks. Built, but **nothing deploys them**; Railway
-  is the target. See [`infra/README.md`](infra/README.md).
-- `service-os-app/` — Next.js prototype that bypasses the proposal/audit
-  gate. Not production. See [`service-os-app/README.md`](service-os-app/README.md).
-- `service-os-agent/` — Python LangGraph prototype with known defects. Not
-  deployed. See [`service-os-agent/README.md`](service-os-agent/README.md).
-- `supabase_migration.sql` — schema for the `service-os-app` prototype
-  only; unrelated to the canonical in-code migrations
+- `experiments/infra/` — AWS CDK stacks. Built, but **nothing deploys
+  them**; Railway is the target. See
+  [`experiments/infra/README.md`](experiments/infra/README.md).
+- `experiments/service-os-app/` — Next.js prototype that bypasses the
+  proposal/audit gate. Not production. See
+  [`experiments/service-os-app/README.md`](experiments/service-os-app/README.md).
+- `experiments/service-os-agent/` — Python LangGraph prototype with known
+  defects. Not deployed. See
+  [`experiments/service-os-agent/README.md`](experiments/service-os-agent/README.md).
+- `experiments/supabase_migration.sql` — schema for the `service-os-app`
+  prototype only; unrelated to the canonical in-code migrations
   (`packages/api/src/db/schema.ts`).
 
 ## Deployment
