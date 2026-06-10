@@ -50,7 +50,11 @@ import type { Pool } from 'pg';
 import { classifyIntent } from '../orchestration/intent-classifier';
 import { confirmIntent } from '../skills/confirm-intent';
 import { summarizeSession } from '../skills/summarize-session';
-import { escalateToHuman } from '../skills/escalate-to-human';
+import {
+  escalateToHuman,
+  emergencyImmediateDial,
+  EMERGENCY_INTENTS,
+} from '../skills/escalate-to-human';
 import { estimateCostCents } from '../skills/session-cost-tracker';
 import {
   intentClassifiedEvent,
@@ -1070,6 +1074,59 @@ export function createVoiceTurnProcessor(
           sessionId: session.id,
         });
         classifierEvent = { type: 'confidence_low', threshold: TAU_INT, score: 0 };
+      }
+
+      // P12-004 — emergency-intent immediate Dial. When the classified
+      // intent is in the emergency set AND the tenant is unsupervised
+      // (checked inside the wrapper via isSupervisorPresent), bypass the
+      // FSM/booking path entirely and Dial the on-call rotation now.
+      // The wrapper emits the `emergency_immediate_dial` audit event.
+      // Supervised tenants and non-emergency intents fall through to the
+      // unchanged FSM dispatch below.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        EMERGENCY_INTENTS.has(classifierEvent.intentType) &&
+        deps.onCallRepo
+      ) {
+        try {
+          const immediate = await emergencyImmediateDial({
+            intent: classifierEvent.intentType,
+            tenantId,
+            sessionId: session.id,
+            channel: 'telephony',
+            onCallRepo: deps.onCallRepo,
+            ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+            session,
+            ...(deps.callControl ? { callControl: deps.callControl } : {}),
+            ...(deps.dispatcherPhoneResolver
+              ? { dispatcherPhoneResolver: deps.dispatcherPhoneResolver }
+              : {}),
+            ...(session.callSid ? { callSid: session.callSid } : {}),
+            dialActionUrl: dialResultUrl(session.id),
+          });
+          if (immediate.dialed && immediate.escalation) {
+            if (immediate.escalation.transfer?.fallbackTwiml !== undefined) {
+              pendingTransferTwiml.set(
+                session.id,
+                immediate.escalation.transfer.fallbackTwiml,
+              );
+            }
+            sideEffectsAll.push({
+              type: 'tts_play',
+              payload: { text: immediate.escalation.message },
+            });
+            await executeSideEffects(session, sideEffectsAll, tenantId);
+            return sideEffectsAll;
+          }
+        } catch (err) {
+          // Best-effort: an immediate-Dial failure must never strand the
+          // caller — fall through to the normal FSM path (whose own
+          // emergency fast-path still escalates via notify_oncall).
+          logger.warn('speechTurn: emergencyImmediateDial failed, falling through', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: session.id,
+          });
+        }
       }
 
       sideEffectsAll.push(...session.machine.dispatch(classifierEvent));
