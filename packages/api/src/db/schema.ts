@@ -2481,7 +2481,7 @@ export const MIGRATIONS = {
       DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
     ALTER TABLE message_dispatches
       ADD CONSTRAINT message_dispatches_entity_type_check
-        CHECK (entity_type IN ('estimate', 'invoice', 'appointment_confirmation', 'delay_notice'));
+        CHECK (entity_type IN ('estimate', 'invoice', 'appointment_confirmation', 'appointment_reminder', 'delay_notice'));
     CREATE INDEX IF NOT EXISTS idx_dispatches_tenant_sent_at
       ON message_dispatches (tenant_id, sent_at DESC);
   `,
@@ -3903,6 +3903,30 @@ export const MIGRATIONS = {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_cmb_session_unique
       ON call_me_back_tasks (tenant_id, session_id)
       WHERE session_id IS NOT NULL;
+  `,
+
+  '155_tenant_integrations_google_business': `
+    -- QA-2026-06-10: google-reviews-worker logs "column credentials does not exist"
+    -- on every sweep. Root cause: migration 101_google_reviews added the
+    -- google_business integration but never updated tenant_integrations:
+    --   1. The provider CHECK only allows ('twilio', 'sendgrid') — no 'google_business'
+    --   2. There is no 'credentials' JSONB column — CredentialResolver.getCredential
+    --      runs: SELECT tenant_id, provider, credentials, credential_version
+    --            FROM tenant_integrations ...
+    --      which fails immediately.
+    -- Fix: widen the provider constraint and add the credentials column.
+
+    -- Widen the provider CHECK constraint to include 'google_business'.
+    ALTER TABLE tenant_integrations
+      DROP CONSTRAINT IF EXISTS tenant_integrations_provider_check;
+    ALTER TABLE tenant_integrations
+      ADD CONSTRAINT tenant_integrations_provider_check
+        CHECK (provider IN ('twilio', 'sendgrid', 'google_business'));
+
+    -- Add the credentials JSONB column used by CredentialResolver.getCredential.
+    -- Defaults to '{}' so existing twilio/sendgrid rows are unaffected.
+    ALTER TABLE tenant_integrations
+      ADD COLUMN IF NOT EXISTS credentials JSONB NOT NULL DEFAULT '{}';
   `,
 };
 
