@@ -64,7 +64,12 @@ interface Props {
    * success.
    */
   onApprove?: () => void | Promise<void>;
-  onReject?: () => void;
+  /**
+   * Invoked when the operator dismisses. May be async — a thrown error
+   * (or rejected promise) reverts the optimistic "Rejected" state and
+   * shows an error toast instead of silently faking the dismissal.
+   */
+  onReject?: () => void | Promise<void>;
 }
 
 export function AIProposalCard({ proposal, compact, onApprove, onReject }: Props) {
@@ -92,6 +97,19 @@ export function AIProposalCard({ proposal, compact, onApprove, onReject }: Props
       toast.error('Couldn’t apply this suggestion. Please try again.');
     } finally {
       setIsApproving(false);
+    }
+  };
+
+  // Mirror runApprove for dismissals: optimistic flip, revert + toast on
+  // failure so a failed server-side rejection never looks like success.
+  const runReject = async () => {
+    const prevStatus = status;
+    setStatus('Rejected');
+    try {
+      await onReject?.();
+    } catch {
+      setStatus(prevStatus);
+      toast.error('Couldn’t dismiss this suggestion. Please try again.');
     }
   };
 
@@ -306,7 +324,7 @@ export function AIProposalCard({ proposal, compact, onApprove, onReject }: Props
         )}
 
         <button
-          onClick={() => { setStatus('Rejected'); onReject?.(); }}
+          onClick={() => { void runReject(); }}
           className="ml-auto flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
         >
           <X size={12} /> Dismiss
