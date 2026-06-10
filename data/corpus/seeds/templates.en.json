@@ -1,0 +1,260 @@
+{
+  "_meta": {
+    "description": "English seed templates per intent. Placeholders: {service} {symptom} {time} {first} {last} {street_num} {street} {suffix} {job_ref}. Expanded by scripts/data-pipeline/generate-utterances.ts.",
+    "lang": "en"
+  },
+  "templates": {
+    "create_appointment": [
+      "Can I get someone out to look at my {service} {time}?",
+      "I'd like to schedule a visit, my {service} {symptom}.",
+      "Can you send a tech {time} for my {service}?",
+      "I need to book an appointment for the {service}.",
+      "Do you have anything {time}? My {service} {symptom}.",
+      "Set me up for {time} if you can, it's the {service}.",
+      "We need somebody to come out about the {service}, {time} works.",
+      "How soon can you get here? The {service} {symptom}."
+    ],
+    "reschedule_appointment": [
+      "I need to move my appointment to {time}.",
+      "Can we push my visit to {time} instead?",
+      "Something came up, can I reschedule for {time}?",
+      "I have to change my appointment, {time} would be better.",
+      "Can you bump my appointment back to {time}?",
+      "Let's reschedule — does {time} work?"
+    ],
+    "cancel_appointment": [
+      "I need to cancel my appointment for {time}.",
+      "Go ahead and cancel the visit, something came up.",
+      "I have to cancel the {service} appointment.",
+      "Can you cancel my appointment? I won't be home.",
+      "Please cancel tomorrow's appointment.",
+      "I don't need the tech to come anymore, cancel it."
+    ],
+    "confirm_appointment": [
+      "Just calling to confirm you're still coming {time}.",
+      "Are we still on for the appointment {time}?",
+      "I wanted to confirm my {service} appointment.",
+      "Confirming the visit — you're coming out, right?",
+      "Yeah I'm confirming, see you {time}."
+    ],
+    "callback": [
+      "Can someone call me back when you get a chance?",
+      "I'd like a callback about my {service}.",
+      "Have somebody call me back {time}, please.",
+      "Nobody's available now? Just call me back later.",
+      "Can you have a person call me back about a quote?"
+    ],
+    "emergency_dispatch": [
+      "My basement is flooding, water is everywhere, I can't shut it off!",
+      "There's water gushing out of the {service}, I need someone right now!",
+      "I smell gas in the house, what do I do?",
+      "Sewage is backing up into the tub, it's an emergency.",
+      "A pipe burst and water is pouring out, please hurry!",
+      "We have no heat and it's freezing, the {service} is completely dead.",
+      "The carbon monoxide alarm is going off, the {service} won't shut off."
+    ],
+    "create_customer": [
+      "Hi, I'm a new customer, I'd like to set up service.",
+      "I've never used you before, can I get on the books?",
+      "I'm new — my name is {first} {last}, I need some work done.",
+      "First time calling, I need to set up an account.",
+      "I got your number from a neighbor, I'd like to become a customer."
+    ],
+    "update_customer": [
+      "I moved, can you update my address on my account?",
+      "My phone number changed, can you update it?",
+      "Please update my email on file.",
+      "I've got a new number, update it for me — same account, {first} {last}.",
+      "Can you change the address you have for me to {street_num} {street} {suffix}?"
+    ],
+    "add_service_location": [
+      "I want to add my rental property to my account too.",
+      "Can you add a second address for me? It's {street_num} {street} {suffix}.",
+      "Add my mom's house to my account, same billing.",
+      "I've got another property I need on the account.",
+      "Put my shop address on the account as a second location."
+    ],
+    "convert_lead": [
+      "Yeah let's do it, go ahead and set me up.",
+      "Okay, I'm ready to move forward.",
+      "Let's go ahead with the work you quoted.",
+      "I talked it over, let's book it.",
+      "Sounds good, sign me up."
+    ],
+    "create_job": [
+      "My {service} {symptom} and I need that fixed.",
+      "I've got a problem with the {service}, it {symptom}.",
+      "Can you open a job for me? The {service} {symptom}.",
+      "Something's wrong with my {service}, it {symptom}.",
+      "I need work done — the {service} {symptom}."
+    ],
+    "draft_estimate": [
+      "Can you send me an estimate for replacing the {service}?",
+      "How about a written quote for the {service} work?",
+      "I'd like an estimate before I commit, for the {service}.",
+      "Can I get a quote in writing for fixing the {service}?",
+      "Send me an estimate for the {service}, please."
+    ],
+    "send_estimate": [
+      "Can you text me that estimate you mentioned?",
+      "Email me the estimate when you can.",
+      "Can you resend the estimate? I lost it.",
+      "Go ahead and send over that quote.",
+      "Forward me the estimate for the {service}."
+    ],
+    "draft_invoice": [
+      "Can I get an invoice for the work you did last week?",
+      "I need an invoice for the {service} repair.",
+      "Can you send me a bill for the job?",
+      "I need a receipt — can you invoice me?",
+      "Send me the invoice for the {job_ref}."
+    ],
+    "record_payment": [
+      "I want to pay my bill, can I give you a card?",
+      "I'd like to pay the balance over the phone.",
+      "Can I make a payment on my account?",
+      "Let me pay what I owe, I've got a check.",
+      "I'm calling to pay my invoice."
+    ],
+    "log_expense": [
+      "Log forty dollars of fittings to {job_ref}.",
+      "Put twenty bucks of materials on {job_ref}.",
+      "Add a fuel expense for {job_ref}.",
+      "Charge the parts to {job_ref}, about sixty dollars.",
+      "Log the supply run, thirty five dollars, to {job_ref}."
+    ],
+    "log_time_entry": [
+      "Put me down for two hours on {job_ref}.",
+      "Log an hour and a half of labor on {job_ref}.",
+      "Add three hours to {job_ref}.",
+      "Clock me for two hours on {job_ref}.",
+      "I spent about ninety minutes on {job_ref}, log it."
+    ],
+    "add_note": [
+      "Add a note that the gate code is four two nine one.",
+      "Put a note on the account — dog in the backyard.",
+      "Note that the customer prefers afternoon visits.",
+      "Add a note to {job_ref}: parts are on backorder.",
+      "Leave a note that the water is shut off at the street."
+    ],
+    "notify_delay": [
+      "Let the ten o'clock know I'm running about twenty minutes behind.",
+      "Tell {job_ref} I'm going to be late.",
+      "Let the customer know I'm stuck in traffic, fifteen minutes out.",
+      "Notify my next appointment that I'm running behind.",
+      "Tell them I'll be there in half an hour, not on time."
+    ],
+    "request_feedback": [
+      "Send {job_ref} a review request.",
+      "Ask the customer for a review on that last job.",
+      "Trigger a feedback request for {job_ref}.",
+      "Have them send a review link to the customer.",
+      "Request feedback from the {job_ref}."
+    ],
+    "mark_lead_lost": [
+      "Mark the {last} lead as lost, they went with someone else.",
+      "Close out that lead, they're not moving forward.",
+      "The prospect passed, mark the lead lost.",
+      "Set that lead to lost, no response.",
+      "They decided not to do it, mark it lost."
+    ],
+    "lookup_appointments": [
+      "When is my next appointment again?",
+      "What time is my appointment {time}?",
+      "Do I have anything scheduled this week?",
+      "Can you remind me when the tech is coming?",
+      "What's on my schedule with you?"
+    ],
+    "lookup_jobs": [
+      "What's the status on the job you opened for me?",
+      "Is the work done yet?",
+      "Where are we at on the {service} repair?",
+      "Did the tech finish the job?",
+      "Any update on my service request?"
+    ],
+    "lookup_invoices": [
+      "How much do I owe you right now?",
+      "What's my balance?",
+      "Do I have any open invoices?",
+      "Did my last payment go through?",
+      "What do I still owe on the {service} job?"
+    ],
+    "lookup_estimates": [
+      "Did that estimate ever go out to me?",
+      "What was the price on the estimate you sent?",
+      "Can you tell me what the estimate covered?",
+      "Is my estimate still good?",
+      "What's the total on my estimate?"
+    ],
+    "lookup_account_summary": [
+      "Can you tell me what's on my account?",
+      "Give me a rundown of my account.",
+      "What do you have on file for me?",
+      "Can you summarize my account real quick?",
+      "What's my account look like right now?"
+    ],
+    "lookup_customer": [
+      "Do you have me in the system? It's under my wife's name.",
+      "Am I in your records? Last name {last}.",
+      "Can you look me up? I think it's under my old number.",
+      "Do you have my address on file?",
+      "Check if I'm a customer already, {first} {last}."
+    ],
+    "pricing_question": [
+      "Roughly how much do you charge to snake a main line?",
+      "What's it run to replace a {service}?",
+      "How much for a service call?",
+      "Ballpark, what would the {service} repair cost?",
+      "What do you charge to come out and look at the {service}?"
+    ],
+    "hours_location": [
+      "Do you guys cover the east side of town?",
+      "What are your hours?",
+      "Are you open on weekends?",
+      "Do you service my area? I'm out past the highway.",
+      "Where are you located?"
+    ],
+    "service_availability": [
+      "Do you all work on tankless water heaters?",
+      "Do you handle {service} repairs?",
+      "Is the {service} something you guys do?",
+      "Do you do commercial work or just residential?",
+      "Can you work on a {service}?"
+    ],
+    "complaint": [
+      "Your guy was supposed to come yesterday and nobody showed up.",
+      "The {service} you fixed is broken again already.",
+      "I waited all day and no one came.",
+      "The tech left a mess and the {service} still {symptom}.",
+      "This is the third time I've called about the same problem."
+    ],
+    "payment_dispute": [
+      "I'm looking at this bill and there's no way it should be this much.",
+      "You charged me twice for the same job.",
+      "This invoice doesn't match what I was quoted.",
+      "I never agreed to this charge on the {service}.",
+      "There's a mistake on my bill, I want it fixed."
+    ],
+    "dnc_optout": [
+      "Take me off your list and don't call me again.",
+      "Stop calling me.",
+      "I want to be on your do-not-call list.",
+      "Quit texting me, I'm not interested.",
+      "Remove my number from your system."
+    ],
+    "greeting": [
+      "Hi there, how's it going today?",
+      "Hey, good morning.",
+      "Hello? Can you hear me okay?",
+      "Hi, yeah, um, hello?",
+      "Good afternoon."
+    ],
+    "agent_handoff_request": [
+      "Can I just talk to an actual person please?",
+      "Is there a human I can speak to?",
+      "I'd rather talk to a real person.",
+      "Put me through to someone, please.",
+      "Can you transfer me to a person?"
+    ]
+  }
+}

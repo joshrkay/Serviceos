@@ -16,7 +16,7 @@ function makeFakeWindow() {
 const base = {
   estimateNumber: 'EST-001',
   customerName: 'Alice Smith',
-  businessName: 'Fieldly Pro Services',
+  businessName: 'Rivet Pro Services',
   lineItems: [
     { description: 'Labor', qty: 2, rate: 95 },
     { description: 'Part', qty: 1, rate: 150 },

@@ -169,6 +169,15 @@ export interface VoiceSession {
    */
   language?: 'en' | 'es';
   /**
+   * Voice-parity — the tenant's opt-in language stack
+   * (`tenant_settings.supported_languages`), resolved at session start. The
+   * first-utterance language gate only switches a call to 'es' when 'es' is
+   * present here. `undefined` means "not resolved" and is treated as
+   * permissive (legacy behavior) so sessions created without a resolver wired
+   * keep auto-detecting Spanish.
+   */
+  supportedLanguages?: ('en' | 'es')[];
+  /**
    * P11-002 — resolved per-tenant TTS voice override for the session
    * language (settings.ttsVoiceEn/Es). When set, the `<Say voice>` uses
    * it instead of the default Polly voice for `language`. undefined =

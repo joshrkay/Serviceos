@@ -44,7 +44,12 @@ export async function activatePack(
 ): Promise<TenantPackActivation> {
   const existing = await repository.findByTenantAndPack(input.tenantId, input.packId);
   if (existing && existing.status === 'active') {
-    throw new Error('Pack already activated for this tenant');
+    // QA-2026-06-04: PUT /:packId/activate is an idempotent verb — an
+    // already-active pack is a no-op success, not an error. The previous
+    // `throw new Error(...)` surfaced as 500 INTERNAL_ERROR on every
+    // re-activation (asyncRoute maps untyped errors to 500), which broke
+    // PROV-01/02 re-runs. No audit event: nothing mutated.
+    return existing;
   }
 
   let result: TenantPackActivation;

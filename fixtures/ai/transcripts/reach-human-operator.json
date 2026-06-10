@@ -1,0 +1,12 @@
+{
+  "id": "transcript-006",
+  "type": "inbound_call",
+  "duration_seconds": 60,
+  "service_type": "plumbing",
+  "transcript": "Customer: This is Greg Tomlin and honestly I don't want to deal with an automated system right now. I have a billing dispute and I need to speak with an actual person — a manager if possible. Dispatcher: I understand, Greg. Customer: Please just transfer me to a human, I'm not going to explain this to a machine.",
+  "expected_entities": {
+    "customer_name": "Greg Tomlin",
+    "request": "Escalation to a live human / operator",
+    "reason": "Billing dispute, explicit request for a person"
+  }
+}

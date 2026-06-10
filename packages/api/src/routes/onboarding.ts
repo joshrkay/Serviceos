@@ -1,8 +1,9 @@
 import { Router, Response } from 'express';
 import type { Pool } from 'pg';
 import { AuthenticatedRequest } from '../auth/clerk';
-import { requireAuth, requireTenant } from '../middleware/auth';
+import { requireAuth, requireTenant, requireRole } from '../middleware/auth';
 import { currentTenantContext } from '../middleware/tenant-context';
+import { toErrorResponse } from '../shared/errors';
 import { SettingsRepository } from '../settings/settings';
 import { PackActivationRepository, activatePack } from '../settings/pack-activation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
@@ -13,7 +14,12 @@ import {
   BusinessIdentityInputSchema,
   BusinessHoursSchema,
   PackPickInputSchema,
+  VoiceConfigInputSchema,
+  CalendarChoiceInputSchema,
 } from '../onboarding/contracts';
+import { saveVoiceConfig } from '../voice/voice-config';
+import { VOICE_PRESETS } from '../integrations/vapi/assistant-config';
+import { getVapiClient, type VapiClient } from '../integrations/vapi/client';
 import { BillingService } from '../billing/subscription';
 import type { Queue } from '../queues/queue';
 import {
@@ -21,6 +27,12 @@ import {
   type ProvisionTwilioPayload,
 } from '../workers/provision-twilio';
 import { VERIFY_AI_JOB_TYPE, type VerifyAiPayload } from '../workers/verify-ai';
+import {
+  seedPackDefaults,
+  type SeedPackDefaultsDeps,
+} from '../packs/seed-pack-defaults';
+import { normalizeMobileE164 } from '../shared/phone/normalize';
+import { isValidIanaTimezone, resolveBootstrapAiModel } from '../settings/settings';
 
 export interface OnboardingRouterDeps {
   settingsRepo: SettingsRepository;
@@ -29,10 +41,29 @@ export interface OnboardingRouterDeps {
   pool?: Pool;
   billingService?: BillingService;
   queue?: Queue;
+  /**
+   * When provided, /api/onboarding/pack auto-seeds canonical job types,
+   * price-book entries, and customer-message defaults for the picked
+   * pack. Without this, the wizard's promise of "we'll set up job types,
+   * pricing, and message templates for you" goes unfulfilled and new
+   * tenants land on an empty estimate page.
+   */
+  packSeedDeps?: SeedPackDefaultsDeps;
+  /** Injectable Vapi client for voice-config assistant pushes. Defaults to
+   * getVapiClient() (off-by-default without VAPI_API_KEY). */
+  vapiClient?: VapiClient | null;
 }
 
 export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
-  const { settingsRepo, packActivationRepo, auditRepo, pool, billingService, queue } = deps;
+  const {
+    settingsRepo,
+    packActivationRepo,
+    auditRepo,
+    pool,
+    billingService,
+    queue,
+    packSeedDeps,
+  } = deps;
   const router = Router();
 
   router.get(
@@ -67,6 +98,13 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     '/identity',
     requireAuth,
     requireTenant,
+    // /identity rewrites business_name, hourly_rate_cents,
+    // business_hours, timezone, AND owner_phone — the same fields
+    // guarded by settings:update / tenant:manage on the main
+    // mutation routes. Without an owner gate here, a dispatcher or
+    // technician could overwrite the owner's personal cell. Same
+    // shape as /pack and /billing/cancel.
+    requireRole('owner'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!pool) {
@@ -88,15 +126,69 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         const v = parsed.data;
         const db = currentTenantContext()?.client ?? pool;
 
+        // Timezone: prefer the value the client submitted (browser-detected
+        // IANA name), then keep whatever was previously stored, then fall
+        // back to ET as last-resort default for the initial INSERT.
+        // Validated via Intl.DateTimeFormat so any runtime-recognized
+        // IANA zone (e.g. America/Adak, America/North_Dakota/Center) is
+        // accepted, but bogus strings like "Foo/Bar" still 400 instead
+        // of silently corrupting tenant_settings.timezone and blowing up
+        // downstream Intl callers later.
+        const submittedTimezone = v.timezone?.trim() || null;
+        if (submittedTimezone && !isValidIanaTimezone(submittedTimezone)) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            issues: [{
+              path: ['timezone'],
+              message: `"${submittedTimezone}" is not a recognized IANA timezone.`,
+            }],
+          });
+          return;
+        }
+
+        // Owner phone: empty string explicitly clears (SQL NULL); omitted
+        // leaves the existing value untouched; a populated value is
+        // normalized to E.164 — invalid input returns 400 with a clear
+        // message instead of being silently dropped.
+        let ownerPhoneToWrite: string | null | undefined = undefined;
+        if (v.ownerPhone !== undefined) {
+          const trimmed = v.ownerPhone.trim();
+          if (trimmed === '') {
+            ownerPhoneToWrite = null;
+          } else {
+            try {
+              ownerPhoneToWrite = normalizeMobileE164(trimmed);
+            } catch (err) {
+              res.status(400).json({
+                error: 'VALIDATION_ERROR',
+                issues: [{
+                  path: ['ownerPhone'],
+                  message: err instanceof Error ? err.message : 'Invalid owner phone number',
+                }],
+              });
+              return;
+            }
+          }
+        }
+
+        // Seed the platform default AI model on the very first INSERT so
+        // the onboarding "AI check" (Step 6) finds aiConfigPresent=true. The
+        // COALESCE on update keeps any tenant-specific override the user
+        // has already set elsewhere — same convention as the timezone and
+        // owner_phone columns below.
+        const bootstrapAiModel = resolveBootstrapAiModel();
+
         await db.query(
           `INSERT INTO tenant_settings (
              id, tenant_id, business_name, service_area_text, service_area_radius,
              business_hours, job_buffer_minutes, hourly_rate_cents,
-             timezone, estimate_prefix, invoice_prefix, next_estimate_number,
+             timezone, owner_phone, ai_model, estimate_prefix, invoice_prefix, next_estimate_number,
              next_invoice_number, default_payment_term_days
            )
            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5::jsonb, $6, $7,
-                   'America/New_York', 'EST-', 'INV-', 1001, 1001, 30)
+                   COALESCE($8, 'America/New_York'),
+                   $9, $11,
+                   'EST-', 'INV-', 1001, 1001, 30)
            ON CONFLICT (tenant_id) DO UPDATE SET
              business_name        = EXCLUDED.business_name,
              service_area_text    = EXCLUDED.service_area_text,
@@ -104,6 +196,12 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
              business_hours       = EXCLUDED.business_hours,
              job_buffer_minutes   = EXCLUDED.job_buffer_minutes,
              hourly_rate_cents    = EXCLUDED.hourly_rate_cents,
+             timezone             = COALESCE($8, tenant_settings.timezone),
+             owner_phone          = CASE
+               WHEN $10::boolean THEN $9
+               ELSE tenant_settings.owner_phone
+             END,
+             ai_model             = COALESCE(tenant_settings.ai_model, $11),
              updated_at           = now()`,
           [
             tenantId,
@@ -113,8 +211,36 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             JSON.stringify(v.businessHours),
             v.jobBufferMinutes,
             v.hourlyRateCents,
+            submittedTimezone,
+            ownerPhoneToWrite ?? null,
+            ownerPhoneToWrite !== undefined,
+            bootstrapAiModel,
           ]
         );
+
+        // Feature 2 extras (migration 148) — persisted in a separate additive
+        // UPDATE so the proven identity INSERT above stays untouched. Each
+        // field is COALESCE'd so an omitted value leaves the stored one intact.
+        if (
+          v.serviceAddress !== undefined ||
+          v.serviceAreaZips !== undefined ||
+          v.servicesOffered !== undefined
+        ) {
+          await db.query(
+            `UPDATE tenant_settings SET
+               service_address  = COALESCE($2, service_address),
+               service_area_zips = COALESCE($3::text[], service_area_zips),
+               services_offered  = COALESCE($4::text[], services_offered),
+               updated_at = now()
+             WHERE tenant_id = $1`,
+            [
+              tenantId,
+              v.serviceAddress ?? null,
+              v.serviceAreaZips ?? null,
+              v.servicesOffered ?? null,
+            ],
+          );
+        }
 
         await auditRepo.create(
           createAuditEvent({
@@ -142,6 +268,15 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     '/pack',
     requireAuth,
     requireTenant,
+    // Pack activation seeds rows into catalog_items and
+    // estimate_templates — the same tables that the main mutation
+    // routes guard with settings:update and estimates:create. Without
+    // an owner-role gate here, a dispatcher or technician with a
+    // valid session could call /api/onboarding/pack and alter the
+    // tenant's price book + job types. Onboarding is owner-driven
+    // anyway (the wizard runs for the operator who signed up), so
+    // restricting to owner matches the actual flow.
+    requireRole('owner'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!pool) {
@@ -183,9 +318,37 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             nextInvoiceNumber: 1001,
             defaultPaymentTermDays: 30,
             activeVerticalPacks: newPacks,
+            // Seed the platform default AI model so the onboarding
+            // "AI check" (Step 6) finds aiConfigPresent=true. Same
+            // value the ensureTenantSettings bootstrap path uses.
+            aiModel: resolveBootstrapAiModel(),
             createdAt: new Date(),
             updatedAt: new Date(),
           });
+        }
+
+        // Serialize pack activation + seed per (tenant, pack) via a
+        // Postgres advisory transaction lock. Two concurrent /pack
+        // requests for the same tenant+pack could both pass the
+        // "already activated" branch and reach the seed probe before
+        // either has committed; both would then observe an empty
+        // catalog/template set and INSERT a full duplicate. Lock is
+        // held until COMMIT (end of this request transaction); a
+        // concurrent caller's try-lock returns false and gets a
+        // clear 409 message.
+        const ctx = currentTenantContext();
+        if (ctx) {
+          const lockRes = await ctx.client.query<{ locked: boolean }>(
+            `SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0)) AS locked`,
+            [`pack:${tenantId}:${packId}`],
+          );
+          if (!lockRes.rows[0]?.locked) {
+            res.status(409).json({
+              error: 'PACK_ACTIVATION_IN_PROGRESS',
+              message: 'Another pack activation is already running for this tenant. Wait a moment and try again.',
+            });
+            return;
+          }
         }
 
         try {
@@ -197,6 +360,27 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           }
         }
 
+        // Auto-seed canonical job types, price book, and message-template
+        // defaults so the wizard's "we'll set this up for you" promise is
+        // real. Idempotent: safe to re-run because each helper checks
+        // for the canonical names first.
+        //
+        // We do NOT swallow seed errors here. Every /api route runs inside
+        // withTenantTransaction, and catching a SQL error mid-transaction
+        // leaves the connection in an aborted state — the auditRepo.create
+        // call below would then fail with "current transaction is aborted,
+        // commands ignored until end of transaction block." Letting the
+        // error propagate rolls the whole request back (including the
+        // pack_activation write) so the next click retries cleanly with
+        // no partial seed left behind.
+        let seedResult: Awaited<ReturnType<typeof seedPackDefaults>> | null = null;
+        if (packSeedDeps) {
+          seedResult = await seedPackDefaults(
+            { tenantId, packId, actorId: userId },
+            packSeedDeps,
+          );
+        }
+
         // Emit audit event
         await auditRepo.create(
           createAuditEvent({
@@ -206,7 +390,16 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             eventType: 'tenant.pack_activated',
             entityType: 'tenant_packs',
             entityId: packId,
-            metadata: { packId },
+            metadata: {
+              packId,
+              ...(seedResult
+                ? {
+                    seedAlreadyApplied: seedResult.alreadySeeded,
+                    catalogItemsCreated: seedResult.catalogItemsCreated,
+                    templatesCreated: seedResult.templatesCreated,
+                  }
+                : {}),
+            },
           })
         );
 
@@ -505,6 +698,11 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     '/billing/checkout-session',
     requireAuth,
     requireTenant,
+    // Owner-only: the route persists a canonical Stripe customer keyed
+    // to the requester's email and stamps the per-tenant pending-checkout
+    // gate. A dispatcher/tech calling here would bind billing to their
+    // email AND lock the owner out of starting checkout for 30 minutes.
+    requireRole('owner'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!billingService) {
@@ -537,12 +735,165 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         });
         res.json(result);
       } catch (err: unknown) {
-        res.status(500).json({
-          error: 'CHECKOUT_SESSION_FAILED',
-          message: err instanceof Error ? err.message : 'Failed to create checkout session',
-        });
+        // ValidationError from createTrialCheckoutSession (already
+        // subscribed, checkout in progress, etc.) must surface as
+        // 400 with its actionable message — otherwise BillingStep
+        // shows the generic "Stripe is temporarily unavailable"
+        // copy reserved for real 5xx outages.
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
       }
     }
+  );
+
+  /**
+   * POST /api/onboarding/billing/cancel
+   *
+   * Called from OnboardingShell when the operator returns via Stripe's
+   * cancel_url (?billing=cancel). Clears tenants.pending_checkout_at so
+   * the trial-checkout gate reopens immediately — without this, the
+   * gate would refuse new checkouts for the full 30-minute staleness
+   * window even after an intentional cancel, contradicting the toast
+   * that says they can subscribe when ready.
+   *
+   * Self-service action on the requesting tenant's own row, no Stripe
+   * round-trip. The Stripe session itself expires at the same 30-min
+   * mark (expires_at is bound in createTrialCheckoutSession) so a
+   * malicious clear can't outlive Stripe's session lifetime anyway.
+   */
+  router.post(
+    '/billing/cancel',
+    requireAuth,
+    requireTenant,
+    // Same authorization as the billing portal (routes/billing.ts uses
+    // tenant:manage there): this endpoint EXPIREs the active Stripe
+    // checkout session and clears the gate, so a dispatcher or
+    // technician could otherwise DOS the owner's onboarding by
+    // repeatedly canceling whatever the owner just started.
+    requireRole('owner'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!billingService) {
+          res.status(503).json({
+            error: 'BILLING_NOT_CONFIGURED',
+            message: 'Subscription billing is not configured',
+          });
+          return;
+        }
+        const tenantId = req.auth!.tenantId;
+        // No body needed — the Stripe session id is read from the
+        // tenants row (createTrialCheckoutSession persisted it).
+        // Stripe only interpolates {CHECKOUT_SESSION_ID} into
+        // success_url, never cancel_url, so the client has no
+        // reliable way to send us the right id.
+        await billingService.clearPendingCheckout(tenantId);
+        res.json({ ok: true });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  /**
+   * GET /api/onboarding/voice/presets — the three ElevenLabs preset voices
+   * the voice-config step offers.
+   */
+  router.get('/voice/presets', requireAuth, requireTenant, (_req: AuthenticatedRequest, res: Response) => {
+    res.json({ presets: VOICE_PRESETS });
+  });
+
+  /**
+   * PUT /api/onboarding/voice — feature 4. Persists the chosen voice + greeting
+   * and pushes them onto the tenant's Vapi assistant (if one exists). Owner-only
+   * (voice config is part of the operator-driven onboarding).
+   */
+  router.put(
+    '/voice',
+    requireAuth,
+    requireTenant,
+    requireRole('owner'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!pool) {
+          res.status(503).json({ error: 'ONBOARDING_NOT_CONFIGURED', message: 'Voice config requires a database connection' });
+          return;
+        }
+        const parsed = VoiceConfigInputSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', issues: parsed.error.issues });
+          return;
+        }
+        const tenantId = req.auth!.tenantId;
+        const userId = req.auth!.userId;
+        const db = currentTenantContext()?.client ?? pool;
+        const result = await saveVoiceConfig(
+          { pool: db as Pool, auditRepo, vapiClient: deps.vapiClient ?? getVapiClient() },
+          {
+            tenantId,
+            actorId: userId,
+            voiceId: parsed.data.voiceId,
+            ...(parsed.data.greeting !== undefined ? { greeting: parsed.data.greeting } : {}),
+          },
+        );
+        res.json(result);
+      } catch (error: unknown) {
+        res.status(500).json({
+          error: 'VOICE_CONFIG_SAVE_FAILED',
+          message: error instanceof Error ? error.message : 'Failed to save voice config',
+        });
+      }
+    },
+  );
+
+  /**
+   * POST /api/onboarding/calendar/choose — feature 5. Records the calendar
+   * provider chosen in onboarding: 'google' (the client then runs the existing
+   * OAuth connect flow) or 'builtin' (the skip path → ServiceOS scheduling).
+   * Owner-only.
+   */
+  router.post(
+    '/calendar/choose',
+    requireAuth,
+    requireTenant,
+    requireRole('owner'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!pool) {
+          res.status(503).json({ error: 'ONBOARDING_NOT_CONFIGURED', message: 'Calendar choice requires a database connection' });
+          return;
+        }
+        const parsed = CalendarChoiceInputSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', issues: parsed.error.issues });
+          return;
+        }
+        const tenantId = req.auth!.tenantId;
+        const userId = req.auth!.userId;
+        const db = currentTenantContext()?.client ?? pool;
+        await db.query(
+          `UPDATE tenant_settings SET calendar_provider = $2, updated_at = now() WHERE tenant_id = $1`,
+          [tenantId, parsed.data.provider],
+        );
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: userId,
+            actorRole: 'owner',
+            eventType: 'tenant.calendar_provider_set',
+            entityType: 'tenant_settings',
+            entityId: tenantId,
+            metadata: { provider: parsed.data.provider },
+          }),
+        );
+        res.json({ ok: true, calendarProvider: parsed.data.provider });
+      } catch (error: unknown) {
+        res.status(500).json({
+          error: 'CALENDAR_CHOICE_FAILED',
+          message: error instanceof Error ? error.message : 'Failed to set calendar provider',
+        });
+      }
+    },
   );
 
   return router;

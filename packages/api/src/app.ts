@@ -84,6 +84,7 @@ import { createVoiceRouter } from './routes/voice';
 import { createVoiceGate } from './voice/voice-gate';
 import { checkAndFireUpgradeNudge } from './voice/check-upgrade-nudge';
 import { maybeAutoGoLiveOnInboundEnd } from './voice/go-live';
+import { maybeFireFirstRealCallActivation } from './voice/activation';
 import { createOnboardingRouter } from './routes/onboarding';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
@@ -215,6 +216,9 @@ import { PgQualityMetricsRepository } from './quality/pg-metrics';
 import { PgVoiceRepository } from './voice/pg-voice';
 import { InMemoryVoiceSessionRepository } from './voice/voice-session';
 import { PgVoiceSessionRepository } from './voice/pg-voice-session';
+import { InMemoryCallMeBackRepository } from './voice/call-me-back/call-me-back';
+import { PgCallMeBackRepository } from './voice/call-me-back/pg-call-me-back';
+import { runCallMeBackSweep } from './workers/call-me-back-worker';
 import { PgTechnicianLocationPingRepository } from './telemetry/pg-technician-location-ping';
 import { PgApprovalRepository } from './estimates/pg-approval';
 import { PgEditDeltaRepository } from './estimates/pg-edit-delta';
@@ -249,6 +253,7 @@ import {
   InMemoryDeliveryProvider,
 } from './notifications/delivery-provider';
 import { TwilioDeliveryProvider } from './notifications/twilio-delivery-provider';
+import { PerTenantTwilioDeliveryProvider } from './notifications/per-tenant-twilio-delivery-provider';
 import { SendService } from './notifications/send-service';
 import {
   InMemoryDispatchRepository,
@@ -439,6 +444,11 @@ export function createApp(): express.Express {
   // whitespace differences would fail legit webhooks and break tenant bootstrap).
   app.use('/webhooks/clerk', express.raw({ type: 'application/json' }));
 
+  // Vapi signs its server messages (serverUrlSecret). Capture the raw Buffer
+  // here so the HMAC verification in handleVapiCallEvent sees the exact bytes
+  // Vapi signed — same treatment as Stripe/Clerk.
+  app.use('/webhooks/vapi', express.raw({ type: 'application/json' }));
+
   // Twilio posts application/x-www-form-urlencoded — mount the matching parser
   // before global express.json() so /webhooks/twilio/* routes get populated
   // req.body fields (used for signature verification + AccountSid match).
@@ -609,7 +619,7 @@ export function createApp(): express.Express {
   const pendingInvitationRepo = pool
     ? new PgPendingInvitationRepository(pool)
     : new InMemoryPendingInvitationRepository();
-  // Tier 4 (Subscription — Fieldly billing). Hoisted up so the Stripe
+  // Tier 4 (Subscription — Rivet billing). Hoisted up so the Stripe
   // webhook can update the cached subscription status when
   // customer.subscription.* events arrive. Single instance shared
   // with the /api/billing route. Requires both Pg pool + Stripe key
@@ -704,6 +714,9 @@ export function createApp(): express.Express {
   const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
   const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository();
   const assignmentRepo     = pool ? new PgAssignmentRepository(pool)     : new InMemoryAssignmentRepository();
+  // Declared here (ahead of its first router use) so the jobs router's
+  // from-estimate scheduling deps can reference it.
+  const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
   // Working hours are now Pg-backed in production (migration 137 added
   // technician_working_hours), so the dispatch feasibility composer and the
   // inbound-AI availability search enforce real working-hours rows instead of
@@ -733,6 +746,8 @@ export function createApp(): express.Express {
   const noteRepo           = pool ? new PgNoteRepository(pool)           : new InMemoryNoteRepository();
   const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
   const settingsRepo       = pool ? new PgSettingsRepository(pool)       : new InMemorySettingsRepository();
+  // Voice-parity (Feature 7) — call_me_back tasks (failed-transfer callbacks).
+  const callMeBackRepo     = pool ? new PgCallMeBackRepository(pool)     : new InMemoryCallMeBackRepository();
   // PR B (Tier 4 / AI approval rules) — shared per-tenant
   // auto-approve threshold resolver. One cached instance for all
   // entry points (twilio adapter, inapp adapter, voice-action-router
@@ -913,28 +928,42 @@ export function createApp(): express.Express {
   // boots in dev without delivery credentials. Send routes return
   // 503 when sendService is undefined.
   const dispatchRepo = pool ? new PgDispatchRepository(pool) : new InMemoryDispatchRepository();
-  const messageDelivery: MessageDeliveryProvider | null =
+  let messageDelivery: MessageDeliveryProvider | null;
+  if (
     process.env.TWILIO_ACCOUNT_SID &&
     process.env.TWILIO_AUTH_TOKEN &&
     process.env.TWILIO_FROM_NUMBER &&
     process.env.SENDGRID_API_KEY &&
     process.env.SENDGRID_FROM_EMAIL
-      ? new TwilioDeliveryProvider({
-          sms: {
-            accountSid: process.env.TWILIO_ACCOUNT_SID,
-            authToken: process.env.TWILIO_AUTH_TOKEN,
-            fromNumber: process.env.TWILIO_FROM_NUMBER,
-          },
-          email: {
-            apiKey: process.env.SENDGRID_API_KEY,
-            fromEmail: process.env.SENDGRID_FROM_EMAIL,
-            fromName: process.env.SENDGRID_FROM_NAME,
-            replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
-          },
-        })
-      : config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging'
-        ? null
-        : new InMemoryDeliveryProvider();
+  ) {
+    // The global Twilio/SendGrid provider handles email and any send that
+    // carries no tenantId; the global Twilio SMS creds also serve as the
+    // dev/test fallback inside getTenantTwilioCreds.
+    const baseDelivery = new TwilioDeliveryProvider({
+      sms: {
+        accountSid: process.env.TWILIO_ACCOUNT_SID,
+        authToken: process.env.TWILIO_AUTH_TOKEN,
+        fromNumber: process.env.TWILIO_FROM_NUMBER,
+      },
+      email: {
+        apiKey: process.env.SENDGRID_API_KEY,
+        fromEmail: process.env.SENDGRID_FROM_EMAIL,
+        fromName: process.env.SENDGRID_FROM_NAME,
+        replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
+      },
+    });
+    // Feature 7 — when a Postgres pool is available, route per-tenant SMS
+    // through each tenant's own Twilio subaccount (failing closed when a
+    // tenant has no credentials). Without a pool we cannot resolve per-tenant
+    // creds, so keep the global provider.
+    messageDelivery = pool
+      ? new PerTenantTwilioDeliveryProvider({ pool, base: baseDelivery })
+      : baseDelivery;
+  } else if (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging') {
+    messageDelivery = null;
+  } else {
+    messageDelivery = new InMemoryDeliveryProvider();
+  }
   const publicBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
   const sendService = messageDelivery
     ? new SendService({
@@ -1303,6 +1332,7 @@ export function createApp(): express.Express {
     estimateExpiry: 590005,
     googleReviews: 590006,
     batchInvoice: 590007,
+    callMeBack: 590008,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -1532,6 +1562,7 @@ export function createApp(): express.Express {
   // the Stripe-Account header. Without it, payments stay on the
   // legacy platform path.
   const publicInvoiceService = new PublicInvoiceService({
+    paymentLinkProvider,
     invoiceRepo,
     jobRepo,
     customerRepo,
@@ -1686,6 +1717,9 @@ export function createApp(): express.Express {
     // callback uses `system:google-oauth-callback` because there is no
     // Clerk session in flight when Google redirects the browser back.
     auditRepo,
+    // Feature 5 — seed a 7-day availability template from the connected
+    // calendar in the OAuth callback. Pool-gated (skipped in-memory).
+    ...(pool ? { pool } : {}),
   };
   app.use(
     '/api/calendar-integrations',
@@ -1828,6 +1862,32 @@ export function createApp(): express.Express {
               { pool, auditRepo },
               { tenantId, channel },
             );
+            // Activation milestone — fire first_real_call_received (+ email +
+            // banner state) on the first real inbound call after go-live.
+            // Runs AFTER auto-go-live so voice_agent_live_at is already set
+            // for the test call. Failure-soft: must never block session end.
+            try {
+              await maybeFireFirstRealCallActivation(
+                {
+                  pool,
+                  auditRepo,
+                  ...(messageDelivery
+                    ? {
+                        sendEmail: (msg) =>
+                          messageDelivery.sendEmail({
+                            to: msg.to,
+                            subject: msg.subject,
+                            text: msg.text,
+                            ...(msg.html ? { html: msg.html } : {}),
+                          }),
+                      }
+                    : {}),
+                },
+                { tenantId, channel },
+              );
+            } catch {
+              // swallow — activation analytics must not break call teardown
+            }
           },
         }
       : {}),
@@ -2040,6 +2100,7 @@ export function createApp(): express.Express {
       settingsRepo,
       leadRepo,
       auditRepo,
+      callMeBackRepo,
       businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
     }),
   );
@@ -2360,7 +2421,16 @@ export function createApp(): express.Express {
     proposalRepo,
     settingsRepo,
     auditRepo,
+    timeEntryRepo,
     scheduleRepo: invoiceScheduleRepo,
+  }, {
+    estimateRepo,
+    jobRepo,
+    appointmentRepo,
+    assignmentRepo,
+    userRepo,
+    invoiceRepo,
+    auditRepo,
   }));
   app.use(
     '/api/jobs',
@@ -2440,7 +2510,6 @@ export function createApp(): express.Express {
   // best-effort: missing CLERK_SECRET_KEY just persists the local
   // intent; the operator can still re-send via dashboard and the
   // webhook still attaches the invitee on accept (lookup is by email).
-  const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
   app.use(
     '/api/users',
     createUsersRouter(
@@ -2667,7 +2736,18 @@ export function createApp(): express.Express {
     '/api/voice',
     createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger, pool ? { pool } : undefined),
   );
-  app.use('/api/onboarding', createOnboardingRouter({ settingsRepo, packActivationRepo, auditRepo, pool, billingService, queue }));
+  app.use(
+    '/api/onboarding',
+    createOnboardingRouter({
+      settingsRepo,
+      packActivationRepo,
+      auditRepo,
+      pool,
+      billingService,
+      queue,
+      packSeedDeps: { catalogRepo, templateRepo },
+    }),
+  );
   app.use(
     '/api/technician-location',
     createTechnicianLocationRouter({
@@ -2686,6 +2766,8 @@ export function createApp(): express.Express {
     createAssistantRouter({
       gateway: llmGateway,
       proposalRepo,
+      // QA-2026-06-05 (AST-05): read-only query intents answer from data.
+      invoiceRepo,
       // §3B/3D/3E — assistant chat shares the operator-side resolver
       // shim with the voice-action-router so the same vertical context
       // reaches both text and voice classification paths.
@@ -2807,6 +2889,41 @@ export function createApp(): express.Express {
     });
   }, 60_000));
 
+  // Voice-parity (Feature 7) — call_me_back sweep. Notifies the CSR
+  // (transfer_number) of callbacks captured when a warm transfer failed. Runs
+  // every 60s; in-memory dev returns no tenants so it no-ops locally.
+  const callMeBackLogger = createLogger({
+    service: 'call-me-back-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.callMeBack, async () => {
+      await runCallMeBackSweep({
+        callMeBackRepo,
+        settingsRepo,
+        ...(messageDelivery
+          ? {
+              deliveryProvider: {
+                sendSms: (args: { to: string; body: string }) =>
+                  messageDelivery.sendSms({ to: args.to, body: args.body }),
+              },
+            }
+          : {}),
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        auditRepo,
+        logger: callMeBackLogger,
+      });
+    }).catch((err) => {
+      callMeBackLogger.error('call_me_back sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 60_000));
+
   // P21-003 — batch-invoice sweep. Daily-grained work; an hourly tick surfaces
   // newly-completed jobs promptly. Opt-in per tenant (settings.batchInvoiceEnabled);
   // in-memory dev returns no tenants so it no-ops locally.
@@ -2868,7 +2985,9 @@ export function createApp(): express.Express {
         error: err instanceof Error ? err.message : String(err),
       });
     });
-  }, 60 * 60_000));
+  }, Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) > 0 ? Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) : 60 * 60_000));
+  // QA-2026-06-05: interval is env-tunable (OVERDUE_SWEEP_INTERVAL_MS) so dev/QA
+  // can observe the sweep inside a test window; default stays hourly.
 
   const appointmentReminderLogger = createLogger({
     service: 'appointment-reminder-worker',
@@ -3049,6 +3168,13 @@ export function createApp(): express.Express {
     repairTemplatesResolver,
     voiceSessionRepo,
     voicePersonaResolver,
+    // Voice-parity (Feature 6) — gate Spanish auto-detection on the tenant's
+    // opt-in stack (supported_languages). Without this the in-app path would
+    // treat any Spanish utterance as allowed and ignore the Settings toggle.
+    supportedLanguagesResolver: async (tenantId: string) => {
+      const s = await settingsRepo.findByTenant(tenantId);
+      return s?.supportedLanguages;
+    },
   });
   app.use(
     '/api/voice/sessions',
@@ -3158,6 +3284,13 @@ export function createApp(): express.Express {
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();
+      // Flush any queued PostHog server-side funnel events before the
+      // process exits so Railway shutdown doesn't drop in-flight
+      // signup/trial/conversion captures.
+      {
+        const { shutdownAnalytics } = await import('./analytics/posthog');
+        await shutdownAnalytics();
+      }
       // Disconnect Redis cache store(s) before draining the DB pool so Railway
       // shutdown is not slowed by lingering Redis connections.
       await shutdownCacheStores();

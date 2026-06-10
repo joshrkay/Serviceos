@@ -445,8 +445,14 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS region TEXT,
       ADD COLUMN IF NOT EXISTS locale TEXT;
     ALTER TABLE tenant_settings DROP CONSTRAINT IF EXISTS tenant_settings_us_region_check;
+    -- QA-2026-06-04: NOT VALID — the runner re-executes every migration on
+    -- every boot (no ledger), so a validating ADD CONSTRAINT here re-checks
+    -- all rows each deploy; any tenant_settings row with a NULL region
+    -- (which the relaxed 088 constraint explicitly allows) bricked the next
+    -- deploy with 23514. NOT VALID keeps the strict intent for new writes in
+    -- the 070→088 window without re-validating existing data; 088 drops it.
     ALTER TABLE tenant_settings ADD CONSTRAINT tenant_settings_us_region_check
-      CHECK (country <> 'US' OR (region IS NOT NULL AND btrim(region) ~ '^[A-Z]{2}$'));
+      CHECK (country <> 'US' OR (region IS NOT NULL AND btrim(region) ~ '^[A-Z]{2}$')) NOT VALID;
 
     CREATE TABLE IF NOT EXISTS tenant_integrations (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -2284,6 +2290,17 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
+  // Blocker 3 RLS exception: oauth_states has tenant_id for the binding
+  // record but is INTENTIONALLY NOT row-level-security protected. The
+  // /callback path calls consume(stateId) BEFORE any tenant context is
+  // set — recovering the tenant_id from the state row is the entire point
+  // of the lookup. RLS would force the row to be invisible to the very
+  // call that needs it. Safety: the id is a 128-bit random UUID acting as
+  // a single-use nonce (consumed_at flips on read), expires_at enforces a
+  // 5-minute window, and the row is created server-side bound to the
+  // already-authenticated tenant/user. The schema-guard test
+  // (every-table-with-tenant_id-has-FORCE) explicitly allowlists this
+  // table; any change should be reviewed alongside that test.
   '085_create_oauth_states': `
     -- Tier 4 (Calendar sync — PR 1). Short-lived nonces for the
     -- Google OAuth flow. The /connect route mints a state, persists
@@ -2464,7 +2481,7 @@ export const MIGRATIONS = {
       DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
     ALTER TABLE message_dispatches
       ADD CONSTRAINT message_dispatches_entity_type_check
-        CHECK (entity_type IN ('estimate', 'invoice', 'appointment_confirmation', 'delay_notice'));
+        CHECK (entity_type IN ('estimate', 'invoice', 'appointment_confirmation', 'appointment_reminder', 'delay_notice'));
     CREATE INDEX IF NOT EXISTS idx_dispatches_tenant_sent_at
       ON message_dispatches (tenant_id, sent_at DESC);
   `,
@@ -3068,7 +3085,10 @@ export const MIGRATIONS = {
   // no FK to tenants (the tenant row is gone by the time we write this) and
   // NO row-level security, so it survives the purge and remains readable
   // cross-tenant by ops. This is the only audit trail of a deprovision, since
-  // the tenant's audit_events rows are themselves purged.
+  // the tenant's audit_events rows are themselves purged. The schema-guard
+  // test (every-table-with-tenant_id-has-FORCE) explicitly allowlists this
+  // table; the tenant_id column is denormalized identity for the purged row,
+  // not a tenancy boundary.
   '123_platform_deprovision_log': `
     CREATE TABLE IF NOT EXISTS platform_deprovision_log (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -3711,6 +3731,198 @@ export const MIGRATIONS = {
     -- branch so the whole lookup is indexed instead of a full-tenant scan.
     CREATE INDEX IF NOT EXISTS idx_proposals_source_recording
       ON proposals (tenant_id, (source_context->>'recordingId'));
+  `,
+  '143_tenant_settings_owner_phone': `
+    -- P8-016 (forward-wiring) — the OWNER's personal cell phone used by
+    -- vulnerability-aware emergency triage to patch a customer call
+    -- directly to the owner with a 5-second context preface. Stored in
+    -- E.164 (+15551234567). Distinct from business_phone (the public number
+    -- the AI answers on) and from users.mobile_number (per-team-member
+    -- binding, multi-user model). For V1 solo operators there is one owner
+    -- per tenant, so settings is the natural home.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS owner_phone TEXT;
+  `,
+
+  '144_tenants_pending_checkout_at': `
+    -- Trial-checkout dedup. When a tenant opens Stripe Checkout, we
+    -- stamp pending_checkout_at = NOW() inside the same advisory-lock
+    -- transaction that mints the session. A second checkout request
+    -- that arrives BEFORE Stripe's subscription.created webhook has
+    -- flipped subscription_status to 'trialing' sees the pending
+    -- timestamp inside its own gate check and refuses — closing the
+    -- residual race the in-process advisory lock alone could not
+    -- cover (lock-release vs webhook-delivery window). Cleared by
+    -- the subscription.created webhook handler; a 30-minute timeout
+    -- in the gate handles abandoned checkouts.
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS pending_checkout_at TIMESTAMPTZ;
+  `,
+
+  '145_tenants_pending_checkout_session_id': `
+    -- Pair the pending_checkout_at marker with the Stripe session id
+    -- so cancellation can actively EXPIRE the open session at Stripe
+    -- before reopening the gate. Earlier attempts to round-trip the
+    -- id via cancel_url interpolation failed — Stripe only expands
+    -- {CHECKOUT_SESSION_ID} in success_url. Persisting it server-side
+    -- on creation is the supported path. Cleared together with
+    -- pending_checkout_at when the subscription.created webhook lands
+    -- or when the cancel endpoint runs.
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS pending_checkout_session_id TEXT;
+  `,
+
+  '146_tenant_settings_activated_at': `
+    -- Activation marker — stamped exactly once, the first time a tenant
+    -- receives a "real" inbound call after the voice agent goes live (see
+    -- voice/activation.ts for the count-based rule). Drives the
+    -- first_real_call_received funnel event's once-per-tenant idempotency
+    -- and the in-app celebration banner. Additive, nullable, no default:
+    -- NULL means "not yet activated". Inherits tenant_settings' existing
+    -- FORCE-RLS tenant_isolation policy — no new policy required.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ;
+  `,
+
+  '147_tenant_settings_vapi_assistant': `
+    -- Vapi voice-assistant binding. vapi_assistant_id is the assistant
+    -- created (and linked to the tenant's provisioned phone number) during
+    -- onboarding; voice_id is the chosen ElevenLabs preset voice persisted
+    -- onto that assistant. Both additive + nullable; inherit tenant_settings'
+    -- FORCE-RLS tenant_isolation policy. NULL = assistant not yet created.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS vapi_assistant_id TEXT;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS voice_id TEXT;
+  `,
+
+  '148_tenant_settings_business_profile_extras': `
+    -- Business-profile fields collected by the onboarding identity step that
+    -- weren't previously modelled: a street/service address, the list of ZIP
+    -- codes the tenant serves, and the multi-select of services offered
+    -- (catalog keys). Additive, nullable; arrays default to empty so reads
+    -- never NPE. Inherit tenant_settings' FORCE-RLS policy.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS service_address TEXT;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS service_area_zips TEXT[] NOT NULL DEFAULT '{}';
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS services_offered TEXT[] NOT NULL DEFAULT '{}';
+  `,
+
+  '149_tenant_settings_calendar_provider': `
+    -- Calendar connection chosen in the onboarding calendar step:
+    -- 'google' (OAuth) or 'builtin' (skip path / use ServiceOS scheduling).
+    -- NULL = not yet chosen. Additive; inherits the FORCE-RLS policy.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS calendar_provider TEXT
+        CHECK (calendar_provider IS NULL OR calendar_provider IN ('google', 'builtin'));
+  `,
+
+  '150_tenant_settings_availability_template': `
+    -- Tech-availability template seeded from the next 7 days of the owner's
+    -- Google Calendar free/busy on connect (see availability/seed-from-google.ts).
+    -- JSONB: { source, generatedAt, windowDays, busy: [{start,end}] }. NULL
+    -- until a Google calendar is connected + seeded. Additive; inherits the
+    -- FORCE-RLS policy.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS availability_template JSONB;
+  `,
+
+  '151_tenant_settings_bill_labor_from_time_entries': `
+    -- Feature (launch): opt-in toggle to recompute an auto-drafted invoice's
+    -- labor line from ACTUAL logged time entries instead of the estimated
+    -- hours. Off by default — owners opt in; with no tracked time the estimate
+    -- is billed as-is. tenant_settings already carries RLS, so this additive
+    -- column needs no policy change.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS bill_labor_from_time_entries BOOLEAN NOT NULL DEFAULT false;
+  `,
+
+  // Voice CSR parity — bilingual opt-in + single-line human transfer.
+  // (Renumbered to 152/153 on merge: main landed 147–151 first; migrations
+  // are append-only and ordered, so these slot in after.)
+  //   * transfer_number: E.164 line the inbound-CSR warm transfer dials. When
+  //     set it REPLACES the on-call rotation for the standard human handoff
+  //     (low-confidence / caller-requested). Nullable — tenants without it fall
+  //     back to the rotation path.
+  //   * supported_languages: opt-in language stack for the voice agent. Defaults
+  //     to ['en']; a tenant opts into Spanish by storing ARRAY['en','es']. The
+  //     language detector only switches a call to 'es' when 'es' is present here.
+  // App/Zod layer constrains values to the {en,es} subset; the DB keeps the
+  // permissive TEXT[] so a future language add doesn't need a CHECK rewrite.
+  '152_voice_parity_transfer_and_languages': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS transfer_number TEXT,
+      ADD COLUMN IF NOT EXISTS supported_languages TEXT[] NOT NULL DEFAULT ARRAY['en']::TEXT[];
+  `,
+
+  // call_me_back_tasks — first-class follow-up captured when a warm transfer to
+  // transfer_number fails (no-answer/busy). The AI takes a callback message from
+  // the caller; the async sweep (call-me-back-worker, P0-009 pattern) notifies
+  // the CSR. Distinct from proposals: a callback is an operational task, not an
+  // AI mutation requiring approval.
+  '153_create_call_me_back_tasks': `
+    CREATE TABLE IF NOT EXISTS call_me_back_tasks (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      session_id TEXT,
+      call_sid TEXT,
+      caller_phone TEXT NOT NULL,
+      caller_name TEXT,
+      callback_message TEXT,
+      intent_summary TEXT,
+      reason TEXT NOT NULL DEFAULT 'transfer_failed',
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'notified', 'completed', 'cancelled')),
+      scheduled_for TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE call_me_back_tasks ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE call_me_back_tasks FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_call_me_back ON call_me_back_tasks;
+    CREATE POLICY tenant_isolation_call_me_back ON call_me_back_tasks
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+    CREATE INDEX IF NOT EXISTS idx_cmb_tenant
+      ON call_me_back_tasks (tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_cmb_pending
+      ON call_me_back_tasks (tenant_id) WHERE status = 'pending';
+  `,
+
+  // Idempotency for the failed-transfer callback. A Twilio retry of
+  // /callback-message carries the same session id (?sid), so one pending
+  // callback per session lets create() no-op + return the existing row
+  // instead of inserting a duplicate that would notify the CSR twice. Partial
+  // (session_id IS NOT NULL) so non-session-originated rows are unconstrained.
+  '154_call_me_back_session_idempotency': `
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_cmb_session_unique
+      ON call_me_back_tasks (tenant_id, session_id)
+      WHERE session_id IS NOT NULL;
+  `,
+
+  '155_tenant_integrations_google_business': `
+    -- QA-2026-06-10: google-reviews-worker logs "column credentials does not exist"
+    -- on every sweep. Root cause: migration 101_google_reviews added the
+    -- google_business integration but never updated tenant_integrations:
+    --   1. The provider CHECK only allows ('twilio', 'sendgrid') — no 'google_business'
+    --   2. There is no 'credentials' JSONB column — CredentialResolver.getCredential
+    --      runs: SELECT tenant_id, provider, credentials, credential_version
+    --            FROM tenant_integrations ...
+    --      which fails immediately.
+    -- Fix: widen the provider constraint and add the credentials column.
+
+    -- Widen the provider CHECK constraint to include 'google_business'.
+    ALTER TABLE tenant_integrations
+      DROP CONSTRAINT IF EXISTS tenant_integrations_provider_check;
+    ALTER TABLE tenant_integrations
+      ADD CONSTRAINT tenant_integrations_provider_check
+        CHECK (provider IN ('twilio', 'sendgrid', 'google_business'));
+
+    -- Add the credentials JSONB column used by CredentialResolver.getCredential.
+    -- Defaults to '{}' so existing twilio/sendgrid rows are unaffected.
+    ALTER TABLE tenant_integrations
+      ADD COLUMN IF NOT EXISTS credentials JSONB NOT NULL DEFAULT '{}';
   `,
 };
 

@@ -2,6 +2,7 @@ import { useAuth } from '@clerk/clerk-react';
 import { Navigate, Outlet, useLocation } from 'react-router';
 import { Zap } from 'lucide-react';
 import { useOnboardingStatus } from '../../hooks/useOnboardingStatus';
+import { LandingPage } from '../landing/LandingPage';
 
 export function ProtectedRoute() {
   const { isLoaded, isSignedIn } = useAuth();
@@ -23,6 +24,8 @@ export function ProtectedRoute() {
   }
 
   if (!isSignedIn) {
+    // Public marketing page at "/" — every other protected path bounces to login.
+    if (location.pathname === '/') return <LandingPage />;
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 

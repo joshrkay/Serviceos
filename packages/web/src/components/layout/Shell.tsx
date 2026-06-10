@@ -22,6 +22,8 @@ import {
   useActiveSessions,
 } from '../../hooks/useActiveSessions';
 import { UpgradeNudgeBanner } from '../onboarding/v2/UpgradeNudgeBanner';
+import { ActivationCelebrationBanner } from '../onboarding/v2/ActivationCelebrationBanner';
+import { PastDueBanner } from '../billing/PastDueBanner';
 import { EscalationPanelHost } from '../dispatch/EscalationPanelHost';
 import {
   usePendingProposals,
@@ -76,7 +78,7 @@ function getNav(mode: Mode): NavItem[] {
       // Inbox, and Money intentionally live off the sidebar to keep the
       // surface calm: Dispatch/Money are reachable by URL (and surfaced in
       // Schedule/Home), and pending approvals stay one click away via the
-      // proposal badge on the Fieldly logo, which links to /inbox.
+      // proposal badge on the Rivet logo, which links to /inbox.
       return [
         { to: '/',              label: 'Home',         icon: Home          },
         { to: '/assistant',     label: 'Assistant',    icon: MessageSquare },
@@ -362,6 +364,14 @@ function ShellInner() {
     <ErrorBoundary>
     <div className="flex flex-col h-screen bg-slate-50 overflow-hidden">
 
+      {/* Payment problem — renders only when the Stripe subscription is
+          past_due. Blocking, not dismissible. */}
+      <PastDueBanner />
+
+      {/* Activation celebration — one-time "first real call" banner, fires
+          when tenant_settings.activated_at is set (< 7 days, not dismissed). */}
+      <ActivationCelebrationBanner />
+
       {/* §10 onboarding — early-upgrade nudge. Renders only when the
           30-minute trial threshold has fired (and onboarding is otherwise
           complete). */}
@@ -381,7 +391,7 @@ function ShellInner() {
           <span className="flex size-7 items-center justify-center rounded-lg bg-slate-900">
             <Zap size={14} className="text-white" />
           </span>
-          <span className="text-sm text-slate-900 tracking-tight">Fieldly</span>
+          <span className="text-sm text-slate-900 tracking-tight">Rivet</span>
           {pendingProposalCount > 0 && (
             <NavLink
               to="/inbox"
@@ -475,7 +485,7 @@ function ShellInner() {
             <span className="flex size-6 items-center justify-center rounded-lg bg-slate-900">
               <Zap size={12} className="text-white" />
             </span>
-            <span className="text-sm text-slate-900">Fieldly</span>
+            <span className="text-sm text-slate-900">Rivet</span>
           </div>
           <div className="flex items-center gap-3">
             {showModeToggle && (

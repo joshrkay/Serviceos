@@ -33,6 +33,9 @@ interface Props {
 
 export function CallRoutingSheet({ open, onOpenChange }: Props) {
   const [settings, setSettings] = useState<EscalationSettings>(DEFAULTS);
+  // Voice-parity — single warm-transfer line (top-level tenant setting).
+  const [transferNumber, setTransferNumber] = useState<string>('');
+  const transferNumberSavedRef = useRef<string>('');
   const updateSeqRef = useRef(0);
 
   useEffect(() => {
@@ -42,9 +45,15 @@ export function CallRoutingSheet({ open, onOpenChange }: Props) {
       try {
         const res = await apiFetch('/api/settings');
         if (cancelled || !res.ok) return;
-        const data = await res.json() as { escalationSettings?: Partial<EscalationSettings> };
+        const data = await res.json() as {
+          escalationSettings?: Partial<EscalationSettings>;
+          transferNumber?: string | null;
+        };
         if (!cancelled) {
           setSettings({ ...DEFAULTS, ...(data.escalationSettings ?? {}) });
+          const tn = data.transferNumber ?? '';
+          setTransferNumber(tn);
+          transferNumberSavedRef.current = tn;
         }
       } catch {
         // ignore — defaults
@@ -54,6 +63,26 @@ export function CallRoutingSheet({ open, onOpenChange }: Props) {
       cancelled = true;
     };
   }, [open]);
+
+  async function saveTransferNumber() {
+    const value = transferNumber.trim();
+    // Skip the round-trip when nothing changed.
+    if (value === transferNumberSavedRef.current.trim()) return;
+    const prev = transferNumberSavedRef.current;
+    transferNumberSavedRef.current = value;
+    try {
+      const res = await apiFetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transferNumber: value === '' ? null : value }),
+      });
+      if (!res.ok) throw new Error(`PUT /api/settings ${res.status}`);
+    } catch {
+      toast.error('Could not save transfer number');
+      transferNumberSavedRef.current = prev;
+      setTransferNumber(prev);
+    }
+  }
 
   async function update(patch: Partial<EscalationSettings>) {
     const prevSettings = settings;
@@ -85,6 +114,28 @@ export function CallRoutingSheet({ open, onOpenChange }: Props) {
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-lg font-semibold mb-4">Call Routing &amp; Handoff</h2>
+
+        <section className="mb-6">
+          <h3 className="text-sm font-medium mb-2">Transfer line</h3>
+          <label className="block text-sm text-slate-600 mb-1">
+            Phone number the AI warm-transfers callers to
+          </label>
+          <input
+            type="tel"
+            inputMode="tel"
+            aria-label="Transfer number"
+            placeholder="+1 512 555 0142"
+            value={transferNumber}
+            onChange={(e) => setTransferNumber(e.target.value)}
+            onBlur={() => void saveTransferNumber()}
+            className="w-full border border-slate-200 rounded px-2 py-2 text-sm"
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            On a confidence-low or "talk to a person" request, the AI says it's
+            getting someone and bridges the call here, texting this line the call
+            context first. If no one answers, it takes a callback message.
+          </p>
+        </section>
 
         <section className="mb-6">
           <h3 className="text-sm font-medium mb-2">Where dispatcher gets context</h3>

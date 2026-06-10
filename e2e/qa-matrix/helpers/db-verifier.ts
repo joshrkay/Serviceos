@@ -6,6 +6,20 @@ export interface DbQueryOptions {
   sql: string;
   params?: unknown[];
   tenantId?: string; // if set, `SET LOCAL app.current_tenant_id` inside a transaction (RLS on)
+  /**
+   * QA-2026-06-04 (ISO-01): mark queries that deliberately run WITHOUT the
+   * tenant GUC to prove RLS suppresses rows. Two environment realities are
+   * handled here instead of failing the row spuriously:
+   *  - On a properly-scoped role, the one-arg `current_setting()` inside the
+   *    RLS policy ERRORS when the GUC is unset ("unrecognized configuration
+   *    parameter"). That is RLS failing CLOSED → captured as rowCount 0 with
+   *    `rlsFailedClosed: true`.
+   *  - On a superuser / BYPASSRLS connection (e.g. Railway's default
+   *    `postgres` user) the probe is meaningless — rows are always visible.
+   *    Captured with `bypassRls: true` so the spec can degrade to partial
+   *    instead of reporting a fake tenant-isolation hole.
+   */
+  noGucProbe?: boolean;
 }
 
 export interface CapturedQuery {
@@ -17,6 +31,10 @@ export interface CapturedQuery {
   timestamp: string;
   durationMs: number;
   artifactPath: string;
+  /** Connection role has rolsuper/rolbypassrls — no-GUC RLS probes are not meaningful. */
+  bypassRls?: boolean;
+  /** Query errored on the missing GUC (policy fails closed) — treated as 0 visible rows. */
+  rlsFailedClosed?: boolean;
 }
 
 export class DbVerifier {
@@ -34,10 +52,27 @@ export class DbVerifier {
     return c;
   }
 
+  private bypassRlsCache: boolean | null = null;
+
+  private async connectionBypassesRls(c: Client): Promise<boolean> {
+    if (this.bypassRlsCache !== null) return this.bypassRlsCache;
+    try {
+      const r = await c.query(
+        'SELECT (rolsuper OR rolbypassrls) AS bypass FROM pg_roles WHERE rolname = current_user'
+      );
+      this.bypassRlsCache = Boolean((r.rows[0] as { bypass?: boolean })?.bypass);
+    } catch {
+      this.bypassRlsCache = false;
+    }
+    return this.bypassRlsCache;
+  }
+
   async query(opts: DbQueryOptions): Promise<CapturedQuery> {
     const c = await this.ensure();
     const started = Date.now();
     let result: QueryResult;
+    let bypassRls: boolean | undefined;
+    let rlsFailedClosed: boolean | undefined;
     if (opts.tenantId) {
       await c.query('BEGIN');
       try {
@@ -47,6 +82,29 @@ export class DbVerifier {
       } catch (err) {
         await c.query('ROLLBACK').catch(() => void 0);
         throw err;
+      }
+    } else if (opts.noGucProbe) {
+      bypassRls = (await this.connectionBypassesRls(c)) || undefined;
+      try {
+        result = await c.query(opts.sql, opts.params ?? []);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Two fails-closed shapes from current_setting('app.current_tenant_id')
+        // inside the RLS policy:
+        //  - GUC never defined in this session → "unrecognized configuration
+        //    parameter".
+        //  - GUC previously SET LOCAL on this connection then reverted → PG
+        //    leaves it defined as '' → the policy's ''::uuid cast errors.
+        if (
+          /unrecognized configuration parameter.*app\.current_tenant_id/i.test(msg) ||
+          /invalid input syntax for type uuid: ""/i.test(msg)
+        ) {
+          // Policy errored on the unset/empty GUC — RLS failed closed; no rows visible.
+          rlsFailedClosed = true;
+          result = { rows: [], rowCount: 0 } as unknown as QueryResult;
+        } else {
+          throw err;
+        }
       }
     } else {
       result = await c.query(opts.sql, opts.params ?? []);
@@ -61,6 +119,8 @@ export class DbVerifier {
       timestamp: new Date().toISOString(),
       durationMs: Date.now() - started,
       artifactPath: '',
+      ...(bypassRls ? { bypassRls } : {}),
+      ...(rlsFailedClosed ? { rlsFailedClosed } : {}),
     };
     capture.artifactPath = writeJsonArtifact(this.evidence.dbDir(), opts.label, capture);
     writeTextArtifact(this.evidence.dbDir(), `${opts.label}.sql`, renderSql(opts));

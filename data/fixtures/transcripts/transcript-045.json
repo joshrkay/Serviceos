@@ -1,0 +1,15 @@
+{
+  "id": "transcript-045",
+  "type": "inbound_call",
+  "duration_seconds": 70,
+  "service_type": "electrical",
+  "transcript": "Customer: This is an emergency, my sub-panel has no power and it's getting bad! This is David Carter at 456 Oak Avenue. Dispatcher: Okay David, stay calm. I'm getting a technician dispatched to 456 Oak Avenue right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "expected_entities": {
+    "customer_name": "David Carter",
+    "issue": "emergency: sub-panel has no power",
+    "equipment": "sub-panel",
+    "address": "456 Oak Avenue",
+    "appointment_window": "immediate dispatch"
+  },
+  "source": "synthetic"
+}

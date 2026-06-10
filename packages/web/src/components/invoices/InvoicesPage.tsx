@@ -693,7 +693,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
   const customer   = inv.customer;
   const status: InvoiceStatus = uiStatus;
   const editable   = status === 'Draft';
-  const paymentLink = `pay.fieldly.app/${inv.invoiceNumber.toLowerCase()}`;
+  const paymentLink = `pay.rivet.ai/${inv.invoiceNumber.toLowerCase()}`;
 
   return (
     <>

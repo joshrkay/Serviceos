@@ -93,6 +93,41 @@ export class InvoiceTaskHandler implements TaskHandler {
 
     const parsed = tryParseInvoiceJson(llmResponse.content);
     const payload = buildPartialInvoicePayload(parsed);
+    // QA-2026-06-05: normalize line items to the execution contract — the
+    // LLM emits `unitPrice` (cents per the system prompt) while the executor
+    // reads `unitPriceCents`; the mismatch produced NaN money casts in live
+    // executions. Non-finite amounts are dropped (they surface as missing
+    // fields for operator review instead of doomed executions). Entity-id
+    // trust is enforced at the entry points that accept free text (the
+    // assistant route) — pipeline callers feed verified context ids.
+    if (Array.isArray(payload.lineItems)) {
+      payload.lineItems = (payload.lineItems as Array<Record<string, unknown>>)
+        .map((li, idx) => {
+          const qty = Number(li.quantity ?? 1) || 1;
+          const unitPriceCents = Number(li.unitPriceCents ?? li.unitPrice);
+          if (!Number.isFinite(unitPriceCents) || unitPriceCents < 0) return undefined;
+          const totalCents = Math.round(unitPriceCents * qty);
+          return {
+            id: typeof li.id === 'string' ? li.id : `li-${idx + 1}`,
+            description: typeof li.description === 'string' ? li.description : 'Service',
+            // DB CHECK allows labor/material/equipment/other — map the
+            // LLM's vocabulary onto it, defaulting to 'other'.
+            category: (() => {
+              const c = typeof li.category === 'string' ? li.category.toLowerCase() : 'labor';
+              if (['labor', 'material', 'equipment', 'other'].includes(c)) return c;
+              if (['service', 'work', 'visit'].includes(c)) return 'labor';
+              if (['parts', 'part', 'supplies'].includes(c)) return 'material';
+              return 'other';
+            })(),
+            quantity: qty,
+            unitPriceCents: Math.round(unitPriceCents),
+            totalCents,
+            sortOrder: idx,
+            taxable: typeof li.taxable === 'boolean' ? li.taxable : false,
+          };
+        })
+        .filter(Boolean);
+    }
 
     const confidenceInput = parsed ?? {};
     const confidence = assessConfidence(confidenceInput);

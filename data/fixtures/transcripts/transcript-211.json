@@ -1,0 +1,15 @@
+{
+  "id": "transcript-211",
+  "type": "inbound_call",
+  "duration_seconds": 90,
+  "service_type": "hvac",
+  "transcript": "Customer: This is an emergency, my condenser is blowing warm air and it's getting bad! This is Gary Olsen at 88 Maple Ave. Dispatcher: Okay Gary, stay calm. I'm getting a technician dispatched to 88 Maple Ave right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "expected_entities": {
+    "customer_name": "Gary Olsen",
+    "issue": "emergency: condenser is blowing warm air",
+    "equipment": "condenser",
+    "address": "88 Maple Ave",
+    "appointment_window": "immediate dispatch"
+  },
+  "source": "synthetic"
+}

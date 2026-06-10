@@ -70,7 +70,13 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['016_create_jobs', 'd13851154b8b98a02c7f73b59d5be99c813b7d04aecef004ace5dc9d39723c31'],
   ['017_create_job_timeline_events', 'b249f4702f2904b120a5b3b6a01d0372e701f768bd2c50e53cea7bedd99f6e47'],
   ['018_create_appointments', '5b9aab1df3fabe35d130752b5af9d7531d7dc92da97a41e7fab601b5cfe6815c'],
-  ['070_tenant_location_and_integrations', '52c828957502021bf5430f1fb19cf3f3608cb99673a9f9439f3e30ab001dca0f'],
+  // 070's region CHECK was changed to NOT VALID on this branch (3db4b4a) — the
+  // runner re-executes every migration on every boot (no ledger) and the named
+  // constraint is DROP'd + re-ADD'd each time, so a validating ADD CONSTRAINT
+  // re-checked all rows and bricked deploys (23514) on any NULL-region row that
+  // the relaxed 088 constraint allows. NOT VALID is the only fix that takes
+  // effect at the 070 step itself; hash regenerated to lock in the edit.
+  ['070_tenant_location_and_integrations', '56a32f2c0274b18ebcae94c747dc0885660078edc629b168ce1bc67fb887bea0'],
   ['019_create_appointment_assignments', 'e9394cf3cdc8c89bc8b7f12556d397a86bfdd5a980f3b39af70e45815e98c35b'],
   ['020_create_estimates', 'b4b9e04bbe669956419eb7083e1e8b441db7398aaa8e9e4d80f683c68792cc4d'],
   ['021_create_estimate_line_items', '43b3f8ba9491c53f7701961bb28eae9cddd4c7d9a3c1c908a5d50b8c1a65cabc'],
@@ -143,7 +149,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['089_drop_vertical_packs_type_check', 'dd41709b4300eb0ed03b2a477bdbe163440c76a557d5c07cdbe3e02910a803b8'],
   ['090_tenant_settings_voice_persona', '95805b86eb94d010c5c231ae4ab641e05debba20464a61888a42ac4809b0dcfb'],
   ['091_voice_session_outcome', '6fea1ddb8c3725191aff36013b7134fe7bf91af7392cc815da7f9c041fcfc59c'],
-  ['092_extend_dispatch_entity_types', '151f56d737928f7fc0678c98d5a83bc0b7117bbbd9865cc770c2c46ad2ebbb94'],
+  // 092_extend_dispatch_entity_types: added 'appointment_reminder' to the entity_type CHECK
+  // constraint — 11 rows in message_dispatches had this value, causing pg error 23514 on every
+  // deploy (runner re-runs all migrations on every boot, DROP+re-ADD re-validates all rows).
+  ['092_extend_dispatch_entity_types', 'cc5d07bbf11a26fb95ec6dc93a8344b24fa44472f89e167e4023bb60da603435'],
   ['092_voice_session_transcript', 'f06ebad750ef6b1a8540d27aa14516f6db350b6debda0ec5cc444ad3a6e37f48'],
   ['093_users_deleted_at', '7d2ed611ca7751641c8cff049b55617e4af203b43257528e7c46c15bd80c127f'],
   ['094_add_held_appointment_fields', 'e71d08dc59d35a7c70c245572de551d7a4f48d4b7a5fcfd9164d39705a6f6607'],
@@ -196,6 +205,20 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['140_batch_invoicing', '63f7146c5a2b08ed910edff1f1f9136955d79474e796801239abb1ff96430fdc'],
   ['141_milestone_billing_safeguards', '38e660dbced93c8fa49efa7ddd4ae6e868c5cf10f3b1d5048dfed243e7d6c777'],
   ['142_proposals_source_recording_index', '2af70e5368d61c8338ac16f66557fd34c3a8daebc2d48b009d3bafa13514659d'],
+  ['143_tenant_settings_owner_phone', 'af5c290ac32a8e6eb099212d29275aef11dff43f2a197a79865cbb7b8bc9c953'],
+  ['144_tenants_pending_checkout_at', '93cb5302caca35e6587b01d97151e8424e554a6ec90c08274d67c81eb436f2b2'],
+  ['145_tenants_pending_checkout_session_id', '2f4d5f3c8be0510bfbc1490192810d65358632d0bcc2540f116d77e5233eed36'],
+  ['146_tenant_settings_activated_at', 'b1851a3b18b950f29de1e2df64e26e882a8096d4ef5916adb1bd127b5af12e34'],
+  ['147_tenant_settings_vapi_assistant', '8e59538f846f9de4d53577e5fafbc0c3327b3e823c7907a2f6bc21290eae8a7a'],
+  ['148_tenant_settings_business_profile_extras', '0b9f55aedb42e1a503aa1fc7338fa790a11be08d4bf3eca26cf205da582c9002'],
+  ['149_tenant_settings_calendar_provider', '1ef4dcbef697bb3e060f0a3ba3102381631c053d0c696131623a63c6d0d03440'],
+  ['150_tenant_settings_availability_template', 'c05e63c2025ecc6fd69cf4fdbee4ac447cda294f65f8e9efb77532c37cfe1175'],
+  ['151_tenant_settings_bill_labor_from_time_entries', 'a33ab626d1b807c19dfd62180a9462c7cbdb41c8b358e89249fb2213f93ac145'],
+  ['152_voice_parity_transfer_and_languages', '437c19e7db82a2a1ec8c04d62d433b13ec609dd55315b3fe859fee39bad680a0'],
+  ['153_create_call_me_back_tasks', '9b9d430535e2f9d35c71de35e7389198a71ed8946f8262527ed9378535952abe'],
+  ['154_call_me_back_session_idempotency', 'a08d1ad3f4a42adb17e2fd5ea464b52fb87721d3dd5fe534c662dd787228c65e'],
+  // QA-2026-06-10: credentials column + google_business provider missing from tenant_integrations
+  ['155_tenant_integrations_google_business', 'd626700ea571d2691927cf6adf43704b3bc44aecde7071f3895c1cf801cf2a7f'],
 ];
 
 function hashMigration(value: string): string {

@@ -17,13 +17,7 @@ import { getMigrationSQL } from '../../src/db/schema';
 
 let container: StartedPostgreSqlContainer | null = null;
 
-export async function setup(): Promise<void> {
-  const image = process.env.POSTGRES_IMAGE || 'pgvector/pgvector:pg16';
-  container = await new PostgreSqlContainer(image)
-    .withDatabase('serviceos_test')
-    .start();
-
-  const uri = container.getConnectionUri();
+async function applyMigrations(uri: string): Promise<void> {
   const bootstrap = new Pool({ connectionString: uri });
   try {
     await bootstrap.query("SET lock_timeout = '5s'");
@@ -32,6 +26,28 @@ export async function setup(): Promise<void> {
   } finally {
     await bootstrap.end();
   }
+}
+
+export async function setup(): Promise<void> {
+  // Honor an externally-provided Postgres (CI service container, or a local
+  // cluster in sandboxes where the Docker registry is unreachable). When
+  // EXTERNAL_TEST_DB_URL is set we apply migrations to it and skip the
+  // testcontainer entirely — same migration path, just a different host. The
+  // connecting role must be a superuser, mirroring the testcontainer default.
+  const externalUri = process.env.EXTERNAL_TEST_DB_URL;
+  if (externalUri) {
+    await applyMigrations(externalUri);
+    process.env.TEST_DB_URL = externalUri;
+    return;
+  }
+
+  const image = process.env.POSTGRES_IMAGE || 'pgvector/pgvector:pg16';
+  container = await new PostgreSqlContainer(image)
+    .withDatabase('serviceos_test')
+    .start();
+
+  const uri = container.getConnectionUri();
+  await applyMigrations(uri);
 
   process.env.TEST_DB_URL = uri;
 }

@@ -1,4 +1,5 @@
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
+import { seedFreshJob } from './helpers/seed-entities';
 
 /**
  * JRN-01 / JRN-02 — the core money pipeline (job-centric model):
@@ -71,10 +72,12 @@ matrixTest('JRN-01', 'Estimate with mixed line items → send → accept', async
   ];
   const expected = totals(items);
 
+  // Own job — one accepted estimate per job (uq_estimates_accepted_per_job).
+  const { jobId } = await seedFreshJob(h, '01-seed');
   const created = await h.api.call({
     method: 'POST',
     path: '/api/estimates',
-    body: { jobId: h.tenantA.jobId, lineItems: items, discountCents: 0, taxRateBps: 0 },
+    body: { jobId, lineItems: items, discountCents: 0, taxRateBps: 0 },
     token: h.tenantA.token,
     label: '01-create',
     expectStatus: 201,
@@ -111,10 +114,17 @@ matrixTest('JRN-02', 'Three estimates, invoice two → issue → pay → paid', 
     ],
   ];
 
+  // Each estimate gets its OWN job: the row accepts two of them, and the
+  // product allows only one accepted estimate per job.
+  const jobs = [
+    await seedFreshJob(h, '02-seed1'),
+    await seedFreshJob(h, '02-seed2'),
+    await seedFreshJob(h, '02-seed3'),
+  ];
   const estIds = [
-    await createEstimate(h, h.tenantA.jobId, sets[0], '02-est1'),
-    await createEstimate(h, h.tenantA.jobId, sets[1], '02-est2'),
-    await createEstimate(h, h.tenantA.jobId, sets[2], '02-est3-uninvoiced'),
+    await createEstimate(h, jobs[0].jobId, sets[0], '02-est1'),
+    await createEstimate(h, jobs[1].jobId, sets[1], '02-est2'),
+    await createEstimate(h, jobs[2].jobId, sets[2], '02-est3-uninvoiced'),
   ];
 
   // Invoice + pay the first two; leave the third un-invoiced.

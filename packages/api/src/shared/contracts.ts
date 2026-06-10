@@ -285,6 +285,10 @@ export const updateSettingsSchema = z.object({
   // so an explicit null is the only path to "clear this field".
   businessPhone: z.string().nullable().optional(),
   businessEmail: z.union([z.string().email(), z.null()]).optional(),
+  // P8-016 — owner's personal cell for emergency triage. Accepts any
+  // human format; normalized to E.164 server-side. Empty string or
+  // explicit null clears the value; omit to leave untouched.
+  ownerPhone: z.string().max(40).nullable().optional(),
   timezone: z.string().nullable().optional(),
   estimatePrefix: z.string().min(1).optional(),
   invoicePrefix: z.string().min(1).optional(),
@@ -301,6 +305,8 @@ export const updateSettingsSchema = z.object({
   autoSendAppointmentReminders: z.boolean().optional(),
   // P20-001 — opt into auto-drafting an invoice (as a proposal) on job completion.
   autoInvoiceOnCompletion: z.boolean().optional(),
+  // Feature (launch) — opt into recomputing auto-invoice labor from actual time entries.
+  billLaborFromTimeEntries: z.boolean().optional(),
   // P21-003 — opt into the daily batch-invoice proposal sweep.
   batchInvoiceEnabled: z.boolean().optional(),
   // P21 — opt into minting on_completion milestone invoices. Without this in
@@ -366,6 +372,9 @@ export const updateSettingsSchema = z.object({
   ttsVoiceEn: ttsVoiceField,
   ttsVoiceEs: ttsVoiceField,
   spanishDispatcherUserIds: z.array(z.string().uuid()).optional(),
+  // Voice-parity (migration 152) — E.164 warm-transfer line. Normalized to
+  // E.164 (or null to clear) at the route boundary, mirroring ownerPhone.
+  transferNumber: z.string().max(40).nullable().optional(),
 }).superRefine((val, ctx) => {
   if (val.depositStrategy === 'percentage') {
     if (val.depositPercentageBps == null) {

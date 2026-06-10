@@ -169,3 +169,50 @@ describe('Estimate status transitions — expired', () => {
     expect(expired!.status).toBe('expired');
   });
 });
+
+// QA-2026-06-04 (JRN-02) — one accepted estimate per job. The DB enforces it
+// via the partial unique index uq_estimates_accepted_per_job; the service
+// must surface the conflict as a 409 (ConflictError), not let the unique
+// violation escape as a 500. The live matrix caught the 500 on Railway dev.
+describe('Estimate lifecycle — one accepted estimate per job (JRN-02)', () => {
+  it('second accept on the same job is refused with a conflict, first stays accepted', async () => {
+    const repo = new InMemoryEstimateRepository();
+    const a = await createEstimate(
+      { tenantId: TENANT, jobId: 'job-X', estimateNumber: 'EST-A', lineItems: items(), createdBy: 'u-1' },
+      repo,
+    );
+    const b = await createEstimate(
+      { tenantId: TENANT, jobId: 'job-X', estimateNumber: 'EST-B', lineItems: items(), createdBy: 'u-1' },
+      repo,
+    );
+
+    await transitionEstimateStatus(TENANT, a.id, 'sent', repo);
+    await transitionEstimateStatus(TENANT, a.id, 'accepted', repo);
+    await transitionEstimateStatus(TENANT, b.id, 'sent', repo);
+
+    await expect(transitionEstimateStatus(TENANT, b.id, 'accepted', repo)).rejects.toThrow(
+      /already has an accepted estimate/i,
+    );
+
+    expect((await getEstimate(TENANT, a.id, repo))!.status).toBe('accepted');
+    expect((await getEstimate(TENANT, b.id, repo))!.status).toBe('sent');
+  });
+
+  it('accepting estimates on different jobs is unaffected', async () => {
+    const repo = new InMemoryEstimateRepository();
+    const a = await createEstimate(
+      { tenantId: TENANT, jobId: 'job-1', estimateNumber: 'EST-A', lineItems: items(), createdBy: 'u-1' },
+      repo,
+    );
+    const b = await createEstimate(
+      { tenantId: TENANT, jobId: 'job-2', estimateNumber: 'EST-B', lineItems: items(), createdBy: 'u-1' },
+      repo,
+    );
+    await transitionEstimateStatus(TENANT, a.id, 'sent', repo);
+    await transitionEstimateStatus(TENANT, a.id, 'accepted', repo);
+    await transitionEstimateStatus(TENANT, b.id, 'sent', repo);
+    const accepted = await transitionEstimateStatus(TENANT, b.id, 'accepted', repo);
+    expect(accepted!.status).toBe('accepted');
+  });
+});
+
