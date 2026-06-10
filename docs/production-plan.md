@@ -31,6 +31,21 @@ arrives over the following ~3 weeks via the lanes (§5).
 From `GO-LIVE-READINESS.md`. Wave T1 items are disjoint files — run as
 parallel threads. Each fix lands with a test.
 
+> **Verification checklist (status as of 2026-06-10, PR #525):**
+>
+> | # | Status | Verified by |
+> |---|--------|-------------|
+> | B1 | ✅ done | `test/webhooks/durable-idempotency.test.ts` (duplicate Stripe/Clerk delivery, cross-instance, failed→retry re-processable) |
+> | B2 | ✅ done | `test/middleware/tenant-context.test.ts` (error→rollback, success→commit, close-before-finish, no double-release) |
+> | B3 | ✅ done | migration 130 + static guard in `test/db/schema.test.ts` + **runtime catalog audit** `test/integration/rls-runtime-audit.test.ts` (pg_class rowsecurity/forcerowsecurity, pg_policies coverage, live cross-tenant SELECT = 0 rows; documented exemptions: oauth_states, platform_deprovision_log) |
+> | B4 | ✅ done | `AssistantPage.test.tsx` (authenticated approve/reject, failure shows toast + no optimistic state; Dismiss now actually calls the API) |
+> | B5 | ☑ accepted constraint | single Railway instance documented below; leader-lock sweeps = week-1 ops story |
+> | B6 | ✅ done | `test/invoices/payment.test.ts` + `test/webhooks/stripe-payment-events.test.ts` (payment.recorded, invoice.status_changed, system actor on webhook path) |
+> | B7 | ✅ done | migration 131 EXCLUDE constraint + `test/appointments/pg-assignment.test.ts` (23P01→409) + `test/proposals/execution/create-appointment-handler.test.ts` (race compensation, audited compensation failure) |
+> | B8 | ✅ done | `EstimateApprovalPage.error.test.tsx` + `production-mock-data-guard.test.ts` |
+> | B9 | ✅ done | `experiments/` quarantine commit d462db5; CI infra steps removed |
+> | B10 | ✅ green | CI checks `test` + `playwright` green on PR #525; full local run 6,189 API + 1,070 web tests |
+
 **Wave T1 (parallel, ~independent one-file fixes):**
 
 | # | Fix | Where |
