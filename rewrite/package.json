@@ -1,0 +1,22 @@
+{
+  "name": "rivet-rewrite",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/contracts",
+    "packages/api",
+    "packages/web"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=packages/contracts && npm run build --workspace=packages/api && npm run build --workspace=packages/web",
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm run test --workspace=packages/contracts && npm run test --workspace=packages/api",
+    "migrate": "npm run migrate --workspace=packages/api",
+    "dev:api": "npm run dev --workspace=packages/api",
+    "dev:web": "npm run dev --workspace=packages/web",
+    "seed": "npm run seed --workspace=packages/api"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
