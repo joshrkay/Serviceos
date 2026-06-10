@@ -85,16 +85,59 @@ describe('runtime RLS audit — live pg catalog', () => {
     expect(missing, `tenant tables with NO RLS policy: ${missing.join(', ')}`).toEqual([]);
   });
 
-  it('cross-tenant SELECT through the tenant GUC returns zero rows', async () => {
+  it('cross-tenant SELECT through the tenant GUC returns zero rows for a non-superuser', async () => {
+    // The test pool connects as a superuser, and superusers bypass RLS
+    // entirely (FORCE does not apply to them) — querying directly here
+    // would either pass vacuously on an empty DB or see every tenant's
+    // rows. Probe through a dedicated unprivileged role instead, exactly
+    // like a least-privilege production app role.
     const pool = await getSharedTestDb();
-    // Pick a representative high-value table that definitely exists.
     const client = await pool.connect();
     try {
-      await client.query(`SELECT set_config('app.current_tenant_id', gen_random_uuid()::text, false)`);
+      // Self-seed: a customer in a tenant the probe will NOT be scoped to,
+      // so the zero-row assertion is meaningful even on an empty database.
+      const { createTestTenant } = await import('./shared');
+      const tenant = await createTestTenant(pool);
+      const seededTenant = tenant.tenantId;
+      await client.query(
+        `SELECT set_config('app.current_tenant_id', $1, false)`,
+        [seededTenant],
+      );
+      await client.query(
+        `INSERT INTO customers (tenant_id, first_name, last_name, display_name, created_by)
+         VALUES ($1, 'Probe', 'Customer', 'Probe Customer', 'rls-audit-test')`,
+        [seededTenant],
+      );
+
+      await client.query(`
+        DO $$ BEGIN
+          CREATE ROLE rls_probe NOLOGIN;
+        EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+      `);
+      await client.query(`GRANT USAGE ON SCHEMA public TO rls_probe`);
+      await client.query(`GRANT SELECT ON customers TO rls_probe`);
+
+      // Scope the GUC to a DIFFERENT (random) tenant, drop privileges,
+      // and assert the seeded row is invisible.
+      await client.query(
+        `SELECT set_config('app.current_tenant_id', gen_random_uuid()::text, false)`,
+      );
+      await client.query(`SET ROLE rls_probe`);
       const res = await client.query(`SELECT count(*)::int AS n FROM customers`);
       expect(res.rows[0].n).toBe(0);
+
+      // Sanity: scoped to the seeded tenant, the probe role CAN see it —
+      // proves the zero above came from the policy, not a broken grant.
+      await client.query(`RESET ROLE`);
+      await client.query(
+        `SELECT set_config('app.current_tenant_id', $1, false)`,
+        [seededTenant],
+      );
+      await client.query(`SET ROLE rls_probe`);
+      const scoped = await client.query(`SELECT count(*)::int AS n FROM customers`);
+      expect(scoped.rows[0].n).toBe(1);
     } finally {
-      await client.query(`SELECT set_config('app.current_tenant_id', '', false)`).catch(() => {});
+      await client.query(`RESET ROLE`).catch(() => {});
       client.release();
     }
   });
