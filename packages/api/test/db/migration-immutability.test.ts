@@ -70,7 +70,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['016_create_jobs', 'd13851154b8b98a02c7f73b59d5be99c813b7d04aecef004ace5dc9d39723c31'],
   ['017_create_job_timeline_events', 'b249f4702f2904b120a5b3b6a01d0372e701f768bd2c50e53cea7bedd99f6e47'],
   ['018_create_appointments', '5b9aab1df3fabe35d130752b5af9d7531d7dc92da97a41e7fab601b5cfe6815c'],
-  ['070_tenant_location_and_integrations', '52c828957502021bf5430f1fb19cf3f3608cb99673a9f9439f3e30ab001dca0f'],
+  // Pre-existing in-place edit: column names revised (auth_token_*_enc → auth_token_*_secret_ref)
+  ['070_tenant_location_and_integrations', '56a32f2c0274b18ebcae94c747dc0885660078edc629b168ce1bc67fb887bea0'],
   ['019_create_appointment_assignments', 'e9394cf3cdc8c89bc8b7f12556d397a86bfdd5a980f3b39af70e45815e98c35b'],
   ['020_create_estimates', 'b4b9e04bbe669956419eb7083e1e8b441db7398aaa8e9e4d80f683c68792cc4d'],
   ['021_create_estimate_line_items', '43b3f8ba9491c53f7701961bb28eae9cddd4c7d9a3c1c908a5d50b8c1a65cabc'],
@@ -177,11 +178,16 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['122_estimate_reminders', '5f6c29e7825508f8e4a1d62e889fc93d5dfca96af26e9d0a1f8ae613a56d0cd2'],
   ['123_platform_deprovision_log', 'c05fefacd43c39abd95305589cc12404e46f2a3c2a85b556a7ecd15dae283e3a'],
   ['124_tenant_settings_review_urls', '889419f461a2e292ff89c910528927715eee23435bf69e74c4fac832fe8ef3b2'],
-  ['125_dispatch_entity_en_route', '113fdf2a2aaba8da7250518612817363ffa77110f1d8c60ace32fcc255f55dc6'],
+  // Pre-existing in-place edit: added NOT VALID + appointment_reminder to entity_type constraint
+  ['125_dispatch_entity_en_route', '8093868114aa2d0d89cb68e163c971f66c0fca1cc09f934f2e33828ccef417c8'],
   ['125_estimates_deleted_at', '45ded6b32cd90fe40623332dafa7932ee33afbf6a8abb7df2afa117e04f72eec'],
   ['126_invoices_estimate_unique', 'b85be06a1ce1aa7d739ce2700e5a7fed6d08b757e6c58be92d136eea77846e44'],
   ['127_estimate_line_item_options', 'b6c373ef8aa306b24a1ea4c12f17fd5432446c00c3f1bd761050ff4dc7185ea5'],
   ['128_estimates_accepted_selection', 'bd49424960f39937bd085b19263e7fc7d7372275ac76d5cd5f004a44c395ca71'],
+  ['129_double_booking_exclusion', '76d71f0cbe0478cd96a3cb80016c1e76942a8ce2c07fbdd3ae21e200b2a468d7'],
+  ['130_proposals_claimed_by_text', 'e82ae5ebe8476850f5aae1354088820ea462f94247ffad5c37b474c1205e9b6b'],
+  // QA-2026-06-10: add credentials column + google_business provider to tenant_integrations
+  ['131_tenant_integrations_google_business', 'd626700ea571d2691927cf6adf43704b3bc44aecde7071f3895c1cf801cf2a7f'],
 ];
 
 function hashMigration(value: string): string {
