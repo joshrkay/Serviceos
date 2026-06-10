@@ -170,3 +170,71 @@ The wedge in one line: Jobber gives the new business owner better paperwork;
 ServiceTitan gives them an office they can't afford; Avoca answers their
 phone. ServiceOS does the office work — they speak, it happens, and they get
 to stay a tradesperson.
+
+---
+
+## 5. Post-plan head-to-head: ServiceOS vs Jobber
+
+Assumes all lanes in `docs/launch-plan.md` ship (P12, P18, P22, P14, P13,
+P15-001, P8, P20). Jobber is the primary head-to-head at this ICP.
+
+### Where ServiceOS leads
+
+- **The AI runs the business; Jobber's AI assists with it.** Jobber's AI
+  Receptionist answers calls and captures requests but hands off to the
+  office workflow — a human still quotes, schedules, invoices. Post-plan,
+  our agent *completes* the work: books during the call (P12-004
+  unsupervised routing), drafts and issues a catalog-priced invoice from a
+  spoken sentence (P22-001/002), chases unsold estimates autonomously (P8),
+  answers "did I make money on that job?" by voice (P22-005). Jobber has no
+  equivalent of the proposal/undo/audit layer — that is the trust story for
+  handing an AI the keys.
+- **Voice as the primary interface.** Jobber Copilot is a chat assistant
+  inside the app; push-to-talk everywhere + offline voice queue
+  (P22-003/004) makes speaking the default way to operate.
+- **Truck inventory.** Jobber has no inventory — a known top complaint that
+  pushes growing shops to Housecall Pro or ServiceTitan. P14
+  (truck-as-warehouse, parts auto-deduct into invoice lines) plus
+  "what's on my truck?" is a differentiator, not parity.
+- **Per-job profitability.** Jobber gates job costing to its top plan; we
+  ship it answerable by voice.
+
+### Where we reach parity
+
+- **QuickBooks sync** (P15-001) — functional parity for a 1–5 person shop
+  (paid invoices → sales receipts); Jobber's sync is deeper and
+  battle-tested.
+- **The money loop** — tiered quotes, payment links, auto-invoice, dunning
+  (P20), customer portal, online booking, review requests, referrals
+  (P15-005).
+- **Scheduling** — drive-time feasibility (already built) is comparable to
+  or edges Jobber's route optimization.
+
+### Where Jobber still wins
+
+1. **Native mobile apps.** Polished iOS/Android vs our PWA — the biggest
+   remaining experience gap (app-store presence, push notifications, camera
+   integration).
+2. **Maturity and trust.** ~250K+ service pros, years of edge cases,
+   ecosystem integrations (Zapier, Mailchimp, ...), brand recognition. We
+   have ~6 integrations and a v1 of everything.
+3. **Consumer financing** — Wisetack is built into Jobber; still Tier 3 for
+   us, and it materially lifts average ticket.
+4. **Custom job forms** — Jobber has a form builder; we ship canned vertical
+   checklists at best.
+5. **Marketing suite breadth** — Jobber's campaigns/email marketing is
+   broader; our follow-up agent is more autonomous within a narrower scope.
+
+### Net
+
+Post-plan, the comparison stops being feature-vs-feature and becomes
+workload-vs-workload: Jobber gives the owner a well-organized office job to
+do at night; ServiceOS does the office job. The demo writes itself — owner
+under a sink, phone rings, appointment books itself, invoice issues itself
+from a spoken sentence, QuickBooks stays current. Jobber cannot bolt this on
+easily: its AI sits on top of the system, ours *is* the system of record
+with write access via proposals.
+
+Two vulnerabilities to manage: the native-app gap (the PWA buys time, not
+parity) and the trust deficit of being new — which is why approval + undo +
+audit belongs front-and-center in marketing, not buried in docs.
