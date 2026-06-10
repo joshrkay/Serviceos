@@ -3,6 +3,7 @@ import { CreateAppointmentExecutionHandler } from '../../../src/proposals/execut
 import { Proposal } from '../../../src/proposals/proposal';
 import { InMemoryAppointmentRepository, createAppointment } from '../../../src/appointments/appointment';
 import { InMemoryAssignmentRepository, assignTechnician } from '../../../src/appointments/assignment';
+import { ConflictError } from '../../../src/shared/errors';
 
 describe('CreateAppointmentExecutionHandler', () => {
   const tenantId = '550e8400-e29b-41d4-a716-446655440000';
@@ -100,6 +101,68 @@ describe('CreateAppointmentExecutionHandler', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('Overlaps with appointment');
     expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it('cancels the created appointment when assignment loses the DB double-booking race (no orphan)', async () => {
+    // Simulate the TOCTOU race: the pre-flight overlap check passes, but the
+    // DB EXCLUDE constraint rejects the assignment INSERT (mapped to
+    // ConflictError by PgAssignmentRepository). The handler must compensate
+    // by canceling the just-created appointment and reporting failure.
+    const racingAssignmentRepo = new InMemoryAssignmentRepository();
+    racingAssignmentRepo.create = vi.fn(async () => {
+      throw new ConflictError(
+        'Technician is already booked at this time (overlaps an existing assignment).',
+      );
+    });
+
+    const handler = new CreateAppointmentExecutionHandler(
+      appointmentRepo,
+      racingAssignmentRepo,
+      { enqueue },
+    );
+
+    const proposal = makeProposal({
+      jobId: '44444444-4444-4444-8444-444444444444',
+      scheduledStart: '2026-04-21T09:00:00Z',
+      scheduledEnd: '2026-04-21T10:00:00Z',
+      technicianId: techId,
+    });
+
+    const result = await handler.execute(proposal, context);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/already booked/i);
+    expect(enqueue).not.toHaveBeenCalled();
+
+    // The appointment created before the failed assignment must be canceled,
+    // not left as an active unassigned orphan.
+    const all = await appointmentRepo.findByJob(tenantId, '44444444-4444-4444-8444-444444444444');
+    expect(all).toHaveLength(1);
+    expect(all[0].status).toBe('canceled');
+  });
+
+  it('rethrows non-conflict assignment failures after compensating', async () => {
+    const failingAssignmentRepo = new InMemoryAssignmentRepository();
+    failingAssignmentRepo.create = vi.fn(async () => {
+      throw new Error('connection terminated');
+    });
+
+    const handler = new CreateAppointmentExecutionHandler(
+      appointmentRepo,
+      failingAssignmentRepo,
+      { enqueue },
+    );
+
+    const proposal = makeProposal({
+      jobId: '55555555-5555-4555-8555-555555555555',
+      scheduledStart: '2026-04-22T09:00:00Z',
+      scheduledEnd: '2026-04-22T10:00:00Z',
+      technicianId: techId,
+    });
+
+    await expect(handler.execute(proposal, context)).rejects.toThrow('connection terminated');
+    const all = await appointmentRepo.findByJob(tenantId, '55555555-5555-4555-8555-555555555555');
+    expect(all).toHaveLength(1);
+    expect(all[0].status).toBe('canceled');
   });
 });
 
