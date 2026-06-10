@@ -30,6 +30,7 @@ import { NoteRepository } from '../../notes/note';
 import { PaymentRepository } from '../../invoices/payment';
 import { ExpenseRepository } from '../../expenses/expense';
 import { AuditRepository } from '../../audit/audit';
+import { ConflictError } from '../../shared/errors';
 import { JobRepository, createJob } from '../../jobs/job';
 import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
@@ -315,13 +316,31 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     }, this.appointmentRepo);
 
     if (this.assignmentRepo && payload.technicianId && typeof payload.technicianId === 'string') {
-      await assignTechnician({
-        tenantId: context.tenantId,
-        appointmentId: appointment.id,
-        technicianId: payload.technicianId,
-        technicianRole: 'technician',
-        assignedBy: context.executedBy,
-      }, this.assignmentRepo, { appointmentRepo: this.appointmentRepo, auditRepo: this.auditRepo });
+      try {
+        await assignTechnician({
+          tenantId: context.tenantId,
+          appointmentId: appointment.id,
+          technicianId: payload.technicianId,
+          technicianRole: 'technician',
+          assignedBy: context.executedBy,
+        }, this.assignmentRepo, { appointmentRepo: this.appointmentRepo, auditRepo: this.auditRepo });
+      } catch (err) {
+        // Atomicity guard: the pre-flight feasibility check above is subject
+        // to a TOCTOU race; the authoritative protection is the DB EXCLUDE
+        // constraint `no_double_booking` (migration 131), which surfaces here
+        // as a ConflictError from assignTechnician. The repositories don't
+        // share a client/transaction, so we compensate instead: cancel the
+        // appointment we just created so a failed booking never leaves an
+        // orphan unassigned appointment behind.
+        await this.appointmentRepo.update(context.tenantId, appointment.id, {
+          status: 'canceled',
+          updatedAt: new Date(),
+        });
+        if (err instanceof ConflictError) {
+          return { success: false, error: err.message };
+        }
+        throw err;
+      }
     }
 
     const channels: Array<'sms' | 'email'> = Array.isArray(payload.notificationChannels)
