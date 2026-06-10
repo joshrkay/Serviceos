@@ -9,13 +9,17 @@ Canonical product (deployed on Railway):
 Deployment: /railway.toml + /Dockerfile (Railway is the deploy target).
 See /docs/deployment.md.
 
-NOT deployed / experimental — do not mistake for production (each has a
+NOT deployed / experimental — quarantined under /experiments (see
+/experiments/README.md); do not mistake for production (each has a
 README explaining why):
-- /infra — AWS CDK stacks; built but deployed by nothing.
-- /service-os-app — Next.js prototype that bypasses the proposal/audit gate.
-- /service-os-agent — Python LangGraph prototype with known defects.
-- /supabase_migration.sql — schema for the service-os-app prototype only;
-  unrelated to the canonical in-code migrations (packages/api/src/db/schema.ts).
+- /experiments/infra — AWS CDK stacks; built but deployed by nothing.
+- /experiments/service-os-app — Next.js prototype that bypasses the
+  proposal/audit gate.
+- /experiments/service-os-agent — Python LangGraph prototype with known
+  defects.
+- /experiments/supabase_migration.sql — schema for the service-os-app
+  prototype only; unrelated to the canonical in-code migrations
+  (packages/api/src/db/schema.ts).
 
 ## Core Patterns
 - All money: integer cents, never floating point

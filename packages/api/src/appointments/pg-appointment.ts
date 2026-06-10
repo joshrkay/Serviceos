@@ -1,5 +1,6 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
+import { ConflictError } from '../shared/errors';
 import {
   Appointment,
   AppointmentListOptions,
@@ -32,6 +33,27 @@ function mapRow(row: Record<string, unknown>): Appointment {
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
+}
+
+/**
+ * Map DB-level double-booking signals to the application's ConflictError
+ * (HTTP 409). Rescheduling an appointment whose technician is already
+ * booked elsewhere fires the migration-131 sync trigger
+ * (`trg_appointments_sync_to_assignments`), whose UPDATE of the
+ * denormalized assignment rows violates the `no_double_booking`
+ * EXCLUDE constraint — SQLSTATE 23P01. Without this mapping the route
+ * layer would surface a 500 instead of a 409.
+ */
+function mapAppointmentDbError(err: unknown): Error {
+  if (err && typeof err === 'object') {
+    const e = err as { code?: string; constraint?: string };
+    if (e.code === '23P01' && e.constraint === 'no_double_booking') {
+      return new ConflictError(
+        'Schedule conflict: the assigned technician is already booked during this time.',
+      );
+    }
+  }
+  return err instanceof Error ? err : new Error(String(err));
 }
 
 export class PgAppointmentRepository extends PgBaseRepository implements AppointmentRepository {
@@ -224,13 +246,17 @@ export class PgAppointmentRepository extends PgBaseRepository implements Appoint
       if (setClauses.length === 0) return this.findById(tenantId, id);
 
       params.push(tenantId, id);
-      const result = await client.query(
-        `UPDATE appointments SET ${setClauses.join(', ')}
-         WHERE tenant_id = $${paramIndex} AND id = $${paramIndex + 1}
-         RETURNING *`,
-        params
-      );
-      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+      try {
+        const result = await client.query(
+          `UPDATE appointments SET ${setClauses.join(', ')}
+           WHERE tenant_id = $${paramIndex} AND id = $${paramIndex + 1}
+           RETURNING *`,
+          params
+        );
+        return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+      } catch (err) {
+        throw mapAppointmentDbError(err);
+      }
     });
   }
 }

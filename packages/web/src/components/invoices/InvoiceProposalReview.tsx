@@ -62,26 +62,28 @@ export function InvoiceProposalReview({
         </div>
       )}
 
-      <table className="line-items-table" data-testid="line-items-table">
-        <thead>
-          <tr>
-            <th>Description</th>
-            <th>Qty</th>
-            <th>Unit Price</th>
-            <th>Total</th>
-          </tr>
-        </thead>
-        <tbody>
-          {proposal.lineItems.map((item, index) => (
-            <tr key={index} data-testid={`line-item-${index}`}>
-              <td>{item.description}</td>
-              <td>{item.quantity}</td>
-              <td>{formatCents(item.unitPrice)}</td>
-              <td>{formatCents(Math.round(item.quantity * item.unitPrice))}</td>
+      <div className="overflow-x-auto">
+        <table className="line-items-table" data-testid="line-items-table">
+          <thead>
+            <tr>
+              <th>Description</th>
+              <th>Qty</th>
+              <th>Unit Price</th>
+              <th>Total</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {proposal.lineItems.map((item, index) => (
+              <tr key={index} data-testid={`line-item-${index}`}>
+                <td>{item.description}</td>
+                <td>{item.quantity}</td>
+                <td>{formatCents(item.unitPrice)}</td>
+                <td>{formatCents(Math.round(item.quantity * item.unitPrice))}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
 
       <div className="totals-section" data-testid="totals-section">
         <div className="total-row" data-testid="subtotal">

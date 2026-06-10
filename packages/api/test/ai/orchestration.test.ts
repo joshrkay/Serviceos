@@ -112,7 +112,8 @@ describe('P2-007 — AI task orchestration baseline', () => {
     expect(tasks).toContain('create_job');
     expect(tasks).toContain('create_appointment');
     expect(tasks).toContain('draft_estimate');
-    expect(tasks).toHaveLength(4);
+    expect(tasks).toContain('issue_invoice');
+    expect(tasks).toHaveLength(5);
   });
 
   it('mock provider test — handler creates valid proposal', async () => {
