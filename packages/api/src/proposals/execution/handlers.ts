@@ -5,7 +5,7 @@ import { CreateInvoiceScheduleExecutionHandler } from './invoice-schedule-handle
 import { InvoiceScheduleRepository } from '../../invoices/invoice-schedule';
 import { BatchInvoiceExecutionHandler } from './batch-invoice-handler';
 import { UpdateInvoiceExecutionHandler } from './update-invoice-handler';
-import { IssueInvoiceExecutionHandler } from '../handlers/issue-invoice';
+import { IssueInvoiceExecutionHandler } from './issue-invoice-handler';
 import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
 import { RescheduleAppointmentExecutionHandler } from './reschedule-handler';
@@ -559,7 +559,14 @@ export function createExecutionHandlerRegistry(deps?: {
   // touch these don't have to provide the dep.
   if (deps?.invoiceRepo) {
     handlers.push(new UpdateInvoiceExecutionHandler(deps.invoiceRepo));
-    handlers.push(new IssueInvoiceExecutionHandler(deps.invoiceRepo, moneyStateDeps));
+    // P22-002 — issue_invoice: draft → open with tenant payment terms,
+    // tenant-timezone due date, and an invoice.issued audit event.
+    handlers.push(new IssueInvoiceExecutionHandler(
+      deps.invoiceRepo,
+      deps.settingsRepo,
+      deps.auditRepo,
+      moneyStateDeps,
+    ));
   }
   if (deps?.estimateRepo) {
     handlers.push(new UpdateEstimateExecutionHandler(
