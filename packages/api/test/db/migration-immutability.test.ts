@@ -217,6 +217,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['152_voice_parity_transfer_and_languages', '437c19e7db82a2a1ec8c04d62d433b13ec609dd55315b3fe859fee39bad680a0'],
   ['153_create_call_me_back_tasks', '9b9d430535e2f9d35c71de35e7389198a71ed8946f8262527ed9378535952abe'],
   ['154_call_me_back_session_idempotency', 'a08d1ad3f4a42adb17e2fd5ea464b52fb87721d3dd5fe534c662dd787228c65e'],
+  // QA-2026-06-10: credentials column + google_business provider missing from tenant_integrations
+  ['155_tenant_integrations_google_business', 'd626700ea571d2691927cf6adf43704b3bc44aecde7071f3895c1cf801cf2a7f'],
 ];
 
 function hashMigration(value: string): string {
