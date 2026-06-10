@@ -6,7 +6,12 @@ import {
   DraftEstimateTaskHandler,
 } from '../tasks/task-handlers';
 import { AppError } from '../../shared/errors';
-import { Proposal } from '../../proposals/proposal';
+import {
+  Proposal,
+  ProposalType,
+  CreateProposalInput,
+  createProposal,
+} from '../../proposals/proposal';
 import {
   applyConfidencePolicy,
   ConfidenceAction,
@@ -43,12 +48,52 @@ export class TaskRouter {
   }
 }
 
+/**
+ * P22-002 — dep-free `issue_invoice` task handler for the default router.
+ *
+ * No LLM call needed: the payload is just `{ invoiceId }`, taken from the
+ * classifier's extracted invoice reference (jobReference / invoiceReference,
+ * UUID or "INV-0042"-style number — the execution handler resolves either).
+ * When no reference was extracted the proposal carries an empty payload so
+ * the execution handler returns a clear validation failure instead of
+ * guessing. The richer conversation-context resolution ("the one we just
+ * drafted") lives in the voice-action-router's repo-backed handler.
+ */
+export class IssueInvoiceTaskHandler implements TaskHandler {
+  readonly taskType: ProposalType = 'issue_invoice';
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ref =
+      context.existingEntities?.invoiceReference ??
+      context.existingEntities?.jobReference;
+    const invoiceId = typeof ref === 'string' && ref.trim() ? ref.trim() : undefined;
+
+    const input: CreateProposalInput = {
+      tenantId: context.tenantId,
+      proposalType: this.taskType,
+      payload: invoiceId ? { invoiceId } : {},
+      summary: invoiceId ? `Issue invoice ${invoiceId}` : context.message,
+      sourceContext: context.conversationId
+        ? { conversationId: context.conversationId }
+        : undefined,
+      createdBy: context.userId,
+      ...(context.tenantThresholdOverride
+        ? { tenantThresholdOverride: context.tenantThresholdOverride }
+        : {}),
+    };
+
+    const proposal = createProposal(input);
+    return { proposal, taskType: this.taskType };
+  }
+}
+
 export function createDefaultTaskRouter(): TaskRouter {
   const router = new TaskRouter();
   router.register(new CreateCustomerTaskHandler());
   router.register(new CreateJobTaskHandler());
   router.register(new CreateAppointmentTaskHandler());
   router.register(new DraftEstimateTaskHandler());
+  router.register(new IssueInvoiceTaskHandler());
   return router;
 }
 
