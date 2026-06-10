@@ -4,6 +4,9 @@ import { LLMGateway } from '../ai/gateway/gateway';
 import { Proposal, ProposalRepository, createProposal, CreateProposalInput, ProposalType } from '../proposals/proposal';
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
+import { routeUnsupervisedProposal } from '../proposals/auto-approve';
+import type { AuditRepository } from '../audit/audit';
+import type { UnsupervisedProposalRouting } from '../settings/settings';
 import { ConflictError } from '../shared/errors';
 import { voiceProposalIdempotencyKey } from '../voice/voice-audit';
 import {
@@ -194,6 +197,29 @@ export interface VoiceActionRouterDeps {
    * the flag. Optional, like every other dep here.
    */
   multiActionEnabled?: (tenantId: string) => Promise<boolean>;
+  /**
+   * P12-004 wiring — unsupervised proposal routing. When the tenant has no
+   * supervisor present and a voice proposal lands in `ready_for_review`,
+   * the worker invokes `routeUnsupervisedProposal` with these seams so the
+   * `queue_and_sms` routing sends the owner a one-tap approve SMS (signed,
+   * single-use token; see `proposals/auto-approve.ts`). Optional: when
+   * absent, behavior is unchanged (queue only, no audit event).
+   */
+  unsupervisedRouting?: {
+    auditRepo: AuditRepository;
+    /** Outbound SMS seam (existing message delivery provider). */
+    sendSms?: (to: string, body: string) => Promise<void>;
+    /** HMAC secret for the one-tap token. Required for the SMS to fire. */
+    secret?: string;
+    /** Builds the public one-tap approve URL from a signed token. */
+    buildApproveUrl?: (token: string) => string;
+    /** Resolves the owner's (or backup supervisor's) E.164 mobile. */
+    resolveOwnerPhone?: (tenantId: string) => Promise<string | null>;
+    /** Reads tenant_settings.unsupervised_proposal_routing. */
+    resolveRouting?: (
+      tenantId: string,
+    ) => Promise<UnsupervisedProposalRouting | undefined>;
+  };
 }
 
 // P11-001: lookup_* intents are READ-ONLY and never produce a
@@ -647,7 +673,13 @@ interface SegmentParams {
 }
 
 type SegmentOutcome =
-  | { kind: 'proposal'; proposal: Proposal; classification: IntentClassification }
+  | {
+      kind: 'proposal';
+      proposal: Proposal;
+      classification: IntentClassification;
+      /** Tenant-wide presence at routing time (P12-004 unsupervised routing). */
+      supervisorPresent: boolean;
+    }
   // The classifier could not route this segment — a voice_clarification
   // was emitted in its place (single path) or should be (chain path; see
   // processChain). `classification` is returned so the caller can decide.
@@ -765,7 +797,12 @@ async function processSegment(
   // to thread presence can't slip an auto-approved (→ auto-executing) proposal
   // past an unsupervised tenant. No-op in the normal case (the handler already
   // computed 'ready_for_review').
-  return { kind: 'proposal', proposal: holdIfUnsupervised(proposal, supervisorPresent), classification };
+  return {
+    kind: 'proposal',
+    proposal: holdIfUnsupervised(proposal, supervisorPresent),
+    classification,
+    supervisorPresent,
+  };
 }
 
 /**
@@ -1066,6 +1103,46 @@ export function createVoiceActionRouterWorker(
           classifierConfidence: outcome.classification.confidence,
           proposalConfidence: outcome.proposal.confidenceScore,
         });
+
+        // P12-004 — unsupervised routing. The proposal just queued with no
+        // supervisor on the wall: apply the tenant-configured routing
+        // (`queue_and_sms` default → one-tap approve SMS to the owner) and
+        // emit the `unsupervised_proposal_routed` audit event. Best-effort:
+        // a routing failure never fails the (already persisted) proposal.
+        if (
+          deps.unsupervisedRouting &&
+          !outcome.supervisorPresent &&
+          outcome.proposal.status === 'ready_for_review'
+        ) {
+          const ur = deps.unsupervisedRouting;
+          try {
+            const routing = await ur.resolveRouting?.(tenantId);
+            const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
+            await routeUnsupervisedProposal(
+              {
+                auditRepo: ur.auditRepo,
+                ...(ur.sendSms ? { sendSms: ur.sendSms } : {}),
+                ...(ur.secret ? { secret: ur.secret } : {}),
+                ...(ur.buildApproveUrl ? { buildApproveUrl: ur.buildApproveUrl } : {}),
+              },
+              {
+                tenantId,
+                proposalId: outcome.proposal.id,
+                ...(routing ? { routing } : {}),
+                // Operator voice recordings are not a live inbound call, so
+                // `escalate_to_oncall` falls back to queue_only here by design.
+                channel: 'other',
+                ...(ownerPhone ? { ownerPhone } : {}),
+                summaryText: outcome.proposal.summary,
+              },
+            );
+          } catch (err) {
+            log.warn('voice-action-router: unsupervised routing failed', {
+              proposalId: outcome.proposal.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
       }
     },
     {
