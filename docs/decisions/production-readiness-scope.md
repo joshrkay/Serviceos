@@ -17,7 +17,7 @@ Out of scope for this tranche unless explicitly re-prioritized:
 **Track 1 + partial Track 2:**
 
 1. **Supabase as Postgres host** — use `DATABASE_URL` pointing at Supabase Postgres; run canonical migrations via `packages/api` only (`npm --prefix packages/api run migrate:apply`).
-2. **Do not** apply [supabase_migration.sql](../../supabase_migration.sql) on the production database (incompatible with [schema.ts](../../packages/api/src/db/schema.ts)).
+2. **Do not** apply [supabase_migration.sql](../../experiments/supabase_migration.sql) on the production database (incompatible with [schema.ts](../../packages/api/src/db/schema.ts)).
 3. **RLS hardening** — tighten `portal_sessions` policy to `app.portal_token_lookup` instead of permissive unset-tenant reads.
 4. **Documentation** — [docs/supabase-host-setup.md](../supabase-host-setup.md) for operators.
 5. **Legacy `service-os-app`** — defer full deprecation; document split-brain risk only.

@@ -123,5 +123,5 @@ fires:
 - Wave 1C story `P0-023` — wires the queue selection in `app.ts`.
 - `docs/superpowers/contracts/p0-dispatch-addendum.md` — coordinator block
   for P0-028 that re-scoped this story to a docs-only ADR.
-- `infra/` CDK `QueueStack` — provisioned but intentionally unused under this
+- `experiments/infra/` CDK `QueueStack` — provisioned but intentionally unused under this
   decision.
