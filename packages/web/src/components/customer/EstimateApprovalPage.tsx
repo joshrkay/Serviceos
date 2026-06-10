@@ -534,8 +534,8 @@ export function EstimateApprovalPage() {
   const [accepted,     setAccept] = useState(false);
   const [showAllItems, setAll]    = useState(false);
 
-  // Try the real public API first. Falls back to mock data for the demo
-  // /e/<estimate-number-slug> URLs that don't correspond to real tokens.
+  // Load the estimate from the real public API. There is deliberately NO
+  // mock/fixture fallback on this public URL — see the error branch below.
   const [apiView, setApiView] = useState<PublicEstimateView | null>(null);
   const [apiLoading, setApiLoading] = useState(true);
   const [apiNotFound, setApiNotFound] = useState(false);
@@ -550,12 +550,17 @@ export function EstimateApprovalPage() {
   // Good-better-best: the line-item ids the customer has chosen. Null
   // until the estimate loads, then seeded from the server's defaults.
   const [selectedIds, setSelectedIds] = useState<string[] | null>(null);
+  // Bumped by the error screen's "Try again" button to re-run the fetch.
+  const [retryCount, setRetryCount] = useState(0);
 
   useEffect(() => {
     if (!id) {
       setApiLoading(false);
       return;
     }
+    setApiLoading(true);
+    setApiError(false);
+    setApiNotFound(false);
     let cancelled = false;
     (async () => {
       try {
@@ -589,7 +594,7 @@ export function EstimateApprovalPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [id]);
+  }, [id, retryCount]);
 
   // Re-sync poll: while the page is open on a live (sent) estimate, poll
   // for a revision so the customer can't accept stale numbers. When the
@@ -662,12 +667,20 @@ export function EstimateApprovalPage() {
     const heading = apiNotFound ? 'Link not found' : 'Couldn’t load this estimate';
     const detail = apiNotFound
       ? 'This estimate link is invalid or has been revoked. Please contact the business that sent it.'
-      : 'We couldn’t load this estimate right now. Please refresh the page, or contact the business that sent it.';
+      : 'We couldn’t load this estimate — check the link or contact the business that sent it.';
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center px-6">
         <div className="max-w-md text-center">
           <h1 className="text-slate-900 mb-2" style={{ fontSize: '1.4rem' }}>{heading}</h1>
           <p className="text-sm text-slate-500">{detail}</p>
+          {apiError && (
+            <button
+              onClick={() => setRetryCount(c => c + 1)}
+              className="mt-5 inline-flex items-center justify-center rounded-2xl bg-slate-900 text-white px-6 py-3 text-sm hover:bg-slate-700 active:scale-[0.98] transition-all"
+            >
+              Try again
+            </button>
+          )}
         </div>
       </div>
     );
