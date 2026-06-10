@@ -30,6 +30,7 @@ function makeAppt(overrides: Partial<Appointment> = {}): Appointment {
     arrivalWindowEnd: overrides.arrivalWindowEnd,
     timezone: overrides.timezone ?? 'America/Los_Angeles',
     status: (overrides.status ?? 'scheduled') as AppointmentStatus,
+    idempotencyKey: overrides.idempotencyKey,
     notes: overrides.notes,
     createdBy: overrides.createdBy ?? 'user-1',
     createdAt: overrides.createdAt ?? new Date(),
@@ -191,5 +192,32 @@ describe('VQ-002 — InMemoryAppointmentRepository (canonical module)', () => {
     const result = await repo.listWithMeta!(tenantA, { status: 'scheduled' });
     expect(result.total).toBe(2);
     expect(result.data.every((a) => a.status === 'scheduled')).toBe(true);
+  });
+
+  it('dedups create() by idempotencyKey — a redelivered write returns the existing hold', async () => {
+    const first = await repo.create(
+      makeAppt({ id: 'appt-idem-1', idempotencyKey: 'voice-hold:rec-1' }),
+    );
+    const second = await repo.create(
+      makeAppt({ id: 'appt-idem-2', idempotencyKey: 'voice-hold:rec-1' }),
+    );
+    // The second insert is suppressed; we get the first row back.
+    expect(first.id).toBe('appt-idem-1');
+    expect(second.id).toBe('appt-idem-1');
+    expect(await repo.findById(tenantA, 'appt-idem-2')).toBeNull();
+  });
+
+  it('idempotencyKey dedup is tenant-scoped and ignores keyless appointments', async () => {
+    await repo.create(makeAppt({ id: 'a1', tenantId: tenantA, idempotencyKey: 'k' }));
+    // Same key, different tenant → not deduped (separate row).
+    const other = await repo.create(
+      makeAppt({ id: 'b1', tenantId: tenantB, idempotencyKey: 'k' }),
+    );
+    expect(other.id).toBe('b1');
+    // No key → never deduped.
+    await repo.create(makeAppt({ id: 'c1', idempotencyKey: undefined }));
+    await repo.create(makeAppt({ id: 'c2', idempotencyKey: undefined }));
+    expect(await repo.findById(tenantA, 'c1')).not.toBeNull();
+    expect(await repo.findById(tenantA, 'c2')).not.toBeNull();
   });
 });

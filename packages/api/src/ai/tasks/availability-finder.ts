@@ -2,6 +2,7 @@ import {
   Appointment,
   AppointmentRepository,
   AppointmentStatus,
+  isExpiredHold,
 } from '../../appointments/appointment';
 import { AssignmentRepository } from '../../appointments/assignment';
 
@@ -186,9 +187,7 @@ export class DefaultAvailabilityFinder implements AvailabilityFinder {
       if (!ACTIVE_APPOINTMENT_STATUSES.has(a.status)) return false;
       // An expired hold has released its slot — treat it as free. A
       // live hold (or a non-hold appointment) still blocks.
-      if (a.holdPendingApproval && a.holdExpiryAt && a.holdExpiryAt.getTime() < now) {
-        return false;
-      }
+      if (isExpiredHold(a, now)) return false;
       return true;
     });
 

@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { ProposalType } from '../enums.js';
+import { proposalStatusSchema } from './status.js';
 
 /**
  * P0-033 (F-1) — API-shaped proposal payload for web inbox/list UIs.
@@ -7,8 +9,10 @@ import { z } from 'zod';
 export const proposalResponseSchema = z.object({
   id: z.string().uuid(),
   tenantId: z.string().uuid(),
-  proposalType: z.string(),
-  status: z.string(),
+  // Typed to the canonical ProposalType enum, kept in exact lockstep with the
+  // API's VALID_PROPOSAL_TYPES union via proposal-type.test.ts.
+  proposalType: z.nativeEnum(ProposalType),
+  status: proposalStatusSchema,
   summary: z.string(),
   explanation: z.string().optional(),
   confidenceScore: z.number().optional(),

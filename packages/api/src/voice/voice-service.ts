@@ -382,11 +382,14 @@ export async function recordInboundCall(
     await client.query('COMMIT');
     return { voiceRecordingId, inserted: true };
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {
-      /* swallow — connection may already be in error state */
-    });
+    try { await client.query('ROLLBACK'); } catch { /* connection may already be in error state */ }
     throw err;
   } finally {
+    // GUC leak fix: plain `SET app.current_tenant_id` persists past
+    // COMMIT/ROLLBACK on the underlying connection. Clear it before
+    // release so the next pool checkout doesn't inherit this tenant's
+    // context.
+    try { await client.query('RESET app.current_tenant_id'); } catch { /* ignore */ }
     client.release();
   }
 }

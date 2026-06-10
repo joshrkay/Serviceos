@@ -1,0 +1,256 @@
+{
+  "_meta": {
+    "description": "Spanish seed templates per intent — natively-phrased US-Latino Spanish, not literal translations. Code-switch templates mix EN service/verb tokens. Placeholders: {service_es} {symptom_es} {time_es} {first} {last} {street_num} {street} {suffix} and EN {service} for code-switch.",
+    "lang": "es",
+    "note": "Code-switch templates are marked by template position; the generator tags rows with code_switch=true when an EN token placeholder ({service}) appears in an es file."
+  },
+  "templates": {
+    "create_appointment": [
+      "Necesito que venga alguien a ver {service_es}, {symptom_es}.",
+      "¿Pueden mandar a alguien {time_es}? {service_es} {symptom_es}.",
+      "Quiero hacer una cita para {service_es}.",
+      "¿Tienen para {time_es}? Es {service_es}.",
+      "Necesito un plumber para {service_es}, {time_es}.",
+      "¿Me pueden agendar una visita? {service_es} {symptom_es}."
+    ],
+    "reschedule_appointment": [
+      "Necesito cambiar mi cita para {time_es}.",
+      "¿Puedo mover la cita a {time_es}?",
+      "Se me complicó, ¿puedo reagendar para {time_es}?",
+      "Quiero cambiar la cita, mejor {time_es}.",
+      "¿Podemos cambiar la appointment para {time_es}?"
+    ],
+    "cancel_appointment": [
+      "Necesito cancelar mi cita de {time_es}.",
+      "Voy a cancelar la visita, surgió algo.",
+      "Cancele mi cita por favor, no voy a estar.",
+      "Ya no necesito que venga el técnico, cancélelo.",
+      "Quiero cancelar la cita del {service_es}."
+    ],
+    "confirm_appointment": [
+      "Solo llamo para confirmar que vienen {time_es}.",
+      "¿Sigue en pie la cita para {time_es}?",
+      "Quería confirmar mi cita del {service_es}.",
+      "Confirmo la visita, ahí los espero {time_es}.",
+      "¿Todavía vienen mañana, verdad?"
+    ],
+    "callback": [
+      "¿Me pueden regresar la llamada cuando puedan?",
+      "Quiero que alguien me llame sobre {service_es}.",
+      "Que me hablen {time_es} por favor.",
+      "¿Me pueden llamar para una cotización?",
+      "Necesito un callback más tarde."
+    ],
+    "emergency_dispatch": [
+      "¡Se está inundando el sótano, hay agua por todos lados, no puedo cerrarla!",
+      "¡Está saliendo mucha agua de {service_es}, necesito a alguien ya!",
+      "Huele a gas en la casa, ¿qué hago?",
+      "Se está regresando el drenaje, es una emergencia.",
+      "¡Se reventó un tubo y está saliendo agua, por favor apúrense!",
+      "No tenemos calefacción y hace mucho frío, {service_es} no funciona."
+    ],
+    "create_customer": [
+      "Hola, soy cliente nuevo, quiero contratar servicio.",
+      "Nunca he usado sus servicios, ¿me pueden dar de alta?",
+      "Soy nuevo, me llamo {first} {last}, necesito un trabajo.",
+      "Es la primera vez que llamo, quiero abrir una cuenta.",
+      "Me pasaron su número, quiero ser cliente."
+    ],
+    "update_customer": [
+      "Me cambié de casa, ¿pueden actualizar mi dirección?",
+      "Cambié de número, actualícenlo por favor.",
+      "Quiero actualizar mi correo en la cuenta.",
+      "Tengo número nuevo, misma cuenta, {first} {last}.",
+      "Cambien mi dirección a {street_num} {street} {suffix}."
+    ],
+    "add_service_location": [
+      "Quiero agregar mi propiedad de renta a la cuenta.",
+      "¿Pueden agregar otra dirección? Es {street_num} {street} {suffix}.",
+      "Agreguen la casa de mi mamá a mi cuenta.",
+      "Tengo otra propiedad para la cuenta.",
+      "Pongan la dirección de mi negocio como segunda ubicación."
+    ],
+    "convert_lead": [
+      "Sí, hagámoslo, déjenme agendado.",
+      "Está bien, quiero seguir adelante.",
+      "Vamos con el trabajo que me cotizaron.",
+      "Ya lo platiqué, vamos a agendarlo.",
+      "Suena bien, apúnteme."
+    ],
+    "create_job": [
+      "{service_es} {symptom_es} y necesito que lo arreglen.",
+      "Tengo un problema con {service_es}, {symptom_es}.",
+      "¿Pueden abrir un trabajo? {service_es} {symptom_es}.",
+      "Algo anda mal con {service_es}, {symptom_es}.",
+      "Necesito trabajo, {service_es} {symptom_es}."
+    ],
+    "draft_estimate": [
+      "¿Me pueden mandar un estimado para cambiar {service_es}?",
+      "Quiero una cotización por escrito del {service_es}.",
+      "Necesito un estimado antes de decidir, del {service_es}.",
+      "¿Me dan un presupuesto del {service_es}?",
+      "Mándenme un estimate del {service_es} por favor."
+    ],
+    "send_estimate": [
+      "¿Me pueden mandar el estimado por texto?",
+      "Mándenme la cotización por correo cuando puedan.",
+      "¿Me reenvían el estimado? Lo perdí.",
+      "Manden esa cotización por favor.",
+      "Envíenme el estimado del {service_es}."
+    ],
+    "draft_invoice": [
+      "¿Me pueden dar una factura del trabajo de la semana pasada?",
+      "Necesito una factura por la reparación del {service_es}.",
+      "¿Me mandan la cuenta del trabajo?",
+      "Necesito un recibo, ¿me facturan?",
+      "Mándenme el invoice del trabajo."
+    ],
+    "record_payment": [
+      "Quiero pagar mi cuenta, ¿les doy una tarjeta?",
+      "Quisiera pagar el balance por teléfono.",
+      "¿Puedo hacer un pago en mi cuenta?",
+      "Déjenme pagar lo que debo, tengo cheque.",
+      "Llamo para pagar mi factura."
+    ],
+    "log_expense": [
+      "Apunta cuarenta dólares de material al trabajo de {last}.",
+      "Pon veinte de partes en el trabajo de {last}.",
+      "Agrega gasolina al trabajo de {last}.",
+      "Cárgale las partes al trabajo, como sesenta dólares.",
+      "Registra el gasto de material, treinta y cinco dólares."
+    ],
+    "log_time_entry": [
+      "Apúntame dos horas en el trabajo de {last}.",
+      "Registra hora y media de labor.",
+      "Agrega tres horas al trabajo de {last}.",
+      "Ponme dos horas en ese trabajo.",
+      "Pasé como noventa minutos, regístralo."
+    ],
+    "add_note": [
+      "Pon una nota: el código del portón es cuatro dos nueve uno.",
+      "Agrega una nota — hay perro en el patio.",
+      "Nota que el cliente prefiere visitas en la tarde.",
+      "Pon una nota: las partes están en backorder.",
+      "Anota que el agua está cerrada en la calle."
+    ],
+    "notify_delay": [
+      "Avísale al de las diez que voy como veinte minutos tarde.",
+      "Dile al cliente que voy a llegar tarde.",
+      "Avisa que estoy en el tráfico, quince minutos.",
+      "Notifica a mi siguiente cita que voy retrasado.",
+      "Diles que llego en media hora, no a tiempo."
+    ],
+    "request_feedback": [
+      "Manda una solicitud de reseña al trabajo de {last}.",
+      "Pídele una reseña al cliente del último trabajo.",
+      "Genera una petición de feedback para ese trabajo.",
+      "Que le manden el link de reseña al cliente.",
+      "Solicita feedback del trabajo de {last}."
+    ],
+    "mark_lead_lost": [
+      "Marca el lead de {last} como perdido, se fueron con otro.",
+      "Cierra ese lead, ya no van a seguir.",
+      "El prospecto no contestó, márcalo como perdido.",
+      "Pon ese lead como perdido.",
+      "Decidieron no hacerlo, márcalo perdido."
+    ],
+    "lookup_appointments": [
+      "¿Cuándo es mi próxima cita?",
+      "¿A qué hora es mi cita {time_es}?",
+      "¿Tengo algo agendado esta semana?",
+      "¿Me recuerda cuándo viene el técnico?",
+      "¿Qué tengo agendado con ustedes?"
+    ],
+    "lookup_jobs": [
+      "¿Cómo va el trabajo que me abrieron?",
+      "¿Ya está listo el trabajo?",
+      "¿Cómo vamos con la reparación del {service_es}?",
+      "¿Ya terminó el técnico?",
+      "¿Hay alguna actualización de mi servicio?"
+    ],
+    "lookup_invoices": [
+      "¿Cuánto les debo ahorita?",
+      "¿Cuál es mi balance?",
+      "¿Tengo facturas pendientes?",
+      "¿Ya entró mi último pago?",
+      "¿Cuánto debo todavía del trabajo del {service_es}?"
+    ],
+    "lookup_estimates": [
+      "¿Ya me mandaron el estimado?",
+      "¿Cuál era el precio del estimado?",
+      "¿Me dice qué cubría el estimado?",
+      "¿Todavía sirve mi estimado?",
+      "¿Cuál es el total de mi estimado?"
+    ],
+    "lookup_account_summary": [
+      "¿Me dice qué hay en mi cuenta?",
+      "Deme un resumen de mi cuenta.",
+      "¿Qué tienen registrado de mí?",
+      "¿Me resume mi cuenta rapidito?",
+      "¿Cómo está mi cuenta ahorita?"
+    ],
+    "lookup_customer": [
+      "¿Me tienen en el sistema? Está bajo el nombre de mi esposa.",
+      "¿Estoy en sus registros? Apellido {last}.",
+      "¿Me pueden buscar? Creo que está con mi número viejo.",
+      "¿Tienen mi dirección registrada?",
+      "Revise si ya soy cliente, {first} {last}."
+    ],
+    "pricing_question": [
+      "¿Más o menos cuánto cobran por destapar el drenaje principal?",
+      "¿Cuánto sale cambiar {service_es}?",
+      "¿Cuánto cobran por venir a revisar?",
+      "Aproximado, ¿cuánto costaría arreglar {service_es}?",
+      "¿Cuánto cobran la visita?"
+    ],
+    "hours_location": [
+      "¿Dan servicio en el lado este de la ciudad?",
+      "¿Cuál es su horario?",
+      "¿Abren los fines de semana?",
+      "¿Dan servicio en mi área? Vivo pasando la carretera.",
+      "¿Dónde están ubicados?"
+    ],
+    "service_availability": [
+      "¿Trabajan con calentadores tankless?",
+      "¿Hacen reparaciones de {service_es}?",
+      "¿Ustedes hacen lo del {service_es}?",
+      "¿Hacen trabajo comercial o solo residencial?",
+      "¿Pueden arreglar {service_es}?"
+    ],
+    "complaint": [
+      "Su técnico iba a venir ayer y nadie llegó.",
+      "El {service_es} que arreglaron ya se descompuso otra vez.",
+      "Esperé todo el día y nadie vino.",
+      "El técnico dejó un tiradero y {service_es} todavía {symptom_es}.",
+      "Es la tercera vez que llamo por lo mismo."
+    ],
+    "payment_dispute": [
+      "Estoy viendo esta cuenta y no puede ser tanto.",
+      "Me cobraron dos veces por el mismo trabajo.",
+      "Esta factura no coincide con lo que me cotizaron.",
+      "Nunca acepté este cargo del {service_es}.",
+      "Hay un error en mi cuenta, quiero que lo arreglen."
+    ],
+    "dnc_optout": [
+      "Quítenme de su lista y no me llamen más.",
+      "Dejen de llamarme.",
+      "Quiero estar en la lista de no llamar.",
+      "Dejen de mandarme textos, no me interesa.",
+      "Borren mi número de su sistema."
+    ],
+    "greeting": [
+      "Hola, ¿cómo está?",
+      "Buenos días.",
+      "¿Bueno? ¿Me escucha bien?",
+      "Hola, sí, este, ¿hola?",
+      "Buenas tardes."
+    ],
+    "agent_handoff_request": [
+      "¿Puedo hablar con una persona de verdad por favor?",
+      "¿Hay alguien con quien pueda hablar?",
+      "Prefiero hablar con una persona real.",
+      "Páseme con alguien por favor.",
+      "¿Me puede transferir con una persona?"
+    ]
+  }
+}

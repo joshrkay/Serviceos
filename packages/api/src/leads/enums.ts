@@ -89,6 +89,7 @@ export const updateLeadSchema = z.object({
   estimatedValueCents: estimatedValueCentsSchema.nullable().optional(),
   notes: z.string().max(5000).optional(),
   assignedUserId: z.string().uuid().nullable().optional(),
+  preferredLanguage: z.enum(['en', 'es']).nullable().optional(),
 });
 
 export const loseLeadSchema = z.object({

@@ -15,6 +15,11 @@ export interface LanguageSettings {
   ttsVoiceEs?: string | null;
   autoDetectLanguage: boolean;
   spanishDispatcherUserIds: string[];
+  /**
+   * Voice-parity — the tenant's opt-in language stack. Always includes 'en';
+   * the Spanish toggle flips this between ['en'] and ['en', 'es'].
+   */
+  supportedLanguages: Language[];
 }
 
 /**

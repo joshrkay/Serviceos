@@ -1,0 +1,15 @@
+{
+  "id": "transcript-126",
+  "type": "inbound_call",
+  "duration_seconds": 180,
+  "service_type": "electrical",
+  "transcript": "Customer: Hi, this is Mark Henderson. I'm calling because my GFCI outlet is flickering. Dispatcher: Hi Mark, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Eaton, maybe 10 years old. Dispatcher: Okay, and what's the service address? Customer: 456 Oak Avenue. Dispatcher: Got it. We can send a technician out Wednesday afternoon. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Mark Henderson",
+    "issue": "GFCI outlet is flickering",
+    "equipment": "Eaton GFCI outlet, maybe 10 years old",
+    "address": "456 Oak Avenue",
+    "appointment_window": "Wednesday afternoon"
+  },
+  "source": "synthetic"
+}

@@ -11,7 +11,7 @@ import {
   undoProposal,
 } from '../../src/proposals/actions';
 import { UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
-import { AppError, ConflictError, ForbiddenError, ValidationError, NotFoundError } from '../../src/shared/errors';
+import { AppError, ForbiddenError, ValidationError, NotFoundError } from '../../src/shared/errors';
 
 describe('P2-005 — Approve / reject / edit interactions', () => {
   const tenantId = 'tenant-1';
@@ -50,6 +50,27 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
 
     const result = await approveProposal(repo, tenantId, proposal.id, actorId, 'dispatcher');
     expect(result.status).toBe('approved');
+  });
+
+  it('approves a draft directly (inbox surfaces drafts)', async () => {
+    const repo = makeRepo();
+    const proposal = createProposal(baseInput); // lands in 'draft'
+    await repo.create(proposal);
+
+    const result = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+    expect(result.status).toBe('approved');
+  });
+
+  it('refuses to approve a proposal with unfilled missingFields', async () => {
+    const repo = makeRepo();
+    const proposal = createProposal({ ...baseInput, missingFields: ['phone'] });
+    await repo.create(proposal);
+
+    await expect(
+      approveProposal(repo, tenantId, proposal.id, actorId, 'owner')
+    ).rejects.toThrow(ValidationError);
+    // Untouched — still draft.
+    expect((await repo.findById(tenantId, proposal.id))!.status).toBe('draft');
   });
 
   it('validation — technician cannot approve', async () => {
@@ -203,49 +224,5 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
         undoProposal(repo, tenantId, 'nonexistent-id', actorId, 'owner')
       ).rejects.toThrow(NotFoundError);
     });
-  });
-});
-
-// QA-2026-06-04 (PROP-01) — approval-state guard regression. The live matrix
-// caught a deployed build where rejecting a DRAFT proposal returned 200 and
-// flipped the row to rejected, bypassing human-in-the-loop review. The
-// lifecycle map only allows draft -> ready_for_review; both reject and
-// approve must 409 on a draft and leave the row untouched.
-describe('PROP-01 — approval-state guard on draft proposals', () => {
-  const tenantId = 'tenant-1';
-  const actorId = 'user-1';
-  const input: CreateProposalInput = {
-    tenantId,
-    proposalType: 'remove_crew_member',
-    payload: { reason: 'QA guard check' },
-    summary: 'QA guard check',
-    createdBy: actorId,
-  };
-
-  it('reject-from-draft is refused with ConflictError and the row stays draft', async () => {
-    const repo = new InMemoryProposalRepository();
-    const proposal = createProposal(input);
-    await repo.create(proposal);
-
-    await expect(
-      rejectProposal(repo, tenantId, proposal.id, actorId, 'owner', 'QA guard check')
-    ).rejects.toBeInstanceOf(ConflictError);
-
-    const after = await repo.findById(tenantId, proposal.id);
-    expect(after?.status).toBe('draft');
-    expect(after?.rejectionReason).toBeUndefined();
-  });
-
-  it('approve-from-draft is refused with ConflictError and the row stays draft', async () => {
-    const repo = new InMemoryProposalRepository();
-    const proposal = createProposal(input);
-    await repo.create(proposal);
-
-    await expect(
-      approveProposal(repo, tenantId, proposal.id, actorId, 'owner')
-    ).rejects.toBeInstanceOf(ConflictError);
-
-    const after = await repo.findById(tenantId, proposal.id);
-    expect(after?.status).toBe('draft');
   });
 });

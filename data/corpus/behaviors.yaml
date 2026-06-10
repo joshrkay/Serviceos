@@ -1,0 +1,285 @@
+# ServiceOS Voice Agent — Behavior / Intent Taxonomy
+#
+# Canonical list of caller-facing behaviors the inbound voice agent must
+# recognize. Each behavior maps either to a shared ProposalType
+# (packages/shared/src/enums.ts) or to a non-proposal routing action.
+#
+# This file is the SOURCE OF TRUTH for:
+#   - intent labels used across data/corpus/*.jsonl
+#   - per-intent precision/recall in the eval harness
+#   - the Spanish "every intent >= 30 utterances" parity requirement
+#
+# Routing actions (non-proposal) used by edge_cases.jsonl expected_handling:
+#   route_to_human | clarify | ignore | emergency_dispatch
+#
+# DO NOT add behaviors here without a corresponding entry in
+# TAXONOMY_GAPS.md justification (synthetic utterances are not auto-promoted).
+
+version: "1.0.0"
+
+routing_actions:
+  - route_to_human       # escalate to a person (complaint, payment dispute, ambiguity)
+  - clarify              # low confidence / partial info / mumble -> reprompt
+  - ignore               # wrong number, butt dial, off-topic, no caller intent
+  - emergency_dispatch   # life-safety: gas, CO, active flood, sewage, no-heat-freezing
+
+behaviors:
+  # ── Booking / scheduling (proposal-backed) ─────────────────────────────
+  - id: create_appointment
+    label: Book an appointment
+    category: booking
+    maps_to: { proposal_type: create_appointment }
+    description: Caller wants to schedule a service visit.
+    example: "Can I get someone out to look at my water heater this week?"
+
+  - id: reschedule_appointment
+    label: Reschedule an appointment
+    category: booking
+    maps_to: { proposal_type: reschedule_appointment }
+    description: Caller wants to move an existing appointment to a new time.
+    example: "I need to push my Tuesday appointment to Thursday."
+
+  - id: cancel_appointment
+    label: Cancel an appointment
+    category: booking
+    maps_to: { proposal_type: cancel_appointment }
+    description: Caller wants to cancel a scheduled visit.
+    example: "I have to cancel the appointment for tomorrow morning."
+
+  - id: confirm_appointment
+    label: Confirm an appointment
+    category: booking
+    maps_to: { proposal_type: confirm_appointment }
+    description: Caller is confirming they will keep a scheduled visit.
+    example: "Just calling to confirm you're still coming Friday at nine."
+
+  - id: callback
+    label: Request a callback
+    category: booking
+    maps_to: { proposal_type: callback }
+    description: Caller wants someone to call them back later.
+    example: "Can someone call me back when you get a chance?"
+
+  - id: emergency_dispatch
+    label: Emergency dispatch
+    category: triage
+    maps_to: { proposal_type: emergency_dispatch, routing_action: emergency_dispatch }
+    description: Life-safety or active-damage situation requiring immediate dispatch.
+    example: "My basement is flooding, water is everywhere, I can't shut it off!"
+
+  # ── Customer / lead lifecycle (proposal-backed) ────────────────────────
+  - id: create_customer
+    label: New customer intake
+    category: lifecycle
+    maps_to: { proposal_type: create_customer }
+    description: First-time caller providing their contact details.
+    example: "Hi, I'm a new customer, I'd like to set up service."
+
+  - id: update_customer
+    label: Update customer info
+    category: lifecycle
+    maps_to: { proposal_type: update_customer }
+    description: Existing customer changing phone, email, or address on file.
+    example: "I moved — can you update my address on my account?"
+
+  - id: add_service_location
+    label: Add a service location
+    category: lifecycle
+    maps_to: { proposal_type: add_service_location }
+    description: Customer adding a second property to their account.
+    example: "I want to add my rental property to my account too."
+
+  - id: convert_lead
+    label: Convert lead to customer
+    category: lifecycle
+    maps_to: { proposal_type: convert_lead }
+    description: A prospect deciding to move forward and become a customer.
+    example: "Yeah let's do it, go ahead and set me up."
+
+  - id: create_job
+    label: Create a service job
+    category: lifecycle
+    maps_to: { proposal_type: create_job }
+    description: Caller describing a problem that becomes a tracked job.
+    example: "My garbage disposal is jammed and humming, I need that fixed."
+
+  # ── Estimates & invoices (proposal-backed) ─────────────────────────────
+  - id: draft_estimate
+    label: Request an estimate
+    category: money
+    maps_to: { proposal_type: draft_estimate }
+    description: Caller asking for a written estimate/quote.
+    example: "Can you send me an estimate for replacing the water heater?"
+
+  - id: send_estimate
+    label: Send an estimate
+    category: money
+    maps_to: { proposal_type: send_estimate }
+    description: Caller asking that an existing estimate be sent to them.
+    example: "Can you text me that estimate you mentioned?"
+
+  - id: draft_invoice
+    label: Request an invoice
+    category: money
+    maps_to: { proposal_type: draft_invoice }
+    description: Caller asking for an invoice for completed work.
+    example: "Can I get an invoice for the work you did last week?"
+
+  - id: record_payment
+    label: Make a payment
+    category: money
+    maps_to: { proposal_type: record_payment }
+    description: Caller wanting to pay a balance.
+    example: "I want to pay my bill, can I give you a card?"
+
+  - id: log_expense
+    label: Log an expense (operator)
+    category: operator
+    maps_to: { proposal_type: log_expense }
+    description: Operator/tech logging a job material or fuel expense by phone.
+    example: "Log forty dollars of fittings to the Johnson job."
+
+  - id: log_time_entry
+    label: Log time (operator)
+    category: operator
+    maps_to: { proposal_type: log_time_entry }
+    description: Operator/tech logging labor time on a job.
+    example: "Put me down for two hours on the Maple Street job."
+
+  - id: add_note
+    label: Add a note
+    category: operator
+    maps_to: { proposal_type: add_note }
+    description: Caller or operator adding a free-text note to a record.
+    example: "Add a note that the gate code is 4–2–9–1."
+
+  - id: notify_delay
+    label: Notify of a delay (operator)
+    category: operator
+    maps_to: { proposal_type: notify_delay }
+    description: Operator/tech reporting they will be late to a visit.
+    example: "Let the ten o'clock know I'm running about twenty minutes behind."
+
+  - id: request_feedback
+    label: Request feedback / review
+    category: operator
+    maps_to: { proposal_type: request_feedback }
+    description: Operator triggering a review/feedback request to a customer.
+    example: "Send the Garcia job a review request."
+
+  - id: mark_lead_lost
+    label: Mark a lead lost (operator)
+    category: operator
+    maps_to: { proposal_type: mark_lead_lost }
+    description: Operator marking a prospect as not moving forward.
+    example: "Mark the Smith lead as lost, they went with someone else."
+
+  # ── Lookups (read-only, no proposal) ───────────────────────────────────
+  - id: lookup_appointments
+    label: Look up appointments
+    category: lookup
+    maps_to: { routing_action: clarify }
+    read_only: true
+    description: Caller asking when their next/scheduled appointment is.
+    example: "When is my next appointment again?"
+
+  - id: lookup_jobs
+    label: Look up jobs / work status
+    category: lookup
+    maps_to: { routing_action: clarify }
+    read_only: true
+    description: Caller asking about the status of work in progress.
+    example: "What's the status on the job you opened for me?"
+
+  - id: lookup_invoices
+    label: Look up invoices / balance
+    category: lookup
+    maps_to: { routing_action: clarify }
+    read_only: true
+    description: Caller asking about their balance or an invoice.
+    example: "How much do I owe you right now?"
+
+  - id: lookup_estimates
+    label: Look up estimates
+    category: lookup
+    maps_to: { routing_action: clarify }
+    read_only: true
+    description: Caller asking about an estimate they were sent.
+    example: "Did that estimate ever go out to me?"
+
+  - id: lookup_account_summary
+    label: Account summary
+    category: lookup
+    maps_to: { routing_action: clarify }
+    read_only: true
+    description: Caller asking for a general summary of their account.
+    example: "Can you tell me what's on my account?"
+
+  - id: lookup_customer
+    label: Confirm customer identity/info
+    category: lookup
+    maps_to: { routing_action: clarify }
+    read_only: true
+    description: Confirming who the caller is / what info is on file.
+    example: "Do you have me in the system? It's under my wife's name."
+
+  # ── Pre-sales / informational (no proposal) ────────────────────────────
+  - id: pricing_question
+    label: Pricing / how much
+    category: presale
+    maps_to: { routing_action: clarify }
+    read_only: true
+    description: Caller asking how much a service costs before booking.
+    example: "Roughly how much do you charge to snake a main line?"
+
+  - id: hours_location
+    label: Hours / service area
+    category: presale
+    maps_to: { routing_action: clarify }
+    read_only: true
+    description: Caller asking about hours, location, or whether you serve their area.
+    example: "Do you guys cover the east side of town?"
+
+  - id: service_availability
+    label: Do you do this service
+    category: presale
+    maps_to: { routing_action: clarify }
+    read_only: true
+    description: Caller asking whether you perform a particular type of work.
+    example: "Do you all work on tankless water heaters?"
+
+  # ── Routing / control (no proposal) ────────────────────────────────────
+  - id: complaint
+    label: Complaint / dissatisfaction
+    category: routing
+    maps_to: { routing_action: route_to_human }
+    description: Caller is upset about prior service or billing -> human.
+    example: "Your guy was supposed to come yesterday and nobody showed up."
+
+  - id: payment_dispute
+    label: Billing / payment dispute
+    category: routing
+    maps_to: { routing_action: route_to_human }
+    description: Caller disputing a charge -> human.
+    example: "I'm looking at this bill and there's no way it should be this much."
+
+  - id: dnc_optout
+    label: Do-not-call / opt out
+    category: routing
+    maps_to: { routing_action: route_to_human }
+    description: Caller demanding to stop being contacted.
+    example: "Take me off your list and don't call me again."
+
+  - id: greeting
+    label: Greeting / smalltalk
+    category: routing
+    maps_to: { routing_action: clarify }
+    description: Opening pleasantries before stating a need.
+    example: "Hi there, how's it going today?"
+
+  - id: agent_handoff_request
+    label: Ask for a human
+    category: routing
+    maps_to: { routing_action: route_to_human }
+    description: Caller explicitly asks to speak to a person.
+    example: "Can I just talk to an actual person please?"

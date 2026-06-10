@@ -49,9 +49,63 @@ export interface MoneyDashboardInput {
   invoices: Invoice[];
   payments: Payment[];
   expenses: Expense[];
+  /**
+   * IANA timezone identifier for the tenant. Used to define what
+   * "calendar month" means: the window covers midnight on the first
+   * of the month *in the tenant's local time* through midnight on
+   * the first of the next month. Defaults to `America/New_York` to
+   * match `tenant_settings.timezone`'s default (migration 013) so
+   * existing callers that don't pass a tz get the same legacy-ish
+   * behavior for US/Eastern tenants.
+   */
+  timezone?: string;
 }
 
 const MONTH_RE = /^(\d{4})-(\d{2})$/;
+
+/**
+ * Compute the UTC instant that corresponds to midnight (00:00) on the
+ * given calendar date in the given IANA timezone.
+ *
+ * The naive approach — `Date.UTC(year, month, day)` — is wrong for any
+ * tenant outside UTC: a tenant in PST who looks at "May 2026 revenue"
+ * expects to bucket payments by PST-local midnight boundaries, not UTC
+ * midnight boundaries. Off-by-four-to-eight-hours at month edges is the
+ * difference between a payment showing up in May vs June for that
+ * tenant.
+ *
+ * Algorithm: build a UTC instant at the candidate midnight, format it
+ * through `Intl.DateTimeFormat` in the target timezone to read back the
+ * wall-clock components, then compute the offset between the two and
+ * subtract it. One round-trip handles DST too since we're using the
+ * formatter's awareness of the zone at that exact instant.
+ */
+function localMidnightToUTC(year: number, monthIndex: number, day: number, timezone: string): Date {
+  const utcMidnight = Date.UTC(year, monthIndex, day);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(utcMidnight));
+  const m: Record<string, string> = {};
+  for (const p of parts) m[p.type] = p.value;
+  // The wall-clock midnight UTC reads as in the target zone.
+  const wallClock = Date.UTC(
+    Number(m.year),
+    Number(m.month) - 1,
+    Number(m.day),
+    Number(m.hour) === 24 ? 0 : Number(m.hour), // some locales emit 24 for midnight
+    Number(m.minute),
+    Number(m.second),
+  );
+  const offsetMs = wallClock - utcMidnight;
+  return new Date(utcMidnight - offsetMs);
+}
 
 interface MonthWindow {
   start: Date;
@@ -60,7 +114,18 @@ interface MonthWindow {
   priorEnd: Date;
 }
 
-export function resolveMonthWindow(month: string): MonthWindow {
+/**
+ * Resolve the month-window UTC instants for `month` in the given
+ * timezone. `start` is midnight on the 1st in the tenant tz; `end` is
+ * midnight on the 1st of the following month; `priorStart` is midnight
+ * on the 1st of the prior month. All three are UTC `Date` instances
+ * suitable for the existing `inWindow` half-open comparison.
+ *
+ * When `timezone` is omitted, falls back to `America/New_York` so
+ * older callers (and the in-memory test fixture) keep working without
+ * an API change.
+ */
+export function resolveMonthWindow(month: string, timezone = 'America/New_York'): MonthWindow {
   const match = MONTH_RE.exec(month);
   if (!match) throw new Error("month must be a 'YYYY-MM' string");
   const year = Number(match[1]);
@@ -68,9 +133,9 @@ export function resolveMonthWindow(month: string): MonthWindow {
   if (monthIndex < 0 || monthIndex > 11) {
     throw new Error("month must be a 'YYYY-MM' string with month 01-12");
   }
-  const start = new Date(Date.UTC(year, monthIndex, 1));
-  const end = new Date(Date.UTC(year, monthIndex + 1, 1));
-  const priorStart = new Date(Date.UTC(year, monthIndex - 1, 1));
+  const start = localMidnightToUTC(year, monthIndex, 1, timezone);
+  const end = localMidnightToUTC(year, monthIndex + 1, 1, timezone);
+  const priorStart = localMidnightToUTC(year, monthIndex - 1, 1, timezone);
   return { start, end, priorStart, priorEnd: start };
 }
 
@@ -80,7 +145,7 @@ function inWindow(d: Date, start: Date, end: Date): boolean {
 }
 
 export function computeMoneyDashboardSummary(input: MoneyDashboardInput): MoneyDashboardSummary {
-  const { start, end, priorStart, priorEnd } = resolveMonthWindow(input.month);
+  const { start, end, priorStart, priorEnd } = resolveMonthWindow(input.month, input.timezone);
 
   const completed = input.payments.filter((p) => p.status === 'completed');
 
@@ -143,7 +208,12 @@ export function computeMoneyDashboardSummary(input: MoneyDashboardInput): MoneyD
  * `computeMoneyDashboardSummary` above.
  */
 export interface MoneyDashboardRepository {
-  query(tenantId: string, month: string, now: Date): Promise<MoneyDashboardSummary>;
+  query(
+    tenantId: string,
+    month: string,
+    now: Date,
+    timezone?: string,
+  ): Promise<MoneyDashboardSummary>;
 }
 
 export class InMemoryMoneyDashboardRepository implements MoneyDashboardRepository {
@@ -154,7 +224,12 @@ export class InMemoryMoneyDashboardRepository implements MoneyDashboardRepositor
     this.summary = summary;
   }
 
-  async query(_tenantId: string, month: string, _now: Date): Promise<MoneyDashboardSummary> {
+  async query(
+    _tenantId: string,
+    month: string,
+    _now: Date,
+    _timezone?: string,
+  ): Promise<MoneyDashboardSummary> {
     if (this.summary) return this.summary;
     return {
       month,

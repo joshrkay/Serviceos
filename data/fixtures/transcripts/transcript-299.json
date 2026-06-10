@@ -1,0 +1,15 @@
+{
+  "id": "transcript-299",
+  "type": "inbound_call",
+  "duration_seconds": 80,
+  "service_type": "plumbing",
+  "transcript": "Customer: Hi, this is Tom Bradley. I need to reschedule my appointment for the sump pump. Dispatcher: No problem Tom. When works better for you? Customer: Could we do Wednesday afternoon? Dispatcher: That works. I've moved your appointment to Wednesday afternoon. Customer: Perfect, thanks.",
+  "expected_entities": {
+    "customer_name": "Tom Bradley",
+    "issue": "reschedule sump pump appointment",
+    "equipment": "sump pump",
+    "address": "",
+    "appointment_window": "Wednesday afternoon"
+  },
+  "source": "synthetic"
+}

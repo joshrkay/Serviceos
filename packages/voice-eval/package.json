@@ -1,0 +1,15 @@
+{
+  "name": "@serviceos/voice-eval",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Intent-classification + slot-extraction eval harness for the ServiceOS voice agent. NOT a workspace member; run with npx tsx.",
+  "type": "module",
+  "scripts": {
+    "intent": "tsx run-intent-eval.ts",
+    "intent:gate": "tsx run-intent-eval.ts --gate",
+    "intent:live": "tsx run-intent-eval.ts --live",
+    "slot": "tsx run-slot-eval.ts",
+    "slot:gate": "tsx run-slot-eval.ts --gate",
+    "slot:live": "tsx run-slot-eval.ts --live"
+  }
+}

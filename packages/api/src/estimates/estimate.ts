@@ -150,6 +150,12 @@ export interface EstimateRepository {
   create(estimate: Estimate): Promise<Estimate>;
   findById(tenantId: string, id: string): Promise<Estimate | null>;
   findByJob(tenantId: string, jobId: string): Promise<Estimate[]>;
+  /**
+   * Batched findByJob — all estimates for many jobs in ONE query instead of N.
+   * Used by the invoicing queue / batch sweep to avoid an N+1 over completed
+   * jobs. Excludes soft-deleted rows; callers group by jobId.
+   */
+  findByJobs(tenantId: string, jobIds: string[]): Promise<Estimate[]>;
   findByTenant(tenantId: string, options?: EstimateListOptions): Promise<Estimate[]>;
   /** P1-018: paginated `{ data, total }` form for list UIs. */
   listWithMeta?(tenantId: string, options?: EstimateListOptions): Promise<EstimateListResult>;
@@ -698,6 +704,13 @@ export class InMemoryEstimateRepository implements EstimateRepository {
   async findByJob(tenantId: string, jobId: string): Promise<Estimate[]> {
     return Array.from(this.estimates.values())
       .filter((e) => e.tenantId === tenantId && e.jobId === jobId && !e.deletedAt)
+      .map((e) => ({ ...e, lineItems: [...e.lineItems] }));
+  }
+
+  async findByJobs(tenantId: string, jobIds: string[]): Promise<Estimate[]> {
+    const wanted = new Set(jobIds);
+    return Array.from(this.estimates.values())
+      .filter((e) => e.tenantId === tenantId && wanted.has(e.jobId) && !e.deletedAt)
       .map((e) => ({ ...e, lineItems: [...e.lineItems] }));
   }
 

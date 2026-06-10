@@ -5,11 +5,16 @@ import {
   CheckCircle2, Copy, Phone, Mail, Sparkles, MessageSquare,
   Briefcase, MapPin, RotateCcw, Download,
 } from 'lucide-react';
+import type { EstimateResponse, LineItem as EstimateLineItem } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
+import { Spinner, EmptyState } from '../ui';
+import { ErrorState } from '../ErrorState';
 import { apiFetch } from '../../utils/api-fetch';
 import { printEstimateDocument } from '../../lib/estimatePdf';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { NewEstimateFlow } from './NewEstimateFlow';
@@ -34,69 +39,51 @@ interface EstCompat {
   validUntil?: string;
 }
 
-interface ApiLineItem {
-  id?: string;
-  description: string;
-  quantity: number;
-  unitPriceCents: number;
-  totalCents: number;
-  taxable?: boolean;
-  sortOrder?: number;
-}
-
-interface ApiCustomer {
-  id: string;
-  displayName?: string;
-  firstName?: string;
-  lastName?: string;
-  primaryPhone?: string;
-  email?: string;
-}
-
-interface ApiEstimate {
-  id: string;
-  estimateNumber: string;
-  status: string;
-  jobId?: string;
-  subtotalCents: number;
-  taxCents?: number;
-  totalCents: number;
-  discountCents?: number;
-  validUntil?: string;
-  customerMessage?: string;
-  lineItems?: ApiLineItem[];
-  createdAt?: string;
-  updatedAt?: string;
-  customer?: ApiCustomer;
-  customerId?: string;
-  /** Optimistic-concurrency token sent back as If-Match on edits. */
-  version?: number;
-  /** Locked good-better-best selection (line-item ids) once accepted. */
-  acceptedSelection?: string[];
-}
-
-/** Convert ApiLineItem to UI LineItem for the editor */
-function apiLineToUi(item: ApiLineItem): LineItem {
+/** Convert a shared line item to UI LineItem for the editor */
+function apiLineToUi(item: EstimateLineItem): LineItem {
   return {
+    id: item.id,
     description: item.description,
     qty: item.quantity,
     rate: item.unitPriceCents / 100,
+    taxable: item.taxable,
+    // Preserve good-better-best metadata so an inline edit + save doesn't
+    // strip the tier/add-on structure the customer approves against.
+    groupKey: item.groupKey,
+    groupLabel: item.groupLabel,
+    isOptional: item.isOptional,
+    isDefaultSelected: item.isDefaultSelected,
   };
 }
 
-/** Convert UI LineItem back to ApiLineItem for saving */
-function uiLineToApi(item: LineItem, sortOrder: number): Partial<ApiLineItem> {
+/** Convert UI LineItem back to a shared line item for saving */
+function uiLineToApi(item: LineItem, sortOrder: number): Partial<EstimateLineItem> {
   return {
+    ...(item.id ? { id: item.id } : {}),
     description: item.description,
     quantity: item.qty,
     unitPriceCents: Math.round(item.rate * 100),
     totalCents: Math.round(item.qty * item.rate * 100),
     sortOrder,
-    taxable: false,
+    taxable: item.taxable ?? false,
+    groupKey: item.groupKey,
+    groupLabel: item.groupLabel,
+    isOptional: item.isOptional,
+    isDefaultSelected: item.isDefaultSelected,
   };
 }
 
-type LineItem = { description: string; qty: number; rate: number };
+type LineItem = {
+  id?: string;
+  description: string;
+  qty: number;
+  rate: number;
+  taxable?: boolean;
+  groupKey?: string;
+  groupLabel?: string;
+  isOptional?: boolean;
+  isDefaultSelected?: boolean;
+};
 
 // ─── AI suggestion types ──────────────────────────────────────────────────
 interface AISuggestion {
@@ -485,7 +472,7 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
 }) {
   const total    = lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
   const [copied, setCopied] = useState(false);
-  const link = `fieldly.app/e/${est.estimateNumber.toLowerCase().replace('-', '')}`;
+  const link = `rivet.ai/e/${est.estimateNumber.toLowerCase().replace('-', '')}`;
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center p-4" onClick={onClose}>
@@ -504,7 +491,7 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
               onClick={() => printEstimateDocument({
                 estimateNumber: est.estimateNumber,
                 customerName: est.customer,
-                businessName: 'Fieldly Pro Services',
+                businessName: 'Rivet Pro Services',
                 businessContact: 'Austin, TX · (512) 555-0000',
                 description: est.description,
                 validUntil: est.validUntil,
@@ -527,7 +514,7 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
             <div>
               <div className="flex items-center gap-2 mb-1">
                 <div className="flex size-8 items-center justify-center rounded-lg bg-slate-900 text-white" style={{ fontSize: 12 }}>F</div>
-                <p className="text-sm text-slate-900">Fieldly Pro Services</p>
+                <p className="text-sm text-slate-900">Rivet Pro Services</p>
               </div>
               <p className="text-xs text-slate-400">Austin, TX · (512) 555-0000</p>
             </div>
@@ -742,9 +729,10 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
 // ─── Estimate Detail ──────────────────────────────────────────────────────
 function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: () => void }) {
   const navigate = useNavigate();
-  const { data: est, isLoading, error, refetch } = useDetailQuery<ApiEstimate>('/api/estimates', estimateId);
-  const { mutate: updateEstimate } = useMutation<Record<string, unknown>, ApiEstimate>('PUT', `/api/estimates/${estimateId}`);
-  const { mutate: transitionEstimate } = useMutation<{ status: string }, ApiEstimate>('POST', `/api/estimates/${estimateId}/transition`);
+  const tz = useTenantTimezone();
+  const { data: est, isLoading, error, refetch } = useDetailQuery<EstimateResponse>('/api/estimates', estimateId);
+  const { mutate: updateEstimate } = useMutation<Record<string, unknown>, EstimateResponse>('PUT', `/api/estimates/${estimateId}`);
+  const { mutate: transitionEstimate } = useMutation<{ status: string }, EstimateResponse>('POST', `/api/estimates/${estimateId}/transition`);
 
   const [lineItems,    setLineItems]    = useState<LineItem[]>([]);
   const [sendOpen,     setSendOpen]     = useState(false);
@@ -882,7 +870,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   if (isLoading) {
     return (
       <div className="h-full flex items-center justify-center">
-        <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+        <Spinner size="md" className="text-slate-900" label="Loading estimate" />
       </div>
     );
   }
@@ -899,7 +887,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   // Build a mock Estimate-like object for the sub-components that still need it
   const effectiveCustomerName = enrichedCustomer?.name
     ?? (customer ? (customer.displayName || [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Customer') : 'Customer');
-  const effectiveCustomerId = enrichedCustomer?.id ?? est.customerId ?? customer?.id ?? '';
+  const effectiveCustomerId = enrichedCustomer?.id ?? customer?.id ?? '';
   const estCompat = {
     id: est.id,
     estimateNumber: est.estimateNumber,
@@ -908,7 +896,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
     description: est.customerMessage ?? '',
     status,
     lineItems: uiLineItems,
-    createdDate: est.createdAt ? new Date(est.createdAt).toLocaleDateString() : '',
+    createdDate: est.createdAt ? formatDateInTenantTz(est.createdAt, tz) : '',
     sentDate: undefined as string | undefined,
     viewedDate: undefined as string | undefined,
     approvedDate: undefined as string | undefined,
@@ -989,7 +977,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                     {notes.map(n => (
                       <div key={n.id} className="px-4 py-3">
                         <p className="text-sm text-slate-700 leading-snug">{n.content}</p>
-                        <p className="text-xs text-slate-400 mt-1">{new Date(n.createdAt).toLocaleString()}</p>
+                        <p className="text-xs text-slate-400 mt-1">{formatDateTimeInTenantTz(n.createdAt, tz)}</p>
                       </div>
                     ))}
                   </div>
@@ -1187,7 +1175,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
             customerName: estCompat.customer,
             description: estCompat.description,
             lineItems: uiLineItems,
-            discountCents: est.discountCents ?? 0,
+            discountCents: est.totals.discountCents,
             taxRateBps: 0,
             approvedLabel: status === 'Approved' ? 'Customer approved' : undefined,
           }}
@@ -1226,6 +1214,7 @@ const TABS: { label: string; value: EstimateStatus | 'All' }[] = [
 
 export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {
   const navigate = useNavigate();
+  const tz = useTenantTimezone();
   const [tab,              setTab]           = useState<EstimateStatus | 'All'>('All');
   const [selected,         setSelected]      = useState<string | null>(defaultSelectedId ?? null);
   const [newEstimateOpen,  setNewEstimate]   = useState(false);
@@ -1237,7 +1226,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
     setSelected(defaultSelectedId ?? null);
   }, [defaultSelectedId]);
 
-  const { data, total, isLoading, error, setFilters, refetch } = useListQuery<ApiEstimate>('/api/estimates');
+  const { data, total, isLoading, error, setFilters, refetch } = useListQuery<EstimateResponse>('/api/estimates');
 
   if (selected) {
     return <EstimateDetail estimateId={selected} onBack={() => {
@@ -1257,7 +1246,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
 
   const pendingCount  = normalizedData.filter(e => e.uiStatus === 'Sent' || e.uiStatus === 'Viewed').length;
   const approvedCount = normalizedData.filter(e => e.uiStatus === 'Approved').length;
-  const totalValue    = normalizedData.reduce((s, e) => s + e.totalCents, 0);
+  const totalValue    = normalizedData.reduce((s, e) => s + e.totals.totalCents, 0);
 
   return (
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
@@ -1310,14 +1299,11 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
         {/* Loading / Error */}
         {isLoading && (
           <div className="flex items-center justify-center py-16">
-            <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+            <Spinner size="md" className="text-slate-900" label="Loading estimates" />
           </div>
         )}
         {error && (
-          <div className="flex flex-col items-center py-12 gap-2 text-center">
-            <p className="text-sm text-red-500">Failed to load estimates</p>
-            <button onClick={refetch} className="text-xs text-blue-500 hover:underline">Retry</button>
-          </div>
+          <ErrorState message="Failed to load estimates" onRetry={refetch} />
         )}
 
         {/* List */}
@@ -1352,14 +1338,14 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
                         <p className="text-xs text-slate-400 mt-0.5 truncate">{est.estimateNumber}</p>
                       </div>
                       <div className="flex flex-col items-end gap-1 shrink-0">
-                        <p className="text-sm text-slate-800">{centsToDisplay(est.totalCents)}</p>
+                        <p className="text-sm text-slate-800">{centsToDisplay(est.totals.totalCents)}</p>
                         <StatusBadge status={status} size="sm" />
                       </div>
                     </div>
                     {est.createdAt && (
                       <div className="flex items-center gap-3 mt-2">
                         <span className="flex items-center gap-1 text-xs text-slate-400">
-                          <Clock size={10} /> {new Date(est.createdAt).toLocaleDateString()}
+                          <Clock size={10} /> {formatDateInTenantTz(est.createdAt, tz)}
                         </span>
                       </div>
                     )}
@@ -1369,7 +1355,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
               );
             })}
             {filtered.length === 0 && (
-              <p className="py-12 text-center text-sm text-slate-400">No estimates</p>
+              <EmptyState title="No estimates" />
             )}
           </div>
         )}

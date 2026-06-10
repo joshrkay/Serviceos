@@ -7,6 +7,7 @@ import {
   validateAppointmentInput,
   InMemoryAppointmentRepository,
 } from '../../src/appointments/appointment';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 
 describe('P1-007 — Appointment entity with schedule + arrival window', () => {
   let repo: InMemoryAppointmentRepository;
@@ -522,5 +523,26 @@ describe('P1-007 — Appointment entity with schedule + arrival window', () => {
 
     expect(apt.id).toBeTruthy();
     expect(warnings).toContain('Appointment is scheduled in the past');
+  });
+
+  it('idempotencyKey dedup hit does not emit a second appointment.created audit event', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    const input = {
+      tenantId: 'tenant-1',
+      jobId: 'job-1',
+      scheduledStart: tomorrow,
+      scheduledEnd: tomorrowEnd,
+      timezone: 'UTC',
+      createdBy: 'user-1',
+      idempotencyKey: 'voice-hold:rec-1',
+    };
+    const first = await createAppointment(input, repo, undefined, auditRepo, 'system');
+    // Redelivery: same key → repo returns the existing row (no insert).
+    const second = await createAppointment(input, repo, undefined, auditRepo, 'system');
+
+    expect(second.id).toBe(first.id);
+    const events = await auditRepo.findByEntity('tenant-1', 'appointment', first.id);
+    const created = events.filter((e) => e.eventType === 'appointment.created');
+    expect(created).toHaveLength(1);
   });
 });

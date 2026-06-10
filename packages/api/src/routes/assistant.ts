@@ -343,6 +343,7 @@ async function generateAssistantReply(
             message: segment,
             existingEntities: segEntities,
           });
+          if (!proposal) continue;
           dropUnverifiedIds(proposal.payload, segment, segEntities);
           proposal.sourceContext = { ...(proposal.sourceContext ?? {}), chainId, chainStep: chainCards.length + 1 };
           // Dependency gate: steps after the first reference results that

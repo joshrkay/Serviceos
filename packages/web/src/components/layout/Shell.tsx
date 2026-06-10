@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import {
-  Home, MessageSquare, Briefcase, Calendar, LayoutGrid,
+  Home, MessageSquare, Briefcase, Calendar,
   Users, FileText, Receipt, Settings, Zap, Bell, Layers, TrendingUp, LogOut,
   Wrench,
 } from 'lucide-react';
@@ -22,6 +22,8 @@ import {
   useActiveSessions,
 } from '../../hooks/useActiveSessions';
 import { UpgradeNudgeBanner } from '../onboarding/v2/UpgradeNudgeBanner';
+import { ActivationCelebrationBanner } from '../onboarding/v2/ActivationCelebrationBanner';
+import { PastDueBanner } from '../billing/PastDueBanner';
 import { EscalationPanelHost } from '../dispatch/EscalationPanelHost';
 import {
   usePendingProposals,
@@ -57,33 +59,35 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/settings',       label: 'Settings',  icon: Settings },
       ];
     case 'both':
+      // Supervisor + field-tech power view. Trimmed to the calm core
+      // (Assistant relabel; Dispatch/Inbox/Money dropped from the
+      // sidebar — all still reachable by URL and via the logo badge).
       return [
-        { to: '/assistant',      label: 'Sessions',     icon: MessageSquare },
+        { to: '/assistant',      label: 'Assistant',    icon: MessageSquare },
         { to: '/technician/day', label: 'Today',        icon: Wrench        },
         { to: '/jobs',           label: 'My jobs',      icon: Briefcase     },
         { to: '/schedule',       label: 'Schedule',     icon: Calendar      },
-        { to: '/dispatch',      label: 'Dispatch',     icon: LayoutGrid    },
         { to: '/customers',      label: 'Customers',    icon: Users         },
         { to: '/estimates',      label: 'Estimates',    icon: FileText      },
         { to: '/invoices',       label: 'Invoices',     icon: Receipt       },
-        { to: '/inbox',          label: 'Inbox',        icon: Bell          },
-        { to: '/reports/money',  label: 'Money',        icon: TrendingUp    },
         { to: '/settings',       label: 'Settings',     icon: Settings      },
       ];
     case 'supervisor':
     default:
+      // Mirrors the Figma reference's 10 desktop items exactly. Dispatch,
+      // Inbox, and Money intentionally live off the sidebar to keep the
+      // surface calm: Dispatch/Money are reachable by URL (and surfaced in
+      // Schedule/Home), and pending approvals stay one click away via the
+      // proposal badge on the Rivet logo, which links to /inbox.
       return [
         { to: '/',              label: 'Home',         icon: Home          },
-        { to: '/assistant',     label: 'Sessions',     icon: MessageSquare },
+        { to: '/assistant',     label: 'Assistant',    icon: MessageSquare },
         { to: '/jobs',          label: 'Jobs',         icon: Briefcase     },
         { to: '/schedule',      label: 'Schedule',     icon: Calendar      },
-        { to: '/dispatch',      label: 'Dispatch',     icon: LayoutGrid    },
         { to: '/customers',     label: 'Customers',    icon: Users         },
         { to: '/leads',         label: 'Leads',        icon: TrendingUp    },
         { to: '/estimates',     label: 'Estimates',    icon: FileText      },
         { to: '/invoices',      label: 'Invoices',     icon: Receipt       },
-        { to: '/inbox',         label: 'Inbox',        icon: Bell          },
-        { to: '/reports/money', label: 'Money',        icon: TrendingUp    },
         { to: '/interactions',  label: 'Interactions', icon: Layers        },
         { to: '/settings',      label: 'Settings',     icon: Settings      },
       ];
@@ -110,12 +114,14 @@ function getBottomNav(mode: Mode): NavItem[] {
       ];
     case 'supervisor':
     default:
+      // Matches the Figma mobile bottom bar (6 items).
       return [
-        { to: '/',              label: 'Home',   icon: Home          },
-        { to: '/inbox',         label: 'Inbox',  icon: Bell          },
-        { to: '/reports/money', label: 'Money',  icon: TrendingUp    },
-        { to: '/invoices',      label: 'Bills',  icon: Receipt       },
-        { to: '/assistant',     label: 'AI',     icon: MessageSquare },
+        { to: '/',           label: 'Home',      icon: Home          },
+        { to: '/assistant',  label: 'AI',        icon: MessageSquare },
+        { to: '/jobs',       label: 'Jobs',      icon: Briefcase     },
+        { to: '/leads',      label: 'Leads',     icon: TrendingUp    },
+        { to: '/customers',  label: 'Customers', icon: Users         },
+        { to: '/invoices',   label: 'Invoices',  icon: Receipt       },
       ];
   }
 }
@@ -358,6 +364,14 @@ function ShellInner() {
     <ErrorBoundary>
     <div className="flex flex-col h-screen bg-slate-50 overflow-hidden">
 
+      {/* Payment problem — renders only when the Stripe subscription is
+          past_due. Blocking, not dismissible. */}
+      <PastDueBanner />
+
+      {/* Activation celebration — one-time "first real call" banner, fires
+          when tenant_settings.activated_at is set (< 7 days, not dismissed). */}
+      <ActivationCelebrationBanner />
+
       {/* §10 onboarding — early-upgrade nudge. Renders only when the
           30-minute trial threshold has fired (and onboarding is otherwise
           complete). */}
@@ -377,7 +391,7 @@ function ShellInner() {
           <span className="flex size-7 items-center justify-center rounded-lg bg-slate-900">
             <Zap size={14} className="text-white" />
           </span>
-          <span className="text-sm text-slate-900 tracking-tight">Fieldly</span>
+          <span className="text-sm text-slate-900 tracking-tight">Rivet</span>
           {pendingProposalCount > 0 && (
             <NavLink
               to="/inbox"
@@ -471,7 +485,7 @@ function ShellInner() {
             <span className="flex size-6 items-center justify-center rounded-lg bg-slate-900">
               <Zap size={12} className="text-white" />
             </span>
-            <span className="text-sm text-slate-900">Fieldly</span>
+            <span className="text-sm text-slate-900">Rivet</span>
           </div>
           <div className="flex items-center gap-3">
             {showModeToggle && (
@@ -485,7 +499,31 @@ function ShellInner() {
               </div>
             )}
             <CameraButton variant="topbar" onOpen={() => setCameraOpen(true)} />
-            <Bell size={18} className="text-slate-500" />
+            {/* Mobile approvals entry point. The supervisor bottom bar
+                mirrors the Figma 6 (no Inbox) and the logo proposal badge
+                is desktop-only, so this Bell is the persistent mobile path
+                to the approval queue — with the live pending count. */}
+            <NavLink
+              to="/inbox"
+              aria-label={
+                pendingProposalCount > 0
+                  ? `${pendingProposalCount} pending proposal${pendingProposalCount === 1 ? '' : 's'} — open inbox`
+                  : 'Open approval inbox'
+              }
+              data-testid="mobile-inbox-bell"
+              className="relative flex items-center justify-center text-slate-500"
+            >
+              <Bell size={18} />
+              {pendingProposalCount > 0 && (
+                <span
+                  data-testid="mobile-inbox-badge"
+                  className="absolute -top-1.5 -right-1.5 flex size-3.5 min-w-3.5 items-center justify-center rounded-full bg-blue-600 px-0.5 text-white"
+                  style={{ fontSize: 9 }}
+                >
+                  {pendingProposalCount > 9 ? '9+' : pendingProposalCount}
+                </span>
+              )}
+            </NavLink>
             <NavLink to="/settings" className="relative flex items-center justify-center">
               <span className={`flex size-7 items-center justify-center rounded-full text-xs transition-all ${
                 location.pathname.startsWith('/settings')

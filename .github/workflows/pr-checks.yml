@@ -59,7 +59,6 @@ jobs:
       - name: Per-module coverage thresholds (PRD §13)
         run: npx ts-node scripts/check-coverage.ts
         working-directory: packages/api
-        continue-on-error: true
 
   # VQ-024 — Voice Quality v1 Layer 1 corpus suite.
   #

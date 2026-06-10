@@ -185,8 +185,18 @@ describe('P1-012 — Invoice numbering + due dates + statuses', () => {
     ).rejects.toThrow('Invalid transition from draft to paid');
   });
 
-  it('validation — paid and void are terminal', () => {
-    expect(isValidInvoiceTransition('paid', 'open')).toBe(false);
+  it('validation — void and canceled are terminal', () => {
     expect(isValidInvoiceTransition('void', 'open')).toBe(false);
+    expect(isValidInvoiceTransition('void', 'partially_paid')).toBe(false);
+    expect(isValidInvoiceTransition('canceled', 'open')).toBe(false);
+  });
+
+  it('validation — paid can REOPEN when a settled payment is reversed (NSF/chargeback)', () => {
+    // A reversal (ACH return / chargeback) recomputes the balance and
+    // drops the invoice back to 'open' (no payments left) or
+    // 'partially_paid' (other payments remain). See reversePayment().
+    expect(isValidInvoiceTransition('paid', 'open')).toBe(true);
+    expect(isValidInvoiceTransition('paid', 'partially_paid')).toBe(true);
+    expect(isValidInvoiceTransition('partially_paid', 'open')).toBe(true);
   });
 });

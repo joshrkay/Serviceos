@@ -1,0 +1,15 @@
+{
+  "id": "transcript-223",
+  "type": "inbound_call",
+  "duration_seconds": 60,
+  "service_type": "hvac",
+  "transcript": "Customer: This is an emergency, my package unit keeps short cycling and it's getting bad! This is Patricia Hall at 9 Lakeview Drive. Dispatcher: Okay Patricia, stay calm. I'm getting a technician dispatched to 9 Lakeview Drive right now. Customer: Please hurry. Dispatcher: A tech is on the way, they'll call you when they're close.",
+  "expected_entities": {
+    "customer_name": "Patricia Hall",
+    "issue": "emergency: package unit keeps short cycling",
+    "equipment": "package unit",
+    "address": "9 Lakeview Drive",
+    "appointment_window": "immediate dispatch"
+  },
+  "source": "synthetic"
+}
