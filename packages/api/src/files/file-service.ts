@@ -11,8 +11,35 @@ export interface FileRecord {
   entityType?: string;
   entityId?: string;
   uploadedBy: string;
+  // RV-006: image post-process pipeline outputs. Unset until the
+  // image-post-process worker has run for this file. `contentHash` is the
+  // SHA-256 hex of the FINAL stored object and is stamped by every pipeline
+  // path (success, document hash-only, graceful degradation) — its presence
+  // is the worker's "already processed" idempotency marker.
+  width?: number;
+  height?: number;
+  thumbnailS3Key?: string;
+  exifStripped?: boolean;
+  contentHash?: string;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/**
+ * RV-006: partial update applied by the image post-process worker once the
+ * pipeline finishes. `contentHash` is required because every pipeline
+ * outcome stamps it; the remaining fields are only set on full image
+ * success. `contentType`/`sizeBytes` change when HEIC/WEBP is converted to
+ * JPEG in place.
+ */
+export interface FilePipelineUpdate {
+  contentHash: string;
+  width?: number;
+  height?: number;
+  thumbnailS3Key?: string;
+  exifStripped?: boolean;
+  contentType?: string;
+  sizeBytes?: number;
 }
 
 export interface UploadRequest {
@@ -35,6 +62,17 @@ export interface FileRepository {
   findById(tenantId: string, id: string): Promise<FileRecord | null>;
   findByEntity(tenantId: string, entityType: string, entityId: string): Promise<FileRecord[]>;
   updateSize(tenantId: string, id: string, sizeBytes: number): Promise<FileRecord | null>;
+  /** RV-006: stamp post-process pipeline outputs. Null when not found in tenant. */
+  updatePipelineResults(
+    tenantId: string,
+    id: string,
+    update: FilePipelineUpdate
+  ): Promise<FileRecord | null>;
+  /**
+   * RV-006: all files in the tenant whose pipeline-computed content_hash
+   * matches (newest first). Powers the attach-time dedupe lookup.
+   */
+  findByContentHash(tenantId: string, contentHash: string): Promise<FileRecord[]>;
   delete(tenantId: string, id: string): Promise<boolean>;
 }
 
@@ -47,11 +85,17 @@ export interface ObjectMetadata {
 // targets Cloudflare R2, which is S3-compatible — see S3StorageProvider.
 // getObjectMetadata returns null when the backend cannot introspect the
 // object (e.g. the dev provider discards bytes); callers must treat null
-// as "skip reconciliation".
+// as "skip reconciliation". Likewise getObject returns null when the
+// object's bytes are unavailable (missing key, or the dev provider which
+// discards payloads); callers must treat null as "skip processing".
 export interface StorageProvider {
   generateUploadUrl(bucket: string, key: string, contentType: string): Promise<string>;
   generateDownloadUrl(bucket: string, key: string): Promise<string>;
   getObjectMetadata(bucket: string, key: string): Promise<ObjectMetadata | null>;
+  /** RV-006: fetch the full object body. Null when unavailable. */
+  getObject(bucket: string, key: string): Promise<Buffer | null>;
+  /** RV-006: write/overwrite an object server-side (post-process outputs). */
+  putObject(bucket: string, key: string, body: Buffer, contentType: string): Promise<void>;
   deleteObject(bucket: string, key: string): Promise<void>;
 }
 
@@ -170,6 +214,35 @@ export class InMemoryFileRepository implements FileRepository {
     const updated: FileRecord = { ...file, sizeBytes, updatedAt: new Date() };
     this.files.set(id, updated);
     return { ...updated };
+  }
+
+  async updatePipelineResults(
+    tenantId: string,
+    id: string,
+    update: FilePipelineUpdate
+  ): Promise<FileRecord | null> {
+    const file = this.files.get(id);
+    if (!file || file.tenantId !== tenantId) return null;
+    const updated: FileRecord = {
+      ...file,
+      contentHash: update.contentHash,
+      width: update.width ?? file.width,
+      height: update.height ?? file.height,
+      thumbnailS3Key: update.thumbnailS3Key ?? file.thumbnailS3Key,
+      exifStripped: update.exifStripped ?? file.exifStripped ?? false,
+      contentType: update.contentType ?? file.contentType,
+      sizeBytes: update.sizeBytes ?? file.sizeBytes,
+      updatedAt: new Date(),
+    };
+    this.files.set(id, updated);
+    return { ...updated };
+  }
+
+  async findByContentHash(tenantId: string, contentHash: string): Promise<FileRecord[]> {
+    return Array.from(this.files.values())
+      .filter((f) => f.tenantId === tenantId && f.contentHash === contentHash)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map((f) => ({ ...f }));
   }
 
   async delete(tenantId: string, id: string): Promise<boolean> {

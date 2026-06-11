@@ -229,6 +229,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['159_create_tenant_feature_flags', 'd30f579a89e543e42fec2f499dfd30b170994696d5f08b43b838a1cff483a319'],
   // RV-005: generalized attachments foundation (photos & documents on any entity)
   ['160_create_attachments', '25894a97ec6e05ddf8be60c0c90616e0b20355b9425008c334e188e5c21b1d9b'],
+  // RV-006: image post-process pipeline columns on files (dims, thumbnail, exif flag, content hash)
+  ['161_files_image_pipeline_columns', '237e44d6cf831a1fa52d972ccbe1de5180b2578f696857c642cc43f50c592464'],
 ];
 
 function hashMigration(value: string): string {

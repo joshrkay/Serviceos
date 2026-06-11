@@ -36,8 +36,26 @@ class FakeStorageProvider implements StorageProvider {
   async getObjectMetadata(): Promise<ObjectMetadata | null> {
     return null;
   }
+  async getObject(): Promise<Buffer | null> {
+    return null;
+  }
+  async putObject(): Promise<void> {
+    return;
+  }
   async deleteObject(): Promise<void> {
     return;
+  }
+}
+
+/** RV-006: records image-pipeline enqueues; optionally fails to prove isolation. */
+class FakeQueue {
+  sent: Array<{ type: string; payload: unknown; idempotencyKey?: string }> = [];
+  constructor(private readonly opts: { fail?: boolean } = {}) {}
+
+  async send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string> {
+    if (this.opts.fail) throw new Error('queue unavailable');
+    this.sent.push({ type, payload, idempotencyKey });
+    return `msg-${this.sent.length}`;
   }
 }
 
@@ -490,6 +508,227 @@ describe('AttachmentService', () => {
         portalVisibleOnly: false,
       });
       expect(result).toHaveLength(1);
+    });
+  });
+
+  // ── RV-006: image post-process pipeline integration ──────────────────────
+
+  describe('image post-process enqueue hook (RV-006)', () => {
+    function makeServiceWithQueue(queue: FakeQueue) {
+      return new AttachmentService(
+        attachmentRepo,
+        fileRepo,
+        new FakeStorageProvider(),
+        auditRepo,
+        { job: async (_t, id) => knownJobs.has(id) },
+        queue
+      );
+    }
+
+    it('enqueues an image_post_process message with a per-file idempotency key', async () => {
+      const queue = new FakeQueue();
+      const withQueue = makeServiceWithQueue(queue);
+      const file = await seedFile();
+
+      await withQueue.attach(TENANT_A, ACTOR, {
+        fileId: file.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+
+      expect(queue.sent).toHaveLength(1);
+      expect(queue.sent[0].type).toBe('image_post_process');
+      expect(queue.sent[0].payload).toEqual({ tenantId: TENANT_A, fileId: file.id });
+      expect(queue.sent[0].idempotencyKey).toBe(`image_post_process:${file.id}`);
+    });
+
+    it('attach succeeds even when the enqueue fails (failure-isolated)', async () => {
+      const queue = new FakeQueue({ fail: true });
+      const withQueue = makeServiceWithQueue(queue);
+      const file = await seedFile();
+
+      const attachment = await withQueue.attach(TENANT_A, ACTOR, {
+        fileId: file.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+
+      expect(attachment.id).toBeTruthy();
+      expect(await attachmentRepo.findById(TENANT_A, attachment.id)).not.toBeNull();
+    });
+
+    it('does not enqueue when the optional queue is absent', async () => {
+      // `service` from beforeEach has no queue — attach must behave as before.
+      const file = await seedFile();
+      const attachment = await service.attach(TENANT_A, ACTOR, {
+        fileId: file.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+      expect(attachment.id).toBeTruthy();
+    });
+  });
+
+  describe('thumbnailUrl (RV-006)', () => {
+    it('includes a presigned thumbnailUrl when the file has a thumbnail_s3_key', async () => {
+      const file = await seedFile();
+      await service.attach(TENANT_A, ACTOR, {
+        fileId: file.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+      await fileRepo.updatePipelineResults(TENANT_A, file.id, {
+        contentHash: 'hash-1',
+        thumbnailS3Key: `${file.storageKey}.thumb.jpg`,
+        width: 480,
+        height: 320,
+        exifStripped: true,
+      });
+
+      const listed = await service.listForEntity(TENANT_A, 'job', jobId);
+      expect(listed).toHaveLength(1);
+      expect(listed[0].thumbnailUrl).toBe(
+        `https://fake.local/get/test-bucket/${file.storageKey}.thumb.jpg`
+      );
+    });
+
+    it('omits thumbnailUrl when the pipeline has not produced one', async () => {
+      const file = await seedFile();
+      await service.attach(TENANT_A, ACTOR, {
+        fileId: file.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+
+      const listed = await service.listForEntity(TENANT_A, 'job', jobId);
+      expect(listed[0].thumbnailUrl).toBeUndefined();
+    });
+  });
+
+  describe('content-hash dedupe on attach (RV-006)', () => {
+    async function seedProcessedFile(contentHash: string, entityId = jobId) {
+      const file = await seedFile(TENANT_A, 'job', entityId);
+      await fileRepo.updatePipelineResults(TENANT_A, file.id, { contentHash });
+      return (await fileRepo.findById(TENANT_A, file.id))!;
+    }
+
+    it('re-attaching a processed file to the same entity within 24h returns the existing attachment', async () => {
+      const file = await seedProcessedFile('hash-dup');
+      const first = await service.attach(TENANT_A, ACTOR, {
+        fileId: file.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+      const auditCountAfterFirst = auditRepo.getAll().length;
+
+      // Offline-outbox retry: the client re-sends the same attach.
+      const second = await service.attach(TENANT_A, ACTOR, {
+        fileId: file.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+
+      expect(second.id).toBe(first.id);
+      expect(await attachmentRepo.listByEntity(TENANT_A, 'job', jobId)).toHaveLength(1);
+      // No duplicate attachment.uploaded audit event either.
+      expect(auditRepo.getAll().length).toBe(auditCountAfterFirst);
+    });
+
+    it('dedupes across different file rows sharing the same content hash', async () => {
+      // Offline retry where the client re-UPLOADED the bytes first: a second
+      // files row exists with the same pipeline-computed hash.
+      const fileA = await seedProcessedFile('hash-shared');
+      const first = await service.attach(TENANT_A, ACTOR, {
+        fileId: fileA.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+      const fileB = await seedProcessedFile('hash-shared');
+
+      const second = await service.attach(TENANT_A, ACTOR, {
+        fileId: fileB.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+
+      expect(second.id).toBe(first.id);
+      expect(await attachmentRepo.listByEntity(TENANT_A, 'job', jobId)).toHaveLength(1);
+    });
+
+    it('does not dedupe when the existing attachment is older than 24h', async () => {
+      const file = await seedProcessedFile('hash-old');
+      const first = await service.attach(TENANT_A, ACTOR, {
+        fileId: file.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+      // Age the stored attachment past the window (in-memory repo keeps
+      // object refs in a private map — reach in for the test).
+      const stored = (
+        attachmentRepo as unknown as { attachments: Map<string, { createdAt: Date }> }
+      ).attachments.get(first.id)!;
+      stored.createdAt = new Date(Date.now() - 25 * 60 * 60 * 1000);
+
+      const second = await service.attach(TENANT_A, ACTOR, {
+        fileId: file.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+
+      expect(second.id).not.toBe(first.id);
+      expect(await attachmentRepo.listByEntity(TENANT_A, 'job', jobId)).toHaveLength(2);
+    });
+
+    it('does not dedupe attachments on a different entity', async () => {
+      const otherJobId = uuidv4();
+      knownJobs.add(otherJobId);
+      const fileA = await seedProcessedFile('hash-cross-entity');
+      await service.attach(TENANT_A, ACTOR, {
+        fileId: fileA.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+
+      const fileB = await seedProcessedFile('hash-cross-entity', otherJobId);
+      const second = await service.attach(TENANT_A, ACTOR, {
+        fileId: fileB.id,
+        entityType: 'job',
+        entityId: otherJobId,
+        kind: 'photo',
+      });
+
+      expect(await attachmentRepo.listByEntity(TENANT_A, 'job', otherJobId)).toHaveLength(1);
+      expect(second.entityId).toBe(otherJobId);
+    });
+
+    it('does not dedupe unprocessed files (content_hash still NULL) — documented limitation', async () => {
+      const file = await seedFile();
+      const first = await service.attach(TENANT_A, ACTOR, {
+        fileId: file.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+      const second = await service.attach(TENANT_A, ACTOR, {
+        fileId: file.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+      expect(second.id).not.toBe(first.id);
+      expect(await attachmentRepo.listByEntity(TENANT_A, 'job', jobId)).toHaveLength(2);
     });
   });
 });
