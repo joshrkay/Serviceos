@@ -3975,6 +3975,23 @@ export const MIGRATIONS = {
     ALTER TABLE proposal_sms_events
       ADD COLUMN IF NOT EXISTS seq BIGSERIAL;
   `,
+
+  // RV-001: per-tenant feature flag overrides.
+  // Resolution order: tenant override → platform flag → false.
+  '159_create_tenant_feature_flags': `
+    CREATE TABLE IF NOT EXISTS tenant_feature_flags (
+      tenant_id  UUID      NOT NULL REFERENCES tenants(id),
+      flag_key   TEXT      NOT NULL,
+      enabled    BOOLEAN   NOT NULL,
+      updated_by UUID,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (tenant_id, flag_key)
+    );
+    ALTER TABLE tenant_feature_flags ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_feature_flags FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_tenant_feature_flags ON tenant_feature_flags
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
