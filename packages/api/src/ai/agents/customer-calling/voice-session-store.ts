@@ -184,6 +184,14 @@ export interface VoiceSession {
    * use the default.
    */
   ttsVoice?: string;
+  /**
+   * RV-071 — in-flight owner voice-approval dialogue (readback awaiting
+   * the explicit affirmative, clarification list, or challenge prompt).
+   * Adapter-side state like `leadId`: the FSM never reads it. Carries no
+   * secrets (the challenge value is re-read from settings at verify
+   * time). Cleared whenever a turn resolves the dialogue.
+   */
+  pendingVoiceApproval?: import('../../tasks/proposal-approval-task').PendingVoiceApproval;
   /** Set after `endSession()` to short-circuit further input. */
   ended: boolean;
   /**

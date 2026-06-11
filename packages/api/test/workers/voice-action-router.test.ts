@@ -1258,3 +1258,56 @@ describe('voice-action-router entity resolution', () => {
       .toBeUndefined();
   });
 });
+
+// ─── RV-071 — owner approval intents are NOT routable from this worker ───────
+//
+// approve_proposal / reject_proposal are only actionable on a live,
+// verified owner call (telephony FSM, RV-070 ownerSession). This worker
+// processes recorded memos with no caller-ID identity and no confirm
+// turn — even a classifier that returns the intent at 0.99 must produce
+// NO proposal and NO mutation here.
+
+describe('RV-071 — voice-action-router refuses owner approval intents', () => {
+  it.each(['approve_proposal', 'reject_proposal'])(
+    'a high-confidence %s classification produces no proposal and no mutation',
+    async (intentType) => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const seeded = await proposalRepo.create(
+        // A pending proposal that a mis-route could have approved.
+        (await import('../../src/proposals/proposal')).createProposal({
+          tenantId: 'tenant-1',
+          proposalType: 'draft_estimate',
+          payload: { customerName: 'Henderson', lineItems: [], totalCents: 45000 },
+          summary: 'Estimate for Henderson',
+          createdBy: 'voice',
+        }),
+      );
+
+      const gateway = gatewayReturning([
+        JSON.stringify({
+          intentType,
+          confidence: 0.99,
+          reasoning: 'owner-style command',
+          extractedEntities: { proposalReference: 'the Henderson estimate' },
+        }),
+      ]);
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+      await worker.handle(
+        msg({
+          tenantId: 'tenant-1',
+          userId: 'user-1',
+          transcript: 'approve the Henderson estimate',
+        }),
+        silentLogger(),
+      );
+
+      const all = await proposalRepo.findByTenant('tenant-1');
+      // No new proposal was created (no clarification either — skipped).
+      expect(all).toHaveLength(1);
+      // And the seeded proposal was not touched.
+      const stored = await proposalRepo.findById('tenant-1', seeded.id);
+      expect(stored?.status).toBe(seeded.status);
+    },
+  );
+});

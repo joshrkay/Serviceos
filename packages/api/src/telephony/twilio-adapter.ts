@@ -20,7 +20,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
-import { classifyIntent, isLookupIntent } from '../ai/orchestration/intent-classifier';
+import { classifyIntent, isLookupIntent, isVoiceApprovalIntent } from '../ai/orchestration/intent-classifier';
 import {
   CreateCustomerVoiceTaskHandler,
   CREATE_CUSTOMER_CONFIRMATION_TTS,
@@ -96,6 +96,8 @@ import { detectFrustration } from '../ai/agents/customer-calling/frustration-det
 import type { SettingsRepository } from '../settings/settings';
 import type { UserRepository } from '../users/user';
 import { isApproverPhone } from '../proposals/approver-identity';
+import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
+import type { OneTapFallbackDeps } from '../ai/tasks/proposal-approval-task';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -263,6 +265,17 @@ export interface TwilioAdapterDeps {
    * checked — exactly mirroring the SMS reply handler's identity logic.
    */
   userRepo?: UserRepository;
+  /**
+   * RV-071 — pending-edit parity guard for voice approvals (same repo
+   * method the SMS reply transport and one-tap route use).
+   */
+  smsEventRepo?: Pick<ProposalSmsEventRepository, 'hasUnappliedEditRequest'>;
+  /**
+   * RV-071 — one-tap SMS fallback for refused money/irreversible voice
+   * approvals (same secret/sender/URL/owner-phone wiring as P12-004
+   * unsupervised routing). Threaded through to the voice-turn processor.
+   */
+  voiceApprovalOneTap?: OneTapFallbackDeps;
 }
 
 /**
@@ -1206,6 +1219,20 @@ export class TwilioGatherAdapter {
       return this.finalizeTwiml(session, frustrationEffects, opts.sessionId);
     }
 
+    // RV-071 — an in-flight owner approval dialogue (readback awaiting the
+    // explicit yes, clarification list, or challenge) consumes this turn.
+    // Runs before the empty-speech check: silence while a readback is
+    // pending means "no action — keep it for later", not a reprompt.
+    const approvalTurn = await this.processor.handlePendingVoiceApproval(
+      session,
+      opts.speechResult,
+      opts.tenantId,
+    );
+    if (approvalTurn) {
+      await this.processor.executeSideEffects(session, approvalTurn, opts.tenantId);
+      return this.finalizeTwiml(session, approvalTurn, opts.sessionId);
+    }
+
     const sideEffectsAll: SideEffect[] = [];
     const currentState = session.machine.currentState;
 
@@ -1277,7 +1304,16 @@ export class TwilioGatherAdapter {
       try {
         const classification = await classifyIntent(
           opts.speechResult,
-          { tenantId: opts.tenantId, verticalPromptSection, planPromptSection },
+          {
+            tenantId: opts.tenantId,
+            verticalPromptSection,
+            planPromptSection,
+            // RV-071 — appended ONLY on verified owner sessions so every
+            // other call's prompt stays byte-identical (cassette hashes).
+            ...(session.machine.currentContext.ownerSession === true
+              ? { ownerSession: true }
+              : {}),
+          },
           this.deps.gateway,
         );
         // VQ-003: surface the classifier outcome for the harness.
@@ -1337,6 +1373,26 @@ export class TwilioGatherAdapter {
           type: 'tts_play',
           payload: { text: 'Anything else I can help you with?' },
         });
+        await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+        return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+      }
+
+      // RV-071 — owner voice approval. Routed OUTSIDE the FSM (the same
+      // pattern as the lookup skills above: state stays in
+      // intent_capture/closing; the dialogue rides the session). The
+      // processor hard-gates on the RV-070 ownerSession flag — a
+      // non-owner "approve" falls into the normal reprompt path.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        isVoiceApprovalIntent(classifierEvent.intentType)
+      ) {
+        const approvalFx = await this.processor.handleVoiceApprovalIntent(session, {
+          intentType: classifierEvent.intentType,
+          entities: classifierEvent.entities,
+          utterance: opts.speechResult,
+          tenantId: opts.tenantId,
+        });
+        sideEffectsAll.push(...approvalFx);
         await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
         return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
       }

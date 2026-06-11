@@ -13,6 +13,7 @@ import { ConflictError } from '../shared/errors';
 import { voiceProposalIdempotencyKey } from '../voice/voice-audit';
 import {
   classifyIntent,
+  isVoiceApprovalIntent,
   ExtractedEntities,
   IntentClassification,
   IntentType,
@@ -881,6 +882,22 @@ async function processSegment(
       log,
     );
     return { kind: 'clarified', classification };
+  }
+
+  // RV-071 — HARD routing gate: the owner approval intents are only
+  // actionable on a live, verified owner call (the telephony FSM path,
+  // gated by RV-070's ownerSession). This worker processes recorded
+  // operator memos and synthetic transcripts, which carry NO caller-ID
+  // identity and have no confirm turn — so approve_proposal /
+  // reject_proposal must NEVER dispatch a mutation here, regardless of
+  // what the classifier returned. (They are also absent from
+  // INTENT_TO_PROPOSAL_TYPE; this explicit guard makes the invariant
+  // loud instead of an accident of the map.)
+  if (isVoiceApprovalIntent(classification.intentType)) {
+    log.warn('voice-action-router: owner approval intent refused on this channel', {
+      intent: classification.intentType,
+    });
+    return { kind: 'skipped', classification };
   }
 
   const proposalType = INTENT_TO_PROPOSAL_TYPE[classification.intentType];

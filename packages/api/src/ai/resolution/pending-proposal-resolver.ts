@@ -81,6 +81,7 @@ const TYPE_WORDS: ReadonlyArray<{ rx: RegExp; types: ReadonlyArray<string> }> = 
  */
 const STOPWORDS = new Set([
   'the', 'a', 'an', 'that', 'this', 'one', 'ones', 'for', 'of', 'to', 'on',
+  'it', 'them', 'me', 'us', 'him', 'her', 'go', 'ahead', 'and',
   'please', 'approve', 'reject', 'decline', 'yes', 'no', 'okay', 'ok',
   'proposal', 'proposals', 'pending', 'new', 'my', 'our', 'their',
   'dollar', 'dollars', 'bucks',

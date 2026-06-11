@@ -69,6 +69,12 @@ export type IntentType =
   // Caller confirms/agrees to a pending action the agent proposed
   // ("yes", "that's right", "go ahead"). Conversational, non-proposal.
   | 'confirm'
+  // RV-071 — owner voice approval channel. Routable ONLY on verified
+  // owner sessions (ClassifyContext.ownerSession): the prompt section
+  // documenting them is appended only then, and the voice routing layers
+  // additionally hard-gate on the session flag (never prompt-only).
+  | 'approve_proposal'
+  | 'reject_proposal'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
@@ -112,6 +118,8 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'language_switch',
   'operator_request',
   'confirm',
+  'approve_proposal',
+  'reject_proposal',
   'unknown',
 ] as const;
 
@@ -194,6 +202,11 @@ export interface ExtractedEntities {
   timeEntryType?: 'job' | 'drive' | 'break' | 'admin';
   // notify_delay: how many minutes late the crew is running.
   delayMinutes?: number;
+  // RV-071 — approve_proposal / reject_proposal (owner sessions only):
+  // the owner's words identifying WHICH pending proposal ("the Henderson
+  // estimate", "the second one", "the $450 invoice"). Resolved downstream
+  // by the pendingProposals entity-resolver source — never trusted as an id.
+  proposalReference?: string;
 }
 
 /**
@@ -280,6 +293,16 @@ export interface ClassifyContext {
    * short-circuit (P18-001).
    */
   callerIsExistingCustomer?: boolean;
+  /**
+   * RV-071 — true ONLY when the session was established as a verified
+   * owner line (RV-070's `CallingAgentContext.ownerSession`). Appends the
+   * owner-approval prompt section (approve_proposal / reject_proposal) as
+   * a SEPARATE system message — non-owner calls keep byte-identical
+   * prompt messages, so voice-quality cassette hashes (and gateway cache
+   * keys) are unaffected. The prompt is a hint, not the gate: routing
+   * layers enforce the ownerSession check independently.
+   */
+  ownerSession?: boolean;
 }
 
 /**
@@ -700,6 +723,37 @@ Confidence calibration:
 
 Never invent entities. Extract only what the transcript actually says.`;
 
+/**
+ * RV-071 — owner-approval prompt section. Delivered as a SEPARATE system
+ * message, appended ONLY when `ClassifyContext.ownerSession` is true, so
+ * every non-owner call's prompt stays byte-identical to the pre-RV-071
+ * prompt (voice-quality cassettes replay unchanged).
+ */
+export const OWNER_APPROVAL_PROMPT_SECTION = `Owner-session intents (this caller is the VERIFIED business owner — these two intents exist only on this call):
+- "approve_proposal" — the owner wants to APPROVE a pending proposal/draft awaiting review.
+                        Put the owner's words identifying WHICH proposal in
+                        extractedEntities.proposalReference (verbatim phrase).
+                        Examples: "Approve the Henderson estimate"
+                                  "Approve the second one"
+                                  "Go ahead and approve the 450 dollar invoice"
+- "reject_proposal"  — the owner wants to REJECT / decline a pending proposal.
+                        Extract proposalReference the same way.
+                        Examples: "Reject the Acme invoice"
+                                  "Decline the Henderson estimate"
+                                  "Don't send that estimate — reject it"
+Notes:
+- "approve"/"reject" must target a proposal or draft ("the estimate", "the invoice",
+  "the second one"). A bare "yes"/"go ahead" answering YOUR question is still "confirm".
+- Do not change the JSON output schema; proposalReference is just an extra
+  optional key inside extractedEntities.`;
+
+/** RV-071 — predicate the voice routing layers use to gate owner approval intents. */
+export function isVoiceApprovalIntent(
+  intent: IntentType | string | undefined | null,
+): intent is 'approve_proposal' | 'reject_proposal' {
+  return intent === 'approve_proposal' || intent === 'reject_proposal';
+}
+
 function isSupportedIntent(value: unknown): value is IntentType {
   return typeof value === 'string' && (SUPPORTED_INTENTS as readonly string[]).includes(value);
 }
@@ -847,6 +901,8 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (timeEntryType) extracted.timeEntryType = timeEntryType;
     // notify_delay fields
     if (typeof ee.delayMinutes === 'number') extracted.delayMinutes = ee.delayMinutes;
+    // approve_proposal / reject_proposal fields (RV-071)
+    if (typeof ee.proposalReference === 'string') extracted.proposalReference = ee.proposalReference;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }
@@ -946,6 +1002,12 @@ export async function classifyIntent(
       role: 'system',
       content: `Caller plan context (use to personalize the response; do not change the JSON output schema):\n${context.planPromptSection}`,
     });
+  }
+  // RV-071 — owner-approval intents are documented to the model ONLY on a
+  // verified owner session. Appended last so non-owner calls keep
+  // byte-identical messages (cassette hashes / gateway cache keys).
+  if (context.ownerSession === true) {
+    systemMessages.push({ role: 'system', content: OWNER_APPROVAL_PROMPT_SECTION });
   }
 
   const response = await gateway.complete({
