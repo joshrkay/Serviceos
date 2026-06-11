@@ -51,12 +51,26 @@ export interface KeywordHandler {
   handle(ctx: InboundSmsContext): Promise<HandlerResult>;
 }
 
+/**
+ * P2-034 — fallback for messages no keyword claims. The proposal-reply
+ * feature needs to see free-text from the owner ("make it $200 instead")
+ * during an edit session, and to send the one-time "Reply Y/N/EDIT"
+ * clarification — neither starts with a registered keyword. Exactly one
+ * fallback may be registered; it runs only after keyword routing declines
+ * (no match, or the matched handler returned `handled: false`).
+ */
+export interface FallbackHandler {
+  readonly name: string;
+  handle(ctx: InboundSmsContext): Promise<HandlerResult>;
+}
+
 interface RegistryEntry {
   keyword: string;
   handler: KeywordHandler;
 }
 
 const registry = new Map<string, RegistryEntry>();
+let fallback: FallbackHandler | undefined;
 
 function normalize(keyword: string): string {
   return keyword.trim().toLowerCase();
@@ -91,6 +105,33 @@ export function registerKeywordHandler(
   }
 }
 
+export function registerFallbackHandler(
+  handler: FallbackHandler,
+  options: RegisterKeywordHandlerOptions = {},
+): void {
+  if (fallback && !options.overwrite) {
+    throw new Error(
+      `duplicate fallback registration: '${fallback.name}' is already registered`,
+    );
+  }
+  fallback = handler;
+}
+
+async function runFallback(ctx: InboundSmsContext): Promise<HandlerResult | null> {
+  if (!fallback) return null;
+  try {
+    return await fallback.handle({ ...ctx });
+  } catch (err) {
+    logger.error('Inbound SMS fallback handler threw', {
+      tenantId: ctx.tenantId,
+      messageSid: ctx.messageSid,
+      fallback: fallback.name,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { handled: false, handler: fallback.name, reason: 'handler_error' };
+  }
+}
+
 export async function dispatchInboundSms(
   ctx: InboundSmsContext,
 ): Promise<HandlerResult> {
@@ -101,12 +142,14 @@ export async function dispatchInboundSms(
 
   const entry = registry.get(firstToken.toLowerCase());
   if (!entry) {
+    const viaFallback = await runFallback(ctx);
+    if (viaFallback?.handled) return viaFallback;
     return { handled: false, reason: 'no_matching_handler' };
   }
 
+  let keywordResult: HandlerResult;
   try {
-    const result = await entry.handler.handle({ ...ctx });
-    return result;
+    keywordResult = await entry.handler.handle({ ...ctx });
   } catch (err) {
     logger.error('Inbound SMS handler threw', {
       tenantId: ctx.tenantId,
@@ -114,12 +157,20 @@ export async function dispatchInboundSms(
       keyword: entry.keyword,
       error: err instanceof Error ? err.message : String(err),
     });
-    return {
+    keywordResult = {
       handled: false,
       handler: entry.keyword,
       reason: 'handler_error',
     };
   }
+  if (keywordResult.handled) return keywordResult;
+
+  // The keyword's feature declined (e.g. 'out' from a non-technician
+  // mobile). Give the fallback a look — during an owner edit session the
+  // whole message is free-text and any first token is plausible.
+  const viaFallback = await runFallback(ctx);
+  if (viaFallback?.handled) return viaFallback;
+  return keywordResult;
 }
 
 /**
@@ -128,4 +179,5 @@ export async function dispatchInboundSms(
  */
 export function __resetKeywordRegistryForTests(): void {
   registry.clear();
+  fallback = undefined;
 }

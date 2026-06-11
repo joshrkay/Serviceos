@@ -9,13 +9,19 @@ money/trust, and every human touchpoint must be one tap.
 
 ## Sprint 1
 
-1. **P2-034 — SMS one-tap approval transport** (JTBD #7 Admin Reduction,
-   #2, #5). The single biggest persona lever still unshipped: proposals
-   render to <320-char SMS with `APPROVE`/`EDIT`/`REJECT` replies,
-   idempotent on MessageSid. Spec is complete in
-   `wave-2-strategic-stories.md`; the keyword dispatcher (P6-028) and
-   batch-approve endpoint (P2-035) it builds on are live. Web approval
-   works, but the owner is in a truck — approval must come to the thumb.
+1. ~~**P2-034 — SMS one-tap approval transport**~~ ✅ **SHIPPED 2026-06-11**
+   (JTBD #7 Admin Reduction, #2, #5). Proposals render to SMS (≤320-char
+   human part + reply tokens + the one-tap link); the owner replies
+   `Y`/`YES`/`OK` to approve, `N reason…` to reject, `EDIT` to open a
+   10-minute LLM-interpreted edit session re-rendered for re-approval.
+   Identity = owner/backup-supervisor mobile (never the body); duplicate
+   MessageSid no-ops upstream; a repeated `Y` can't double-execute;
+   unrecognized text gets ONE clarification nudge then escalates to the
+   queue. Approval goes through the existing `approveProposal` path —
+   execution, undo window, audits unchanged. New: `proposal_sms_events`
+   (migration 156, RLS+FORCE), dispatcher fallback-handler seam,
+   `parseProposalSmsReply` shared contract. Not in this slice: MMS
+   voice-memo edits, Twilio delivery-status sync onto the events table.
 2. **P2-035 markers — confidence markers on proposal renders** (JTBD #7).
    The `pricingSource: 'uncatalogued' | 'ambiguous'` and
    `catalogResolution` candidates now exist on draft payloads; surface

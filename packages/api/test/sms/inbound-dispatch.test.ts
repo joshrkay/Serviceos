@@ -13,6 +13,7 @@ import {
   dispatchInboundSms,
   registerKeywordHandler,
   __resetKeywordRegistryForTests,
+  registerFallbackHandler,
   type KeywordHandler,
   type InboundSmsContext,
 } from '../../src/sms/inbound-dispatch';
@@ -133,5 +134,64 @@ describe('P2-034 — inbound SMS keyword dispatcher', () => {
     const result = await dispatchInboundSms({ ...ctxBase, body: 'CONFIRM yes' });
     expect(result.handled).toBe(true);
     expect(result.handler).toBe('p7-confirmation-reply');
+  });
+});
+
+describe('P2-034 — fallback handler', () => {
+  it('runs the fallback when no keyword matches', async () => {
+    registerFallbackHandler({
+      name: 'proposal-reply',
+      handle: async () => ({ handled: true, handler: 'proposal-reply', reason: 'edit_recorded' }),
+    });
+
+    const result = await dispatchInboundSms({ ...ctxBase, body: 'make it $200 instead' });
+    expect(result).toEqual({ handled: true, handler: 'proposal-reply', reason: 'edit_recorded' });
+  });
+
+  it('runs the fallback when the keyword handler declines', async () => {
+    registerKeywordHandler({
+      keywords: ['OUT'],
+      handle: async () => ({ handled: false, handler: 'tech-status', reason: 'unknown_mobile' }),
+    });
+    registerFallbackHandler({
+      name: 'proposal-reply',
+      handle: async () => ({ handled: true, handler: 'proposal-reply', reason: 'edit_recorded' }),
+    });
+
+    const result = await dispatchInboundSms({ ...ctxBase, body: 'OUT at the curb' });
+    expect(result.handler).toBe('proposal-reply');
+  });
+
+  it('preserves the keyword result when the fallback also declines', async () => {
+    registerKeywordHandler({
+      keywords: ['OUT'],
+      handle: async () => ({ handled: false, handler: 'tech-status', reason: 'unknown_mobile' }),
+    });
+    registerFallbackHandler({
+      name: 'proposal-reply',
+      handle: async () => ({ handled: false, handler: 'proposal-reply', reason: 'not_owner' }),
+    });
+
+    const result = await dispatchInboundSms({ ...ctxBase, body: 'OUT 12:30' });
+    expect(result).toEqual({ handled: false, handler: 'tech-status', reason: 'unknown_mobile' });
+  });
+
+  it('a thrown fallback never propagates', async () => {
+    registerFallbackHandler({
+      name: 'proposal-reply',
+      handle: async () => {
+        throw new Error('boom');
+      },
+    });
+
+    const result = await dispatchInboundSms({ ...ctxBase, body: 'free text' });
+    expect(result).toEqual({ handled: false, reason: 'no_matching_handler' });
+  });
+
+  it('rejects a second fallback registration without overwrite', () => {
+    const fb = { name: 'a', handle: async () => ({ handled: false }) };
+    registerFallbackHandler(fb);
+    expect(() => registerFallbackHandler({ ...fb, name: 'b' })).toThrow(/duplicate fallback/);
+    expect(() => registerFallbackHandler({ ...fb, name: 'b' }, { overwrite: true })).not.toThrow();
   });
 });

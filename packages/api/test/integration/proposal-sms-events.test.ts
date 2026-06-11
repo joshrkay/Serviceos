@@ -1,0 +1,155 @@
+/**
+ * Docker-gated integration tests — NOT run in web sessions. Requires the
+ * testcontainer Postgres started by `npm run test:integration`.
+ *
+ * P2-034 — proposal_sms_events against REAL Postgres (migration 156).
+ * The unit suite uses the in-memory repo; these tests pin the actual
+ * column names, the CHECK constraints, the open-edit-session predicate
+ * (consumed_at IS NULL AND expires_at > now), and RLS tenant isolation —
+ * the class of bug that mocked-Pool tests cannot catch.
+ */
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { Pool } from 'pg';
+import {
+  getSharedTestDb,
+  createTestTenant,
+  closeSharedTestDb,
+  type TestTenant,
+} from './shared';
+import {
+  PgProposalSmsEventRepository,
+  createProposalSmsEvent,
+} from '../../src/proposals/sms/sms-event';
+import { PgProposalRepository } from '../../src/proposals/pg-proposal';
+import { createProposal } from '../../src/proposals/proposal';
+
+describe('Postgres integration — proposal_sms_events (P2-034)', () => {
+  let pool: Pool;
+  let repo: PgProposalSmsEventRepository;
+  let tenant: TestTenant;
+  let other: TestTenant;
+  let proposalId: string;
+  let otherProposalId: string;
+
+  async function seedProposal(tenantId: string): Promise<string> {
+    const proposalRepo = new PgProposalRepository(pool);
+    const proposal = await proposalRepo.create(
+      createProposal({
+        tenantId,
+        proposalType: 'add_note',
+        payload: { message: 'note' },
+        summary: 'Add a note',
+        createdBy: 'voice',
+      }),
+    );
+    return proposal.id;
+  }
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    repo = new PgProposalSmsEventRepository(pool);
+    tenant = await createTestTenant(pool);
+    other = await createTestTenant(pool);
+    proposalId = await seedProposal(tenant.tenantId);
+    otherProposalId = await seedProposal(other.tenantId);
+  }, 120_000);
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  it('round-trips an outbound render', async () => {
+    const event = await repo.create(
+      createProposalSmsEvent({
+        tenantId: tenant.tenantId,
+        proposalId,
+        direction: 'outbound',
+        kind: 'proposal_rendered',
+        body: 'Add a note. Reply Y to approve, N to reject, EDIT to change.',
+      }),
+    );
+
+    const recent = await repo.findRecentOutbound(tenant.tenantId, 5);
+    expect(recent.map((e) => e.id)).toContain(event.id);
+    const found = recent.find((e) => e.id === event.id);
+    expect(found).toMatchObject({
+      tenantId: tenant.tenantId,
+      proposalId,
+      direction: 'outbound',
+      kind: 'proposal_rendered',
+    });
+    expect(found?.createdAt).toBeInstanceOf(Date);
+  });
+
+  it('open edit session honors expiry and consumption', async () => {
+    const now = new Date();
+    const session = await repo.create(
+      createProposalSmsEvent({
+        tenantId: tenant.tenantId,
+        proposalId,
+        direction: 'inbound',
+        kind: 'edit_session_opened',
+        messageSid: 'SM-edit-1',
+        body: 'EDIT',
+        expiresAt: new Date(now.getTime() + 10 * 60 * 1000),
+      }),
+    );
+
+    const open = await repo.findOpenEditSession(tenant.tenantId, now);
+    expect(open?.id).toBe(session.id);
+
+    // After the window the session is gone even unconsumed.
+    const afterExpiry = new Date(now.getTime() + 11 * 60 * 1000);
+    expect(await repo.findOpenEditSession(tenant.tenantId, afterExpiry)).toBeNull();
+
+    // Consumption closes it inside the window too. markConsumed is idempotent.
+    await repo.markConsumed(tenant.tenantId, session.id, now);
+    await repo.markConsumed(tenant.tenantId, session.id, now);
+    expect(await repo.findOpenEditSession(tenant.tenantId, now)).toBeNull();
+  });
+
+  it('counts clarification nudges per proposal', async () => {
+    expect(await repo.countClarifications(tenant.tenantId, proposalId)).toBe(0);
+    await repo.create(
+      createProposalSmsEvent({
+        tenantId: tenant.tenantId,
+        proposalId,
+        direction: 'outbound',
+        kind: 'clarification_sent',
+        body: 'Didn’t catch that. Reply Y, N, or EDIT.',
+      }),
+    );
+    expect(await repo.countClarifications(tenant.tenantId, proposalId)).toBe(1);
+  });
+
+  it('is tenant-isolated: tenant B events are invisible to tenant A queries', async () => {
+    await repo.create(
+      createProposalSmsEvent({
+        tenantId: other.tenantId,
+        proposalId: otherProposalId,
+        direction: 'outbound',
+        kind: 'proposal_rendered',
+        body: 'Tenant B proposal',
+      }),
+    );
+
+    const recentA = await repo.findRecentOutbound(tenant.tenantId, 50);
+    expect(recentA.every((e) => e.tenantId === tenant.tenantId)).toBe(true);
+    expect(recentA.map((e) => e.proposalId)).not.toContain(otherProposalId);
+  });
+
+  it('rejects kinds outside the CHECK constraint', async () => {
+    await expect(
+      repo.create({
+        ...createProposalSmsEvent({
+          tenantId: tenant.tenantId,
+          proposalId,
+          direction: 'inbound',
+          kind: 'reply_approve',
+          body: 'Y',
+        }),
+        kind: 'bogus_kind' as never,
+      }),
+    ).rejects.toThrow();
+  });
+});
