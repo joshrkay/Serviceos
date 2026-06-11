@@ -303,12 +303,28 @@ export const voiceClarificationPayloadSchema = z.object({
     'low_confidence',
     'parse_failed',
     'missing_entities',
+    // P8 — intent understood, but an entity reference matched several
+    // tenant records ("three Bobs"); candidates carry the picker list.
+    'ambiguous_entity',
   ]),
   suggestedIntents: z.array(z.string()).optional(),
   classifierReasoning: z.string().optional(),
   classifierConfidence: z.number().min(0).max(1).optional(),
   recordingId: z.string().optional(),
   conversationId: z.string().optional(),
+  /** P8 — the free-text reference that was ambiguous ("Bob"). */
+  entityReference: z.string().optional(),
+  /** P8 — disambiguation candidates for the review UI's one-tap picker. */
+  entityCandidates: z
+    .array(
+      z.object({
+        id: z.string(),
+        label: z.string(),
+        hint: z.string().optional(),
+        score: z.number().min(0).max(1),
+      }),
+    )
+    .optional(),
 });
 
 export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
