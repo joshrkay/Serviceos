@@ -4,10 +4,9 @@
  * Mirrors pg-note.test.ts: mocked pool, no Docker.
  * Verifies resolution order, cache TTL, cache bust on setTenantFlag, upsert shape.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { Pool, PoolClient, QueryResult } from 'pg';
 import { PgTenantFeatureFlagRepository } from '../../src/flags/pg-tenant-feature-flags';
-import { PgFeatureFlagRepository } from '../../src/flags/pg-feature-flags';
 
 type CapturedCall = { sql: string; params: unknown[] };
 type Responder = (sql: string, params: unknown[]) => { rows: Record<string, unknown>[]; rowCount?: number };
@@ -209,6 +208,39 @@ describe('PgTenantFeatureFlagRepository cache', () => {
     // next read must re-query DB
     await repo.isEnabledForTenant(TENANT, 'my-flag');
     expect(tenantSelectCount).toBe(2);
+  });
+
+  it('RV-001-14: cache expires after 30 s — re-queries DB past TTL', async () => {
+    vi.useFakeTimers();
+    try {
+      let callCount = 0;
+      const { pool } = makeMockPool((sql) => {
+        if (isContext(sql) || sql.includes('RESET')) return { rows: [] };
+        if (sql.includes('tenant_feature_flags') && sql.includes('SELECT')) {
+          callCount++;
+          return { rows: tenantOverrideRow(true) };
+        }
+        if (sql.includes('_feature_flags')) return { rows: [] };
+        return { rows: [] };
+      });
+      const repo = new PgTenantFeatureFlagRepository(pool, pool);
+
+      // Populate cache
+      await repo.isEnabledForTenant(TENANT, 'my-flag');
+      expect(callCount).toBe(1);
+
+      // Within TTL — served from cache
+      vi.advanceTimersByTime(29_999);
+      await repo.isEnabledForTenant(TENANT, 'my-flag');
+      expect(callCount).toBe(1);
+
+      // Past TTL — must re-query DB
+      vi.advanceTimersByTime(2);
+      await repo.isEnabledForTenant(TENANT, 'my-flag');
+      expect(callCount).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
