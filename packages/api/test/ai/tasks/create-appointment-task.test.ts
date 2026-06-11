@@ -164,3 +164,63 @@ describe('CreateAppointmentAITaskHandler', () => {
     expect(payload.scheduledStart).toBe('2026-06-02T18:00:00.000Z');
   });
 });
+
+// ─── RV-007 (F-4): Confidence Marker `_meta` ─────────────────────────────
+describe('RV-007 — CreateAppointmentAITaskHandler populates payload._meta', () => {
+  const tenantId = 'tenant-1';
+  const userId = 'user-1';
+
+  it('sets overallConfidence mapped from the task confidence score (overall-only — no per-field signal)', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        dateTimePhrase: 'tomorrow at 2pm',
+        summary: 'Follow-up visit',
+        confidence_score: 0.88,
+      }),
+    );
+    const handler = new CreateAppointmentAITaskHandler(gateway);
+
+    const result = await handler.handle({
+      tenantId,
+      userId,
+      message: 'Schedule a follow-up tomorrow at 2pm',
+      timezone: TZ,
+      now: NOW,
+    });
+
+    expect(result.proposal.proposalType).toBe('create_appointment');
+    const meta = (result.proposal.payload as Record<string, unknown>)._meta as Record<
+      string,
+      unknown
+    >;
+    expect(meta).toBeDefined();
+    expect(meta.overallConfidence).toBe('high'); // 0.88 ≥ 0.8
+    expect(meta.fieldConfidence).toBeUndefined();
+    expect(meta.markers).toBeUndefined();
+  });
+
+  it('maps a mid score to medium', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        dateTimePhrase: 'tomorrow at 2pm',
+        summary: 'AC tune-up',
+        confidence_score: 0.6,
+      }),
+    );
+    const handler = new CreateAppointmentAITaskHandler(gateway);
+
+    const result = await handler.handle({
+      tenantId,
+      userId,
+      message: 'come tomorrow at 2pm',
+      timezone: TZ,
+      now: NOW,
+    });
+
+    const meta = (result.proposal.payload as Record<string, unknown>)._meta as Record<
+      string,
+      unknown
+    >;
+    expect(meta.overallConfidence).toBe('medium');
+  });
+});

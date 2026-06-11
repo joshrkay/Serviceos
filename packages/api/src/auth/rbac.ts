@@ -66,7 +66,10 @@ export type Permission =
   // Voice training assets — gated separately from generic `settings:update`
   // so an org can later carve out a compliance-only role that approves /
   // activates / archives without granting full settings edit.
-  | 'vertical_training_assets:approve';
+  | 'vertical_training_assets:approve'
+  // RV-005 — portal visibility is owner-only; technicians and dispatchers
+  // cannot control what customers see in the portal.
+  | 'attachments:visibility';
 
 const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   owner: [
@@ -129,6 +132,7 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'availability:view',
     'availability:manage',
     'vertical_training_assets:approve',
+    'attachments:visibility',
   ],
   dispatcher: [
     'users:list',

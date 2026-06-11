@@ -27,7 +27,15 @@ export interface ConfidenceMetadata {
   assessedAt: Date;
 }
 
-export type ConfidenceLevel = 'high' | 'medium' | 'low' | 'very_low';
+/**
+ * The single confidence vocabulary (RV-007 / F-4). Carried from AI
+ * classification into proposal payload `_meta` and rendered in
+ * UI/SMS/voice. Runtime array + derived type so Zod contracts can
+ * reuse it without defining a parallel enum.
+ */
+export const CONFIDENCE_LEVELS = ['high', 'medium', 'low', 'very_low'] as const;
+
+export type ConfidenceLevel = (typeof CONFIDENCE_LEVELS)[number];
 
 export function validateConfidenceScore(score: number): boolean {
   return typeof score === 'number' && !isNaN(score) && score >= 0 && score <= 1;

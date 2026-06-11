@@ -96,6 +96,10 @@ import { createJobPhotosRouter } from './routes/job-photos';
 import { JobPhotoService } from './jobs/job-photo-service';
 import { InMemoryJobPhotoRepository } from './jobs/job-photo';
 import { PgJobPhotoRepository } from './jobs/pg-job-photo';
+import { createAttachmentsRouter } from './routes/attachments';
+import { AttachmentService } from './attachments/attachment-service';
+import { InMemoryAttachmentRepository } from './attachments/attachment';
+import { PgAttachmentRepository } from './attachments/pg-attachment';
 import { createDispatchRoutes } from './dispatch/routes';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
@@ -845,6 +849,8 @@ export function createApp(): express.Express {
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
   const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
   const jobPhotoRepo       = pool ? new PgJobPhotoRepository(pool)       : new InMemoryJobPhotoRepository();
+  // RV-005: generalized attachments (photos & documents on any entity).
+  const attachmentRepo     = pool ? new PgAttachmentRepository(pool)     : new InMemoryAttachmentRepository();
   const catalogRepo        = pool ? new PgCatalogItemRepository(pool)    : new InMemoryCatalogItemRepository();
   const feedbackRequestRepo = pool ? new PgFeedbackRequestRepository(pool) : new InMemoryFeedbackRequestRepository();
   const feedbackResponseRepo = pool ? new PgFeedbackResponseRepository(pool) : new InMemoryFeedbackResponseRepository();
@@ -2582,7 +2588,26 @@ export function createApp(): express.Express {
   app.use(
     '/api/jobs',
     createJobPhotosRouter({
-      service: new JobPhotoService(jobPhotoRepo, fileRepo, storageProvider),
+      // RV-005: attachmentRepo enables the dual-write shadow — every job
+      // photo created through this flow also lands in `attachments`.
+      service: new JobPhotoService(jobPhotoRepo, fileRepo, storageProvider, attachmentRepo),
+      fileRepo,
+      storage: storageProvider,
+      bucket: storageBucket,
+      auditRepo,
+    })
+  );
+  app.use(
+    '/api/attachments',
+    createAttachmentsRouter({
+      service: new AttachmentService(attachmentRepo, fileRepo, storageProvider, auditRepo, {
+        // RV-005: entity-existence lookups for the supported types. The
+        // remaining entity types (form_response, expense, agreement_run,
+        // customer) return NOT_SUPPORTED until later tasks wire them.
+        job: async (tenantId, id) => (await jobRepo.findById(tenantId, id)) !== null,
+        invoice: async (tenantId, id) => (await invoiceRepo.findById(tenantId, id)) !== null,
+        estimate: async (tenantId, id) => (await estimateRepo.findById(tenantId, id)) !== null,
+      }),
       fileRepo,
       storage: storageProvider,
       bucket: storageBucket,

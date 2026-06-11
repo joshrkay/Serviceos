@@ -310,3 +310,79 @@ describe('P22 — EstimateTaskHandler catalog grounding', () => {
     expect(line).not.toHaveProperty('pricingSource');
   });
 });
+
+// ─── RV-007 (F-4): Confidence Marker `_meta` ─────────────────────────────
+describe('RV-007 — EstimateTaskHandler populates payload._meta', () => {
+  function seededCatalog(): InMemoryCatalogItemRepository {
+    const repo = new InMemoryCatalogItemRepository();
+    void repo.create(
+      createCatalogItem({
+        tenantId: 'tenant-1',
+        name: 'Water Heater Install',
+        category: 'Labor',
+        unit: 'each',
+        unitPriceCents: 185_000,
+      }),
+    );
+    return repo;
+  }
+
+  it('sets overallConfidence from the task confidence score (no per-field signal → overall-only)', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: validEstimateJson }); // confidence_score 0.85
+    const handler = new EstimateTaskHandler(makeGateway(stub));
+
+    const { proposal } = await handler.handle(makeContext());
+
+    const meta = proposal.payload._meta as Record<string, unknown>;
+    expect(meta).toBeDefined();
+    expect(meta.overallConfidence).toBe('high'); // 0.85 ≥ 0.8
+    expect(meta.fieldConfidence).toBeUndefined();
+    expect(meta.markers).toBeUndefined();
+  });
+
+  it('maps a mid confidence score to medium', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      content: JSON.stringify({
+        customerId: '550e8400-e29b-41d4-a716-446655440000',
+        lineItems: [{ description: 'Something', quantity: 1, unitPrice: 50 }],
+        confidence_score: 0.6,
+      }),
+    });
+    const handler = new EstimateTaskHandler(makeGateway(stub));
+
+    const { proposal } = await handler.handle(makeContext());
+
+    expect((proposal.payload._meta as Record<string, unknown>).overallConfidence).toBe('medium');
+  });
+
+  it('uncatalogued line → fieldConfidence low on its unitPrice + a marker with reason', async () => {
+    const repo = seededCatalog();
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      content: JSON.stringify({
+        customerId: '550e8400-e29b-41d4-a716-446655440000',
+        lineItems: [
+          { description: 'Water Heater Install', quantity: 1, unitPrice: 999 },
+          { description: 'mystery flux capacitor', quantity: 1, unitPrice: 9_900 },
+        ],
+        confidence_score: 0.95,
+      }),
+    });
+    const handler = new EstimateTaskHandler(makeGateway(stub), repo);
+
+    const { proposal } = await handler.handle(makeContext());
+
+    const meta = proposal.payload._meta as {
+      overallConfidence: string;
+      fieldConfidence?: Record<string, string>;
+      markers?: Array<{ path: string; reason: string }>;
+    };
+    expect(meta.fieldConfidence).toEqual({ 'lineItems[1].unitPrice': 'low' });
+    expect(meta.markers).toHaveLength(1);
+    expect(meta.markers![0].path).toBe('lineItems[1].unitPrice');
+    expect(meta.markers![0].reason).toContain('mystery flux capacitor');
+    expect(meta.markers![0].reason).toContain('catalog');
+  });
+});

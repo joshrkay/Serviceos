@@ -406,3 +406,60 @@ describe('P18-001 create_customer regression — AST-01 classifier signup phrasi
     expect(result.intentType).toBe('create_customer');
   });
 });
+
+// ─── RV-007 (F-4): Confidence Marker `_meta` ─────────────────────────────
+describe('RV-007 — create-customer task populates payload._meta', () => {
+  const handler = new CreateCustomerVoiceTaskHandler();
+
+  it('sets overallConfidence mapped from the classifier confidence (overall-only — no per-field signal)', async () => {
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up as a new customer",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Alex Smith',
+        callerIdPhone: '+15551230100',
+        classifierConfidence: 0.92,
+      },
+    });
+
+    const meta = out.proposal!.payload._meta as Record<string, unknown>;
+    expect(meta).toBeDefined();
+    expect(meta.overallConfidence).toBe('high'); // 0.92 ≥ 0.8
+    expect(meta.fieldConfidence).toBeUndefined();
+    expect(meta.markers).toBeUndefined();
+  });
+
+  it('maps a low classifier confidence to low', async () => {
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: 'maybe sign me up I guess',
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Mumbly Caller',
+        callerIdPhone: '+15551230101',
+        classifierConfidence: 0.35,
+      },
+    });
+
+    const meta = out.proposal!.payload._meta as Record<string, unknown>;
+    expect(meta.overallConfidence).toBe('low');
+  });
+
+  it('omits _meta when no classifier confidence was threaded (non-voice callers unchanged)', async () => {
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: 'Add customer Acme',
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Acme Corp',
+        callerIdPhone: '+15550000001',
+      },
+    });
+
+    expect(out.proposal!.payload._meta).toBeUndefined();
+  });
+});
