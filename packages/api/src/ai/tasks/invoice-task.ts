@@ -2,13 +2,14 @@ import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
 import { assessConfidence } from '../guardrails/confidence';
-import { CatalogItemRepository } from '../../catalog/catalog-item';
+import type { CatalogItem, CatalogItemRepository } from '../../catalog/catalog-item';
 import {
   applyCatalogPricing,
   CatalogPricingOutcome,
   resolveLineItems,
   UNCATALOGUED_CONFIDENCE_CAP,
 } from '../resolution/catalog-resolver';
+import { buildCatalogPromptSection } from './catalog-resolution';
 
 const INVOICE_SYSTEM_PROMPT = `You are an invoice generation assistant for a field service company.
 Given the job context, customer information, and completed work details, generate a structured invoice.
@@ -84,9 +85,23 @@ export class InvoiceTaskHandler implements TaskHandler {
    */
   private readonly catalogRepo?: CatalogItemRepository;
 
-  constructor(gateway: LLMGateway, catalogRepo?: CatalogItemRepository) {
+  constructor(gateway: LLMGateway, deps?: CatalogItemRepository | InvoiceTaskDeps) {
     this.gateway = gateway;
-    this.catalogRepo = catalogRepo;
+    this.catalogRepo = deps && 'listByTenant' in deps ? deps : deps?.catalogRepo;
+  }
+
+  /**
+   * Fetch active tenant catalog items for prompt grounding. Best-effort:
+   * catalog outages should not block invoice drafting.
+   */
+  private async fetchCatalog(tenantId: string): Promise<CatalogItem[]> {
+    if (!this.catalogRepo) return [];
+    try {
+      const items = await this.catalogRepo.listByTenant(tenantId);
+      return items.filter((i) => i.archivedAt === null);
+    } catch {
+      return [];
+    }
   }
 
   async handle(context: TaskContext): Promise<TaskResult> {
@@ -153,12 +168,14 @@ export class InvoiceTaskHandler implements TaskHandler {
         const items = (await this.catalogRepo.listByTenant(context.tenantId)).filter(
           (i) => i.archivedAt === null,
         );
-        const resolutions = resolveLineItems(
-          lineItems.map((li) => String(li.description ?? '')),
-          items,
-        );
-        catalogOutcome = applyCatalogPricing(lineItems, resolutions, 'unitPriceCents');
-        payload.lineItems = catalogOutcome.lineItems;
+        if (items.length > 0) {
+          const resolutions = resolveLineItems(
+            lineItems.map((li) => String(li.description ?? '')),
+            items,
+          );
+          catalogOutcome = applyCatalogPricing(lineItems, resolutions, 'unitPriceCents');
+          payload.lineItems = catalogOutcome.lineItems;
+        }
       } catch {
         catalogOutcome = undefined;
       }

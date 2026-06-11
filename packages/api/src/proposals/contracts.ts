@@ -103,12 +103,13 @@ const lineItemSchema = z
     description: z.string().min(1),
     quantity: z.number(),
     unitPrice: z.number().optional(),
-    unitPriceCents: z.number().int().min(0).optional(),
+    unitPriceCents: z.number().int().min(0).nullable().optional(),
     category: z.string().optional(),
     catalogItemId: z.string().uuid().optional(),
     pricingSource: z.enum(['catalog', 'ambiguous', 'uncatalogued', 'manual']).optional(),
+    needsPricing: z.boolean().optional(),
   })
-  .refine((li) => li.unitPrice !== undefined || li.unitPriceCents !== undefined, {
+  .refine((li) => li.unitPrice !== undefined || li.unitPriceCents != null, {
     message: 'line item requires unitPrice or unitPriceCents',
   });
 
