@@ -94,6 +94,8 @@ import {
 import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
 import type { SettingsRepository } from '../settings/settings';
+import type { UserRepository } from '../users/user';
+import { isApproverPhone } from '../proposals/approver-identity';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -254,6 +256,13 @@ export interface TwilioAdapterDeps {
   settingsRepo?: SettingsRepository;
   whisperCache?: WhisperCache;
   deliveryProvider?: { sendSms(args: { to: string; body: string }): Promise<unknown> };
+  /**
+   * RV-070 — resolves the backup supervisor's mobile for owner-line
+   * recognition (`tenant_settings.backup_supervisor_user_id` →
+   * users.mobile_number). Optional: without it, only owner_phone is
+   * checked — exactly mirroring the SMS reply handler's identity logic.
+   */
+  userRepo?: UserRepository;
 }
 
 /**
@@ -539,6 +548,37 @@ export class TwilioGatherAdapter {
     });
   }
 
+  /**
+   * RV-070 — owner-line recognition. True when the inbound caller-ID
+   * matches `tenant_settings.owner_phone` or the backup supervisor's
+   * mobile (normalized E.164 comparison — the SAME identity logic as the
+   * SMS reply transport, via `proposals/approver-identity.ts`). Best
+   * effort and fail-closed: a settings/user lookup failure returns false
+   * so a degraded dependency can never mint an owner session.
+   */
+  private async resolveOwnerSession(
+    tenantId: string,
+    from: string | undefined,
+  ): Promise<boolean> {
+    if (!this.deps.settingsRepo || !from) return false;
+    try {
+      return await isApproverPhone(
+        {
+          settingsRepo: this.deps.settingsRepo,
+          ...(this.deps.userRepo ? { userRepo: this.deps.userRepo } : {}),
+        },
+        tenantId,
+        from,
+      );
+    } catch (err) {
+      logger.warn('resolveOwnerSession failed — treating caller as non-owner', {
+        tenantId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
   private async resolveEscalationTriggers(
     tenantId: string,
   ): Promise<CallingAgentContext['escalationTriggers'] | undefined> {
@@ -617,10 +657,14 @@ export class TwilioGatherAdapter {
       ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
       : [];
     const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
+    // RV-070 — owner-line recognition happens at session establishment,
+    // from the verified caller-ID only.
+    const ownerSession = await this.resolveOwnerSession(opts.tenantId, opts.from);
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
       ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
       ...(escalationTriggers ? { escalationTriggers } : {}),
+      ...(ownerSession ? { ownerSession: true } : {}),
     });
     // initializeStreamSession reads callerIdBySession to drive
     // identifyCaller/lead creation; without this, every media-stream
@@ -924,10 +968,14 @@ export class TwilioGatherAdapter {
       ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
       : [];
     const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
+    // RV-070 — owner-line recognition happens at session establishment,
+    // from the verified caller-ID only.
+    const ownerSession = await this.resolveOwnerSession(opts.tenantId, opts.from);
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
       ...(repairTemplatesForInbound.length > 0 ? { repairTemplates: repairTemplatesForInbound } : {}),
       ...(escalationTriggers ? { escalationTriggers } : {}),
+      ...(ownerSession ? { ownerSession: true } : {}),
     });
     this.persistVoiceSessionRow(session, opts.callSid);
 

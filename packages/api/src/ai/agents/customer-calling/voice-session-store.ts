@@ -283,6 +283,8 @@ export class VoiceSessionStore {
       conversationId?: string;
       repairTemplates?: ReadonlyArray<RepairTemplate>;
       escalationTriggers?: CallingAgentContext['escalationTriggers'];
+      /** RV-070 — caller-ID matched an approver phone (owner / backup). */
+      ownerSession?: boolean;
     } = {}
   ): VoiceSession {
     const id = uuidv4();
@@ -296,6 +298,7 @@ export class VoiceSessionStore {
       ...(opts.escalationTriggers
         ? { escalationTriggers: opts.escalationTriggers }
         : {}),
+      ...(opts.ownerSession ? { ownerSession: true } : {}),
     });
     const costTracker = new SessionCostTracker(
       channel === 'inapp' ? DEFAULT_INAPP_CAPS : DEFAULT_TELEPHONY_CAPS

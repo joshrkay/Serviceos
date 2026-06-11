@@ -1953,6 +1953,9 @@ export function createApp(): express.Express {
     callControl: telephonyCallControl,
     dispatcherPhoneResolver: createBusinessPhoneDispatcherResolver(settingsRepo),
     settingsRepo,
+    // RV-070 — owner-line recognition: backup supervisor mobile lookup
+    // (mirrors the SMS reply transport's approver identity).
+    userRepo,
     whisperCache: sharedWhisperCache,
     ...(messageDelivery
       ? {
