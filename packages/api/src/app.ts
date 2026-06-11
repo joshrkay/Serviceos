@@ -1171,6 +1171,9 @@ export function createApp(): express.Express {
       interpretEdit: createLlmEditInterpreter(llmGateway),
     },
     { overwrite: true },
+    // YES is also the compliance opt-in keyword — registerProposalReplySms
+    // upgrades the plain START handler to the opt-in-first composite.
+    { dncRepo },
   );
   const recordProposalSmsRender = async (args: {
     tenantId: string;

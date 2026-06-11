@@ -47,6 +47,7 @@ import type { UserRepository } from '../../users/user';
 import { type AuditRepository, createAuditEvent } from '../../audit/audit';
 import { ValidationError } from '../../shared/errors';
 import { normalizePhone } from '../../shared/phone';
+import { STOP_KEYWORDS, START_KEYWORDS } from '../../compliance/stop-reply';
 import {
   type ProposalSmsEventRepository,
   createProposalSmsEvent,
@@ -377,12 +378,23 @@ export async function handleProposalSmsReply(
   }
 }
 
+/**
+ * Tokens the compliance STOP/START handlers own (TCPA). `yes` doubles as
+ * the opt-in keyword — it reaches this feature only through the composite
+ * in start-keyword.ts, never by direct registration. Kept in sync with
+ * compliance/stop-reply.ts via the registration test.
+ */
+export const COMPLIANCE_RESERVED_TOKENS: ReadonlySet<string> = new Set([
+  ...STOP_KEYWORDS,
+  ...START_KEYWORDS,
+].map((k) => k.toLowerCase()));
+
 export class ProposalReplyKeywordHandler implements KeywordHandler {
   readonly keywords: readonly string[] = [
     ...APPROVE_TOKENS,
     ...REJECT_TOKENS,
     ...EDIT_TOKENS,
-  ];
+  ].filter((k) => !COMPLIANCE_RESERVED_TOKENS.has(k));
 
   constructor(private readonly deps: ProposalSmsReplyDeps) {}
 
