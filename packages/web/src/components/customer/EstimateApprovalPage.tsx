@@ -893,7 +893,7 @@ export function EstimateApprovalPage() {
                           key={item.id}
                           type="button"
                           onClick={() => selectTier(groupKey, item.id)}
-                          className={`flex w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
+                          className={`flex min-h-11 w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
                         >
                           <span className="flex items-center gap-3 min-w-0">
                             <span className={`flex size-4 shrink-0 items-center justify-center rounded-full border ${isSel ? 'border-blue-600 bg-blue-600' : 'border-slate-300'}`}>
@@ -922,7 +922,7 @@ export function EstimateApprovalPage() {
                           key={item.id}
                           type="button"
                           onClick={() => toggleAddOn(item.id)}
-                          className={`flex w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
+                          className={`flex min-h-11 w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
                         >
                           <span className="flex items-center gap-3 min-w-0">
                             <span className={`flex size-4 shrink-0 items-center justify-center rounded border ${isSel ? 'border-blue-600 bg-blue-600' : 'border-slate-300'}`}>
@@ -942,7 +942,12 @@ export function EstimateApprovalPage() {
 
           {/* Line items */}
           <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden mb-4">
-            <div className="grid grid-cols-[1fr_40px_72px_72px] gap-x-2 px-5 py-2.5 bg-slate-50 border-b border-slate-100">
+            {/* minmax(0,1fr) lets the description track shrink below its
+                content width (grid items default to min-width:auto, which
+                forced horizontal overflow on ≤390px phones). Narrower fixed
+                columns below the sm breakpoint; tabular-nums keeps money
+                digits stable and right-aligned. */}
+            <div className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_40px_72px_72px] gap-x-2 px-5 py-2.5 bg-slate-50 border-b border-slate-100">
               <p className="text-xs text-slate-400">Item</p>
               <p className="text-xs text-slate-400 text-right">Qty</p>
               <p className="text-xs text-slate-400 text-right">Rate</p>
@@ -950,18 +955,18 @@ export function EstimateApprovalPage() {
             </div>
             <div className="divide-y divide-slate-50">
               {visItems.map((item, i) => (
-                <div key={i} className="grid grid-cols-[1fr_40px_72px_72px] gap-x-2 px-5 py-3 items-start">
-                  <p className="text-sm text-slate-800">{item.description}</p>
-                  <p className="text-sm text-slate-500 text-right">{item.qty}</p>
-                  <p className="text-sm text-slate-500 text-right">${fmtUsd(item.rate)}</p>
-                  <p className="text-sm text-slate-800 text-right">${fmtUsd(item.qty * item.rate)}</p>
+                <div key={i} className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_40px_72px_72px] gap-x-2 px-5 py-3 items-start">
+                  <p className="text-sm text-slate-800 min-w-0 break-words">{item.description}</p>
+                  <p className="text-sm text-slate-500 text-right tabular-nums">{item.qty}</p>
+                  <p className="text-sm text-slate-500 text-right tabular-nums">${fmtUsd(item.rate)}</p>
+                  <p className="text-sm text-slate-800 text-right tabular-nums">${fmtUsd(item.qty * item.rate)}</p>
                 </div>
               ))}
             </div>
             {lineItems.length > 3 && (
               <button
                 onClick={() => setAll(v => !v)}
-                className="flex items-center justify-center gap-1 w-full py-2.5 text-xs text-slate-400 hover:text-slate-600 border-t border-slate-100 transition-colors"
+                className="flex min-h-11 items-center justify-center gap-1 w-full py-2.5 text-xs text-slate-400 hover:text-slate-600 border-t border-slate-100 transition-colors"
               >
                 {showAllItems ? <><ChevronUp size={12} /> Show less</> : <><ChevronDown size={12} /> {lineItems.length - 3} more items</>}
               </button>
@@ -983,7 +988,7 @@ export function EstimateApprovalPage() {
               lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate })),
               totalDollars: total,
             })}
-            className="mb-4 flex items-center justify-center gap-1.5 w-full rounded-xl border border-slate-200 bg-white py-2.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors"
+            className="mb-4 flex min-h-11 items-center justify-center gap-1.5 w-full rounded-xl border border-slate-200 bg-white py-2.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors"
           >
             <Download size={12} /> Download PDF
           </button>

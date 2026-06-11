@@ -1,26 +1,23 @@
 /**
  * Entity resolver — closes the "three Bobs" gap.
  *
- * Task handlers extract names from the transcript as free text
- * ("customerName: Bob"). Before the proposal is persisted we try to
- * resolve that text to a concrete tenant-scoped entity ID. Three
- * outcomes matter:
+ * The intent classifier extracts names from the transcript as free text
+ * ("customerName: Bob"). Before the task handler drafts, the
+ * voice-action-router resolves that text to a concrete tenant-scoped
+ * entity ID via `annotateResolvedEntities`. Three outcomes matter:
  *
  *   - zero matches  → proposal is persisted with the raw name on
  *     `sourceContext.pendingReference`; the review UI prompts the
  *     operator to pick from the full list or create a new record.
- *   - one match     → the resolved ID is injected into the payload.
- *   - many matches  → the caller should emit a `voice_clarification`
- *     proposal with the candidates instead of persisting the
- *     underlying mutation. `EntityResolverResult.kind === 'ambiguous'`
- *     surfaces the candidate list.
+ *   - one match     → the resolved ID is injected into the task context.
+ *   - many matches  → the router emits a `voice_clarification` proposal
+ *     (reason 'ambiguous_entity') with the candidate list instead of
+ *     drafting. `EntityResolverResult.kind === 'ambiguous'` surfaces
+ *     the candidates.
  *
- * This file defines the interface and a `NullEntityResolver` that is
- * the unwired default — it returns `kind: 'skipped'` so the existing
- * pipeline (which never resolved entities) behaves identically when
- * no concrete resolver is configured. The production implementation
- * (backed by Postgres ILIKE + trigram) lives in a follow-up slice; the
- * interface is stable so the router can be wired now.
+ * The production implementation is `PgEntityResolver` (Postgres
+ * pg_trgm), wired in app.ts. The dep is optional on the router —
+ * pipelines without a resolver simply skip resolution.
  */
 
 export type EntityKind = 'customer' | 'job' | 'appointment' | 'invoice' | 'estimate';
@@ -54,17 +51,4 @@ export interface EntityResolver {
     reference: string;
     kind: EntityKind;
   }): Promise<EntityResolverResult>;
-}
-
-/**
- * Default resolver that always returns `skipped`. Keeps the pipeline
- * backward-compatible with the pre-resolver code path: the task
- * handler's raw reference string is passed through unchanged. Swap
- * this for the Postgres-backed resolver once the follow-up slice
- * lands.
- */
-export class NullEntityResolver implements EntityResolver {
-  async resolve(): Promise<EntityResolverResult> {
-    return { kind: 'skipped' };
-  }
 }

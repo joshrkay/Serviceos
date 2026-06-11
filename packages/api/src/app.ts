@@ -321,6 +321,7 @@ import { PgCallTranscriptTurnRepository } from './voice/pg-call-transcript-turn'
 import { InMemoryCallTranscriptTurnRepository } from './voice/call-transcript-turn';
 import type { EmbeddingProvider } from './ai/providers/openai-compatible';
 import { createVoiceActionRouterWorker, VoiceActionRouterPayload } from './workers/voice-action-router';
+import { PgEntityResolver } from './ai/resolution/pg-entity-resolver';
 import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
 import { DefaultAvailabilityFinder } from './ai/tasks/availability-finder';
 import { runExecutionSweep } from './workers/execution-worker';
@@ -1452,6 +1453,14 @@ export function createApp(): express.Express {
     thresholdResolver,
     tenantSchedulingResolver,
     appointmentRepo,
+    // P22 — catalog grounding: drafted invoice/estimate line items get
+    // priced from the tenant's catalog instead of trusting the LLM.
+    catalogRepo,
+    // P8 — "three Bobs": free-text customer/job references resolve to
+    // verified tenant IDs (pg_trgm) before drafting; ambiguous matches
+    // become one-tap clarifications. In-memory mode (no pool) skips
+    // resolution, same as before.
+    ...(pool ? { entityResolver: new PgEntityResolver(pool) } : {}),
     // Lets reschedule/cancel/confirm scope appointment resolution to the
     // verified caller's own appointments (appointment → job → customerId).
     jobRepo,
@@ -2842,6 +2851,8 @@ export function createApp(): express.Express {
       proposalRepo,
       // QA-2026-06-05 (AST-05): read-only query intents answer from data.
       invoiceRepo,
+      // P22 — catalog grounding for assistant-drafted invoices/estimates.
+      catalogRepo,
       // §3B/3D/3E — assistant chat shares the operator-side resolver
       // shim with the voice-action-router so the same vertical context
       // reaches both text and voice classification paths.

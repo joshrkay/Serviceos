@@ -5,6 +5,7 @@ import { Proposal, ProposalRepository, createProposal, CreateProposalInput, Prop
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
 import { routeUnsupervisedProposal } from '../proposals/auto-approve';
+import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
 import type { AuditRepository } from '../audit/audit';
 import type { UnsupervisedProposalRouting } from '../settings/settings';
 import { ConflictError } from '../shared/errors';
@@ -37,6 +38,12 @@ import { SlotConflictChecker } from '../ai/tasks/slot-conflict-checker';
 import { AvailabilityFinder } from '../ai/tasks/availability-finder';
 import { AppointmentRepository } from '../appointments/appointment';
 import { JobRepository } from '../jobs/job';
+import { CatalogItemRepository } from '../catalog/catalog-item';
+import {
+  EntityCandidate,
+  EntityKind,
+  EntityResolver,
+} from '../ai/resolution/entity-resolver';
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
 import { CreateCustomerTaskHandler, TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
@@ -108,6 +115,11 @@ export interface VoiceActionRouterPayload {
  */
 export interface RecentReferentProvider {
   forConversation(tenantId: string, conversationId: string): Promise<ConversationReferent[]>;
+}
+
+export interface UnsupervisedRoutingDeps extends RouteUnsupervisedProposalDeps {
+  resolveOwnerPhone?: (tenantId: string) => Promise<string | null | undefined>;
+  resolveRouting?: (tenantId: string) => Promise<UnsupervisedProposalRouting | undefined>;
 }
 
 export interface VoiceActionRouterDeps {
@@ -198,28 +210,33 @@ export interface VoiceActionRouterDeps {
    */
   multiActionEnabled?: (tenantId: string) => Promise<boolean>;
   /**
-   * P12-004 wiring — unsupervised proposal routing. When the tenant has no
-   * supervisor present and a voice proposal lands in `ready_for_review`,
-   * the worker invokes `routeUnsupervisedProposal` with these seams so the
-   * `queue_and_sms` routing sends the owner a one-tap approve SMS (signed,
-   * single-use token; see `proposals/auto-approve.ts`). Optional: when
-   * absent, behavior is unchanged (queue only, no audit event).
+   * P22 catalog grounding for the draft_invoice / draft_estimate
+   * handlers. When present, drafted line items are resolved against the
+   * tenant's active catalog and matched prices override the LLM's
+   * numbers (ambiguous → operator picks; uncatalogued → confidence
+   * capped below auto-approve). Optional so tests without a catalog
+   * keep the pre-P22 behavior.
    */
-  unsupervisedRouting?: {
-    auditRepo: AuditRepository;
-    /** Outbound SMS seam (existing message delivery provider). */
-    sendSms?: (to: string, body: string) => Promise<void>;
-    /** HMAC secret for the one-tap token. Required for the SMS to fire. */
-    secret?: string;
-    /** Builds the public one-tap approve URL from a signed token. */
-    buildApproveUrl?: (token: string) => string;
-    /** Resolves the owner's (or backup supervisor's) E.164 mobile. */
-    resolveOwnerPhone?: (tenantId: string) => Promise<string | null>;
-    /** Reads tenant_settings.unsupervised_proposal_routing. */
-    resolveRouting?: (
-      tenantId: string,
-    ) => Promise<UnsupervisedProposalRouting | undefined>;
-  };
+  catalogRepo?: CatalogItemRepository;
+  /**
+   * P8 — "three Bobs" closure. When present, the classifier's free-text
+   * customerName / jobReference are resolved to tenant-scoped IDs
+   * BEFORE the task handler runs: resolved → verified UUIDs land on the
+   * task context; ambiguous → a voice_clarification with the candidate
+   * list replaces the draft (no LLM drafting call is wasted);
+   * not_found → the raw reference is stamped on
+   * sourceContext.pendingReference for the review UI. Annotate-only:
+   * resolution never changes proposal status or approval logic.
+   * Production wires `PgEntityResolver` (pg_trgm); optional so tests
+   * without it keep the pre-resolver behavior.
+   */
+  entityResolver?: EntityResolver;
+  /**
+   * P12-004 — routes review-held proposals when no supervisor is present.
+   * Production sends a one-tap approval SMS for queue_and_sms tenants and
+   * records the unsupervised routing audit event. Optional for tests.
+   */
+  unsupervisedRouting?: UnsupervisedRoutingDeps;
 }
 
 // P11-001: lookup_* intents are READ-ONLY and never produce a
@@ -329,8 +346,8 @@ class IssueInvoiceTaskHandler implements TaskHandler {
 
 function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandler> {
   const handlers = new Map<ProposalType, TaskHandler>();
-  handlers.set('draft_invoice', new InvoiceTaskHandler(deps.gateway));
-  handlers.set('draft_estimate', new EstimateTaskHandler(deps.gateway));
+  handlers.set('draft_invoice', new InvoiceTaskHandler(deps.gateway, deps.catalogRepo));
+  handlers.set('draft_estimate', new EstimateTaskHandler(deps.gateway, deps.catalogRepo));
   handlers.set(
     'create_appointment',
     new CreateAppointmentAITaskHandler(
@@ -501,6 +518,91 @@ function entitiesForProposal(
   return payload;
 }
 
+/** Resolved-entity annotation for one utterance (see annotateResolvedEntities). */
+interface EntityAnnotation {
+  kind: 'ok';
+  resolved: { customerId?: string; jobId?: string };
+  pendingReferences: Array<{ kind: EntityKind; reference: string }>;
+}
+/** An ambiguous reference that must be clarified before drafting. */
+interface EntityAmbiguity {
+  kind: 'ambiguous';
+  entityKind: EntityKind;
+  reference: string;
+  candidates: EntityCandidate[];
+}
+
+/**
+ * Resolve the classifier's free-text entity references against
+ * tenant-scoped records (P8 "three Bobs"). Best-effort by design:
+ * a resolver failure logs a warning and behaves like 'skipped' —
+ * entity resolution must never block or fail a drafting pipeline that
+ * worked without it.
+ *
+ * The verified caller-ID identity is sacred: when `verifiedCustomerId`
+ * is present, the spoken customerName is NOT resolved (a caller saying
+ * a name must never reassign the proposal to a different customer).
+ */
+async function annotateResolvedEntities(
+  resolver: EntityResolver | undefined,
+  params: {
+    tenantId: string;
+    entities: ExtractedEntities | undefined;
+    verifiedCustomerId?: string;
+  },
+  log: Logger,
+): Promise<EntityAnnotation | EntityAmbiguity> {
+  const ok: EntityAnnotation = { kind: 'ok', resolved: {}, pendingReferences: [] };
+  if (!resolver || !params.entities) return ok;
+
+  const lookups: Array<{ kind: 'customer' | 'job'; reference: string }> = [];
+  if (params.entities.customerName && !params.verifiedCustomerId) {
+    lookups.push({ kind: 'customer', reference: params.entities.customerName });
+  }
+  if (params.entities.jobReference) {
+    lookups.push({ kind: 'job', reference: params.entities.jobReference });
+  }
+
+  for (const lookup of lookups) {
+    let result;
+    try {
+      result = await resolver.resolve({
+        tenantId: params.tenantId,
+        reference: lookup.reference,
+        kind: lookup.kind,
+      });
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      log.warn('voice-action-router: entity resolver failed, continuing unresolved', {
+        entityKind: lookup.kind,
+        error: error.message,
+      });
+      continue;
+    }
+    switch (result.kind) {
+      case 'resolved':
+        if (lookup.kind === 'customer') ok.resolved.customerId = result.candidate.id;
+        else ok.resolved.jobId = result.candidate.id;
+        break;
+      case 'ambiguous':
+        // First ambiguity wins — one clarification per utterance keeps
+        // the operator's feed to a single, answerable question.
+        return {
+          kind: 'ambiguous',
+          entityKind: lookup.kind,
+          reference: lookup.reference,
+          candidates: result.candidates,
+        };
+      case 'not_found':
+        ok.pendingReferences.push({ kind: lookup.kind, reference: lookup.reference });
+        break;
+      case 'skipped':
+        break;
+    }
+  }
+  return ok;
+}
+
 /**
  * Sanitize the classifier's free-text reasoning before persisting it
  * on a proposal. Bounds length and strips control characters so the
@@ -571,11 +673,23 @@ async function emitClarification(
      * must not collide on one key.
      */
     idempotencyKey?: string;
+    /**
+     * P8 — set when the intent classified fine but an entity reference
+     * matched several records ("three Bobs"). The clarification carries
+     * the candidate list so the review UI can render a one-tap picker.
+     */
+    entityAmbiguity?: {
+      entityKind: EntityKind;
+      reference: string;
+      candidates: EntityCandidate[];
+    };
   },
   log: Logger
 ): Promise<void> {
   const { tenantId, userId, transcript, classification, conversationId, recordingId } = input;
-  const reason = classification.unknownReason ?? 'unknown_intent';
+  const reason = input.entityAmbiguity
+    ? 'ambiguous_entity'
+    : (classification.unknownReason ?? 'unknown_intent');
 
   const suggestedIntents: string[] = [];
   if (classification.lowConfidenceIntent) {
@@ -602,6 +716,17 @@ async function emitClarification(
       : {}),
     ...(recordingId ? { recordingId } : {}),
     ...(conversationId ? { conversationId } : {}),
+    ...(input.entityAmbiguity
+      ? {
+          entityReference: input.entityAmbiguity.reference,
+          entityCandidates: input.entityAmbiguity.candidates.map((c) => ({
+            id: c.id,
+            label: c.label,
+            ...(c.hint ? { hint: c.hint } : {}),
+            score: c.score,
+          })),
+        }
+      : {}),
   };
 
   const tenantThresholdOverride = deps.thresholdResolver
@@ -614,12 +739,21 @@ async function emitClarification(
   // instead of writing a malformed proposal to storage.
   assertValidProposalPayload('voice_clarification', payload);
 
+  // Entity ambiguity is a different question than "didn't catch that" —
+  // the intent was understood; the operator just picks WHICH record.
+  const summary = input.entityAmbiguity
+    ? `Which ${input.entityAmbiguity.entityKind}? "${input.entityAmbiguity.reference}" matched ${input.entityAmbiguity.candidates.length} records`
+    : clarificationSummary(transcript);
+  const explanation = input.entityAmbiguity
+    ? `Heard the request, but "${input.entityAmbiguity.reference}" matches more than one ${input.entityAmbiguity.entityKind}. Tap the right one below.`
+    : clarificationExplanation(classification);
+
   const proposal = createProposal({
     tenantId,
     proposalType: 'voice_clarification',
     payload,
-    summary: clarificationSummary(transcript),
-    explanation: clarificationExplanation(classification),
+    summary,
+    explanation,
     confidenceScore: classification.confidence,
     sourceContext: {
       source: 'voice',
@@ -749,6 +883,43 @@ async function processSegment(
     return { kind: 'skipped', classification };
   }
 
+  // P8 — resolve free-text entity references to verified tenant IDs
+  // before drafting. Runs after the handler lookup so lookup_*/unknown
+  // paths never pay for it; an ambiguous reference short-circuits to a
+  // clarification BEFORE the (more expensive) LLM drafting call.
+  const annotation = await annotateResolvedEntities(
+    deps.entityResolver,
+    {
+      tenantId,
+      entities: classification.extractedEntities,
+      ...(customerId ? { verifiedCustomerId: customerId } : {}),
+    },
+    log,
+  );
+  if (annotation.kind === 'ambiguous') {
+    await emitClarification(
+      deps,
+      {
+        tenantId,
+        userId,
+        transcript: segmentText,
+        classification,
+        conversationId,
+        recordingId,
+        entityAmbiguity: {
+          entityKind: annotation.entityKind,
+          reference: annotation.reference,
+          candidates: annotation.candidates,
+        },
+        ...(params.applyDedup && recordingId
+          ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
+          : {}),
+      },
+      log,
+    );
+    return { kind: 'clarified', classification };
+  }
+
   const tenantThresholdOverride = deps.thresholdResolver
     ? await deps.thresholdResolver(tenantId).catch(() => undefined)
     : undefined;
@@ -775,14 +946,21 @@ async function processSegment(
     userId,
     message: segmentText,
     conversationId,
-    existingEntities: entitiesForProposal(
-      classification.intentType,
-      classification.extractedEntities,
-    ),
+    existingEntities: {
+      ...entitiesForProposal(classification.intentType, classification.extractedEntities),
+      // P8 — resolved IDs ride the context entities so the drafting LLM
+      // (and passthrough handlers) get verified UUIDs instead of free text.
+      ...(annotation.resolved.customerId ? { customerId: annotation.resolved.customerId } : {}),
+      ...(annotation.resolved.jobId ? { jobId: annotation.resolved.jobId } : {}),
+    },
     timezone: scheduling?.timezone ?? DEFAULT_TENANT_TIMEZONE,
     now: deps.now ? deps.now() : new Date(),
     supervisorPresent,
-    ...(customerId ? { customerId } : {}),
+    // Verified caller-ID identity wins; a resolver hit fills it only
+    // when caller-ID didn't establish one.
+    ...((customerId ?? annotation.resolved.customerId)
+      ? { customerId: customerId ?? annotation.resolved.customerId }
+      : {}),
     // Single-action only: lets the held-slot path key the appointment on
     // `voice-hold:<recordingId>` so a concurrent redelivery can't double-book.
     ...(params.applyDedup && recordingId ? { recordingId } : {}),
@@ -790,6 +968,19 @@ async function processSegment(
   };
 
   const { proposal } = await handler.handle(context);
+  // P8 — references that matched nothing are stamped on sourceContext so
+  // the review UI prompts "pick from the list or create new" instead of
+  // the operator discovering a dangling name at execution time.
+  const annotated =
+    annotation.pendingReferences.length > 0
+      ? {
+          ...proposal,
+          sourceContext: {
+            ...(proposal.sourceContext ?? {}),
+            pendingReference: annotation.pendingReferences,
+          },
+        }
+      : proposal;
   // Chokepoint backstop for the "never auto-execute when unsupervised"
   // invariant. Every task handler forwards supervisorPresent into its
   // CreateProposalInput, but this is the single place every voice-sourced
@@ -799,7 +990,7 @@ async function processSegment(
   // computed 'ready_for_review').
   return {
     kind: 'proposal',
-    proposal: holdIfUnsupervised(proposal, supervisorPresent),
+    proposal: holdIfUnsupervised(annotated, supervisorPresent),
     classification,
     supervisorPresent,
   };

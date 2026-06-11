@@ -168,4 +168,59 @@ describe('P2-002 — Typed proposal contracts', () => {
       })
     ).not.toThrow();
   });
+
+  // P22 — line items accept either price field plus catalog annotations.
+  describe('line item price fields (P22)', () => {
+    const base = { customerId: validCustomerId, jobId: validJobId };
+
+    it('accepts unitPriceCents-only lines (invoice handler output shape)', () => {
+      const result = validateProposalPayload('draft_invoice', {
+        ...base,
+        lineItems: [{ description: 'Labor', quantity: 1, unitPriceCents: 7500 }],
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('accepts unitPrice-only lines (estimate handler output shape)', () => {
+      const result = validateProposalPayload('draft_estimate', {
+        customerId: validCustomerId,
+        lineItems: [{ description: 'Labor', quantity: 1, unitPrice: 7500 }],
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects lines with NEITHER price field', () => {
+      const result = validateProposalPayload('draft_invoice', {
+        ...base,
+        lineItems: [{ description: 'Labor', quantity: 1 }],
+      });
+      expect(result.valid).toBe(false);
+    });
+
+    it('accepts catalog annotations (catalogItemId + pricingSource)', () => {
+      const result = validateProposalPayload('draft_invoice', {
+        ...base,
+        lineItems: [
+          {
+            description: 'Water Heater Install',
+            quantity: 1,
+            unitPriceCents: 185000,
+            catalogItemId: uuidv4(),
+            pricingSource: 'catalog',
+          },
+        ],
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects an unknown pricingSource', () => {
+      const result = validateProposalPayload('draft_invoice', {
+        ...base,
+        lineItems: [
+          { description: 'X', quantity: 1, unitPriceCents: 100, pricingSource: 'vibes' },
+        ],
+      });
+      expect(result.valid).toBe(false);
+    });
+  });
 });

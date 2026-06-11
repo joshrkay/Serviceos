@@ -93,12 +93,25 @@ export const createBookingPayloadSchema = z.object({
   appointmentId: z.string().uuid(),
 });
 
-const lineItemSchema = z.object({
-  description: z.string().min(1),
-  quantity: z.number(),
-  unitPrice: z.number(),
-  category: z.string().optional(),
-});
+// One price field is required, but which one depends on the producer:
+// the estimate path emits `unitPrice` (integer cents) while the invoice
+// path normalizes to the executor's `unitPriceCents`. P22 adds
+// `catalogItemId` + `pricingSource` so the review UI and audit trail
+// can show WHERE a price came from (catalog-resolved vs LLM-invented).
+const lineItemSchema = z
+  .object({
+    description: z.string().min(1),
+    quantity: z.number(),
+    unitPrice: z.number().optional(),
+    unitPriceCents: z.number().int().min(0).nullable().optional(),
+    category: z.string().optional(),
+    catalogItemId: z.string().uuid().optional(),
+    pricingSource: z.enum(['catalog', 'ambiguous', 'uncatalogued', 'manual']).optional(),
+    needsPricing: z.boolean().optional(),
+  })
+  .refine((li) => li.unitPrice !== undefined || li.unitPriceCents != null, {
+    message: 'line item requires unitPrice or unitPriceCents',
+  });
 
 export const draftEstimatePayloadSchema = z.object({
   customerId: z.string().uuid(),
@@ -291,12 +304,28 @@ export const voiceClarificationPayloadSchema = z.object({
     'low_confidence',
     'parse_failed',
     'missing_entities',
+    // P8 — intent understood, but an entity reference matched several
+    // tenant records ("three Bobs"); candidates carry the picker list.
+    'ambiguous_entity',
   ]),
   suggestedIntents: z.array(z.string()).optional(),
   classifierReasoning: z.string().optional(),
   classifierConfidence: z.number().min(0).max(1).optional(),
   recordingId: z.string().optional(),
   conversationId: z.string().optional(),
+  /** P8 — the free-text reference that was ambiguous ("Bob"). */
+  entityReference: z.string().optional(),
+  /** P8 — disambiguation candidates for the review UI's one-tap picker. */
+  entityCandidates: z
+    .array(
+      z.object({
+        id: z.string(),
+        label: z.string(),
+        hint: z.string().optional(),
+        score: z.number().min(0).max(1),
+      }),
+    )
+    .optional(),
 });
 
 export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
