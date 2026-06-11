@@ -53,6 +53,13 @@ export interface ProposalSmsEvent {
   /** Set when an edit session is closed (edit received / superseded). */
   consumedAt?: Date;
   createdAt: Date;
+  /**
+   * Monotonic insertion order (DB BIGSERIAL / in-memory counter),
+   * assigned by the store. Tiebreaker for same-millisecond `createdAt` —
+   * "the latest render" must be deterministic because it decides which
+   * proposal a Y/N reply targets.
+   */
+  seq?: number;
 }
 
 export interface CreateProposalSmsEventInput {
@@ -109,21 +116,30 @@ export interface ProposalSmsEventRepository {
    * `reapproval_rendered` — the owner asked for a change that could not
    * be applied over SMS. While true, an SMS `Y` must NOT approve: the
    * owner would be executing the stale payload they were told needs the
-   * review queue. Ties (equal timestamps) resolve to applied.
+   * review queue. Decided by insertion order (`seq`), so same-millisecond
+   * pairs resolve correctly: the reapproval is always inserted after.
    */
   hasUnappliedEditRequest(tenantId: string, proposalId: string): Promise<boolean>;
   /** Close an edit session (idempotent). */
   markConsumed(tenantId: string, id: string, at: Date): Promise<void>;
 }
 
+function bySeqDesc(a: ProposalSmsEvent, b: ProposalSmsEvent): number {
+  const byTime = b.createdAt.getTime() - a.createdAt.getTime();
+  if (byTime !== 0) return byTime;
+  return (b.seq ?? 0) - (a.seq ?? 0);
+}
+
 export class InMemoryProposalSmsEventRepository
   implements ProposalSmsEventRepository
 {
   readonly events: ProposalSmsEvent[] = [];
+  private nextSeq = 1;
 
   async create(event: ProposalSmsEvent): Promise<ProposalSmsEvent> {
-    this.events.push({ ...event });
-    return event;
+    const stored = { ...event, seq: this.nextSeq++ };
+    this.events.push(stored);
+    return { ...stored };
   }
 
   async findRecentOutbound(tenantId: string, limit: number): Promise<ProposalSmsEvent[]> {
@@ -134,7 +150,7 @@ export class InMemoryProposalSmsEventRepository
           e.direction === 'outbound' &&
           (e.kind === 'proposal_rendered' || e.kind === 'reapproval_rendered'),
       )
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .sort(bySeqDesc)
       .slice(0, limit)
       .map((e) => ({ ...e }));
   }
@@ -154,7 +170,7 @@ export class InMemoryProposalSmsEventRepository
           e.expiresAt !== undefined &&
           e.expiresAt.getTime() > now.getTime(),
       )
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      .sort(bySeqDesc);
     return open[0] ? { ...open[0] } : null;
   }
 
@@ -168,16 +184,15 @@ export class InMemoryProposalSmsEventRepository
   }
 
   async hasUnappliedEditRequest(tenantId: string, proposalId: string): Promise<boolean> {
-    const latestOf = (kind: ProposalSmsEventKind): number | null => {
-      const times = this.events
-        .filter((e) => e.tenantId === tenantId && e.proposalId === proposalId && e.kind === kind)
-        .map((e) => e.createdAt.getTime());
-      return times.length > 0 ? Math.max(...times) : null;
-    };
-    const editRequest = latestOf('edit_request');
-    if (editRequest === null) return false;
-    const reapproval = latestOf('reapproval_rendered');
-    return reapproval === null || editRequest > reapproval;
+    const latest = this.events
+      .filter(
+        (e) =>
+          e.tenantId === tenantId &&
+          e.proposalId === proposalId &&
+          (e.kind === 'edit_request' || e.kind === 'reapproval_rendered'),
+      )
+      .sort(bySeqDesc)[0];
+    return latest?.kind === 'edit_request';
   }
 
   async markConsumed(tenantId: string, id: string, at: Date): Promise<void> {
@@ -199,6 +214,7 @@ function mapRow(row: Record<string, unknown>): ProposalSmsEvent {
     ...(row.expires_at ? { expiresAt: new Date(row.expires_at as string) } : {}),
     ...(row.consumed_at ? { consumedAt: new Date(row.consumed_at as string) } : {}),
     createdAt: new Date(row.created_at as string),
+    ...(row.seq != null ? { seq: Number(row.seq) } : {}),
   };
 }
 
@@ -243,7 +259,7 @@ export class PgProposalSmsEventRepository
           WHERE tenant_id = $1
             AND direction = 'outbound'
             AND kind IN ('proposal_rendered', 'reapproval_rendered')
-          ORDER BY created_at DESC
+          ORDER BY created_at DESC, seq DESC
           LIMIT $2`,
         [tenantId, limit],
       );
@@ -264,7 +280,7 @@ export class PgProposalSmsEventRepository
             AND from_phone = $2
             AND consumed_at IS NULL
             AND expires_at > $3
-          ORDER BY created_at DESC
+          ORDER BY created_at DESC, seq DESC
           LIMIT 1`,
         [tenantId, fromPhone, now],
       );
@@ -286,21 +302,18 @@ export class PgProposalSmsEventRepository
 
   async hasUnappliedEditRequest(tenantId: string, proposalId: string): Promise<boolean> {
     return this.withTenant(tenantId, async (client) => {
+      // Insertion order decides: the reapproval row is always inserted
+      // after the edit_request it answers, so the most recent of the two
+      // kinds tells whether the latest request was applied.
       const result = await client.query(
-        `SELECT
-           MAX(created_at) FILTER (WHERE kind = 'edit_request')        AS edit_request_at,
-           MAX(created_at) FILTER (WHERE kind = 'reapproval_rendered') AS reapproval_at
-         FROM proposal_sms_events
-         WHERE tenant_id = $1 AND proposal_id = $2`,
+        `SELECT kind FROM proposal_sms_events
+          WHERE tenant_id = $1 AND proposal_id = $2
+            AND kind IN ('edit_request', 'reapproval_rendered')
+          ORDER BY created_at DESC, seq DESC
+          LIMIT 1`,
         [tenantId, proposalId],
       );
-      const row = result.rows[0] as {
-        edit_request_at: string | null;
-        reapproval_at: string | null;
-      };
-      if (!row.edit_request_at) return false;
-      if (!row.reapproval_at) return true;
-      return new Date(row.edit_request_at).getTime() > new Date(row.reapproval_at).getTime();
+      return result.rows[0]?.kind === 'edit_request';
     });
   }
 

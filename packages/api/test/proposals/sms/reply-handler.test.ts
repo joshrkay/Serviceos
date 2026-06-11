@@ -185,6 +185,23 @@ describe('handleProposalSmsReply — approve', () => {
     );
   });
 
+  it('same-millisecond renders target the later-inserted proposal (seq tiebreaker)', async () => {
+    const h = makeHarness();
+    const sameInstant = new Date('2026-06-11T15:00:00Z');
+    await seedPendingProposal(h, TENANT, {}, sameInstant);
+    const newer = await seedPendingProposal(
+      h,
+      TENANT,
+      { summary: 'Invoice Mr Chen $300' },
+      sameInstant,
+    );
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'approved' });
+    expect((await h.proposalRepo.findById(TENANT, newer.id))?.status).toBe('approved');
+  });
+
   it('blocks approval when required fields are missing and says so', async () => {
     const h = makeHarness();
     // voice_clarification payloads require fields; simulate missing ones via
@@ -395,6 +412,12 @@ describe('edit session flow', () => {
     expect(h.auditRepo.getAll().map((e) => e.eventType)).toContain(
       'proposal.sms_edit_requested',
     );
+    // "Your note is attached" must be true: the instruction is queue-visible
+    // on sourceContext, the review UI's annotation carrier.
+    const annotated = await h.proposalRepo.findById(TENANT, proposal.id);
+    expect(annotated?.sourceContext?.pendingSmsEditRequest).toMatchObject({
+      instruction: 'mumble mumble',
+    });
   });
 
   it('Y after a failed edit capture does NOT approve the stale payload', async () => {

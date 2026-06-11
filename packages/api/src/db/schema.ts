@@ -3965,6 +3965,16 @@ export const MIGRATIONS = {
     ALTER TABLE proposal_sms_events
       ADD COLUMN IF NOT EXISTS from_phone TEXT;
   `,
+
+  '158_proposal_sms_events_seq': `
+    -- P2-034 review fix: created_at has millisecond precision, so
+    -- back-to-back renders (multi-action chains) can tie and "the latest
+    -- outbound render" — which decides what a Y/N reply targets — becomes
+    -- nondeterministic. BIGSERIAL backfills existing rows in insertion
+    -- order and gives every new row a monotonic tiebreaker.
+    ALTER TABLE proposal_sms_events
+      ADD COLUMN IF NOT EXISTS seq BIGSERIAL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

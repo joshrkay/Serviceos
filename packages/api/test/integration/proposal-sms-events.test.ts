@@ -114,6 +114,28 @@ describe('Postgres integration — proposal_sms_events (P2-034)', () => {
     expect(await repo.findOpenEditSession(tenant.tenantId, OWNER, now)).toBeNull();
   });
 
+  it('breaks created_at ties by insertion order (seq)', async () => {
+    const pA = await seedProposal(tenant.tenantId);
+    const pB = await seedProposal(tenant.tenantId);
+    const sameInstant = new Date('2026-06-11T16:00:00Z');
+    for (const proposalIdAtTie of [pA, pB]) {
+      await repo.create(
+        createProposalSmsEvent({
+          tenantId: tenant.tenantId,
+          proposalId: proposalIdAtTie,
+          direction: 'outbound',
+          kind: 'proposal_rendered',
+          body: 'render',
+          now: sameInstant,
+        }),
+      );
+    }
+
+    const [latest] = await repo.findRecentOutbound(tenant.tenantId, 1);
+    expect(latest.proposalId).toBe(pB);
+    expect(latest.seq).toBeGreaterThan(0);
+  });
+
   it('tracks unapplied edit requests (blocks SMS approval until re-rendered)', async () => {
     const editProposalId = await seedProposal(tenant.tenantId);
     expect(await repo.hasUnappliedEditRequest(tenant.tenantId, editProposalId)).toBe(false);

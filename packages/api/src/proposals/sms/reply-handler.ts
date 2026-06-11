@@ -629,7 +629,19 @@ async function applyEditInstruction(
 
   // No interpreter, an empty delta, or a failed/invalid one: the request
   // is recorded (edit_request event + audit) and the owner gets the
-  // truthful next step — never a silent guess.
+  // truthful next step — never a silent guess. The instruction is also
+  // stamped on sourceContext (the review UI's annotation carrier, like
+  // missingFields/pendingReference) so "your note is attached" is true:
+  // the operator sees WHAT the owner asked to change, in the queue.
+  await deps.proposalRepo.update(ctx.tenantId, proposal.id, {
+    sourceContext: {
+      ...(proposal.sourceContext ?? {}),
+      pendingSmsEditRequest: {
+        instruction,
+        receivedAt: (deps.now ? deps.now() : new Date()).toISOString(),
+      },
+    },
+  });
   await audit(deps, ctx, 'proposal.sms_edit_requested', proposal.id, {});
   await reply(
     deps,
