@@ -471,10 +471,25 @@ async function applyEditInstruction(
           edits,
           deps.auditRepo,
         );
+        // The stored summary was written BEFORE the edit, so it can still
+        // describe the old value (a time, a price). The owner must never
+        // re-approve text that contradicts what will execute — echo their
+        // own instruction so the change is explicit. Money/customer facts
+        // are appended from the NEW payload by the renderer.
+        const instructionNote =
+          instruction.trim().length > 80
+            ? `${instruction.trim().slice(0, 79)}…`
+            : instruction.trim();
+        // Pre-truncate the base summary: the renderer trims the summary
+        // tail to fit, and the change note must survive that trim.
+        const baseSummary =
+          updated.summary.length > 140
+            ? `${updated.summary.slice(0, 139)}…`
+            : updated.summary;
         const body = renderProposalSms(
           {
             proposalType: updated.proposalType,
-            summary: updated.summary,
+            summary: `${baseSummary} — your change: "${instructionNote}"`,
             payload: updated.payload,
           },
           { reapproval: true },

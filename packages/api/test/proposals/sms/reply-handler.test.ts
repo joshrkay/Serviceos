@@ -332,9 +332,12 @@ describe('edit session flow', () => {
     expect(updated?.status).toBe('ready_for_review'); // re-approval required
     const rerender = h.smsEventRepo.events.find((e) => e.kind === 'reapproval_rendered');
     expect(rerender?.proposalId).toBe(proposal.id);
-    // The re-approval SMS itself carries the reply tokens.
+    // The re-approval SMS itself carries the reply tokens — and echoes the
+    // owner's instruction, since the stored summary may still describe the
+    // pre-edit value (it is not recomputed by editProposal).
     expect(h.sent.at(-1)?.body).toContain('Reply Y to approve');
     expect(h.sent.at(-1)?.body).toContain('Updated:');
+    expect(h.sent.at(-1)?.body).toContain('your change: "actually it is for Mr Chen"');
     // The next Y approves the edited proposal.
     const approval = await handleProposalSmsReply(ctx('Y'), h.deps);
     expect(approval).toMatchObject({ handled: true, reason: 'approved' });
