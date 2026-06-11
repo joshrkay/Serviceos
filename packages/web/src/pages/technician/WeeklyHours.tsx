@@ -143,39 +143,41 @@ export default function WeeklyHours({
         <h1 className="text-xl font-semibold">Weekly hours</h1>
         <span className="text-sm text-slate-500">Week of {week}</span>
       </header>
-      <table className="w-full text-left text-sm">
-        <thead>
-          <tr className="border-b border-slate-200 text-slate-500">
-            <th className="py-1">Day</th>
-            <th className="py-1">Date</th>
-            <th className="py-1 text-right">Hours</th>
-          </tr>
-        </thead>
-        <tbody>
-          {dates.map((date, i) => (
-            <tr key={date} className="border-b border-slate-100">
-              <td className="py-1 font-medium">{DAY_LABELS[i]}</td>
-              <td className="py-1 text-slate-500">{date}</td>
-              <td className="py-1 text-right font-mono" data-testid={`hours-${date}`}>
-                {(byDayMap.get(date) ?? 0).toFixed(2)}
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-sm">
+          <thead>
+            <tr className="border-b border-slate-200 text-slate-500">
+              <th className="py-1">Day</th>
+              <th className="py-1">Date</th>
+              <th className="py-1 text-right">Hours</th>
+            </tr>
+          </thead>
+          <tbody>
+            {dates.map((date, i) => (
+              <tr key={date} className="border-b border-slate-100">
+                <td className="py-1 font-medium">{DAY_LABELS[i]}</td>
+                <td className="py-1 text-slate-500">{date}</td>
+                <td className="py-1 text-right font-mono" data-testid={`hours-${date}`}>
+                  {(byDayMap.get(date) ?? 0).toFixed(2)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td className="py-2 font-semibold" colSpan={2}>
+                Total
+              </td>
+              <td
+                className="py-2 text-right font-mono font-semibold"
+                data-testid="weekly-total"
+              >
+                {(rollup?.totalHours ?? 0).toFixed(2)}
               </td>
             </tr>
-          ))}
-        </tbody>
-        <tfoot>
-          <tr>
-            <td className="py-2 font-semibold" colSpan={2}>
-              Total
-            </td>
-            <td
-              className="py-2 text-right font-mono font-semibold"
-              data-testid="weekly-total"
-            >
-              {(rollup?.totalHours ?? 0).toFixed(2)}
-            </td>
-          </tr>
-        </tfoot>
-      </table>
+          </tfoot>
+        </table>
+      </div>
     </div>
   );
 }

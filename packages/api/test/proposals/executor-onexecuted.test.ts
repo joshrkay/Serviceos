@@ -3,12 +3,28 @@ import { ProposalExecutor, ProposalExecutionEvent } from '../../src/proposals/ex
 import {
   Proposal,
   InMemoryProposalRepository,
+  ProposalRepository,
   createProposal,
   ProposalType,
 } from '../../src/proposals/proposal';
 import { ExecutionHandler } from '../../src/proposals/execution/handlers';
-import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
+import {
+  InMemoryProposalExecutionRepository,
+  ProposalExecutionRepository,
+} from '../../src/proposals/proposal-execution';
+import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import { transitionProposal } from '../../src/proposals/lifecycle';
+
+// §11 H1: the executor now requires an IdempotencyGuard. Proposals
+// without an `idempotencyKey` fall through the guard as a passthrough,
+// so existing onExecuted/executionRepo tests just need a real guard
+// wired in — behavior is unchanged.
+function makeGuard(
+  executionRepo: ProposalExecutionRepository,
+  proposalRepo: ProposalRepository,
+): IdempotencyGuard {
+  return new IdempotencyGuard(executionRepo, proposalRepo);
+}
 
 // Phase 4a-1 regression suite for the new onExecuted callback + the
 // proposal_executions row write. Existing executor.test.ts coverage of
@@ -62,7 +78,7 @@ describe('ProposalExecutor — Phase 4a-1 onExecuted + proposal_executions row',
     const proposal = approvedProposal();
     await repo.create(proposal);
 
-    const executor = new ProposalExecutor(handlers, repo, undefined, {
+    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), {
       executionRepo,
       onExecuted,
     });
@@ -89,7 +105,7 @@ describe('ProposalExecutor — Phase 4a-1 onExecuted + proposal_executions row',
     const proposal = approvedProposal();
     await repo.create(proposal);
 
-    const executor = new ProposalExecutor(handlers, repo, undefined, {
+    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), {
       executionRepo,
       onExecuted,
     });
@@ -114,7 +130,8 @@ describe('ProposalExecutor — Phase 4a-1 onExecuted + proposal_executions row',
     const onExecuted = vi.fn(async () => {
       throw new Error('downstream queue is down');
     });
-    const executor = new ProposalExecutor(handlers, repo, undefined, { onExecuted });
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), { onExecuted });
 
     // Despite the callback throwing, the executor should resolve cleanly.
     const result = await executor.execute(proposal, { tenantId: TENANT_A, executedBy: 'user-1' });
@@ -129,7 +146,8 @@ describe('ProposalExecutor — Phase 4a-1 onExecuted + proposal_executions row',
     await repo.create(proposal);
     const onExecuted = vi.fn(async (_event: ProposalExecutionEvent) => undefined);
 
-    const executor = new ProposalExecutor(handlers, repo, undefined, { onExecuted });
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), { onExecuted });
     await executor.execute(proposal, { tenantId: TENANT_A, executedBy: 'user-1' });
 
     expect(onExecuted).toHaveBeenCalledTimes(1);
@@ -144,7 +162,7 @@ describe('ProposalExecutor — Phase 4a-1 onExecuted + proposal_executions row',
     proposal.idempotencyKey = 'idem-7';
     await repo.create(proposal);
 
-    const executor = new ProposalExecutor(handlers, repo, undefined, { executionRepo });
+    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), { executionRepo });
     await executor.execute(proposal, { tenantId: TENANT_A, executedBy: 'user-1' });
 
     const rows = await executionRepo.listByProposal(TENANT_A, proposal.id);

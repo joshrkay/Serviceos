@@ -18,14 +18,15 @@ Return valid JSON with this exact shape:
   "city": "<string or null>",
   "state": "<string or null>",
   "verticals": [
-    { "type": "hvac" | "plumbing", "confidence": <0-1>, "source_text": "<quote from transcript>" }
+    { "type": "hvac" | "plumbing" | "electrical", "confidence": <0-1>, "source_text": "<quote from transcript>" }
   ],
   "service_descriptions": ["<string>"],
   "confidence_score": <0-1>
 }
 
 Rules:
-- Only identify verticals from this list: hvac, plumbing.
+- Only identify verticals from this list: hvac, plumbing, electrical.
+- Electrical is supported as a basic second-class vertical; do not infer rich electrical pack details.
 - If the transcript is too vague to identify the vertical, return an empty verticals array.
 - Do NOT guess or fabricate information not present in the transcript.
 - Casual or uncertain mentions ("we sometimes help with plumbing") should get low confidence (< 0.5).
@@ -69,6 +70,7 @@ export class BusinessProfileExtractor implements OnboardingExtractor<BusinessPro
           { role: 'user', content: userMessage },
         ],
         responseFormat: 'json',
+        tenantId: context.tenantId,
       });
       parsed = tryParseJson(response.content);
     } catch {
@@ -81,7 +83,7 @@ export class BusinessProfileExtractor implements OnboardingExtractor<BusinessPro
     const needsClarification = data.verticalPacks.length === 0 || data.confidence < 0.3;
     const clarificationQuestions: string[] = [];
     if (data.verticalPacks.length === 0) {
-      clarificationQuestions.push('What type of services does your business provide? (e.g., HVAC, plumbing)');
+      clarificationQuestions.push('What type of services does your business provide? (e.g., HVAC, plumbing, electrical)');
     }
     if (!data.businessName) {
       clarificationQuestions.push('What is your business name?');

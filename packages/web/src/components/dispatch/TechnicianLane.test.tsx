@@ -122,4 +122,66 @@ describe('P6-004 — Technician lanes', () => {
       expect(onReorder).toHaveBeenCalledWith('appt-1', 0, 1);
     });
   });
+
+  describe('dispatch feasibility drop-zone colors', () => {
+    const lane = { id: 'tech-1', name: 'Alex Tech' };
+
+    it('renders idle state when no dragPreview is provided', () => {
+      const { getByTestId } = render(
+        <TechnicianLane technician={lane} appointments={[]} />,
+      );
+      expect(getByTestId('technician-lane').getAttribute('data-drop-zone-state')).toBe('drop-zone--idle');
+    });
+
+    it('renders blocking state when preview.feasible is false', () => {
+      const { getByTestId } = render(
+        <TechnicianLane
+          technician={lane}
+          appointments={[]}
+          dragPreview={{
+            targetTechnicianId: lane.id,
+            preview: {
+              feasible: false,
+              blocking: [{ check: 'overlap', severity: 'blocking', message: 'x' }],
+              warnings: [], info: [], travelTime: null,
+            },
+          }}
+        />,
+      );
+      expect(getByTestId('technician-lane').getAttribute('data-drop-zone-state')).toBe('drop-zone--blocking');
+    });
+
+    it('renders warning state when preview has warnings only', () => {
+      const { getByTestId } = render(
+        <TechnicianLane
+          technician={lane}
+          appointments={[]}
+          dragPreview={{
+            targetTechnicianId: lane.id,
+            preview: {
+              feasible: true,
+              blocking: [],
+              warnings: [{ check: 'travel_time', severity: 'warning', message: 'tight' }],
+              info: [], travelTime: null,
+            },
+          }}
+        />,
+      );
+      expect(getByTestId('technician-lane').getAttribute('data-drop-zone-state')).toBe('drop-zone--warning');
+    });
+
+    it('renders ok state when preview is clean', () => {
+      const { getByTestId } = render(
+        <TechnicianLane
+          technician={lane}
+          appointments={[]}
+          dragPreview={{
+            targetTechnicianId: lane.id,
+            preview: { feasible: true, blocking: [], warnings: [], info: [], travelTime: null },
+          }}
+        />,
+      );
+      expect(getByTestId('technician-lane').getAttribute('data-drop-zone-state')).toBe('drop-zone--ok');
+    });
+  });
 });

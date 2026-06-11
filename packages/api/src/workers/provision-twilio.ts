@@ -10,6 +10,8 @@ import {
   attachNumberToMessagingService,
   listSubaccountPhoneNumbers,
 } from '../integrations/twilio/provisioning';
+import { getVapiClient, type VapiClient } from '../integrations/vapi/client';
+import { buildAssistantConfig } from '../integrations/vapi/assistant-config';
 
 // Status values match migration 071_widen_tenant_integrations_status:
 // 't0_requested' = provisioning in flight; 'full_readiness' = fully active.
@@ -35,9 +37,14 @@ async function tenantQuery<R extends QueryResultRow = QueryResultRow>(
     await client.query('COMMIT');
     return result;
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    try { await client.query('ROLLBACK'); } catch { /* best-effort */ }
     throw err;
   } finally {
+    // GUC leak fix: plain `SET app.current_tenant_id` persists past
+    // COMMIT/ROLLBACK on the underlying connection. Clear it before
+    // release so the next pool checkout doesn't inherit this tenant's
+    // context.
+    try { await client.query('RESET app.current_tenant_id'); } catch { /* ignore */ }
     client.release();
   }
 }
@@ -52,6 +59,10 @@ export const PROVISION_TWILIO_JOB_TYPE = 'provision_twilio_subaccount';
 
 export function createProvisionTwilioWorker(deps: {
   pool: Pool;
+  /** Injectable for tests; production resolves from VAPI_API_KEY via
+   * getVapiClient(). When null/absent, the Vapi assistant step is skipped
+   * (off-by-default), exactly like Twilio skips without its creds. */
+  vapiClient?: VapiClient;
 }): WorkerHandler<ProvisionTwilioPayload> {
   return {
     type: PROVISION_TWILIO_JOB_TYPE,
@@ -233,6 +244,69 @@ export function createProvisionTwilioWorker(deps: {
           );
         }
 
+        // Step 4.5 — create the Vapi assistant linked to this number.
+        // Off-by-default: skipped when VAPI_API_KEY isn't configured (no
+        // client). Best-effort — a Vapi hiccup must NOT fail Twilio
+        // readiness (SMS/voice still come up); the next provisioning run
+        // retries assistant creation while vapi_assistant_id is still null.
+        const vapi = deps.vapiClient ?? getVapiClient();
+        if (vapi && phoneE164) {
+          try {
+            const cfgRes = await tenantQuery<{
+              business_name: string | null;
+              voice_greeting: string | null;
+              voice_id: string | null;
+              services_offered: string[] | null;
+              vapi_assistant_id: string | null;
+            }>(
+              pool,
+              tenantId,
+              `SELECT business_name, voice_greeting, voice_id, services_offered, vapi_assistant_id
+                 FROM tenant_settings WHERE tenant_id = $1`,
+              [tenantId],
+            );
+            const cfg = cfgRes.rows[0];
+            if (cfg && !cfg.vapi_assistant_id) {
+              const assistantConfig = buildAssistantConfig({
+                businessName: cfg.business_name ?? 'ServiceOS',
+                greeting: cfg.voice_greeting,
+                voicePresetId: cfg.voice_id,
+                services: cfg.services_offered ?? [],
+                serverUrl: `${baseUrl}/webhooks/vapi/${tenantId}`,
+                ...(process.env.VAPI_WEBHOOK_SECRET
+                  ? { serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET }
+                  : {}),
+              });
+              const { assistantId } = await vapi.createAssistant(assistantConfig);
+              await vapi.linkPhoneNumber({
+                assistantId,
+                phoneE164,
+                ...(phoneNumberSid ? { twilioPhoneNumberSid: phoneNumberSid } : {}),
+              });
+              await tenantQuery(
+                pool,
+                tenantId,
+                `UPDATE tenant_settings SET vapi_assistant_id = $1, updated_at = NOW() WHERE tenant_id = $2`,
+                [assistantId, tenantId],
+              );
+              await tenantQuery(
+                pool,
+                tenantId,
+                `UPDATE tenant_integrations
+                   SET provider_data = provider_data || $1::jsonb, updated_at = NOW()
+                 WHERE tenant_id = $2 AND provider = 'twilio'`,
+                [JSON.stringify({ vapiAssistantId: assistantId }), tenantId],
+              );
+              logger.info('Vapi assistant created and linked', { tenantId, assistantId });
+            }
+          } catch (vapiErr) {
+            logger.error('Vapi assistant creation failed (Twilio readiness unaffected)', {
+              tenantId,
+              error: vapiErr instanceof Error ? vapiErr.message : String(vapiErr),
+            });
+          }
+        }
+
         // Step 5 — mark active
         await tenantQuery(
           pool,
@@ -242,6 +316,18 @@ export function createProvisionTwilioWorker(deps: {
            WHERE tenant_id = $1 AND provider = 'twilio'`,
           [tenantId, STATUS_ACTIVE]
         );
+
+        if (phoneE164) {
+          await tenantQuery(
+            pool,
+            tenantId,
+            `UPDATE tenant_settings
+             SET business_phone = COALESCE(NULLIF(TRIM(business_phone), ''), $1),
+                 updated_at = NOW()
+             WHERE tenant_id = $2`,
+            [phoneE164, tenantId],
+          );
+        }
 
         logger.info('Twilio provisioning complete', { tenantId, subaccountSid, phoneE164 });
       } catch (err) {

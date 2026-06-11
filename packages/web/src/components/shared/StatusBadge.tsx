@@ -15,9 +15,12 @@ const CONFIG: Record<string, { dot: string; bg: string; text: string; label?: st
   Viewed:        { dot: 'bg-violet-500', bg: 'bg-violet-50', text: 'text-violet-700' },
   Approved:      { dot: 'bg-green-500',  bg: 'bg-green-50',  text: 'text-green-700' },
   Declined:      { dot: 'bg-red-500',    bg: 'bg-red-50',    text: 'text-red-700' },
+  Expired:       { dot: 'bg-slate-400',  bg: 'bg-slate-100', text: 'text-slate-500' },
   Unpaid:        { dot: 'bg-amber-500',  bg: 'bg-amber-50',  text: 'text-amber-700' },
   Paid:          { dot: 'bg-green-500',  bg: 'bg-green-50',  text: 'text-green-700' },
   Overdue:       { dot: 'bg-red-500',    bg: 'bg-red-50',    text: 'text-red-700' },
+  'Estimate sent':     { dot: 'bg-blue-500',   bg: 'bg-blue-50',   text: 'text-blue-700' },
+  'Estimate approved': { dot: 'bg-green-500',  bg: 'bg-green-50',  text: 'text-green-700' },
   Urgent:        { dot: 'bg-red-500',    bg: 'bg-red-50',    text: 'text-red-700' },
   Normal:        { dot: 'bg-slate-400',  bg: 'bg-slate-100', text: 'text-slate-600' },
 };

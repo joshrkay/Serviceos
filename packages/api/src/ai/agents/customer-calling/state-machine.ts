@@ -9,6 +9,8 @@
 
 import type { CallingAgentState, CallingAgentContext, CallingAgentEvent, SideEffect } from './types';
 import { transition } from './transitions';
+import type { TriageDecision, UrgencyTier, VulnerabilityScore } from '@ai-service-os/shared';
+import { triageDecision } from '../../vulnerability/triage-decision';
 
 export class CallingAgentStateMachine {
   private state: CallingAgentState = 'idle';
@@ -43,5 +45,23 @@ export class CallingAgentStateMachine {
     this.state = result.nextState;
     this.context = result.updatedContext;
     return result.sideEffects;
+  }
+
+  /**
+   * P8-016 — vulnerability triage PRE-FILTER, run at the escalation site
+   * BEFORE the existing escalate-to-human call. Given the extracted
+   * vulnerability score and the call's urgency tier, returns the triage
+   * decision:
+   *   - 'patch_owner'            → page the owner's cell (owner-cell-patch);
+   *   - 'high_priority_booking'  → high-priority booking + owner notified;
+   *   - 'normal'                 → FALL THROUGH to the existing escalation /
+   *                                booking behavior, completely unchanged.
+   *
+   * Pure delegation to `triageDecision()`; the FSM itself performs no I/O.
+   * Callers branch on `decision.kind` and only diverge from existing behavior
+   * for the two non-'normal' kinds.
+   */
+  evaluateTriage(score: VulnerabilityScore, urgency: UrgencyTier): TriageDecision {
+    return triageDecision(score, urgency);
   }
 }

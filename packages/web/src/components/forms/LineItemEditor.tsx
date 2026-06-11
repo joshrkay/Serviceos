@@ -1,4 +1,7 @@
 import React, { useCallback, useMemo } from 'react';
+import { formatCurrency as formatUSD } from '../../utils/currency';
+import { CatalogPicker } from './CatalogPicker';
+import { catalogItemToDraft } from './catalogToLineItem';
 
 /**
  * Editable line item shape — what the editor renders/maintains internally.
@@ -12,6 +15,12 @@ export interface LineItemDraft {
   unitPriceDollars: string;
   taxable: boolean;
   category?: 'labor' | 'material' | 'equipment' | 'other';
+  // Good-better-best authoring (estimates only). A non-empty `groupLabel`
+  // makes the row one option in a mutually-exclusive tier group; an
+  // optional row with no group is a standalone add-on.
+  isOptional?: boolean;
+  groupLabel?: string;
+  isDefaultSelected?: boolean;
 }
 
 export interface LineItemPayload {
@@ -23,11 +32,19 @@ export interface LineItemPayload {
   totalCents: number;
   sortOrder: number;
   taxable: boolean;
+  groupKey?: string;
+  groupLabel?: string;
+  isOptional?: boolean;
+  isDefaultSelected?: boolean;
 }
 
 export interface LineItemEditorProps {
   items: LineItemDraft[];
   onChange: (items: LineItemDraft[]) => void;
+  /** Enable good-better-best authoring controls (estimates only). */
+  enableOptions?: boolean;
+  /** Show an "Add from Price Book" picker that appends catalog items as rows. */
+  enableCatalog?: boolean;
 }
 
 /** Generate a stable client id for a new row (no UUID dep). */
@@ -56,6 +73,7 @@ export function toLineItemPayload(
   const safeDollars = Number.isFinite(dollars) && dollars >= 0 ? dollars : 0;
   const unitPriceCents = Math.round(safeDollars * 100);
   const totalCents = Math.round(safeDollars * 100 * safeQty);
+  const groupLabel = draft.groupLabel?.trim() || undefined;
   return {
     id: draft.id,
     description: draft.description.trim(),
@@ -65,6 +83,12 @@ export function toLineItemPayload(
     totalCents,
     sortOrder,
     taxable: draft.taxable,
+    // A tier row is selectable by virtue of its group; a row flagged
+    // optional with no group is a standalone add-on.
+    groupKey: groupLabel,
+    groupLabel,
+    isOptional: draft.isOptional || groupLabel !== undefined ? true : undefined,
+    isDefaultSelected: draft.isDefaultSelected ? true : undefined,
   };
 }
 
@@ -78,14 +102,15 @@ export function totalCents(items: LineItemDraft[]): number {
   }, 0);
 }
 
-function formatUSD(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
-}
-
 const inputCls =
   'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';
 
-export function LineItemEditor({ items, onChange }: LineItemEditorProps) {
+export function LineItemEditor({
+  items,
+  onChange,
+  enableOptions = false,
+  enableCatalog = false,
+}: LineItemEditorProps) {
   const update = useCallback(
     (index: number, patch: Partial<LineItemDraft>) => {
       const next = items.slice();
@@ -114,13 +139,28 @@ export function LineItemEditor({ items, onChange }: LineItemEditorProps) {
     <div data-testid="line-item-editor" className="space-y-2">
       <div className="flex items-center justify-between">
         <h2 className="text-sm text-slate-700">Line items</h2>
-        <button
-          type="button"
-          onClick={add}
-          className="text-xs rounded-md border border-slate-200 px-2 py-1 hover:bg-slate-50"
-        >
-          + Add row
-        </button>
+        <div className="flex items-center gap-2">
+          {enableCatalog && (
+            <CatalogPicker
+              onPick={(item) => {
+                const draft = catalogItemToDraft(item);
+                // On a fresh form `items` is a single blank draft; replace it
+                // rather than appending, so the picked row isn't trailed by an
+                // empty one that fails the "every row needs a description" check.
+                const soleEmpty =
+                  items.length === 1 && !items[0].description.trim();
+                onChange(soleEmpty ? [draft] : [...items, draft]);
+              }}
+            />
+          )}
+          <button
+            type="button"
+            onClick={add}
+            className="text-xs rounded-md border border-slate-200 px-2 py-1 hover:bg-slate-50"
+          >
+            + Add row
+          </button>
+        </div>
       </div>
 
       {items.length === 0 && (
@@ -179,6 +219,40 @@ export function LineItemEditor({ items, onChange }: LineItemEditorProps) {
             >
               ×
             </button>
+            {enableOptions && (
+              <div className="col-span-12 flex flex-wrap items-center gap-3 pl-1 pb-1">
+                <label className="flex items-center gap-1.5 text-xs text-slate-500">
+                  <input
+                    type="checkbox"
+                    aria-label={`optional-${index}`}
+                    checked={item.isOptional ?? false}
+                    onChange={(e) => update(index, { isOptional: e.target.checked })}
+                  />
+                  Optional add-on
+                </label>
+                <label className="flex items-center gap-1.5 text-xs text-slate-500">
+                  Tier group
+                  <input
+                    aria-label={`group-${index}`}
+                    value={item.groupLabel ?? ''}
+                    onChange={(e) => update(index, { groupLabel: e.target.value })}
+                    placeholder="e.g. Plan"
+                    className="rounded-md border border-slate-200 px-2 py-1 text-xs w-28"
+                  />
+                </label>
+                {(item.isOptional || (item.groupLabel ?? '').trim()) && (
+                  <label className="flex items-center gap-1.5 text-xs text-slate-500">
+                    <input
+                      type="checkbox"
+                      aria-label={`default-selected-${index}`}
+                      checked={item.isDefaultSelected ?? false}
+                      onChange={(e) => update(index, { isDefaultSelected: e.target.checked })}
+                    />
+                    Pre-selected
+                  </label>
+                )}
+              </div>
+            )}
           </div>
         );
       })}

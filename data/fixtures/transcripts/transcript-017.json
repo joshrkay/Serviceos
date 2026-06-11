@@ -1,0 +1,15 @@
+{
+  "id": "transcript-017",
+  "type": "inbound_call",
+  "duration_seconds": 180,
+  "service_type": "plumbing",
+  "transcript": "Customer: Hi, this is Sarah Johnson. I'm calling because my sump pump has low water pressure. Dispatcher: Hi Sarah, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Kohler, an older one, 15 years. Dispatcher: Okay, and what's the service address? Customer: 7 River Road. Dispatcher: Got it. We can send a technician out Saturday between 10 and 12. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Sarah Johnson",
+    "issue": "sump pump has low water pressure",
+    "equipment": "Kohler sump pump, an older one, 15 years",
+    "address": "7 River Road",
+    "appointment_window": "Saturday between 10 and 12"
+  },
+  "source": "synthetic"
+}

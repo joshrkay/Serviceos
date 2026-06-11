@@ -15,6 +15,7 @@
  */
 
 import type { TenantSettings } from '../settings/settings';
+import { applyBps } from '../shared/billing-engine';
 
 export type DepositRuleSettings = Pick<
   TenantSettings,
@@ -53,7 +54,10 @@ export function evaluateDepositRule(
   if (settings.depositStrategy === 'percentage') {
     const bps = settings.depositPercentageBps;
     if (bps == null || bps <= 0) return 0;
-    return Math.min(Math.round((totalCents * bps) / 10000), totalCents);
+    // Percentage-of-money math routed through the shared billing engine's
+    // applyBps so the rounding convention matches tax lines exactly; the
+    // cap ensures we never demand more deposit than the contract is worth.
+    return Math.min(applyBps(totalCents, bps), totalCents);
   }
   if (settings.depositStrategy === 'fixed') {
     const fixed = settings.depositFixedCents;

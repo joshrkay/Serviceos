@@ -1,0 +1,15 @@
+{
+  "id": "transcript-277",
+  "type": "inbound_call",
+  "duration_seconds": 55,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is Tom Bradley. I wanted to check on the status of my package unit job and what I owe. Dispatcher: Sure Tom, let me pull up your account. Customer: Thank you. Dispatcher: Your package unit job is scheduled and your balance is on file. Anything else? Customer: No, that's all.",
+  "expected_entities": {
+    "customer_name": "Tom Bradley",
+    "issue": "status check on package unit job",
+    "equipment": "package unit",
+    "address": "",
+    "appointment_window": ""
+  },
+  "source": "synthetic"
+}

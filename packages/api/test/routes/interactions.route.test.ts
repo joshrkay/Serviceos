@@ -21,8 +21,8 @@ function makeClient(rowsForQuery: Record<string, unknown>[][], countRow: { total
   let callIdx = 0;
   return {
     query: vi.fn().mockImplementation(async (sql: string) => {
-      // BEGIN / COMMIT / ROLLBACK / SET (RLS context) → return empty
-      if (/^(BEGIN|COMMIT|ROLLBACK|SET\b)/i.test(sql.trim())) {
+      // BEGIN / COMMIT / ROLLBACK / SET / set_config (RLS context) → return empty
+      if (/^(BEGIN|COMMIT|ROLLBACK|SET\b)/i.test(sql.trim()) || /set_config/i.test(sql)) {
         return { rows: [] } as QueryResult;
       }
       // SELECT COUNT(*) → return countRow

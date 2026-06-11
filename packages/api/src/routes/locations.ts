@@ -13,10 +13,12 @@ import {
   setPrimary,
   LocationRepository,
 } from '../locations/location';
+import { AuditRepository } from '../audit/audit';
 
 export function createLocationRouter(
   locationRepo: LocationRepository,
-  ownership: TenantOwnership
+  ownership: TenantOwnership,
+  auditRepo?: AuditRepository,
 ): Router {
   const router = Router();
 
@@ -30,7 +32,10 @@ export function createLocationRouter(
       await ownership.requireExists(req.auth!.tenantId, 'customer', parsed.customerId);
       const result = await createLocation(
         { ...parsed, tenantId: req.auth!.tenantId },
-        locationRepo
+        locationRepo,
+        auditRepo,
+        req.auth!.userId,
+        req.auth!.role,
       );
       res.status(201).json(result);
     })
@@ -73,7 +78,15 @@ export function createLocationRouter(
     requireTenant,
     requirePermission('locations:update'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const result = await updateLocation(req.auth!.tenantId, req.params.id, req.body, locationRepo);
+      const result = await updateLocation(
+        req.auth!.tenantId,
+        req.params.id,
+        req.body,
+        locationRepo,
+        auditRepo,
+        req.auth!.userId,
+        req.auth!.role,
+      );
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Location not found' });
         return;
@@ -88,7 +101,14 @@ export function createLocationRouter(
     requireTenant,
     requirePermission('locations:delete'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const result = await archiveLocation(req.auth!.tenantId, req.params.id, locationRepo);
+      const result = await archiveLocation(
+        req.auth!.tenantId,
+        req.params.id,
+        locationRepo,
+        auditRepo,
+        req.auth!.userId,
+        req.auth!.role,
+      );
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Location not found' });
         return;
@@ -103,7 +123,14 @@ export function createLocationRouter(
     requireTenant,
     requirePermission('locations:update'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const result = await setPrimary(req.auth!.tenantId, req.params.id, locationRepo);
+      const result = await setPrimary(
+        req.auth!.tenantId,
+        req.params.id,
+        locationRepo,
+        auditRepo,
+        req.auth!.userId,
+        req.auth!.role,
+      );
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Location not found' });
         return;

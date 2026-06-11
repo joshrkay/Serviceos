@@ -1,6 +1,6 @@
 export type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
 export type JobStatus = 'New' | 'Scheduled' | 'Unscheduled' | 'Dispatched' | 'En Route' | 'On Site' | 'Active' | 'In Progress' | 'Waiting for Parts' | 'Day 2' | 'Completed' | 'Canceled' | 'No Show' | 'Pending';
-export type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined';
+export type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined' | 'Expired';
 export type InvoiceStatus = 'Draft' | 'Sent' | 'Unpaid' | 'Paid' | 'Overdue';
 export type ProposalType = 'Invoice' | 'Estimate' | 'Schedule' | 'Follow-up' | 'Alert' | 'Duplicate' | 'Customer' | 'Clarification' | 'Note' | 'Payment' | 'Send';
 export type ProposalConfidence = 'High' | 'Medium';
@@ -222,7 +222,7 @@ export const jobs: Job[] = [
       { status: 'On Site', time: '9:04 AM', note: 'Carlos checked in' },
     ],
     activity: [
-      { id: 'j1-a1', type: 'system', content: 'Job created via Fieldly AI', time: '8:15 AM', authorInitials: 'AI', authorColor: '#6366f1' },
+      { id: 'j1-a1', type: 'system', content: 'Job created via Rivet AI', time: '8:15 AM', authorInitials: 'AI', authorColor: '#6366f1' },
       { id: 'j1-a2', type: 'status_change', content: 'Dispatched to Carlos Reyes', time: '8:30 AM', author: 'Mike (owner)', authorInitials: 'MO', authorColor: '#475569' },
       { id: 'j1-a3', type: 'check_in', content: 'Carlos checked in on site', time: '9:04 AM', author: 'Carlos Reyes', authorInitials: 'CR', authorColor: '#3B82F6' },
       { id: 'j1-a4', type: 'photo', content: 'Before photos of AC unit and condenser added', time: '9:08 AM', author: 'Carlos Reyes', authorInitials: 'CR', authorColor: '#3B82F6' },

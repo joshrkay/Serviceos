@@ -7,9 +7,14 @@ import {
   EstimateTemplateRepository,
   createTemplate,
   instantiateTemplate,
+  updateTemplate,
 } from '../templates/estimate-template';
+import { AuditRepository } from '../audit/audit';
 
-export function createTemplateRouter(templateRepo: EstimateTemplateRepository): Router {
+export function createTemplateRouter(
+  templateRepo: EstimateTemplateRepository,
+  auditRepo?: AuditRepository,
+): Router {
   const router = Router();
 
   router.get(
@@ -73,7 +78,9 @@ export function createTemplateRouter(templateRepo: EstimateTemplateRepository): 
           tenantId: req.auth!.tenantId,
           createdBy: req.auth!.userId,
         },
-        templateRepo
+        templateRepo,
+        auditRepo,
+        req.auth!.role,
       );
       res.status(201).json(result);
     })
@@ -103,16 +110,23 @@ export function createTemplateRouter(templateRepo: EstimateTemplateRepository): 
     requirePermission('estimates:update'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const { name, description, lineItemTemplates, defaultDiscountCents, defaultTaxRateBps, defaultCustomerMessage, isActive } = req.body;
-      const result = await templateRepo.update(req.auth!.tenantId, req.params.id, {
-        ...(name !== undefined && { name }),
-        ...(description !== undefined && { description }),
-        ...(lineItemTemplates !== undefined && { lineItemTemplates }),
-        ...(defaultDiscountCents !== undefined && { defaultDiscountCents }),
-        ...(defaultTaxRateBps !== undefined && { defaultTaxRateBps }),
-        ...(defaultCustomerMessage !== undefined && { defaultCustomerMessage }),
-        ...(isActive !== undefined && { isActive }),
-        updatedAt: new Date(),
-      });
+      const result = await updateTemplate(
+        templateRepo,
+        req.auth!.tenantId,
+        req.params.id,
+        {
+          ...(name !== undefined && { name }),
+          ...(description !== undefined && { description }),
+          ...(lineItemTemplates !== undefined && { lineItemTemplates }),
+          ...(defaultDiscountCents !== undefined && { defaultDiscountCents }),
+          ...(defaultTaxRateBps !== undefined && { defaultTaxRateBps }),
+          ...(defaultCustomerMessage !== undefined && { defaultCustomerMessage }),
+          ...(isActive !== undefined && { isActive }),
+          updatedAt: new Date(),
+        },
+        { userId: req.auth!.userId, role: req.auth!.role },
+        auditRepo,
+      );
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Template not found' });
         return;

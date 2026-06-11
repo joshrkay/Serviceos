@@ -26,6 +26,15 @@ export const gatewayRequestsTotal = new Counter({
   registers: [metricsRegistry],
 });
 
+// ---------- Voice gates (§10 onboarding — trial fraud guardrails) ----------
+
+export const voiceBlocksTotal = new Counter({
+  name: 'voice_blocks_total',
+  help: 'Inbound voice calls blocked by trial/billing gates, by reason',
+  labelNames: ['reason'],
+  registers: [metricsRegistry],
+});
+
 export const gatewayRequestLatencyMs = new Histogram({
   name: 'gateway_request_latency_ms',
   help: 'End-to-end LLM gateway request latency in ms',
@@ -34,10 +43,13 @@ export const gatewayRequestLatencyMs = new Histogram({
   registers: [metricsRegistry],
 });
 
+// BREAKING CHANGE (P2-029): labels changed from {provider, reason} to
+// {provider, taskType, outcome}. Update any dashboards or alerts that
+// reference the old 'reason' label.
 export const gatewayRetryAttemptsTotal = new Counter({
   name: 'gateway_retry_attempts_total',
   help: 'Retry attempts issued by the gateway',
-  labelNames: ['provider', 'reason'],
+  labelNames: ['provider', 'taskType', 'outcome'],
   registers: [metricsRegistry],
 });
 
@@ -45,6 +57,18 @@ export const gatewayFallbackActivationsTotal = new Counter({
   name: 'gateway_fallback_activations_total',
   help: 'Fallback path activations',
   labelNames: ['stage'],
+  registers: [metricsRegistry],
+});
+
+/**
+ * P2-029 — provider-level failover counter.
+ * Incremented each time ProviderFailoverWrapper advances from one provider
+ * to the next (from_provider → to_provider).
+ */
+export const gatewayFailoverTotal = new Counter({
+  name: 'gateway_failover_total',
+  help: 'Provider-level failover events',
+  labelNames: ['from_provider', 'to_provider'],
   registers: [metricsRegistry],
 });
 
@@ -88,6 +112,19 @@ export const breakerState = new Gauge({
   registers: [metricsRegistry],
 });
 
+/**
+ * P2-029 spec-compliant breaker state gauge.
+ * Set to 1 for the current state, 0 for others.
+ * Labels: provider (string), state ('closed'|'open'|'half_open').
+ * Note: half-open is spelled with underscore here to match Prometheus label conventions.
+ */
+export const gatewayBreakerState = new Gauge({
+  name: 'gateway_breaker_state',
+  help: 'Circuit breaker state per provider (1=active, 0=inactive)',
+  labelNames: ['provider', 'state'],
+  registers: [metricsRegistry],
+});
+
 export const breakerTransitionsTotal = new Counter({
   name: 'breaker_transitions_total',
   help: 'Circuit breaker state transitions',
@@ -106,6 +143,26 @@ export const breakerHalfOpenProbeSuccessRatio = new Gauge({
   name: 'breaker_half_open_probe_success_ratio',
   help: 'Last observed half-open probe success ratio per breaker key',
   labelNames: ['key'],
+  registers: [metricsRegistry],
+});
+
+// ---------- Cache ----------
+
+/**
+ * P2-031 — response cache hit/miss counters.
+ * Partitioned by taskType so operators can see which task types benefit most.
+ */
+export const gatewayCacheHitsTotal = new Counter({
+  name: 'gateway_cache_hits_total',
+  help: 'LLM gateway cache hits (deterministic tasks served from cache)',
+  labelNames: ['taskType'],
+  registers: [metricsRegistry],
+});
+
+export const gatewayCacheMissesTotal = new Counter({
+  name: 'gateway_cache_misses_total',
+  help: 'LLM gateway cache misses (deterministic tasks not found in cache)',
+  labelNames: ['taskType'],
   registers: [metricsRegistry],
 });
 

@@ -104,7 +104,7 @@ describe('ESTIMATE_STATUS_MAP — forward mapping (API → UI label)', () => {
     expect(normalizeEstimateStatus('sent')).toBe('Sent');
     expect(normalizeEstimateStatus('accepted')).toBe('Approved');
     expect(normalizeEstimateStatus('rejected')).toBe('Declined');
-    expect(normalizeEstimateStatus('expired')).toBe('Draft');
+    expect(normalizeEstimateStatus('expired')).toBe('Expired');
   });
 });
 
@@ -171,7 +171,11 @@ describe('Invoice FilterConfig values — reverse mapping', () => {
 // ─── centsToDisplay invariants ───────────────────────────────────────────────
 
 describe('centsToDisplay', () => {
-  it('always produces exactly two decimal places', () => {
+  it('always produces exactly two decimal places, with thousands separators above 999', () => {
+    // Blocker (money display): before the fix, `$1500.99` had no comma
+    // because the helper used `.toFixed(2)`. The canonical formatter
+    // routes through `Intl.NumberFormat`, which keeps the two-decimal
+    // invariant AND inserts the locale-appropriate grouping separator.
     const cases: [number, string][] = [
       [0, '$0.00'],
       [1, '$0.01'],
@@ -180,8 +184,8 @@ describe('centsToDisplay', () => {
       [101, '$1.01'],
       [1000, '$10.00'],
       [15000, '$150.00'],
-      [150099, '$1500.99'],
-      [999999, '$9999.99'],
+      [150099, '$1,500.99'],
+      [999999, '$9,999.99'],
     ];
     for (const [cents, expected] of cases) {
       expect(centsToDisplay(cents), `centsToDisplay(${cents})`).toBe(expected);
@@ -195,7 +199,7 @@ describe('centsToDisplay', () => {
   it('never returns a string containing a floating-point imprecision', () => {
     // Edge case: numbers that could trigger binary float weirdness
     const result = centsToDisplay(150099);
-    expect(result).toBe('$1500.99');
+    expect(result).toBe('$1,500.99');
     expect(result).not.toContain('1500.9899');
     expect(result).not.toContain('1500.9900');
   });

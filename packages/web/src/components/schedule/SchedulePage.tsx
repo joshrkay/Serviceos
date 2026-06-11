@@ -1,11 +1,13 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   ChevronLeft, ChevronRight, Plus, Clock, User, AlertTriangle,
-  Bell, CheckCircle, X, MapPin, Briefcase,
+  Bell, CheckCircle, X, MapPin, Briefcase, LayoutGrid,
 } from 'lucide-react';
-import { technicians } from '../../data/mock-data';
-import { useNavigate } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
+import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatInTenantTz, formatTimeInTenantTz } from '../../utils/formatInTenantTz';
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
@@ -23,6 +25,8 @@ interface ApiAppointment {
   status: string;
   notes?: string;
   timezone: string;
+  holdPendingApproval?: boolean;
+  holdExpiryAt?: string;
 }
 
 interface EnrichedAppointment extends ApiAppointment {
@@ -35,20 +39,20 @@ interface EnrichedAppointment extends ApiAppointment {
   hasConflict: boolean;
 }
 
-/** Build a 7-day window starting from yesterday */
-function buildWeekDays(today: Date) {
+/** Build a 7-day window starting from yesterday, labelled in the tenant TZ. */
+function buildWeekDays(today: Date, timezone: string) {
   return Array.from({ length: 7 }, (_, i) => {
     const d = new Date(today);
     d.setDate(today.getDate() + i - 1);
-    const label = d.toLocaleDateString('en-US', { weekday: 'short' });
-    const date  = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const label = formatInTenantTz(d, timezone, { weekday: 'short' });
+    const date  = formatInTenantTz(d, timezone, { month: 'short', day: 'numeric' });
     const isoDate = d.toISOString().split('T')[0];
     return { label, date, isoDate, isToday: i === 1 };
   });
 }
 
-function toTimeLabel(iso: string) {
-  return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+function toTimeLabel(iso: string, timezone: string) {
+  return formatTimeInTenantTz(iso, timezone);
 }
 
 function overlap(a: ApiAppointment, b: ApiAppointment): boolean {
@@ -131,13 +135,17 @@ function DelaySheet({ appointmentId, onClose }: { appointmentId: string; onClose
 }
 
 /** New appointment form panel */
-function NewAppointmentForm({ selectedDate, onCreated, onClose }: {
+function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
   selectedDate: string;
   onCreated: () => void;
   onClose: () => void;
+  technicians: { id: string; name: string }[];
 }) {
   const [jobId,    setJobId]    = useState('');
-  const [techId,   setTechId]   = useState(technicians[0]?.id ?? '');
+  const [techId,   setTechId]   = useState('');
+  useEffect(() => {
+    if (!techId && technicians[0]?.id) setTechId(technicians[0].id);
+  }, [technicians, techId]);
   const [startTime, setStartTime] = useState('10:00');
   const [endTime,   setEndTime]   = useState('12:00');
   const [saving, setSaving]     = useState(false);
@@ -250,8 +258,10 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose }: {
 
 export function SchedulePage() {
   const navigate = useNavigate();
+  const { technicians } = useTechnicianRoster();
+  const tz = useTenantTimezone();
   const today = useMemo(() => new Date(), []);
-  const weekDays = useMemo(() => buildWeekDays(today), [today]);
+  const weekDays = useMemo(() => buildWeekDays(today, tz), [today, tz]);
   const [selectedIso, setSelectedIso] = useState(weekDays[1].isoDate);
   const [showNew,     setShowNew]     = useState(false);
   const [techFilter,  setTechFilter]  = useState('All');
@@ -272,11 +282,11 @@ export function SchedulePage() {
       const to    = end.toISOString();
       const res  = await apiFetch(`/api/appointments?fromDate=${encodeURIComponent(from)}&toDate=${encodeURIComponent(to)}&sort=asc`);
       if (!res.ok) {
-        // A 401 means the session token was rejected — surface a clear message
-        // instead of a misleading empty state (BUG-4). Other failures fall
-        // through to the graceful empty state.
+        // Surface a clear error instead of a misleading empty state (BUG-4).
         if (res.status === 401) {
-          setError('Session expired — please reload the page to sign in again.');
+          setError('Session expired — please reload');
+        } else {
+          setError("Couldn't load appointments — please try again");
         }
         setLoading(false);
         return;
@@ -329,12 +339,30 @@ export function SchedulePage() {
     } catch {
       setAppointments([]);
       setEnriched([]);
+      setError("Couldn't load appointments — please try again");
     } finally {
       setLoading(false);
     }
   }, [selectedIso]);
 
   useEffect(() => { loadAppointments(); }, [loadAppointments]);
+
+  // Re-apply technician names when the roster loads after appointments.
+  const technicianIdsKey = technicians.map((t) => t.id).join(',');
+  useEffect(() => {
+    if (technicians.length === 0) return;
+    setEnriched((prev) => {
+      let changed = false;
+      const next = prev.map((a) => {
+        if (!a.technicianId) return a;
+        const tech = technicians.find((t) => t.id === a.technicianId);
+        if (!tech || a.technicianName === tech.name) return a;
+        changed = true;
+        return { ...a, technicianName: tech.name };
+      });
+      return changed ? next : prev;
+    });
+  }, [technicianIdsKey, technicians]);
 
   function buildFallback(appt: ApiAppointment): EnrichedAppointment {
     return { ...appt, customerName: 'Customer', jobSummary: appt.jobId, serviceAddress: '', technicianId: '', technicianName: 'Unassigned', serviceType: '', hasConflict: false };
@@ -359,12 +387,22 @@ export function SchedulePage() {
             </p>
           )}
         </div>
-        <button
-          onClick={() => setShowNew(v => !v)}
-          className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors"
-        >
-          <Plus size={14} /> New appointment
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Dispatch Board lives off the sidebar (calm-nav decision), so the
+              Schedule header is its primary in-app entry point. */}
+          <Link
+            to="/dispatch"
+            className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
+          >
+            <LayoutGrid size={14} /> Dispatch board
+          </Link>
+          <button
+            onClick={() => setShowNew(v => !v)}
+            className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors"
+          >
+            <Plus size={14} /> New appointment
+          </button>
+        </div>
       </div>
 
       {/* Week nav */}
@@ -423,6 +461,7 @@ export function SchedulePage() {
           selectedDate={selectedIso}
           onCreated={loadAppointments}
           onClose={() => setShowNew(false)}
+          technicians={technicians}
         />
       )}
 
@@ -477,9 +516,23 @@ export function SchedulePage() {
                 <div
                   key={appt.id}
                   className={`rounded-xl bg-white border px-4 py-4 transition-all ${
-                    appt.hasConflict ? 'border-amber-300 bg-amber-50/30' : 'border-slate-200'
+                    appt.holdPendingApproval
+                      ? 'border-dashed border-amber-400 bg-amber-50/80'
+                      : appt.hasConflict
+                        ? 'border-amber-300 bg-amber-50/30'
+                        : 'border-slate-200'
                   }`}
                 >
+                  {appt.holdPendingApproval && (
+                    <div className="flex items-center gap-1.5 text-xs text-amber-800 bg-amber-100 border border-amber-200 rounded-lg px-2.5 py-1 mb-3 w-fit">
+                      Tentative hold
+                      {appt.holdExpiryAt && (
+                        <span>
+                          · expires {formatTimeInTenantTz(appt.holdExpiryAt, tz)}
+                        </span>
+                      )}
+                    </div>
+                  )}
                   {/* Conflict badge */}
                   {appt.hasConflict && (
                     <div className="flex items-center gap-1.5 text-xs text-amber-700 bg-amber-100 border border-amber-200 rounded-lg px-2.5 py-1 mb-3 w-fit">
@@ -490,8 +543,8 @@ export function SchedulePage() {
                   <div className="flex gap-4">
                     {/* Time column */}
                     <div className="shrink-0 w-16 text-right">
-                      <p className="text-sm text-slate-800">{toTimeLabel(appt.scheduledStart)}</p>
-                      <p className="text-xs text-slate-400 mt-0.5">{toTimeLabel(appt.scheduledEnd)}</p>
+                      <p className="text-sm text-slate-800">{toTimeLabel(appt.scheduledStart, tz)}</p>
+                      <p className="text-xs text-slate-400 mt-0.5">{toTimeLabel(appt.scheduledEnd, tz)}</p>
                     </div>
 
                     {/* Divider */}
@@ -585,7 +638,7 @@ export function SchedulePage() {
             )}
             <p className="text-xs text-slate-500 flex items-center gap-1.5">
               <Clock size={11} className="text-slate-400" />
-              {toTimeLabel(detailAppt.scheduledStart)} – {toTimeLabel(detailAppt.scheduledEnd)}
+              {toTimeLabel(detailAppt.scheduledStart, tz)} – {toTimeLabel(detailAppt.scheduledEnd, tz)}
             </p>
             <p className="text-xs text-slate-500">Technician: {detailAppt.technicianName}</p>
           </div>

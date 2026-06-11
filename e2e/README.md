@@ -45,6 +45,21 @@ file's header comment are met.
    `charge.succeeded` webhook flips invoice to paid. Needs Stripe test keys
    and P5-016 closed (Stripe Elements frontend).
 
+## CI secrets (unlock journeys)
+
+Add these repository secrets to run UI smoke and journeys in GitHub Actions:
+
+| Secret | Purpose |
+|--------|---------|
+| `E2E_CLERK_PUBLISHABLE_KEY` | Clerk testing publishable key |
+| `E2E_CLERK_SECRET_KEY` | Clerk testing secret for `@clerk/testing` token mint |
+| `E2E_CLERK_USER_USERNAME` | Test user email |
+| `E2E_CLERK_USER_PASSWORD` | Test user password |
+
+Optional: `E2E_USE_TEST_DB=1` with a dedicated Postgres URL for seeded journey data.
+
+Until secrets are set, `e2e.yml` runs API health smoke only; journey specs remain skipped.
+
 ## Running against deployed envs
 
 By default the config starts local dev servers via `webServer`. To run against

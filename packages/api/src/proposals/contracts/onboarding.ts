@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
-const verticalTypeSchema = z.enum(['hvac', 'plumbing']);
+// Electrical is accepted as a basic second-class vertical; rich defaults are added separately.
+const verticalTypeSchema = z.enum(['hvac', 'plumbing', 'electrical']);
 
 const lineItemCategorySchema = z.enum(['labor', 'material', 'equipment', 'other']);
 

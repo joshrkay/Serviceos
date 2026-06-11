@@ -1,6 +1,6 @@
 # Phase 0 — Platform Foundation: Launch Readiness Gaps
 
-> **14 stories** | Continues from P0-018
+> **16 stories** | Continues from P0-018
 
 ---
 
@@ -510,3 +510,57 @@ npm test --workspace=packages/api -- --run -t "P0-035|SlotConflictChecker|create
 - [ ] Both busy — surfaces the technician conflict (more actionable for dispatcher)
 - [ ] Unassigned tech — only the customer-busy check applies; technician-busy is skipped
 - [ ] Repo error — surfaces a `voice_clarification` with a "could not verify availability — please confirm manually" message rather than crashing the task
+
+---
+
+### P0-036 — Per-caller (phone) rate-limit utility
+
+> **Size:** S | **Layer:** Infrastructure | **AI Build:** High | **Human Review:** Moderate | **Wave:** Wave-C blocker B5
+
+**Dependencies:** P0-019
+
+**Allowed files:** `packages/api/src/shared/rate-limit/**`, `packages/api/src/db/schema.ts`
+
+**Build prompt:** Add a generic per-phone sliding-window rate-limit utility for downstream features that initiate outbound communication on inbound triggers (P8-015 dropped-call recovery first). The existing HTTP `express-rate-limit` middleware is request-scoped, not domain-scoped, and cannot enforce "one SMS per E.164 per 5 minutes". Create `packages/api/src/shared/rate-limit/phone-rate-limit.ts` exporting `tryConsume(scope: string, key: string, limit: number, windowMs: number): Promise<boolean>` backed by a Postgres sliding-window counter. Migration `102_phone_rate_limits` creates `phone_rate_limits (tenant_id UUID, scope TEXT, key TEXT, window_start TIMESTAMPTZ, count INT, PRIMARY KEY (tenant_id, scope, key, window_start))` with RLS by tenant_id and an index `(tenant_id, scope, key, window_start)`. Use a transactional `INSERT ... ON CONFLICT (...) DO UPDATE SET count = count + 1 RETURNING count` so concurrent writers see consistent counts. The "scope" parameter exists so future features (verification codes, etc.) can reuse the same table without colliding.
+
+**Review prompt:** Verify the sliding window is implemented correctly (not a fixed bucket — old windows expire). Verify concurrent `tryConsume()` calls on the same `(scope, key)` cannot double-count. Verify the migration is RLS-safe and that the index covers the lookup query. Verify the utility is generic and does not encode dropped-call semantics. Confirm there is no in-memory fallback in production code paths (Postgres-only).
+
+**Automated checks:**
+```bash
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit
+cd packages/api && npm test -- --grep "P0-036"
+```
+
+**Required tests:**
+- [ ] Consume → consume → deny (limit=2, window=1min)
+- [ ] Window expiry — after `windowMs`, count resets for the same key
+- [ ] Distinct scopes do not interfere — `('sms_recovery', '+15551234567')` and `('verify_code', '+15551234567')` count independently
+- [ ] Distinct tenants do not interfere — RLS-enforced
+- [ ] Concurrent calls — 10 parallel `tryConsume` with limit=3 returns true exactly 3 times
+- [ ] Migration replay — migration is idempotent (running twice is a no-op)
+
+---
+
+### P0-037 — Expand `LinkableEntityType` for voice and SMS conversations
+
+> **Size:** S | **Layer:** Infrastructure | **AI Build:** High | **Human Review:** Light | **Wave:** Wave-C blocker B6
+
+**Dependencies:** none
+
+**Allowed files:** `packages/api/src/conversations/linkage.ts`, `packages/api/src/conversations/pg-conversation-link.ts`
+
+**Build prompt:** The current `LinkableEntityType` union in `packages/api/src/conversations/linkage.ts` is `'customer' | 'job' | 'estimate' | 'invoice'`. P8-015 (dropped-call SMS recovery) needs to thread a recovery SMS to its originating voice intake so a subsequent SMS reply continues the same conversation. Add `'voice_session'` and `'sms_conversation'` to the union, update the validator, and update `pg-conversation-link.ts` if it has a hardcoded list. No migration is required — the `entity_type` column is `TEXT` with no DB-level check constraint.
+
+**Review prompt:** Verify the union is exhaustive everywhere it's switched on (TypeScript should catch this — fix all resulting errors rather than casting). Verify the validator accepts the new values. Verify no existing test asserts the OLD union exhaustively (such tests would mask future additions).
+
+**Automated checks:**
+```bash
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit
+cd packages/api && npm test -- --grep "P0-037"
+```
+
+**Required tests:**
+- [ ] Round-trip a `voice_session` link — create, list-by-conversation, list-by-entity
+- [ ] Round-trip a `sms_conversation` link
+- [ ] Existing entity-type round-trips remain green (`customer`, `job`, `estimate`, `invoice`)
+- [ ] Validator rejects an unknown entity type (`'foo'` → 400)

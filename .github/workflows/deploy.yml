@@ -10,7 +10,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: '22'
+          node-version: '20'
           cache: 'npm'
       - run: npm ci
 
@@ -20,6 +20,28 @@ jobs:
       - name: Type check Web
         run: npx tsc --noEmit
         working-directory: packages/web
+
+      - name: Owner-loop critical path
+        run: npx vitest run test/owner-loop-critical-path.test.ts
+        working-directory: packages/api
+        env:
+          NODE_ENV: test
+
+      - name: Voice smoke (synthetic) — §11 H2 Layer A
+        # Fast structural gate: Media Streams server attaches and the
+        # documented upgrade contract is stable. Tier-2 promotion will
+        # add the full canned-audio → CreateBooking assertion.
+        # See docs/runbooks/launch-quality-bar.md.
+        run: npx vitest run test/voice/voice-smoke.synthetic.test.ts
+        working-directory: packages/api
+        env:
+          NODE_ENV: test
+
+      - name: Owner loop critical path — §11 H2
+        run: npx vitest run test/owner-loop-critical-path.test.ts
+        working-directory: packages/api
+        env:
+          NODE_ENV: test
 
       - name: Lint
         run: npm run lint
@@ -36,6 +58,10 @@ jobs:
       - name: Coverage check
         run: npm run test:coverage
 
+      - name: Per-module coverage thresholds (PRD §13)
+        run: npx ts-node scripts/check-coverage.ts
+        working-directory: packages/api
+
       - name: Migration dry-run
         run: npm run migrate:dryrun
         working-directory: packages/api
@@ -50,43 +76,18 @@ jobs:
       - uses: actions/checkout@v5
       - name: Install Railway CLI
         run: npm install -g @railway/cli
-      - name: Run API migrations (dev)
-        run: railway run --service api --environment dev -- node packages/api/dist/src/db/migrate.js
+      # Migrations run inside Railway via `preDeployCommand` in railway.toml.
+      - name: Deploy API to Railway (Development)
+        run: railway up --service "@serviceos/api" --environment Development --detach
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      - name: Deploy API to Railway (dev)
-        run: railway up --service api --environment dev --detach
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      - name: Deploy Web to Railway (dev)
-        run: railway up --service web --environment dev --detach
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-
-  deploy-railway-staging:
-    needs: deploy-railway-dev
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    environment: staging
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
-      - name: Run API migrations (staging)
-        run: railway run --service api --environment staging -- node packages/api/dist/src/db/migrate.js
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      - name: Deploy API to Railway (staging)
-        run: railway up --service api --environment staging --detach
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      - name: Deploy Web to Railway (staging)
-        run: railway up --service web --environment staging --detach
+      - name: Deploy Web to Railway (Development)
+        run: railway up --service "@serviceos/web" --environment Development --detach
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
   deploy-railway-prod:
-    needs: deploy-railway-staging
+    needs: deploy-railway-dev
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: prod
@@ -94,15 +95,11 @@ jobs:
       - uses: actions/checkout@v5
       - name: Install Railway CLI
         run: npm install -g @railway/cli
-      - name: Run API migrations (prod)
-        run: railway run --service api --environment production -- node packages/api/dist/src/db/migrate.js
+      - name: Deploy API to Railway (production)
+        run: railway up --service "@serviceos/api" --environment production --detach
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      - name: Deploy API to Railway (prod)
-        run: railway up --service api --environment production --detach
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      - name: Deploy Web to Railway (prod)
-        run: railway up --service web --environment production --detach
+      - name: Deploy Web to Railway (production)
+        run: railway up --service "@serviceos/web" --environment production --detach
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}

@@ -1,0 +1,135 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { createLogger } from '../../src/logging/logger';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import {
+  InMemoryDroppedCallRecoveryRepository,
+} from '../../src/sms/recovery/scheduler';
+import type { DroppedCallHandlerDeps } from '../../src/sms/recovery/dropped-call-handler';
+import { runDroppedCallRecoverySweep } from '../../src/workers/dropped-call-worker';
+
+const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
+const TENANT = '00000000-0000-0000-0000-000000000001';
+const E164 = '+15551234567';
+const NOW = new Date('2026-05-21T12:01:05Z');
+
+function handlerDeps(
+  repo: InMemoryDroppedCallRecoveryRepository,
+  overrides: Partial<Omit<DroppedCallHandlerDeps, 'repo'>> = {},
+): Omit<DroppedCallHandlerDeps, 'repo'> {
+  return {
+    audit: new InMemoryAuditRepository(),
+    logger,
+    rateLimit: { check: vi.fn(async () => true), record: vi.fn(async () => undefined) },
+    resolvedSince: vi.fn(async () => null),
+    compose: vi.fn(async () => 'Sorry we got cut off — text us back anytime.'),
+    sendSms: vi.fn(async () => 'SM_sid'),
+    now: () => NOW,
+    ...overrides,
+  };
+}
+
+async function seedRow(
+  repo: InMemoryDroppedCallRecoveryRepository,
+  sessionId: string,
+  scheduledFor: Date,
+): Promise<void> {
+  await repo.schedule({ tenantId: TENANT, voiceSessionId: sessionId, callerE164: E164, scheduledFor });
+}
+
+describe('P8-015 dropped-call recovery worker sweep', () => {
+  let repo: InMemoryDroppedCallRecoveryRepository;
+
+  beforeEach(() => {
+    repo = new InMemoryDroppedCallRecoveryRepository();
+  });
+
+  it('drains a due row and sends its recovery SMS', async () => {
+    await seedRow(repo, 'sess-due', new Date(NOW.getTime() - 1000));
+    const deps = handlerDeps(repo);
+    const result = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: deps,
+      logger,
+      now: () => NOW,
+    });
+    expect(result).toEqual({ due: 1, sent: 1, suppressed: 0, failed: 0 });
+    expect(deps.sendSms).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips a not-yet-due row (scheduled_for in the future)', async () => {
+    await seedRow(repo, 'sess-future', new Date(NOW.getTime() + 60_000));
+    const deps = handlerDeps(repo);
+    const result = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: deps,
+      logger,
+      now: () => NOW,
+    });
+    expect(result.due).toBe(0);
+    expect(deps.sendSms).not.toHaveBeenCalled();
+  });
+
+  it('counts a suppressed row without sending', async () => {
+    await seedRow(repo, 'sess-booked', new Date(NOW.getTime() - 1000));
+    const deps = handlerDeps(repo, {
+      resolvedSince: vi.fn(async () => 'booking_completed' as const),
+    });
+    const result = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: deps,
+      logger,
+      now: () => NOW,
+    });
+    expect(result).toEqual({ due: 1, sent: 0, suppressed: 1, failed: 0 });
+    expect(deps.sendSms).not.toHaveBeenCalled();
+  });
+
+  it('isolates a failing row (left pending for retry) without aborting the batch', async () => {
+    await seedRow(repo, 'sess-bad', new Date(NOW.getTime() - 2000));
+    await seedRow(repo, 'sess-good', new Date(NOW.getTime() - 1000));
+    const sendSms = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('twilio 500'))
+      .mockResolvedValue('SM_ok');
+    const deps = handlerDeps(repo, { sendSms });
+    const result = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: deps,
+      logger,
+      now: () => NOW,
+    });
+    expect(result.due).toBe(2);
+    expect(result.failed).toBe(1);
+    expect(result.sent).toBe(1);
+    // The failed row stays pending (not stamped) so a later sweep retries it.
+    const stillPending = repo.rows.find((r) => r.voiceSessionId === 'sess-bad');
+    expect(stillPending?.sentAt).toBeFalsy();
+    expect(stillPending?.suppressedReason).toBeFalsy();
+  });
+
+  it('does NOT re-drain an already-sent row (idempotent across sweeps)', async () => {
+    await seedRow(repo, 'sess-once', new Date(NOW.getTime() - 1000));
+    const deps = handlerDeps(repo);
+    await runDroppedCallRecoverySweep({ repo, handlerDeps: deps, logger, now: () => NOW });
+    await runDroppedCallRecoverySweep({ repo, handlerDeps: deps, logger, now: () => NOW });
+    expect(deps.sendSms).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns zeroed counts (no throw) when findDue fails', async () => {
+    const brokenRepo = {
+      findDue: vi.fn(async () => {
+        throw new Error('db down');
+      }),
+      schedule: vi.fn(),
+      markSent: vi.fn(),
+      markSuppressed: vi.fn(),
+    } as unknown as InMemoryDroppedCallRecoveryRepository;
+    const result = await runDroppedCallRecoverySweep({
+      repo: brokenRepo,
+      handlerDeps: handlerDeps(repo),
+      logger,
+      now: () => NOW,
+    });
+    expect(result).toEqual({ due: 0, sent: 0, suppressed: 0, failed: 0 });
+  });
+});

@@ -10,6 +10,7 @@ import { createJobRouter } from '../../src/routes/jobs';
 import { createCustomerRouter } from '../../src/routes/customers';
 import { createEstimateRouter } from '../../src/routes/estimates';
 import { createInvoiceRouter } from '../../src/routes/invoices';
+import { createPaymentRouter } from '../../src/routes/payments';
 import { createAppointmentRouter } from '../../src/routes/appointments';
 import { createProposalsRouter } from '../../src/routes/proposals';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
@@ -26,6 +27,7 @@ import { AuthenticatedRequest } from '../../src/auth/clerk';
 import { permissiveTenantOwnership } from '../../src/shared/tenant-ownership';
 import { InMemoryQueue } from '../../src/queues/queue';
 import { NoopFeedbackDispatcher } from '../../src/feedback/dispatcher';
+import { MockPaymentLinkProvider } from '../../src/payments/payment-link-provider';
 
 export const TEST_TENANT_ID = 'tenant-test-1';
 export const TEST_USER_ID = 'user-test-1';
@@ -96,8 +98,31 @@ export async function buildTestApp(): Promise<TestApp> {
 
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, new InMemoryQueue(), new NoopFeedbackDispatcher()));
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
-  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo));
+  app.use(
+    '/api/estimates',
+    createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, undefined, undefined, {
+      jobRepo,
+      invoiceRepo,
+    }),
+  );
+  app.use(
+    '/api/invoices',
+    createInvoiceRouter(
+      invoiceRepo,
+      settingsRepo,
+      auditRepo,
+      ownership,
+      paymentRepo,
+      undefined,
+      jobRepo,
+      estimateRepo,
+      new MockPaymentLinkProvider(),
+    ),
+  );
+  app.use(
+    '/api/payments',
+    createPaymentRouter(paymentRepo, invoiceRepo, jobRepo, estimateRepo, auditRepo),
+  );
   app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo));
   app.use('/api/proposals', createProposalsRouter(proposalRepo));
 

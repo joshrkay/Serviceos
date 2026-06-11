@@ -16,7 +16,6 @@
  * text-in / TTS-out, exposed at /api/voice/sessions.
  */
 
-import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
 import type { LLMGateway } from '../../gateway/gateway';
 import type { TtsProvider } from '../../tts/tts-provider';
@@ -42,7 +41,13 @@ import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
 import type { VoiceSessionRepository } from '../../../voice/voice-session';
 import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
+import { resolveSchedulingEntities } from './entity-resolution';
+import { detectLanguage, renderTtsText } from './tts-copy';
+import type { Language } from '../../i18n/i18n';
+import { isLanguageSupported } from '../../orchestration/language-detector';
 import type { VoicePersona, VoicePersonaResolver } from '../../../settings/voice-persona-resolver';
+import type { RepairTemplate } from '../../../verticals/registry';
+import type { DroppedCallScheduler } from '../../../sms/recovery/scheduler';
 
 export interface InAppAdapterDeps {
   store: VoiceSessionStore;
@@ -104,6 +109,39 @@ export interface InAppAdapterDeps {
    * lookup failure.
    */
   voicePersonaResolver?: VoicePersonaResolver;
+  /**
+   * §P2-3 — Resolves the vertical-specific repair templates for a tenant.
+   * When present, the templates are threaded into the FSM context at
+   * session creation so low-confidence reprompts use vertical-aware copy.
+   * When absent, the FSM falls back to the generic "say that again" prompt.
+   */
+  repairTemplatesResolver?: (tenantId: string) => Promise<ReadonlyArray<RepairTemplate>>;
+  /**
+   * P8-015 — Dropped-call SMS recovery scheduler. When wired, the adapter
+   * fires it at the terminal hook (after `session.terminalOutcome` is set)
+   * for outcomes in {dropped, failed} so a caller who hung up before booking
+   * gets a brand-voice recovery SMS ~60s later. The scheduler itself
+   * persists a durable row (queue), so the call-teardown path stays fast and
+   * a restart never loses the pending recovery. Optional: absent in fixtures
+   * that don't exercise recovery. `schedule()` is swallow-on-error, so the
+   * adapter never has to guard the call.
+   */
+  droppedCallScheduler?: DroppedCallScheduler;
+  /**
+   * P8-015 — Resolves the caller's E.164 from a terminal session so recovery
+   * can be addressed. Optional: when absent (or when it returns undefined),
+   * recovery is silently skipped — there is no one to text.
+   */
+  callerPhoneResolver?: (session: VoiceSession) => string | undefined;
+  /**
+   * Voice-parity — resolves the tenant's opt-in language stack
+   * (`tenant_settings.supported_languages`). When wired, the result is stored
+   * on the session and the first-utterance language gate only switches a call
+   * to Spanish if 'es' is in the stack. Optional: when absent, the session's
+   * `supportedLanguages` stays undefined and Spanish detection is permissive
+   * (legacy behavior), so existing fixtures keep working unchanged.
+   */
+  supportedLanguagesResolver?: (tenantId: string) => Promise<Language[] | undefined>;
 }
 
 export interface StartSessionResult {
@@ -142,7 +180,7 @@ export function buildInappGreeting(persona?: VoicePersona | null): string {
  *    will be classified but reprompted by the FSM. Both adapters
  *    rely on this same FSM gate, so behavior is now consistent.
  */
-function classifierToFsmEvent(
+export function classifierToFsmEvent(
   intentType: string,
   confidence: number,
   entities: Record<string, unknown> | undefined
@@ -169,12 +207,13 @@ function summaryFor(intent: string | undefined, entities: Record<string, unknown
   return 'Voice clarification needed';
 }
 
-function intentToProposalType(intent: string | undefined): ProposalType {
+export function intentToProposalType(intent: string | undefined): ProposalType {
   switch (intent) {
     case 'create_invoice': return 'draft_invoice';
     case 'update_invoice': return 'update_invoice';
     case 'issue_invoice': return 'issue_invoice';
     case 'send_invoice': return 'send_invoice';
+    case 'send_estimate': return 'send_estimate';
     case 'record_payment': return 'record_payment';
     case 'draft_estimate': return 'draft_estimate';
     case 'update_estimate': return 'update_estimate';
@@ -186,6 +225,15 @@ function intentToProposalType(intent: string | undefined): ProposalType {
     case 'create_job': return 'create_job';
     case 'add_note': return 'add_note';
     case 'emergency_dispatch': return 'emergency_dispatch';
+    case 'update_customer': return 'update_customer';
+    case 'log_expense': return 'log_expense';
+    case 'convert_lead': return 'convert_lead';
+    case 'confirm_appointment': return 'confirm_appointment';
+    case 'mark_lead_lost': return 'mark_lead_lost';
+    case 'add_service_location': return 'add_service_location';
+    case 'log_time_entry': return 'log_time_entry';
+    case 'notify_delay': return 'notify_delay';
+    case 'request_feedback': return 'request_feedback';
     default: return 'voice_clarification';
   }
 }
@@ -194,7 +242,7 @@ function intentToProposalType(intent: string | undefined): ProposalType {
  * Map FSM escalation reasons to the strict EscalationReason union the
  * escalate-to-human skill accepts.
  */
-function toEscalationReason(reason: string | undefined): EscalationReason {
+export function toEscalationReason(reason: string | undefined): EscalationReason {
   switch (reason) {
     case 'caller_requested':
     case 'low_confidence':
@@ -225,8 +273,24 @@ export class InAppVoiceAdapter {
    * (consent is captured at account creation; see disclose_recording).
    */
   async startSession(tenantId: string, userId: string, conversationId?: string): Promise<StartSessionResult> {
-    const session = this.deps.store.create(tenantId, 'inapp');
+    const repairTemplates = this.deps.repairTemplatesResolver
+      ? await this.deps.repairTemplatesResolver(tenantId).catch(() => [])
+      : [];
+    const session = this.deps.store.create(tenantId, 'inapp', {
+      ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
+    });
     const convId = conversationId ?? session.id;
+
+    // Voice-parity — resolve the tenant's opt-in language stack so the
+    // first-utterance gate (below in handleInput) can honor it. Best-effort:
+    // a resolver failure leaves the stack undefined (permissive legacy
+    // behavior) rather than blocking the call.
+    if (this.deps.supportedLanguagesResolver) {
+      const stack = await this.deps
+        .supportedLanguagesResolver(tenantId)
+        .catch(() => undefined);
+      if (stack && stack.length > 0) session.supportedLanguages = stack;
+    }
 
     // B2: persist a voice_sessions row at session start. Fire-and-forget
     // so a transient repo error never blocks the call.
@@ -309,6 +373,18 @@ export class InAppVoiceAdapter {
     }
 
     session.transcript.push(`caller: ${text}`);
+    // VOX-02: sticky language detection from the caller's own words.
+    // Voice-parity — only switch to Spanish when the tenant opted into 'es'
+    // (session.supportedLanguages). When the stack is unresolved (undefined),
+    // treat it as permissive so legacy sessions keep auto-detecting Spanish.
+    if (
+      detectLanguage(text) === 'es' &&
+      isLanguageSupported('es', session.supportedLanguages ?? ['en', 'es'])
+    ) {
+      session.language = 'es';
+    } else if (!session.language) {
+      session.language = 'en';
+    }
 
     // §3B + §3D: vertical + intake-question prompt section.
     // §3C: caller-plan prompt section (only when caller is identified).
@@ -423,6 +499,24 @@ export class InAppVoiceAdapter {
       for (const [k, v] of Object.entries(fsmEvent.entities)) {
         if (typeof v === 'string') refs[k] = v;
       }
+      // QA-2026-06-05 (SCH-02/03): REAL resolution before entity_resolved —
+      // turn customer/job/appointment references and natural-language times
+      // into concrete ids/timestamps so the execution contract is satisfied.
+      // Best-effort: failures leave refs as-is and the proposal surfaces for
+      // operator review.
+      if (this.deps.pool) {
+        try {
+          const concrete = await resolveSchedulingEntities(
+            this.deps.pool,
+            session.tenantId,
+            fsmEvent.intentType,
+            fsmEvent.entities,
+          );
+          Object.assign(refs, concrete);
+        } catch {
+          // Resolution must never break the call flow.
+        }
+      }
       const effects2 = session.machine.dispatch({ type: 'entity_resolved', refs });
       allSideEffects.push(...effects2);
       const aggregate2 = await this.executeSideEffects(session, effects2);
@@ -455,7 +549,9 @@ export class InAppVoiceAdapter {
     let ttsAudio: Buffer | undefined;
     let ttsText: string | undefined;
     if (ttsLast && typeof ttsLast.payload.text === 'string') {
-      ttsText = ttsLast.payload.text;
+      // VOX-02: expand template keys ('intent_confirm', 'greeting', …) into
+      // localized human copy — callers were literally hearing the raw key.
+      ttsText = renderTtsText(ttsLast.payload.text, ttsLast.payload, session.language ?? 'en');
       session.transcript.push(`agent: ${ttsText}`);
       if (this.deps.ttsProvider) {
         try {
@@ -560,6 +656,37 @@ export class InAppVoiceAdapter {
     session.terminalOutcome = outcome;
     session.terminalReason = endedReason;
     void this.persistSessionEnded(session, endedReason, outcome);
+    // P8-015 — arm a dropped-call recovery SMS. Detection (outcome ∈
+    // {dropped, failed}, voice channel, usable caller id) lives inside the
+    // scheduler; `schedule()` is swallow-on-error and persists a durable
+    // queue row, so this never blocks or breaks call teardown.
+    this.scheduleDroppedCallRecovery(session, outcome);
+  }
+
+  /**
+   * P8-015 — fire the recovery scheduler when wired. Resolves the caller's
+   * E.164 via the injected resolver; if either the scheduler or the resolver
+   * is absent (or there is no caller id), recovery is silently skipped.
+   */
+  private scheduleDroppedCallRecovery(
+    session: VoiceSession,
+    outcome: CallOutcome,
+  ): void {
+    const scheduler = this.deps.droppedCallScheduler;
+    if (!scheduler) return;
+    const callerE164 = this.deps.callerPhoneResolver?.(session);
+    if (!callerE164) return;
+    void scheduler
+      .schedule({
+        tenantId: session.tenantId,
+        voiceSessionId: session.id,
+        callerE164,
+        outcome,
+        channel: session.channel,
+      })
+      .catch(() => {
+        /* swallow — scheduler already logs; recovery is best-effort */
+      });
   }
 
   /**
@@ -627,6 +754,16 @@ export class InAppVoiceAdapter {
           // Telephony-only; ignored on the in-app channel (P8-012 will
           // wire mic-streaming).
           break;
+        case 'emit_quality_event':
+          // Quality telemetry events are no-ops on the in-app channel;
+          // the event bus is telephony-specific. Handled here to satisfy
+          // the exhaustiveness guard.
+          break;
+        case 'escalate_with_context':
+          // Section 7 will wire the full escalate_with_context fan-out
+          // (SMS, whisper, in-app panel) in the telephony adapter.
+          // No-op here until the in-app channel gets escalation support.
+          break;
         default: {
           // Exhaustiveness guard: future SideEffectType additions
           // surface as a typecheck error here.
@@ -684,35 +821,94 @@ export class InAppVoiceAdapter {
           tenantThresholdOverride = undefined;
         }
       }
+      // QA-2026-06-05: execution handlers read the FLAT task contract
+      // (create_customer wants payload.name; create_appointment wants
+      // payload.jobId/scheduledStart/... — see proposals/execution/*), but
+      // this adapter only nested the raw classifier entities, so EVERY
+      // voice execution failed its handler validation (live:
+      // 'Payload must include a non-empty name' / 'a valid jobId').
+      // Promote primitive entity values to the payload top level — the
+      // classifier's entity keys ARE the task-contract field names — while
+      // keeping `entities` intact for audit/rendering. Reserved envelope
+      // keys are never clobbered, and create_customer's displayName→name
+      // alias mirrors the assistant route's translation.
+      const RESERVED = new Set(['intent', 'entities', 'sessionId', 'conversationId', 'callSid', 'customerId', 'confidence']);
+      const flat: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(entities)) {
+        if (RESERVED.has(k)) continue;
+        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') flat[k] = v;
+      }
+      if (typeof entities.displayName === 'string' && flat.name === undefined) flat.name = entities.displayName;
       const proposal = buildProposal({
         tenantId: session.tenantId,
         proposalType,
         payload: {
+          ...flat,
           intent,
           entities,
           sessionId: session.id,
           conversationId: typeof payload.conversationId === 'string' ? payload.conversationId : undefined,
         },
         summary,
+        // QA-2026-06-04: mirror the AI task handlers (create-appointment-task
+        // et al.) — calling-agent proposals are capture-class from the
+        // autonomous tier with a real classifier confidence. Without these,
+        // initialProposalStatus always returned 'draft', which the approval
+        // guard correctly refuses to approve — voice proposals were stuck.
+        ...(typeof payload.confidence === 'number' ? { confidenceScore: payload.confidence } : {}),
+        sourceTrustTier: 'autonomous',
         sourceContext: {
           source: 'calling-agent',
           channel: session.channel,
           sessionId: session.id,
         },
-        aiRunId: uuidv4(),
+        // QA-2026-06-04: do NOT fabricate an aiRunId. proposals.ai_run_id has
+        // an FK to ai_runs(id); a random uuid violates it and the swallowed
+        // error silently dropped EVERY voice proposal on Postgres-backed envs
+        // (in-memory repos don't enforce the FK, which is why tests passed).
+        // Use a real run id when the engine provides one, else leave it null.
+        ...(typeof payload.aiRunId === 'string' && payload.aiRunId ? { aiRunId: payload.aiRunId } : {}),
         createdBy: typeof payload.customerId === 'string'
           ? payload.customerId
           : this.deps.systemActorId ?? 'calling-agent',
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       });
-      const stored = await this.deps.proposalRepo.create(proposal);
+      let stored = await this.deps.proposalRepo.create(proposal);
+      // QA-2026-06-05: parity with the AI-task pipeline's guardrail promote
+      // step (ai/guardrails/low-confidence.ts) which the calling-agent path
+      // does not run. Proposals that initialProposalStatus left in 'draft'
+      // despite a complete, caller-confirmed payload (e.g. irreversible
+      // classes like cancel_appointment that must never auto-approve) have
+      // to surface in the operator inbox — the inbox reads
+      // 'ready_for_review' and the lifecycle guard refuses to approve a
+      // 'draft'. Without this promote, non-capture voice intents were
+      // permanently invisible AND unapprovable.
+      if (stored.status === 'draft') {
+        const promoted = await this.deps.proposalRepo.updateStatus(
+          session.tenantId,
+          stored.id,
+          'ready_for_review'
+        );
+        if (promoted) stored = promoted;
+      }
       session.proposalIds.push(stored.id);
       session.events.emit('voice-event', { type: 'proposal_created', proposalId: stored.id });
       return stored.id;
-    } catch {
+    } catch (err) {
       // Proposal creation failure should never break the flow — the
-      // operator can re-state the request. Errors are logged via the
-      // audit_log side-effect that always accompanies create_proposal.
+      // operator can re-state the request — but it must never be silent
+      // either: a swallowed FK violation hid the dropped-proposal defect
+      // for every voice session. Surface it in the audit log.
+      await this.handleAuditLog(session, {
+        type: 'audit_log',
+        payload: {
+          eventType: 'agent.calling.proposal_persist_failed',
+          intent,
+          proposalType,
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: session.id,
+        },
+      } as SideEffect);
       return undefined;
     }
   }

@@ -1,9 +1,12 @@
 import { Invoice, InvoiceRepository } from './invoice';
+import type { PaymentLinkProvider } from '../payments/payment-link-provider';
 import { PaymentRepository } from './payment';
 import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
 import { SettingsRepository } from '../settings/settings';
 import { ValidationError, NotFoundError } from '../shared/errors';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { publicActorFromToken } from '../feedback/feedback-response';
 
 export interface StripeConfig {
   apiKey: string;
@@ -61,6 +64,14 @@ export interface ConnectAccountResolver {
 }
 
 export interface PublicInvoiceServiceDeps {
+  /**
+   * QA-2026-06-05 (PORT-02): dev-grade fallback. When Stripe isn't
+   * configured (no STRIPE_SECRET_KEY) the checkout leg used to 400 —
+   * route through the PaymentLinkProvider abstraction instead, which is
+   * the mock on dev and Stripe-backed in prod. The direct Stripe +
+   * Connect-account path below remains primary whenever apiKey exists.
+   */
+  paymentLinkProvider?: PaymentLinkProvider;
   invoiceRepo: InvoiceRepository;
   jobRepo: JobRepository;
   customerRepo: CustomerRepository;
@@ -83,6 +94,12 @@ export interface PublicInvoiceServiceDeps {
   connectAccountResolver?: ConnectAccountResolver;
   /** Override-able fetch for unit tests. */
   stripeFetch?: typeof fetch;
+  /**
+   * D2-1d — audit logging for the first-mint checkout link creation.
+   * Optional so older harnesses still build. Subsequent calls that
+   * return the cached URL DO NOT re-emit the event.
+   */
+  auditRepo?: AuditRepository;
 }
 
 export class PublicInvoiceService {
@@ -118,7 +135,7 @@ export class PublicInvoiceService {
   async getOrCreateCheckoutUrl(token: string): Promise<{ url: string }> {
     const invoice = await this.lookupByToken(token);
 
-    if (!this.deps.stripeConfig?.apiKey) {
+    if (!this.deps.stripeConfig?.apiKey && !this.deps.paymentLinkProvider) {
       throw new ValidationError('Payment processing is not configured');
     }
 
@@ -136,6 +153,23 @@ export class PublicInvoiceService {
     // Return existing link if already created.
     if (invoice.stripePaymentLinkUrl) {
       return { url: invoice.stripePaymentLinkUrl };
+    }
+
+    // Provider fallback (no direct Stripe key): mint via the abstraction —
+    // mock URLs on dev, Stripe-backed where the provider is configured.
+    if (!this.deps.stripeConfig?.apiKey && this.deps.paymentLinkProvider) {
+      const link = await this.deps.paymentLinkProvider.generateLink({
+        tenantId: invoice.tenantId,
+        invoiceId: invoice.id,
+        amountCents: invoice.amountDueCents,
+        currency: 'usd',
+        description: `Invoice ${invoice.invoiceNumber}`,
+      });
+      await this.deps.invoiceRepo.update(invoice.tenantId, invoice.id, {
+        stripePaymentLinkUrl: link.linkUrl,
+        updatedAt: new Date(),
+      });
+      return { url: link.linkUrl };
     }
 
     const job = await this.deps.jobRepo.findById(invoice.tenantId, invoice.jobId);
@@ -163,7 +197,7 @@ export class PublicInvoiceService {
     const useConnect = connect && connect.chargesEnabled;
 
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.deps.stripeConfig.apiKey}`,
+      Authorization: `Bearer ${this.deps.stripeConfig!.apiKey}`,
       'Content-Type': 'application/x-www-form-urlencoded',
     };
     if (useConnect && connect) {
@@ -224,6 +258,29 @@ export class PublicInvoiceService {
 
       const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);
       throw new Error(`Failed to persist Stripe payment link ${data.id}: ${msg}`);
+    }
+
+    if (this.deps.auditRepo) {
+      // D2-1d — first-mint only (the early-return above short-circuits
+      // when a link already exists, so we never re-emit on idempotent
+      // repeats). Token is hashed into the synthetic actor — raw token
+      // is never persisted.
+      await this.deps.auditRepo.create(
+        createAuditEvent({
+          tenantId: invoice.tenantId,
+          actorId: publicActorFromToken(token),
+          actorRole: 'customer',
+          eventType: 'public_invoice.checkout_created',
+          entityType: 'invoice',
+          entityId: invoice.id,
+          metadata: {
+            invoiceNumber: invoice.invoiceNumber,
+            amountDueCents: invoice.amountDueCents,
+            stripePaymentLinkId: data.id,
+            viaConnect: Boolean(useConnect),
+          },
+        }),
+      );
     }
 
     return { url: data.url };

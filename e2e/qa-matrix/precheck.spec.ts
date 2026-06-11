@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { Client } from 'pg';
+import { apiBase, tenantA } from './fixtures/tokens';
 
 /**
  * Fails fast if prerequisites are missing so matrix rows don't produce
@@ -10,6 +11,7 @@ const REQUIRED_ENV = [
   'E2E_BASE_URL',
   'E2E_API_URL',
   'E2E_DB_URL_READONLY',
+  'E2E_DB_URL_READWRITE',
   'E2E_CLERK_HMAC_SECRET',
   'E2E_TENANT_A_ID',
   'E2E_TENANT_A_CUSTOMER_ID',
@@ -57,6 +59,142 @@ test('precheck — DB is reachable and has tenants/estimates/invoices tables', a
     for (const t of ['tenants', 'estimates', 'invoices', 'customers', 'jobs']) {
       expect(found, `Missing table: ${t}`).toContain(t);
     }
+  } finally {
+    await client.end();
+  }
+});
+
+test('precheck — minted tenant token can call /api/me (CLERK_DEV_HMAC_TOKENS path active)', async ({ request }) => {
+  const t = tenantA();
+  const me = await request.get(`${apiBase().replace(/\/$/, '')}/api/me`, {
+    headers: { Authorization: `Bearer ${t.token}` },
+  });
+
+  expect(me.status(), `Expected 200 from /api/me using minted HMAC tenant token; got ${me.status()}.`).toBe(200);
+});
+
+test('precheck — voice utterance generates proposal IDs (non-mock LLM path)', async ({ request }) => {
+  const t = tenantA();
+  const base = apiBase().replace(/\/$/, '');
+
+  const create = await request.post(`${base}/api/voice/sessions`, {
+    headers: { Authorization: `Bearer ${t.token}` },
+    data: { channel: 'qa-precheck' },
+  });
+  expect([200, 201], `Unexpected create session status: ${create.status()}`).toContain(create.status());
+
+  const created = (await create.json()) as { id?: string; sessionId?: string };
+  const sessionId = created.id ?? created.sessionId;
+  expect(sessionId, `Voice session create response did not include id/sessionId: ${JSON.stringify(created)}`).toBeTruthy();
+
+  // QA-2026-06-04: the deployed route is /input (singular turn), not
+  // /utterances — the old path 404'd on every env. Keep this aligned with
+  // e2e/qa-matrix/helpers/voice-flow.ts.
+  const utter = await request.post(`${base}/api/voice/sessions/${sessionId}/input`, {
+    headers: { Authorization: `Bearer ${t.token}` },
+    data: {
+      text: `Create an estimate proposal for job ${t.jobId} with diagnostic labor line item for $125 total.`,
+    },
+  });
+  expect(utter.status(), `Unexpected voice input status: ${utter.status()}`).toBe(200);
+
+  const utterBody = (await utter.json()) as {
+    proposalIds?: string[];
+    proposals?: Array<{ id: string }>;
+  };
+  const proposalIds = utterBody.proposalIds ?? utterBody.proposals?.map((p) => p.id) ?? [];
+  expect(
+    proposalIds.length,
+    `Expected voice input to return at least one proposal id (non-mock LLM signal). Body=${JSON.stringify(utterBody)}`
+  ).toBeGreaterThanOrEqual(1);
+});
+
+test('precheck — approved proposal transitions to executed after undo window', async ({ request }) => {
+  const t = tenantA();
+  const base = apiBase().replace(/\/$/, '');
+
+  // QA-2026-06-05: use the assistant's create_customer intent — the ONLY
+  // assistant path that persists a real proposal row today (estimate/invoice
+  // cards are unpersisted LLM JSON; building those is AST-04/05/07 backlog
+  // work). This test's purpose is the D9 contract: approved proposal →
+  // executed after the undo window, i.e. execution-worker liveness.
+  const draft = await request.post(`${base}/api/assistant/chat`, {
+    headers: { Authorization: `Bearer ${t.token}` },
+    data: {
+      messages: [
+        {
+          role: 'user',
+          content: `Create a new customer named Undo Window QA at 555-000-1111 with email undo.window.qa@example.com.`,
+        },
+      ],
+    },
+  });
+  expect(draft.status(), `Expected assistant chat 200, got ${draft.status()}.`).toBe(200);
+
+  const draftBody = (await draft.json()) as {
+    message?: { proposal?: { id?: string } };
+    proposal?: { id?: string };
+  };
+  const proposalId = draftBody.message?.proposal?.id ?? draftBody.proposal?.id;
+  expect(proposalId, `No proposal id found in assistant response: ${JSON.stringify(draftBody)}`).toBeTruthy();
+
+  const approve = await request.post(`${base}/api/proposals/${proposalId}/approve`, {
+    headers: { Authorization: `Bearer ${t.token}` },
+    data: {},
+  });
+  // 409 'approved → approved' is fine — capture-class proposals at high
+  // confidence auto-approve before our explicit approve lands.
+  expect([200, 202, 409], `Unexpected proposal approve status: ${approve.status()}`).toContain(approve.status());
+
+  await new Promise((resolve) => setTimeout(resolve, 6_500));
+
+  const timeoutMs = 45_000;
+  const start = Date.now();
+  let latestStatus = 'unknown';
+  while (Date.now() - start < timeoutMs) {
+    const statusRes = await request.get(`${base}/api/proposals/${proposalId}`, {
+      headers: { Authorization: `Bearer ${t.token}` },
+    });
+    expect(statusRes.status(), `Failed fetching proposal status for ${proposalId}.`).toBe(200);
+    const body = (await statusRes.json()) as { status?: string };
+    latestStatus = body.status ?? 'missing';
+    if (latestStatus === 'executed') break;
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+  }
+
+  expect(
+    latestStatus,
+    `Proposal ${proposalId} did not reach executed within ${timeoutMs}ms after undo window elapsed.`
+  ).toBe('executed');
+});
+
+test('precheck — capture message_dispatches entity_type check constraint definition', async () => {
+  const client = new Client({ connectionString: process.env.E2E_DB_URL_READONLY });
+  await client.connect();
+  try {
+    const res = await client.query(
+      `SELECT c.conname, pg_get_constraintdef(c.oid) AS definition
+       FROM pg_constraint c
+       JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+       WHERE n.nspname = 'public'
+         AND t.relname = 'message_dispatches'
+         AND c.contype = 'c'
+         AND pg_get_constraintdef(c.oid) ILIKE '%entity_type%'
+       ORDER BY c.conname`
+    );
+
+    expect(
+      res.rowCount,
+      'No message_dispatches CHECK constraint containing entity_type found in pg_constraint catalog.'
+    ).toBeGreaterThan(0);
+
+    const defs = res.rows.map((r) => `${r.conname}: ${r.definition}`);
+    test.info().annotations.push({
+      type: 'evidence',
+      description: `message_dispatches entity_type CHECK => ${defs.join(' | ')}`,
+    });
+    console.log(`[precheck evidence] message_dispatches entity_type CHECK => ${defs.join(' | ')}`);
   } finally {
     await client.end();
   }

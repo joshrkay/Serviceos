@@ -1,5 +1,3 @@
-import type { GatewayConfig } from './types';
-
 /**
  * Task-to-model routing table.
  *
@@ -9,7 +7,24 @@ import type { GatewayConfig } from './types';
  * System prompts are intentionally generic — they reference "service businesses"
  * rather than specific verticals so the same routing works for HVAC, plumbing,
  * painting, electrical, or any service type the tenant configures.
+ *
+ * GatewayConfig and TaskRouteConfig were moved here from the deleted types.ts
+ * (P2-027 Gap 2) since routing-config.ts is their natural home.
  */
+
+export interface TaskRouteConfig {
+  model: string;
+  systemPrompt?: string;
+  temperature?: number;
+  maxTokens?: number;
+}
+
+export interface GatewayConfig {
+  /** Per-task routing: taskType → model + defaults */
+  routes: Record<string, TaskRouteConfig>;
+  /** Fallback model when taskType has no route */
+  defaultModel: string;
+}
 
 const defaultModel = process.env.AI_DEFAULT_MODEL || 'openai/gpt-4o-mini';
 const advancedModel = process.env.AI_ADVANCED_MODEL || 'openai/gpt-4o';
@@ -34,6 +49,17 @@ export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
       systemPrompt:
         'Classify the user intent from the provided text. ' +
         'Respond only with valid JSON matching the IntentClassification schema.',
+    },
+    // Multi-action chaining: split a multi-action utterance into ordered
+    // atomic sub-utterances. Cheap model (same tier as classify_intent);
+    // each segment is re-classified separately afterward.
+    decompose_transcript: {
+      model: defaultModel,
+      temperature: 0.0,
+      maxTokens: 512,
+      systemPrompt:
+        'Split a service-business voice command into ordered atomic actions. ' +
+        'Respond only with valid JSON. Be conservative — most commands are a single action.',
     },
     extract_job_details: {
       model: defaultModel,

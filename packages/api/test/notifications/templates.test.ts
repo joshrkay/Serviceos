@@ -42,6 +42,23 @@ describe('estimate templates', () => {
     expect(html).toContain('Tom &lt;tags&gt;');
     expect(html).not.toContain('Tom <tags>');
   });
+
+  it('renders Spanish SMS when language is es (money/number unchanged)', () => {
+    const { body } = renderEstimateSms({ ...ctx, language: 'es' });
+    expect(body).toContain('su presupuesto de Acme HVAC está listo');
+    expect(body).toContain('EST-1042');
+    expect(body).toContain('$875.00');
+    expect(body).toContain('https://app.example.com/e/abc123');
+  });
+
+  it('omitting language is byte-identical to language: en (regression)', () => {
+    expect(renderEstimateSms(ctx).body).toBe(renderEstimateSms({ ...ctx, language: 'en' }).body);
+  });
+
+  it('renders Spanish email subject when language is es', () => {
+    const { subject } = renderEstimateEmail({ ...ctx, language: 'es' });
+    expect(subject).toBe('Presupuesto EST-1042 de Acme HVAC');
+  });
 });
 
 describe('invoice templates', () => {

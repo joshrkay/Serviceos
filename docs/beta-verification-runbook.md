@@ -37,7 +37,7 @@
 
 Every other section depends on this. A failure here is a hard stop.
 
-- [ ] **1.1** Go to `/signup`. Page loads with Fieldly branding, no console errors.
+- [ ] **1.1** Go to `/signup`. Page loads with Rivet branding, no console errors.
 - [ ] **1.2** Sign up with a fresh test email. Clerk flow completes — no error screen.
 - [ ] **1.3** After signup, the app lands on `/onboarding` or `/dashboard`. Not a blank screen.
 - [ ] **1.4** Open DevTools → Network. Find the `/api/me` or session call. Response body includes a `tenantId` field. **This proves the Clerk webhook fired and Postgres provisioned the tenant.**

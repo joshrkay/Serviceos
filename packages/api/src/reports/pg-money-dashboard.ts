@@ -32,8 +32,13 @@ export class PgMoneyDashboardRepository implements MoneyDashboardRepository {
     private readonly expenseRepo: ExpenseRepository,
   ) {}
 
-  async query(tenantId: string, month: string, now: Date): Promise<MoneyDashboardSummary> {
-    const { start, end, priorStart } = resolveMonthWindow(month);
+  async query(
+    tenantId: string,
+    month: string,
+    now: Date,
+    timezone?: string,
+  ): Promise<MoneyDashboardSummary> {
+    const { start, end, priorStart } = resolveMonthWindow(month, timezone);
     const [openInvoices, partiallyPaidInvoices, payments, expenses] = await Promise.all([
       this.invoiceRepo.findByTenant(tenantId, { status: 'open' }),
       this.invoiceRepo.findByTenant(tenantId, { status: 'partially_paid' }),
@@ -45,6 +50,6 @@ export class PgMoneyDashboardRepository implements MoneyDashboardRepository {
       this.expenseRepo.findByTenant(tenantId, { from: start, to: end }),
     ]);
     const invoices = [...openInvoices, ...partiallyPaidInvoices];
-    return computeMoneyDashboardSummary({ month, now, invoices, payments, expenses });
+    return computeMoneyDashboardSummary({ month, now, invoices, payments, expenses, timezone });
   }
 }

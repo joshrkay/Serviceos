@@ -21,7 +21,7 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'record_payment' | 'log_expense' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal';
 
 export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -29,25 +29,39 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_job',
   'create_appointment',
   'create_booking',
+  'callback',
   'draft_estimate',
   'update_estimate',
   'draft_invoice',
   'update_invoice',
   'issue_invoice',
+  'create_invoice_schedule',
+  'batch_invoice',
   'reassign_appointment',
   'reschedule_appointment',
+  'add_crew_member',
+  'remove_crew_member',
   'cancel_appointment',
   'voice_clarification',
   'add_note',
   'send_invoice',
+  'send_estimate',
   'record_payment',
   'log_expense',
+  'convert_lead',
+  'confirm_appointment',
+  'mark_lead_lost',
+  'add_service_location',
+  'log_time_entry',
+  'notify_delay',
+  'request_feedback',
   'emergency_dispatch',
   'onboarding_tenant_settings',
   'onboarding_service_category',
   'onboarding_estimate_template',
   'onboarding_team_member',
   'onboarding_schedule',
+  'review_response_proposal',
 ];
 
 export interface Proposal {
@@ -84,6 +98,8 @@ export interface Proposal {
   approvedAt?: Date;
   executedAt?: Date;
   executedBy?: string;
+  /** QA-2026-06-05: why execution failed — persisted so failed proposals are debuggable. */
+  executionError?: string;
   claimedBy?: string;
   claimedAt?: Date;
   executionRetryCount?: number;
@@ -94,6 +110,14 @@ export interface Proposal {
    */
   undoneAt?: Date;
   undoneBy?: string;
+  /**
+   * Multi-action chaining. Shared by every proposal decomposed from the
+   * same voice utterance. Denormalized into its own indexed column (in
+   * addition to `sourceContext.chainId`) so the execution-time chain
+   * resolver can look up siblings without scanning JSONB. Undefined for
+   * single-action proposals — they behave exactly as before.
+   */
+  chainId?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -114,6 +138,12 @@ export interface CreateProposalInput {
   targetEntityId?: string;
   idempotencyKey?: string;
   expiresAt?: Date;
+  /**
+   * Multi-action chaining — links this proposal to its sibling
+   * proposals decomposed from the same utterance. Optional: omitting it
+   * yields a standalone (single-action) proposal exactly as before.
+   */
+  chainId?: string;
   createdBy: string;
   /**
    * Trust tier of the agent that produced this proposal. When set,
@@ -137,6 +167,19 @@ export interface CreateProposalInput {
    * back with the correct type.
    */
   missingFields?: string[];
+  /**
+   * Phase 12 supervisor-gating signals, forwarded verbatim to
+   * `decideInitialStatus`. These were previously declared on the AI
+   * task inputs but DROPPED here — `createProposal` never forwarded
+   * them — so the unsupervised hard-block and the per-tenant threshold
+   * override never engaged on the agent/voice path. They are now
+   * threaded through. Omitting them preserves the pre-Phase-12 default
+   * (supervisor assumed present, legacy 0.9 threshold) for callers that
+   * don't supply agent-source signals.
+   */
+  supervisorMode?: Mode;
+  supervisorPresent?: boolean;
+  tenantThresholdOverride?: ResolveThresholdInput['tenantOverride'];
 }
 
 /**
@@ -186,12 +229,28 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'create_job':
     case 'create_appointment':
     case 'create_booking':
+    // A callback request is a low-risk capture: it asks an operator to
+    // call the caller back (e.g. an after-hours booking). It carries no
+    // money and mutates nothing until the operator acts.
+    case 'callback':
     case 'draft_estimate':
     case 'update_estimate':
     case 'draft_invoice':
     case 'update_invoice':
+    // create_invoice_schedule sets up a milestone plan + drafts the first
+    // milestone invoice — no money moves and sending is a later step, so it
+    // is capture-class (stays in 'draft' until the owner approves).
+    case 'create_invoice_schedule':
+    // batch_invoice fans out N draft_invoice proposals on approval — it mints
+    // drafts, moves no money, and sends nothing, so it is capture-class too.
+    case 'batch_invoice':
     case 'reassign_appointment':
     case 'reschedule_appointment':
+    // Crew add/remove are dispatcher-initiated capture actions: they
+    // attach/detach a non-primary technician on an appointment. They
+    // mutate an assignment row, not money or customer comms.
+    case 'add_crew_member':
+    case 'remove_crew_member':
     case 'add_note':
     case 'onboarding_tenant_settings':
     case 'onboarding_service_category':
@@ -199,7 +258,26 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'onboarding_team_member':
     case 'onboarding_schedule':
     case 'log_expense':
+    // Converting a lead to a customer is a low-risk capture: it promotes
+    // an existing CRM record. It moves no money and is reversible (the
+    // customer can be re-archived), so it stays capture-class.
+    case 'convert_lead':
+    // Confirming an appointment, marking a lead lost, adding a service
+    // location, and clocking in time are all low-risk capture actions:
+    // they record an operator-stated fact, move no money, and are
+    // reversible.
+    case 'confirm_appointment':
+    case 'mark_lead_lost':
+    case 'add_service_location':
+    case 'log_time_entry':
       return 'capture';
+    // Delay notices and feedback requests are outbound customer-facing
+    // messages — comms-class so they never auto-approve regardless of
+    // trust tier. An operator always screen-taps before a customer is
+    // contacted.
+    case 'notify_delay':
+    case 'request_feedback':
+      return 'comms';
     case 'issue_invoice':
       return 'money';
     // voice_clarification is not a mutation — it is a user-visible
@@ -224,6 +302,16 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     // explicit approval. A mis-sent invoice is a real reputation
     // cost.
     case 'send_invoice':
+    // Sending an estimate is an outbound customer-facing message too —
+    // same 'comms' gate as send_invoice. Never auto-approves regardless
+    // of trust tier; an operator (or supervisor) must approve the send.
+    case 'send_estimate':
+      return 'comms';
+    // Review responses: public + private + service-credit are always
+    // owner-approved (per-component). The auto-approve path is
+    // hard-blocked because the 'comms' class never auto-approves
+    // regardless of trust tier — see decideInitialStatus().
+    case 'review_response_proposal':
       return 'comms';
     // Money: per D3, money-class proposals never auto-approve
     // regardless of confidence / trust tier. The MCP money_server
@@ -321,10 +409,37 @@ export function decideInitialStatus(input: {
 
 export interface ProposalRepository {
   create(proposal: Proposal): Promise<Proposal>;
+  /**
+   * Persist several proposals atomically (single transaction). Used by
+   * the voice chain builder so a partial failure mid-chain never leaves
+   * orphaned members in the DB — either every member of the chain is
+   * written or none is. All proposals MUST share the same tenantId.
+   */
+  createMany(proposals: Proposal[]): Promise<Proposal[]>;
   findById(tenantId: string, id: string): Promise<Proposal | null>;
   findByTenant(tenantId: string): Promise<Proposal[]>;
   findByStatus(tenantId: string, status: ProposalStatus): Promise<Proposal[]>;
   findByAiRun(tenantId: string, aiRunId: string): Promise<Proposal[]>;
+  /**
+   * Indexed lookup for voice redelivery dedup (P1). Returns the most recent
+   * proposal whose idempotencyKey === `idempotencyKey` (single-action path) OR
+   * whose sourceContext.recordingId === `recordingId` (chain members, which
+   * can't share one key), else null. Replaces a per-message findByTenant scan
+   * on the hot inbound-voice path — backed by the idempotency unique index and
+   * idx_proposals_source_recording.
+   */
+  findByRecordingId(
+    tenantId: string,
+    recordingId: string,
+    idempotencyKey: string,
+  ): Promise<Proposal | null>;
+  /**
+   * Multi-action chaining — fetch every proposal sharing a chainId,
+   * ordered by chainIndex. Used by the execution-time chain resolver to
+   * read a dependency's resultEntityId, and by the inbox to group a
+   * chain into one card.
+   */
+  findByChain(tenantId: string, chainId: string): Promise<Proposal[]>;
   updateStatus(
     tenantId: string,
     id: string,
@@ -338,6 +453,7 @@ export interface ProposalRepository {
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
       >
@@ -401,6 +517,14 @@ export function createProposal(input: CreateProposalInput): Proposal {
     sourceTrustTier: input.sourceTrustTier,
     confidenceScore: input.confidenceScore,
     missingFields: input.missingFields,
+    // Phase 12: forward the supervisor-gating signals. Previously these
+    // were silently dropped, so the unsupervised hard-block and the
+    // per-tenant threshold override were dead-wired on the voice path —
+    // a high-confidence autonomous proposal auto-approved even with no
+    // supervisor present. Forwarding restores the gate.
+    supervisorMode: input.supervisorMode,
+    supervisorPresent: input.supervisorPresent,
+    tenantThresholdOverride: input.tenantThresholdOverride,
   });
   // D9 undo window: auto-approved proposals stamp `approvedAt` at
   // creation so the 5-second undo window starts ticking immediately.
@@ -431,6 +555,7 @@ export function createProposal(input: CreateProposalInput): Proposal {
     targetEntityId: input.targetEntityId,
     idempotencyKey: input.idempotencyKey,
     expiresAt: input.expiresAt,
+    chainId: input.chainId,
     approvedAt,
     createdBy: input.createdBy,
     createdAt: now,
@@ -454,6 +579,36 @@ export class InMemoryProposalRepository implements ProposalRepository {
     }
     this.proposals.set(proposal.id, { ...proposal });
     return { ...proposal };
+  }
+
+  async createMany(proposals: Proposal[]): Promise<Proposal[]> {
+    // Atomic semantics: validate every member first (idempotency
+    // collisions — both against the store AND within the batch, which
+    // the pg unique index would catch), then commit them all. A throw
+    // before the commit loop leaves the store untouched, matching the pg
+    // single-transaction behavior.
+    const seenKeys = new Set<string>();
+    for (const proposal of proposals) {
+      if (!proposal.idempotencyKey) continue;
+      const dedupeKey = `${proposal.tenantId}:${proposal.idempotencyKey}`;
+      const collides =
+        seenKeys.has(dedupeKey) ||
+        Array.from(this.proposals.values()).some(
+          (p) => p.tenantId === proposal.tenantId && p.idempotencyKey === proposal.idempotencyKey
+        );
+      if (collides) {
+        throw new ConflictError(
+          `Proposal with idempotency key '${proposal.idempotencyKey}' already exists for this tenant`
+        );
+      }
+      seenKeys.add(dedupeKey);
+    }
+    const created: Proposal[] = [];
+    for (const proposal of proposals) {
+      this.proposals.set(proposal.id, { ...proposal });
+      created.push({ ...proposal });
+    }
+    return created;
   }
 
   async findById(tenantId: string, id: string): Promise<Proposal | null> {
@@ -480,6 +635,34 @@ export class InMemoryProposalRepository implements ProposalRepository {
       .map((p) => ({ ...p }));
   }
 
+  async findByRecordingId(
+    tenantId: string,
+    recordingId: string,
+    idempotencyKey: string,
+  ): Promise<Proposal | null> {
+    const match = Array.from(this.proposals.values())
+      .filter(
+        (p) =>
+          p.tenantId === tenantId &&
+          (p.idempotencyKey === idempotencyKey ||
+            (p.sourceContext as Record<string, unknown> | undefined)?.recordingId ===
+              recordingId),
+      )
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+    return match ? { ...match } : null;
+  }
+
+  async findByChain(tenantId: string, chainId: string): Promise<Proposal[]> {
+    return Array.from(this.proposals.values())
+      .filter((p) => p.tenantId === tenantId && p.chainId === chainId)
+      .map((p) => ({ ...p }))
+      .sort((a, b) => {
+        const ai = (a.sourceContext?.chainIndex as number | undefined) ?? 0;
+        const bi = (b.sourceContext?.chainIndex as number | undefined) ?? 0;
+        return ai - bi;
+      });
+  }
+
   async updateStatus(
     tenantId: string,
     id: string,
@@ -493,6 +676,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
       >
@@ -508,6 +692,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
       if (updates.rejectionDetails !== undefined) proposal.rejectionDetails = updates.rejectionDetails;
       if (updates.resultEntityId !== undefined) proposal.resultEntityId = updates.resultEntityId;
       if (updates.approvedAt !== undefined) proposal.approvedAt = updates.approvedAt;
+      if (updates.executionError !== undefined) proposal.executionError = updates.executionError;
       if (updates.executedAt !== undefined) proposal.executedAt = updates.executedAt;
       if (updates.executedBy !== undefined) proposal.executedBy = updates.executedBy;
       if (updates.undoneAt !== undefined) proposal.undoneAt = updates.undoneAt;

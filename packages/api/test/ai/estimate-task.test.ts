@@ -3,6 +3,11 @@ import { LLMGateway } from '../../src/ai/gateway/gateway';
 import type { LLMProvider, LLMGatewayConfig } from '../../src/ai/gateway/gateway';
 import { StubProvider } from '../../src/ai/gateway/providers';
 import { TaskContext } from '../../src/ai/tasks/task-handlers';
+import {
+  CatalogItem,
+  createCatalogItem,
+  InMemoryCatalogItemRepository,
+} from '../../src/catalog/catalog-item';
 
 function makeGateway(stub: StubProvider): LLMGateway {
   const providers = new Map<string, LLMProvider>();
@@ -196,5 +201,112 @@ describe('P2-016 — Estimate draft proposal generation', () => {
 
     expect(result.proposal.confidenceScore).toBe(0.5);
     expect(result.proposal.status).toBe('draft');
+  });
+});
+
+// ─── P22: catalog grounding (mirror of the invoice handler cases; this
+// contract's price field is `unitPrice`, integer cents) ─────────────────
+describe('P22 — EstimateTaskHandler catalog grounding', () => {
+  function seededCatalog(): { repo: InMemoryCatalogItemRepository; heater: CatalogItem } {
+    const repo = new InMemoryCatalogItemRepository();
+    const heater = createCatalogItem({
+      tenantId: 'tenant-1',
+      name: 'Water Heater Install',
+      category: 'Labor',
+      unit: 'each',
+      unitPriceCents: 185_000,
+    });
+    const airFilter = createCatalogItem({
+      tenantId: 'tenant-1',
+      name: 'Air Filter',
+      category: 'Parts',
+      unit: 'each',
+      unitPriceCents: 2_000,
+    });
+    const waterFilter = createCatalogItem({
+      tenantId: 'tenant-1',
+      name: 'Water Filter',
+      category: 'Parts',
+      unit: 'each',
+      unitPriceCents: 3_500,
+    });
+    void repo.create(heater);
+    void repo.create(airFilter);
+    void repo.create(waterFilter);
+    return { repo, heater };
+  }
+
+  function estimateJson(lineItems: unknown[], confidence = 0.95): string {
+    return JSON.stringify({
+      customerId: '550e8400-e29b-41d4-a716-446655440000',
+      lineItems,
+      confidence_score: confidence,
+    });
+  }
+
+  it('catalog match writes the catalog price into unitPrice', async () => {
+    const { repo, heater } = seededCatalog();
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      content: estimateJson([{ description: 'Water Heater Install', quantity: 1, unitPrice: 999 }]),
+    });
+    const handler = new EstimateTaskHandler(makeGateway(stub), repo);
+
+    const { proposal } = await handler.handle(makeContext());
+
+    const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+    expect(line.unitPrice).toBe(185_000);
+    expect(line.catalogItemId).toBe(heater.id);
+    expect(line.pricingSource).toBe('catalog');
+    expect(line).not.toHaveProperty('totalCents'); // estimate contract has no per-line totals
+    expect(proposal.confidenceFactors).toContain('catalog_priced');
+  });
+
+  it('ambiguous match forces draft with missingFields + candidates', async () => {
+    const { repo } = seededCatalog();
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      content: estimateJson([{ description: 'filter', quantity: 1, unitPrice: 2_500 }]),
+    });
+    const handler = new EstimateTaskHandler(makeGateway(stub), repo);
+
+    const { proposal } = await handler.handle(makeContext());
+
+    const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+    expect(line.unitPrice).toBe(2_500);
+    expect(line.pricingSource).toBe('ambiguous');
+    expect(proposal.status).toBe('draft');
+    const ctx = proposal.sourceContext as Record<string, unknown>;
+    expect(ctx.missingFields).toEqual(['lineItems[0].catalogItemId']);
+    expect(ctx.catalogResolution).toBeDefined();
+  });
+
+  it('uncatalogued line caps confidence below auto-approve', async () => {
+    const { repo } = seededCatalog();
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      content: estimateJson([{ description: 'mystery flux capacitor', quantity: 1, unitPrice: 9_900 }]),
+    });
+    const handler = new EstimateTaskHandler(makeGateway(stub), repo);
+
+    const { proposal } = await handler.handle(makeContext());
+
+    expect(proposal.confidenceScore).toBeLessThanOrEqual(0.85);
+    expect(proposal.status).not.toBe('approved');
+    expect(proposal.confidenceFactors).toContain('uncatalogued_line_item');
+  });
+
+  it('without a catalog repo, behavior is unchanged (regression pin)', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      content: estimateJson([{ description: 'Water Heater Install', quantity: 1, unitPrice: 999 }]),
+    });
+    const handler = new EstimateTaskHandler(makeGateway(stub)); // no repo
+
+    const { proposal } = await handler.handle(makeContext());
+
+    const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+    expect(line.unitPrice).toBe(999);
+    expect(line).not.toHaveProperty('pricingSource');
   });
 });

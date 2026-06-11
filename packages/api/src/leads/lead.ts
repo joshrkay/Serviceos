@@ -86,6 +86,7 @@ export interface UpdateLeadInput {
   assignedUserId?: string | null;
   lostReason?: string | null;
   convertedCustomerId?: string | null;
+  preferredLanguage?: 'en' | 'es' | null;
 }
 
 export interface LeadListOptions {

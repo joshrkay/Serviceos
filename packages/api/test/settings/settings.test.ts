@@ -5,6 +5,7 @@ import {
   getNextEstimateNumber,
   getNextInvoiceNumber,
   validateSettingsInput,
+  ensureTenantSettings,
   InMemorySettingsRepository,
 } from '../../src/settings/settings';
 
@@ -30,6 +31,33 @@ describe('P1-017 — Tenant business settings and numbering preferences', () => 
     expect(settings.nextEstimateNumber).toBe(1);
     expect(settings.nextInvoiceNumber).toBe(1);
     expect(settings.defaultPaymentTermDays).toBe(30);
+    // P11-002 — language stack seeded with safe defaults.
+    expect(settings.defaultLanguage).toBe('en');
+    expect(settings.autoDetectLanguage).toBe(true);
+  });
+
+  it('P11-002 — persists language settings end-to-end', async () => {
+    await createSettings({ tenantId: 'tenant-lang', businessName: 'Bilingual Co' }, repo);
+    const updated = await updateSettings(
+      'tenant-lang',
+      {
+        defaultLanguage: 'es',
+        autoDetectLanguage: false,
+        ttsVoiceEs: 'Polly.Lupe',
+        spanishDispatcherUserIds: ['11111111-1111-1111-1111-111111111111'],
+      },
+      repo,
+    );
+    expect(updated?.defaultLanguage).toBe('es');
+    expect(updated?.autoDetectLanguage).toBe(false);
+    expect(updated?.ttsVoiceEs).toBe('Polly.Lupe');
+    expect(updated?.spanishDispatcherUserIds).toEqual([
+      '11111111-1111-1111-1111-111111111111',
+    ]);
+
+    const reread = await getSettings('tenant-lang', repo);
+    expect(reread?.defaultLanguage).toBe('es');
+    expect(reread?.autoDetectLanguage).toBe(false);
   });
 
   it('happy path — creates settings with custom values', async () => {
@@ -108,6 +136,26 @@ describe('P1-017 — Tenant business settings and numbering preferences', () => 
     expect(errors).toContain('Invalid timezone');
   });
 
+  it('validation — accepts any IANA timezone Intl recognizes (not just the display list)', () => {
+    // Regression for the "browser detected America/Juneau but onboarding
+    // 400s" bug — the VALID_TIMEZONES dropdown list is intentionally
+    // small but Intl-recognized zones outside it must still validate.
+    for (const tz of [
+      'America/Juneau',
+      'America/Adak',
+      'America/North_Dakota/Center',
+      'Europe/London',
+      'Asia/Tokyo',
+    ]) {
+      const errors = validateSettingsInput({
+        tenantId: 'tenant-1',
+        businessName: 'ACME',
+        timezone: tz,
+      });
+      expect(errors, `expected ${tz} to be accepted`).not.toContain('Invalid timezone');
+    }
+  });
+
   it('validation — rejects empty prefix', () => {
     const errors = validateSettingsInput({
       tenantId: 'tenant-1',
@@ -151,5 +199,53 @@ describe('P1-017 — Tenant business settings and numbering preferences', () => 
     await expect(
       createSettings({ tenantId: 'tenant-1', businessName: 'Duplicate' }, repo)
     ).rejects.toThrow('Settings already exist');
+  });
+
+  describe('onboarding-blocker fix — ensureTenantSettings seeds aiModel', () => {
+    const ORIGINAL_DEFAULT_MODEL = process.env.AI_DEFAULT_MODEL;
+
+    afterEach(() => {
+      if (ORIGINAL_DEFAULT_MODEL === undefined) {
+        delete process.env.AI_DEFAULT_MODEL;
+      } else {
+        process.env.AI_DEFAULT_MODEL = ORIGINAL_DEFAULT_MODEL;
+      }
+    });
+
+    it('writes a non-null aiModel for a fresh tenant (env default wins)', async () => {
+      process.env.AI_DEFAULT_MODEL = 'gpt-4o-mini-test';
+
+      const settings = await ensureTenantSettings('tenant-new', repo, {
+        businessName: 'Fresh Co',
+      });
+
+      expect(settings.aiModel).toBe('gpt-4o-mini-test');
+      // Sanity: the row that lands in the repo carries the same value so
+      // the onboarding "AI check" step finds aiConfigPresent === true.
+      const reread = await getSettings('tenant-new', repo);
+      expect(reread?.aiModel).toBe('gpt-4o-mini-test');
+    });
+
+    it('falls back to a hardcoded default when AI_DEFAULT_MODEL is unset', async () => {
+      delete process.env.AI_DEFAULT_MODEL;
+
+      const settings = await ensureTenantSettings('tenant-no-env', repo);
+
+      expect(settings.aiModel).toBe('gpt-4o-mini');
+      expect(settings.aiModel).not.toBeNull();
+    });
+
+    it('never overwrites an existing tenant override on idempotent re-call', async () => {
+      // Seed with a different model than what AI_DEFAULT_MODEL would yield.
+      process.env.AI_DEFAULT_MODEL = 'platform-default-now';
+      await createSettings({ tenantId: 'tenant-override', businessName: 'X' }, repo);
+      await updateSettings('tenant-override', { aiModel: 'tenant-pinned-model' }, repo);
+
+      // Change AI_DEFAULT_MODEL to prove ensureTenantSettings does not re-seed.
+      process.env.AI_DEFAULT_MODEL = 'new-platform-default';
+      const second = await ensureTenantSettings('tenant-override', repo);
+
+      expect(second.aiModel).toBe('tenant-pinned-model');
+    });
   });
 });

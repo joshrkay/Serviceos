@@ -17,6 +17,7 @@
  *     forge attribution or impersonate an internal user.
  */
 import { Request, Router, Response } from 'express';
+import type { Pool } from 'pg';
 import { z } from 'zod';
 import { toErrorResponse } from '../shared/errors';
 import { LeadRepository } from '../leads/lead';
@@ -26,6 +27,8 @@ import { TenantRepository } from '../auth/clerk';
 import { attributionSchema, LeadSource } from '../leads/enums';
 import { SettingsRepository } from '../settings/settings';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
+import { formatBusinessHoursSummary } from '../public-intake/format-business-hours';
+import { isValidVerticalType } from '../shared/vertical-types';
 
 const PUBLIC_INTAKE_SOURCE: LeadSource = 'web_form';
 const PUBLIC_INTAKE_ACTOR_ID = 'public_intake';
@@ -77,6 +80,7 @@ export function createPublicIntakeRouter(
   auditRepo: AuditRepository,
   settingsRepo: SettingsRepository,
   packRegistry: VerticalPackRegistry,
+  pool?: Pool,
 ): Router {
   const router = Router();
 
@@ -153,9 +157,18 @@ export function createPublicIntakeRouter(
       const settings = await settingsRepo.findByTenant(tenantId);
 
       const serviceTypes: { verticalType: string; displayName: string }[] = [];
+      const seenVerticals = new Set<string>();
       for (const packId of settings?.activeVerticalPacks ?? []) {
-        const pack = await packRegistry.getByPackId(packId);
-        if (pack) {
+        let pack = await packRegistry.getByPackId(packId);
+        if (!pack && isValidVerticalType(packId)) {
+          const candidates = await packRegistry.findByVertical(packId);
+          pack =
+            candidates
+              .filter((p) => p.status === 'active')
+              .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0] ?? null;
+        }
+        if (pack && !seenVerticals.has(pack.verticalType)) {
+          seenVerticals.add(pack.verticalType);
           serviceTypes.push({
             verticalType: pack.verticalType,
             displayName: pack.displayName,
@@ -163,10 +176,52 @@ export function createPublicIntakeRouter(
         }
       }
 
+      let businessPhone = settings?.businessPhone?.trim() || null;
+      if (!businessPhone && pool) {
+        const twilioRow = await pool.query<{ phone: string | null }>(
+          `SELECT provider_data->>'phoneE164' AS phone
+           FROM tenant_integrations
+           WHERE tenant_id = $1 AND provider = 'twilio'
+           LIMIT 1`,
+          [tenantId],
+        );
+        businessPhone = twilioRow.rows[0]?.phone?.trim() || null;
+      }
+
+      let businessHours: unknown = null;
+      if (pool) {
+        const tsRow = await pool.query<{ business_hours: unknown }>(
+          `SELECT business_hours FROM tenant_settings WHERE tenant_id=$1`,
+          [tenantId],
+        );
+        businessHours = tsRow.rows[0]?.business_hours ?? null;
+      }
+
+      let averageRating: number | undefined;
+      let reviewCount: number | undefined;
+      if (pool) {
+        const rev = await pool.query<{ avg: string | null; c: string }>(
+          `SELECT AVG(rating)::float AS avg, COUNT(*)::int AS c
+           FROM google_reviews WHERE tenant_id = $1`,
+          [tenantId],
+        );
+        const count = Number(rev.rows[0]?.c ?? 0);
+        if (count > 0) {
+          reviewCount = count;
+          averageRating = Math.round(Number(rev.rows[0]?.avg ?? 0) * 10) / 10;
+        }
+      }
+
       res.status(200).json({
         businessName: settings?.businessName ?? tenant.name,
-        businessPhone: settings?.businessPhone ?? null,
+        businessPhone,
         serviceTypes,
+        businessHoursSummary: formatBusinessHoursSummary(
+          businessHours,
+          settings?.timezone,
+        ),
+        intakeTagline: null,
+        ...(averageRating !== undefined ? { averageRating, reviewCount } : {}),
       });
     } catch (err) {
       const { statusCode, body } = toErrorResponse(err);

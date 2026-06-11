@@ -7,6 +7,8 @@ import {
   captureDispatchEvent,
 } from '../../dispatch/analytics';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
+import { TransactionalCommsService } from '../../notifications/transactional-comms-service';
+import { notifyDispatchBoardChanged } from '../../dispatch/board-notify';
 
 export class CancelAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'cancel_appointment';
@@ -15,6 +17,7 @@ export class CancelAppointmentExecutionHandler implements ExecutionHandler {
     private readonly appointmentRepo?: AppointmentRepository,
     private readonly analyticsRepo?: DispatchAnalyticsRepository,
     private readonly auditRepo?: AuditRepository,
+    private readonly transactionalComms?: TransactionalCommsService,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -87,6 +90,14 @@ export class CancelAppointmentExecutionHandler implements ExecutionHandler {
           }),
         );
       }
+
+      if (this.transactionalComms) {
+        await this.transactionalComms.notifyCanceled(context.tenantId, appointmentId);
+      }
+
+      // Spatial board sync: a canceled appointment must vanish from any open
+      // dispatch board for that day.
+      notifyDispatchBoardChanged(context.tenantId, appointment.scheduledStart);
 
       return { success: true, resultEntityId: appointmentId };
     }

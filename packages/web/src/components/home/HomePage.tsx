@@ -1,14 +1,29 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import {
-  AlertCircle, Clock, ChevronRight, ArrowRight, CalendarDays,
-  DollarSign, FileText, Zap, Send, Eye, Calendar, Plus,
-  CheckCircle2, Mic, TrendingUp,
+  AlertCircle, Clock, ChevronRight, ArrowRight,
+  DollarSign, FileText, Send, Eye, Briefcase,
+  CheckCircle2, Mic, TrendingUp, Bell,
 } from 'lucide-react';
-import { leads } from '../../data/mock-data';
 import { useListQuery } from '../../hooks/useListQuery';
-import { normalizeJobStatus, normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
+import { StatCard } from '../ui';
+import {
+  normalizeJobStatus,
+  normalizeEstimateStatus,
+  centsToDisplay,
+  normalizeJobMoneyState,
+  JOB_MONEY_STATE_LABEL,
+} from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
+import { TimeGivenBackCard } from './TimeGivenBackCard';
+import { MoneyLoopHomeCard } from './MoneyLoopHomeCard';
+import { ErrorState } from '../ErrorState';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import {
+  formatDateInTenantTz,
+  formatInTenantTz,
+  formatTimeInTenantTz,
+} from '../../utils/formatInTenantTz';
 
 // ─── API Types ────────────────────────────────────────────────────────────
 interface ApiJob {
@@ -16,6 +31,7 @@ interface ApiJob {
   jobNumber: string;
   summary: string;
   status: string;
+  moneyState?: string;
   priority?: string;
   serviceType?: string;
   scheduledStart?: string;
@@ -31,6 +47,16 @@ interface ApiEstimate {
   customer?: { id: string; displayName?: string; firstName?: string; lastName?: string };
   sentAt?: string;
   viewedAt?: string;
+}
+
+interface ApiLead {
+  id: string;
+  firstName?: string;
+  lastName?: string;
+  companyName?: string;
+  stage: string;
+  estimatedValueCents?: number;
+  sourceDetail?: string;
 }
 
 interface ApiInvoice {
@@ -59,28 +85,28 @@ function customerName(c?: ApiJob['customer']): string {
   return c.displayName || [c.firstName, c.lastName].filter(Boolean).join(' ') || 'Customer';
 }
 
-function formatTime(iso?: string): string | null {
+function formatTime(iso: string | undefined, timezone: string): string | null {
   if (!iso) return null;
-  return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  return formatTimeInTenantTz(iso, timezone);
 }
 
-function formatDate(iso?: string): string {
+function formatDate(iso: string | undefined, timezone: string): string {
   if (!iso) return '';
-  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return formatDateInTenantTz(iso, timezone);
 }
 
 function todayIso(): string {
   return new Date().toISOString().split('T')[0];
 }
 
-function buildWeek(): { day: string; date: string; isToday: boolean }[] {
+function buildWeek(timezone: string): { day: string; date: string; isToday: boolean }[] {
   const today = new Date();
   return Array.from({ length: 7 }, (_, i) => {
     const d = new Date(today);
     d.setDate(today.getDate() + i);
     return {
-      day: d.toLocaleDateString('en-US', { weekday: 'short' }),
-      date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+      day: formatInTenantTz(d, timezone, { weekday: 'short' }),
+      date: formatDateInTenantTz(d, timezone),
       isToday: i === 0,
     };
   });
@@ -134,6 +160,7 @@ function AttentionRow({
 
 // ─── Compact job row ──────────────────────────────────────────────────────
 function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
+  const tz = useTenantTimezone();
   const svc = SVC[job.serviceType ?? ''] ?? SVC.HVAC;
   const name = customerName(job.customer);
   const uiStatus = normalizeJobStatus(job.status);
@@ -141,7 +168,17 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
     ? [job.technician.firstName, job.technician.lastName].filter(Boolean).join(' ')
     : null;
   const techColor = job.technician?.color ?? '#94a3b8';
-  const scheduledTime = formatTime(job.scheduledStart);
+  const scheduledTime = formatTime(job.scheduledStart, tz);
+  const moneyState = normalizeJobMoneyState(job.moneyState);
+  const moneyLabel = moneyState ? JOB_MONEY_STATE_LABEL[moneyState] : null;
+  const moneyBadgeClasses: Record<string, string> = {
+    overdue: 'bg-red-100 text-red-700',
+    paid: 'bg-green-100 text-green-700',
+    invoiced: 'bg-amber-100 text-amber-800',
+    estimate_sent: 'bg-amber-100 text-amber-800',
+  };
+  const moneyBadgeClass =
+    (moneyState && moneyBadgeClasses[moneyState]) ?? 'bg-violet-100 text-violet-700';
 
   return (
     <button
@@ -154,7 +191,14 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
           <p className="text-sm text-slate-900 truncate">{name}</p>
-          <StatusBadge status={uiStatus} size="sm" />
+          <div className="flex items-center gap-1.5 shrink-0">
+            {moneyLabel && (
+              <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-md ${moneyBadgeClass}`}>
+                {moneyLabel}
+              </span>
+            )}
+            <StatusBadge status={uiStatus} size="sm" />
+          </div>
         </div>
         <div className="flex items-center gap-2 mt-0.5">
           {scheduledTime && (
@@ -184,7 +228,8 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
 
 // ─── This week strip ──────────────────────────────────────────────────────
 function WeekStrip({ todayCount }: { todayCount: number }) {
-  const WEEK = buildWeek();
+  const tz = useTenantTimezone();
+  const WEEK = buildWeek(tz);
   return (
     <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: 'none' }}>
       {WEEK.map((d, i) => {
@@ -220,6 +265,7 @@ function WeekStrip({ todayCount }: { todayCount: number }) {
 // ─── Main dashboard ───────────────────────────────────────────────────────
 export function HomePage() {
   const navigate   = useNavigate();
+  const tz         = useTenantTimezone();
   const [dismissed, setDismiss] = useState<Set<string>>(new Set());
 
   const today = todayIso();
@@ -228,6 +274,8 @@ export function HomePage() {
   const jobsQuery = useListQuery<ApiJob>('/api/jobs', { filters: { scheduledDate: today } });
   const estimatesQuery = useListQuery<ApiEstimate>('/api/estimates', { filters: { status: 'sent' } });
   const invoicesQuery = useListQuery<ApiInvoice>('/api/invoices', { filters: { status: 'open' } });
+  const leadsQuery = useListQuery<ApiLead>('/api/leads', { filters: { limit: '50' } });
+  const leads = leadsQuery.data ?? [];
 
   const todayJobs    = jobsQuery.data.filter(j => normalizeJobStatus(j.status) !== 'Canceled');
   const pendingEsts  = estimatesQuery.data.filter(e => {
@@ -250,13 +298,13 @@ export function HomePage() {
       id: `inv-${i.id}`, type: 'overdue' as const,
       message: `${customerName(i.customer)} — invoice overdue`,
       sub: `${i.invoiceNumber} · ${centsToDisplay(i.totalCents)} · Was due ${i.dueDate ?? ''}`,
-      action: 'Remind', to: '/invoices',
+      action: 'Remind', to: `/invoices/${i.id}`,
     })),
     ...pendingEsts.filter(e => !dismissed.has(`est-${e.id}`)).map(e => ({
       id: `est-${e.id}`, type: 'followup' as const,
       message: `${customerName(e.customer)} estimate not yet opened`,
-      sub: `${e.estimateNumber} · ${centsToDisplay(e.totalCents)}${e.sentAt ? ` · Sent ${formatDate(e.sentAt)}` : ''}`,
-      action: 'Follow up', to: '/estimates',
+      sub: `${e.estimateNumber} · ${centsToDisplay(e.totalCents)}${e.sentAt ? ` · Sent ${formatDate(e.sentAt, tz)}` : ''}`,
+      action: 'Follow up', to: `/estimates/${e.id}`,
     })),
   ].filter(item => !dismissed.has(item.id));
 
@@ -274,7 +322,7 @@ export function HomePage() {
             <div>
               <h1 className="text-slate-900">Good morning, Mike ☀️</h1>
               <p className="text-sm text-slate-400 mt-0.5">
-                {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
+                {formatInTenantTz(new Date(), tz, { weekday: 'long', month: 'long', day: 'numeric' })}
               </p>
             </div>
             <button
@@ -285,20 +333,61 @@ export function HomePage() {
             </button>
           </div>
 
-          {/* 3-stat pulse */}
+          {/* 3-stat pulse — calm StatCard tiles (tone tints only the icon
+              chip, per the design vision). Each tile is a button that
+              drills into the matching surface. */}
           <div className="grid grid-cols-3 gap-3 mt-4">
-            {[
-              { label: 'Active today',    value: `${activeCount} jobs`,             color: 'text-blue-700',  bg: 'bg-blue-50 border-blue-100'   },
-              { label: 'Outstanding',     value: `$${totalOut.toLocaleString()}`,   color: 'text-amber-700', bg: 'bg-amber-50 border-amber-100' },
-              { label: 'Needs attention', value: `${attentionItems.length} items`,  color: attentionItems.length > 0 ? 'text-red-600' : 'text-green-700', bg: attentionItems.length > 0 ? 'bg-red-50 border-red-100' : 'bg-green-50 border-green-100' },
-            ].map(({ label, value, color, bg }) => (
-              <div key={label} className={`rounded-xl border px-3 py-2.5 ${bg}`}>
-                <p className={`text-xs mb-0.5 ${color}`}>{label}</p>
-                <p className={`text-sm ${color}`}>{value}</p>
-              </div>
-            ))}
+            <button
+              type="button"
+              onClick={() => navigate('/jobs')}
+              className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+            >
+              <StatCard
+                className="h-full"
+                tone="info"
+                label="Active today"
+                value={activeCount}
+                hint="jobs"
+                icon={<Briefcase size={16} />}
+              />
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/reports/money')}
+              data-testid="home-stat-outstanding"
+              className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+            >
+              <StatCard
+                className="h-full"
+                tone="warning"
+                label="Outstanding"
+                value={`$${totalOut.toLocaleString()}`}
+                hint={`${unpaidInvs.length} unpaid`}
+                icon={<DollarSign size={16} />}
+              />
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate(attentionItems.length > 0 ? '/invoices' : '/inbox')}
+              data-testid="home-stat-attention"
+              className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+            >
+              <StatCard
+                className="h-full"
+                tone={attentionItems.length > 0 ? 'danger' : 'success'}
+                label="Needs attention"
+                value={`${attentionItems.length} items`}
+                hint={attentionItems.length > 0 ? 'review now' : 'all clear'}
+                icon={attentionItems.length > 0 ? <AlertCircle size={16} /> : <CheckCircle2 size={16} />}
+              />
+            </button>
           </div>
         </div>
+
+        <MoneyLoopHomeCard />
+
+        {/* ── Time given back ── */}
+        <TimeGivenBackCard />
 
         {/* ── Two-column layout ── */}
         <div className="flex flex-col md:grid md:grid-cols-[1fr_320px] md:items-start divide-y md:divide-y-0 md:divide-x divide-slate-100">
@@ -313,6 +402,11 @@ export function HomePage() {
                 <div className="flex items-center justify-center py-8">
                   <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
                 </div>
+              ) : jobsQuery.error ? (
+                <ErrorState
+                  message={jobsQuery.error.includes('401') ? "Session expired — please reload" : "Couldn't load jobs — please try again"}
+                  onRetry={() => jobsQuery.refetch()}
+                />
               ) : todayJobs.length === 0 ? (
                 <p className="text-sm text-slate-400 py-4 text-center">No jobs scheduled today</p>
               ) : (
@@ -346,16 +440,23 @@ export function HomePage() {
                 </button>
               </div>
               {(() => {
-                const pipeline = leads.filter(l => l.status !== 'Won' && l.status !== 'Lost');
-                const newLeads = leads.filter(l => l.status === 'New');
-                const pipelineValue = pipeline.reduce((s, l) => s + (l.estimatedValue ?? 0), 0);
+                const pipeline = leads.filter((l) => l.stage !== 'won' && l.stage !== 'lost');
+                const newLeads = leads.filter((l) => l.stage === 'new');
+                const pipelineValueCents = pipeline.reduce(
+                  (s, l) => s + (l.estimatedValueCents ?? 0),
+                  0,
+                );
+                const leadDisplayName = (l: ApiLead) =>
+                  [l.firstName, l.lastName].filter(Boolean).join(' ')
+                  || l.companyName
+                  || 'Lead';
                 return (
                   <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
                     <div className="flex divide-x divide-slate-100">
                       {[
-                        { label: 'New',       count: leads.filter(l => l.status === 'New').length,           color: 'text-blue-600',   dot: 'bg-blue-500'   },
-                        { label: 'Contacted', count: leads.filter(l => l.status === 'Contacted').length,     color: 'text-amber-600',  dot: 'bg-amber-500'  },
-                        { label: 'Est. Sent', count: leads.filter(l => l.status === 'Estimate Sent').length, color: 'text-violet-600', dot: 'bg-violet-500' },
+                        { label: 'New', count: leads.filter((l) => l.stage === 'new').length, color: 'text-blue-600', dot: 'bg-blue-500' },
+                        { label: 'Contacted', count: leads.filter((l) => l.stage === 'contacted').length, color: 'text-amber-600', dot: 'bg-amber-500' },
+                        { label: 'Quoted', count: leads.filter((l) => l.stage === 'quoted').length, color: 'text-violet-600', dot: 'bg-violet-500' },
                       ].map(({ label, count, color, dot }) => (
                         <button key={label} onClick={() => navigate('/leads')} className="flex-1 flex flex-col items-center py-3.5 hover:bg-slate-50 transition-colors">
                           <span className={`flex size-1.5 rounded-full mb-1.5 ${dot}`} />
@@ -369,8 +470,13 @@ export function HomePage() {
                         <button onClick={() => navigate('/leads')} className="flex items-center gap-2.5 w-full text-left hover:opacity-80 transition-opacity">
                           <span className="size-1.5 rounded-full bg-blue-500 shrink-0 animate-pulse" />
                           <p className="text-xs text-slate-600 flex-1">
-                            <span className="text-slate-900">{newLeads[0].name}</span>
-                            {' '}— {newLeads[0].description.slice(0, 45)}…
+                            <span className="text-slate-900">{leadDisplayName(newLeads[0]!)}</span>
+                            {newLeads[0]!.sourceDetail && (
+                              <>
+                                {' '}— {newLeads[0]!.sourceDetail!.slice(0, 45)}
+                                {newLeads[0]!.sourceDetail!.length > 45 ? '…' : ''}
+                              </>
+                            )}
                           </p>
                           <ChevronRight size={12} className="text-slate-300 shrink-0" />
                         </button>
@@ -378,7 +484,7 @@ export function HomePage() {
                     )}
                     <div className="border-t border-slate-100 px-4 py-2.5 bg-slate-50">
                       <p className="text-xs text-slate-400">
-                        ${pipelineValue.toLocaleString()} est. pipeline value · {pipeline.length} active
+                        ${(pipelineValueCents / 100).toLocaleString()} est. pipeline value · {pipeline.length} active
                       </p>
                     </div>
                   </div>
@@ -415,19 +521,24 @@ export function HomePage() {
             )}
 
             {/* Pending estimates */}
-            {(estimatesQuery.isLoading || pendingEsts.length > 0) && (
+            {(estimatesQuery.isLoading || estimatesQuery.error || pendingEsts.length > 0) && (
               <section className="px-4 py-5">
                 <SectionHead label="Pending estimates" count={pendingEsts.length} onAll={() => navigate('/estimates')} />
                 {estimatesQuery.isLoading ? (
                   <div className="flex items-center justify-center py-6">
                     <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
                   </div>
+                ) : estimatesQuery.error ? (
+                  <ErrorState
+                    message={estimatesQuery.error.includes('401') ? "Session expired — please reload" : "Couldn't load estimates — please try again"}
+                    onRetry={() => estimatesQuery.refetch()}
+                  />
                 ) : (
                   <div className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 overflow-hidden">
                     {pendingEsts.map(est => (
                       <button
                         key={est.id}
-                        onClick={() => navigate('/estimates')}
+                        onClick={() => navigate(`/estimates/${est.id}`)}
                         className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-slate-50 transition-colors group"
                       >
                         <div className="flex size-8 items-center justify-center rounded-xl shrink-0 bg-blue-100">
@@ -436,7 +547,7 @@ export function HomePage() {
                         <div className="flex-1 min-w-0">
                           <p className="text-sm text-slate-800 truncate">{customerName(est.customer)}</p>
                           <p className="text-xs text-slate-400 mt-0.5">
-                            {est.estimateNumber}{est.sentAt ? ` · Sent ${formatDate(est.sentAt)}` : ''}
+                            {est.estimateNumber}{est.sentAt ? ` · Sent ${formatDate(est.sentAt, tz)}` : ''}
                           </p>
                         </div>
                         <div className="flex flex-col items-end gap-1 shrink-0">
@@ -451,7 +562,7 @@ export function HomePage() {
             )}
 
             {/* Unpaid invoices */}
-            {(invoicesQuery.isLoading || unpaidInvs.length > 0) && (
+            {(invoicesQuery.isLoading || invoicesQuery.error || unpaidInvs.length > 0) && (
               <section className="px-4 py-5">
                 <div className="flex items-center justify-between mb-2.5">
                   <div className="flex items-center gap-2">
@@ -460,8 +571,8 @@ export function HomePage() {
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-sm text-amber-700">${totalOut.toLocaleString()}</span>
-                    <button onClick={() => navigate('/invoices')} className="flex items-center gap-0.5 text-xs text-blue-600 hover:text-blue-700">
-                      View all <ArrowRight size={11} />
+                    <button onClick={() => navigate('/reports/money')} className="flex items-center gap-0.5 text-xs text-blue-600 hover:text-blue-700">
+                      Money summary <ArrowRight size={11} />
                     </button>
                   </div>
                 </div>
@@ -469,6 +580,11 @@ export function HomePage() {
                   <div className="flex items-center justify-center py-6">
                     <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
                   </div>
+                ) : invoicesQuery.error ? (
+                  <ErrorState
+                    message={invoicesQuery.error.includes('401') ? "Session expired — please reload" : "Couldn't load invoices — please try again"}
+                    onRetry={() => invoicesQuery.refetch()}
+                  />
                 ) : (
                   <div className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 overflow-hidden">
                     {unpaidInvs.map(inv => {
@@ -476,7 +592,7 @@ export function HomePage() {
                       return (
                         <button
                           key={inv.id}
-                          onClick={() => navigate('/invoices')}
+                          onClick={() => navigate(`/invoices/${inv.id}`)}
                           className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
                         >
                           <div className={`flex size-8 items-center justify-center rounded-xl shrink-0 ${
@@ -508,10 +624,10 @@ export function HomePage() {
               <SectionHead label="Quick actions" />
               <div className="grid grid-cols-2 gap-2">
                 {[
-                  { label: 'New job',      icon: Plus,         color: 'text-blue-600',   bg: 'bg-blue-50',   to: '/jobs'      },
-                  { label: 'New estimate', icon: FileText,     color: 'text-indigo-600', bg: 'bg-indigo-50', to: '/estimates' },
-                  { label: 'New invoice',  icon: DollarSign,   color: 'text-amber-600',  bg: 'bg-amber-50',  to: '/invoices'  },
-                  { label: 'Schedule',     icon: CalendarDays, color: 'text-green-600',  bg: 'bg-green-50',  to: '/schedule'  },
+                  { label: 'Approval inbox', icon: Bell,         color: 'text-blue-600',   bg: 'bg-blue-50',   to: '/inbox'          },
+                  { label: 'Money summary',  icon: TrendingUp,   color: 'text-amber-700',  bg: 'bg-amber-50',  to: '/reports/money'  },
+                  { label: 'New estimate',   icon: FileText,     color: 'text-indigo-600', bg: 'bg-indigo-50', to: '/estimates'      },
+                  { label: 'New invoice',    icon: DollarSign,   color: 'text-amber-600',  bg: 'bg-amber-50',  to: '/invoices'       },
                 ].map(({ label, icon: Icon, color, bg, to }) => (
                   <button
                     key={label}
@@ -528,7 +644,7 @@ export function HomePage() {
             </section>
 
             {/* All clear */}
-            {attentionItems.length === 0 && unpaidInvs.length === 0 && pendingEsts.length === 0 && !jobsQuery.isLoading && !estimatesQuery.isLoading && !invoicesQuery.isLoading && (
+            {attentionItems.length === 0 && unpaidInvs.length === 0 && pendingEsts.length === 0 && !jobsQuery.isLoading && !estimatesQuery.isLoading && !invoicesQuery.isLoading && !jobsQuery.error && !estimatesQuery.error && !invoicesQuery.error && (
               <section className="px-4 py-8 flex flex-col items-center gap-2">
                 <CheckCircle2 size={28} className="text-green-500" />
                 <p className="text-sm text-slate-600">All clear — nothing urgent</p>

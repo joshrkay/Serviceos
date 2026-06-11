@@ -1,0 +1,15 @@
+{
+  "id": "transcript-256",
+  "type": "inbound_call",
+  "duration_seconds": 150,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is Maria Lopez. I'm calling because my package unit won't turn on. Dispatcher: Hi Maria, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Trane, maybe 10 years old. Dispatcher: Okay, and what's the service address? Customer: 9 Lakeview Drive. Dispatcher: Got it. We can send a technician out Wednesday afternoon. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Maria Lopez",
+    "issue": "package unit won't turn on",
+    "equipment": "Trane package unit, maybe 10 years old",
+    "address": "9 Lakeview Drive",
+    "appointment_window": "Wednesday afternoon"
+  },
+  "source": "synthetic"
+}

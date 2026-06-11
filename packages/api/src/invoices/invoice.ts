@@ -4,6 +4,7 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
 import { SettingsRepository, getNextInvoiceNumber } from '../settings/settings';
 import { buildOriginationMetadata } from '../leads/attribution-metadata';
+import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 
 export type InvoiceStatus = 'draft' | 'open' | 'partially_paid' | 'paid' | 'void' | 'canceled';
 
@@ -39,6 +40,10 @@ export interface Invoice {
   stripePaymentLinkUrl?: string;
   /** Inherits from `job.originatingLeadId` at creation; preserves source attribution. */
   originatingLeadId?: string;
+  /** P21-001 — set when this invoice is a milestone of an invoice_schedules row. */
+  scheduleId?: string;
+  /** P21-001 — 0-based position of this invoice within its schedule's milestones. */
+  milestoneIndex?: number;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -55,6 +60,9 @@ export interface CreateInvoiceInput {
   customerMessage?: string;
   /** Optional override; routes auto-populate from job when omitted. */
   originatingLeadId?: string;
+  /** P21-001/002 — link a minted milestone invoice to its schedule + position. */
+  scheduleId?: string;
+  milestoneIndex?: number;
   createdBy: string;
 }
 
@@ -95,6 +103,12 @@ export interface InvoiceRepository {
   create(invoice: Invoice): Promise<Invoice>;
   findById(tenantId: string, id: string): Promise<Invoice | null>;
   findByJob(tenantId: string, jobId: string): Promise<Invoice[]>;
+  /**
+   * Batched findByJob — all invoices for many jobs in ONE query instead of N.
+   * Used by the invoicing queue / batch sweep to avoid an N+1 over completed
+   * jobs. Returns all matching invoices; callers group by jobId.
+   */
+  findByJobs(tenantId: string, jobIds: string[]): Promise<Invoice[]>;
   findByTenant(tenantId: string, options?: InvoiceListOptions): Promise<Invoice[]>;
   /** P1-018: paginated `{ data, total }` form for list UIs. */
   listWithMeta?(tenantId: string, options?: InvoiceListOptions): Promise<InvoiceListResult>;
@@ -112,8 +126,14 @@ export interface InvoiceRepository {
 export const INVOICE_STATUS_TRANSITIONS: Record<InvoiceStatus, InvoiceStatus[]> = {
   draft: ['open', 'canceled'],
   open: ['partially_paid', 'paid', 'void'],
-  partially_paid: ['paid', 'void'],
-  paid: [],
+  // 'paid' and 'partially_paid' can REOPEN when a settled payment is
+  // reversed (ACH/bank NSF return or card chargeback — see
+  // reversePayment() in payments/payment-service.ts). The reversal
+  // recomputes the balance and drops the invoice back to 'partially_paid'
+  // (other payments remain) or 'open' (no payments left), so it re-enters
+  // normal collections. 'paid' is therefore no longer terminal.
+  partially_paid: ['open', 'paid', 'void'],
+  paid: ['open', 'partially_paid'],
   void: [],
   canceled: [],
 };
@@ -174,6 +194,8 @@ export async function createInvoice(
     amountDueCents: totals.totalCents,
     customerMessage: input.customerMessage,
     originatingLeadId: input.originatingLeadId,
+    scheduleId: input.scheduleId,
+    milestoneIndex: input.milestoneIndex,
     createdBy: input.createdBy,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -313,7 +335,8 @@ export async function issueInvoice(
   tenantId: string,
   id: string,
   paymentTermDays: number,
-  repository: InvoiceRepository
+  repository: InvoiceRepository,
+  moneyStateDeps?: RefreshJobMoneyStateDeps,
 ): Promise<Invoice | null> {
   const invoice = await repository.findById(tenantId, id);
   if (!invoice) return null;
@@ -325,19 +348,27 @@ export async function issueInvoice(
   const issuedAt = new Date();
   const dueDate = calculateDueDate(issuedAt, paymentTermDays);
 
-  return repository.update(tenantId, id, {
+  const updated = await repository.update(tenantId, id, {
     status: 'open',
     issuedAt,
     dueDate,
     updatedAt: new Date(),
   });
+
+  // §6 Time-to-Cash. Best-effort job money-state rollup.
+  if (updated && moneyStateDeps) {
+    await refreshJobMoneyStateSafe(tenantId, updated.jobId, 'system', moneyStateDeps);
+  }
+
+  return updated;
 }
 
 export async function transitionInvoiceStatus(
   tenantId: string,
   id: string,
   newStatus: InvoiceStatus,
-  repository: InvoiceRepository
+  repository: InvoiceRepository,
+  moneyStateDeps?: RefreshJobMoneyStateDeps,
 ): Promise<Invoice | null> {
   const invoice = await repository.findById(tenantId, id);
   if (!invoice) return null;
@@ -346,7 +377,17 @@ export async function transitionInvoiceStatus(
     throw new ValidationError(`Invalid transition from ${invoice.status} to ${newStatus}`);
   }
 
-  return repository.update(tenantId, id, { status: newStatus, updatedAt: new Date() });
+  const updated = await repository.update(tenantId, id, {
+    status: newStatus,
+    updatedAt: new Date(),
+  });
+
+  // §6 Time-to-Cash. Best-effort job money-state rollup.
+  if (updated && moneyStateDeps) {
+    await refreshJobMoneyStateSafe(tenantId, updated.jobId, 'system', moneyStateDeps);
+  }
+
+  return updated;
 }
 
 export class InMemoryInvoiceRepository implements InvoiceRepository {
@@ -366,6 +407,13 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
   async findByJob(tenantId: string, jobId: string): Promise<Invoice[]> {
     return Array.from(this.invoices.values())
       .filter((i) => i.tenantId === tenantId && i.jobId === jobId)
+      .map((i) => ({ ...i, lineItems: [...i.lineItems] }));
+  }
+
+  async findByJobs(tenantId: string, jobIds: string[]): Promise<Invoice[]> {
+    const wanted = new Set(jobIds);
+    return Array.from(this.invoices.values())
+      .filter((i) => i.tenantId === tenantId && wanted.has(i.jobId))
       .map((i) => ({ ...i, lineItems: [...i.lineItems] }));
   }
 

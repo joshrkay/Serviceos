@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import swaggerUi from 'swagger-ui-express';
 import { openApiSpec } from './swagger/spec';
@@ -8,8 +9,12 @@ import { toErrorResponse } from './shared/errors';
 import { createPool } from './db/pool';
 import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
+import { createIntegrationResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
+import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
+import { createBusinessPhoneDispatcherResolver } from './telephony/dispatcher-phone-resolver';
+import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
 import {
@@ -55,6 +60,7 @@ import { createPaymentRouter } from './routes/payments';
 import { createNoteRouter } from './routes/notes';
 import {
   createMeRouter,
+  DEFAULT_TENANT_TIMEZONE,
   InMemoryUserModeService,
   type MeUserRecord,
   type MeTenantSettings,
@@ -67,12 +73,18 @@ import {
 } from './ai/supervisor-presence';
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
+import { createDncRouter } from './routes/dnc';
 import { createVerticalRouter } from './routes/verticals';
+import { createVerticalTrainingAssetsRouter } from './routes/vertical-training-assets';
 import { createTemplateRouter } from './routes/templates';
 import { createBundleRouter } from './routes/bundles';
 import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
+import { createVoiceGate } from './voice/voice-gate';
+import { checkAndFireUpgradeNudge } from './voice/check-upgrade-nudge';
+import { maybeAutoGoLiveOnInboundEnd } from './voice/go-live';
+import { maybeFireFirstRealCallActivation } from './voice/activation';
 import { createOnboardingRouter } from './routes/onboarding';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
@@ -87,10 +99,13 @@ import { PgJobPhotoRepository } from './jobs/pg-job-photo';
 import { createDispatchRoutes } from './dispatch/routes';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
+import { createPublicBookingRouter } from './routes/public-booking';
 import { createReportsRouter } from './routes/reports';
+import { RepoBackedTimeGivenBackReporter } from './reports/time-given-back';
 import { createTimeEntriesRouter } from './routes/time-entries';
 import { InMemoryTimeEntryRepository } from './time-tracking/time-entry';
 import { PgTimeEntryRepository } from './time-tracking/pg-time-entry';
+import { TimeEntryService } from './time-tracking/time-entry-service';
 import {
   PgRevenueBySourceRepository,
   InMemoryRevenueBySourceRepository,
@@ -98,6 +113,7 @@ import {
 import { PgMoneyDashboardRepository } from './reports/pg-money-dashboard';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
+import { initSentry, setSentryClient } from './monitoring/sentry';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -109,17 +125,28 @@ import { InMemoryAppointmentRepository } from './appointments/appointment';
 import { InMemoryAssignmentRepository } from './appointments/assignment';
 import { InMemoryEstimateRepository } from './estimates/estimate';
 import { InMemoryInvoiceRepository } from './invoices/invoice';
+import { InMemoryInvoiceScheduleRepository } from './invoices/invoice-schedule';
+import { PgInvoiceScheduleRepository } from './invoices/pg-invoice-schedule';
+import { InMemoryBatchInvoiceRunRepository } from './invoices/batch-invoice-run';
+import { PgBatchInvoiceRunRepository } from './invoices/pg-batch-invoice-run';
+import { runBatchInvoiceSweep } from './workers/batch-invoice-worker';
 import { InMemoryPaymentRepository } from './invoices/payment';
 import { createPaymentLinkProvider } from './payments/payment-link-provider';
 import { InMemoryNoteRepository } from './notes/note';
 import { InMemoryConversationRepository } from './conversations/conversation-service';
-import { InMemorySettingsRepository } from './settings/settings';
+import { InMemorySettingsRepository, resolveEscalationSettings } from './settings/settings';
 import { InMemoryAuditRepository } from './audit/audit';
 import { InMemoryLookupEventRepository } from './lookup-events/lookup-event';
 import { PgLookupEventRepository } from './lookup-events/pg-lookup-event';
 import { LookupEventService } from './lookup-events/lookup-event-service';
 import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
+import {
+  InMemoryPrivacyAuditRepository,
+  InMemoryTrainingAssetRepository,
+} from './verticals/in-memory-training-assets';
+import { TrainingAssetRedactionService } from './verticals/training-asset-redaction';
+import { TrainingAssetService } from './verticals/training-asset-service';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
 import { InMemoryVoiceRepository, createTranscribeAudioFn } from './voice/voice-service';
 import { createWhisperTranscriptionProvider } from './voice/transcription-providers';
@@ -133,6 +160,7 @@ import {
 } from './flags/feature-flags';
 import { PgFeatureFlagRepository } from './flags/pg-feature-flags';
 import { createFeatureFlagsRouter } from './routes/feature-flags';
+import { createAdminTenantsRouter } from './routes/admin-tenants';
 import { InMemoryTechnicianLocationPingRepository } from './telemetry/technician-location-ping';
 import {
   InMemoryTechnicianLocationAuthorizer,
@@ -140,10 +168,20 @@ import {
 } from './telemetry/technician-location-authz';
 import { InMemoryQueue, processMessage } from './queues/queue';
 import { createProvisionTwilioWorker, PROVISION_TWILIO_JOB_TYPE } from './workers/provision-twilio';
+import { createDeprovisionTenantWorker } from './workers/deprovision-tenant';
+import { createVerifyAiWorker } from './workers/verify-ai';
 import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
 import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
+import { VerticalTerminologyProvider } from './voice/vertical-terminology-provider';
+import { FillerEngine } from './ai/agents/customer-calling/filler-engine';
+import { FillerAudioCache } from './ai/agents/customer-calling/filler-audio-cache';
+import { classifyTurnSentiment } from './ai/agents/customer-calling/sentiment-classifier';
+import { createHvacPack } from './verticals/packs/hvac';
+import { createPlumbingPack } from './verticals/packs/plumbing';
+import { createElectricalPack } from './verticals/packs/electrical';
+import { isValidVerticalType } from './shared/vertical-types';
 import {
   buildCallerPlanContext,
   formatCallerPlanForPrompt,
@@ -170,10 +208,17 @@ import { PgSettingsRepository } from './settings/pg-settings';
 import { PgAuditRepository } from './audit/pg-audit';
 import { PgEstimateTemplateRepository } from './templates/pg-estimate-template';
 import { PgServiceBundleRepository } from './verticals/pg-bundles';
+import {
+  PgPrivacyAuditRepository,
+  PgTrainingAssetRepository,
+} from './verticals/pg-training-assets';
 import { PgQualityMetricsRepository } from './quality/pg-metrics';
 import { PgVoiceRepository } from './voice/pg-voice';
 import { InMemoryVoiceSessionRepository } from './voice/voice-session';
 import { PgVoiceSessionRepository } from './voice/pg-voice-session';
+import { InMemoryCallMeBackRepository } from './voice/call-me-back/call-me-back';
+import { PgCallMeBackRepository } from './voice/call-me-back/pg-call-me-back';
+import { runCallMeBackSweep } from './workers/call-me-back-worker';
 import { PgTechnicianLocationPingRepository } from './telemetry/pg-technician-location-ping';
 import { PgApprovalRepository } from './estimates/pg-approval';
 import { PgEditDeltaRepository } from './estimates/pg-edit-delta';
@@ -208,19 +253,30 @@ import {
   InMemoryDeliveryProvider,
 } from './notifications/delivery-provider';
 import { TwilioDeliveryProvider } from './notifications/twilio-delivery-provider';
+import { PerTenantTwilioDeliveryProvider } from './notifications/per-tenant-twilio-delivery-provider';
 import { SendService } from './notifications/send-service';
 import {
   InMemoryDispatchRepository,
   PgDispatchRepository,
 } from './notifications/dispatch-repository';
-import { SendServiceInvoiceDeliveryProvider } from './notifications/invoice-delivery-adapter';
 import { PublicEstimateService } from './estimates/public-estimate-service';
 import { createPublicEstimatesRouter } from './routes/public-estimates';
 import { PublicInvoiceService } from './invoices/public-invoice-service';
 import { createPublicInvoicesRouter } from './routes/public-invoices';
 import { createPublicPaymentsRouter } from './routes/public-payments';
+import { createOneTapApproveRouter } from './routes/one-tap-approve';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
+import { runOverdueInvoiceSweep } from './workers/overdue-invoice-worker';
+import { runGoogleReviewsSweep } from './workers/google-reviews';
+import { PgReviewRepository } from './reputation/pg-review';
+import { PgReviewPollStateRepository } from './reputation/poll-state';
+import { PgServiceCreditRepository } from './reputation/pg-service-credit';
+import { PgGoogleBusinessReplyResolver } from './reputation/pg-google-business-reply-resolver';
+import { MessageDeliveryReviewPrivateMessageSender } from './reputation/private-message-sender-adapter';
+import { NoopBrandVoiceLoader } from './reputation/brand-voice';
+import { PgCustomerLoader } from './reputation/match-customer';
+import { createCredentialResolver } from './integrations/credentials';
 import { InMemoryAgreementRepository } from './agreements/agreement';
 import { PgAgreementRepository } from './agreements/pg-agreement';
 import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
@@ -234,6 +290,10 @@ import {
 import { PgPortalSessionRepository } from './portal/pg-portal-session';
 import { createPortalRouter } from './routes/portal';
 import { createPublicPortalRouter } from './routes/public-portal';
+import {
+  PgTenantTransactionRunner,
+  InMemoryTransactionRunner,
+} from './db/tenant-transaction';
 import { createJob as createJobDomain } from './jobs/job';
 import { createInvoice as createInvoiceDomain } from './invoices/invoice';
 
@@ -259,26 +319,53 @@ import { InMemoryProposalExecutionRepository } from './proposals/proposal-execut
 import { PgProposalExecutionRepository } from './proposals/pg-proposal-execution';
 import { PgCallTranscriptTurnRepository } from './voice/pg-call-transcript-turn';
 import { InMemoryCallTranscriptTurnRepository } from './voice/call-transcript-turn';
-import {
-  OpenAICompatibleProvider,
-  type EmbeddingProvider,
-} from './ai/providers/openai-compatible';
+import type { EmbeddingProvider } from './ai/providers/openai-compatible';
 import { createVoiceActionRouterWorker, VoiceActionRouterPayload } from './workers/voice-action-router';
+import { PgEntityResolver } from './ai/resolution/pg-entity-resolver';
 import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
 import { DefaultAvailabilityFinder } from './ai/tasks/availability-finder';
 import { runExecutionSweep } from './workers/execution-worker';
-import { createLLMGateway, createMockLLMGateway } from './ai/gateway/factory';
+import {
+  createLLMGateway,
+  createMockLLMGateway,
+  createEmbeddingProvider,
+  shutdownCacheStores,
+} from './ai/gateway/factory';
+import * as gatewayFactory from './ai/gateway/factory';
+import { createAiHealthRouter } from './routes/ai-health';
+import { InMemoryAiRunRepository } from './ai/ai-run';
+import { PgAiRunRepository } from './ai/pg-ai-run';
+import { createEvaluationRouter } from './routes/evaluation';
+import { PgShadowComparisonStore } from './ai/evaluation/pg-shadow-comparison';
+import { InMemoryShadowComparisonStore } from './ai/evaluation/shadow-comparison';
 import { createTtsProvider } from './ai/tts/tts-provider';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
 import { createVoiceSessionsRouter } from './routes/voice-sessions';
+import { escalationOutcomeRouter } from './escalations/outcome-route';
+import { escalationEventsRouter } from './escalations/events-route';
+import { whisperRouter } from './telephony/whisper-route';
+import { WhisperCache } from './telephony/whisper-cache';
+import { requireTwilioSignature } from './telephony/twilio-signature';
 import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation';
 import { InMemoryProposalRepository } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 import { ProposalExecutor } from './proposals/execution/executor';
+import { IdempotencyGuard } from './proposals/execution/idempotency';
+import {
+  NoOpIdempotencyLockProvider,
+  PgIdempotencyLockProvider,
+} from './proposals/execution/idempotency-lock';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
-import { CreateCustomerVoiceExecutionHandler } from './proposals/execution/create-customer-handler';
-import { NoopInvoiceDeliveryProvider } from './proposals/execution/voice-extended-handlers';
+import { resolveInvoiceDeliveryProvider } from './proposals/execution/invoice-delivery-factory';
+import { resolveEstimateDeliveryProvider } from './proposals/execution/estimate-delivery-factory';
+import { InMemoryWorkingHoursRepository } from './availability/working-hours';
+import { PgWorkingHoursRepository } from './availability/pg-working-hours';
+import { InMemoryUnavailableBlockRepository } from './availability/unavailable-block';
+import { createTravelTimeProvider } from './scheduling/travel-time/factory';
+import { StubSkillMatcher } from './scheduling/skill-matcher';
+import { createSchedulingRouter } from './scheduling/routes';
+import type { FeasibilityDependencies } from './scheduling/feasibility-types';
 import {
   createDiffAnalysisWorker,
   InMemoryDiffAnalysisRepository,
@@ -294,7 +381,20 @@ import {
   NoopDelayNotificationService,
 } from './notifications/delay-notifications';
 import { TwilioDelayNotificationService } from './notifications/twilio-delay-notification-service';
-import { AppointmentConfirmationNotifier } from './notifications/appointment-confirmation-notifier';
+import { TransactionalCommsService } from './notifications/transactional-comms-service';
+import { runAppointmentReminderSweep } from './workers/appointment-reminder-worker';
+import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
+import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
+import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
+import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
+import { registerKeywordHandler } from './sms/inbound-dispatch';
+import {
+  registerProposalReplySms,
+  PgProposalSmsEventRepository,
+  InMemoryProposalSmsEventRepository,
+  createProposalSmsEvent,
+  createLlmEditInterpreter,
+} from './proposals/sms';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -306,105 +406,34 @@ import {
 import { requireAuth } from './middleware/auth';
 import { withTenantTransaction } from './middleware/tenant-context';
 import type { TenantIntegrationStatus } from './integrations/status-machine';
+// In-memory dev fallback for the WebhookEvent idempotency repo. Extracted from
+// this composition-root into its own module so app.ts no longer carries an
+// inline repository class. Production/staging always use the Pg variant
+// (createApp() throws if DATABASE_URL is missing in those environments).
+import { InMemoryWebhookEventRepository } from './webhooks/in-memory-webhook-event';
 
-/**
- * In-memory dev fallback for the WebhookEvent idempotency repo.
- *
- * The Pg-backed variant (PgWebhookEventRepository, P0-020) sits on top of the
- * `webhook_events` table. There is no shared interface declaration in the
- * webhook-event source (only the Pg class), and per the P0-023 hard rules we
- * cannot edit any pg-* source file. To keep the `pool ? Pg : InMemory`
- * wiring pattern consistent across all six newly wired entities, a minimal
- * Map-backed stub lives here. It mirrors PgWebhookEventRepository's public
- * surface (recordReceipt / markProcessed / markFailed / findById /
- * findUnprocessed) so dev runs without DATABASE_URL still type-check.
- *
- * Production and staging ALWAYS use the Pg variant — `createApp()` throws
- * above if DATABASE_URL is missing in those environments. So this stub is a
- * dev-only fallback by construction.
- */
-class InMemoryWebhookEventRepository {
-  private events = new Map<string, {
-    id: string;
-    provider: string;
-    eventId: string;
-    eventType: string;
-    payload: Record<string, unknown>;
-    receivedAt: Date;
-    processedAt: Date | null;
-    processingError: string | null;
-  }>();
-
-  private key(provider: string, eventId: string): string {
-    return `${provider}:${eventId}`;
-  }
-
-  async recordReceipt(
-    provider: string,
-    eventId: string,
-    eventType: string,
-    payload: Record<string, unknown>,
-  ): Promise<{ inserted: boolean; record: {
-    id: string;
-    provider: string;
-    eventId: string;
-    eventType: string;
-    payload: Record<string, unknown>;
-    receivedAt: Date;
-    processedAt: Date | null;
-    processingError: string | null;
-  } }> {
-    if (!provider) throw new Error('provider is required');
-    if (!eventId) throw new Error('eventId is required');
-    const k = this.key(provider, eventId);
-    const existing = this.events.get(k);
-    if (existing) {
-      return { inserted: false, record: { ...existing } };
-    }
-    const record = {
-      id: `${k}:${this.events.size + 1}`,
-      provider,
-      eventId,
-      eventType,
-      payload,
-      receivedAt: new Date(),
-      processedAt: null,
-      processingError: null,
-    };
-    this.events.set(k, record);
-    return { inserted: true, record: { ...record } };
-  }
-
-  async markProcessed(provider: string, eventId: string): Promise<void> {
-    const r = this.events.get(this.key(provider, eventId));
-    if (r) {
-      r.processedAt = new Date();
-      r.processingError = null;
-    }
-  }
-
-  async markFailed(provider: string, eventId: string, error: string): Promise<void> {
-    const r = this.events.get(this.key(provider, eventId));
-    if (r) {
-      r.processingError = error;
-    }
-  }
-
-  async findById(provider: string, eventId: string) {
-    const r = this.events.get(this.key(provider, eventId));
-    return r ? { ...r } : null;
-  }
-
-  async findUnprocessed(limit = 100) {
-    return Array.from(this.events.values())
-      .filter((r) => r.processedAt === null && r.processingError === null)
-      .sort((a, b) => a.receivedAt.getTime() - b.receivedAt.getTime())
-      .slice(0, limit)
-      .map((r) => ({ ...r }));
-  }
-}
+// Composition-root helpers extracted into ./bootstrap. Imported for local use
+// inside createApp() AND re-exported so existing tests that import them from
+// '../../src/app' keep working. (A bare `export { X } from './m'` re-export
+// does NOT bind X into local scope, so a local import is required too.)
+import { buildHelmetOptions } from './bootstrap/helmet-options';
+import { checkMetricsAuth, type MetricsAuthResult } from './bootstrap/metrics-auth';
+export { buildHelmetOptions, checkMetricsAuth, type MetricsAuthResult };
 
 export function createApp(): express.Express {
+  // §11 H3: Initialize Sentry FIRST so any error thrown during startup
+  // or in handler construction below is captured. initSentry() is a no-op
+  // when SENTRY_DSN is unset (dev/test), so this is safe in every env.
+  // The instrument() wrappers on the four critical paths read the registered
+  // client via getSentryClient() — without setSentryClient() they fall back
+  // to the no-op client and exceptions are silently swallowed by the monitor.
+  const sentryClient = initSentry({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.NODE_ENV || 'development',
+    release: process.env.GIT_SHA ?? process.env.RAILWAY_GIT_COMMIT_SHA,
+  });
+  setSentryClient(sentryClient);
+
   const app = express();
 
   // Behind Railway / Cloudflare / any reverse proxy: trust the immediate
@@ -417,6 +446,17 @@ export function createApp(): express.Express {
   // Mount with express.raw() BEFORE express.json() so this path gets a Buffer
   // and the global json() middleware skips it (body-parser sets req._body = true).
   app.use('/webhooks/stripe', express.raw({ type: 'application/json' }));
+
+  // Clerk/svix sign the raw request bytes too. Same treatment as Stripe:
+  // capture the raw Buffer here so the handler verifies over the exact bytes
+  // svix signed, instead of re-serializing the parsed object (key order /
+  // whitespace differences would fail legit webhooks and break tenant bootstrap).
+  app.use('/webhooks/clerk', express.raw({ type: 'application/json' }));
+
+  // Vapi signs its server messages (serverUrlSecret). Capture the raw Buffer
+  // here so the HMAC verification in handleVapiCallEvent sees the exact bytes
+  // Vapi signed — same treatment as Stripe/Clerk.
+  app.use('/webhooks/vapi', express.raw({ type: 'application/json' }));
 
   // Twilio posts application/x-www-form-urlencoded — mount the matching parser
   // before global express.json() so /webhooks/twilio/* routes get populated
@@ -434,8 +474,18 @@ export function createApp(): express.Express {
   // can throw on missing CORS_ORIGIN before we wire the middleware.
   const config = loadConfig();
 
-  // Swagger UI — no auth required
+  // Swagger UI — no auth required.
+  // Mounted BEFORE helmet() so the CSP below doesn't break swagger-ui-express
+  // (which injects inline scripts/styles to render). The /api-docs surface is
+  // already public + read-only; the security trade-off is acceptable.
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
+
+  // D1-3 — helmet hardening. Adds CSP / HSTS / X-Frame-Options / nosniff /
+  // referrer-policy headers the security audit (docs/pre-launch-hardening-
+  // 2026-05-16.md) flagged as missing. See `buildHelmetOptions` below for
+  // the full CSP whitelist + rationale.
+  const isProd = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod';
+  app.use(helmet(buildHelmetOptions(isProd)));
 
   // CORS — use explicit origin in prod/staging (validated by config), wildcard in dev/test.
   app.use(cors({
@@ -497,9 +547,42 @@ export function createApp(): express.Express {
   const healthRouter = createHealthRouter('1.0.0', process.env.NODE_ENV || 'development', checks);
   app.use('/', healthRouter);
 
-  // Prometheus metrics. Mounted on the public surface deliberately —
-  // production should rely on network-level allowlist (ingress / VPC).
-  app.get('/metrics', async (_req, res) => {
+  // P2-029 — AI provider health endpoint. Public, no auth required.
+  // Uses the shared breaker registry populated by createLLMGateway().
+  // Reading gatewayFactory.sharedBreakerRegistry at request time (not at
+  // mount time) ensures the registry is populated after createLLMGateway()
+  // is called later in the boot sequence.
+  app.use('/api/health', (req, res, next) => {
+    const registry = gatewayFactory.sharedBreakerRegistry;
+    if (!registry) {
+      // Gateway not yet initialised (e.g. mock mode without AI_PROVIDER_API_KEY)
+      if (req.path === '/ai') {
+        res.status(200).json({ providers: [] });
+        return;
+      }
+      next();
+      return;
+    }
+    createAiHealthRouter(registry)(req, res, next);
+  });
+
+  // Prometheus metrics — gated by `checkMetricsAuth` (METRICS_TOKEN bearer).
+  // The endpoint exposes tenant ids, request volumes, and pool counts, so
+  // network-level allowlists alone are not enough on a public hostname.
+  app.get('/metrics', async (req, res) => {
+    const auth = checkMetricsAuth(
+      req.headers.authorization,
+      process.env.METRICS_TOKEN,
+      process.env.NODE_ENV,
+    );
+    if (!auth.ok) {
+      if (auth.headers) {
+        for (const [k, v] of Object.entries(auth.headers)) res.setHeader(k, v);
+      }
+      res.status(auth.status).json(auth.body);
+      return;
+    }
+
     try {
       const { renderMetrics } = await import('./monitoring/metrics');
       const { contentType, body } = await renderMetrics();
@@ -532,6 +615,7 @@ export function createApp(): express.Express {
     : new InMemorySettingsRepository();
   // Constructed early so the Stripe webhook handler can record payments.
   const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
+  const webhookEstimateRepo = pool ? new PgEstimateRepository(pool) : new InMemoryEstimateRepository();
   const webhookPaymentRepo = pool ? new PgPaymentRepository(pool) : new InMemoryPaymentRepository();
   // Tier 4 (Deposit rules — PR 3b). Hoisted up so the Stripe webhook
   // and the rest of the app share a single instance — InMemory repos
@@ -544,7 +628,7 @@ export function createApp(): express.Express {
   const pendingInvitationRepo = pool
     ? new PgPendingInvitationRepository(pool)
     : new InMemoryPendingInvitationRepository();
-  // Tier 4 (Subscription — Fieldly billing). Hoisted up so the Stripe
+  // Tier 4 (Subscription — Rivet billing). Hoisted up so the Stripe
   // webhook can update the cached subscription status when
   // customer.subscription.* events arrive. Single instance shared
   // with the /api/billing route. Requires both Pg pool + Stripe key
@@ -575,99 +659,53 @@ export function createApp(): express.Express {
   const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
   const webhookAuditRepo = pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository();
   const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
+  // Blocker 1 — durable idempotency store for the Stripe/Clerk dedup path
+  // (handleWebhookEvent). Postgres-backed in real deploys; left undefined
+  // without a pool (tests/dev) so createWebhookRouter falls back to its
+  // in-memory map. createWebhookRouter throws if this is missing in prod.
+  const webhookRepo = pool ? new PgWebhookRepository(pool) : undefined;
+
+  // §7 Phase 1 — DNC repository + STOP/START keyword handler registration.
+  // The inbound-SMS dispatcher routes any matching first-token to these
+  // handlers, which mutate tenant_dnc_list. Suppression at outbound-send
+  // time is layered on top in send-service / appointment-confirmation-notifier.
+  const dncRepo = pool ? new PgDncRepository(pool) : new InMemoryDncRepository();
+  registerKeywordHandler(buildStopKeywordHandler({ dncRepo }), { overwrite: true });
+  registerKeywordHandler(buildStartKeywordHandler({ dncRepo }), { overwrite: true });
 
   // Resolves per-tenant integration credentials for inbound webhook signature
   // verification. Returns null when no row exists or the integration provider
   // doesn't match — recordTwilio / recordSendGrid then 403 with audit.
-  const integrationResolver = pool
-    ? async (tenantId: string, provider: 'twilio' | 'sendgrid') => {
-        const { decrypt } = await import('./integrations/crypto');
-        const { setTenantContext } = await import('./db/schema');
-        const encKey = process.env.TENANT_ENCRYPTION_KEY;
+  const integrationResolver = pool ? createIntegrationResolver(pool) : undefined;
 
-        // tenant_integrations is FORCE RLS — must set app.current_tenant_id
-        // GUC on a dedicated client/transaction. Webhook handlers run outside
-        // withTenantTransaction so we open one here.
-        const client = await pool.connect();
-        let rows: Array<{
-          subaccount_sid: string | null;
-          auth_token_primary_enc: string | null;
-          auth_token_secondary_enc: string | null;
-          provider_data: Record<string, unknown>;
-        }> = [];
-        try {
-          await client.query('BEGIN');
-          await client.query(setTenantContext(tenantId));
-          const result = await client.query<{
-            subaccount_sid: string | null;
-            auth_token_primary_enc: string | null;
-            auth_token_secondary_enc: string | null;
-            provider_data: Record<string, unknown>;
-          }>(
-            `SELECT subaccount_sid, auth_token_primary_enc, auth_token_secondary_enc, provider_data
-             FROM tenant_integrations
-             WHERE tenant_id = $1 AND provider = $2`,
-            [tenantId, provider]
-          );
-          rows = result.rows;
-          await client.query('COMMIT');
-        } catch (err) {
-          await client.query('ROLLBACK');
-          throw err;
-        } finally {
-          client.release();
-        }
-        const row = rows[0];
-        if (!row) return null;
-        // Decryption is only needed for Twilio auth tokens. SendGrid integrations
-        // store a public verification key (not encrypted) in provider_data, so
-        // the resolver shouldn't 403 valid SendGrid webhooks just because
-        // TENANT_ENCRYPTION_KEY isn't configured.
-        const canDecrypt = Boolean(encKey);
-        if (provider === 'twilio' && !canDecrypt) return null;
-        return {
-          tenantId,
-          provider,
-          subaccountSid: row.subaccount_sid ?? undefined,
-          authTokenPrimary: row.auth_token_primary_enc && canDecrypt
-            ? decrypt(row.auth_token_primary_enc, encKey!)
-            : undefined,
-          authTokenSecondary: row.auth_token_secondary_enc && canDecrypt
-            ? decrypt(row.auth_token_secondary_enc, encKey!)
-            : undefined,
-          sendgridPublicKeyPem: (row.provider_data?.sendgridPublicKeyPem as string | undefined),
-        };
-      }
-    : undefined;
-
-  app.use(
-    '/webhooks',
-    createWebhookRouter(config, {
-      tenantRepo,
-      settingsRepo: webhookSettingsRepo,
-      invoiceRepo: webhookInvoiceRepo,
-      paymentRepo: webhookPaymentRepo,
-      jobRepo,
-      // Tier 4 (Team members — PR 3). Invitee join-tenant path on
-      // user.created. The same shared pending invitation repo + pool
-      // backs the /api/users invite routes so an invite written by
-      // the route is found by the webhook on accept.
-      pendingInvitationRepo,
-      pool: pool ?? undefined,
-      // Tier 4 (Subscription — PR 1). Same instance the route uses,
-      // so a customer.subscription.* webhook updates the cached
-      // status the GET /api/billing/subscription endpoint reads.
-      // Wired only when both pool and STRIPE_SECRET_KEY exist.
-      billingService,
-      connectService,
-      stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
-      queue,
-      appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
-      auditRepo: webhookAuditRepo,
-      webhookEventRepo,
-      integrationResolver,
-    })
-  );
+  const webhookRouterDeps: import('./webhooks/routes').WebhookRouterDeps = {
+    tenantRepo,
+    settingsRepo: webhookSettingsRepo,
+    invoiceRepo: webhookInvoiceRepo,
+    estimateRepo: webhookEstimateRepo,
+    paymentRepo: webhookPaymentRepo,
+    jobRepo,
+    // Tier 4 (Team members — PR 3). Invitee join-tenant path on
+    // user.created. The same shared pending invitation repo + pool
+    // backs the /api/users invite routes so an invite written by
+    // the route is found by the webhook on accept.
+    pendingInvitationRepo,
+    pool: pool ?? undefined,
+    // Tier 4 (Subscription — PR 1). Same instance the route uses,
+    // so a customer.subscription.* webhook updates the cached
+    // status the GET /api/billing/subscription endpoint reads.
+    // Wired only when both pool and STRIPE_SECRET_KEY exist.
+    billingService,
+    connectService,
+    stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+    queue,
+    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
+    auditRepo: webhookAuditRepo,
+    webhookEventRepo,
+    webhookRepo,
+    integrationResolver,
+  };
+  app.use('/webhooks', createWebhookRouter(config, webhookRouterDeps));
 
   // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
   // Mounted before /api Clerk auth so unauthenticated presigned-style PUTs
@@ -685,8 +723,24 @@ export function createApp(): express.Express {
   const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
   const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository();
   const assignmentRepo     = pool ? new PgAssignmentRepository(pool)     : new InMemoryAssignmentRepository();
+  // Declared here (ahead of its first router use) so the jobs router's
+  // from-estimate scheduling deps can reference it.
+  const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
+  // Working hours are now Pg-backed in production (migration 137 added
+  // technician_working_hours), so the dispatch feasibility composer and the
+  // inbound-AI availability search enforce real working-hours rows instead of
+  // treating missing rows as no-conflict. The unavailable-block repo stays
+  // InMemory for now — wiring its Pg variant (table from migration 116) is a
+  // separate, out-of-scope change. InMemory variants stay for tests / no-pool.
+  const workingHoursRepo       = pool ? new PgWorkingHoursRepository(pool)     : new InMemoryWorkingHoursRepository();
+  const unavailableBlockRepo   = new InMemoryUnavailableBlockRepository();
+  const travelTimeProvider     = createTravelTimeProvider(process.env);
+  const skillMatcher           = new StubSkillMatcher();
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
   const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
+  const invoiceScheduleRepo = pool ? new PgInvoiceScheduleRepository(pool) : new InMemoryInvoiceScheduleRepository();
+  const batchInvoiceRunRepo = pool ? new PgBatchInvoiceRunRepository(pool) : new InMemoryBatchInvoiceRunRepository();
+  const batchInvoiceTxRunner = pool ? new PgTenantTransactionRunner(pool) : new InMemoryTransactionRunner();
   const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
   const expenseRepo        = pool ? new PgExpenseRepository(pool)        : new InMemoryExpenseRepository();
   // P5-017: Resolve the payment-link provider via the factory so the mock
@@ -701,12 +755,29 @@ export function createApp(): express.Express {
   const noteRepo           = pool ? new PgNoteRepository(pool)           : new InMemoryNoteRepository();
   const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
   const settingsRepo       = pool ? new PgSettingsRepository(pool)       : new InMemorySettingsRepository();
+  // Voice-parity (Feature 7) — call_me_back tasks (failed-transfer callbacks).
+  const callMeBackRepo     = pool ? new PgCallMeBackRepository(pool)     : new InMemoryCallMeBackRepository();
   // PR B (Tier 4 / AI approval rules) — shared per-tenant
   // auto-approve threshold resolver. One cached instance for all
   // entry points (twilio adapter, inapp adapter, voice-action-router
   // worker) so settings hits the DB at most once per tenant per TTL
   // window across the whole process.
   const thresholdResolver = createThresholdResolver(settingsRepo);
+  // Per-tenant scheduling context (IANA timezone) for the voice booking
+  // path. Delegates to settingsRepo (same RLS / withTenant path) so spoken
+  // times ("next Tuesday at 2pm") resolve against the TENANT's zone instead
+  // of a hardcoded one. A 60s cache mirrors thresholdResolver/voicePersona
+  // so a multi-segment chain doesn't re-query settings per segment. Best-
+  // effort: the router falls back to the product default when undefined.
+  const schedulingTzCache = new Map<string, { timezone?: string; expiresAt: number }>();
+  const tenantSchedulingResolver = async (tenantId: string) => {
+    const hit = schedulingTzCache.get(tenantId);
+    if (hit && hit.expiresAt > Date.now()) return { timezone: hit.timezone };
+    const settings = await settingsRepo.findByTenant(tenantId);
+    const timezone = settings?.timezone;
+    schedulingTzCache.set(tenantId, { timezone, expiresAt: Date.now() + 60_000 });
+    return { timezone };
+  };
   // B1 — per-tenant voice persona. 60-second LRU cache; shared by
   // both the Twilio and in-app adapters.
   const voicePersonaResolver = createVoicePersonaResolver(settingsRepo);
@@ -735,6 +806,42 @@ export function createApp(): express.Express {
   const approvalRepo       = pool ? new PgApprovalRepository(pool)       : new InMemoryApprovalRepository();
   const deltaRepo          = pool ? new PgEditDeltaRepository(pool)      : new InMemoryEditDeltaRepository();
   const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
+  const trainingAssetRepo = pool
+    ? new PgTrainingAssetRepository(pool)
+    : new InMemoryTrainingAssetRepository();
+  const privacyAuditRepo = pool
+    ? new PgPrivacyAuditRepository(pool)
+    : new InMemoryPrivacyAuditRepository();
+  // Holder set later once the vertical prompt resolver is built (it
+  // depends on canonicalPackRegistry, which is created further down).
+  // Lifecycle mutations call this to drop the cached prompt section
+  // for the affected tenant so admins see activate/archive without
+  // waiting for the 5-minute TTL.
+  let invalidateVerticalPromptCache: ((tenantId: string) => void) | null = null;
+  // §3B/3D/3E — operator-side classifier paths (voice-action-router worker
+  // and assistant chat router) are constructed BEFORE the vertical prompt
+  // resolver itself, so we hand them a lazy holder that defers to the real
+  // resolver once it's built (mirrors `invalidateVerticalPromptCache` above).
+  // Operator paths don't have a customerId in scope, so they only need the
+  // vertical resolver — the caller-plan resolver applies to inbound callers
+  // (twilio/inapp adapters), not to operator-spoken commands.
+  let operatorVerticalPromptResolver:
+    | ((tenantId: string) => Promise<string | undefined>)
+    | null = null;
+  const operatorVerticalResolverShim = async (
+    tenantId: string,
+  ): Promise<string | undefined> => {
+    return operatorVerticalPromptResolver
+      ? operatorVerticalPromptResolver(tenantId)
+      : undefined;
+  };
+  const trainingAssetService = new TrainingAssetService({
+    assetRepo: trainingAssetRepo,
+    privacyAuditRepo,
+    auditRepo,
+    redaction: new TrainingAssetRedactionService(),
+    invalidatePromptCache: (tenantId) => invalidateVerticalPromptCache?.(tenantId),
+  });
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
   const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
   const jobPhotoRepo       = pool ? new PgJobPhotoRepository(pool)       : new InMemoryJobPhotoRepository();
@@ -754,16 +861,7 @@ export function createApp(): express.Express {
   const agreementRunRepo = pool
     ? new PgAgreementRunRepository(pool)
     : new InMemoryAgreementRunRepository();
-  // P0-023: WebhookEvent idempotency repo. PgWebhookEventRepository (P0-020)
-  // is wired here so a future webhook handler can pull it from app-level
-  // wiring without re-instantiating. The webhooks/routes.ts router still
-  // uses its own InMemoryWebhookRepository for the legacy
-  // (provider/event/svix-id) shape — that one is unchanged.
-  const webhookEventRepo2   = webhookEventRepo;
   const timeEntryRepo      = pool ? new PgTimeEntryRepository(pool)       : new InMemoryTimeEntryRepository();
-  // Reference the variable so TS doesn't drop it; downstream consumers will
-  // attach in a follow-up PR.
-  void webhookEventRepo2;
 
   const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
     process.env as NodeJS.ProcessEnv
@@ -779,12 +877,24 @@ export function createApp(): express.Express {
 
   // URL-based provider for the queue worker pipeline.
   const transcriptionProvider = createWhisperTranscriptionProvider(process.env);
+  // AI-run repository — tracks every LLM call lifecycle (pending → running → completed/failed).
+  // Pg-backed in production; InMemory when DATABASE_URL is unset (dev/test).
+  const aiRunRepo = pool ? new PgAiRunRepository(pool) : new InMemoryAiRunRepository();
+
+  // P2-030 — shadow comparison store.
+  // PgShadowComparisonStore when DATABASE_URL + SHADOW_LLM_ENABLED=true;
+  // InMemoryShadowComparisonStore otherwise (zero overhead, data not durable).
+  const shadowStore =
+    pool && process.env.SHADOW_LLM_ENABLED === 'true'
+      ? new PgShadowComparisonStore(pool)
+      : new InMemoryShadowComparisonStore();
+
   // LLM gateway — single instance shared across intent classifier,
   // voice-action-router task handlers, and future AI features.
   // Falls back to a MockLLMProvider in dev/test so the app boots
   // without an AI_PROVIDER_API_KEY.
   const llmGateway = config.AI_PROVIDER_API_KEY
-    ? createLLMGateway(config)
+    ? createLLMGateway(config, { aiRunRepo, shadowStore })
     : createMockLLMGateway('{"intentType":"unknown","confidence":0}').gateway;
 
   // Phase 4a-1: dedicated EmbeddingProvider for the RAG corpus. The
@@ -792,12 +902,8 @@ export function createApp(): express.Express {
   // doesn't apply to embeddings (`text-embedding-3-small` only). When
   // AI_PROVIDER_API_KEY is unset, embeddings are unavailable and the
   // ingestion workers stay un-registered — the rest of the app boots.
-  const embeddingProvider: EmbeddingProvider | null = config.AI_PROVIDER_API_KEY
-    ? new OpenAICompatibleProvider({
-        apiKey: config.AI_PROVIDER_API_KEY,
-        baseURL: config.AI_PROVIDER_BASE_URL ?? 'https://api.openai.com/v1',
-      })
-    : null;
+  const embeddingProvider: EmbeddingProvider | null =
+    createEmbeddingProvider(config);
 
   // Phase 4a-1 repositories — used by transcript-ingestion-worker and
   // proposal-correction-worker. All Pg-backed in production with
@@ -831,28 +937,42 @@ export function createApp(): express.Express {
   // boots in dev without delivery credentials. Send routes return
   // 503 when sendService is undefined.
   const dispatchRepo = pool ? new PgDispatchRepository(pool) : new InMemoryDispatchRepository();
-  const messageDelivery: MessageDeliveryProvider | null =
+  let messageDelivery: MessageDeliveryProvider | null;
+  if (
     process.env.TWILIO_ACCOUNT_SID &&
     process.env.TWILIO_AUTH_TOKEN &&
     process.env.TWILIO_FROM_NUMBER &&
     process.env.SENDGRID_API_KEY &&
     process.env.SENDGRID_FROM_EMAIL
-      ? new TwilioDeliveryProvider({
-          sms: {
-            accountSid: process.env.TWILIO_ACCOUNT_SID,
-            authToken: process.env.TWILIO_AUTH_TOKEN,
-            fromNumber: process.env.TWILIO_FROM_NUMBER,
-          },
-          email: {
-            apiKey: process.env.SENDGRID_API_KEY,
-            fromEmail: process.env.SENDGRID_FROM_EMAIL,
-            fromName: process.env.SENDGRID_FROM_NAME,
-            replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
-          },
-        })
-      : process.env.NODE_ENV === 'production'
-        ? null
-        : new InMemoryDeliveryProvider();
+  ) {
+    // The global Twilio/SendGrid provider handles email and any send that
+    // carries no tenantId; the global Twilio SMS creds also serve as the
+    // dev/test fallback inside getTenantTwilioCreds.
+    const baseDelivery = new TwilioDeliveryProvider({
+      sms: {
+        accountSid: process.env.TWILIO_ACCOUNT_SID,
+        authToken: process.env.TWILIO_AUTH_TOKEN,
+        fromNumber: process.env.TWILIO_FROM_NUMBER,
+      },
+      email: {
+        apiKey: process.env.SENDGRID_API_KEY,
+        fromEmail: process.env.SENDGRID_FROM_EMAIL,
+        fromName: process.env.SENDGRID_FROM_NAME,
+        replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
+      },
+    });
+    // Feature 7 — when a Postgres pool is available, route per-tenant SMS
+    // through each tenant's own Twilio subaccount (failing closed when a
+    // tenant has no credentials). Without a pool we cannot resolve per-tenant
+    // creds, so keep the global provider.
+    messageDelivery = pool
+      ? new PerTenantTwilioDeliveryProvider({ pool, base: baseDelivery })
+      : baseDelivery;
+  } else if (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging') {
+    messageDelivery = null;
+  } else {
+    messageDelivery = new InMemoryDeliveryProvider();
+  }
   const publicBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
   const sendService = messageDelivery
     ? new SendService({
@@ -863,9 +983,54 @@ export function createApp(): express.Express {
         customerRepo,
         settingsRepo,
         dispatchRepo,
+        dncRepo,
         publicBaseUrl,
       })
     : undefined;
+
+  // ── P12-004 wiring — one-tap approve (unsupervised queue_and_sms) ────────
+  // HMAC secret for the single-use approve token in the owner SMS. In prod /
+  // staging it must be configured explicitly; dev falls back to a fixed
+  // secret so the flow is exercisable without env setup.
+  const oneTapSecret =
+    process.env.ONE_TAP_APPROVE_SECRET ??
+    (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging'
+      ? undefined
+      : 'dev-one-tap-approve-secret');
+  const oneTapApiBaseUrl = (
+    process.env.PUBLIC_API_URL ?? process.env.APP_PUBLIC_URL ?? 'http://localhost:3000'
+  ).replace(/\/+$/, '');
+  // Durable single-use nonce store: reuse the webhook_events idempotency
+  // primitive (unique index on (source, idempotency_key), INSERT … ON
+  // CONFLICT DO NOTHING) so a one-tap link stays single-use across restarts
+  // and across instances. In-memory repo backs dev without a DATABASE_URL.
+  const consumeOneTapNonce = async (nonce: string): Promise<boolean> => {
+    const receipt = await webhookEventRepo.recordReceipt(
+      'one_tap_approve',
+      nonce,
+      'one_tap_approve_nonce',
+      {},
+    );
+    return receipt.inserted;
+  };
+  // Capture as const so the SMS closure narrows (messageDelivery is a let).
+  const oneTapDelivery = messageDelivery;
+  const oneTapSmsSender = oneTapDelivery
+    ? async (to: string, body: string): Promise<void> => {
+        await oneTapDelivery.sendSms({ to, body });
+      }
+    : undefined;
+  // Owner/backup-supervisor phone for the unsupervised SMS: tenant_settings
+  // owner_phone first, then the backup supervisor's mobile_number.
+  const resolveUnsupervisedOwnerPhone = async (tenantId: string): Promise<string | null> => {
+    const settings = await settingsRepo.findByTenant(tenantId);
+    if (settings?.ownerPhone) return settings.ownerPhone;
+    if (settings?.backupSupervisorUserId) {
+      const backup = await userRepo.findById(tenantId, settings.backupSupervisorUserId);
+      return backup?.mobileNumber ?? null;
+    }
+    return null;
+  };
 
   const workerLogger = createLogger({
     service: 'transcription-worker',
@@ -900,6 +1065,13 @@ export function createApp(): express.Express {
           recordingId: event.recordingId,
         });
       },
+      // Blocker 12 — encrypt retained raw transcripts at rest. Prefer a
+      // dedicated TRANSCRIPT_ENCRYPTION_KEY but fall back to the
+      // already-provisioned TENANT_ENCRYPTION_KEY so encryption is active in
+      // prod without a new ops step. When neither is set the raw transcript
+      // is not retained (no plaintext PII at rest).
+      rawTranscriptEncryptionKey:
+        process.env.TRANSCRIPT_ENCRYPTION_KEY ?? process.env.TENANT_ENCRYPTION_KEY,
     }
   );
 
@@ -976,50 +1148,163 @@ export function createApp(): express.Express {
       );
     }
   }
+
+  // ── P2-034 wiring — SMS approval transport ───────────────────────────────
+  // Outbound: the unsupervised queue_and_sms body now carries reply tokens
+  // (Y / N / EDIT) and each render is persisted to proposal_sms_events.
+  // Inbound: the owner's reply (verified against tenant_settings.owner_phone)
+  // approves/rejects through the EXISTING proposal actions, or opens a
+  // 10-minute edit session interpreted by the LLM gateway and re-rendered
+  // for re-approval. Free text with no context gets one clarification nudge.
+  const proposalSmsEventRepo = pool
+    ? new PgProposalSmsEventRepository(pool)
+    : new InMemoryProposalSmsEventRepository();
+  registerProposalReplySms(
+    {
+      proposalRepo,
+      smsEventRepo: proposalSmsEventRepo,
+      settingsRepo,
+      userRepo,
+      auditRepo,
+      appointmentRepo,
+      ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
+      interpretEdit: createLlmEditInterpreter(llmGateway),
+    },
+    { overwrite: true },
+    // YES is also the compliance opt-in keyword — registerProposalReplySms
+    // upgrades the plain START handler to the opt-in-first composite.
+    { dncRepo },
+  );
+  const recordProposalSmsRender = async (args: {
+    tenantId: string;
+    proposalId: string;
+    body: string;
+  }): Promise<void> => {
+    await proposalSmsEventRepo.create(
+      createProposalSmsEvent({
+        tenantId: args.tenantId,
+        proposalId: args.proposalId,
+        direction: 'outbound',
+        kind: 'proposal_rendered',
+        body: args.body,
+      }),
+    );
+  };
   // Voice intents (add_note, send_invoice, record_payment) execute
-  // against real domain repositories. Note + payment use the same
-  // in-memory or Pg repos already wired above. Invoice delivery
-  // routes through the unified SendService when delivery credentials
-  // are configured; otherwise falls back to the Noop so the proposal
-  // executor stays exercised in dev/test without sending bytes.
-  const invoiceDeliveryProvider = sendService
-    ? new SendServiceInvoiceDeliveryProvider(sendService)
-    : new NoopInvoiceDeliveryProvider();
+  // against real domain repositories. Invoice delivery routes through
+  // SendService when configured; resolveInvoiceDeliveryProvider throws at
+  // boot in prod/staging without credentials; dev/test uses Noop.
+  const invoiceDeliveryProvider = resolveInvoiceDeliveryProvider({
+    nodeEnv: config.NODE_ENV,
+    sendService,
+  });
+  const estimateDeliveryProvider = resolveEstimateDeliveryProvider({
+    nodeEnv: config.NODE_ENV,
+    sendService,
+  });
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
     : new InMemoryDispatchAnalyticsRepository();
-  const schedulingConfirmationNotifier = messageDelivery
-    ? new AppointmentConfirmationNotifier({
+  const transactionalComms = messageDelivery
+    ? new TransactionalCommsService({
         delivery: messageDelivery,
         appointmentRepo,
         jobRepo,
         customerRepo,
         settingsRepo,
+        invoiceRepo,
         dispatchRepo,
+        dncRepo,
       })
     : undefined;
+  if (transactionalComms) {
+    webhookRouterDeps.paymentReceiptNotifier = transactionalComms;
+  }
+  const feasibilityDeps: FeasibilityDependencies = {
+    assignmentRepo,
+    appointmentRepo,
+    jobRepo,
+    locationRepo,
+    workingHoursRepo,
+    unavailableBlockRepo,
+    travelTimeProvider,
+    skillMatcher,
+  };
+  // P7-026 — wire the review-response execution handler's three
+  // optional deps so an approved review_response_proposal actually
+  // mutates state instead of falling through the handler's "no dep
+  // wired" guards. Hoisted ahead of the createExecutionHandlerRegistry
+  // call (the polling worker, registered later, reuses these
+  // instances).
+  const googleReviewsReviewRepo = pool ? new PgReviewRepository(pool) : null;
+  const googleReviewsPollStateRepo = pool
+    ? new PgReviewPollStateRepository(pool)
+    : null;
+  const googleReviewsCredResolver = pool
+    ? createCredentialResolver({ pool })
+    : null;
+  const serviceCreditRepo = pool ? new PgServiceCreditRepository(pool) : undefined;
+  const googleReplyResolver =
+    googleReviewsReviewRepo && googleReviewsCredResolver
+      ? new PgGoogleBusinessReplyResolver(
+          googleReviewsReviewRepo,
+          googleReviewsCredResolver,
+        )
+      : undefined;
+  const reviewPrivateMessageSender = messageDelivery
+    ? new MessageDeliveryReviewPrivateMessageSender(
+        messageDelivery,
+        customerRepo,
+      )
+    : undefined;
+  // Built ahead of the execution registry so the notify_delay handler can
+  // send a real delay notice; reused by the delay-notification worker below.
+  const delayNotificationService = messageDelivery
+    ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo)
+    : new NoopDelayNotificationService();
   const executionHandlers = createExecutionHandlerRegistry({
+    customerRepo,
+    jobRepo,
+    locationRepo,
     appointmentRepo,
     assignmentRepo,
     invoiceRepo,
     estimateRepo,
     settingsRepo,
+    scheduleRepo: invoiceScheduleRepo,
+    proposalRepo,
+    docRevisionRepo: documentRevisionRepo,
+    editDeltaRepo: deltaRepo,
     noteRepo,
     paymentRepo,
     invoiceDeliveryProvider,
+    estimateDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
-    schedulingNotifier: schedulingConfirmationNotifier,
+    schedulingNotifier: transactionalComms,
+    transactionalComms,
     expenseRepo,
     auditRepo,
+    feasibilityDeps,
+    ...(serviceCreditRepo ? { serviceCreditRepo } : {}),
+    ...(googleReplyResolver ? { googleReplyResolver } : {}),
+    ...(reviewPrivateMessageSender ? { reviewPrivateMessageSender } : {}),
+    // Full-app voice capability execution deps (convert_lead / mark_lead_lost,
+    // log_time_entry, request_feedback, notify_delay). Without these the
+    // respective handlers degrade to a validated passthrough.
+    leadRepo,
+    timeEntryService: new TimeEntryService(timeEntryRepo, auditRepo),
+    feedbackRepo: feedbackRequestRepo,
+    delayNotificationService,
   });
-  // P18-001: replace the stub create_customer handler from the registry
-  // with the wired-up voice handler so an approved create_customer
-  // proposal actually persists a Customer row + audit trail. The base
-  // registry installs a synthetic-id stub so unit tests can run
-  // without a CustomerRepository dep; production overrides it here.
-  executionHandlers.set(
-    'create_customer',
-    new CreateCustomerVoiceExecutionHandler(customerRepo, auditRepo),
+  // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
+  // default to `proposal-run:{tenant}:{id}` when callers omit one.
+  const proposalIdempotencyLock = pool
+    ? new PgIdempotencyLockProvider(pool)
+    : new NoOpIdempotencyLockProvider();
+  const proposalIdempotencyGuard = new IdempotencyGuard(
+    proposalExecutionRepo,
+    proposalRepo,
+    proposalIdempotencyLock,
   );
   // Phase 4a-1: persist a proposal_executions row on success + fire the
   // proposal-correction-worker. The onExecuted callback is failure-soft
@@ -1028,7 +1313,7 @@ export function createApp(): express.Express {
   const proposalExecutor = new ProposalExecutor(
     executionHandlers,
     proposalRepo,
-    undefined,
+    proposalIdempotencyGuard,
     {
       executionRepo: proposalExecutionRepo,
       onExecuted: async (event) => {
@@ -1104,9 +1389,6 @@ export function createApp(): express.Express {
     new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
     delayNoticeStateRepo,
   );
-  const delayNotificationService = messageDelivery
-    ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo)
-    : new NoopDelayNotificationService();
   const delayNotificationWorker = createDelayNotificationWorker({
     service: delayNotificationService,
     stateRepo: delayNoticeStateRepo,
@@ -1116,11 +1398,66 @@ export function createApp(): express.Express {
     delayNotificationWorker.type,
     delayNotificationWorker as import('./queues/queue').WorkerHandler<unknown>
   );
+  // Blocker 5 — background-loop lifecycle + leader election.
+  //
+  // (1) Every setInterval below is registered here so graceful shutdown can
+  //     clearInterval them before the pg pool drains; otherwise a tick fires
+  //     mid-teardown and throws on a closed pool. `shuttingDown` also stops
+  //     leader-gated sweeps from starting new work during shutdown.
+  // (2) Tenant-wide sweeps (recurring agreements, overdue invoices,
+  //     appointment/estimate reminders, estimate expiry, Google reviews) run
+  //     in-process on EVERY instance. On a multi-instance deploy that means
+  //     duplicate invoices/reminders/review replies. `runAsLeader` gates each
+  //     tick behind a Postgres advisory lock so exactly one instance runs it;
+  //     others skip. Single-instance launch (or in-memory dev with no pool)
+  //     always runs. The execution worker and queue poll loop are NOT gated —
+  //     they are already multi-instance-safe (claimForExecution / FOR UPDATE
+  //     SKIP LOCKED) and gating them would needlessly serialize throughput.
+  const backgroundIntervals: NodeJS.Timeout[] = [];
+  let shuttingDown = false;
+  const registerInterval = (handle: NodeJS.Timeout): NodeJS.Timeout => {
+    backgroundIntervals.push(handle);
+    return handle;
+  };
+  const SWEEP_LOCK = {
+    recurringAgreements: 590001,
+    overdueInvoice: 590002,
+    appointmentReminder: 590003,
+    estimateReminder: 590004,
+    estimateExpiry: 590005,
+    googleReviews: 590006,
+    batchInvoice: 590007,
+    callMeBack: 590008,
+  } as const;
+  const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
+    if (shuttingDown) return;
+    if (!pool) {
+      // In-memory dev: no coordination needed (sweeps no-op with no tenants).
+      await work();
+      return;
+    }
+    const client = await pool.connect();
+    try {
+      const res = await client.query<{ locked: boolean }>(
+        'SELECT pg_try_advisory_lock($1) AS locked',
+        [lockKey],
+      );
+      if (!res.rows[0]?.locked) return; // another instance owns this tick
+      try {
+        await work();
+      } finally {
+        await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
+      }
+    } finally {
+      client.release();
+    }
+  };
+
   const executionWorkerLogger = createLogger({
     service: 'execution-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  setInterval(async () => {
+  registerInterval(setInterval(async () => {
     try {
       await runExecutionSweep({
         proposalRepo,
@@ -1132,7 +1469,7 @@ export function createApp(): express.Express {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-  }, 1000);
+  }, 1000));
 
   // voice-action-router — consumes transcripts enqueued by the
   // transcription worker's onTranscribed hook, classifies intent,
@@ -1163,7 +1500,43 @@ export function createApp(): express.Express {
     slotConflictChecker,
     availabilityFinder,
     thresholdResolver,
+    tenantSchedulingResolver,
     appointmentRepo,
+    // P22 — catalog grounding: drafted invoice/estimate line items get
+    // priced from the tenant's catalog instead of trusting the LLM.
+    catalogRepo,
+    // P8 — "three Bobs": free-text customer/job references resolve to
+    // verified tenant IDs (pg_trgm) before drafting; ambiguous matches
+    // become one-tap clarifications. In-memory mode (no pool) skips
+    // resolution, same as before.
+    ...(pool ? { entityResolver: new PgEntityResolver(pool) } : {}),
+    // Lets reschedule/cancel/confirm scope appointment resolution to the
+    // verified caller's own appointments (appointment → job → customerId).
+    jobRepo,
+    // §3B/3D/3E — operator voice commands need the same vertical
+    // terminology + intake-question disambiguation the customer-facing
+    // adapters get. The shim is wired here because the real resolver
+    // is built ~280 lines below; once `verticalPromptResolver` is
+    // constructed, `operatorVerticalPromptResolver` is assigned and the
+    // shim starts returning live data on the next classifier call.
+    verticalPromptResolver: operatorVerticalResolverShim,
+    // P12-004 — unsupervised proposal routing: when no supervisor is
+    // present and the tenant routing is queue_and_sms (default), send the
+    // owner a one-tap approve SMS with a signed single-use link. Audit
+    // event `unsupervised_proposal_routed` fires on every routed proposal.
+    unsupervisedRouting: {
+      auditRepo,
+      ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
+      ...(oneTapSecret ? { secret: oneTapSecret } : {}),
+      buildApproveUrl: (token: string) =>
+        `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
+      resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
+      resolveRouting: async (tenantId: string) =>
+        (await settingsRepo.findByTenant(tenantId))?.unsupervisedProposalRouting,
+      // P2-034 — persist each outbound render so inbound Y/N/EDIT replies
+      // can resolve which proposal the owner is answering.
+      recordSmsEvent: recordProposalSmsRender,
+    },
   });
   workerRegistry.set(
     voiceActionRouterWorker.type,
@@ -1176,6 +1549,7 @@ export function createApp(): express.Express {
     settingsRepo,
     feedbackRequestRepo,
     dispatcher: feedbackDispatcher,
+    dncRepo,
     publicBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
   });
   workerRegistry.set(
@@ -1189,13 +1563,27 @@ export function createApp(): express.Express {
       provisionTwilioWorker.type,
       provisionTwilioWorker as import('./queues/queue').WorkerHandler<unknown>
     );
+
+    const deprovisionTenantWorker = createDeprovisionTenantWorker({ pool });
+    workerRegistry.set(
+      deprovisionTenantWorker.type,
+      deprovisionTenantWorker as import('./queues/queue').WorkerHandler<unknown>
+    );
+  }
+
+  if (pool && llmGateway) {
+    const verifyAiWorker = createVerifyAiWorker({ pool, gateway: llmGateway, auditRepo });
+    workerRegistry.set(
+      verifyAiWorker.type,
+      verifyAiWorker as import('./queues/queue').WorkerHandler<unknown>
+    );
   }
 
   // Unified queue poll loop: receives any message type and routes to the
   // matching worker by message.type. This is the single consumer for the
   // queue — multiple setInterval poll loops would race for the same row
   // under PgQueue's FOR UPDATE SKIP LOCKED semantics and waste cycles.
-  setInterval(async () => {
+  registerInterval(setInterval(async () => {
     try {
       const message = await queue.receive();
       if (!message) return;
@@ -1221,7 +1609,7 @@ export function createApp(): express.Express {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-  }, 250);
+  }, 250));
 
   // Cross-entity tenant ownership guard. Routes pass parent ids (e.g.
   // jobs.customerId) through validation against the requesting tenant
@@ -1238,7 +1626,10 @@ export function createApp(): express.Express {
   });
 
   // Public feedback routes are mounted before /api auth middleware.
-  app.use('/public/feedback', createPublicFeedbackRouter(feedbackRequestRepo, feedbackResponseRepo, settingsRepo));
+  // D2-1d: auditRepo wired so the public feedback submission emits
+  // `feedback_response.submitted` with the synthetic public:<tokenHash>
+  // actor required by CLAUDE.md "all mutations emit audit events".
+  app.use('/public/feedback', createPublicFeedbackRouter(feedbackRequestRepo, feedbackResponseRepo, settingsRepo, auditRepo));
 
   // Public lead intake — embedded marketing-page form posts here.
   // Tenant identified by UUID in the URL. The outer `/public` limiter
@@ -1257,7 +1648,7 @@ export function createApp(): express.Express {
       standardHeaders: true,
       legacyHeaders: false,
     }),
-    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo, settingsRepo, canonicalPackRegistry)
+    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo, settingsRepo, canonicalPackRegistry, pool)
   );
 
   // Public unauthenticated estimate approval flow (token-authenticated).
@@ -1274,8 +1665,32 @@ export function createApp(): express.Express {
     stripeConfig: process.env.STRIPE_SECRET_KEY
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
       : null,
+    // D2-1d: emit public_estimate.{approved,declined} with the
+    // synthetic public:<tokenHash> actor on every public approve/decline.
+    auditRepo,
+    // Roll up job money state when a lapsed estimate is auto-expired on the
+    // public path, so the job doesn't stay stuck in 'estimate_sent'.
+    moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: requestLogger },
   });
   app.use('/public/estimates', createPublicEstimatesRouter(publicEstimateService));
+
+  // P12-004 — public one-tap proposal approval (token-gated, single-use).
+  // The owner SMS from the unsupervised queue_and_sms routing links here.
+  // Approval flows through the existing approveProposal path (status guard,
+  // undo window, audit, execution worker); the signed nonce is consumed
+  // durably via webhook_events so links are single-use across instances.
+  app.use(
+    '/public/proposals',
+    createOneTapApproveRouter({
+      proposalRepo,
+      auditRepo,
+      ...(oneTapSecret ? { secret: oneTapSecret } : {}),
+      consumeNonce: consumeOneTapNonce,
+      // P2-034 — a pending manual edit request blocks the link too, not
+      // just SMS Y replies; both paths approve the same stale payload.
+      smsEventRepo: proposalSmsEventRepo,
+    }),
+  );
 
   // Public unauthenticated invoice payment flow (token-authenticated).
   // Stripe Payment Link creation is enabled when STRIPE_SECRET_KEY is set.
@@ -1285,6 +1700,7 @@ export function createApp(): express.Express {
   // the Stripe-Account header. Without it, payments stay on the
   // legacy platform path.
   const publicInvoiceService = new PublicInvoiceService({
+    paymentLinkProvider,
     invoiceRepo,
     jobRepo,
     customerRepo,
@@ -1293,6 +1709,9 @@ export function createApp(): express.Express {
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
       : undefined,
     paymentRepo,
+    // D2-1d: emit public_invoice.checkout_created on first link mint.
+    // Subsequent idempotent calls (cached URL) DO NOT re-emit.
+    auditRepo,
     connectAccountResolver: connectService
       ? {
           resolveTenantConnectAccount: async (tenantId: string) => {
@@ -1325,7 +1744,46 @@ export function createApp(): express.Express {
       appointmentRepo,
       leadRepo,
       auditRepo,
+      assignmentRepo,
+      locationRepo,
+      proposalRepo,
+      settingsRepo,
+      transactionRunner: pool
+        ? new PgTenantTransactionRunner(pool)
+        : new InMemoryTransactionRunner(),
       paymentLinkProvider,
+    }),
+  );
+
+  // Public, token-less online booking — the prospect acquisition funnel
+  // (Jobber "Online Booking" parity). Mounted BEFORE the global /api Clerk
+  // auth: there is no session, the tenant is the UUID in the path (same as
+  // public-intake). A booking never auto-confirms — it creates a held
+  // appointment + `create_booking` proposal for the owner to approve.
+  app.use(
+    '/api/public/booking',
+    // Stricter than the global /api limiter: an unauthenticated write path that
+    // creates customers/jobs/appointments + holds calendar slots. Mirrors the
+    // /public/intake limiter (booking is heavier, so a touch tighter).
+    rateLimit({
+      windowMs: 60 * 1000,
+      max: 5,
+      standardHeaders: true,
+      legacyHeaders: false,
+    }),
+    createPublicBookingRouter({
+      tenantRepo: intakeTenantRepo,
+      customerRepo,
+      locationRepo,
+      jobRepo,
+      appointmentRepo,
+      proposalRepo,
+      auditRepo,
+      assignmentRepo,
+      settingsRepo,
+      transactionRunner: pool
+        ? new PgTenantTransactionRunner(pool)
+        : new InMemoryTransactionRunner(),
     }),
   );
 
@@ -1392,6 +1850,14 @@ export function createApp(): express.Express {
     // separate (googleApiUrl). 5173 is the Vite dev default; matches
     // publicBaseUrl elsewhere in this file.
     appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+    // D2-1d: emit calendar_integration.{connected,disconnected,
+    // callback_consumed} for the per-user Google OAuth lifecycle. The
+    // callback uses `system:google-oauth-callback` because there is no
+    // Clerk session in flight when Google redirects the browser back.
+    auditRepo,
+    // Feature 5 — seed a 7-day availability template from the connected
+    // calendar in the OAuth callback. Pool-gated (skipped in-memory).
+    ...(pool ? { pool } : {}),
   };
   app.use(
     '/api/calendar-integrations',
@@ -1407,6 +1873,11 @@ export function createApp(): express.Express {
   // sessions in the same VoiceSessionStore so the FSM/cost-tracker pool
   // is uniform across channels. Process-local; idle-reaped via setInterval.
   const voiceSessionStore = new VoiceSessionStore();
+  // F6b: Process-local whisper TwiML cache. Shared between:
+  //   - whisperRouter (serves TwiML to Twilio when dispatcher answers)
+  //   - MediaStreamAdapter (stores whisper text after escalation_started)
+  // Single-instance; multi-instance Railway deploys would need Redis.
+  const sharedWhisperCache = new WhisperCache();
   // OnCall repo is created here so both the telephony adapter (notify_oncall
   // side effect) and the in-app adapter (escalation) share a single
   // implementation. The in-app block below reuses this same instance.
@@ -1414,10 +1885,21 @@ export function createApp(): express.Express {
   // §3B + §3D: shared vertical-prompt resolver injected into both
   // calling-agent adapters so per-tenant equipment terminology AND
   // intake-question disambiguation reach the classifier.
+  const verticalPromptResolverLogger = createLogger({
+    service: 'vertical-prompt-resolver',
+    environment: process.env.NODE_ENV ?? 'development',
+  });
   const verticalPromptResolver = buildVerticalPromptResolver({
     packActivationRepo,
     canonicalPackRegistry,
+    trainingAssetRepo,
+    logger: verticalPromptResolverLogger,
   });
+  invalidateVerticalPromptCache = (tenantId) => verticalPromptResolver.invalidate(tenantId);
+  // §3B/3D/3E — light up the operator-side resolver shim now that the
+  // real resolver exists. The voice-action-router worker and assistant
+  // router both pick it up on their next classifier call.
+  operatorVerticalPromptResolver = verticalPromptResolver;
   // §3C: caller-plan resolver. Returns a prompt-shaped block when the
   // caller's customerId resolves to an active maintenance agreement.
   const callerPlanResolver = async (
@@ -1428,6 +1910,33 @@ export function createApp(): express.Express {
     const section = formatCallerPlanForPrompt(ctx);
     return section.length > 0 ? section : undefined;
   };
+  // §P2-3 — Build a shared in-memory map for rich pack fields (sttKeywords,
+  // repairTemplates) that are NOT round-tripped through the canonical registry.
+  // This is the same Map used by the streaming terminologyProvider; creating it
+  // here ensures it is also available to the non-streaming twilio/inapp adapters.
+  const sharedRichPackByType = new Map([
+    ['hvac', createHvacPack()],
+    ['plumbing', createPlumbingPack()],
+    ['electrical', createElectricalPack()],
+  ]);
+  const repairTemplatesResolver = async (tenantId: string): Promise<ReadonlyArray<import('./verticals/registry').RepairTemplate>> => {
+    const activations = await packActivationRepo.findByTenant(tenantId);
+    const active = activations
+      .filter((a) => a.status === 'active')
+      .sort((a, b) => b.activatedAt.getTime() - a.activatedAt.getTime())[0];
+    if (!active) return [];
+    const base = active.packId.replace(/-v\d+$/, '');
+    if (!isValidVerticalType(base)) return [];
+    return sharedRichPackByType.get(base)?.repairTemplates ?? [];
+  };
+  const telephonyCallControl = new DefaultTwilioCallControl();
+  // Owner-scoped revenue lookup (voice `lookup_revenue`) shares the same
+  // money-dashboard repo the /api/reports router uses below.
+  const moneyDashboardRepo = new PgMoneyDashboardRepository(
+    invoiceRepo,
+    paymentRepo,
+    expenseRepo,
+  );
   const twilioAdapter = new TwilioGatherAdapter({
     store: voiceSessionStore,
     gateway: llmGateway,
@@ -1435,6 +1944,18 @@ export function createApp(): express.Express {
     proposalRepo,
     auditRepo,
     onCallRepo: sharedOnCallRepo,
+    callControl: telephonyCallControl,
+    dispatcherPhoneResolver: createBusinessPhoneDispatcherResolver(settingsRepo),
+    settingsRepo,
+    whisperCache: sharedWhisperCache,
+    ...(messageDelivery
+      ? {
+          deliveryProvider: {
+            sendSms: (args: { to: string; body: string }) =>
+              messageDelivery.sendSms({ to: args.to, body: args.body }),
+          },
+        }
+      : {}),
     leadRepo,
     // P11-001: lookup-skill family wiring. Without these the adapter
     // falls back to a "let me get a person to help" line on lookup_*
@@ -1444,6 +1965,9 @@ export function createApp(): express.Express {
     appointmentRepo,
     invoiceRepo,
     agreementRepo,
+    moneyDashboardRepo,
+    catalogRepo,
+    availabilityFinder,
     lookupEvents: lookupEventService,
     systemActorId: 'system:inbound-call',
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
@@ -1456,9 +1980,55 @@ export function createApp(): express.Express {
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,
+    repairTemplatesResolver,
     voiceSessionRepo,
     voiceRepo,
     voicePersonaResolver,
+    // §10 onboarding — fire the 30-minute upgrade nudge after every
+    // inbound call ends. Pool-gated (no-op when running in-memory).
+    ...(pool
+      ? {
+          onSessionEnded: async ({
+            tenantId,
+            channel,
+          }: {
+            tenantId: string;
+            channel: 'voice_inbound' | 'inapp_voice';
+          }) => {
+            await checkAndFireUpgradeNudge({ pool }, tenantId);
+            await maybeAutoGoLiveOnInboundEnd(
+              { pool, auditRepo },
+              { tenantId, channel },
+            );
+            // Activation milestone — fire first_real_call_received (+ email +
+            // banner state) on the first real inbound call after go-live.
+            // Runs AFTER auto-go-live so voice_agent_live_at is already set
+            // for the test call. Failure-soft: must never block session end.
+            try {
+              await maybeFireFirstRealCallActivation(
+                {
+                  pool,
+                  auditRepo,
+                  ...(messageDelivery
+                    ? {
+                        sendEmail: (msg) =>
+                          messageDelivery.sendEmail({
+                            to: msg.to,
+                            subject: msg.subject,
+                            text: msg.text,
+                            ...(msg.html ? { html: msg.html } : {}),
+                          }),
+                      }
+                    : {}),
+                },
+                { tenantId, channel },
+              );
+            } catch {
+              // swallow — activation analytics must not break call teardown
+            }
+          },
+        }
+      : {}),
   });
   // P8-012: feature flag the Media Streams (live audio) path. Default
   // off — when off, the existing Gather adapter remains the only
@@ -1533,12 +2103,20 @@ export function createApp(): express.Express {
     }
   };
 
+  // D2-3 — real phone-number → tenant lookup for inbound /voice. The
+  // legacy `resolveTenantId` callback is still wired for `/gather` and
+  // `/dial-result`, which already run inside an established call; the
+  // /voice handler consults this repo first and only falls through to
+  // the env-var seam in dev (with a loud WARN).
+  const phoneNumberRepo = pool ? new PgPhoneNumberRepository(pool) : undefined;
+
   app.use(
     '/api/telephony',
     createTelephonyRouter({
       adapter: twilioAdapter,
       authTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
       publicBaseUrl: process.env.PUBLIC_API_URL,
+      ...(phoneNumberRepo ? { phoneNumberRepo } : {}),
       resolveTenantId: ({ to }) => resolveTenantIdByPhoneNumber(to),
       mediaStreamsEnabled,
       // P8-014: mount the recording webhook in production. Without this
@@ -1650,7 +2228,33 @@ export function createApp(): express.Express {
           warnings,
         };
       },
+      // §10 onboarding voice gates — only wired when both pool and auditRepo
+      // exist (production / integration test). In-memory dev mode skips
+      // gating entirely (the route stays legacy behavior).
+      ...(pool && auditRepo
+        ? { voiceGate: createVoiceGate({ pool, auditRepo }) }
+        : {}),
+      ...(pool ? { pool } : {}),
+      settingsRepo,
+      leadRepo,
+      auditRepo,
+      callMeBackRepo,
+      businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
     }),
+  );
+
+  // F6b: Whisper TwiML route — mounted BEFORE requireAuth so Twilio's
+  // signed GETs (no Clerk session) are accepted. Path is under
+  // /api/telephony so it's co-located with the main telephony webhook.
+  // Twilio signature verification is enforced to prevent unauthenticated
+  // access to whisper TwiML (which contains PII: caller name, phone, intent).
+  app.use(
+    '/api/telephony',
+    requireTwilioSignature(
+      ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+      { publicBaseUrl: () => process.env.PUBLIC_API_URL },
+    ),
+    whisperRouter({ whisperCache: sharedWhisperCache }),
   );
 
   // P8-012: attach the Media Streams WebSocketServer to the http.Server
@@ -1680,6 +2284,84 @@ export function createApp(): express.Express {
       ? new DeepgramStreamingProvider(deepgramKey)
       : null;
     if (streamingProvider) {
+      // Reuse sharedRichPackByType (already built above for repairTemplatesResolver)
+      // so sttKeywords + repairTemplates come from the same in-memory pack instances.
+      const terminologyProvider = new VerticalTerminologyProvider({
+        repo: {
+          findByType: async (type) => sharedRichPackByType.get(type) ?? null,
+        },
+        lookupVertical: async (tenantId: string) => {
+          const activations = await packActivationRepo.findByTenant(tenantId);
+          const active = activations
+            .filter((a) => a.status === 'active')
+            .sort((a, b) => b.activatedAt.getTime() - a.activatedAt.getTime())[0];
+          if (!active) return null;
+          // Activation packId is conventionally the verticalType ('hvac',
+          // 'plumbing', 'electrical') or a versioned packId like 'hvac-v1'.
+          // Strip the suffix and validate.
+          const packId = active.packId;
+          const base = packId.replace(/-v\d+$/, '');
+          if (!isValidVerticalType(base)) {
+            verticalPromptResolverLogger.debug('vertical lookup returned null', {
+              tenantId,
+              packId,
+              derivedBase: base,
+              reason: 'invalid_vertical_type',
+            });
+            return null;
+          }
+          return base;
+        },
+      });
+
+      // P2-1: Filler engine + cache. One engine instance is shared across
+      // calls. Cross-call state sharing means the no-repeat guarantee is
+      // process-wide, not per-call — acceptable because callers can't hear
+      // each other's audio, and round-robin over 8 fillers means no caller
+      // hears the same filler back-to-back regardless. The cache loads all
+      // PCM files from disk once at boot; missing files are logged (warn).
+      const fillerCache = new FillerAudioCache(
+        require('path').resolve(__dirname, 'ai/agents/customer-calling/fillers'),
+      );
+      fillerCache.load();
+      const fillerEngine = new FillerEngine();
+
+      // F6c — wire LLM-backed sentiment classifier into the MediaStream adapter.
+      // The adapter calls this after each caller turn (fire-and-forget); if the
+      // frustration score exceeds the per-tenant threshold it dispatches
+      // `frustration_detected` back into the FSM out-of-band.
+      //
+      // The sentiment function expects `deps.llm.complete({ prompt })` returning
+      // `{ text }`. We adapt the LLM gateway (which uses messages arrays) into
+      // that interface here using the `call_sentiment` task type so routing
+      // config can target it separately from main call-flow completions.
+      //
+      // escalationSettings is per-tenant and resolved per-session: the
+      // `resolveEscalationSettings` resolver (passed into attachMediaStreamServer
+      // below) reads the tenant's current settings at session start, so the
+      // static `escalationSettings` dep is intentionally left unset.
+      const sentimentClassifierDep = llmGateway
+        ? (
+            input: Parameters<typeof classifyTurnSentiment>[0],
+            budget?: Partial<Parameters<typeof classifyTurnSentiment>[1]>,
+          ) =>
+            classifyTurnSentiment(input, {
+              llm: {
+                complete: async ({ prompt }: { prompt: string }) => {
+                  const res = await llmGateway.complete({
+                    taskType: 'call_sentiment',
+                    messages: [{ role: 'user' as const, content: prompt }],
+                  });
+                  return { text: res.content };
+                },
+              },
+              // Per-session cost-cap inputs threaded in by the adapter so the
+              // classifier's budget guard can skip the LLM call when the session
+              // is near its cost cap.
+              ...budget,
+            })
+        : undefined;
+
       const origListen = app.listen.bind(app);
       // Wrap listen() so the WS upgrade handler is attached the moment
       // the http.Server exists. Fire-and-forget; errors during attach
@@ -1693,6 +2375,9 @@ export function createApp(): express.Express {
             store: voiceSessionStore,
             streamingProvider,
             ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
+            terminologyProvider,
+            fillerEngine,
+            fillerCache,
             speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
               twilioAdapter.processCallerUtterance({
                 sessionId: session.id,
@@ -1714,6 +2399,28 @@ export function createApp(): express.Express {
             // future-phase change (auth at first `start` message).
             authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
             ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
+            // Section 7 (CRITICAL): wire the gather adapter's shared Map so
+            // Dial TwiML built inside handleEscalateWithContext is visible to
+            // the route layer via takePendingTransferTwiml(sessionId). Without
+            // this the caller stays on hold forever — the dispatcher gets SMS
+            // but the call never bridges.
+            setPendingTransferTwiml: twilioAdapter.setPendingTransferTwiml.bind(twilioAdapter),
+            // F6b: Wire the shared whisper cache so the MediaStream adapter
+            // stores whisper TwiML after handleEscalateWithContext runs.
+            whisperCache: sharedWhisperCache,
+            // F6c: LLM-backed sentiment classifier. Only fires when
+            // escalationSettings.trigger_llm_sentiment is true.
+            ...(sentimentClassifierDep ? { sentimentClassifier: sentimentClassifierDep } : {}),
+            // F6c (per-tenant): resolve escalation settings at WS session start
+            // so CallRoutingSheet toggle changes take effect on the next call.
+            resolveEscalationSettings: async (tenantId: string) => {
+              const settings = await settingsRepo.findByTenant(tenantId);
+              return resolveEscalationSettings(settings);
+            },
+            // F6c: deliver out-of-band frustration_detected effects (notify_oncall,
+            // audit) through the host processor — emitSideEffects only renders TTS.
+            deliverEscalationEffects: (session, effects, tenantId) =>
+              twilioAdapter.deliverOutOfBandEffects(session, effects, tenantId),
           },
         );
         return server;
@@ -1840,11 +2547,29 @@ export function createApp(): express.Express {
   // the link points at this same deployment.
   app.use(
     '/api/portal-sessions',
-    createPortalRouter({ portalRepo: portalSessionRepo, customerRepo }),
+    // D2-1d: portal tokens are bearer credentials; both mint and
+    // revoke emit portal_session.{created,revoked} via auditRepo.
+    createPortalRouter({ portalRepo: portalSessionRepo, customerRepo, auditRepo }),
   );
   app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo));
-  app.use('/api/locations', createLocationRouter(locationRepo, ownership));
-  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher, customerRepo, locationRepo));
+  app.use('/api/locations', createLocationRouter(locationRepo, ownership, auditRepo));
+  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher, customerRepo, locationRepo, {
+    estimateRepo,
+    invoiceRepo,
+    proposalRepo,
+    settingsRepo,
+    auditRepo,
+    timeEntryRepo,
+    scheduleRepo: invoiceScheduleRepo,
+  }, {
+    estimateRepo,
+    jobRepo,
+    appointmentRepo,
+    assignmentRepo,
+    userRepo,
+    invoiceRepo,
+    auditRepo,
+  }));
   app.use(
     '/api/jobs',
     createJobFilesRouter({
@@ -1868,17 +2593,54 @@ export function createApp(): express.Express {
     '/api/appointments',
     createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo, {
       delayNotificationCoordinator,
-    })
+    }, auditRepo)
   );
-  app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo, jobRepo, customerRepo, locationRepo }));
   app.use(
-    '/api/estimates',
-    createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService, {
-      gateway: llmGateway,
+    '/api/dispatch',
+    createDispatchRoutes({
+      appointmentRepo,
+      assignmentRepo,
+      jobRepo,
+      customerRepo,
+      locationRepo,
+      enRouteCoordinator: delayNotificationCoordinator,
       proposalRepo,
+      boardEventsDeps: {
+        authUserIdFromRequest: async (req) =>
+          (req as { auth?: { userId?: string } }).auth?.userId ?? null,
+        authTenantIdFromRequest: async (req) =>
+          (req as { auth?: { tenantId?: string } }).auth?.tenantId ?? null,
+      },
     }),
   );
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo));
+  app.use(
+    '/api/estimates',
+    createEstimateRouter(
+      estimateRepo,
+      settingsRepo,
+      auditRepo,
+      ownership,
+      sendService,
+      { gateway: llmGateway, proposalRepo },
+      { jobRepo, invoiceRepo },
+      { docRevisionRepo: documentRevisionRepo, editDeltaRepo: deltaRepo },
+      paymentRepo,
+    ),
+  );
+  app.use(
+    '/api/invoices',
+    createInvoiceRouter(
+      invoiceRepo,
+      settingsRepo,
+      auditRepo,
+      ownership,
+      paymentRepo,
+      sendService,
+      jobRepo,
+      estimateRepo,
+      paymentLinkProvider,
+    ),
+  );
 
   // Tier 4 (Team members — PR 1+2+3). User roster, role editing, and
   // invitation flow. Tenant scoping is enforced by the route's
@@ -1886,16 +2648,20 @@ export function createApp(): express.Express {
   // best-effort: missing CLERK_SECRET_KEY just persists the local
   // intent; the operator can still re-send via dashboard and the
   // webhook still attaches the invitee on accept (lookup is by email).
-  const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
   app.use(
     '/api/users',
-    createUsersRouter(userRepo, {
-      // Same instance the Clerk webhook reads on user.created — the
-      // accept side reads what the invite side wrote.
-      pendingInvitationRepo,
-      clerkSecretKey: process.env.CLERK_SECRET_KEY,
-      appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
-    }),
+    createUsersRouter(
+      userRepo,
+      {
+        // Same instance the Clerk webhook reads on user.created — the
+        // accept side reads what the invite side wrote.
+        pendingInvitationRepo,
+        clerkSecretKey: process.env.CLERK_SECRET_KEY,
+        appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
+      },
+      // D2-1c — audit-log user role / name edits + invitations.
+      auditRepo,
+    ),
   );
 
   // Tier 4 (Calendar sync — PR 1). Auth'd lifecycle endpoints.
@@ -1909,16 +2675,16 @@ export function createApp(): express.Express {
 
   // billingService is hoisted earlier so the Stripe webhook can use
   // the same instance.
-  app.use('/api/billing', createBillingRouter({ billingService, connectService }));
+  app.use('/api/billing', createBillingRouter({ billingService, connectService, auditRepo }));
 
   // Tenant-scoped reporting (revenue by lead source / UTM, money dashboard, tax export).
   const revenueBySourceRepo = pool
     ? new PgRevenueBySourceRepository(pool)
     : new InMemoryRevenueBySourceRepository();
-  const moneyDashboardRepo = new PgMoneyDashboardRepository(
-    invoiceRepo,
-    paymentRepo,
-    expenseRepo,
+  const timeGivenBackReporter = new RepoBackedTimeGivenBackReporter(
+    proposalRepo,
+    settingsRepo,
+    voiceSessionRepo,
   );
   app.use(
     '/api/reports',
@@ -1928,10 +2694,32 @@ export function createApp(): express.Express {
       expenseRepo,
       invoiceRepo,
       paymentRepo,
+      timeGivenBackReporter,
+      // Look up the tenant tz so /money-dashboard buckets by local
+      // month boundaries. Without this the dashboard would default
+      // to America/New_York (matches tenant_settings.timezone's DB
+      // default) — close-enough for most US tenants but wrong for
+      // anyone on PST or other zones. Delegates to the existing
+      // settingsRepo so we don't add a second tenant_settings query
+      // path (and inherit its RLS / withTenant handling for free).
+      getTenantTimezone: async (tenantId: string) => {
+        const settings = await settingsRepo.findByTenant(tenantId);
+        return settings?.timezone ?? DEFAULT_TENANT_TIMEZONE;
+      },
     }),
   );
-  app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
-  app.use('/api/notes', createNoteRouter(noteRepo, ownership));
+  app.use(
+    '/api/payments',
+    createPaymentRouter(
+      paymentRepo,
+      invoiceRepo,
+      jobRepo,
+      estimateRepo,
+      auditRepo,
+      transactionalComms,
+    ),
+  );
+  app.use('/api/notes', createNoteRouter(noteRepo, ownership, auditRepo));
 
   // ── P12-001: /api/me — current user + mode ──────────────────────────────
   // Pg-backed UserModeService when DATABASE_URL is set; in-memory in
@@ -1974,14 +2762,16 @@ export function createApp(): express.Express {
         async getTenantSettings(tenantId) {
           const r = await pool.query(
             `SELECT backup_supervisor_user_id,
-                    COALESCE(unsupervised_proposal_routing, 'queue_and_sms') AS unsupervised_proposal_routing
+                    COALESCE(unsupervised_proposal_routing, 'queue_and_sms') AS unsupervised_proposal_routing,
+                    COALESCE(timezone, $2) AS timezone
              FROM tenant_settings WHERE tenant_id = $1 LIMIT 1`,
-            [tenantId],
+            [tenantId, DEFAULT_TENANT_TIMEZONE],
           );
           if (r.rowCount === 0) {
             return {
               backup_supervisor_user_id: null,
               unsupervised_proposal_routing: 'queue_and_sms',
+              timezone: DEFAULT_TENANT_TIMEZONE,
             } as MeTenantSettings;
           }
           const row = r.rows[0] as Record<string, unknown>;
@@ -1991,6 +2781,7 @@ export function createApp(): express.Express {
               : null,
             unsupervised_proposal_routing:
               row.unsupervised_proposal_routing as MeTenantSettings['unsupervised_proposal_routing'],
+            timezone: String(row.timezone),
           };
         },
         async getTenantIntegrationStatuses(tenantId) {
@@ -2043,27 +2834,58 @@ export function createApp(): express.Express {
 
   app.use('/api/me', createMeRouter(userModeService, auditRepo));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
-  app.use('/api/conversations', createConversationRouter(conversationRepo));
+  app.use(
+    '/api/conversations',
+    createConversationRouter(conversationRepo, auditRepo, {
+      gateway: llmGateway,
+      settingsRepo,
+    }),
+  );
+  app.use('/api/dnc', createDncRouter({ dncRepo, auditRepo }));
 
   app.use(
     '/api/settings',
-    createSettingsRouter(settingsRepo, {
-      activationRepo: packActivationRepo,
-      verticalPackRegistry: canonicalPackRegistry,
-    }),
+    createSettingsRouter(
+      settingsRepo,
+      {
+        activationRepo: packActivationRepo,
+        verticalPackRegistry: canonicalPackRegistry,
+      },
+      // D2-1c — audit-log tenant-settings + language mutations.
+      auditRepo,
+    ),
   );
-  app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry));
+  app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry, auditRepo));
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
-  app.use('/api/templates', createTemplateRouter(templateRepo));
-  app.use('/api/bundles', createBundleRouter(bundleRepo));
+  app.use('/api/vertical-training-assets', createVerticalTrainingAssetsRouter(trainingAssetService));
+  app.use('/api/templates', createTemplateRouter(templateRepo, auditRepo));
+  app.use('/api/bundles', createBundleRouter(bundleRepo, auditRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
+
+  // P2-030 — AI evaluation admin API (owner-only; tenant-scoped).
+  app.use('/api/evaluation', createEvaluationRouter({ shadowStore }));
+
   const voiceLogger = createLogger({
     service: 'voice',
     environment: process.env.NODE_ENV || 'development',
     level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
   });
-  app.use('/api/voice', createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger));
-  app.use('/api/onboarding', createOnboardingRouter(settingsRepo, packActivationRepo, auditRepo));
+  app.use(
+    '/api/voice',
+    createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger, pool ? { pool } : undefined),
+  );
+  app.use(
+    '/api/onboarding',
+    createOnboardingRouter({
+      settingsRepo,
+      packActivationRepo,
+      auditRepo,
+      pool,
+      billingService,
+      queue,
+      packSeedDeps: { catalogRepo, templateRepo },
+    }),
+  );
   app.use(
     '/api/technician-location',
     createTechnicianLocationRouter({
@@ -2072,13 +2894,29 @@ export function createApp(): express.Express {
         technicianLocationAuthorizer.canSubmitForTechnician(auth, technicianId),
     })
   );
-  app.use('/api/catalog/items', createCatalogItemsRouter(catalogRepo));
+  app.use('/api/catalog/items', createCatalogItemsRouter(catalogRepo, auditRepo));
   app.use(
     '/api/files',
     createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
   );
-  app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
-  app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo));
+  app.use(
+    '/api/assistant',
+    createAssistantRouter({
+      gateway: llmGateway,
+      proposalRepo,
+      // QA-2026-06-05 (AST-05): read-only query intents answer from data.
+      invoiceRepo,
+      // P22 — catalog grounding for assistant-drafted invoices/estimates.
+      catalogRepo,
+      // §3B/3D/3E — assistant chat shares the operator-side resolver
+      // shim with the voice-action-router so the same vertical context
+      // reaches both text and voice classification paths.
+      verticalPromptResolver: operatorVerticalResolverShim,
+    }),
+  );
+  // D2-1c — audit-log proposal approve / reject / edit / undo.
+  app.use('/api/dispatch', createSchedulingRouter(feasibilityDeps, userRepo));
+  app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo, auditRepo, feasibilityDeps));
   if (pool) {
     app.use('/api/interactions', createInteractionsRouter({ pool }));
   }
@@ -2159,7 +2997,7 @@ export function createApp(): express.Express {
   // BUG-6 — backs the Contracts page (`MaintenanceContractsPage`,
   // `ContractDetailPage`, `CreateContractSheet`). Distinct surface
   // from /api/agreements; in-memory only.
-  app.use('/api/maintenance-contracts', createMaintenanceContractsRouter());
+  app.use('/api/maintenance-contracts', createMaintenanceContractsRouter(auditRepo));
 
   // Recurring agreements sweep (P9-003). Runs every 60s. Uses the same
   // setInterval driver pattern as the execution-worker (P0-009). The
@@ -2169,8 +3007,8 @@ export function createApp(): express.Express {
     service: 'recurring-agreements-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  setInterval(async () => {
-    try {
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.recurringAgreements, async () => {
       await runRecurringAgreementsSweep({
         agreementRepo,
         runRepo: agreementRunRepo,
@@ -2184,12 +3022,269 @@ export function createApp(): express.Express {
         auditRepo,
         logger: agreementsLogger,
       });
-    } catch (err) {
+    }).catch((err) => {
       agreementsLogger.error('Recurring-agreements sweep failed', {
         error: err instanceof Error ? err.message : String(err),
       });
+    });
+  }, 60_000));
+
+  // Voice-parity (Feature 7) — call_me_back sweep. Notifies the CSR
+  // (transfer_number) of callbacks captured when a warm transfer failed. Runs
+  // every 60s; in-memory dev returns no tenants so it no-ops locally.
+  const callMeBackLogger = createLogger({
+    service: 'call-me-back-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.callMeBack, async () => {
+      await runCallMeBackSweep({
+        callMeBackRepo,
+        settingsRepo,
+        ...(messageDelivery
+          ? {
+              deliveryProvider: {
+                sendSms: (args: { to: string; body: string }) =>
+                  messageDelivery.sendSms({ to: args.to, body: args.body }),
+              },
+            }
+          : {}),
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        auditRepo,
+        logger: callMeBackLogger,
+      });
+    }).catch((err) => {
+      callMeBackLogger.error('call_me_back sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 60_000));
+
+  // P21-003 — batch-invoice sweep. Daily-grained work; an hourly tick surfaces
+  // newly-completed jobs promptly. Opt-in per tenant (settings.batchInvoiceEnabled);
+  // in-memory dev returns no tenants so it no-ops locally.
+  const batchInvoiceLogger = createLogger({
+    service: 'batch-invoice-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.batchInvoice, async () => {
+      await runBatchInvoiceSweep({
+        jobRepo,
+        invoiceRepo,
+        estimateRepo,
+        proposalRepo,
+        settingsRepo,
+        runRepo: batchInvoiceRunRepo,
+        txRunner: batchInvoiceTxRunner,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        auditRepo,
+        logger: batchInvoiceLogger,
+      });
+    }).catch((err) => {
+      batchInvoiceLogger.error('Batch-invoice sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 3_600_000));
+
+  // §6 Time-to-Cash: overdue-invoice sweep. Hourly — invoice due dates
+  // have day granularity, so an hourly check surfaces newly-overdue
+  // invoices promptly without churn. Same setInterval driver + tenant
+  // lister pattern as the recurring-agreements sweep above; in-memory
+  // dev returns no tenants so it no-ops locally.
+  const overdueInvoiceLogger = createLogger({
+    service: 'overdue-invoice-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.overdueInvoice, async () => {
+      await runOverdueInvoiceSweep({
+        jobRepo,
+        estimateRepo,
+        invoiceRepo,
+        auditRepo,
+        transactionalComms,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        logger: overdueInvoiceLogger,
+      });
+    }).catch((err) => {
+      overdueInvoiceLogger.error('Overdue-invoice sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) > 0 ? Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) : 60 * 60_000));
+  // QA-2026-06-05: interval is env-tunable (OVERDUE_SWEEP_INTERVAL_MS) so dev/QA
+  // can observe the sweep inside a test window; default stays hourly.
+
+  const appointmentReminderLogger = createLogger({
+    service: 'appointment-reminder-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  if (transactionalComms) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.appointmentReminder, async () => {
+        await runAppointmentReminderSweep({
+          appointmentRepo,
+          transactionalComms,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          logger: appointmentReminderLogger,
+        });
+      }).catch((err) => {
+        appointmentReminderLogger.error('Appointment-reminder sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 60 * 60_000));
+  }
+
+  // Estimate-reminder worker — nudges customers on estimates sent but
+  // unviewed/unaccepted after 3 days (1 reminder, capped). Only runs when
+  // SendService is configured (it re-sends via the unified send path).
+  const estimateReminderLogger = createLogger({
+    service: 'estimate-reminder-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  if (sendService) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.estimateReminder, async () => {
+        await runEstimateReminderSweep({
+          estimateRepo,
+          sendService,
+          auditRepo,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          logger: estimateReminderLogger,
+        });
+      }).catch((err) => {
+        estimateReminderLogger.error('Estimate-reminder sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 60 * 60_000));
+  }
+
+  // Estimate-expiry worker — transitions sent estimates past their
+  // valid_until date to 'expired' so stale quotes can't be accepted and
+  // the pipeline reflects lapsed offers. Runs hourly; no SendService
+  // dependency (it only changes status).
+  const estimateExpiryLogger = createLogger({
+    service: 'estimate-expiry-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.estimateExpiry, async () => {
+      await runEstimateExpirySweep({
+        estimateRepo,
+        auditRepo,
+        moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: estimateExpiryLogger },
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        logger: estimateExpiryLogger,
+      });
+    }).catch((err) => {
+      estimateExpiryLogger.error('Estimate-expiry sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 60 * 60_000));
+
+  // P7-026 PR a: Google Business reviews polling. Every 15 minutes
+  // we sweep every tenant with an active `google_business`
+  // integration and persist new reviews idempotently. One tenant's
+  // failure never stops the loop (per-tenant try/catch inside the
+  // sweep). Per-tenant exponential backoff on 429 lives in
+  // review_poll_state; tenants currently throttled are skipped
+  // entirely until the window lifts.
+  //
+  // When `pool` is unset (in-memory dev), the sweep no-ops cleanly:
+  // the worker short-circuits on a null credential resolver and
+  // returns all-zero metrics.
+  const googleReviewsLogger = createLogger({
+    service: 'google-reviews-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  // P7-026 final wiring — ingestion → proposal bridge. When all the
+  // build-proposal deps are available (LLM gateway + customer loader +
+  // brand voice + service-credit repo), newly-inserted reviews
+  // immediately produce a draft review_response_proposal. When any are
+  // missing, we log a one-shot warning so ops can see "ingestion only,
+  // no proposals being created" without grepping the per-tick logs.
+  const googleReviewsCustomerLoader = pool ? new PgCustomerLoader(pool) : null;
+  const googleReviewsBrandVoiceLoader = new NoopBrandVoiceLoader();
+  const googleReviewsProposalEmission =
+    serviceCreditRepo && googleReviewsCustomerLoader
+      ? {
+          proposalRepo,
+          buildProposalDeps: {
+            llmGateway,
+            customerLoader: googleReviewsCustomerLoader,
+            brandVoiceLoader: googleReviewsBrandVoiceLoader,
+            serviceCreditRepo,
+          },
+        }
+      : undefined;
+  if (!googleReviewsProposalEmission) {
+    googleReviewsLogger.warn(
+      'Google reviews worker: proposal emission deps incomplete — ' +
+        'ingestion will run but no review_response_proposal drafts will be created',
+      {
+        hasServiceCreditRepo: Boolean(serviceCreditRepo),
+        hasCustomerLoader: Boolean(googleReviewsCustomerLoader),
+      },
+    );
+  }
+  registerInterval(setInterval(() => {
+    if (
+      !googleReviewsReviewRepo ||
+      !googleReviewsPollStateRepo ||
+      !googleReviewsCredResolver
+    ) {
+      return;
     }
-  }, 60_000);
+    void runAsLeader(SWEEP_LOCK.googleReviews, async () => {
+      await runGoogleReviewsSweep({
+        reviewRepo: googleReviewsReviewRepo,
+        pollStateRepo: googleReviewsPollStateRepo,
+        credentialResolver: googleReviewsCredResolver,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        logger: googleReviewsLogger,
+        ...(googleReviewsProposalEmission
+          ? { proposalEmission: googleReviewsProposalEmission }
+          : {}),
+      });
+    }).catch((err) => {
+      googleReviewsLogger.error('Google reviews sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 15 * 60_000));
 
   // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
   // unified TTS provider, and the existing proposal/audit/oncall repos.
@@ -2210,12 +3305,41 @@ export function createApp(): express.Express {
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,
+    repairTemplatesResolver,
     voiceSessionRepo,
     voicePersonaResolver,
+    // Voice-parity (Feature 6) — gate Spanish auto-detection on the tenant's
+    // opt-in stack (supported_languages). Without this the in-app path would
+    // treat any Spanish utterance as allowed and ignore the Settings toggle.
+    supportedLanguagesResolver: async (tenantId: string) => {
+      const s = await settingsRepo.findByTenant(tenantId);
+      return s?.supportedLanguages;
+    },
   });
   app.use(
     '/api/voice/sessions',
     createVoiceSessionsRouter({ adapter: inAppVoiceAdapter, store: voiceSessionStore })
+  );
+
+  // ── F5: Escalation outcome + SSE events routes ────────────────────────────
+  // escalationOutcomeRouter: user-facing POST /api/escalations/:id/outcome.
+  // escalationEventsRouter:  user-facing GET  /api/escalations/events (SSE).
+  // Both sit behind /api so they inherit the requireAuth gate above.
+  app.use(
+    '/api/escalations',
+    escalationOutcomeRouter({ store: voiceSessionStore }),
+  );
+  app.use(
+    '/api/escalations',
+    escalationEventsRouter({
+      authUserIdFromRequest: async (req) => {
+        return (req as unknown as { auth?: { userId?: string } }).auth?.userId ?? null;
+      },
+      authTenantIdFromRequest: async (req) => {
+        return (req as unknown as { auth?: { tenantId?: string } }).auth?.tenantId ?? null;
+      },
+      subscribeToVoiceEvents: (cb) => voiceSessionStore.subscribeGlobal(cb),
+    }),
   );
 
   const featureFlagRepo: FeatureFlagRepository = pool
@@ -2235,7 +3359,17 @@ export function createApp(): express.Express {
     }
     await hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
   })();
-  app.use('/api/admin/feature-flags', createFeatureFlagsRouter(featureFlagRepo, featureFlagStore));
+  // D2-1c — audit-log platform-admin feature-flag upsert / delete.
+  app.use(
+    '/api/admin/feature-flags',
+    createFeatureFlagsRouter(featureFlagRepo, featureFlagStore, {}, auditRepo),
+  );
+
+  // Platform-admin tenant lifecycle (hard-delete / deprovision). Requires a
+  // DB pool; the queue is always present (Pg- or in-memory).
+  if (pool) {
+    app.use('/api/admin/tenants', createAdminTenantsRouter({ pool, queue }));
+  }
 
   // Wire the WS publish-side kill switches: every call to publish()
   // consults the feature flag store at runtime, so flipping
@@ -2278,10 +3412,28 @@ export function createApp(): express.Express {
   const shutdown = async (signal: NodeJS.Signals) => {
     try {
       // eslint-disable-next-line no-console
-      console.log(`[app] ${signal} received — closing voice sessions and pg pool`);
+      console.log(`[app] ${signal} received — stopping background loops, closing voice sessions and pg pool`);
+      // Blocker 5 — stop all background setInterval loops (sweeps, queue poll,
+      // execution worker) BEFORE the pg pool drains. `shuttingDown` also
+      // prevents an already-scheduled leader-gated sweep tick from starting
+      // new work. Without this, a tick fires mid-teardown and throws on a
+      // closed pool. In-flight queue jobs are bounded by the pool-drain race
+      // below.
+      shuttingDown = true;
+      for (const handle of backgroundIntervals) clearInterval(handle);
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();
+      // Flush any queued PostHog server-side funnel events before the
+      // process exits so Railway shutdown doesn't drop in-flight
+      // signup/trial/conversion captures.
+      {
+        const { shutdownAnalytics } = await import('./analytics/posthog');
+        await shutdownAnalytics();
+      }
+      // Disconnect Redis cache store(s) before draining the DB pool so Railway
+      // shutdown is not slowed by lingering Redis connections.
+      await shutdownCacheStores();
       if (pool) {
         await Promise.race([
           pool.end(),

@@ -57,6 +57,12 @@ export const en = {
   'lookup.account.empty':
     "I'm not seeing anything notable on your account right now.",
 
+  // ── Telephony greeting (default opener) ──────────────────────────────
+  'greeting.opener_default': 'Thank you for calling {{business}}.',
+  'greeting.opener_named': 'Thank you for calling {{business}}. This is {{agent}}.',
+  'greeting.cta': 'How can I help you today?',
+  'greeting.one_moment': 'One moment, please.',
+
   // ── Caller identification ────────────────────────────────────────────
   'identify.greet_known': 'Hi {{name}}, welcome back.',
   'identify.greet_unknown':
@@ -64,9 +70,14 @@ export const en = {
 
   // ── Escalation ───────────────────────────────────────────────────────
   'escalate.transferring':
-    'One moment — I am transferring you to a team member who can help.',
+    'Okay, let me get someone on the line for you.',
   'escalate.no_dispatcher':
     "I'm sorry, no one is available right now. {{business}} will call you back as soon as possible. Thank you for calling.",
+  // Voice-parity (Feature 7) — warm transfer failed; take a callback message.
+  'callback.prompt':
+    "I'm sorry, I couldn't reach anyone right now. Please tell me briefly what you need and the best number to reach you, and someone will call you right back.",
+  'callback.ack':
+    'Thank you. Someone from {{business}} will call you back as soon as possible. Goodbye.',
 
   // ── Recording disclosure ─────────────────────────────────────────────
   'disclose.two_party':

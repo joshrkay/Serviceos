@@ -4,6 +4,9 @@ import { Proposal } from '../../../src/proposals/proposal';
 import { InMemoryAppointmentRepository, createAppointment } from '../../../src/appointments/appointment';
 import { InMemoryAssignmentRepository, assignTechnician } from '../../../src/appointments/assignment';
 import { InMemoryDispatchAnalyticsRepository } from '../../../src/dispatch/analytics';
+import { FeasibilityDependencies } from '../../../src/scheduling/feasibility-types';
+import { StubSkillMatcher } from '../../../src/scheduling/skill-matcher';
+import { HaversineFallbackProvider } from '../../../src/scheduling/travel-time/haversine-fallback';
 
 describe('P6-012 — Execution for reassignment proposals', () => {
   let handler: ReassignAppointmentExecutionHandler;
@@ -229,5 +232,99 @@ describe('P6-012 — Execution for reassignment proposals', () => {
       const result = await handler.execute(proposal, context);
       expect(result.success).toBe(true);
     });
+  });
+
+  it('rejects when feasibility reports a blocking overlap', async () => {
+    const localAssignmentRepo = new InMemoryAssignmentRepository();
+    // Appointment to be reassigned to techB
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-05-17T10:00:00Z'),
+      scheduledEnd: new Date('2026-05-17T11:00:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+    // techA currently holds this appointment (for freshness check)
+    await localAssignmentRepo.create({
+      id: 'as-1', tenantId, appointmentId: appt.id,
+      technicianId: techA, isPrimary: true, assignedBy: 'user-1', assignedAt: new Date(),
+    });
+    // techB already has a conflicting appointment at the same time
+    const conflict = await createAppointment({
+      tenantId, jobId: 'job-2',
+      scheduledStart: new Date('2026-05-17T10:30:00Z'),
+      scheduledEnd: new Date('2026-05-17T11:30:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+    await localAssignmentRepo.create({
+      id: 'as-2', tenantId, appointmentId: conflict.id,
+      technicianId: techB, isPrimary: true, assignedBy: 'user-1', assignedAt: new Date(),
+    });
+
+    const feasibilityDeps: FeasibilityDependencies = {
+      assignmentRepo: localAssignmentRepo, appointmentRepo,
+      jobRepo: { findById: async () => null } as any,
+      locationRepo: { findById: async () => null } as any,
+      workingHoursRepo: { findByTechnicianAndDay: async () => null } as any,
+      unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
+      travelTimeProvider: new HaversineFallbackProvider(),
+      skillMatcher: new StubSkillMatcher(),
+    };
+    const handlerWithFeasibility = new ReassignAppointmentExecutionHandler(
+      appointmentRepo, localAssignmentRepo, undefined, feasibilityDeps,
+    );
+
+    const proposal = makeProposal({
+      appointmentId: appt.id,
+      fromTechnicianId: techA,
+      toTechnicianId: techB,
+    });
+    const result = await handlerWithFeasibility.execute(proposal, context);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Overlaps with/);
+  });
+
+  it('passes feasibility (warnings only) and surfaces them on the result', async () => {
+    const localAssignmentRepo = new InMemoryAssignmentRepository();
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-05-17T10:00:00Z'),
+      scheduledEnd: new Date('2026-05-17T11:00:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+    await localAssignmentRepo.create({
+      id: 'as-1', tenantId, appointmentId: appt.id,
+      technicianId: techA, isPrimary: true, assignedBy: 'user-1', assignedAt: new Date(),
+    });
+
+    // Inject a working-hours mock that triggers an "outside working hours" warning for techB.
+    const workingHoursRepo: any = {
+      findByTechnicianAndDay: async () => ({
+        id: 'wh', tenantId, technicianId: techB,
+        dayOfWeek: 0, startTime: '14:00', endTime: '17:00', isActive: true,
+        createdAt: new Date(), updatedAt: new Date(),
+      }),
+    };
+    const feasibilityDeps: FeasibilityDependencies = {
+      assignmentRepo: localAssignmentRepo, appointmentRepo,
+      jobRepo: { findById: async () => null } as any,
+      locationRepo: { findById: async () => null } as any,
+      workingHoursRepo,
+      unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
+      travelTimeProvider: new HaversineFallbackProvider(),
+      skillMatcher: new StubSkillMatcher(),
+    };
+    const handlerWithFeasibility = new ReassignAppointmentExecutionHandler(
+      appointmentRepo, localAssignmentRepo, undefined, feasibilityDeps,
+    );
+
+    const proposal = makeProposal({
+      appointmentId: appt.id,
+      fromTechnicianId: techA,
+      toTechnicianId: techB,
+    });
+    const result = await handlerWithFeasibility.execute(proposal, context) as any;
+    expect(result.success).toBe(true);
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings.some((w: any) => w.check === 'working_hours')).toBe(true);
   });
 });

@@ -5,12 +5,16 @@ import { AppointmentRepository, updateAppointment } from '../../appointments/app
 import { AssignmentRepository } from '../../appointments/assignment';
 import { validateAppointmentTimes } from '../../appointments/validation';
 import { checkSchedulingProposalFreshness } from '../../ai/guardrails/scheduling-staleness';
-import { detectOverlappingAppointments } from '../../dispatch/validation';
 import {
   DispatchAnalyticsRepository,
   captureDispatchEvent,
 } from '../../dispatch/analytics';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
+import { checkFeasibility } from '../../scheduling/feasibility';
+import { FeasibilityDependencies, FeasibilityIssue } from '../../scheduling/feasibility-types';
+import { TransactionalCommsService } from '../../notifications/transactional-comms-service';
+import { notifyDispatchBoardChanged } from '../../dispatch/board-notify';
+import { boardDateFromAppointment } from '../../dispatch/board-revision';
 
 export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'reschedule_appointment';
@@ -20,6 +24,8 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
     private readonly assignmentRepo?: AssignmentRepository,
     private readonly analyticsRepo?: DispatchAnalyticsRepository,
     private readonly auditRepo?: AuditRepository,
+    private readonly feasibilityDeps?: FeasibilityDependencies,
+    private readonly transactionalComms?: TransactionalCommsService,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -71,44 +77,62 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
         return { success: false, error: `Stale proposal: ${freshness.reasons.join('; ')}` };
       }
 
-      // Conflict check — ensure no overlapping appointments for the assigned technician
-      if (this.assignmentRepo) {
-        const assignments = await this.assignmentRepo.findByAppointment(
-          context.tenantId,
-          appointmentId,
-        );
-        const primary = assignments.find((a) => a.isPrimary);
-        if (primary) {
-          const techAssignments = await this.assignmentRepo.findByTechnician(
-            context.tenantId,
-            primary.technicianId,
-          );
-          const techAppointments = await Promise.all(
-            techAssignments.map((a) =>
-              this.appointmentRepo!.findById(context.tenantId, a.appointmentId)
-            )
-          );
-          const existingAppts = techAppointments
-            .filter((a): a is NonNullable<typeof a> => a !== null)
-            .map((a) => ({
-              id: a.id,
-              technicianId: primary.technicianId,
-              scheduledStart: a.scheduledStart,
-              scheduledEnd: a.scheduledEnd,
-              status: a.status,
-            }));
-          const conflicts = detectOverlappingAppointments(
-            primary.technicianId,
-            startDate,
-            endDate,
-            existingAppts,
-            appointmentId,
-          );
-          const blocking = conflicts.filter((c) => c.severity === 'blocking');
-          if (blocking.length > 0) {
-            return { success: false, error: blocking[0].message };
-          }
+      // "No slot selected" guard. Tech-out proposals (P6-028) are created with
+      // `sourceContext.requiresSlotSelection` and the payload seeded with the
+      // appointment's CURRENT times, for the owner to edit to a real new slot.
+      // Approving one (e.g. via APPROVE ALL) WITHOUT editing would update
+      // nothing yet still fire a customer "we've rescheduled you" notification
+      // (notifyRescheduled below). Reject that so the owner must pick a time
+      // first. Scoped to flagged proposals so an ordinary reschedule
+      // re-executed with its already-applied times stays idempotent.
+      const requiresSlotSelection =
+        proposal.sourceContext?.requiresSlotSelection === true;
+      const hasArrivalWindowChange =
+        payload.newArrivalWindowStart != null ||
+        payload.newArrivalWindowEnd != null;
+      if (
+        requiresSlotSelection &&
+        !hasArrivalWindowChange &&
+        startDate.getTime() === appointment.scheduledStart.getTime() &&
+        endDate.getTime() === appointment.scheduledEnd.getTime()
+      ) {
+        return {
+          success: false,
+          error:
+            'Reschedule has no new time selected — pick a new slot before approving.',
+        };
+      }
+
+      // Conflict / feasibility check — delegate to the checkFeasibility composer
+      let trailingWarnings: FeasibilityIssue[] = [];
+      if (this.feasibilityDeps) {
+        // Determine the proposed technician — for in-lane reschedule, that's the current primary.
+        // Look it up via assignmentRepo if available; otherwise fall back to '' (composer skips overlap).
+        let proposedTechnicianId = '';
+        if (this.assignmentRepo) {
+          const currentAssignments = await this.assignmentRepo.findByAppointment(context.tenantId, appointmentId);
+          const primary = currentAssignments.find((a) => a.isPrimary);
+          if (primary) proposedTechnicianId = primary.technicianId;
         }
+
+        const feasibility = await checkFeasibility(
+          {
+            tenantId: context.tenantId,
+            appointment,
+            proposedTechnicianId,
+            proposedScheduledStart: startDate,
+            proposedScheduledEnd: endDate,
+          },
+          this.feasibilityDeps,
+        );
+        if (feasibility.blocking.length > 0) {
+          return {
+            success: false,
+            error: feasibility.blocking[0].message,
+            ...({ warnings: feasibility.warnings } as Record<string, unknown>),
+          };
+        }
+        trailingWarnings = feasibility.warnings;
       }
 
       const updates: Record<string, unknown> = {
@@ -169,7 +193,26 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
         );
       }
 
-      return { success: true, resultEntityId: appointmentId };
+      if (this.transactionalComms) {
+        await this.transactionalComms.notifyRescheduled(context.tenantId, appointmentId);
+      }
+
+      // Spatial board sync. When a reschedule crosses calendar days, BOTH
+      // boards must refresh: the new day (appointment appears) and the old
+      // day (appointment leaves). Notifying only the new day would leave a
+      // stale card on a dispatcher viewing the original day.
+      notifyDispatchBoardChanged(context.tenantId, updated.scheduledStart);
+      const oldDate = boardDateFromAppointment(appointment.scheduledStart);
+      const newDate = boardDateFromAppointment(updated.scheduledStart);
+      if (oldDate !== newDate) {
+        notifyDispatchBoardChanged(context.tenantId, appointment.scheduledStart);
+      }
+
+      return {
+        success: true,
+        resultEntityId: appointmentId,
+        ...({ warnings: trailingWarnings } as Record<string, unknown>),
+      };
     }
 
     return { success: true, resultEntityId: appointmentId };

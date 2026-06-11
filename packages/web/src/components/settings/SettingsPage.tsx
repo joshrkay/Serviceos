@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useClerk } from '@clerk/clerk-react';
 import {
-  ChevronRight, Building2, Users, Shield, Bell, Globe,
+  ChevronRight, Building2, Users, Shield, Bell, Globe, Clock,
   CreditCard, Link, Zap, FileText, Sparkles, Copy, ExternalLink,
-  MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen, Star,
+  MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen, Star, Phone,
+  Calendar,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { QuickBooksModal } from './QuickBooksModal';
@@ -20,10 +21,14 @@ import { TeamMembersSheet } from './TeamMembersSheet';
 import { CalendarSyncSheet } from './CalendarSyncSheet';
 import { PaymentMethodsSheet } from './PaymentMethodsSheet';
 import { VerticalPacksSheet } from './VerticalPacksSheet';
+import { CallRoutingSheet } from './CallRoutingSheet';
+import { OperatorHoursSheet } from './OperatorHoursSheet';
+import { DncListSheet } from './DncListSheet';
 import {
   fetchLanguageSettings,
   updateLanguageSettings,
 } from '../../api/settings';
+import { businessInitial } from '../../utils/business-initial';
 
 export function SettingsPage() {
   const navigate = useNavigate();
@@ -35,6 +40,8 @@ export function SettingsPage() {
   const [aiAuto, setAiAuto]         = useState(false);
   const [reminders, setReminders]   = useState(true);
   const [spanishMode, setSpanishMode] = useState(false);
+  const [businessName, setBusinessName] = useState<string | null>(null);
+  const [voiceAgentLive, setVoiceAgentLive] = useState<boolean | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -45,6 +52,9 @@ export function SettingsPage() {
         const data = (await res.json()) as {
           autoApplyInternalUpdates?: boolean;
           autoSendAppointmentReminders?: boolean;
+          businessName?: string;
+          googleReviewUrl?: string | null;
+          yelpReviewUrl?: string | null;
         };
         if (typeof data.autoApplyInternalUpdates === 'boolean') {
           setAiAuto(data.autoApplyInternalUpdates);
@@ -52,8 +62,25 @@ export function SettingsPage() {
         if (typeof data.autoSendAppointmentReminders === 'boolean') {
           setReminders(data.autoSendAppointmentReminders);
         }
+        if (typeof data.businessName === 'string' && data.businessName.trim()) {
+          setBusinessName(data.businessName.trim());
+        }
+        if (typeof data.googleReviewUrl === 'string') {
+          setGoogleReviewUrl(data.googleReviewUrl);
+        }
+        if (typeof data.yelpReviewUrl === 'string') {
+          setYelpReviewUrl(data.yelpReviewUrl);
+        }
       } catch {
         /* network hiccup — defaults remain */
+      }
+      try {
+        const statusRes = await apiFetch('/api/onboarding/status');
+        if (cancelled || !statusRes.ok) return;
+        const status = (await statusRes.json()) as { voiceAgentLive?: boolean };
+        setVoiceAgentLive(status.voiceAgentLive ?? false);
+      } catch {
+        // Settings still usable when onboarding status unavailable.
       }
     })();
     (async () => {
@@ -122,6 +149,9 @@ export function SettingsPage() {
   const [calendarSyncOpen, setCalendarSyncOpen] = useState(false);
   const [paymentMethodsOpen, setPaymentMethodsOpen] = useState(false);
   const [verticalPacksOpen, setVerticalPacksOpen] = useState(false);
+  const [callRoutingOpen, setCallRoutingOpen] = useState(false);
+  const [dncListOpen, setDncListOpen] = useState(false);
+  const [operatorHoursOpen, setOperatorHoursOpen] = useState(false);
   // Tier 4 (Calendar sync — PR 1). Auto-open the sheet + toast when
   // the user lands back here from Google's OAuth redirect. The
   // server-side callback redirects to /settings?calendar_connected=1
@@ -159,6 +189,7 @@ export function SettingsPage() {
     }
   }, []);
   const [copied, setCopied]         = useState(false);
+  const [bookingCopied, setBookingCopied] = useState(false);
   const [googleReviewUrl, setGoogleReviewUrl] = useState('');
   const [yelpReviewUrl, setYelpReviewUrl]     = useState('');
   const [savingReviews, setSavingReviews]     = useState(false);
@@ -166,7 +197,7 @@ export function SettingsPage() {
   const [reviewsError, setReviewsError]       = useState('');
 
   /**
-   * Tier 4 (Subscription — Fieldly billing). POST /api/billing/portal-session
+   * Tier 4 (Subscription — Rivet billing). POST /api/billing/portal-session
    * and redirect the operator to the Stripe-hosted portal where they can
    * manage card, plan, view invoices, etc. Returns to /settings on close.
    */
@@ -205,7 +236,8 @@ export function SettingsPage() {
     setReviewsError('');
     try {
       const res = await apiFetch('/api/settings', {
-        method: 'PATCH',
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ googleReviewUrl, yelpReviewUrl }),
       });
       if (!res.ok) {
@@ -221,12 +253,52 @@ export function SettingsPage() {
     }
   }
 
-  const intakeUrl = 'fieldly.app/intake/ortega-hvac';
+  const intakePath = useMemo(() => {
+    if (!me?.tenant_id) return null;
+    return `/intake?t=${me.tenant_id}`;
+  }, [me?.tenant_id]);
+
+  const intakeUrlDisplay = useMemo(() => {
+    if (!intakePath) return 'Sign in to generate your intake link';
+    if (typeof window === 'undefined') return intakePath;
+    return `${window.location.host}${intakePath}`;
+  }, [intakePath]);
+
+  const intakeUrlAbsolute = useMemo(() => {
+    if (!intakePath) return '';
+    if (typeof window === 'undefined') return intakePath;
+    return `${window.location.origin}${intakePath}`;
+  }, [intakePath]);
 
   function copyIntakeUrl() {
-    navigator.clipboard.writeText(`https://${intakeUrl}`).catch(() => {});
+    if (!intakeUrlAbsolute) return;
+    navigator.clipboard.writeText(intakeUrlAbsolute).catch(() => {});
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  }
+
+  const bookingPath = useMemo(() => {
+    if (!me?.tenant_id) return null;
+    return `/book?t=${me.tenant_id}`;
+  }, [me?.tenant_id]);
+
+  const bookingUrlDisplay = useMemo(() => {
+    if (!bookingPath) return 'Sign in to generate your booking link';
+    if (typeof window === 'undefined') return bookingPath;
+    return `${window.location.host}${bookingPath}`;
+  }, [bookingPath]);
+
+  const bookingUrlAbsolute = useMemo(() => {
+    if (!bookingPath) return '';
+    if (typeof window === 'undefined') return bookingPath;
+    return `${window.location.origin}${bookingPath}`;
+  }, [bookingPath]);
+
+  function copyBookingUrl() {
+    if (!bookingUrlAbsolute) return;
+    navigator.clipboard.writeText(bookingUrlAbsolute).catch(() => {});
+    setBookingCopied(true);
+    setTimeout(() => setBookingCopied(false), 2000);
   }
 
   const SECTIONS = [
@@ -234,7 +306,7 @@ export function SettingsPage() {
       title: 'Business',
       items: [
         { icon: Building2, label: 'Business profile',    description: 'Name, phone, email, timezone',                   action: () => setBusinessProfileOpen(true) },
-        { icon: Globe,     label: 'Language & region',   description: 'English / Español · Voice + interface language', action: () => navigate('/settings/language') },
+        { icon: Globe,     label: 'Language & region',   description: 'English / Español · Voice + customer messages', action: () => navigate('/settings/language') },
         { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => setTerminologyOpen(true) },
         { icon: BookOpen,  label: 'Price book',          description: 'Services, parts & materials with set prices',          action: () => navigate('/settings/price-book') },
         { icon: Zap,       label: 'Vertical packs',      description: 'Activate HVAC, Plumbing, or other service verticals',  action: () => setVerticalPacksOpen(true) },
@@ -244,15 +316,42 @@ export function SettingsPage() {
       title: 'Team',
       items: [
         { icon: Users,  label: 'Team members',        description: 'View the roster and roles', action: () => setTeamMembersOpen(true) },
-        { icon: Shield, label: 'Roles & permissions', description: 'Owner, Admin, Technician',             action: () => {} },
+        { icon: Shield, label: 'Roles & permissions', description: 'Owner, Admin, Technician',             action: () => toast.info('Coming soon') },
       ],
     },
     {
       title: 'AI & Automation',
       items: [
+        {
+          icon: Phone,
+          label: 'AI phone answering',
+          description:
+            voiceAgentLive === null
+              ? 'Loading…'
+              : voiceAgentLive
+                ? 'On — inbound calls use the AI assistant'
+                : 'Off — callers hear voicemail until you turn this on',
+          action: () => {
+            void (async () => {
+              if (voiceAgentLive === null) return;
+              const path = voiceAgentLive ? '/api/voice/pause' : '/api/voice/go-live';
+              const res = await apiFetch(path, { method: 'POST' });
+              if (!res.ok) {
+                toast.error('Could not update AI phone answering');
+                return;
+              }
+              const body = (await res.json()) as { voiceAgentLive: boolean };
+              setVoiceAgentLive(body.voiceAgentLive);
+              toast.success(body.voiceAgentLive ? 'AI phone answering is on' : 'AI phone answering is off');
+            })();
+          },
+        },
         { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => setAiRulesOpen(true) },
-        { icon: Bell,     label: 'Reminders & follow-ups',          description: 'Auto-send thresholds and timing',             action: () => {} },
+        { icon: Bell,     label: 'Reminders & follow-ups',          description: 'Auto-send thresholds and timing',             action: () => toast.info('Coming soon') },
         { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => navigate('/settings/templates') },
+        { icon: Clock,    label: 'Operator hours',                  description: 'Business hours for after-hours call routing', action: () => setOperatorHoursOpen(true) },
+        { icon: Zap,      label: 'Call routing & handoff',          description: 'Channels, triggers, and after-hours behavior', action: () => setCallRoutingOpen(true) },
+        { icon: Zap,      label: 'Do-Not-Call list',                description: 'Numbers blocked from outbound calls (TCPA / DNC)', action: () => setDncListOpen(true) },
       ],
     },
     {
@@ -266,7 +365,7 @@ export function SettingsPage() {
       items: [
         { icon: CreditCard, label: 'Payment methods',        description: 'Connect Stripe to accept card + ACH', action: () => setPaymentMethodsOpen(true) },
         { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => setDepositRulesOpen(true) },
-        { icon: CreditCard, label: 'Fieldly subscription',   description: 'Manage card, plan, invoices', action: () => openBillingPortal() },
+        { icon: CreditCard, label: 'Rivet subscription',   description: 'Manage card, plan, invoices', action: () => openBillingPortal() },
       ],
     },
     {
@@ -291,7 +390,7 @@ export function SettingsPage() {
           icon: Link,
           label: 'Zapier',
           description: 'Not connected',
-          action: () => {},
+          action: () => toast.info('Coming soon'),
         },
       ],
     },
@@ -332,7 +431,7 @@ export function SettingsPage() {
                 </span>
                 <div>
                   <p className="text-sm text-slate-900">Templates &amp; Customization</p>
-                  <p className="text-xs text-slate-400 mt-0.5">Your Fieldly learns and adapts over time</p>
+                  <p className="text-xs text-slate-400 mt-0.5">Your Rivet learns and adapts over time</p>
                 </div>
               </div>
               <div className="flex items-center gap-1.5 shrink-0">
@@ -378,11 +477,14 @@ export function SettingsPage() {
 
         {/* Business card */}
         <div className="rounded-2xl bg-slate-900 text-white px-5 py-5 mb-6 flex items-center gap-4">
-          <span className="flex size-12 items-center justify-center rounded-xl bg-white/10 text-2xl shrink-0">🔧</span>
+          <span className="flex size-12 items-center justify-center rounded-xl bg-white/10 text-lg font-medium shrink-0">
+            {businessInitial(businessName)}
+          </span>
           <div className="flex-1 min-w-0">
-            <p className="text-white">Ortega HVAC &amp; Services</p>
-            <p className="text-xs text-slate-400 mt-0.5">HVAC · Plumbing · Painting · Austin, TX</p>
-            <p className="text-xs text-slate-400 mt-0.5">Owner</p>
+            <p className="text-white">{businessName ?? 'Your business'}</p>
+            <p className="text-xs text-slate-400 mt-0.5">
+              {me?.role ? me.role.charAt(0).toUpperCase() + me.role.slice(1) : 'Owner'}
+            </p>
           </div>
           <button
             onClick={() => setBusinessProfileOpen(true)}
@@ -403,16 +505,18 @@ export function SettingsPage() {
               <p className="text-xs text-slate-400 mt-0.5">Share this link so customers can request service</p>
             </div>
             <button
-              onClick={() => navigate('/intake')}
-              className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors shrink-0"
+              onClick={() => intakePath && navigate(intakePath)}
+              disabled={!intakePath}
+              className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors shrink-0 disabled:opacity-40"
             >
               <ExternalLink size={11} /> Preview
             </button>
           </div>
           <div className="px-4 py-3 bg-slate-50 flex items-center gap-3">
-            <p className="flex-1 text-xs text-slate-500 truncate font-mono">{intakeUrl}</p>
+            <p className="flex-1 text-xs text-slate-500 truncate font-mono">{intakeUrlDisplay}</p>
             <button
               onClick={copyIntakeUrl}
+              disabled={!intakeUrlAbsolute}
               className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs transition-all shrink-0 ${
                 copied
                   ? 'bg-green-100 text-green-700'
@@ -425,6 +529,45 @@ export function SettingsPage() {
           <div className="px-4 py-3 border-t border-slate-100">
             <p className="text-xs text-slate-400">
               New leads from this form appear in your <button onClick={() => navigate('/leads')} className="text-blue-600 hover:underline">Lead Pipeline</button> automatically.
+            </p>
+          </div>
+        </div>
+
+        {/* Online Booking — featured card */}
+        <div className="rounded-xl bg-white border border-slate-200 overflow-hidden mb-5">
+          <div className="flex items-center gap-3 px-4 py-3.5 border-b border-slate-100">
+            <span className="flex size-7 items-center justify-center rounded-lg bg-blue-100 shrink-0">
+              <Calendar size={14} className="text-blue-600" />
+            </span>
+            <div className="flex-1">
+              <p className="text-sm text-slate-800">Online booking link</p>
+              <p className="text-xs text-slate-400 mt-0.5">Let customers self-schedule a real time slot — paste into Google Business or your site</p>
+            </div>
+            <button
+              onClick={() => bookingPath && navigate(bookingPath)}
+              disabled={!bookingPath}
+              className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors shrink-0 disabled:opacity-40"
+            >
+              <ExternalLink size={11} /> Preview
+            </button>
+          </div>
+          <div className="px-4 py-3 bg-slate-50 flex items-center gap-3">
+            <p className="flex-1 text-xs text-slate-500 truncate font-mono">{bookingUrlDisplay}</p>
+            <button
+              onClick={copyBookingUrl}
+              disabled={!bookingUrlAbsolute}
+              className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs transition-all shrink-0 ${
+                bookingCopied
+                  ? 'bg-green-100 text-green-700'
+                  : 'bg-white border border-slate-200 text-slate-600 hover:border-slate-300'
+              }`}
+            >
+              {bookingCopied ? <><Check size={11} /> Copied!</> : <><Copy size={11} /> Copy link</>}
+            </button>
+          </div>
+          <div className="px-4 py-3 border-t border-slate-100">
+            <p className="text-xs text-slate-400">
+              Bookings arrive as a held appointment plus an approval in your <button onClick={() => navigate('/assistant')} className="text-blue-600 hover:underline">approval queue</button> — nothing is confirmed without you.
             </p>
           </div>
         </div>
@@ -447,7 +590,7 @@ export function SettingsPage() {
             },
             {
               label: 'Spanish language mode',
-              description: 'Interface and customer communications in Español',
+              description: 'Customer messages & AI phone calls in Español',
               value: spanishMode, onChange: toggleSpanishMode,
             },
           ].map(({ label, description, value, onChange }) => (
@@ -603,7 +746,7 @@ export function SettingsPage() {
           >
             Sign out
           </button>
-          <p className="text-center text-xs text-slate-400">Fieldly v1.0 · © 2026</p>
+          <p className="text-center text-xs text-slate-400">Rivet v1.0 · © 2026</p>
         </div>
       </div>
 
@@ -639,7 +782,10 @@ export function SettingsPage() {
 
       {/* Business profile sheet — closes the first of the 13 settings stubs. */}
       {businessProfileOpen && (
-        <BusinessProfileSheet onClose={() => setBusinessProfileOpen(false)} />
+        <BusinessProfileSheet
+          onClose={() => setBusinessProfileOpen(false)}
+          onSaved={(fields) => setBusinessName(fields.businessName)}
+        />
       )}
 
       {/* Terminology sheet — entity-label overrides (Quote vs Estimate, etc.) */}
@@ -681,6 +827,20 @@ export function SettingsPage() {
       {verticalPacksOpen && (
         <VerticalPacksSheet onClose={() => setVerticalPacksOpen(false)} />
       )}
+
+      {/* Call routing & handoff sheet — channels, triggers, AI sentiment gate. */}
+      <CallRoutingSheet
+        open={callRoutingOpen}
+        onOpenChange={setCallRoutingOpen}
+      />
+      <OperatorHoursSheet
+        open={operatorHoursOpen}
+        onOpenChange={setOperatorHoursOpen}
+      />
+      <DncListSheet
+        open={dncListOpen}
+        onOpenChange={setDncListOpen}
+      />
     </div>
   );
 }

@@ -1,10 +1,11 @@
 import { Proposal, ProposalRepository } from '../proposal';
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from '../lifecycle';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
-import { IdempotencyGuard } from './idempotency';
+import { IdempotencyGuard, withResolvedIdempotencyKey } from './idempotency';
 import { ProposalType } from '../proposal';
 import { AppError } from '../../shared/errors';
 import { ProposalExecutionRepository } from '../proposal-execution';
+import { resolveChainReferences } from './chain-resolution';
 
 /**
  * Fired after a proposal completes execution (success or failure).
@@ -24,14 +25,17 @@ export interface ProposalExecutionEvent {
 
 export class ProposalExecutor {
   /**
-   * Optional idempotency guard. When supplied, proposals with an
+   * Idempotency guard (required, §11 H1). Proposals with an
    * `idempotencyKey` are checked against prior executed proposals
    * before the handler runs — if a previous success is found, the
    * executor short-circuits with that same `resultEntityId` instead
    * of double-creating entities. Protects against queue redelivery
-   * and operator re-approval after a network blip.
+   * and operator re-approval after a network blip. Proposals without
+   * a key flow through as a passthrough (the guard itself handles
+   * that branch), so wiring the guard is safe for every executor
+   * call site.
    */
-  private readonly idempotency?: IdempotencyGuard;
+  private readonly idempotency: IdempotencyGuard;
 
   /**
    * Optional repository to persist a `proposal_executions` row for each
@@ -52,7 +56,7 @@ export class ProposalExecutor {
   constructor(
     private readonly handlers: Map<ProposalType, ExecutionHandler>,
     private readonly proposalRepo: ProposalRepository,
-    idempotency?: IdempotencyGuard,
+    idempotency: IdempotencyGuard,
     options: {
       executionRepo?: ProposalExecutionRepository;
       onExecuted?: (event: ProposalExecutionEvent) => Promise<void> | void;
@@ -101,21 +105,79 @@ export class ProposalExecutor {
       );
     }
 
-    // Idempotency gate: route through the guard when present. When
-    // `idempotencyKey` is absent the guard is a passthrough and runs
-    // the handler directly, preserving behavior for callers that
-    // haven't adopted idempotency keys yet.
-    let result: ExecutionResult;
-    let alreadyExecuted = false;
-    if (this.idempotency) {
-      const outcome = await this.idempotency.checkAndExecute(proposal, () =>
-        handler.execute(proposal, context)
-      );
-      result = outcome.result;
-      alreadyExecuted = outcome.alreadyExecuted;
-    } else {
-      result = await handler.execute(proposal, context);
+    // Multi-action chaining: resolve any symbolic reference tokens
+    // (`$ref:chain[0].customerId`) against the resultEntityId of the
+    // sibling this proposal depends on. `noop` for non-chained
+    // proposals → behavior is unchanged.
+    let executableProposal = proposal;
+    const chainResolution = await resolveChainReferences(proposal, {
+      proposalRepo: this.proposalRepo,
+    });
+    if (chainResolution.status === 'resolved') {
+      executableProposal = { ...proposal, payload: chainResolution.payload };
+    } else if (chainResolution.status === 'blocked') {
+      if (chainResolution.reason === 'parent_pending') {
+        // The dependency hasn't executed yet. The sweep claimed this row
+        // (status -> 'executing') before calling us; if we just threw, it
+        // would sit in 'executing' until resetStaleExecuting runs (~10
+        // min) because findReadyForExecution only sees 'approved'. Return
+        // it to 'approved' first so the very next sweep tick re-attempts
+        // it — once the parent has executed. This is the ordering
+        // guarantee for chains; it does not depend on claim order.
+        if (proposal.status === 'executing') {
+          await this.proposalRepo.updateStatus(
+            proposal.tenantId,
+            proposal.id,
+            'approved',
+            { approvedAt: proposal.approvedAt },
+          );
+        }
+        throw new AppError(
+          'CHAIN_PARENT_PENDING',
+          `Proposal depends on chain sibling '${chainResolution.parentId}' which has not executed yet. Retrying.`,
+          409
+        );
+      }
+      // parent_failed → cascade-fail this dependent. No infinite retry.
+      const failed = transitionProposal(proposal, 'execution_failed', context.executedBy);
+      await this.proposalRepo.updateStatus(failed.tenantId, failed.id, failed.status, {
+        rejectionDetails: `Blocked by failed chain dependency '${chainResolution.parentId}'`,
+      });
+      return {
+        proposal: failed,
+        result: { success: false, error: 'chain_dependency_failed' },
+      };
     }
+
+    // Idempotency gate (§11 H1). Keys default to `proposal-run:{tenant}:{id}`
+    // when callers omit `idempotencyKey`, so every execution is lockable.
+    const keyedProposal = withResolvedIdempotencyKey(executableProposal);
+    let executionId: string | undefined;
+    let executionRecordedInGuard = false;
+    const outcome = await this.idempotency.checkAndExecute(keyedProposal, async () => {
+      const handlerResult = await handler.execute(keyedProposal, context);
+
+      // Critical race fix (§11 H1): write the idempotency marker while we still
+      // hold the advisory lock. If this insert happened later (after
+      // checkAndExecute returns), a second concurrent caller could acquire the
+      // lock, fail to find a prior execution, and run the handler a second time.
+      if (this.executionRepo && handlerResult.success) {
+        const row = await this.executionRepo.recordExecution({
+          tenantId: keyedProposal.tenantId,
+          proposalId: keyedProposal.id,
+          executedPayload: keyedProposal.payload,
+          executedBy: context.executedBy,
+          status: 'succeeded',
+          idempotencyKey: keyedProposal.idempotencyKey,
+        });
+        executionId = row.id;
+        executionRecordedInGuard = true;
+      }
+
+      return handlerResult;
+    });
+    const result: ExecutionResult = outcome.result;
+    const alreadyExecuted = outcome.alreadyExecuted;
 
     let updatedProposal: Proposal;
     if (result.success) {
@@ -159,6 +221,12 @@ export class ProposalExecutor {
           resultEntityId: updatedProposal.resultEntityId,
           executedAt: updatedProposal.executedAt,
           executedBy: updatedProposal.executedBy,
+          // QA-2026-06-05: persist WHY execution failed. Handlers return a
+          // reason in result.error, but it was dropped — execution_failed
+          // rows had execution_error NULL and were undebuggable (live: every
+          // voice create_customer failed silently on a payload-shape
+          // mismatch for weeks of QA archaeology).
+          ...(result.success ? {} : { executionError: result.error ?? 'unknown execution failure' }),
         }
       );
     } else if (proposal.status === 'approved') {
@@ -186,8 +254,7 @@ export class ProposalExecutor {
     // blocks: failures are logged via console (no logger threaded yet)
     // but never rethrown — the proposal is already in 'executed' state
     // and the user-visible side effect succeeded.
-    let executionId: string | undefined;
-    if (this.executionRepo && !alreadyExecuted) {
+    if (this.executionRepo && !alreadyExecuted && !executionRecordedInGuard) {
       try {
         const row = await this.executionRepo.recordExecution({
           tenantId: updatedProposal.tenantId,
@@ -201,7 +268,7 @@ export class ProposalExecutor {
           executedBy: context.executedBy,
           status: result.success ? 'succeeded' : 'failed',
           errorMessage: result.success ? undefined : result.error ?? 'execution_failed',
-          idempotencyKey: updatedProposal.idempotencyKey ?? undefined,
+          idempotencyKey: withResolvedIdempotencyKey(updatedProposal).idempotencyKey,
         });
         executionId = row.id;
       } catch (err) {

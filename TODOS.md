@@ -5,32 +5,18 @@ tracks follow-ups surfaced during /review that were intentionally not fixed.
 
 ---
 
-## Executor double-execution on multi-instance deploys ✅ CLOSED
+## Executor double-execution on multi-instance deploys ✅ CLOSED (in code)
 
-`packages/api/src/proposals/execution/executor.ts:17-72` checks
-`proposal.status === 'approved'` from the in-memory object returned by
-`findReadyForExecution`, runs the handler's side effects, THEN calls
-`updateStatus('executed')`. With more than one API instance running, two
-workers can both claim the same approved proposal via `findReadyForExecution`
-and run the handler twice (customer created twice, appointment booked twice,
-etc.).
+Shipped via `ProposalRepository.claimForExecution(proposalId, workerId)`
+(see `packages/api/src/proposals/proposal.ts:546` for the in-memory impl
+and `pg-proposal.ts:285` for the Postgres impl). The execution worker calls
+`claimForExecution` at `packages/api/src/workers/execution-worker.ts:67`,
+which atomically transitions `approved → executing` and returns `null` if
+another worker won the race. `'executing'` is in the `ProposalStatus`
+enum (`proposal.ts:14`) and `resetStaleExecuting` (`proposal.ts:557`)
+handles crash recovery with a retry count cap.
 
-This was surfaced during `/review` of PR #89 but explicitly deferred to keep
-the P0-gap PR focused. Not a problem today because ServiceOS runs a single
-Railway dyno, but any horizontal scale flips this on.
-
-**Fix:** atomic claim via `UPDATE proposals SET status = 'executing' WHERE id
-= $1 AND status = 'approved' RETURNING *` before running the handler. If the
-update returns no row, another worker claimed it — skip. Add an `'executing'`
-ProposalStatus (or a dedicated `claimed_by` + `claimed_at` column pair) and
-thread it through the lifecycle.
-
-**Effort:** ~30 min CC + careful thinking about crash recovery (what if the
-handler crashes mid-execution — do we reset `executing` back to `approved` on
-a timeout?). Flag before scaling past one dyno.
-
-This same issue covers the §8 `log_expense` idempotency concern — same
-double-execution risk, same fix.
+Safe to scale past one dyno.
 
 ---
 
@@ -63,24 +49,66 @@ infer it from their address.
 
 ---
 
-## Partial refunds are unrepresentable
+## charge.refund.updated handler for pending → succeeded transitions
 
-`PaymentStatus` is binary: `'pending' | 'completed' | 'failed' | 'refunded'`.
-A $500 payment with a $50 partial refund either stays `'completed'` (refund
-invisible) or flips to `'refunded'` (overstates the refund as $500). The §8
-tax export currently uses the binary status — refunded rows surface with
-`[REFUNDED]` in the description so the accountant can adjust manually, but
-the magnitude isn't carried.
+D2-4 (PR #384) added `charge.refunded` handling and `091e6e1` adds a
+`refund.status === 'succeeded'` guard so non-settled refunds (`pending`,
+`requires_action`, `failed`, `canceled`) are skip-ACKed without mutating
+`refundedAmountCents`. When Stripe later settles a previously-pending
+refund, it re-fires `charge.refunded` with `status='succeeded'`, so the
+guard is functional today.
 
-**Fix:** add `refunded_amount_cents INTEGER` and `refunded_at TIMESTAMPTZ`
-columns to `payments`. Treat refund as a separate event: the original
-payment stays `completed` for its original receivedAt period; the refund
-is a separate `expense` row (or a negative income row) dated by `refunded_at`.
-Migration is straightforward — both new columns are NULL-able and
-default-NULL doesn't break existing rows.
+**Optional enhancement:** wire a dedicated `charge.refund.updated`
+handler in `packages/api/src/webhooks/routes.ts`. This event fires on
+every refund status transition (including `pending → failed`), letting
+us explicitly observe failed-refund cases for monitoring rather than
+relying on the absence of a re-fired `charge.refunded`. Low priority —
+the current handler is correct, this would just improve observability.
 
-**Effort:** ~1 hour CC + schema migration + update the tax-export
-income loop to emit refund rows.
+**Effort:** ~30 min CC + 2 tests.
 
-Not blocking launch because solo-operator partial refunds are rare and the
-accountant can adjust the `[REFUNDED]` rows manually.
+Surfaced by `chatgpt-codex-connector[bot]` in PR #384 review (2026-05-16).
+
+---
+
+## Partial refunds are unrepresentable ✅ MOSTLY CLOSED (D2-4)
+
+D2-4 (2026-05-16, PR #384) added `refunded_amount_cents`, `refunded_at`, and `last_refund_stripe_id` columns to `payments` (migration 100), wired `recordRefund()` in `packages/api/src/payments/payment-service.ts` (with over-refund guard), connected the Stripe `charge.refunded` webhook, and updated `tax-export.ts` + `money-dashboard.ts` to emit negative-income rows + gross/net distinction.
+
+**Known limitation carried forward:** multi-partial-refund time-bucketing.
+
+`packages/api/src/payments/payment-service.ts` stores cumulative
+`refundedAmountCents` plus a single `refundedAt` timestamp on the
+payment row. Two partial refunds across different months collapse to
+the latest refund's date in the tax export — Jan + Feb refunds both
+get attributed to February. The over-refund magnitude guard at
+`payment-service.ts:72-76` keeps totals correct; only per-event
+time-bucketing is lossy.
+
+**Fix (follow-up D2-4a):** add a `payment_refunds` child table:
+
+```sql
+CREATE TABLE payment_refunds (
+  id UUID PRIMARY KEY,
+  tenant_id UUID NOT NULL,
+  payment_id UUID NOT NULL REFERENCES payments(id) ON DELETE RESTRICT,
+  amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+  stripe_refund_id TEXT NULL,
+  refunded_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_payment_refunds_tenant_payment ON payment_refunds(tenant_id, payment_id);
+CREATE INDEX idx_payment_refunds_refunded_at ON payment_refunds(refunded_at);
+```
+
+Then refactor `recordRefund()` to INSERT a row (instead of updating
+cumulative columns), and rebuild `tax-export.ts` + `money-dashboard.ts`
+to aggregate from the child table. Keep the cumulative columns as a
+denormalization for fast reads, updated by a trigger or in the same
+transaction as the INSERT.
+
+**Acceptable for now because:** beta is US-only solo-operator; multi-partial-refunds are rare; accountants can adjust manually using the `payment.refunded` audit events (which DO carry accurate per-event timestamps).
+
+**Effort:** ~half-day CC + migration 101 + test refresh.
+
+Surfaced by `gemini-code-assist[bot]` in PR #384 review (2026-05-16).

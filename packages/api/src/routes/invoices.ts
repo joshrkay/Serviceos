@@ -24,6 +24,16 @@ import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { applyDepositCreditToInvoice } from '../invoices/deposit-credit';
 import { SendService } from '../notifications/send-service';
 import { Job, JobRepository } from '../jobs/job';
+import { EstimateRepository } from '../estimates/estimate';
+import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
+import { createLogger } from '../logging/logger';
+import { PaymentLinkProvider } from '../payments/payment-link-provider';
+import { createInvoicePaymentLink } from '../invoices/invoice-payment-link';
+
+const logger = createLogger({
+  service: 'invoices-route',
+  environment: process.env.NODE_ENV || 'development',
+});
 
 const nestedPaymentSchema = z.object({
   amountCents: z.number().int().positive(),
@@ -43,8 +53,21 @@ export function createInvoiceRouter(
   // without a job repo still build the router; deposit credit only
   // fires when both jobRepo + paymentRepo are wired.
   jobRepo?: JobRepository,
+  // §6 Time-to-Cash. Optional so legacy harnesses still build; the
+  // money-state rollup fires only when both jobRepo + estimateRepo
+  // are wired.
+  estimateRepo?: EstimateRepository,
+  paymentLinkProvider?: PaymentLinkProvider,
 ): Router {
   const router = Router();
+
+  // §6 Time-to-Cash. Built once at factory time — the rollup needs the
+  // job, estimate and invoice repos plus the audit repo for the
+  // job.money_state_changed event.
+  const refreshDeps: RefreshJobMoneyStateDeps | undefined =
+    jobRepo && estimateRepo
+      ? { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger }
+      : undefined;
 
   router.post(
     '/',
@@ -265,6 +288,34 @@ export function createInvoiceRouter(
   );
 
   router.post(
+    '/:id/payment-link',
+    requireAuth,
+    requireTenant,
+    requirePermission('invoices:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!paymentLinkProvider) {
+          res.status(501).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Payment link provider is not configured on this router',
+          });
+          return;
+        }
+        const result = await createInvoicePaymentLink(
+          req.auth!.tenantId,
+          req.params.id,
+          invoiceRepo,
+          paymentLinkProvider,
+        );
+        res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  router.post(
     '/:id/issue',
     requireAuth,
     requireTenant,
@@ -272,7 +323,13 @@ export function createInvoiceRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const paymentTermDays = req.body.paymentTermDays ?? 30;
-        const result = await issueInvoice(req.auth!.tenantId, req.params.id, paymentTermDays, invoiceRepo);
+        const result = await issueInvoice(
+          req.auth!.tenantId,
+          req.params.id,
+          paymentTermDays,
+          invoiceRepo,
+          refreshDeps,
+        );
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
           return;
@@ -308,7 +365,11 @@ export function createInvoiceRouter(
             processedBy: req.auth!.userId,
           },
           invoiceRepo,
-          paymentRepo
+          paymentRepo,
+          refreshDeps,
+          undefined,
+          auditRepo,
+          { actorRole: req.auth!.role },
         );
         res.status(201).json(result);
       } catch (err) {
@@ -330,7 +391,13 @@ export function createInvoiceRouter(
           res.status(400).json({ error: 'VALIDATION_ERROR', message: 'status is required' });
           return;
         }
-        const result = await transitionInvoiceStatus(req.auth!.tenantId, req.params.id, status, invoiceRepo);
+        const result = await transitionInvoiceStatus(
+          req.auth!.tenantId,
+          req.params.id,
+          status,
+          invoiceRepo,
+          refreshDeps,
+        );
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
           return;
@@ -374,6 +441,11 @@ export function createInvoiceRouter(
           invoiceId: req.params.id,
           ...parsed.data,
         });
+        // §6 Time-to-Cash. `sendInvoice` only stamps `sentAt`/`lastDispatchId`;
+        // it does NOT transition the invoice's status. The job's money-state
+        // (driven by `status`/`dueDate`) is therefore unchanged at send time,
+        // so no rollup call is needed here — unlike the estimate `/send` route,
+        // where SendService transitions the estimate to 'sent' internally.
         res.status(202).json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);

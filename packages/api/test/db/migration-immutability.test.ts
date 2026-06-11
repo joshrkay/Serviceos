@@ -70,7 +70,13 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['016_create_jobs', 'd13851154b8b98a02c7f73b59d5be99c813b7d04aecef004ace5dc9d39723c31'],
   ['017_create_job_timeline_events', 'b249f4702f2904b120a5b3b6a01d0372e701f768bd2c50e53cea7bedd99f6e47'],
   ['018_create_appointments', '5b9aab1df3fabe35d130752b5af9d7531d7dc92da97a41e7fab601b5cfe6815c'],
-  ['070_tenant_location_and_integrations', '52c828957502021bf5430f1fb19cf3f3608cb99673a9f9439f3e30ab001dca0f'],
+  // 070's region CHECK was changed to NOT VALID on this branch (3db4b4a) — the
+  // runner re-executes every migration on every boot (no ledger) and the named
+  // constraint is DROP'd + re-ADD'd each time, so a validating ADD CONSTRAINT
+  // re-checked all rows and bricked deploys (23514) on any NULL-region row that
+  // the relaxed 088 constraint allows. NOT VALID is the only fix that takes
+  // effect at the 070 step itself; hash regenerated to lock in the edit.
+  ['070_tenant_location_and_integrations', '56a32f2c0274b18ebcae94c747dc0885660078edc629b168ce1bc67fb887bea0'],
   ['019_create_appointment_assignments', 'e9394cf3cdc8c89bc8b7f12556d397a86bfdd5a980f3b39af70e45815e98c35b'],
   ['020_create_estimates', 'b4b9e04bbe669956419eb7083e1e8b441db7398aaa8e9e4d80f683c68792cc4d'],
   ['021_create_estimate_line_items', '43b3f8ba9491c53f7701961bb28eae9cddd4c7d9a3c1c908a5d50b8c1a65cabc'],
@@ -117,11 +123,6 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['063_language_detection', '918c4cd778821e6b38a381c6dfceb3e3446c9e390245fcb6eca0e486067b576f'],
   ['064_create_job_photos', '3ad6f895d04b29e6ef6f1d2d5b74757b6417fe9e73cfe61e61ebe31b15dfd2a7'],
   ['065_create_portal_sessions', '6b939dc150298e5af212577fda04ec07aec8338f026a6107c7ad09491f1ded10'],
-  // Phase-13 voice_sessions + per-user current_mode + tenant-level
-  // backup-supervisor / unsupervised routing. Body byte-identical to
-  // the original 063_create_voice_sessions_and_modes entry from the
-  // p12-mode-switching branch; key bumped to 066 on merge because
-  // main claimed 063–065 first.
   ['066_create_voice_sessions_and_modes', '8268a58eecee1db168757965fe310b203a7bd9eb77b5b4fe2ed9e97d0bc94614'],
   ['067_create_time_entries', '069290a0144fb08de0171bb07d5255496236ef2d66a4dce40228a2de02c5a49f'],
   ['068_create_language_settings', 'dc485f4a1ec4e0bab7f3a58c6e54339d434057ceccbaa562c78952efa19e9931'],
@@ -148,11 +149,82 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['089_drop_vertical_packs_type_check', 'dd41709b4300eb0ed03b2a477bdbe163440c76a557d5c07cdbe3e02910a803b8'],
   ['090_tenant_settings_voice_persona', '95805b86eb94d010c5c231ae4ab641e05debba20464a61888a42ac4809b0dcfb'],
   ['091_voice_session_outcome', '6fea1ddb8c3725191aff36013b7134fe7bf91af7392cc815da7f9c041fcfc59c'],
-  ['092_extend_dispatch_entity_types', '151f56d737928f7fc0678c98d5a83bc0b7117bbbd9865cc770c2c46ad2ebbb94'],
+  // 092_extend_dispatch_entity_types: added 'appointment_reminder' to the entity_type CHECK
+  // constraint — 11 rows in message_dispatches had this value, causing pg error 23514 on every
+  // deploy (runner re-runs all migrations on every boot, DROP+re-ADD re-validates all rows).
+  ['092_extend_dispatch_entity_types', 'cc5d07bbf11a26fb95ec6dc93a8344b24fa44472f89e167e4023bb60da603435'],
   ['092_voice_session_transcript', 'f06ebad750ef6b1a8540d27aa14516f6db350b6debda0ec5cc444ad3a6e37f48'],
   ['093_users_deleted_at', '7d2ed611ca7751641c8cff049b55617e4af203b43257528e7c46c15bd80c127f'],
   ['094_add_held_appointment_fields', 'e71d08dc59d35a7c70c245572de551d7a4f48d4b7a5fcfd9164d39705a6f6607'],
+  ['095_vertical_training_assets', '2c97e28a9f31bf562a69e4204779da6ed7a8aaf4f65ead102ce5c97a45156350'],
   ['096_create_expenses', '66dfd938628d33c4e65f25037c59d52fbed2848fa43123a94fb92f59b6d1a73e'],
+  ['097_vertical_training_assets_idempotency', '3c0fbe088bd918a4900e6c1b3c6b68ace51959ff7ae3ecf2b09aae3285ed025a'],
+  ['098_tenant_settings_onboarding_fields', 'cc5d352de051b7687fb2f379aa9dc247671aff5909f1a3a9d9c1f96af0830ad4'],
+  ['099_proposal_executions_idempotency_index', '90549c0a15f7b54d35f70d02ee741b3c562eb9ed5d7119c4826e3ae36bf86f99'],
+  ['100_payments_refund_tracking', '242a61a9e99abd1dfc793c6cd53962beeab7c15d283fa37d84004dfe1bf940ed'],
+  ['101_google_reviews', 'ee39147f5eb59b0455ea40290a3592f70068907e13fa0d2c392ba4a3acd6d8f8'],
+  ['102_review_poll_state', 'b069f6a315219c16ac432f1854b1865d337efa6a8fa66a12efc6c89d18ebb207'],
+  ['103_service_credits', 'd4a6951eb9a1afe53bc92e1b81b7594e8f084d48765580ecae3065325198e102'],
+  ['104_service_credits_review_fk', '3774d608685bc1c9fa21706ec1905be65a0fc9496c49aeac7b938422371ef97c'],
+  ['105_create_dispatch_analytics', '4711390273626b42dccb496db8d9b355d5aa91d37dede77f9777ab14045c0c83'],
+  ['106_tenant_settings_escalation_settings', '96affeb743beef4681931fb26f91441b50ddfe8139938028da862d9cefcd9ba0'],
+  ['107_portal_sessions_system_lookup_rls', 'fd29a8fb3e536e27e307a1aa537e13bc4017525f8b08b2955d94078610da0eba'],
+  ['108_tenant_settings_voice_agent_live', 'c030fc16ba92177b18589c7b3342ad945a0c6d2f0a59b0fa2449274d62b680e9'],
+  ['109_users_mobile_number', '84773bb91c016828430bdb2f5a8504edef06193ad201ce41051a4b15134d9f22'],
+  ['110_tenant_settings_brand_voice', '4d5499d20742415bb4852704a2fe3972446a3acc6efbfb050d4b57b573a6dc34'],
+  ['111_phone_rate_limits', '07b4989a51fea21cf60c8f5245da2bab2ec01b8ebc4fae5afc8378545397594d'],
+  ['112_dropped_call_recoveries', '40e7b282467a7da006b5b6ba0d9403eb6ab24ed7009332741c350517969e256f'],
+  ['113_customer_vulnerability_fields', '464fc3086ad7b96cce4447abd1c65fe8048401de206a1c7aea95d0e92109f3d7'],
+  ['114_weather_cache', 'df441501f3f1f009fb264ab67ff38048053d2fc9f999d99f40d494df6d011a16'],
+  ['115_vulnerability_signals', 'c846d961b36ff8382fb829237c664d3b79443f14390d779263017e64632789d3'],
+  ['116_tech_unavailable_blocks', '300d10f9639ca0bca5eabd9fa16831008afbbcf3c747f91a4f40c5929eab9fe0'],
+  ['117_tech_status_today', '5f2224447036245f802ac7aeeb333fb46614670526fdc621285a4200d321a55a'],
+  ['118_jobs_money_state', '2f7263cff926f33f21d8b01da9b01feb892c4f61ba09b8a1eafd404f455f8010'],
+  ['119_view_token_lookup_functions', '0d4251c8391c2cdf6c1cb8120cf50e92c739e62db3a80cc8eaeb0b48579711a3'],
+  ['120_tenant_settings_ai_config', 'e81e1e5ccef2b65ce8412ea57ccbca4b319a2ca67d9846ebc1c0ba871943a3b1'],
+  ['121_estimate_revision_versioning', '9f1c9074e2f31c07b01e9a7f50989e89da5c198135017f8c31aa6906449d05c2'],
+  ['122_estimate_reminders', '5f6c29e7825508f8e4a1d62e889fc93d5dfca96af26e9d0a1f8ae613a56d0cd2'],
+  ['123_platform_deprovision_log', 'c05fefacd43c39abd95305589cc12404e46f2a3c2a85b556a7ecd15dae283e3a'],
+  ['124_tenant_settings_review_urls', '889419f461a2e292ff89c910528927715eee23435bf69e74c4fac832fe8ef3b2'],
+  ['125_dispatch_entity_en_route', '113fdf2a2aaba8da7250518612817363ffa77110f1d8c60ace32fcc255f55dc6'],
+  ['125_estimates_deleted_at', '45ded6b32cd90fe40623332dafa7932ee33afbf6a8abb7df2afa117e04f72eec'],
+  ['126_invoices_estimate_unique', 'b85be06a1ce1aa7d739ce2700e5a7fed6d08b757e6c58be92d136eea77846e44'],
+  ['127_estimate_line_item_options', 'b6c373ef8aa306b24a1ea4c12f17fd5432446c00c3f1bd761050ff4dc7185ea5'],
+  ['128_estimates_accepted_selection', 'bd49424960f39937bd085b19263e7fc7d7372275ac76d5cd5f004a44c395ca71'],
+  ['129_estimates_one_accepted_per_job', '1267fa8e2704f3ef25a3f4c9ff981eb63b18d98bc0a2ffa6252e5ebe7165f8bd'],
+  ['130_force_rls_missing_tables', '118b99fadd7df2d32568791a0976031e0893619e93e6c5ea199d937e28183c13'],
+  ['131_appointment_assignments_no_double_booking', '27484d3c8eef021201ccd827419b3cbbec8516c14868759543b0f16d7ba3f295'],
+  ['132_customer_consent_status', 'd4d2d0b5de1471a746cb9db7757630e27ef5a0f45e4fd61ad9c236645c49396d'],
+  ['133_payments_reversal_tracking', '9e4be3033b999501b6faa258b4475d58452f322f797751b57f203529668f6afb'],
+  ['134_proposal_chains', 'edcfadb2580167f35be75ea42d258fa7d499088d28cca5bbfc8b84823aa9e2ad'],
+  ['135_appointments_idempotency_key', 'ab65a6bf7b64221c2761b81e7c5d6f42b2e048b7fa7fcb52ab4adffe1c370aeb'],
+  ['136_create_invoice_dunning', '085bab2c52bb030111b677d061d70019eded0a144aa99797ac1eff80bfb3149a'],
+  ['137_technician_working_hours', '9337884066ddee9644370bca78c50c7489a854a831ceec4e5cedfce8a707248d'],
+  ['138_tenant_settings_auto_invoice_on_completion', '022db9a74cf4fab10dd8c23b6fabcbbf6edb36a7629adff7e39e5f05292e85f2'],
+  ['139_create_invoice_schedules', '01debb27ace85e2ac1df38317894cce7b35fd54a20431fe526d12246fda696d9'],
+  ['140_batch_invoicing', '63f7146c5a2b08ed910edff1f1f9136955d79474e796801239abb1ff96430fdc'],
+  ['141_milestone_billing_safeguards', '38e660dbced93c8fa49efa7ddd4ae6e868c5cf10f3b1d5048dfed243e7d6c777'],
+  ['142_proposals_source_recording_index', '2af70e5368d61c8338ac16f66557fd34c3a8daebc2d48b009d3bafa13514659d'],
+  ['143_tenant_settings_owner_phone', 'af5c290ac32a8e6eb099212d29275aef11dff43f2a197a79865cbb7b8bc9c953'],
+  ['144_tenants_pending_checkout_at', '93cb5302caca35e6587b01d97151e8424e554a6ec90c08274d67c81eb436f2b2'],
+  ['145_tenants_pending_checkout_session_id', '2f4d5f3c8be0510bfbc1490192810d65358632d0bcc2540f116d77e5233eed36'],
+  ['146_tenant_settings_activated_at', 'b1851a3b18b950f29de1e2df64e26e882a8096d4ef5916adb1bd127b5af12e34'],
+  ['147_tenant_settings_vapi_assistant', '8e59538f846f9de4d53577e5fafbc0c3327b3e823c7907a2f6bc21290eae8a7a'],
+  ['148_tenant_settings_business_profile_extras', '0b9f55aedb42e1a503aa1fc7338fa790a11be08d4bf3eca26cf205da582c9002'],
+  ['149_tenant_settings_calendar_provider', '1ef4dcbef697bb3e060f0a3ba3102381631c053d0c696131623a63c6d0d03440'],
+  ['150_tenant_settings_availability_template', 'c05e63c2025ecc6fd69cf4fdbee4ac447cda294f65f8e9efb77532c37cfe1175'],
+  ['151_tenant_settings_bill_labor_from_time_entries', 'a33ab626d1b807c19dfd62180a9462c7cbdb41c8b358e89249fb2213f93ac145'],
+  ['152_voice_parity_transfer_and_languages', '437c19e7db82a2a1ec8c04d62d433b13ec609dd55315b3fe859fee39bad680a0'],
+  ['153_create_call_me_back_tasks', '9b9d430535e2f9d35c71de35e7389198a71ed8946f8262527ed9378535952abe'],
+  ['154_call_me_back_session_idempotency', 'a08d1ad3f4a42adb17e2fd5ea464b52fb87721d3dd5fe534c662dd787228c65e'],
+  // QA-2026-06-10: credentials column + google_business provider missing from tenant_integrations
+  ['155_tenant_integrations_google_business', 'd626700ea571d2691927cf6adf43704b3bc44aecde7071f3895c1cf801cf2a7f'],
+  // P2-034: SMS approval transport — proposal_sms_events
+  ['156_proposal_sms_events', '57fcfceeddded524d51d9d941e139b094dc684e818ea6c5772d561710a72d469'],
+  // P2-034 review: sender-scoped edit sessions
+  ['157_proposal_sms_events_from_phone', 'ba440770da6030cbbeb747578d33763768ef56191219f082b3b5233a6d204561'],
+  // P2-034 review: monotonic tiebreaker for latest-render ordering
+  ['158_proposal_sms_events_seq', '69e5325add052650a0355aeddab03b016018bf3d3272f63601b468ba32a67b9d'],
 ];
 
 function hashMigration(value: string): string {

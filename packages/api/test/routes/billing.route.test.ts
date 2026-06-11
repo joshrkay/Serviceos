@@ -72,7 +72,7 @@ function makeService(overrides: Partial<BillingService> = {}): BillingService {
   } as unknown as BillingService;
 }
 
-describe('GET /api/billing/subscription — Tier 4 Subscription (Fieldly)', () => {
+describe('GET /api/billing/subscription — Tier 4 Subscription (Rivet)', () => {
   it('returns the cached subscription view when service is wired', async () => {
     const service = makeService();
     const app = buildApp({ service });
@@ -99,7 +99,7 @@ describe('GET /api/billing/subscription — Tier 4 Subscription (Fieldly)', () =
   });
 });
 
-describe('POST /api/billing/portal-session — Tier 4 Subscription (Fieldly)', () => {
+describe('POST /api/billing/portal-session — Tier 4 Subscription (Rivet)', () => {
   let service: BillingService;
   beforeEach(() => {
     service = makeService();

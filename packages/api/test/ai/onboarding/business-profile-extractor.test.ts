@@ -130,13 +130,13 @@ describe('P4-EXT-001 — Business profile extraction from voice transcript', () 
     expect(result.data.confidence).toBe(0);
   });
 
-  it('filters out invalid vertical types', async () => {
+  it('accepts electrical as a basic supported vertical', async () => {
     const { gateway, provider } = createMockLLMGateway();
     provider.setDefaultResponse(
       mockBusinessProfileResponse({
         verticals: [
           { type: 'hvac', confidence: 0.9, source_text: 'HVAC' },
-          { type: 'electrical', confidence: 0.8, source_text: 'electrical' }, // invalid
+          { type: 'electrical', confidence: 0.8, source_text: 'electrical' },
           { type: 'plumbing', confidence: 0.7, source_text: 'plumbing' },
         ],
       })
@@ -148,7 +148,7 @@ describe('P4-EXT-001 — Business profile extraction from voice transcript', () 
     const types = result.data.verticalPacks.map((v) => v.type);
     expect(types).toContain('hvac');
     expect(types).toContain('plumbing');
-    expect(types).not.toContain('electrical');
+    expect(types).toContain('electrical');
   });
 
   it('sends transcript in LLM request within character limit', async () => {

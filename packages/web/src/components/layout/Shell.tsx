@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
-import { NavLink, Outlet, useLocation } from 'react-router';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import {
   Home, MessageSquare, Briefcase, Calendar,
   Users, FileText, Receipt, Settings, Zap, Bell, Layers, TrendingUp, LogOut,
@@ -17,7 +17,18 @@ import {
   shouldShowModeSwitchModal,
 } from '../mode/ModeSwitchModal';
 import { CompressedSessionStrip } from '../sessions/CompressedSessionStrip';
-import { useActiveSessions } from '../../hooks/useActiveSessions';
+import {
+  ActiveSessionsProvider,
+  useActiveSessions,
+} from '../../hooks/useActiveSessions';
+import { UpgradeNudgeBanner } from '../onboarding/v2/UpgradeNudgeBanner';
+import { ActivationCelebrationBanner } from '../onboarding/v2/ActivationCelebrationBanner';
+import { PastDueBanner } from '../billing/PastDueBanner';
+import { EscalationPanelHost } from '../dispatch/EscalationPanelHost';
+import {
+  usePendingProposals,
+  type PendingProposalSummary,
+} from '../../hooks/usePendingProposals';
 
 interface NavItem {
   to: string;
@@ -33,10 +44,6 @@ interface NavItem {
  * underlying routes remain the existing ones (e.g. `/assistant` is
  * "Sessions" in supervisor mode, `/technician/day` is "Today" in tech).
  *
- * Routes that don't yet exist (e.g. `/dispatch`) are deliberately
- * omitted — the supervisor wall + DispatchBoard wiring lands in a
- * separate story. Adding them here would 404 and we'd rather hide
- * them until they're real.
  */
 function getNav(mode: Mode): NavItem[] {
   switch (mode) {
@@ -47,11 +54,16 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/customers',      label: 'Customers', icon: Users    },
         { to: '/estimates',      label: 'Estimates', icon: FileText },
         { to: '/invoices',       label: 'Invoices',  icon: Receipt  },
+        { to: '/inbox',          label: 'Inbox',     icon: Bell     },
+        { to: '/reports/money',  label: 'Money',     icon: TrendingUp },
         { to: '/settings',       label: 'Settings',  icon: Settings },
       ];
     case 'both':
+      // Supervisor + field-tech power view. Trimmed to the calm core
+      // (Assistant relabel; Dispatch/Inbox/Money dropped from the
+      // sidebar — all still reachable by URL and via the logo badge).
       return [
-        { to: '/assistant',      label: 'Sessions',     icon: MessageSquare },
+        { to: '/assistant',      label: 'Assistant',    icon: MessageSquare },
         { to: '/technician/day', label: 'Today',        icon: Wrench        },
         { to: '/jobs',           label: 'My jobs',      icon: Briefcase     },
         { to: '/schedule',       label: 'Schedule',     icon: Calendar      },
@@ -62,9 +74,14 @@ function getNav(mode: Mode): NavItem[] {
       ];
     case 'supervisor':
     default:
+      // Mirrors the Figma reference's 10 desktop items exactly. Dispatch,
+      // Inbox, and Money intentionally live off the sidebar to keep the
+      // surface calm: Dispatch/Money are reachable by URL (and surfaced in
+      // Schedule/Home), and pending approvals stay one click away via the
+      // proposal badge on the Rivet logo, which links to /inbox.
       return [
         { to: '/',              label: 'Home',         icon: Home          },
-        { to: '/assistant',     label: 'Sessions',     icon: MessageSquare },
+        { to: '/assistant',     label: 'Assistant',    icon: MessageSquare },
         { to: '/jobs',          label: 'Jobs',         icon: Briefcase     },
         { to: '/schedule',      label: 'Schedule',     icon: Calendar      },
         { to: '/customers',     label: 'Customers',    icon: Users         },
@@ -81,21 +98,23 @@ function getBottomNav(mode: Mode): NavItem[] {
   switch (mode) {
     case 'tech':
       return [
-        { to: '/technician/day', label: 'Today',     icon: Wrench   },
-        { to: '/jobs',           label: 'Jobs',      icon: Briefcase },
-        { to: '/customers',      label: 'Customers', icon: Users    },
-        { to: '/invoices',       label: 'Invoices',  icon: Receipt  },
+        { to: '/technician/day', label: 'Today',  icon: Wrench     },
+        { to: '/inbox',          label: 'Inbox',  icon: Bell       },
+        { to: '/reports/money',  label: 'Money',  icon: TrendingUp },
+        { to: '/invoices',       label: 'Bills',  icon: Receipt    },
+        { to: '/estimates',      label: 'Quotes', icon: FileText   },
       ];
     case 'both':
       return [
-        { to: '/assistant',      label: 'Sessions',  icon: MessageSquare },
-        { to: '/technician/day', label: 'Today',     icon: Wrench        },
-        { to: '/jobs',           label: 'Jobs',      icon: Briefcase     },
-        { to: '/customers',      label: 'Customers', icon: Users         },
-        { to: '/invoices',       label: 'Invoices',  icon: Receipt       },
+        { to: '/technician/day', label: 'Today',  icon: Wrench        },
+        { to: '/inbox',          label: 'Inbox',  icon: Bell          },
+        { to: '/reports/money',  label: 'Money',  icon: TrendingUp    },
+        { to: '/invoices',       label: 'Bills',  icon: Receipt       },
+        { to: '/assistant',      label: 'AI',     icon: MessageSquare },
       ];
     case 'supervisor':
     default:
+      // Matches the Figma mobile bottom bar (6 items).
       return [
         { to: '/',           label: 'Home',      icon: Home          },
         { to: '/assistant',  label: 'AI',        icon: MessageSquare },
@@ -141,10 +160,12 @@ interface ModeToggleProps {
  */
 function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
   const [pending, setPending] = useState<Mode | null>(null);
-  const options: ReadonlyArray<{ mode: Mode; label: string }> = [
-    { mode: 'supervisor', label: 'Supervisor' },
-    { mode: 'both',       label: 'Both' },
-    { mode: 'tech',       label: 'Tech' },
+  // The topbar (mobile) variant uses a short "Sup" label so all three
+  // options fit a 320px-wide header; full names stay on aria-label.
+  const options: ReadonlyArray<{ mode: Mode; label: string; fullLabel: string }> = [
+    { mode: 'supervisor', label: variant === 'topbar' ? 'Sup' : 'Supervisor', fullLabel: 'Supervisor' },
+    { mode: 'both',       label: 'Both', fullLabel: 'Both' },
+    { mode: 'tech',       label: 'Tech', fullLabel: 'Tech' },
   ];
 
   const handleClick = async (target: Mode) => {
@@ -160,9 +181,12 @@ function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
     }
   };
 
+  // Touch targets: the topbar (mobile) variant must be >= 40px tall;
+  // the sidebar variant matches the desktop nav density but keeps a
+  // 40px minimum hit area too.
   const sizeClass = variant === 'sidebar'
-    ? 'text-xs px-2 py-1'
-    : 'text-xs px-2 py-1';
+    ? 'text-xs px-2 py-1 min-h-[40px]'
+    : 'text-xs px-1.5 min-h-[40px]';
 
   return (
     <div
@@ -171,7 +195,7 @@ function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
       data-testid="mode-toggle"
       className="flex rounded-md border border-slate-200 bg-slate-50 overflow-hidden"
     >
-      {options.map(({ mode, label }) => {
+      {options.map(({ mode, label, fullLabel }) => {
         const active = current === mode;
         const isPending = pending === mode;
         return (
@@ -180,6 +204,7 @@ function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
             type="button"
             role="radio"
             aria-checked={active}
+            aria-label={fullLabel}
             data-mode-option={mode}
             disabled={pending !== null}
             onClick={() => handleClick(mode)}
@@ -198,6 +223,19 @@ function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
 }
 
 export function Shell() {
+  // ActiveSessionsProvider singletonizes the supervisor-wall WS + the
+  // /api/voice/sessions/active poller — `useActiveSessions()` is
+  // called in both ShellInner and CompressedSessionStrip, and both
+  // now read from the same provider instance instead of opening
+  // duplicate connections per consumer.
+  return (
+    <ActiveSessionsProvider>
+      <ShellInner />
+    </ActiveSessionsProvider>
+  );
+}
+
+function ShellInner() {
   const location = useLocation();
   const [cameraOpen, setCameraOpen] = useState(false);
   const voiceBarRef = useRef<VoiceBarHandle>(null);
@@ -222,7 +260,53 @@ export function Shell() {
   const { isLoaded, user } = useUser();
   const { signOut } = useClerk();
   const { me, switchMode } = useMe();
-  const { sessions, pendingProposalCount } = useActiveSessions();
+  const { sessions, pendingProposalCount: liveSessionPendingCount } = useActiveSessions();
+  const navigate = useNavigate();
+
+  // P2-033 — toast on each genuinely new pending proposal. Sonner's
+  // action.onClick doesn't auto-navigate, so we drive it through
+  // react-router's `navigate` to land on /inbox where the operator can
+  // approve/reject. Callback is stable so the hook doesn't reset its
+  // visibility-aware polling on every render.
+  const handleNewProposal = useCallback(
+    (proposal: PendingProposalSummary) => {
+      toast.info(`New proposal: ${proposal.summary}`, {
+        action: {
+          label: 'Review',
+          onClick: () => navigate('/inbox'),
+        },
+      });
+    },
+    [navigate],
+  );
+
+  const handleCriticalProposal = useCallback(
+    (proposal: PendingProposalSummary) => {
+      const expiry = proposal.expiresAt
+        ? new Date(proposal.expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+        : 'soon';
+      toast.warning(`Hold expiring ${expiry}: ${proposal.summary}`, {
+        action: {
+          label: 'Review',
+          onClick: () => navigate('/inbox'),
+        },
+      });
+    },
+    [navigate],
+  );
+
+  const {
+    count: pendingProposalCount,
+  } = usePendingProposals({
+    enabled: isLoaded && Boolean(user),
+    onNewProposal: handleNewProposal,
+    onCriticalProposal: handleCriticalProposal,
+  });
+
+  // Prefer the live session feed when it's reporting (the supervisor
+  // wall ships its own count); otherwise fall back to the polled
+  // proposals total so the mode-switch modal sees the right number.
+  const modeSwitchPendingCount = liveSessionPendingCount || pendingProposalCount;
   // Phase 12 — pending mode-switch confirmation. When a user clicks a
   // destination that requires a confirmation modal (supervisor→tech /
   // both→tech), we stash it here and render <ModeSwitchModal>. The
@@ -284,7 +368,22 @@ export function Shell() {
 
   return (
     <ErrorBoundary>
-    <div className="flex h-screen bg-slate-50 overflow-hidden">
+    <div className="flex flex-col h-screen bg-slate-50 overflow-hidden">
+
+      {/* Payment problem — renders only when the Stripe subscription is
+          past_due. Blocking, not dismissible. */}
+      <PastDueBanner />
+
+      {/* Activation celebration — one-time "first real call" banner, fires
+          when tenant_settings.activated_at is set (< 7 days, not dismissed). */}
+      <ActivationCelebrationBanner />
+
+      {/* §10 onboarding — early-upgrade nudge. Renders only when the
+          30-minute trial threshold has fired (and onboarding is otherwise
+          complete). */}
+      <UpgradeNudgeBanner />
+
+      <div className="flex flex-1 overflow-hidden">
 
       {/* Toast portal — mounted at the layout root so toasts surface
           across all authenticated pages. role="status"/role="alert" are
@@ -298,11 +397,18 @@ export function Shell() {
           <span className="flex size-7 items-center justify-center rounded-lg bg-slate-900">
             <Zap size={14} className="text-white" />
           </span>
-          <span className="text-sm text-slate-900 tracking-tight">Fieldly</span>
-          <span
-            className="ml-auto flex size-5 items-center justify-center rounded-full bg-blue-600 text-white"
-            style={{ fontSize: 10 }}
-          >3</span>
+          <span className="text-sm text-slate-900 tracking-tight">Rivet</span>
+          {pendingProposalCount > 0 && (
+            <NavLink
+              to="/inbox"
+              aria-label={`${pendingProposalCount} pending proposal${pendingProposalCount === 1 ? '' : 's'} — open inbox`}
+              data-testid="pending-proposal-badge"
+              className="ml-auto flex size-5 items-center justify-center rounded-full bg-blue-600 text-white"
+              style={{ fontSize: 10 }}
+            >
+              {pendingProposalCount > 9 ? '9+' : pendingProposalCount}
+            </NavLink>
+          )}
         </div>
 
         {/* Nav */}
@@ -321,14 +427,14 @@ export function Shell() {
               >
                 <Icon size={16} className={active ? 'text-blue-600' : ''} />
                 {label}
-                {to === '/assistant' && (
-                  <span className="ml-auto flex size-4 items-center justify-center rounded-full bg-blue-100 text-blue-700" style={{ fontSize: 9 }}>4</span>
-                )}
-                {to === '/invoices' && (
-                  <span className="ml-auto flex size-4 items-center justify-center rounded-full bg-amber-100 text-amber-700" style={{ fontSize: 9 }}>2</span>
-                )}
-                {to === '/leads' && (
-                  <span className="ml-auto flex size-4 items-center justify-center rounded-full bg-blue-100 text-blue-700" style={{ fontSize: 9 }}>5</span>
+                {to === '/inbox' && pendingProposalCount > 0 && (
+                  <span
+                    className="ml-auto flex min-w-[18px] h-[18px] items-center justify-center rounded-full bg-blue-600 text-white px-1"
+                    style={{ fontSize: 9 }}
+                    data-testid="sidebar-inbox-badge"
+                  >
+                    {pendingProposalCount > 9 ? '9+' : pendingProposalCount}
+                  </span>
                 )}
               </NavLink>
             );
@@ -385,11 +491,11 @@ export function Shell() {
             <span className="flex size-6 items-center justify-center rounded-lg bg-slate-900">
               <Zap size={12} className="text-white" />
             </span>
-            <span className="text-sm text-slate-900">Fieldly</span>
+            <span className="text-sm text-slate-900">Rivet</span>
           </div>
           <div className="flex items-center gap-3">
             {showModeToggle && (
-              <div className="hidden sm:block w-44">
+              <div className="w-36 sm:w-44">
                 <ModeToggle
                   current={currentMode}
                   canFieldServe={canFieldServe}
@@ -399,7 +505,31 @@ export function Shell() {
               </div>
             )}
             <CameraButton variant="topbar" onOpen={() => setCameraOpen(true)} />
-            <Bell size={18} className="text-slate-500" />
+            {/* Mobile approvals entry point. The supervisor bottom bar
+                mirrors the Figma 6 (no Inbox) and the logo proposal badge
+                is desktop-only, so this Bell is the persistent mobile path
+                to the approval queue — with the live pending count. */}
+            <NavLink
+              to="/inbox"
+              aria-label={
+                pendingProposalCount > 0
+                  ? `${pendingProposalCount} pending proposal${pendingProposalCount === 1 ? '' : 's'} — open inbox`
+                  : 'Open approval inbox'
+              }
+              data-testid="mobile-inbox-bell"
+              className="relative flex items-center justify-center text-slate-500"
+            >
+              <Bell size={18} />
+              {pendingProposalCount > 0 && (
+                <span
+                  data-testid="mobile-inbox-badge"
+                  className="absolute -top-1.5 -right-1.5 flex size-3.5 min-w-3.5 items-center justify-center rounded-full bg-blue-600 px-0.5 text-white"
+                  style={{ fontSize: 9 }}
+                >
+                  {pendingProposalCount > 9 ? '9+' : pendingProposalCount}
+                </span>
+              )}
+            </NavLink>
             <NavLink to="/settings" className="relative flex items-center justify-center">
               <span className={`flex size-7 items-center justify-center rounded-full text-xs transition-all ${
                 location.pathname.startsWith('/settings')
@@ -436,15 +566,25 @@ export function Shell() {
           <div className="flex">
             {bottomNav.map(({ to, label, icon: Icon }) => {
               const active = isExact(to);
+              const showInboxBadge = to === '/inbox' && pendingProposalCount > 0;
               return (
                 <NavLink
                   key={to}
                   to={to}
-                  className={`flex flex-1 flex-col items-center justify-center gap-0.5 py-2 transition-colors ${
+                  className={`relative flex flex-1 flex-col items-center justify-center gap-0.5 py-2 transition-colors ${
                     active ? 'text-blue-600' : 'text-slate-400 hover:text-slate-600'
                   }`}
                 >
                   <Icon size={18} />
+                  {showInboxBadge && (
+                    <span
+                      className="absolute top-1 right-[calc(50%-18px)] flex size-4 items-center justify-center rounded-full bg-blue-600 text-white"
+                      style={{ fontSize: 8 }}
+                      data-testid="mobile-inbox-badge"
+                    >
+                      {pendingProposalCount > 9 ? '9+' : pendingProposalCount}
+                    </span>
+                  )}
                   <span style={{ fontSize: 9 }}>{label}</span>
                 </NavLink>
               );
@@ -459,6 +599,11 @@ export function Shell() {
         <CameraCapture onClose={() => setCameraOpen(false)} />
       )}
 
+      {/* F5 — escalation panel host. Renders floating overlays for
+          dispatcher context when a call is transferred. Mounted at the
+          layout root so panels surface across all authenticated pages. */}
+      <EscalationPanelHost />
+
       {/* Phase 12 — mode-switch confirmation. Rendered at the layout
           root so it overlays everything. The modal owns its own
           presentation; we own the `switchMode` invocation on confirm. */}
@@ -467,12 +612,13 @@ export function Shell() {
           from={currentMode}
           to={pendingMode}
           activeSessionCount={sessions.length}
-          pendingProposalCount={pendingProposalCount}
+          pendingProposalCount={modeSwitchPendingCount}
           onConfirm={confirmPendingMode}
           onCancel={() => setPendingMode(null)}
         />
       )}
 
+      </div>
     </div>
     </ErrorBoundary>
   );

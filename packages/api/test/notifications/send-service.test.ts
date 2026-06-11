@@ -22,6 +22,7 @@ import {
 import {
   InMemorySettingsRepository,
 } from '../../src/settings/settings';
+import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
 
 const TENANT = 'tenant-test-1';
 
@@ -116,6 +117,7 @@ interface Harness {
   estimate: InMemoryEstimateRepository;
   invoice: InMemoryInvoiceRepository;
   settings: InMemorySettingsRepository;
+  dnc: InMemoryDncRepository;
 }
 
 async function buildHarness(): Promise<Harness> {
@@ -126,6 +128,7 @@ async function buildHarness(): Promise<Harness> {
   const settings = new InMemorySettingsRepository();
   const dispatch = new InMemoryDispatchRepository();
   const delivery = new InMemoryDeliveryProvider();
+  const dnc = new InMemoryDncRepository();
 
   await settings.create({
     id: uuidv4(),
@@ -149,9 +152,10 @@ async function buildHarness(): Promise<Harness> {
     customerRepo: customer,
     settingsRepo: settings,
     dispatchRepo: dispatch,
+    dncRepo: dnc,
     publicBaseUrl: 'https://app.example.com',
   });
-  return { send, delivery, dispatch, customer, job, estimate, invoice, settings };
+  return { send, delivery, dispatch, customer, job, estimate, invoice, settings, dnc };
 }
 
 describe('SendService.sendEstimate', () => {
@@ -192,6 +196,64 @@ describe('SendService.sendEstimate', () => {
     expect(dispatches).toHaveLength(1);
     expect(dispatches[0].channel).toBe('sms');
     expect(dispatches[0].provider).toBe('in-memory');
+  });
+
+  it('preserves the original sentAt on a re-send (set-once)', async () => {
+    const c = makeCustomer();
+    await h.customer.create(c);
+    const j = makeJob(c.id);
+    await h.job.create(j);
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+
+    const original = new Date('2020-01-01T00:00:00Z');
+    await h.estimate.update(TENANT, est.id, { sentAt: original, status: 'sent' });
+
+    await h.send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms' });
+
+    const persisted = await h.estimate.findById(TENANT, est.id);
+    expect(persisted?.sentAt?.toISOString()).toBe(original.toISOString());
+  });
+
+  it('P11-002 — localizes the SMS when the customer prefers Spanish', async () => {
+    const c = makeCustomer({ preferredLanguage: 'es' });
+    await h.customer.create(c);
+    const j = makeJob(c.id);
+    await h.job.create(j);
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+
+    await h.send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms' });
+
+    expect(h.delivery.sentSms[0].body).toContain('su presupuesto de Acme HVAC está listo');
+  });
+
+  it('P11-002 — uses the tenant default language when no customer preference', async () => {
+    await h.settings.update(TENANT, { defaultLanguage: 'es' });
+    const c = makeCustomer(); // no preferredLanguage
+    await h.customer.create(c);
+    const j = makeJob(c.id);
+    await h.job.create(j);
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+
+    await h.send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms' });
+
+    expect(h.delivery.sentSms[0].body).toContain('su presupuesto de Acme HVAC está listo');
+  });
+
+  it('P11-002 — customer preference (en) overrides a Spanish tenant default', async () => {
+    await h.settings.update(TENANT, { defaultLanguage: 'es' });
+    const c = makeCustomer({ preferredLanguage: 'en' });
+    await h.customer.create(c);
+    const j = makeJob(c.id);
+    await h.job.create(j);
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+
+    await h.send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms' });
+
+    expect(h.delivery.sentSms[0].body).toContain('your estimate from Acme HVAC is ready');
   });
 
   it('sends both SMS and email when channel=both', async () => {
@@ -359,6 +421,7 @@ describe('SendService — failure audit and idempotency', () => {
       customerRepo: h.customer,
       settingsRepo: h.settings,
       dispatchRepo: h.dispatch,
+      dncRepo: h.dnc,
       publicBaseUrl: 'https://app.example.com',
     });
 
@@ -401,5 +464,61 @@ describe('SendService — failure audit and idempotency', () => {
     expect(h.delivery.sentSms[0].idempotencyKey).toMatch(
       new RegExp(`^estimate:${est.id}:sms:\\d+$`)
     );
+  });
+});
+
+describe('SendService SMS suppression (§7 phase 1)', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await buildHarness();
+  });
+
+  it('SMS to a DNC-listed phone is blocked; email still sends; failed dispatch row recorded', async () => {
+    const c = makeCustomer({ primaryPhone: '+15551234567', email: 'cust@example.com', smsConsent: true });
+    await h.customer.create(c);
+    const j = makeJob(c.id);
+    await h.job.create(j);
+    const inv = makeInvoice(j.id);
+    await h.invoice.create(inv);
+    h.dnc.add(TENANT, normalizePhone('+15551234567'));
+
+    const result = await h.send.sendInvoice({
+      tenantId: TENANT, invoiceId: inv.id, channel: 'both',
+    });
+
+    expect(h.delivery.sentSms).toHaveLength(0);
+    expect(h.delivery.sentEmails).toHaveLength(1);
+    expect(result.channelsSent.map((c) => c.channel)).toEqual(['email']);
+
+    const rows = await h.dispatch.findByEntity(TENANT, 'invoice', inv.id);
+    const smsRow = rows.find((r) => r.channel === 'sms');
+    expect(smsRow?.status).toBe('failed');
+    expect(smsRow?.errorMessage ?? '').toMatch(/suppressed|DNC|opt[- ]?out/i);
+  });
+
+  it('SMS to a customer with sms_consent=false is blocked even when channel=sms only', async () => {
+    const c = makeCustomer({ primaryPhone: '+15551234567', email: 'cust@example.com', smsConsent: false });
+    await h.customer.create(c);
+    const j = makeJob(c.id);
+    await h.job.create(j);
+    const inv = makeInvoice(j.id);
+    await h.invoice.create(inv);
+
+    await expect(
+      h.send.sendInvoice({ tenantId: TENANT, invoiceId: inv.id, channel: 'sms' }),
+    ).rejects.toThrow(/consent|suppressed/i);
+    expect(h.delivery.sentSms).toHaveLength(0);
+  });
+
+  it('SMS to a customer with consent + clean DNC sends normally', async () => {
+    const c = makeCustomer({ primaryPhone: '+15551234567', email: 'cust@example.com', smsConsent: true });
+    await h.customer.create(c);
+    const j = makeJob(c.id);
+    await h.job.create(j);
+    const inv = makeInvoice(j.id);
+    await h.invoice.create(inv);
+
+    await h.send.sendInvoice({ tenantId: TENANT, invoiceId: inv.id, channel: 'sms' });
+    expect(h.delivery.sentSms).toHaveLength(1);
   });
 });

@@ -53,6 +53,17 @@ export interface DialDispatcherOptions {
    * 20s per the story spec.
    */
   timeoutSeconds?: number;
+  /**
+   * Absolute URL Twilio fetches when the dispatcher answers, before
+   * connecting the caller. The returned TwiML plays in the dispatcher's
+   * ear only (whisper). The caller hears ring/hold during this window.
+   *
+   * If omitted, no whisper is played and `<Number>` has no `url=`
+   * attribute — preserving backward-compatibility.
+   *
+   * The value is XML-escaped before insertion into the TwiML document.
+   */
+  whisperUrl?: string;
 }
 
 /**
@@ -172,6 +183,7 @@ export class DefaultTwilioCallControl implements TwilioCallControl {
     const callerIdAttr = opts.callerId
       ? ` callerId="${xmlEscape(opts.callerId)}"`
       : '';
+    const whisperAttr = opts.whisperUrl ? ` url="${xmlEscape(opts.whisperUrl)}"` : '';
 
     // The dispatcher number is wrapped in <Number> so Twilio's verb
     // parser handles E.164 cleanly. Both `dispatcherPhone` and
@@ -181,7 +193,7 @@ export class DefaultTwilioCallControl implements TwilioCallControl {
       `<?xml version="1.0" encoding="UTF-8"?>` +
       `<Response>` +
       `<Dial timeout="${timeout}" action="${xmlEscape(opts.actionUrl)}" method="POST"${callerIdAttr}>` +
-      `<Number>${xmlEscape(dispatcherPhone)}</Number>` +
+      `<Number${whisperAttr}>${xmlEscape(dispatcherPhone)}</Number>` +
       `</Dial>` +
       `</Response>`
     );

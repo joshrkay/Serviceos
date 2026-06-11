@@ -1,6 +1,6 @@
 # Phase 1 — Core Business Entities: Launch Readiness Gaps
 
-> **4 stories** | Continues from P1-017
+> **5 stories** | Continues from P1-017
 
 ---
 
@@ -132,3 +132,32 @@ npm test -- --grep "P1-021"
 - [ ] Remove — team member removed, loses access
 - [ ] Self-removal blocked — owner cannot remove themselves
 - [ ] Permission — non-owner gets 403 on team management
+
+---
+
+### P1-022 — Add `mobile_number` to users for inbound identity binding
+
+> **Size:** S | **Layer:** Data | **AI Build:** High | **Human Review:** Moderate | **Wave:** Wave-C blocker B4
+
+**Dependencies:** P0-019, P1-008
+
+**Allowed files:** `packages/api/src/db/schema.ts`, `packages/api/src/users/user.ts`, `packages/api/src/users/pg-user.ts`, `packages/api/src/shared/phone/normalize.ts` (new — colocate E.164 normalization)
+
+**Build prompt:** The `users` table has no mobile-number column today. Two upcoming stories need to bind an inbound communication to a user by mobile: P6-028 (tech replies `OUT` from their phone) and P8-016 (system patches an emergency call through to the owner's cell). Add migration key `109_users_mobile_number` to `packages/api/src/db/schema.ts`'s `MIGRATIONS` object: `ALTER TABLE users ADD COLUMN mobile_number TEXT;` and `CREATE UNIQUE INDEX users_mobile_unique ON users (tenant_id, mobile_number) WHERE mobile_number IS NOT NULL;` — partial unique so existing rows (NULL) don't conflict. Extend the `User` interface in `packages/api/src/users/user.ts` with `mobileNumber?: string`. Extend `pg-user.ts` to read/write the column and add `findByMobileNumber(tenantId: string, e164: string): Promise<User | null>`. Add an E.164 normalization helper at `packages/api/src/shared/phone/normalize.ts` so callers store and look up consistently — accept common US input formats and reject obviously bad ones with a clear error.
+
+**Review prompt:** Verify the migration is idempotent (uses `IF NOT EXISTS` patterns where possible — note that ALTER TABLE ADD COLUMN already requires `IF NOT EXISTS` post-9.6). Verify the partial unique index allows multiple NULLs but rejects two rows sharing a `(tenant_id, mobile_number)` pair. Verify the normalizer handles `(555) 123-4567` → `+15551234567` and rejects `abc`. Verify `findByMobileNumber` does NOT leak cross-tenant rows (defense-in-depth alongside RLS). Confirm no caller bypasses the normalizer to store raw input.
+
+**Automated checks:**
+```bash
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit
+cd packages/api && npm test -- --grep "P1-022"
+```
+
+**Required tests:**
+- [ ] Add mobile to a user, look it up by E.164
+- [ ] Two users in the same tenant cannot share a mobile (uniqueness)
+- [ ] Two users in different tenants CAN share a mobile (partial unique scoped by tenant)
+- [ ] Multiple users with NULL mobile in same tenant (partial index permits this)
+- [ ] Normalizer: `(555) 123-4567`, `555-123-4567`, `5551234567` all → `+15551234567`
+- [ ] Normalizer rejects `abc` and `+1234` (too short)
+- [ ] `findByMobileNumber` returns `null` for cross-tenant lookups

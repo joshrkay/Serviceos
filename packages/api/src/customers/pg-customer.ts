@@ -29,6 +29,10 @@ function mapRow(row: Record<string, unknown>): Customer {
     originatingLeadId: (row.originating_lead_id as string) ?? undefined,
     preferredLanguage:
       (row.preferred_language as 'en' | 'es' | null | undefined) ?? undefined,
+    // P8-016 — additive vulnerability fields (migration 113).
+    dateOfBirth: row.date_of_birth ? new Date(row.date_of_birth as string) : undefined,
+    accountType:
+      (row.account_type as 'residential' | 'b2b' | null | undefined) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -47,9 +51,10 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
           id, tenant_id, first_name, last_name, display_name, company_name,
           primary_phone, secondary_phone, email, preferred_channel, sms_consent,
           communication_notes, is_archived, archived_at, originating_lead_id,
+          date_of_birth, account_type, preferred_language,
           created_by, created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                  $15, $16, $17, $18)
+                  $15, $16, $17, $18, $19, $20, $21)
         RETURNING *`,
         [
           customer.id,
@@ -67,6 +72,9 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
           customer.isArchived,
           customer.archivedAt ?? null,
           customer.originatingLeadId ?? null,
+          customer.dateOfBirth ?? null,
+          customer.accountType ?? null,
+          customer.preferredLanguage ?? null,
           customer.createdBy,
           customer.createdAt,
           customer.updatedAt,
@@ -176,6 +184,8 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
         archivedAt: 'archived_at',
         originatingLeadId: 'originating_lead_id',
         preferredLanguage: 'preferred_language',
+        dateOfBirth: 'date_of_birth',
+        accountType: 'account_type',
         updatedAt: 'updated_at',
       };
 

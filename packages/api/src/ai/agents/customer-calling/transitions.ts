@@ -14,6 +14,7 @@ import type {
   TransitionResult,
   SideEffect,
 } from './types';
+import { selectRepairTemplate } from './repair-templates';
 
 // ─── Thresholds ───────────────────────────────────────────────────────────────
 
@@ -205,6 +206,78 @@ function checkGlobalGuards(
     };
   }
 
+  // operator_request from any non-terminal state fast-paths to escalation.
+  // Idempotent: skip if already in a terminal/escalating state.
+  if (event.type === 'intent_classified' && event.intentType === 'operator_request') {
+    if (state === 'escalating' || state === 'terminated') {
+      return { nextState: state, sideEffects: [], updatedContext: context };
+    }
+    if (context.escalationTriggers && !context.escalationTriggers.trigger_explicit_request) {
+      return {
+        nextState: state,
+        sideEffects: [
+          ttsPlay(
+            "I can help with scheduling and service questions. What do you need help with today?",
+          ),
+        ],
+        updatedContext: context,
+      };
+    }
+    const updatedContext: CallingAgentContext = {
+      ...context,
+      currentIntent: event.intentType,
+      extractedEntities: event.entities,
+      retryCount: 0,
+      escalationReason: 'operator_request',
+    };
+    return {
+      nextState: 'escalating',
+      sideEffects: [
+        auditLog(updatedContext, state, 'escalating', 'operator_request'),
+        ttsPlay("Of course — let me connect you with a person right now."),
+        notifyOncall(updatedContext, 'operator_request'),
+      ],
+      updatedContext,
+    };
+  }
+
+  // frustration_detected fires from keyword detector or LLM sentiment classifier.
+  // Idempotent: skip if already in a terminal/escalating state.
+  if (event.type === 'frustration_detected') {
+    if (state === 'escalating' || state === 'terminated') {
+      return { nextState: state, sideEffects: [], updatedContext: context };
+    }
+    if (
+      event.source === 'keyword' &&
+      context.escalationTriggers &&
+      !context.escalationTriggers.trigger_keyword_frustration
+    ) {
+      return { nextState: state, sideEffects: [], updatedContext: context };
+    }
+    const escalationReason: CallingAgentContext['escalationReason'] =
+      event.source === 'keyword' ? 'keyword_frustration' : 'llm_sentiment';
+    const updatedContext: CallingAgentContext = { ...context, escalationReason };
+    return {
+      nextState: 'escalating',
+      sideEffects: [
+        auditLog(updatedContext, state, 'escalating', escalationReason),
+        {
+          type: 'emit_quality_event',
+          payload: {
+            eventType: 'frustration_escalation',
+            trigger: escalationReason,
+            keyword: event.detail ?? null,
+            source: event.source,
+            reasonHint: event.reasonHint ?? null,
+          },
+        },
+        ttsPlay("I understand. Let me get a person on the line for you right away."),
+        notifyOncall(updatedContext, escalationReason),
+      ],
+      updatedContext,
+    };
+  }
+
   return null;
 }
 
@@ -388,12 +461,14 @@ function transitionIntentCapture(
       };
     }
 
+    // operator_request is handled by checkGlobalGuards and never reaches here.
     // Confidence at or above threshold → entity_resolution
     if (event.confidence >= TAU_INT) {
       const updatedContext: CallingAgentContext = {
         ...context,
         currentIntent: event.intentType,
         extractedEntities: event.entities,
+        lastIntentConfidence: event.confidence,
         retryCount: 0,
       };
       return {
@@ -411,6 +486,24 @@ function transitionIntentCapture(
     // Confidence below threshold → reprompt or escalate
     const newRetryCount = context.retryCount + 1;
     if (newRetryCount > MAX_INTENT_CAPTURE_RETRIES) {
+      if (
+        context.escalationTriggers &&
+        !context.escalationTriggers.trigger_low_confidence
+      ) {
+        return {
+          nextState: 'intent_capture',
+          sideEffects: [
+            auditLog(context, 'intent_capture', 'intent_capture', 'low_confidence_cap', {
+              confidence: event.confidence,
+              retryCount: newRetryCount,
+            }),
+            ttsPlay(
+              "I'm still having trouble understanding. Could you describe what you need in a few words?",
+            ),
+          ],
+          updatedContext: { ...context, retryCount: newRetryCount },
+        };
+      }
       return {
         nextState: 'escalating',
         sideEffects: [
@@ -430,17 +523,31 @@ function transitionIntentCapture(
     }
 
     // Reprompt
-    return {
-      nextState: 'intent_capture',
-      sideEffects: [
-        auditLog(context, 'intent_capture', 'intent_capture', 'reprompt', {
-          confidence: event.confidence,
-          retryCount: newRetryCount,
-        }),
-        ttsPlay("I want to make sure I got that right — can you say that again?"),
-      ],
-      updatedContext: { ...context, retryCount: newRetryCount },
-    };
+    {
+      const repair = selectRepairTemplate(context.repairTemplates ?? [], {
+        trigger: 'low_intent_confidence',
+      });
+      const repromptText = repair?.text ?? "I want to make sure I got that right — can you say that again?";
+      return {
+        nextState: 'intent_capture',
+        sideEffects: [
+          auditLog(context, 'intent_capture', 'intent_capture', 'reprompt', {
+            confidence: event.confidence,
+            retryCount: newRetryCount,
+          }),
+          {
+            type: 'emit_quality_event',
+            payload: {
+              eventType: 'repair_template_fired',
+              trigger: 'low_intent_confidence',
+              text: repromptText,
+            },
+          },
+          ttsPlay(repromptText),
+        ],
+        updatedContext: { ...context, retryCount: newRetryCount },
+      };
+    }
   }
 
   // confidence_low internal event (alternative path)
@@ -472,23 +579,37 @@ function transitionIntentCapture(
       };
     }
 
-    return {
-      nextState: 'intent_capture',
-      sideEffects: [
-        auditLog(context, 'intent_capture', 'intent_capture', 'reprompt', {
-          threshold: event.threshold,
-          score: event.score,
+    {
+      const repair = selectRepairTemplate(context.repairTemplates ?? [], {
+        trigger: 'low_audio_confidence',
+      });
+      const repromptText = repair?.text ?? "I want to make sure I got that right — can you say that again?";
+      return {
+        nextState: 'intent_capture',
+        sideEffects: [
+          auditLog(context, 'intent_capture', 'intent_capture', 'reprompt', {
+            threshold: event.threshold,
+            score: event.score,
+            retryCount: newRetryCount,
+            repromptCount: newRepromptCount,
+          }),
+          {
+            type: 'emit_quality_event',
+            payload: {
+              eventType: 'repair_template_fired',
+              trigger: 'low_audio_confidence',
+              text: repromptText,
+            },
+          },
+          ttsPlay(repromptText),
+        ],
+        updatedContext: {
+          ...context,
           retryCount: newRetryCount,
           repromptCount: newRepromptCount,
-        }),
-        ttsPlay("I want to make sure I got that right — can you say that again?"),
-      ],
-      updatedContext: {
-        ...context,
-        retryCount: newRetryCount,
-        repromptCount: newRepromptCount,
-      },
-    };
+        },
+      };
+    }
   }
 
   return ignoredTransition('intent_capture', event, context);
@@ -561,6 +682,9 @@ function transitionIntentConfirm(
             callSid: context.callSid,
             conversationId: context.conversationId,
             customerId: context.customerId,
+            // Real classifier confidence (caller has also explicitly
+            // confirmed the intent by this point) — see types.ts.
+            confidence: context.lastIntentConfidence,
           },
         },
       ],
@@ -587,6 +711,7 @@ function transitionIntentConfirm(
     };
   }
 
+  // operator_request is handled by checkGlobalGuards and never reaches here.
   // intent_classified in intent_confirm → treat as correction
   if (event.type === 'intent_classified') {
     return {
@@ -661,6 +786,7 @@ function transitionClosing(
     };
   }
 
+  // operator_request is handled by checkGlobalGuards and never reaches here.
   // intent_classified in closing → treat as second intent (loop back)
   if (event.type === 'intent_classified') {
     return {

@@ -5,7 +5,11 @@ const HIGH_RISK_PATTERNS: Array<{ name: string; regex: RegExp }> = [
   { name: 'jwt', regex: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g },
   { name: 'api_key', regex: /\b(?:sk|pk|rk|api|key)[_-]?[A-Za-z0-9]{12,}\b/gi },
   { name: 'email', regex: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi },
-  { name: 'phone', regex: /\b(?:\+?\d{1,2}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g },
+  // QA-2026-06-04: the old pattern matched ANY bare 10-digit run, so every
+  // epoch-seconds timestamp (e.g. Stripe's `created`) hard-failed the
+  // capture pipeline as a "phone". Require separators between groups, or an
+  // explicit E.164 `+` prefix — bare digit runs are epochs/ids, not PII.
+  { name: 'phone', regex: /\b(?:\+?\d{1,2}[\s.-])?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b|\+\d{10,13}\b/g },
 ];
 
 function scrubString(input: string): string {

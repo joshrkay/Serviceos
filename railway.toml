@@ -14,10 +14,11 @@ healthcheckPath = "/health"
 healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
-# Tell Railway's edge which container port to route traffic to. The
-# @serviceos/api service has PORT=3000 set as a service-level variable, so
-# the app (packages/api/src/index.ts) listens on 3000. Without this line,
-# the edge defaulted to a different port and returned "Application not
-# found" after PR #366 removed it. NOTE: this must match the service-level
-# PORT env var on Railway. If PORT is ever changed there, change this too.
-port = 3000
+# Port routing is intentionally NOT pinned here. The app honors Railway's
+# injected PORT (packages/api/src/index.ts: `process.env.PORT || 3000`) and
+# listens on it, so Railway's edge routes to that same port automatically.
+# Hardcoding `port = 3000` previously misrouted traffic ("Application not
+# found") whenever the injected PORT differed (Railway's default is 8080) —
+# see docs/verification-runs/beta-verification-2026-05-13.md. Leaving it
+# unset keeps the listen port and the edge target in lockstep regardless of
+# the service's PORT value.

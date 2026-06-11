@@ -71,7 +71,7 @@ This is not a real failure — see top of this file.
 **Result from this run:** ☐ NOT EXERCISED (sandbox egress blocked; needs re-run
 from a host that can reach Railway).
 
-- [ ] **1.1** `/signup` page loads with Fieldly branding — **needs human pass**
+- [ ] **1.1** `/signup` page loads with Rivet branding — **needs human pass**
 - [ ] **1.2** Clerk signup completes — **needs human pass**
 - [ ] **1.3** Lands on `/onboarding` or `/dashboard` — **needs human pass**
 - [ ] **1.4** `/api/me` includes `tenantId` — **needs human pass**

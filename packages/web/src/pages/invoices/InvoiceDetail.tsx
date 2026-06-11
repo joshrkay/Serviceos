@@ -11,6 +11,7 @@ import {
   toLineItemPayload,
 } from '../../components/forms/LineItemEditor';
 import { apiFetch } from '../../utils/api-fetch';
+import { formatCurrency as formatCents } from '../../utils/currency';
 
 interface LineItem {
   id: string;
@@ -44,10 +45,6 @@ interface Invoice {
   lineItems: LineItem[];
   payments: Payment[];
   createdAt: string;
-}
-
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
 }
 
 function formatDateTime(isoDate: string): string {
@@ -253,28 +250,30 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
                   Edit
                 </button>
               </div>
-              <table className="list-table">
-                <thead>
-                  <tr>
-                    <th>Description</th>
-                    <th>Qty</th>
-                    <th>Unit Price</th>
-                    <th>Total</th>
-                    <th>Taxable</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(data.lineItems ?? []).map((item) => (
-                    <tr key={item.id}>
-                      <td>{item.description}</td>
-                      <td>{item.quantity}</td>
-                      <td>{formatCents(item.unitPriceCents)}</td>
-                      <td>{formatCents(item.totalCents)}</td>
-                      <td>{item.taxable ? 'Yes' : 'No'}</td>
+              <div className="overflow-x-auto">
+                <table className="list-table">
+                  <thead>
+                    <tr>
+                      <th>Description</th>
+                      <th>Qty</th>
+                      <th>Unit Price</th>
+                      <th>Total</th>
+                      <th>Taxable</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {(data.lineItems ?? []).map((item) => (
+                      <tr key={item.id}>
+                        <td>{item.description}</td>
+                        <td>{item.quantity}</td>
+                        <td>{formatCents(item.unitPriceCents)}</td>
+                        <td>{formatCents(item.totalCents)}</td>
+                        <td>{item.taxable ? 'Yes' : 'No'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           ),
         },
@@ -296,26 +295,28 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
           content: recordedPayments.length === 0 ? (
             <p>No payments recorded.</p>
           ) : (
-            <table className="list-table">
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Amount</th>
-                  <th>Method</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recordedPayments.map((p) => (
-                  <tr key={p.id}>
-                    <td>{formatDateTime(p.createdAt)}</td>
-                    <td>{formatCents(p.amountCents)}</td>
-                    <td>{formatPaymentMethod(p.method)}</td>
-                    <td>{formatPaymentStatus(p.status)}</td>
+            <div className="overflow-x-auto">
+              <table className="list-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Amount</th>
+                    <th>Method</th>
+                    <th>Status</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {recordedPayments.map((p) => (
+                    <tr key={p.id}>
+                      <td>{formatDateTime(p.createdAt)}</td>
+                      <td>{formatCents(p.amountCents)}</td>
+                      <td>{formatPaymentMethod(p.method)}</td>
+                      <td>{formatPaymentStatus(p.status)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           ),
         },
         ...(showPaymentForm

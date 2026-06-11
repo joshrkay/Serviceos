@@ -181,8 +181,34 @@ const PLUMBING_OBJECTION_SCRIPTS: readonly ObjectionScript[] = [
   },
 ];
 
+const PLUMBING_TRAINING_ASSETS = [
+  {
+    assetKind: 'emergency_rule',
+    title: 'Burst pipe escalation',
+    scrubbedText:
+      'If the caller reports a burst pipe, active flooding, or uncontrolled water, treat as urgent and escalate to a human dispatcher.',
+    labels: {
+      intent: 'emergency_dispatch',
+      urgencyTier: 'emergency',
+      expectedNextAction: 'escalate_to_oncall',
+      shouldEscalate: true,
+    },
+    provenance: { source: 'synthetic_default', sourceVersion: '2026-05-15' },
+  },
+  {
+    assetKind: 'eval_scenario',
+    title: 'Leak versus clog disambiguation',
+    scrubbedText:
+      'When a caller reports a plumbing issue, ask whether it is a leak, clog, no water, or fixture problem before proposing next steps.',
+    labels: {
+      expectedNextQuestion: 'Is this a leak, a clog, no water, or a fixture issue?',
+    },
+    provenance: { source: 'synthetic_default', sourceVersion: '2026-05-15' },
+  },
+];
+
 export function createPlumbingPack(): VerticalPack {
-  return createVerticalPack(
+  const pack = createVerticalPack(
     'plumbing',
     'Plumbing Professional',
     '1.0.0',
@@ -192,6 +218,32 @@ export function createPlumbingPack(): VerticalPack {
     PLUMBING_INTAKE_QUESTIONS,
     PLUMBING_OBJECTION_SCRIPTS
   );
+  pack.metadata = {
+    ...pack.metadata,
+    training_tier: 'first_class',
+    training_assets: PLUMBING_TRAINING_ASSETS,
+  };
+  pack.sttKeywords = [
+    'P-trap:3',
+    'flange:3',
+    'sump pump:3',
+    'water heater:3',
+    'tankless:3',
+    'sewer line:3',
+    'drain field:3',
+    'septic:3',
+    'shut-off valve:3',
+    'pressure regulator:3',
+    'snaking:3',
+    'rooter:3',
+  ];
+  pack.repairTemplates = [
+    { trigger: 'ambiguous_service_type', text: 'Is this an emergency, like flooding or a burst pipe, or can we schedule a visit?' },
+    { trigger: 'low_intent_confidence', text: 'Are you reporting a problem with water, drains, or your water heater?' },
+    { trigger: 'low_audio_confidence', text: "I'm having trouble hearing you — could you say that one more time?" },
+    { trigger: 'ambiguous_entity', text: 'Just to make sure I have the right name — could you spell that for me?' },
+  ];
+  return pack;
 }
 
 export const PLUMBING_LINE_ITEM_DEFAULTS = {

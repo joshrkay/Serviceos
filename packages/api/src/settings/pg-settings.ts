@@ -1,6 +1,11 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { SettingsRepository, TenantSettings } from './settings';
+import {
+  DEFAULT_ESCALATION_SETTINGS,
+  EscalationSettings,
+  SettingsRepository,
+  TenantSettings,
+} from './settings';
 
 function mapRow(row: Record<string, unknown>): TenantSettings {
   const terminologyRaw = row.terminology_preferences as Record<string, unknown> | null;
@@ -23,6 +28,7 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     businessName: row.business_name as string,
     businessPhone: (row.business_phone as string) ?? undefined,
     businessEmail: (row.business_email as string) ?? undefined,
+    ownerPhone: (row.owner_phone as string) ?? undefined,
     timezone: row.timezone as string,
     estimatePrefix: row.estimate_prefix as string,
     invoicePrefix: row.invoice_prefix as string,
@@ -44,6 +50,10 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // DEFAULT value.
     autoApplyInternalUpdates: row.auto_apply_internal_updates as boolean | undefined,
     autoSendAppointmentReminders: row.auto_send_appointment_reminders as boolean | undefined,
+    autoInvoiceOnCompletion: row.auto_invoice_on_completion as boolean | undefined,
+    billLaborFromTimeEntries: row.bill_labor_from_time_entries as boolean | undefined,
+    batchInvoiceEnabled: row.batch_invoice_enabled as boolean | undefined,
+    milestoneBillingEnabled: row.milestone_billing_enabled as boolean | undefined,
     // Tier 4 — migration 076. JSONB column; pg returns the parsed
     // object directly. Empty object means "no overrides" — surface as
     // undefined so consumers can rely on the same shape across both
@@ -70,10 +80,64 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // the safe pre-existing flow.
     depositTimingPolicy:
       (row.deposit_timing_policy as 'before_approval' | 'after_approval' | null) ?? undefined,
+    // §9 — migration 098. Owner's hourly rate (integer cents).
+    hourlyRateCents: (row.hourly_rate_cents as number | null) ?? undefined,
+    // §10 — identity fields persisted by PUT /api/onboarding/identity.
+    // Projected here so GET /api/settings returns them for the
+    // IdentityStep re-edit pre-load. NULL → undefined per the rest of
+    // this mapper's convention.
+    serviceAreaText: (row.service_area_text as string | null) ?? undefined,
+    serviceAreaRadius: (row.service_area_radius as number | null) ?? undefined,
+    businessHours: (() => {
+      const raw = row.business_hours as
+        | Record<string, { open: string; close: string } | null>
+        | null
+        | undefined;
+      if (!raw || typeof raw !== 'object') return undefined;
+      return raw;
+    })(),
+    jobBufferMinutes: (row.job_buffer_minutes as number | null) ?? undefined,
     // B1 — migration 088. NULL from DB → undefined in TS (same
     // convention as all other nullable optional columns here).
     voiceAgentName: (row.voice_agent_name as string | null) ?? undefined,
     voiceGreeting: (row.voice_greeting as string | null) ?? undefined,
+    escalationSettings: (() => {
+      const raw = row.escalation_settings as Partial<EscalationSettings> | null | undefined;
+      if (!raw || typeof raw !== 'object' || Object.keys(raw).length === 0) {
+        return undefined;
+      }
+      return { ...DEFAULT_ESCALATION_SETTINGS, ...raw };
+    })(),
+    // P4-015 — migration 110. JSONB column; pg returns the parsed object
+    // directly. Empty object means "not configured" — surface as undefined
+    // so the brand-voice composer falls back to its neutral default tone.
+    brandVoice: (() => {
+      const raw = row.brand_voice as Record<string, unknown> | null | undefined;
+      if (!raw || typeof raw !== 'object' || Object.keys(raw).length === 0) return undefined;
+      return raw as TenantSettings['brandVoice'];
+    })(),
+    // Migration 120. NULL → undefined to match the InMemory repo shape.
+    googleReviewUrl: (row.google_review_url as string | null) ?? undefined,
+    yelpReviewUrl: (row.yelp_review_url as string | null) ?? undefined,
+    // P11-002 — language stack. default_language / auto_detect_language
+    // are NOT NULL with column defaults, so a pre-migration row still
+    // reads 'en' / true.
+    defaultLanguage: (row.default_language as 'en' | 'es' | null) ?? 'en',
+    autoDetectLanguage: (row.auto_detect_language as boolean | null) ?? true,
+    ttsVoiceEn: (row.tts_voice_en as string | null) ?? undefined,
+    ttsVoiceEs: (row.tts_voice_es as string | null) ?? undefined,
+    spanishDispatcherUserIds:
+      (row.spanish_dispatcher_user_ids as string[] | null) ?? undefined,
+    // Voice-parity (migration 152). supported_languages is NOT NULL with a
+    // DEFAULT ARRAY['en'], so a pre-migration row still reads ['en'].
+    // transfer_number is nullable → undefined when unset.
+    supportedLanguages:
+      (row.supported_languages as ('en' | 'es')[] | null) ?? ['en'],
+    transferNumber: (row.transfer_number as string | null) ?? undefined,
+    // Migration 120 (`120_tenant_settings_ai_config`). NULL → undefined to
+    // match the InMemory repo shape; consumers (onboarding's
+    // `aiConfigPresent`, verify_ai worker) treat undefined as "not seeded".
+    aiModel: (row.ai_model as string | null) ?? undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -113,10 +177,10 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
       const result = await client.query(
         `INSERT INTO tenant_settings (
           id, tenant_id, business_name, business_phone, business_email,
-          timezone, estimate_prefix, invoice_prefix, next_estimate_number,
+          owner_phone, timezone, estimate_prefix, invoice_prefix, next_estimate_number,
           next_invoice_number, default_payment_term_days, terminology_preferences,
-          created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+          ai_model, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         RETURNING *`,
         [
           settings.id,
@@ -124,6 +188,7 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           settings.businessName,
           settings.businessPhone ?? null,
           settings.businessEmail ?? null,
+          settings.ownerPhone ?? null,
           settings.timezone,
           settings.estimatePrefix,
           settings.invoicePrefix,
@@ -131,6 +196,11 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           settings.nextInvoiceNumber,
           settings.defaultPaymentTermDays,
           terminologyJson ? JSON.stringify(terminologyJson) : null,
+          // Onboarding-blocker fix: persist the seeded ai_model so the
+          // verify_ai worker finds a model on the very first tenant_settings
+          // row. The COALESCE backfill in webhooks/routes.ts is kept as a
+          // safety net for tenants whose bootstrap predates this code.
+          settings.aiModel ?? null,
           settings.createdAt,
           settings.updatedAt,
         ]
@@ -182,6 +252,7 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         businessName: 'business_name',
         businessPhone: 'business_phone',
         businessEmail: 'business_email',
+        ownerPhone: 'owner_phone',
         timezone: 'timezone',
         estimatePrefix: 'estimate_prefix',
         invoicePrefix: 'invoice_prefix',
@@ -194,6 +265,10 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         // Tier 4 — migration 075.
         autoApplyInternalUpdates: 'auto_apply_internal_updates',
         autoSendAppointmentReminders: 'auto_send_appointment_reminders',
+        autoInvoiceOnCompletion: 'auto_invoice_on_completion',
+        billLaborFromTimeEntries: 'bill_labor_from_time_entries',
+        batchInvoiceEnabled: 'batch_invoice_enabled',
+        milestoneBillingEnabled: 'milestone_billing_enabled',
         // Tier 4 — migration 077. Deposit rules. Each accepts an
         // explicit `null` to clear the value (vs `undefined` which
         // means "don't touch this field on update").
@@ -203,9 +278,27 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         depositRequiredAboveCents: 'deposit_required_above_cents',
         // Tier 4 — migration 079.
         depositTimingPolicy: 'deposit_timing_policy',
+        // §9 — migration 098.
+        hourlyRateCents: 'hourly_rate_cents',
         // B1 — migration 088.
         voiceAgentName: 'voice_agent_name',
         voiceGreeting: 'voice_greeting',
+        escalationSettings: 'escalation_settings',
+        // Migration 120 — public review links.
+        googleReviewUrl: 'google_review_url',
+        yelpReviewUrl: 'yelp_review_url',
+        // P11-002 — language stack.
+        defaultLanguage: 'default_language',
+        autoDetectLanguage: 'auto_detect_language',
+        ttsVoiceEn: 'tts_voice_en',
+        ttsVoiceEs: 'tts_voice_es',
+        spanishDispatcherUserIds: 'spanish_dispatcher_user_ids',
+        // Voice-parity — migration 152. transfer_number is plain TEXT and
+        // flows through the generic handler; supported_languages is text[]
+        // and is special-cased below (like spanish_dispatcher_user_ids).
+        transferNumber: 'transfer_number',
+        // Migration 120 — per-tenant AI model override.
+        aiModel: 'ai_model',
         updatedAt: 'updated_at',
       };
 
@@ -223,6 +316,53 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           setClauses.push(`auto_approve_threshold = $${paramIndex}::jsonb`);
           const v = value as Record<string, number> | undefined | null;
           params.push(v && Object.keys(v).length > 0 ? JSON.stringify(v) : '{}');
+          paramIndex++;
+          continue;
+        }
+        if (key === 'escalationSettings') {
+          setClauses.push(`escalation_settings = $${paramIndex}::jsonb`);
+          const v = value as Partial<EscalationSettings> | undefined | null;
+          params.push(
+            v && typeof v === 'object' && Object.keys(v).length > 0
+              ? JSON.stringify(v)
+              : '{}',
+          );
+          paramIndex++;
+          continue;
+        }
+        // P4-015 — brand_voice is JSONB; mirror the threshold/escalation
+        // pattern. Cleared (undefined / empty / null) writes '{}' so the
+        // column matches its DEFAULT and reads back as undefined.
+        if (key === 'brandVoice') {
+          setClauses.push(`brand_voice = $${paramIndex}::jsonb`);
+          const v = value as Record<string, unknown> | undefined | null;
+          params.push(
+            v && typeof v === 'object' && Object.keys(v).length > 0
+              ? JSON.stringify(v)
+              : '{}',
+          );
+          paramIndex++;
+          continue;
+        }
+        // P11-002 — spanish_dispatcher_user_ids is a native Postgres uuid[]
+        // column. Cast the param explicitly so node-pg's array serialization
+        // is interpreted as uuid[] regardless of placeholder context, and
+        // pass null (not '{}') to clear since the column is nullable.
+        if (key === 'spanishDispatcherUserIds') {
+          setClauses.push(`spanish_dispatcher_user_ids = $${paramIndex}::uuid[]`);
+          const v = value as string[] | undefined | null;
+          params.push(Array.isArray(v) ? v : null);
+          paramIndex++;
+          continue;
+        }
+        // Voice-parity (migration 152) — supported_languages is a native
+        // Postgres text[] column (NOT NULL DEFAULT ARRAY['en']). Cast the param
+        // explicitly and default a cleared/empty write back to ['en'] so the
+        // column never goes empty and reads stay English-safe.
+        if (key === 'supportedLanguages') {
+          setClauses.push(`supported_languages = $${paramIndex}::text[]`);
+          const v = value as string[] | undefined | null;
+          params.push(Array.isArray(v) && v.length > 0 ? v : ['en']);
           paramIndex++;
           continue;
         }

@@ -8,8 +8,12 @@
  */
 
 import { useState, useEffect } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { MessageSquare } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
+import { Spinner, EmptyState } from '../ui';
+import { ErrorState } from '../ErrorState';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 
 interface MessageDispatch {
   id: string;
@@ -43,6 +47,7 @@ const ENTITY_LABEL: Record<string, string> = {
 };
 
 export function DispatchLogPage() {
+  const tz = useTenantTimezone();
   const [dispatches, setDispatches] = useState<MessageDispatch[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -83,22 +88,21 @@ export function DispatchLogPage() {
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-3xl mx-auto px-5 py-6 pb-20 flex flex-col gap-3">
           {loading && (
-            <div className="flex items-center gap-2 text-slate-400 py-8">
-              <RefreshCw size={14} className="animate-spin" />
-              <span className="text-sm">Loading dispatch log…</span>
+            <div className="flex items-center justify-center py-8">
+              <Spinner size="md" className="text-slate-900" label="Loading dispatch log" />
             </div>
           )}
 
           {error && (
-            <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-              <strong>Error loading dispatch log:</strong> {error}
-            </div>
+            <ErrorState message="Couldn't load the dispatch log." />
           )}
 
           {!loading && !error && dispatches.length === 0 && (
-            <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
-              No outbound messages recorded yet. Send an estimate or invoice to see dispatch records here.
-            </div>
+            <EmptyState
+              icon={<MessageSquare size={20} />}
+              title="No outbound messages yet"
+              description="Send an estimate or invoice and dispatch records will appear here."
+            />
           )}
 
           {!loading && !error && dispatches.length > 0 && (
@@ -123,7 +127,7 @@ export function DispatchLogPage() {
                       <p className="text-xs text-slate-400 font-mono truncate">{d.providerMessageId}</p>
                     )}
                     <p className="text-xs text-slate-400">
-                      {new Date(d.sentAt).toLocaleString()} · {d.provider}
+                      {formatDateTimeInTenantTz(d.sentAt, tz)} · {d.provider}
                     </p>
                     {d.errorMessage && (
                       <p className="text-xs text-red-600 mt-1">{d.errorMessage}</p>

@@ -5,8 +5,12 @@
  * owners — the gating happens in the parent so the parent can decide
  * whether to mount the section at all (avoids rendering disabled UI
  * for non-owners). The section renders only when mounted.
+ *
+ * Save is optimistic (matching the AIProposalCard pattern): the chosen
+ * values stick immediately; a failed PATCH reverts the controls to the
+ * last-saved values and surfaces an error toast.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Shield } from 'lucide-react';
 import { toast } from 'sonner';
 import { useApiClient } from '../../lib/apiClient';
@@ -23,6 +27,21 @@ interface SupervisorBackupSectionProps {
   initialRouting: UnsupervisedProposalRouting;
 }
 
+/** Shape returned by GET /api/users (Tier-4 team roster route). */
+interface RosterUser {
+  id: string;
+  email: string;
+  role: 'owner' | 'dispatcher' | 'technician';
+  firstName?: string;
+  lastName?: string;
+}
+
+/** Roles that can act as a supervisor. Technicians cannot. */
+const SUPERVISE_CAPABLE_ROLES: ReadonlyArray<RosterUser['role']> = [
+  'owner',
+  'dispatcher',
+];
+
 const ROUTING_OPTIONS: ReadonlyArray<{
   value: UnsupervisedProposalRouting;
   label: string;
@@ -30,9 +49,9 @@ const ROUTING_OPTIONS: ReadonlyArray<{
 }> = [
   {
     value: 'queue_and_sms',
-    label: 'Queue + SMS owner',
+    label: 'Text me a one-tap approve link',
     description:
-      "Customer hears 'let me check and text you right back'. Proposal queues. You get an SMS with a one-tap re-approve link.",
+      "Customer hears 'let me check and text you right back'. Proposal queues. You get an SMS with a one-tap approve link.",
   },
   {
     value: 'queue_only',
@@ -44,12 +63,14 @@ const ROUTING_OPTIONS: ReadonlyArray<{
     value: 'escalate_to_oncall',
     label: 'Route call to on-call',
     description:
-      "AI does not book unsupervised. Inbound call rings the on-call rotation directly.",
+      'AI does not book unsupervised. Inbound call rings the on-call rotation directly.',
   },
 ];
 
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function displayName(u: RosterUser): string {
+  const name = [u.firstName, u.lastName].filter(Boolean).join(' ').trim();
+  return name ? `${name} (${u.email})` : u.email;
+}
 
 export function SupervisorBackupSection({
   initialBackupUserId,
@@ -59,35 +80,71 @@ export function SupervisorBackupSection({
   const [backupUserId, setBackupUserId] = useState<string>(
     initialBackupUserId ?? '',
   );
-  const [routing, setRouting] = useState<UnsupervisedProposalRouting>(
-    initialRouting,
-  );
+  const [routing, setRouting] =
+    useState<UnsupervisedProposalRouting>(initialRouting);
   const [saving, setSaving] = useState(false);
+  const [users, setUsers] = useState<RosterUser[]>([]);
+  const [usersError, setUsersError] = useState(false);
+
+  // Last value known to be persisted — the revert target for a failed
+  // optimistic save.
+  const lastSavedRef = useRef<{
+    backupUserId: string;
+    routing: UnsupervisedProposalRouting;
+  }>({ backupUserId: initialBackupUserId ?? '', routing: initialRouting });
 
   // Re-sync when the parent re-fetches /api/me (e.g. after a mode switch).
   useEffect(() => {
     setBackupUserId(initialBackupUserId ?? '');
+    lastSavedRef.current.backupUserId = initialBackupUserId ?? '';
   }, [initialBackupUserId]);
   useEffect(() => {
     setRouting(initialRouting);
+    lastSavedRef.current.routing = initialRouting;
   }, [initialRouting]);
 
-  const trimmedUserId = backupUserId.trim();
-  const userIdValid = trimmedUserId === '' || UUID_RE.test(trimmedUserId);
+  // Load the tenant roster for the picker; only supervise-capable
+  // roles (owner, dispatcher) are offered as backup supervisors.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiClient('/api/users');
+        if (!res.ok) throw new Error(`Load failed (${res.status})`);
+        const json = (await res.json()) as { data?: RosterUser[] } | RosterUser[];
+        const list = Array.isArray(json) ? json : (json?.data ?? []);
+        if (!cancelled) {
+          setUsers(
+            list.filter((u) => SUPERVISE_CAPABLE_ROLES.includes(u.role)),
+          );
+          setUsersError(false);
+        }
+      } catch {
+        if (!cancelled) setUsersError(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiClient]);
 
   async function handleSave() {
-    if (!userIdValid) {
-      toast.error('Backup supervisor user ID must be a valid UUID');
-      return;
-    }
+    const prior = { ...lastSavedRef.current };
+    const next = { backupUserId, routing };
+    // Optimistic: the chosen values stick immediately.
+    lastSavedRef.current = next;
     setSaving(true);
     try {
       await updateTenantModeSettings(apiClient, {
-        backupSupervisorUserId: trimmedUserId === '' ? null : trimmedUserId,
+        backupSupervisorUserId: backupUserId === '' ? null : backupUserId,
         unsupervisedProposalRouting: routing,
       });
       toast.success('Supervisor backup saved');
     } catch (err) {
+      // Revert to the last persisted values + toast (AIProposalCard pattern).
+      lastSavedRef.current = prior;
+      setBackupUserId(prior.backupUserId);
+      setRouting(prior.routing);
       const message = err instanceof Error ? err.message : 'Save failed';
       toast.error(message);
     } finally {
@@ -103,57 +160,54 @@ export function SupervisorBackupSection({
     >
       <div className="flex items-center gap-2 mb-1">
         <Shield size={16} className="text-slate-600" />
-        <h2
-          id="supervisor-backup-heading"
-          className="text-sm text-slate-900"
-        >
+        <h2 id="supervisor-backup-heading" className="text-sm text-slate-900">
           Supervisor backup
         </h2>
       </div>
       <p className="text-xs text-slate-500 mb-4">
         When the active supervisor switches to Tech mode and no one else is
-        watching the wall, AI proposals route per the rule below. The
-        backup user gets the live wall on their device when they're
-        signed in.
+        watching the wall, AI proposals route per the rule below. The backup
+        user gets the live wall on their device when they're signed in.
       </p>
 
       <div className="mb-5">
         <label
-          htmlFor="backup-supervisor-user-id"
+          htmlFor="backup-supervisor-select"
           className="block text-xs text-slate-700 mb-1"
         >
-          Backup supervisor user ID
+          Backup supervisor (used when active supervisor switches to tech)
         </label>
-        <input
-          id="backup-supervisor-user-id"
-          data-testid="backup-supervisor-input"
-          type="text"
+        <select
+          id="backup-supervisor-select"
+          data-testid="backup-supervisor-select"
           value={backupUserId}
           onChange={(e) => setBackupUserId(e.target.value)}
-          placeholder="UUID — leave blank for none"
-          className={`w-full text-xs px-3 py-2 rounded-md border ${
-            userIdValid
-              ? 'border-slate-200 focus:border-slate-400'
-              : 'border-red-300 focus:border-red-400'
-          }`}
-        />
-        {!userIdValid && (
-          <p className="text-xs text-red-600 mt-1" role="alert">
-            Must be a valid UUID
+          className="w-full min-h-[44px] text-sm px-3 py-2 rounded-md border border-slate-200 bg-white focus:border-slate-400"
+        >
+          <option value="">None</option>
+          {users.map((u) => (
+            <option key={u.id} value={u.id}>
+              {displayName(u)}
+            </option>
+          ))}
+        </select>
+        {usersError && (
+          <p className="text-xs text-amber-600 mt-1" role="alert">
+            Couldn't load the team list — try reloading the page.
           </p>
         )}
       </div>
 
       <fieldset className="mb-4">
         <legend className="text-xs text-slate-700 mb-2">
-          Unsupervised proposal routing
+          When unsupervised, low-confidence proposals should:
         </legend>
         <div className="space-y-2">
           {ROUTING_OPTIONS.map((opt) => (
             <label
               key={opt.value}
               data-testid={`routing-option-${opt.value}`}
-              className="flex items-start gap-3 px-3 py-2 rounded-md border border-slate-200 cursor-pointer hover:border-slate-300"
+              className="flex items-start gap-3 px-3 py-3 min-h-[44px] rounded-md border border-slate-200 cursor-pointer hover:border-slate-300"
             >
               <input
                 type="radio"
@@ -176,8 +230,8 @@ export function SupervisorBackupSection({
         type="button"
         data-testid="supervisor-backup-save"
         onClick={handleSave}
-        disabled={saving || !userIdValid}
-        className="text-xs px-3 py-1.5 rounded-md bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-60"
+        disabled={saving}
+        className="text-xs px-4 min-h-[44px] rounded-md bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-60"
       >
         {saving ? 'Saving…' : 'Save'}
       </button>

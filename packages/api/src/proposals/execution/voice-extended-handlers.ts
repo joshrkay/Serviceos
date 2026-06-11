@@ -10,8 +10,11 @@ import {
   PaymentRepository,
   PaymentMethod,
   recordPayment,
+  PaymentReceiptNotifier,
 } from '../../invoices/payment';
 import { InvoiceRepository } from '../../invoices/invoice';
+import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
+import { AuditRepository } from '../../audit/audit';
 
 /**
  * Execution handlers for the Stage-2 voice intents.
@@ -137,7 +140,10 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
 
   constructor(
     private readonly paymentRepo?: PaymentRepository,
-    private readonly invoiceRepo?: InvoiceRepository
+    private readonly invoiceRepo?: InvoiceRepository,
+    private readonly moneyStateDeps?: RefreshJobMoneyStateDeps,
+    private readonly paymentReceiptNotifier?: PaymentReceiptNotifier,
+    private readonly auditRepo?: AuditRepository,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -175,7 +181,11 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
           processedBy: context.executedBy,
         },
         this.invoiceRepo,
-        this.paymentRepo
+        this.paymentRepo,
+        this.moneyStateDeps,
+        this.paymentReceiptNotifier,
+        this.auditRepo,
+        { actorRole: 'system', correlationId: proposal.id },
       );
       return { success: true, resultEntityId: payment.id };
     } catch (err) {
@@ -221,6 +231,76 @@ export class NoopInvoiceDeliveryProvider implements InvoiceDeliveryProvider {
   async send(dispatch: InvoiceDispatch): Promise<{ providerMessageId?: string }> {
     this.lastDispatch = dispatch;
     return { providerMessageId: `noop-${uuidv4()}` };
+  }
+}
+
+// ─── send_estimate ─────────────────────────────────────────────
+//
+// Outbound delivery of an estimate (the customer-facing approval link),
+// mirroring send_invoice. Same 'comms' gate: never auto-approves, so an
+// operator/supervisor must approve before the executor runs this. Lets
+// the voice flow "draft an estimate → send it" once a human signs off.
+export interface EstimateDispatch {
+  tenantId: string;
+  estimateId: string;
+  channel: 'email' | 'sms';
+  recipient?: string;
+  customMessage?: string;
+}
+
+export interface EstimateDeliveryProvider {
+  send(dispatch: EstimateDispatch): Promise<{ providerMessageId?: string }>;
+}
+
+export class NoopEstimateDeliveryProvider implements EstimateDeliveryProvider {
+  lastDispatch: EstimateDispatch | null = null;
+
+  async send(dispatch: EstimateDispatch): Promise<{ providerMessageId?: string }> {
+    this.lastDispatch = dispatch;
+    return { providerMessageId: `noop-${uuidv4()}` };
+  }
+}
+
+export class SendEstimateExecutionHandler implements ExecutionHandler {
+  proposalType: ProposalType = 'send_estimate';
+
+  constructor(private readonly provider?: EstimateDeliveryProvider) {}
+
+  async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
+    const { payload } = proposal;
+
+    if (!isUuid(payload.estimateId)) {
+      return {
+        success: false,
+        error: 'Payload must include a valid estimateId UUID (resolve estimateReference at review time first)',
+      };
+    }
+    if (payload.channel !== 'email' && payload.channel !== 'sms') {
+      return { success: false, error: 'Payload must specify channel as email or sms' };
+    }
+
+    if (!this.provider) {
+      // Dev wiring without a provider. Returns synthetic id.
+      return { success: true, resultEntityId: uuidv4() };
+    }
+
+    const dispatch: EstimateDispatch = {
+      tenantId: context.tenantId,
+      estimateId: payload.estimateId,
+      channel: payload.channel,
+      recipient: typeof payload.recipient === 'string' ? payload.recipient : undefined,
+      customMessage: typeof payload.customMessage === 'string' ? payload.customMessage : undefined,
+    };
+
+    try {
+      const sent = await this.provider.send(dispatch);
+      return { success: true, resultEntityId: sent.providerMessageId ?? uuidv4() };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : 'Estimate delivery failed',
+      };
+    }
   }
 }
 

@@ -18,13 +18,24 @@ import { useListQuery } from '../../hooks/useListQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { toast } from 'sonner';
 
+// Money lives under nested `totals` to match the API's serialized Invoice entity
+// (the authenticated GET /api/invoices returns invoice.totals.totalCents, not a
+// flat top-level totalCents — the prior flat fixtures masked a real rendering bug).
+const totalsOf = (totalCents: number) => ({
+  subtotalCents: totalCents,
+  discountCents: 0,
+  taxRateBps: 0,
+  taxableSubtotalCents: totalCents,
+  taxCents: 0,
+  totalCents,
+});
+
 const mockInvoices = [
   {
     id: 'i1',
     invoiceNumber: 'INV-001',
     status: 'open',
-    totalCents: 120000,
-    subtotalCents: 120000,
+    totals: totalsOf(120000),
     dueDate: '2026-03-20',
     issuedAt: '2026-03-01T00:00:00Z',
     customer: { id: 'c1', displayName: 'Alice Smith' },
@@ -33,16 +44,14 @@ const mockInvoices = [
     id: 'i2',
     invoiceNumber: 'INV-002',
     status: 'paid',
-    totalCents: 85000,
-    subtotalCents: 85000,
+    totals: totalsOf(85000),
     customer: { id: 'c2', displayName: 'Bob Jones' },
   },
   {
     id: 'i3',
     invoiceNumber: 'INV-003',
     status: 'draft',
-    totalCents: 45000,
-    subtotalCents: 45000,
+    totals: totalsOf(45000),
     customer: { id: 'c3', displayName: 'Carol White' },
   },
 ];
@@ -89,7 +98,7 @@ describe('InvoicesPage', () => {
 
   it('formats totalCents as dollars', () => {
     renderPage();
-    expect(screen.getAllByText('$1200.00').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('$1,200.00').length).toBeGreaterThan(0);
     expect(screen.getAllByText('$850.00').length).toBeGreaterThan(0);
   });
 
@@ -103,8 +112,8 @@ describe('InvoicesPage', () => {
 
   it('shows outstanding total', () => {
     renderPage();
-    // only open invoice: $1200.00 outstanding (may appear multiple times)
-    expect(screen.getAllByText('$1200.00').length).toBeGreaterThan(0);
+    // only open invoice: $1,200.00 outstanding (may appear multiple times)
+    expect(screen.getAllByText('$1,200.00').length).toBeGreaterThan(0);
   });
 
   it('shows total invoice count', () => {

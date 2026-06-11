@@ -4,13 +4,26 @@ import { MemoryRouter } from 'react-router';
 import { SchedulePage } from './SchedulePage';
 
 vi.mock('../../utils/api-fetch', () => ({ apiFetch: vi.fn() }));
-vi.mock('../../data/mock-data', () => ({
+
+const ROSTER = {
   technicians: [
     { id: 't1', name: 'Carlos Reyes', initials: 'CR', color: '#3B82F6' },
-    { id: 't2', name: 'Marcus Webb',  initials: 'MW', color: '#22C55E' },
-    { id: 't3', name: 'Sarah Lin',    initials: 'SL', color: '#8B5CF6' },
+    { id: 't2', name: 'Marcus Webb', initials: 'MW', color: '#22C55E' },
+    { id: 't3', name: 'Sarah Lin', initials: 'SL', color: '#8B5CF6' },
   ],
+  isLoading: false,
+  error: null,
+};
+
+vi.mock('../../hooks/useTechnicianRoster', () => ({
+  useTechnicianRoster: () => ROSTER,
 }));
+
+const TECHNICIANS = [
+  { id: 't1', firstName: 'Carlos', lastName: 'Reyes' },
+  { id: 't2', firstName: 'Marcus', lastName: 'Webb' },
+  { id: 't3', firstName: 'Sarah', lastName: 'Lin' },
+];
 
 import { apiFetch } from '../../utils/api-fetch';
 
@@ -73,6 +86,9 @@ function setupApi(appointments: unknown[] = [appt1, appt2], jobs: Record<string,
     if (url.startsWith('/api/appointments?')) {
       return mockResponse({ data: appointments });
     }
+    if (url.includes('/api/users')) {
+      return mockResponse({ data: TECHNICIANS });
+    }
     const jobMatch = url.match(/^\/api\/jobs\/([^/?]+)/);
     if (jobMatch) {
       const job = jobs[jobMatch[1]];
@@ -116,6 +132,12 @@ describe('SchedulePage', () => {
     expect(await screen.findByText('Drain cleaning')).toBeInTheDocument();
   });
 
+  it('exposes a Dispatch board entry point linking to /dispatch', async () => {
+    renderPage();
+    const link = await screen.findByRole('link', { name: /dispatch board/i });
+    expect(link).toHaveAttribute('href', '/dispatch');
+  });
+
   it('shows appointment count after load', async () => {
     renderPage();
     expect(await screen.findByText('2 appointments')).toBeInTheDocument();
@@ -133,10 +155,15 @@ describe('SchedulePage', () => {
     expect(await screen.findByText('No appointments')).toBeInTheDocument();
   });
 
-  it('falls back gracefully when /api/appointments returns non-ok', async () => {
-    vi.mocked(apiFetch).mockResolvedValueOnce(mockResponse({}, false, 500));
+  it('shows error message when /api/appointments returns non-ok (500)', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/api/users')) return mockResponse({ data: TECHNICIANS });
+      if (url.startsWith('/api/appointments?')) return mockResponse({}, false, 500);
+      return mockResponse({});
+    });
     renderPage();
-    expect(await screen.findByText('No appointments')).toBeInTheDocument();
+    expect(await screen.findByText("Couldn't load appointments — please try again")).toBeInTheDocument();
   });
 
   it('uses fallback customer label when /api/jobs/:id fails', async () => {
@@ -154,7 +181,9 @@ describe('SchedulePage', () => {
       expect(apptCall).toBeDefined();
       const url = String(apptCall![0]);
       expect(url).toContain(`fromDate=${TODAY}`);
-      expect(url).toContain(`toDate=${TODAY}`);
+      // toDate encodes the end of the selected day as UTC — may be TODAY or TODAY+1
+      // depending on the local timezone offset, so we only verify the param is present.
+      expect(url).toContain('toDate=');
       expect(url).toContain('sort=asc');
     });
   });
@@ -219,10 +248,15 @@ describe('SchedulePage', () => {
       .getAllByRole('button')
       .find(b => b.className.includes('rounded-full') && b.textContent?.endsWith('Carlos'));
     expect(carlosFilter).toBeDefined();
+    await waitFor(() => {
+      expect(carlosFilter).toBeDefined();
+    });
     fireEvent.click(carlosFilter!);
 
-    expect(screen.queryByText('Bob Jones')).not.toBeInTheDocument();
-    expect(screen.getByText('Alice Smith')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText('Bob Jones')).not.toBeInTheDocument();
+      expect(screen.getByText('Alice Smith')).toBeInTheDocument();
+    });
   });
 
   it('flags overlapping appointments on the same technician as conflicts', async () => {
@@ -253,5 +287,49 @@ describe('SchedulePage', () => {
     const detailsButtons = screen.getAllByRole('button', { name: 'Details' });
     fireEvent.click(detailsButtons[0]);
     expect(screen.getByText('Appointment details')).toBeInTheDocument();
+  });
+
+  // ── P20-004: Error states for authenticated data panels ──────────────────
+
+  it('[P20-004] shows session-expired message on 401 and does not leave spinner up', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/api/users')) return mockResponse({ data: TECHNICIANS });
+      if (url.startsWith('/api/appointments?')) return mockResponse({}, false, 401);
+      return mockResponse({});
+    });
+    renderPage();
+    expect(await screen.findByText('Session expired — please reload')).toBeInTheDocument();
+    expect(document.querySelector('.animate-spin')).not.toBeInTheDocument();
+  });
+
+  it('[P20-004] shows generic error message on non-401 failure (not 401)', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/api/users')) return mockResponse({ data: TECHNICIANS });
+      if (url.startsWith('/api/appointments?')) return mockResponse({}, false, 503);
+      return mockResponse({});
+    });
+    renderPage();
+    expect(await screen.findByText("Couldn't load appointments — please try again")).toBeInTheDocument();
+  });
+
+  it('[P20-004] renders "Reload page" affordance alongside the session-expired message', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/api/users')) return mockResponse({ data: TECHNICIANS });
+      if (url.startsWith('/api/appointments?')) return mockResponse({}, false, 401);
+      return mockResponse({});
+    });
+    renderPage();
+    expect(await screen.findByText('Session expired — please reload')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /reload page/i })).toBeInTheDocument();
+  });
+
+  it('[P20-004] happy path: loads data successfully without showing any error', async () => {
+    renderPage();
+    expect(await screen.findByText('Alice Smith')).toBeInTheDocument();
+    expect(screen.queryByText('Session expired — please reload')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Couldn't load/)).not.toBeInTheDocument();
   });
 });

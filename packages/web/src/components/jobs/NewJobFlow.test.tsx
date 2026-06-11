@@ -1,8 +1,50 @@
 import React from 'react';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { NewJobFlow } from './NewJobFlow';
+
+const listQueryStable = {
+  data: [
+    {
+      id: 'cust-roberto',
+      displayName: 'Roberto Rodriguez',
+      primaryPhone: '512-555-0100',
+      locations: [
+        {
+          id: 'loc-1',
+          street1: '412 Maple Drive, Austin TX',
+          city: '',
+          state: '',
+          postalCode: '',
+          isPrimary: true,
+          serviceTypes: ['HVAC'],
+        },
+      ],
+    },
+  ],
+  total: 1,
+  page: 1,
+  pageSize: 25,
+  isLoading: false,
+  error: null,
+  refetch: vi.fn(),
+  setPage: vi.fn(),
+  setSearch: vi.fn(),
+  setFilters: vi.fn(),
+};
+
+vi.mock('../../hooks/useListQuery', () => ({
+  useListQuery: () => listQueryStable,
+}));
+
+vi.mock('../../hooks/useTechnicianRoster', () => ({
+  useTechnicianRoster: () => ({ technicians: [], isLoading: false, error: null }),
+}));
+
+vi.mock('../../hooks/useMutation', () => ({
+  useMutation: () => ({ mutate: vi.fn(), isLoading: false, error: null }),
+}));
 
 function renderFlow() {
   return render(
@@ -14,6 +56,10 @@ function renderFlow() {
 }
 
 describe('NewJobFlow', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it('allows creating and selecting a new customer from the customer step', async () => {
     const user = userEvent.setup();
     renderFlow();

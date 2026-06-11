@@ -1,0 +1,319 @@
+import type { Pool } from 'pg';
+import { PgBaseRepository } from '../db/pg-base';
+import type { VerticalType } from '../shared/vertical-types';
+import type {
+  PrivacyAuditEntry,
+  PrivacyAuditRepository,
+  TrainingAssetListOptions,
+  TrainingAssetListPage,
+  TrainingAssetRepository,
+  TryUpdateResult,
+  VerticalTrainingAsset,
+} from './training-assets';
+
+const DEFAULT_LIST_LIMIT = 50;
+const MAX_LIST_LIMIT = 200;
+
+function jsonValue<T>(value: unknown, fallback: T): T {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === 'string') return JSON.parse(value) as T;
+  return value as T;
+}
+
+function rowToAsset(row: Record<string, unknown>): VerticalTrainingAsset {
+  return {
+    id: String(row.id),
+    tenantId: String(row.tenant_id),
+    verticalType: row.vertical_type as VerticalType,
+    assetKind: row.asset_kind as VerticalTrainingAsset['assetKind'],
+    status: row.status as VerticalTrainingAsset['status'],
+    title: String(row.title),
+    rawText: row.raw_text === null || row.raw_text === undefined ? undefined : String(row.raw_text),
+    scrubbedText: row.scrubbed_text === null || row.scrubbed_text === undefined ? undefined : String(row.scrubbed_text),
+    labels: jsonValue(row.labels, {}) as VerticalTrainingAsset['labels'],
+    provenance: jsonValue(row.provenance, {}) as VerticalTrainingAsset['provenance'],
+    redactionSummary: row.redaction_summary
+      ? jsonValue(row.redaction_summary, undefined) as VerticalTrainingAsset['redactionSummary']
+      : undefined,
+    createdBy: String(row.created_by),
+    approvedBy: row.approved_by === null || row.approved_by === undefined ? undefined : String(row.approved_by),
+    activatedAt: row.activated_at ? new Date(String(row.activated_at)) : undefined,
+    createdAt: new Date(String(row.created_at)),
+    updatedAt: new Date(String(row.updated_at)),
+    idempotencyKey:
+      row.idempotency_key === null || row.idempotency_key === undefined
+        ? undefined
+        : String(row.idempotency_key),
+  };
+}
+
+function rowToPrivacyAuditEntry(row: Record<string, unknown>): PrivacyAuditEntry {
+  return {
+    id: String(row.id),
+    tenantId: String(row.tenant_id),
+    actorId: String(row.actor_id),
+    entityType: row.entity_type as PrivacyAuditEntry['entityType'],
+    entityId: String(row.entity_id),
+    operation: row.operation as PrivacyAuditEntry['operation'],
+    redactionSummary: jsonValue(row.redaction_summary, {}) as PrivacyAuditEntry['redactionSummary'],
+    redactions: jsonValue(row.redactions, []) as PrivacyAuditEntry['redactions'],
+    createdAt: new Date(String(row.created_at)),
+  };
+}
+
+export class PgTrainingAssetRepository extends PgBaseRepository implements TrainingAssetRepository {
+  constructor(pool: Pool) {
+    super(pool);
+  }
+
+  async save(asset: VerticalTrainingAsset): Promise<VerticalTrainingAsset> {
+    return this.withTenant(asset.tenantId, async (client) => {
+      const result = await client.query(
+        `INSERT INTO vertical_training_assets (
+          id, tenant_id, vertical_type, asset_kind, status, title,
+          raw_text, scrubbed_text, labels, provenance, redaction_summary,
+          created_by, approved_by, activated_at, created_at, updated_at,
+          idempotency_key
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6,
+          $7, $8, $9, $10, $11,
+          $12, $13, $14, $15, $16,
+          $17
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          vertical_type = EXCLUDED.vertical_type,
+          asset_kind = EXCLUDED.asset_kind,
+          status = EXCLUDED.status,
+          title = EXCLUDED.title,
+          raw_text = EXCLUDED.raw_text,
+          scrubbed_text = EXCLUDED.scrubbed_text,
+          labels = EXCLUDED.labels,
+          provenance = EXCLUDED.provenance,
+          redaction_summary = EXCLUDED.redaction_summary,
+          created_by = EXCLUDED.created_by,
+          approved_by = EXCLUDED.approved_by,
+          activated_at = EXCLUDED.activated_at,
+          created_at = EXCLUDED.created_at,
+          updated_at = COALESCE($16, vertical_training_assets.updated_at),
+          idempotency_key = EXCLUDED.idempotency_key
+        WHERE vertical_training_assets.tenant_id = EXCLUDED.tenant_id
+        RETURNING *`,
+        [
+          asset.id,
+          asset.tenantId,
+          asset.verticalType,
+          asset.assetKind,
+          asset.status,
+          asset.title,
+          asset.rawText ?? null,
+          asset.scrubbedText ?? null,
+          JSON.stringify(asset.labels),
+          JSON.stringify(asset.provenance),
+          asset.redactionSummary ? JSON.stringify(asset.redactionSummary) : null,
+          asset.createdBy,
+          asset.approvedBy ?? null,
+          asset.activatedAt ?? null,
+          asset.createdAt,
+          asset.updatedAt,
+          asset.idempotencyKey ?? null,
+        ],
+      );
+      if (result.rows.length === 0) {
+        throw new Error('training asset id belongs to another tenant');
+      }
+      return rowToAsset(result.rows[0]);
+    });
+  }
+
+  async tryUpdate(
+    asset: VerticalTrainingAsset,
+    expectedUpdatedAt: Date,
+  ): Promise<TryUpdateResult> {
+    return this.withTenant(asset.tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE vertical_training_assets SET
+          status = $3,
+          title = $4,
+          scrubbed_text = $5,
+          labels = $6,
+          provenance = $7,
+          redaction_summary = $8,
+          approved_by = $9,
+          activated_at = $10,
+          updated_at = $11
+        WHERE tenant_id = $1
+          AND id = $2
+          AND updated_at = $12
+        RETURNING *`,
+        [
+          asset.tenantId,
+          asset.id,
+          asset.status,
+          asset.title,
+          asset.scrubbedText ?? null,
+          JSON.stringify(asset.labels),
+          JSON.stringify(asset.provenance),
+          asset.redactionSummary ? JSON.stringify(asset.redactionSummary) : null,
+          asset.approvedBy ?? null,
+          asset.activatedAt ?? null,
+          asset.updatedAt,
+          expectedUpdatedAt,
+        ],
+      );
+      if (result.rows.length > 0) {
+        return { kind: 'updated', asset: rowToAsset(result.rows[0]) };
+      }
+      const existsResult = await client.query(
+        `SELECT 1 FROM vertical_training_assets
+         WHERE tenant_id = $1 AND id = $2
+         LIMIT 1`,
+        [asset.tenantId, asset.id],
+      );
+      return existsResult.rows.length > 0 ? { kind: 'stale' } : { kind: 'missing' };
+    });
+  }
+
+  async findById(tenantId: string, id: string): Promise<VerticalTrainingAsset | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM vertical_training_assets
+         WHERE tenant_id = $1 AND id = $2
+         LIMIT 1`,
+        [tenantId, id],
+      );
+      return result.rows.length > 0 ? rowToAsset(result.rows[0]) : null;
+    });
+  }
+
+  async findByIdempotencyKey(
+    tenantId: string,
+    idempotencyKey: string,
+  ): Promise<VerticalTrainingAsset | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM vertical_training_assets
+         WHERE tenant_id = $1 AND idempotency_key = $2
+         LIMIT 1`,
+        [tenantId, idempotencyKey],
+      );
+      return result.rows.length > 0 ? rowToAsset(result.rows[0]) : null;
+    });
+  }
+
+  async delete(tenantId: string, id: string): Promise<void> {
+    await this.withTenant(tenantId, async (client) => {
+      await client.query(
+        `DELETE FROM vertical_training_assets
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, id],
+      );
+    });
+  }
+
+  async listByTenant(
+    tenantId: string,
+    options: TrainingAssetListOptions = {},
+  ): Promise<TrainingAssetListPage> {
+    return this.withTenant(tenantId, async (client) => {
+      const limit = normalizePaginationLimit(options.limit);
+      const offset = normalizePaginationOffset(options.offset);
+      const [pageResult, countResult] = await Promise.all([
+        client.query(
+          `SELECT * FROM vertical_training_assets
+           WHERE tenant_id = $1
+           ORDER BY updated_at DESC, id ASC
+           LIMIT $2 OFFSET $3`,
+          [tenantId, limit, offset],
+        ),
+        client.query(
+          `SELECT COUNT(*)::int AS count FROM vertical_training_assets
+           WHERE tenant_id = $1`,
+          [tenantId],
+        ),
+      ]);
+      return {
+        data: pageResult.rows.map(rowToAsset),
+        total: Number(countResult.rows[0]?.count ?? 0),
+        limit,
+        offset,
+      };
+    });
+  }
+
+  async listActiveByTenantAndVertical(
+    tenantId: string,
+    verticalType: VerticalType,
+    limit?: number,
+  ): Promise<VerticalTrainingAsset[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const normalizedLimit = normalizeActiveListLimit(limit);
+      const values: unknown[] = [tenantId, verticalType];
+      if (normalizedLimit !== undefined) {
+        values.push(normalizedLimit);
+      }
+      const result = await client.query(
+        `SELECT * FROM vertical_training_assets
+         WHERE tenant_id = $1 AND vertical_type = $2 AND status = 'active'
+         ORDER BY updated_at DESC, id ASC${normalizedLimit === undefined ? '' : '\n         LIMIT $3'}`,
+        values,
+      );
+      return result.rows.map(rowToAsset);
+    });
+  }
+}
+
+function normalizeActiveListLimit(limit: number | undefined): number | undefined {
+  if (limit === undefined) return undefined;
+  if (!Number.isFinite(limit)) return 1;
+  return Math.min(50, Math.max(1, Math.floor(limit)));
+}
+
+function normalizePaginationLimit(limit: number | undefined): number {
+  if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_LIST_LIMIT;
+  return Math.min(MAX_LIST_LIMIT, Math.max(1, Math.floor(limit)));
+}
+
+function normalizePaginationOffset(offset: number | undefined): number {
+  if (offset === undefined || !Number.isFinite(offset)) return 0;
+  return Math.max(0, Math.floor(offset));
+}
+
+export class PgPrivacyAuditRepository extends PgBaseRepository implements PrivacyAuditRepository {
+  constructor(pool: Pool) {
+    super(pool);
+  }
+
+  async create(entry: PrivacyAuditEntry): Promise<PrivacyAuditEntry> {
+    return this.withTenant(entry.tenantId, async (client) => {
+      const result = await client.query(
+        `INSERT INTO privacy_audit (
+          id, tenant_id, actor_id, entity_type, entity_id, operation,
+          redaction_summary, redactions, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        RETURNING *`,
+        [
+          entry.id,
+          entry.tenantId,
+          entry.actorId,
+          entry.entityType,
+          entry.entityId,
+          entry.operation,
+          JSON.stringify(entry.redactionSummary),
+          JSON.stringify(entry.redactions),
+          entry.createdAt,
+        ],
+      );
+      return rowToPrivacyAuditEntry(result.rows[0]);
+    });
+  }
+
+  async delete(tenantId: string, id: string): Promise<void> {
+    await this.withTenant(tenantId, async (client) => {
+      await client.query(
+        `DELETE FROM privacy_audit
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, id],
+      );
+    });
+  }
+}

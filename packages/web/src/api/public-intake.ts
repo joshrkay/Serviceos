@@ -16,6 +16,10 @@ export interface IntakeTenantInfo {
   businessName: string;
   businessPhone: string | null;
   serviceTypes: IntakeServiceType[];
+  businessHoursSummary?: string | null;
+  intakeTagline?: string | null;
+  averageRating?: number;
+  reviewCount?: number;
 }
 
 export interface SubmitIntakeLeadPayload {

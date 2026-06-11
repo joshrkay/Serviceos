@@ -1,6 +1,7 @@
 import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from '../execution/handlers';
 import { Invoice, InvoiceRepository, issueInvoice } from '../../invoices/invoice';
+import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
 
 const DEFAULT_PAYMENT_TERM_DAYS = 30;
 
@@ -30,7 +31,10 @@ async function resolveInvoice(
 export class IssueInvoiceExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'issue_invoice';
 
-  constructor(private readonly invoiceRepo: InvoiceRepository) {}
+  constructor(
+    private readonly invoiceRepo: InvoiceRepository,
+    private readonly moneyStateDeps?: RefreshJobMoneyStateDeps,
+  ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { invoiceId, paymentTermDays } = proposal.payload as {
@@ -61,7 +65,7 @@ export class IssueInvoiceExecutionHandler implements ExecutionHandler {
     const termDays =
       typeof paymentTermDays === 'number' ? paymentTermDays : DEFAULT_PAYMENT_TERM_DAYS;
 
-    await issueInvoice(context.tenantId, invoice.id, termDays, this.invoiceRepo);
+    await issueInvoice(context.tenantId, invoice.id, termDays, this.invoiceRepo, this.moneyStateDeps);
 
     return { success: true, resultEntityId: invoice.id };
   }

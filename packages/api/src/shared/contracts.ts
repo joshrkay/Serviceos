@@ -113,6 +113,11 @@ const lineItemSchema = z.object({
   totalCents: z.number().int().nonnegative(),
   sortOrder: z.number().int(),
   taxable: z.boolean(),
+  // Good-better-best tiers + optional add-ons (estimates only).
+  groupKey: z.string().min(1).max(120).optional(),
+  groupLabel: z.string().min(1).max(200).optional(),
+  isOptional: z.boolean().optional(),
+  isDefaultSelected: z.boolean().optional(),
 });
 
 export const createCustomerSchema = z.object({
@@ -244,6 +249,34 @@ export const createCatalogItemSchema = z.object({
 
 export const updateCatalogItemSchema = createCatalogItemSchema.partial();
 
+// Public review-link field (Settings → Reviews). Trims the input FIRST so a
+// whitespace-only value ('   ') normalizes to null (cleared) instead of
+// failing validation; a non-empty value must be a valid URL.
+const reviewUrlField = z
+  .preprocess(
+    (v) => (typeof v === 'string' ? v.trim() : v),
+    z.union([
+      // https only — these values are rendered as clickable hrefs on the
+      // public feedback page, so reject javascript:/data:/http: schemes.
+      z.string().url().refine((u) => /^https:\/\//i.test(u), {
+        message: 'Review URL must be an https:// link',
+      }),
+      z.literal(''),
+      z.null(),
+    ]),
+  )
+  .optional()
+  .transform((v) => (v === '' ? null : v));
+
+// Polly voice id (e.g. "Polly.Mia-Neural"). Constrained so a stored value
+// can never inject XML metacharacters into the `<Say voice="...">` TwiML.
+const ttsVoiceField = z
+  .string()
+  .regex(/^[A-Za-z0-9._-]+$/, 'Invalid voice id')
+  .max(64)
+  .nullable()
+  .optional();
+
 export const updateSettingsSchema = z.object({
   businessName: z.string().min(1).optional(),
   // Codex P2 (PR #316): `.nullable()` so the Business profile sheet
@@ -252,6 +285,10 @@ export const updateSettingsSchema = z.object({
   // so an explicit null is the only path to "clear this field".
   businessPhone: z.string().nullable().optional(),
   businessEmail: z.union([z.string().email(), z.null()]).optional(),
+  // P8-016 — owner's personal cell for emergency triage. Accepts any
+  // human format; normalized to E.164 server-side. Empty string or
+  // explicit null clears the value; omit to leave untouched.
+  ownerPhone: z.string().max(40).nullable().optional(),
   timezone: z.string().nullable().optional(),
   estimatePrefix: z.string().min(1).optional(),
   invoicePrefix: z.string().min(1).optional(),
@@ -266,6 +303,15 @@ export const updateSettingsSchema = z.object({
   // Tier 4 — Quick-settings toggles persistence.
   autoApplyInternalUpdates: z.boolean().optional(),
   autoSendAppointmentReminders: z.boolean().optional(),
+  // P20-001 — opt into auto-drafting an invoice (as a proposal) on job completion.
+  autoInvoiceOnCompletion: z.boolean().optional(),
+  // Feature (launch) — opt into recomputing auto-invoice labor from actual time entries.
+  billLaborFromTimeEntries: z.boolean().optional(),
+  // P21-003 — opt into the daily batch-invoice proposal sweep.
+  batchInvoiceEnabled: z.boolean().optional(),
+  // P21 — opt into minting on_completion milestone invoices. Without this in
+  // the schema Zod strips it, so the toggle could never be set via the API.
+  milestoneBillingEnabled: z.boolean().optional(),
   // Tier 4 — AI approval rules: per-mode auto-approve threshold override.
   // Each entry is a confidence in [0, 1]. Missing keys fall back to
   // DEFAULT_AUTO_APPROVE_THRESHOLDS in proposals/auto-approve.ts.
@@ -290,9 +336,45 @@ export const updateSettingsSchema = z.object({
   // ('before_approval') or AFTER ('after_approval'). Default behavior
   // is 'after_approval'; existing tenants keep current flow.
   depositTimingPolicy: z.enum(['before_approval', 'after_approval']).optional(),
+  // §9 — owner's effective hourly rate (integer cents). Populated by
+  // §10 onboarding; until set, the Time-Given-Back card shows hours
+  // only. null clears the field.
+  hourlyRateCents: z.number().int().min(0).nullable().optional(),
   // B1 — Per-tenant voice persona. null clears the field.
   voiceAgentName: z.string().min(1).max(80).nullable().optional(),
   voiceGreeting: z.string().min(1).max(500).nullable().optional(),
+  // F8 — Call routing & handoff (CallRoutingSheet). Persisted to the
+  // escalation_settings JSONB column (migration 106) and consumed by the
+  // telephony stack via resolveEscalationSettings. Partial: missing keys
+  // fall back to DEFAULT_ESCALATION_SETTINGS on read.
+  escalationSettings: z
+    .object({
+      channel_sms: z.boolean(),
+      channel_in_app: z.boolean(),
+      channel_whisper: z.boolean(),
+      trigger_low_confidence: z.boolean(),
+      trigger_explicit_request: z.boolean(),
+      trigger_keyword_frustration: z.boolean(),
+      trigger_llm_sentiment: z.boolean(),
+      llm_sentiment_threshold: z.number().min(0).max(1),
+      after_hours_voice_mode: z.enum(['voicemail', 'ai_answering']),
+    })
+    .partial()
+    .optional(),
+  // Public review links (Settings → Reviews). Migration 120. Whitespace/empty
+  // normalizes to null so a cleared field reads back as "not configured".
+  googleReviewUrl: reviewUrlField,
+  yelpReviewUrl: reviewUrlField,
+  // P11-002 — tenant language stack. Persisted to tenant_settings and
+  // consumed by the voice agent + customer-facing comms.
+  defaultLanguage: z.enum(['en', 'es']).optional(),
+  autoDetectLanguage: z.boolean().optional(),
+  ttsVoiceEn: ttsVoiceField,
+  ttsVoiceEs: ttsVoiceField,
+  spanishDispatcherUserIds: z.array(z.string().uuid()).optional(),
+  // Voice-parity (migration 152) — E.164 warm-transfer line. Normalized to
+  // E.164 (or null to clear) at the route boundary, mirroring ownerPhone.
+  transferNumber: z.string().max(40).nullable().optional(),
 }).superRefine((val, ctx) => {
   if (val.depositStrategy === 'percentage') {
     if (val.depositPercentageBps == null) {
@@ -321,7 +403,7 @@ export const conversationAccessSchema = z.object({
 
 // Phase 4 — Vertical Packs + Estimate Intelligence
 
-export const verticalTypeSchema = z.enum(['hvac', 'plumbing']);
+export const verticalTypeSchema = z.enum(['hvac', 'plumbing', 'electrical']);
 
 const lineItemTemplateSchema = z.object({
   description: z.string().min(1),

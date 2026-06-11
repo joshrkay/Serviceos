@@ -39,6 +39,15 @@ export interface ContextAssemblyDependencies {
   approvedEstimateRepo: ApprovedEstimateRepository;
 }
 
+export function buildMergedVerticalVoicePrompt(input: {
+  canonicalPrompt?: string;
+  trainingAssetPrompt?: string;
+}): string | undefined {
+  const sections = [input.canonicalPrompt, input.trainingAssetPrompt]
+    .filter((section): section is string => Boolean(section && section.trim().length > 0));
+  return sections.length > 0 ? sections.join('\n\n') : undefined;
+}
+
 export async function assembleVerticalContext(
   input: ContextAssemblyInput,
   deps: ContextAssemblyDependencies

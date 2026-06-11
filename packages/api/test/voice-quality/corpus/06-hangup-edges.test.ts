@@ -75,7 +75,7 @@ describe('VQ-015 — Bucket 06 hangup edges', () => {
   );
 
   it.each(SCRIPT_IDS)(
-    'VQ-015 — cassette stub for %s is valid JSON with empty entries',
+    'VQ-015 — cassette file for %s is valid JSON (entries filled after seed/record)',
     (scriptId) => {
       const cassettePath = path.join(
         CORPUS_ROOT,
@@ -87,7 +87,7 @@ describe('VQ-015 — Bucket 06 hangup edges', () => {
       expect(parsed.scriptId).toBe(scriptId);
       expect(parsed.version).toBe(1);
       expect(parsed.rubricVersion).toBe('v1');
-      expect(parsed.entries).toEqual([]);
+      expect(Array.isArray(parsed.entries)).toBe(true);
     },
   );
 });

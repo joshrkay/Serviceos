@@ -202,6 +202,94 @@ describe('POST /api/telephony/gather', () => {
   });
 });
 
+describe('tenant-resolution failure degrades gracefully (not HTTP 500)', () => {
+  function buildAppWithResolver(
+    resolveTenantId: () => string | undefined | Promise<string | undefined>,
+  ): express.Application {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const gateway = makeGateway('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Test Co',
+      publicBaseUrl: PUBLIC_BASE_URL,
+    });
+    const app = express();
+    app.use(
+      '/api/telephony',
+      createTelephonyRouter({
+        adapter,
+        authTokenGetter: () => AUTH_TOKEN,
+        publicBaseUrl: PUBLIC_BASE_URL,
+        resolveTenantId,
+      }),
+    );
+    return app;
+  }
+
+  function signedPost(
+    app: express.Application,
+    path: string,
+    params: Record<string, string>,
+  ) {
+    const url = `${PUBLIC_BASE_URL}${path}`;
+    const sig = twilio.getExpectedTwilioSignature(AUTH_TOKEN, url, params);
+    return request(app)
+      .post(path)
+      .set('X-Twilio-Signature', sig)
+      .type('form')
+      .send(params);
+  }
+
+  const GATHER_PARAMS = {
+    CallSid: 'CA-x',
+    SpeechResult: 'hi',
+    Confidence: '0.9',
+    From: '+15125550100',
+    To: '+15125550999',
+  };
+  const DIAL_PARAMS = {
+    CallSid: 'CA-x',
+    DialCallStatus: 'no-answer',
+    From: '+15125550100',
+    To: '+15125550999',
+  };
+
+  it('gather: 200 + graceful hangup TwiML when tenant cannot be resolved (terminal)', async () => {
+    const app = buildAppWithResolver(() => undefined);
+    const res = await signedPost(app, '/api/telephony/gather?sid=sess-x', GATHER_PARAMS);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/xml/);
+    expect(res.text).toContain('<Response');
+    expect(res.text).toContain('<Hangup');
+  });
+
+  it('gather: 503 (Twilio retries) when tenant lookup throws (transient)', async () => {
+    const app = buildAppWithResolver(() => {
+      throw new Error('db down');
+    });
+    const res = await signedPost(app, '/api/telephony/gather?sid=sess-x', GATHER_PARAMS);
+    expect(res.status).toBe(503);
+  });
+
+  it('dial-result: 200 + graceful hangup TwiML when tenant cannot be resolved (terminal)', async () => {
+    const app = buildAppWithResolver(() => undefined);
+    const res = await signedPost(app, '/api/telephony/dial-result?sid=sess-x', DIAL_PARAMS);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/xml/);
+    expect(res.text).toContain('<Response');
+    expect(res.text).toContain('<Hangup');
+  });
+
+  it('dial-result: 503 (Twilio retries) when tenant lookup throws (transient)', async () => {
+    const app = buildAppWithResolver(() => {
+      throw new Error('db down');
+    });
+    const res = await signedPost(app, '/api/telephony/dial-result?sid=sess-x', DIAL_PARAMS);
+    expect(res.status).toBe(503);
+  });
+});
+
 // ─── P8-013 — POST /api/telephony/dial-result ────────────────────────────────────────────────────────────────────────────────────────
 
 interface DialHarness {
@@ -340,7 +428,7 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
     expect(calledUsers).toContain('u2');
   });
 
-  it('on full rotation exhaustion, queues customer_callback_required proposal + audit and plays "we will call you back"', async () => {
+  it('on full rotation exhaustion, queues customer_callback_required proposal + audit and plays voicemail', async () => {
     const { app, store, auditRepo, proposalRepo, callControl } = buildDialHarness({
       rotation: [{ id: 'r1', userId: 'u1', orderIndex: 0 }],
       phones: { u1: '+15125550101' },
@@ -365,7 +453,8 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
 
     expect(res.status).toBe(200);
     expect(res.text).toMatch(/Acme Plumbing/);
-    expect(res.text).toMatch(/call you back/i);
+    expect(res.text).toMatch(/<Record/);
+    expect(res.text).toMatch(/voicemail-status/);
     expect(res.text).toContain('<Hangup');
 
     const proposals = await proposalRepo.findByTenant(TENANT_ID);
@@ -404,14 +493,14 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
 
     expect(res.status).toBe(200);
     expect(res.text).toContain('<Hangup');
-    expect(res.text).not.toMatch(/call you back/i);
+    expect(res.text).not.toMatch(/<Record/);
     expect(res.text).not.toContain('<Dial');
 
     const proposals = await proposalRepo.findByTenant(TENANT_ID);
     expect(proposals).toHaveLength(0);
   });
 
-  it('cascade: dispatcher 1 no-answer → dispatcher 2 dialed → dispatcher 2 no-answer → callback', async () => {
+  it('cascade: dispatcher 1 no-answer → dispatcher 2 dialed → dispatcher 2 no-answer → voicemail', async () => {
     const { app, store, proposalRepo, auditRepo, callControl } = buildDialHarness({
       rotation: [
         { id: 'r1', userId: 'u1', orderIndex: 0 },
@@ -445,7 +534,8 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       From: '+15125550100',
       To: '+15125550999',
     });
-    expect(res2.text).toMatch(/call you back/i);
+    expect(res2.text).toMatch(/<Record/);
+    expect(res2.text).toMatch(/voicemail-status/);
     expect(res2.text).toContain('Acme Plumbing');
     expect(res2.text).toContain('<Hangup');
 
@@ -526,7 +616,8 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       From: '+15125550100',
       To: '+15125550999',
     });
-    expect(res.text).toMatch(/call you back/i);
+    expect(res.text).toMatch(/<Record/);
+    expect(res.text).toMatch(/voicemail-status/);
     await new Promise((resolve) => setImmediate(resolve));
 
     const row = await voiceSessionRepo.findById(TENANT_ID, session.id);

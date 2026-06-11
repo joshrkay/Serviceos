@@ -63,15 +63,22 @@ export function makeUnauthenticatedAbort(): DOMException {
 /**
  * Triggers a redirect to the login page, preserving the current path so the
  * user lands where they were after re-authentication. Extracted so tests can
- * spy on it via `window.location` without depending on react-router.
+ * spy on it via `window.location` without depending on react-router. Exported
+ * so the non-hook `apiFetch` helper (utils/api-fetch.ts) can reuse the same
+ * redirect URL construction.
  */
-function redirectToLogin(): void {
+export function redirectToLogin(): void {
   if (typeof window === 'undefined') return;
   // Preserve the full path — pathname AND query string — so the login page
   // can return the user exactly where they were, not just to the route root.
-  const { pathname, search } = window.location;
-  const here = `${pathname}${search ?? ''}`;
-  const target = '/login?redirect=' + encodeURIComponent(here);
+  // Hash is intentionally excluded: it is client-only and not round-tripped
+  // through the server-side login flow.
+  const pathname = window.location.pathname;
+  const search = window.location.search;
+  // Guard against redirect loops: if we are already on the login page, fall
+  // back to '/' so we never produce redirect=%2Flogin%3Fredirect%3D….
+  const destination = pathname.startsWith('/login') ? '/' : `${pathname}${search}`;
+  const target = '/login?redirect=' + encodeURIComponent(destination);
   window.location.href = target;
 }
 

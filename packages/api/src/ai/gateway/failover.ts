@@ -130,6 +130,7 @@ export class FailoverGateway {
           policy: this.retryPolicy,
           deadline,
           provider: providerName,
+          taskType: request.taskType,
         });
       }
       return wrapped();
@@ -168,6 +169,7 @@ export class FailoverGateway {
           policy: this.retryPolicy,
           deadline,
           provider: 'fallback',
+          taskType: request.taskType,
         });
       }
       return wrapped();

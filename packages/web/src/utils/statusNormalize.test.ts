@@ -36,7 +36,7 @@ describe('normalizeEstimateStatus', () => {
     expect(normalizeEstimateStatus('sent')).toBe('Sent');
     expect(normalizeEstimateStatus('accepted')).toBe('Approved');
     expect(normalizeEstimateStatus('rejected')).toBe('Declined');
-    expect(normalizeEstimateStatus('expired')).toBe('Draft');
+    expect(normalizeEstimateStatus('expired')).toBe('Expired');
   });
 
   it('falls back to raw string for unknown status', () => {
@@ -76,10 +76,25 @@ describe('centsToDisplay', () => {
     expect(centsToDisplay(0)).toBe('$0.00');
   });
 
-  it('converts whole dollar amounts', () => {
+  it('converts whole dollar amounts under one thousand', () => {
     expect(centsToDisplay(1000)).toBe('$10.00');
     expect(centsToDisplay(15000)).toBe('$150.00');
-    expect(centsToDisplay(100000)).toBe('$1000.00');
+  });
+
+  // Blocker (money display): `$1000.00` (no separator) was the bug. The
+  // canonical formatter routes through `Intl.NumberFormat`, which inserts
+  // the locale-appropriate grouping separator and always emits two
+  // decimals — matching the behavior the InvoicePaymentPage already had.
+  it('uses thousands separators above 999', () => {
+    expect(centsToDisplay(100000)).toBe('$1,000.00');
+    expect(centsToDisplay(123450)).toBe('$1,234.50');
+    expect(centsToDisplay(1000000)).toBe('$10,000.00');
+    expect(centsToDisplay(1234567890)).toBe('$12,345,678.90');
+  });
+
+  it('renders negative amounts with the minus before the symbol', () => {
+    expect(centsToDisplay(-500)).toBe('-$5.00');
+    expect(centsToDisplay(-100000)).toBe('-$1,000.00');
   });
 
   it('converts fractional cents', () => {

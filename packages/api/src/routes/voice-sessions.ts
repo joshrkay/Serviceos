@@ -37,6 +37,27 @@ const inputSchema = z.object({
 export function createVoiceSessionsRouter(deps: VoiceSessionsRouterDeps): Router {
   const router = Router();
 
+  // X10/PR#398 — supervisor-wall discovery. The WS gateway rejects
+  // voice subscriptions without a targetId (see authorizeSubscribe),
+  // so the wall first fetches the list of active sessions for the
+  // tenant, seeds its local state, and then sends one `subscribe`
+  // frame per session id. Channel value is mapped to the wall's
+  // SessionChannel enum so the frontend doesn't have to do it.
+  router.get(
+    '/active',
+    requireAuth,
+    requireTenant,
+    requirePermission('ai:run'),
+    (req: AuthenticatedRequest, res: Response) => {
+      const sessions = deps.store.listActiveByTenant(req.auth!.tenantId).map((s) => ({
+        id: s.id,
+        channel: s.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
+        startedAt: s.createdAt.toISOString(),
+      }));
+      res.json({ sessions });
+    },
+  );
+
   router.post(
     '/',
     requireAuth,

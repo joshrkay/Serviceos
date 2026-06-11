@@ -6,22 +6,8 @@
  * themselves — the calling hook (`useMe`) owns the auth wiring.
  */
 
-export type Mode = 'supervisor' | 'tech' | 'both';
-
-export interface MeResponse {
-  user_id: string;
-  tenant_id: string;
-  role: string;
-  can_field_serve: boolean;
-  current_mode: Mode;
-  mode_changed_at: string | null;
-  permissions: string[];
-  backup_supervisor_user_id: string | null;
-  unsupervised_proposal_routing:
-    | 'queue_and_sms'
-    | 'queue_only'
-    | 'escalate_to_oncall';
-}
+export type { Mode, MeResponse } from '@ai-service-os/shared';
+import type { Mode, MeResponse } from '@ai-service-os/shared';
 
 export type AuthedFetch = (
   input: string,

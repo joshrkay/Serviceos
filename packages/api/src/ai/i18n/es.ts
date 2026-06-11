@@ -59,6 +59,12 @@ export const es: Record<keyof EnglishCatalog, string> = {
   'lookup.account.empty':
     'No veo nada destacado en su cuenta en este momento.',
 
+  // ── Telephony greeting (default opener) ──────────────────────────────
+  'greeting.opener_default': 'Gracias por llamar a {{business}}.',
+  'greeting.opener_named': 'Gracias por llamar a {{business}}. Le atiende {{agent}}.',
+  'greeting.cta': '¿En qué puedo ayudarle hoy?',
+  'greeting.one_moment': 'Un momento, por favor.',
+
   // ── Caller identification ────────────────────────────────────────────
   'identify.greet_known': 'Hola {{name}}, bienvenido de nuevo.',
   'identify.greet_unknown':
@@ -66,9 +72,14 @@ export const es: Record<keyof EnglishCatalog, string> = {
 
   // ── Escalation ───────────────────────────────────────────────────────
   'escalate.transferring':
-    'Un momento — le voy a transferir a un miembro del equipo que pueda ayudarle.',
+    'De acuerdo, déjeme comunicarle con alguien ahora mismo.',
   'escalate.no_dispatcher':
     'Lo siento, no hay nadie disponible en este momento. {{business}} le devolverá la llamada lo antes posible. Gracias por llamar.',
+  // Voice-parity (Feature 7) — la transferencia falló; tomar un mensaje.
+  'callback.prompt':
+    'Lo siento, no pude comunicarme con nadie en este momento. Dígame brevemente qué necesita y el mejor número para llamarle, y alguien le devolverá la llamada en seguida.',
+  'callback.ack':
+    'Gracias. Alguien de {{business}} le devolverá la llamada lo antes posible. Hasta luego.',
 
   // ── Recording disclosure ─────────────────────────────────────────────
   'disclose.two_party':

@@ -15,6 +15,7 @@
 import * as crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { PortalSession, PortalSessionRepository } from './portal-session';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 export interface CreatePortalSessionResult {
   id: string;
@@ -56,12 +57,22 @@ export function tokenHashesEqual(a: string, b: string): boolean {
   }
 }
 
+export interface CreatePortalSessionAuditContext {
+  /** Clerk role of the operator who minted the token (e.g. 'owner'). */
+  actorRole?: string;
+  /** Best-effort IP + UA from the request, for non-repudiation. */
+  ipAddress?: string;
+  userAgent?: string;
+}
+
 export async function createPortalSession(
   tenantId: string,
   customerId: string,
   createdBy: string,
   repo: PortalSessionRepository,
   ttlDays: number = DEFAULT_PORTAL_TTL_DAYS,
+  auditRepo?: AuditRepository,
+  auditContext?: CreatePortalSessionAuditContext,
 ): Promise<CreatePortalSessionResult> {
   if (!tenantId) throw new Error('tenantId is required');
   if (!customerId) throw new Error('customerId is required');
@@ -87,6 +98,29 @@ export async function createPortalSession(
   };
 
   const created = await repo.create(session);
+
+  if (auditRepo) {
+    // D2-1d: portal tokens are bearer credentials — minting must be
+    // auditable. Actor is the authenticated operator who issued the
+    // token; raw token is intentionally NEVER written to the audit row.
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId: createdBy,
+        actorRole: auditContext?.actorRole ?? 'unknown',
+        eventType: 'portal_session.created',
+        entityType: 'portal_session',
+        entityId: created.id,
+        metadata: {
+          customerId,
+          expiresAt: created.expiresAt.toISOString(),
+          ttlDays,
+          ipAddress: auditContext?.ipAddress,
+          userAgent: auditContext?.userAgent,
+        },
+      }),
+    );
+  }
 
   return {
     id: created.id,
@@ -138,12 +172,44 @@ export async function resolvePortalToken(
   };
 }
 
+export interface RevokePortalSessionAuditContext {
+  /** Clerk subject id of the operator performing the revoke. */
+  actorId?: string;
+  actorRole?: string;
+  ipAddress?: string;
+  userAgent?: string;
+}
+
 export async function revokePortalSession(
   tenantId: string,
   sessionId: string,
   repo: PortalSessionRepository,
+  auditRepo?: AuditRepository,
+  auditContext?: RevokePortalSessionAuditContext,
 ): Promise<PortalSession | null> {
   if (!tenantId) throw new Error('tenantId is required');
   if (!sessionId) throw new Error('sessionId is required');
-  return repo.revoke(tenantId, sessionId, new Date());
+  const revoked = await repo.revoke(tenantId, sessionId, new Date());
+
+  if (revoked && auditRepo) {
+    // D2-1d: revoke is a credential-invalidation event — always audited.
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId: auditContext?.actorId ?? 'system',
+        actorRole: auditContext?.actorRole ?? 'unknown',
+        eventType: 'portal_session.revoked',
+        entityType: 'portal_session',
+        entityId: revoked.id,
+        metadata: {
+          customerId: revoked.customerId,
+          revokedAt: revoked.revokedAt?.toISOString(),
+          ipAddress: auditContext?.ipAddress,
+          userAgent: auditContext?.userAgent,
+        },
+      }),
+    );
+  }
+
+  return revoked;
 }

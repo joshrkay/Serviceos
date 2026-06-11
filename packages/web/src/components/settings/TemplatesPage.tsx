@@ -1,11 +1,14 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router';
+import { formatCurrency as formatCents } from '../../utils/currency';
 import {
   ArrowLeft, Sparkles, Check, X, ChevronRight, RefreshCw,
   FileText, MessageSquare, Receipt, Briefcase, Users, Zap,
   TrendingUp, Mail, Clock, Edit3, RotateCcw, ArrowRight,
   Star, AlertCircle, BarChart2, Globe, CheckCircle2, Info,
 } from 'lucide-react';
+import { apiFetch } from '../../utils/api-fetch';
+import { useMe } from '../../hooks/useMe';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type SuggestionStatus = 'pending' | 'accepted' | 'skipped';
@@ -54,7 +57,7 @@ const INITIAL_SUGGESTIONS: AISuggestion[] = [
     title: 'Add diagnostic fee line item by default',
     before: 'Estimate starts with Labor and Parts only',
     after: 'Estimate starts with: Diagnostic Fee ($85), then Labor, then Parts',
-    reason: 'You\'ve manually added a diagnostic fee to 9 of your last 11 estimates. Fieldly can add it automatically.',
+    reason: 'You\'ve manually added a diagnostic fee to 9 of your last 11 estimates. Rivet can add it automatically.',
     source: 'usage',
     confidence: 'High',
     status: 'pending',
@@ -88,7 +91,7 @@ const INITIAL_SUGGESTIONS: AISuggestion[] = [
     title: 'Add refrigerant R-410A to default HVAC parts list',
     before: 'HVAC estimates start with no default parts',
     after: 'HVAC estimates include: R-410A Refrigerant (up to 2 lbs) as a common line item option',
-    reason: '67% of HVAC businesses on Fieldly include refrigerant as a common estimate line item.',
+    reason: '67% of HVAC businesses on Rivet include refrigerant as a common estimate line item.',
     source: 'community',
     tradeCount: 67,
     confidence: 'Medium',
@@ -191,7 +194,7 @@ const TEMPLATES: Template[] = [
     icon: Users,
     iconBg: 'bg-rose-100',
     iconColor: 'text-rose-600',
-    description: 'How Fieldly writes messages to your customers on your behalf',
+    description: 'How Rivet writes messages to your customers on your behalf',
     seededFrom: 'Onboarding · Step 2',
     lastRefined: 'Never',
     refinementCount: 0,
@@ -249,7 +252,7 @@ const COMMUNITY_INSIGHTS = [
 function LoopDiagram() {
   const steps = [
     { icon: Sparkles,   label: 'Onboarding\nseeds templates',  color: 'bg-indigo-100 text-indigo-600' },
-    { icon: BarChart2,  label: 'Fieldly\nwatches usage',       color: 'bg-blue-100   text-blue-600'   },
+    { icon: BarChart2,  label: 'Rivet\nwatches usage',       color: 'bg-blue-100   text-blue-600'   },
     { icon: Zap,        label: 'AI proposes\nrefinements',      color: 'bg-violet-100 text-violet-600' },
     { icon: Check,      label: 'You accept\nor tweak',          color: 'bg-green-100  text-green-600'  },
     { icon: RefreshCw,  label: 'Templates\nimprove',            color: 'bg-slate-100  text-slate-600'  },
@@ -479,7 +482,7 @@ function TemplateDetailModal({ template, onClose }: { template: Template; onClos
             <div className="flex items-start gap-2">
               <Info size={13} className="text-indigo-500 shrink-0 mt-0.5" />
               <p className="text-xs text-indigo-700 leading-relaxed">
-                These values were set during onboarding and refined by Fieldly based on your usage.
+                These values were set during onboarding and refined by Rivet based on your usage.
                 Edits here update your live templates immediately — the AI will use them as the new baseline.
               </p>
             </div>
@@ -516,7 +519,7 @@ function TemplateDetailModal({ template, onClose }: { template: Template; onClos
           <div className="rounded-xl border border-dashed border-slate-200 px-4 py-3.5 flex items-center gap-3">
             <RotateCcw size={13} className="text-slate-400 shrink-0" />
             <p className="text-xs text-slate-500 flex-1">
-              After saving, Fieldly will use these as the new baseline in the refinement loop.
+              After saving, Rivet will use these as the new baseline in the refinement loop.
             </p>
             <button className="text-xs text-slate-400 hover:text-slate-600 transition-colors shrink-0">
               Reset to defaults
@@ -611,7 +614,7 @@ function DigestModal({ settings, onChange, onClose }: {
                 <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100 overflow-hidden">
                   {[
                     { key: 'includeStats',           label: 'Your week in numbers',        desc: 'Jobs completed, revenue, estimates sent' },
-                    { key: 'includeAiSuggestions',   label: 'AI template suggestions',     desc: 'Refinements Fieldly noticed from your usage' },
+                    { key: 'includeAiSuggestions',   label: 'AI template suggestions',     desc: 'Refinements Rivet noticed from your usage' },
                     { key: 'includeCommunityTips',   label: 'Tips from similar businesses',desc: 'Anonymous insights from HVAC, plumbing & painting trades' },
                   ].map(({ key, label, desc }) => (
                     <div key={key} className="flex items-center justify-between px-4 py-3.5">
@@ -640,7 +643,7 @@ function DigestModal({ settings, onChange, onClose }: {
                       <Zap size={12} className="text-white" />
                     </div>
                     <div>
-                      <p className="text-xs text-white">Fieldly Weekly · Mar 10, 2026</p>
+                      <p className="text-xs text-white">Rivet Weekly · Mar 10, 2026</p>
                       <p className="text-xs text-slate-400 mt-0.5">To: mike@ortegarv.com</p>
                     </div>
                   </div>
@@ -648,7 +651,7 @@ function DigestModal({ settings, onChange, onClose }: {
                   <div className="bg-white px-4 py-4 flex flex-col gap-3">
                     <p className="text-sm text-slate-900">Hey Mike 👋</p>
                     <p className="text-xs text-slate-600 leading-relaxed">
-                      Here's your Fieldly summary for the week of March 4–10.
+                      Here's your Rivet summary for the week of March 4–10.
                     </p>
 
                     {settings.includeStats && (
@@ -675,7 +678,7 @@ function DigestModal({ settings, onChange, onClose }: {
                           <Sparkles size={10} /> AI noticed
                         </p>
                         <p className="text-xs text-slate-600">
-                          You added a diagnostic fee to 9 of 11 estimates this week. Want Fieldly to add it by default?
+                          You added a diagnostic fee to 9 of 11 estimates this week. Want Rivet to add it by default?
                         </p>
                         <div className="flex gap-2 mt-2">
                           <button className="text-xs bg-blue-600 text-white rounded-md px-2.5 py-1">Yes, add it</button>
@@ -695,7 +698,7 @@ function DigestModal({ settings, onChange, onClose }: {
                       </div>
                     )}
 
-                    <p className="text-xs text-slate-400">— The Fieldly team</p>
+                    <p className="text-xs text-slate-400">— The Rivet team</p>
                   </div>
                 </div>
               </div>
@@ -703,6 +706,351 @@ function DigestModal({ settings, onChange, onClose }: {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── P4-014 — Live templates section ──────────────────────────────────────────
+/**
+ * Real backend-driven view of estimate templates. Lives alongside the
+ * existing AI-suggestions / mock-template UI rather than replacing it
+ * (the surrounding page is currently a marketing layout with hard-coded
+ * fields that don't map to the live `EstimateTemplate` schema). This
+ * section is the one place where an owner can actually see and edit
+ * persisted templates today.
+ *
+ * Filtering: `/api/settings.activeVerticalPacks` drives which vertical(s)
+ * we ask `/api/templates?verticalType=...` about. When a tenant has no
+ * active packs we render the activation nudge instead of a misleading
+ * empty list.
+ *
+ * Wording-only edit: the spec deliberately scopes the edit affordance to
+ * `defaultCustomerMessage`. Touching `lineItemTemplates` would change the
+ * structural meaning of a template; that lives behind a separate flow we
+ * haven't built yet, so the line-item view here is read-only.
+ *
+ * Exported for unit testing in TemplatesPage.live.test.tsx.
+ */
+interface LiveEstimateTemplate {
+  id: string;
+  tenantId: string;
+  verticalType: string;
+  categoryId: string;
+  name: string;
+  description?: string;
+  lineItemTemplates: {
+    description: string;
+    category: string;
+    defaultQuantity: number;
+    defaultUnitPriceCents: number;
+    taxable: boolean;
+    sortOrder: number;
+    isOptional: boolean;
+  }[];
+  defaultDiscountCents: number;
+  defaultTaxRateBps: number;
+  defaultCustomerMessage?: string;
+  isActive: boolean;
+  usageCount: number;
+  updatedAt: string | Date;
+}
+
+interface LiveSettingsResponse {
+  activeVerticalPacks?: string[];
+}
+
+
+export function LiveTemplateDetailModal({
+  template,
+  canEdit,
+  onClose,
+  onSaved,
+}: {
+  template: LiveEstimateTemplate;
+  canEdit: boolean;
+  onClose: () => void;
+  onSaved: (next: LiveEstimateTemplate) => void;
+}) {
+  const [message, setMessage] = useState(template.defaultCustomerMessage ?? '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSave() {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/templates/${template.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ defaultCustomerMessage: message }),
+      });
+      if (!res.ok) throw new Error(`Save failed (HTTP ${res.status})`);
+      const next = (await res.json()) as LiveEstimateTemplate;
+      setSaving(false);
+      onSaved(next);
+      onClose();
+    } catch (err) {
+      setSaving(false);
+      setError(err instanceof Error ? err.message : 'Save failed');
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/50 px-4 pb-0 md:pb-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-lg bg-white rounded-t-3xl md:rounded-2xl shadow-2xl max-h-[85vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-3 px-5 pt-5 pb-4 border-b border-slate-100 sticky top-0 bg-white z-10">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-blue-100">
+            <FileText size={14} className="text-blue-600" />
+          </span>
+          <div className="flex-1">
+            <p className="text-slate-900">{template.name}</p>
+            <p className="text-xs text-slate-400 mt-0.5">
+              {template.verticalType.toUpperCase()} · used {template.usageCount} {template.usageCount === 1 ? 'time' : 'times'}
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close template detail"
+            className="flex size-8 items-center justify-center rounded-full hover:bg-slate-100 transition-colors"
+          >
+            <X size={15} className="text-slate-500" />
+          </button>
+        </div>
+
+        <div className="px-5 py-5 flex flex-col gap-4">
+          {template.description && (
+            <p className="text-sm text-slate-600 leading-relaxed">{template.description}</p>
+          )}
+
+          {/* Line items — read-only preview. Structure edits are intentionally out of scope. */}
+          <div>
+            <p className="text-xs text-slate-500 mb-2">Line items</p>
+            <div className="rounded-xl border border-slate-200 divide-y divide-slate-100 overflow-hidden">
+              {template.lineItemTemplates.length === 0 ? (
+                <div className="px-4 py-3 text-sm text-slate-400">No line items defined.</div>
+              ) : (
+                template.lineItemTemplates.map((li, i) => (
+                  <div key={i} className="px-4 py-3 flex items-center justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-slate-800 truncate">{li.description}</p>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        {li.category} · qty {li.defaultQuantity}
+                        {li.isOptional ? ' · optional' : ''}
+                      </p>
+                    </div>
+                    <p className="text-sm text-slate-700 shrink-0">
+                      {formatCents(li.defaultUnitPriceCents)}
+                    </p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div>
+            <label htmlFor="template-customer-message" className="text-xs text-slate-500 mb-1.5 block">
+              Customer message (wording)
+            </label>
+            <textarea
+              id="template-customer-message"
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              disabled={!canEdit}
+              rows={4}
+              className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:text-slate-500"
+            />
+            {!canEdit && (
+              <p className="text-xs text-slate-400 mt-1.5">
+                Only owners can edit template wording.
+              </p>
+            )}
+          </div>
+
+          {error && (
+            <div role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700">
+              {error}
+            </div>
+          )}
+        </div>
+
+        {canEdit && (
+          <div className="px-5 pb-5 pt-0">
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="w-full flex items-center justify-center gap-2 rounded-xl py-3.5 text-sm bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white"
+            >
+              {saving ? 'Saving...' : 'Save wording'}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function LiveTemplatesSection() {
+  const { me } = useMe();
+  const canEdit = me?.role === 'owner';
+  const [templates, setTemplates] = useState<LiveEstimateTemplate[] | null>(null);
+  const [activePacks, setActivePacks] = useState<string[] | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<LiveEstimateTemplate | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const settingsRes = await apiFetch('/api/settings');
+        if (!settingsRes.ok) throw new Error(`Settings load failed (HTTP ${settingsRes.status})`);
+        const settings = (await settingsRes.json()) as LiveSettingsResponse;
+        const packs = (settings.activeVerticalPacks ?? []).filter(
+          (p): p is 'hvac' | 'plumbing' => p === 'hvac' || p === 'plumbing',
+        );
+        if (cancelled) return;
+        setActivePacks(packs);
+
+        if (packs.length === 0) {
+          setTemplates([]);
+          setIsLoading(false);
+          return;
+        }
+
+        // Fetch templates per active vertical in parallel. We dedupe by id
+        // afterwards in case a template is registered against multiple
+        // verticals (rare today but the endpoint contract allows it).
+        const responses = await Promise.all(
+          packs.map((vertical) =>
+            apiFetch(`/api/templates?verticalType=${vertical}`).then(async (r) => {
+              if (!r.ok) throw new Error(`Templates load failed (HTTP ${r.status})`);
+              return (await r.json()) as LiveEstimateTemplate[];
+            }),
+          ),
+        );
+        if (cancelled) return;
+        const byId = new Map<string, LiveEstimateTemplate>();
+        for (const list of responses) {
+          for (const t of list) byId.set(t.id, t);
+        }
+        // Most-recently used first — see exit criteria: "Show which templates
+        // were used most recently." Falls back to updatedAt when usage is tied.
+        const merged = Array.from(byId.values()).sort((a, b) => {
+          if (b.usageCount !== a.usageCount) return b.usageCount - a.usageCount;
+          return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+        });
+        setTemplates(merged);
+      } catch (err) {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : 'Could not load templates');
+        setTemplates([]);
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    }
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function handleSaved(next: LiveEstimateTemplate) {
+    setTemplates((prev) =>
+      prev ? prev.map((t) => (t.id === next.id ? next : t)) : prev,
+    );
+  }
+
+  return (
+    <div className="mb-6">
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-sm text-slate-700">Live templates</p>
+        {activePacks && activePacks.length > 0 && (
+          <div className="flex items-center gap-1.5">
+            {activePacks.map((p) => (
+              <span
+                key={p}
+                className="text-xs bg-slate-100 text-slate-600 rounded-full px-2 py-0.5 uppercase tracking-wide"
+              >
+                {p}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {isLoading && (
+        <div className="rounded-xl border border-slate-200 bg-white px-4 py-6 text-center text-sm text-slate-400">
+          Loading templates…
+        </div>
+      )}
+
+      {!isLoading && error && (
+        <div
+          role="alert"
+          className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
+        >
+          {error}
+        </div>
+      )}
+
+      {!isLoading && !error && templates && templates.length === 0 && (
+        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-6 text-center">
+          <p className="text-sm text-slate-600">
+            {activePacks && activePacks.length === 0
+              ? 'No vertical pack is active. Activate a pack to seed templates.'
+              : 'No templates yet for your active verticals.'}
+          </p>
+        </div>
+      )}
+
+      {!isLoading && !error && templates && templates.length > 0 && (
+        <div className="flex flex-col gap-2.5">
+          {templates.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setSelected(t)}
+              className="w-full text-left rounded-xl border border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm transition-all px-4 py-3.5"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-slate-900 truncate">{t.name}</p>
+                  <p className="text-xs text-slate-400 mt-0.5 truncate">
+                    {t.lineItemTemplates.length} line {t.lineItemTemplates.length === 1 ? 'item' : 'items'}
+                    {t.description ? ` · ${t.description}` : ''}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-xs bg-slate-100 text-slate-500 rounded-full px-2 py-0.5 uppercase">
+                    {t.verticalType}
+                  </span>
+                  <span className="text-xs text-slate-400">
+                    used {t.usageCount}×
+                  </span>
+                  <ChevronRight size={14} className="text-slate-300" />
+                </div>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {selected && (
+        <LiveTemplateDetailModal
+          template={selected}
+          canEdit={canEdit}
+          onClose={() => setSelected(null)}
+          onSaved={handleSaved}
+        />
+      )}
     </div>
   );
 }
@@ -841,6 +1189,9 @@ export function TemplatesPage() {
           )}
         </div>
 
+        {/* ── P4-014 — Live templates (backend-backed) ── */}
+        <LiveTemplatesSection />
+
         {/* ── Your Templates ── */}
         <div className="mb-6">
           <div className="flex items-center justify-between mb-3">
@@ -891,7 +1242,7 @@ export function TemplatesPage() {
             ))}
           </div>
           <p className="text-xs text-slate-400 mt-2 px-1">
-            Insights are shared anonymously across Fieldly tenants in the same trade. No identifying information is shared.
+            Insights are shared anonymously across Rivet tenants in the same trade. No identifying information is shared.
           </p>
         </div>
 
@@ -907,7 +1258,7 @@ export function TemplatesPage() {
             </span>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
-                <p className="text-sm text-slate-900">Weekly Fieldly Digest</p>
+                <p className="text-sm text-slate-900">Weekly Rivet Digest</p>
                 {digest.enabled && (
                   <span className="text-xs bg-green-100 text-green-700 rounded-full px-2 py-0.5">On · {digest.day}</span>
                 )}

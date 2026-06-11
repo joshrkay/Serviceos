@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import {
   validateProposalPayload,
+  assertValidProposalPayload,
   PROPOSAL_TYPE_SCHEMAS,
   createCustomerPayloadSchema,
   createJobPayloadSchema,
@@ -9,6 +10,7 @@ import {
   updateCustomerPayloadSchema,
   updateEstimatePayloadSchema,
 } from '../../src/proposals/contracts';
+import { ValidationError } from '../../src/shared/errors';
 
 describe('P2-002 — Typed proposal contracts', () => {
   const validCustomerId = uuidv4();
@@ -125,5 +127,100 @@ describe('P2-002 — Typed proposal contracts', () => {
     expect(result.valid).toBe(false);
     expect(result.errors).toBeDefined();
     expect(result.errors![0]).toContain('Unknown proposal type');
+  });
+
+  it('malformed AI output handled gracefully — assertValidProposalPayload throws ValidationError with structured Zod paths', () => {
+    // Simulates the LLM emitting a `create_customer` proposal with an
+    // empty name and a bogus email. The AI-safety gate that production
+    // task handlers MUST call before persisting is `assertValidProposalPayload`;
+    // this test pins its failure surface so callers can rely on the
+    // typed error + `details.errors` payload.
+    let thrown: unknown;
+    try {
+      assertValidProposalPayload('create_customer', {
+        name: '',
+        email: 'not-an-email',
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(ValidationError);
+    const err = thrown as ValidationError;
+    expect(err.code).toBe('VALIDATION_ERROR');
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toContain("create_customer");
+    const errors = (err.details?.errors ?? []) as string[];
+    expect(errors.some((e) => e.startsWith('name:'))).toBe(true);
+    expect(errors.some((e) => e.startsWith('email:'))).toBe(true);
+  });
+
+  it('malformed AI output handled gracefully — assertValidProposalPayload throws on unknown proposal type', () => {
+    expect(() =>
+      assertValidProposalPayload('not_a_real_type', { foo: 'bar' })
+    ).toThrow(ValidationError);
+  });
+
+  it('happy path — assertValidProposalPayload returns void on valid payload', () => {
+    expect(() =>
+      assertValidProposalPayload('create_customer', {
+        name: 'Jane Doe',
+        email: 'jane@example.com',
+      })
+    ).not.toThrow();
+  });
+
+  // P22 — line items accept either price field plus catalog annotations.
+  describe('line item price fields (P22)', () => {
+    const base = { customerId: validCustomerId, jobId: validJobId };
+
+    it('accepts unitPriceCents-only lines (invoice handler output shape)', () => {
+      const result = validateProposalPayload('draft_invoice', {
+        ...base,
+        lineItems: [{ description: 'Labor', quantity: 1, unitPriceCents: 7500 }],
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('accepts unitPrice-only lines (estimate handler output shape)', () => {
+      const result = validateProposalPayload('draft_estimate', {
+        customerId: validCustomerId,
+        lineItems: [{ description: 'Labor', quantity: 1, unitPrice: 7500 }],
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects lines with NEITHER price field', () => {
+      const result = validateProposalPayload('draft_invoice', {
+        ...base,
+        lineItems: [{ description: 'Labor', quantity: 1 }],
+      });
+      expect(result.valid).toBe(false);
+    });
+
+    it('accepts catalog annotations (catalogItemId + pricingSource)', () => {
+      const result = validateProposalPayload('draft_invoice', {
+        ...base,
+        lineItems: [
+          {
+            description: 'Water Heater Install',
+            quantity: 1,
+            unitPriceCents: 185000,
+            catalogItemId: uuidv4(),
+            pricingSource: 'catalog',
+          },
+        ],
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects an unknown pricingSource', () => {
+      const result = validateProposalPayload('draft_invoice', {
+        ...base,
+        lineItems: [
+          { description: 'X', quantity: 1, unitPriceCents: 100, pricingSource: 'vibes' },
+        ],
+      });
+      expect(result.valid).toBe(false);
+    });
   });
 });

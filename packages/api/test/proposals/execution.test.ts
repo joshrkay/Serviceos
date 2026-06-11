@@ -4,8 +4,10 @@ import {
   InMemoryProposalRepository,
   Proposal,
 } from '../../src/proposals/proposal';
+import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
 import { transitionProposal, UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
+import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import {
   createExecutionHandlerRegistry,
   ExecutionContext,
@@ -45,8 +47,10 @@ describe('P2-010 — Deterministic proposal execution engine', () => {
 
   async function setupExecutor() {
     const repo = new InMemoryProposalRepository();
+    const executionRepo = new InMemoryProposalExecutionRepository();
     const handlers = createExecutionHandlerRegistry();
-    const executor = new ProposalExecutor(handlers, repo);
+    const guard = new IdempotencyGuard(executionRepo, repo);
+    const executor = new ProposalExecutor(handlers, repo, guard);
     return { repo, handlers, executor };
   }
 
@@ -104,7 +108,9 @@ describe('P2-010 — Deterministic proposal execution engine', () => {
   it('validation — rejects unknown proposal type handler', async () => {
     const { repo } = await setupExecutor();
     const emptyHandlers = new Map();
-    const executor = new ProposalExecutor(emptyHandlers, repo);
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    const guard = new IdempotencyGuard(executionRepo, repo);
+    const executor = new ProposalExecutor(emptyHandlers, repo, guard);
     const proposal = makeApprovedProposal();
     await repo.create(proposal);
 
@@ -219,9 +225,10 @@ describe('P2-010 — Deterministic proposal execution engine', () => {
     it('short-circuits when a prior executed proposal shares the idempotencyKey', async () => {
       const { IdempotencyGuard } = await import('../../src/proposals/execution/idempotency');
       const repo = new InMemoryProposalRepository();
+      const executionRepo = new InMemoryProposalExecutionRepository();
       const handlers = createExecutionHandlerRegistry();
-      const guard = new IdempotencyGuard(repo);
-      const executor = new ProposalExecutor(handlers, repo, guard);
+      const guard = new IdempotencyGuard(executionRepo, repo);
+      const executor = new ProposalExecutor(handlers, repo, guard, { executionRepo });
 
       // First proposal executes cleanly under idem-key-42.
       const first = makeApprovedProposal({ idempotencyKey: 'idem-key-42' });
@@ -255,7 +262,8 @@ describe('P2-010 — Deterministic proposal execution engine', () => {
     it('runs the executeFn when no prior executed proposal matches the key', async () => {
       const { IdempotencyGuard } = await import('../../src/proposals/execution/idempotency');
       const repo = new InMemoryProposalRepository();
-      const guard = new IdempotencyGuard(repo);
+      const executionRepo = new InMemoryProposalExecutionRepository();
+      const guard = new IdempotencyGuard(executionRepo, repo);
 
       const proposal = makeApprovedProposal({ idempotencyKey: 'fresh-key' });
       const outcome = await guard.checkAndExecute(proposal, async () => ({
@@ -269,7 +277,8 @@ describe('P2-010 — Deterministic proposal execution engine', () => {
     it('is a passthrough when the proposal has no idempotencyKey', async () => {
       const { IdempotencyGuard } = await import('../../src/proposals/execution/idempotency');
       const repo = new InMemoryProposalRepository();
-      const guard = new IdempotencyGuard(repo);
+      const executionRepo = new InMemoryProposalExecutionRepository();
+      const guard = new IdempotencyGuard(executionRepo, repo);
 
       const proposal = makeApprovedProposal(); // no idempotencyKey
       const outcome = await guard.checkAndExecute(proposal, async () => ({

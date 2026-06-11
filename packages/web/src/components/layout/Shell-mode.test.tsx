@@ -89,6 +89,15 @@ function renderShell() {
 describe('P12-002 — Shell mode-aware nav + toggle visibility', () => {
   beforeEach(() => {
     vi.mocked(useMe).mockReset();
+    // P2-033 — Shell mounts usePendingProposals on render. Stub fetch
+    // so it resolves to an empty list and any setState happens inside
+    // an act-flushed promise tick, avoiding noisy "update not wrapped
+    // in act" warnings in this file's tests (which don't exercise the
+    // proposal-notification UI).
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: [], total: 0 }),
+    } as Response);
   });
 
   it('shows the mode toggle for an owner', () => {
@@ -115,13 +124,23 @@ describe('P12-002 — Shell mode-aware nav + toggle visibility', () => {
     expect(screen.queryByTestId('mode-toggle')).toBeNull();
   });
 
-  it('renders supervisor-mode nav (Sessions, Leads, Interactions)', () => {
+  it('renders supervisor-mode nav (Assistant, Leads, Interactions)', () => {
     mockMe(buildMe({ current_mode: 'supervisor' }));
     renderShell();
-    // Sessions = relabeled /assistant in supervisor mode.
-    expect(screen.getAllByText('Sessions').length).toBeGreaterThan(0);
+    // /assistant is labeled "Assistant" (Figma source of truth).
+    expect(screen.getAllByText('Assistant').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Leads').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Interactions').length).toBeGreaterThan(0);
+  });
+
+  it('keeps the supervisor sidebar at the Figma target of 10 items', () => {
+    mockMe(buildMe({ current_mode: 'supervisor' }));
+    renderShell();
+    const sidebarLinks = document.querySelectorAll('aside nav a');
+    expect(sidebarLinks.length).toBe(10);
+    // Dispatch, Inbox, and Money intentionally live off the sidebar.
+    expect(screen.queryByText('Dispatch')).toBeNull();
+    expect(screen.queryByText('Money')).toBeNull();
   });
 
   it('renders tech-mode nav (Today, My jobs) and omits supervisor-only items', () => {
@@ -132,13 +151,13 @@ describe('P12-002 — Shell mode-aware nav + toggle visibility', () => {
     // Supervisor-only items must be absent in tech mode.
     expect(screen.queryByText('Leads')).toBeNull();
     expect(screen.queryByText('Interactions')).toBeNull();
-    expect(screen.queryByText('Sessions')).toBeNull();
+    expect(screen.queryByText('Assistant')).toBeNull();
   });
 
-  it('renders both-mode nav (Sessions + Today + My jobs together)', () => {
+  it('renders both-mode nav (Assistant + Today + My jobs together)', () => {
     mockMe(buildMe({ current_mode: 'both' }));
     renderShell();
-    expect(screen.getAllByText('Sessions').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Assistant').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Today').length).toBeGreaterThan(0);
     expect(screen.getAllByText('My jobs').length).toBeGreaterThan(0);
   });

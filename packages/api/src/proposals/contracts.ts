@@ -1,12 +1,17 @@
 import { z } from 'zod';
 import { ProposalType } from './proposal';
+import { ValidationError } from '../shared/errors';
 import { reassignAppointmentPayloadSchema } from './contracts/reassignment';
 import { rescheduleAppointmentPayloadSchema } from './contracts/reschedule';
+import { addCrewMemberPayloadSchema, removeCrewMemberPayloadSchema } from './contracts/crew';
 import { cancelAppointmentPayloadSchema } from './contracts/cancellation';
 import { addNotePayloadSchema } from './contracts/notes';
 import { sendInvoicePayloadSchema } from './contracts/send-invoice';
+import { sendEstimatePayloadSchema } from './contracts/send-estimate';
 import { recordPaymentPayloadSchema } from './contracts/record-payment';
 import { logExpensePayloadSchema } from './contracts/log-expense';
+import { createInvoiceSchedulePayloadSchema } from './contracts/create-invoice-schedule';
+import { batchInvoicePayloadSchema } from './contracts/batch-invoice';
 import {
   onboardingTenantSettingsPayloadSchema,
   onboardingServiceCategoryPayloadSchema,
@@ -14,6 +19,10 @@ import {
   onboardingTeamMemberPayloadSchema,
   onboardingSchedulePayloadSchema,
 } from './contracts/onboarding';
+// P7-026 PR c — review_response_proposal schema lives in the shared
+// package (per the spec — single source of truth, re-exported via the
+// shared barrel). Do NOT redefine it locally.
+import { reviewResponseProposalPayloadSchema } from '@ai-service-os/shared';
 
 export const createCustomerPayloadSchema = z.object({
   name: z.string().min(1),
@@ -40,24 +49,69 @@ export const createJobPayloadSchema = z.object({
   priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
 });
 
-export const createAppointmentPayloadSchema = z.object({
-  jobId: z.string().uuid(),
-  scheduledStart: z.string().min(1),
-  scheduledEnd: z.string().min(1),
-  technicianId: z.string().uuid().optional(),
-  notes: z.string().optional(),
-});
+export const createAppointmentPayloadSchema = z
+  .object({
+    jobId: z.string().uuid(),
+    scheduledStart: z.string().min(1),
+    scheduledEnd: z.string().min(1),
+    technicianId: z.string().uuid().optional(),
+    notes: z.string().optional(),
+    // IANA tenant timezone the times should render in (UTC instants are
+    // stored; this is display/context only). Set by the AI booking path.
+    timezone: z.string().optional(),
+    // Optional customer-facing arrival window (home-services standard).
+    arrivalWindowStart: z.string().optional(),
+    arrivalWindowEnd: z.string().optional(),
+    // Carried from the voice path for the dispatcher review card; not all
+    // are persisted directly on the appointment.
+    customerId: z.string().optional(),
+    customerName: z.string().optional(),
+    summary: z.string().optional(),
+  })
+  .refine(
+    (v) => {
+      const s = Date.parse(v.scheduledStart);
+      const e = Date.parse(v.scheduledEnd);
+      return !Number.isNaN(s) && !Number.isNaN(e) && e > s;
+    },
+    { message: 'scheduledEnd must be a valid datetime after scheduledStart' },
+  )
+  .refine(
+    (v) => {
+      // Arrival window is optional, but if both ends are present (e.g. a
+      // dispatcher edit) they must be valid and ordered — never "12pm–8am".
+      if (v.arrivalWindowStart == null && v.arrivalWindowEnd == null) return true;
+      if (v.arrivalWindowStart == null || v.arrivalWindowEnd == null) return false;
+      const s = Date.parse(v.arrivalWindowStart);
+      const e = Date.parse(v.arrivalWindowEnd);
+      return !Number.isNaN(s) && !Number.isNaN(e) && e > s;
+    },
+    { message: 'arrivalWindowEnd must be a valid datetime after arrivalWindowStart' },
+  );
 
 export const createBookingPayloadSchema = z.object({
   appointmentId: z.string().uuid(),
 });
 
-const lineItemSchema = z.object({
-  description: z.string().min(1),
-  quantity: z.number(),
-  unitPrice: z.number(),
-  category: z.string().optional(),
-});
+// One price field is required, but which one depends on the producer:
+// the estimate path emits `unitPrice` (integer cents) while the invoice
+// path normalizes to the executor's `unitPriceCents`. P22 adds
+// `catalogItemId` + `pricingSource` so the review UI and audit trail
+// can show WHERE a price came from (catalog-resolved vs LLM-invented).
+const lineItemSchema = z
+  .object({
+    description: z.string().min(1),
+    quantity: z.number(),
+    unitPrice: z.number().optional(),
+    unitPriceCents: z.number().int().min(0).nullable().optional(),
+    category: z.string().optional(),
+    catalogItemId: z.string().uuid().optional(),
+    pricingSource: z.enum(['catalog', 'ambiguous', 'uncatalogued', 'manual']).optional(),
+    needsPricing: z.boolean().optional(),
+  })
+  .refine((li) => li.unitPrice !== undefined || li.unitPriceCents != null, {
+    message: 'line item requires unitPrice or unitPriceCents',
+  });
 
 export const draftEstimatePayloadSchema = z.object({
   customerId: z.string().uuid(),
@@ -135,6 +189,96 @@ export const issueInvoicePayloadSchema = z.object({
   paymentTermDays: z.number().int().min(1).max(365).optional(),
 });
 
+// convert_lead: promote an existing lead to a customer. The classifier
+// only has a free-text reference ("the Johnson lead"), so the task
+// handler carries `leadReference` and flags `leadId` missing until the
+// review UI / execution handler resolves a concrete lead. Either a
+// resolved `leadId` (uuid) or a `leadReference` must be present.
+export const convertLeadPayloadSchema = z
+  .object({
+    leadId: z.string().uuid().optional(),
+    leadReference: z.string().min(1).optional(),
+  })
+  .refine((v) => Boolean(v.leadId || v.leadReference), {
+    message: 'leadId or leadReference is required',
+  });
+
+// confirm_appointment: mark an existing appointment confirmed. Resolved
+// appointmentId (uuid) by execution time; appointmentReference carries
+// the free-text reference until the review UI resolves it.
+export const confirmAppointmentPayloadSchema = z
+  .object({
+    appointmentId: z.string().uuid().optional(),
+    appointmentReference: z.string().min(1).optional(),
+  })
+  .refine((v) => Boolean(v.appointmentId || v.appointmentReference), {
+    message: 'appointmentId or appointmentReference is required',
+  });
+
+// mark_lead_lost: close out a lead. lostReason is required by the
+// loseLead service, so the contract pins it.
+export const markLeadLostPayloadSchema = z
+  .object({
+    leadId: z.string().uuid().optional(),
+    leadReference: z.string().min(1).optional(),
+    reason: z.string().min(1),
+  })
+  .refine((v) => Boolean(v.leadId || v.leadReference), {
+    message: 'leadId or leadReference is required',
+  });
+
+// add_service_location: attach a new service address to a customer. The
+// classifier only has a free-text address, so the structured fields are
+// resolved by the review UI; either a resolved customerId or a
+// customerReference must be present.
+export const addServiceLocationPayloadSchema = z
+  .object({
+    customerId: z.string().uuid().optional(),
+    customerReference: z.string().min(1).optional(),
+    addressText: z.string().min(1).optional(),
+    label: z.string().optional(),
+    street1: z.string().optional(),
+    street2: z.string().optional(),
+    city: z.string().optional(),
+    state: z.string().optional(),
+    postalCode: z.string().optional(),
+  })
+  .refine((v) => Boolean(v.customerId || v.customerReference), {
+    message: 'customerId or customerReference is required',
+  });
+
+// log_time_entry: clock a technician in on a job/task. userId comes from
+// the execution context (the speaking technician). jobReference is
+// optional — break/admin time may not attach to a job.
+export const logTimeEntryPayloadSchema = z.object({
+  entryType: z.enum(['job', 'drive', 'break', 'admin']),
+  jobId: z.string().uuid().optional(),
+  jobReference: z.string().optional(),
+  notes: z.string().optional(),
+});
+
+// notify_delay: outbound delay notice to a customer. Comms-class.
+export const notifyDelayPayloadSchema = z
+  .object({
+    appointmentId: z.string().uuid().optional(),
+    appointmentReference: z.string().min(1).optional(),
+    delayMinutes: z.number().int().positive().optional(),
+  })
+  .refine((v) => Boolean(v.appointmentId || v.appointmentReference), {
+    message: 'appointmentId or appointmentReference is required',
+  });
+
+// request_feedback: send a post-job feedback/review request. Comms-class.
+export const requestFeedbackPayloadSchema = z
+  .object({
+    jobId: z.string().uuid().optional(),
+    jobReference: z.string().min(1).optional(),
+    customerReference: z.string().min(1).optional(),
+  })
+  .refine((v) => Boolean(v.jobId || v.jobReference || v.customerReference), {
+    message: 'jobId, jobReference, or customerReference is required',
+  });
+
 // voice_clarification: emitted when the voice classifier cannot route
 // a transcript (intent='unknown' OR confidence below threshold). It is
 // NOT a mutation — it surfaces in the operator's feed as "I heard X
@@ -160,12 +304,28 @@ export const voiceClarificationPayloadSchema = z.object({
     'low_confidence',
     'parse_failed',
     'missing_entities',
+    // P8 — intent understood, but an entity reference matched several
+    // tenant records ("three Bobs"); candidates carry the picker list.
+    'ambiguous_entity',
   ]),
   suggestedIntents: z.array(z.string()).optional(),
   classifierReasoning: z.string().optional(),
   classifierConfidence: z.number().min(0).max(1).optional(),
   recordingId: z.string().optional(),
   conversationId: z.string().optional(),
+  /** P8 — the free-text reference that was ambiguous ("Bob"). */
+  entityReference: z.string().optional(),
+  /** P8 — disambiguation candidates for the review UI's one-tap picker. */
+  entityCandidates: z
+    .array(
+      z.object({
+        id: z.string(),
+        label: z.string(),
+        hint: z.string().optional(),
+        score: z.number().min(0).max(1),
+      }),
+    )
+    .optional(),
 });
 
 export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
@@ -174,19 +334,42 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   create_job: createJobPayloadSchema,
   create_appointment: createAppointmentPayloadSchema,
   create_booking: createBookingPayloadSchema,
+  // A callback request captured when the agent cannot complete an action
+  // live (e.g. an after-hours booking) and needs an operator to call back.
+  callback: z
+    .object({
+      reason: z.string().optional(),
+      requestedService: z.string().optional(),
+      callerPhone: z.string().optional(),
+      transcript: z.string().optional(),
+      conversationId: z.string().optional(),
+    })
+    .passthrough(),
   draft_estimate: draftEstimatePayloadSchema,
   update_estimate: updateEstimatePayloadSchema,
   draft_invoice: draftInvoicePayloadSchema,
   update_invoice: updateInvoicePayloadSchema,
   issue_invoice: issueInvoicePayloadSchema,
+  create_invoice_schedule: createInvoiceSchedulePayloadSchema,
+  batch_invoice: batchInvoicePayloadSchema,
   reassign_appointment: reassignAppointmentPayloadSchema,
   reschedule_appointment: rescheduleAppointmentPayloadSchema,
+  add_crew_member: addCrewMemberPayloadSchema,
+  remove_crew_member: removeCrewMemberPayloadSchema,
   cancel_appointment: cancelAppointmentPayloadSchema,
   voice_clarification: voiceClarificationPayloadSchema,
   add_note: addNotePayloadSchema,
   send_invoice: sendInvoicePayloadSchema,
+  send_estimate: sendEstimatePayloadSchema,
   record_payment: recordPaymentPayloadSchema,
   log_expense: logExpensePayloadSchema,
+  convert_lead: convertLeadPayloadSchema,
+  confirm_appointment: confirmAppointmentPayloadSchema,
+  mark_lead_lost: markLeadLostPayloadSchema,
+  add_service_location: addServiceLocationPayloadSchema,
+  log_time_entry: logTimeEntryPayloadSchema,
+  notify_delay: notifyDelayPayloadSchema,
+  request_feedback: requestFeedbackPayloadSchema,
   emergency_dispatch: z.object({
     callerPhone: z.string().optional(),
     emergencyDescription: z.string(),
@@ -197,6 +380,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   onboarding_estimate_template: onboardingEstimateTemplatePayloadSchema,
   onboarding_team_member: onboardingTeamMemberPayloadSchema,
   onboarding_schedule: onboardingSchedulePayloadSchema,
+  review_response_proposal: reviewResponseProposalPayloadSchema,
 };
 
 export function validateProposalPayload(
@@ -217,4 +401,31 @@ export function validateProposalPayload(
   }
 
   return { valid: true };
+}
+
+/**
+ * P2-002 AI-safety gate. Production AI task handlers (and any other
+ * code path that translates a model's structured output into a
+ * proposal) MUST call this before `createProposal`. Throws a typed
+ * `ValidationError` with the offending Zod paths in `details.errors`,
+ * which the HTTP layer surfaces as a 400 rather than letting the
+ * payload reach storage or execution.
+ *
+ * Plain `createProposal` is intentionally left as a pure builder so
+ * test fixtures can construct proposals with synthetic payloads
+ * without dragging in the full schema for unrelated concerns
+ * (lifecycle, audit, prioritization). The gate is enforced where AI
+ * emits, not where any caller builds.
+ */
+export function assertValidProposalPayload(
+  proposalType: string,
+  payload: unknown
+): void {
+  const validation = validateProposalPayload(proposalType, payload);
+  if (!validation.valid) {
+    throw new ValidationError(
+      `Invalid payload for proposal type '${proposalType}'`,
+      { errors: validation.errors }
+    );
+  }
 }

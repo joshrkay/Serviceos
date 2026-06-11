@@ -1,7 +1,13 @@
 import { v4 as uuidv4 } from 'uuid';
 import { ValidationError } from '../shared/errors';
 
-export type LinkableEntityType = 'customer' | 'job' | 'estimate' | 'invoice';
+export type LinkableEntityType =
+  | 'customer'
+  | 'job'
+  | 'estimate'
+  | 'invoice'
+  | 'voice_session'
+  | 'sms_conversation';
 
 export interface ConversationLink {
   id: string;
@@ -31,7 +37,15 @@ export function validateLinkInput(input: CreateLinkInput): string[] {
   if (!input.tenantId) errors.push('tenantId is required');
   if (!input.conversationId) errors.push('conversationId is required');
   if (!input.entityType) errors.push('entityType is required');
-  if (input.entityType && !['customer', 'job', 'estimate', 'invoice'].includes(input.entityType)) {
+  const allowed: LinkableEntityType[] = [
+    'customer',
+    'job',
+    'estimate',
+    'invoice',
+    'voice_session',
+    'sms_conversation',
+  ];
+  if (input.entityType && !allowed.includes(input.entityType)) {
     errors.push('Invalid entityType');
   }
   if (!input.entityId) errors.push('entityId is required');

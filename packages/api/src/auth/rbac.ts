@@ -62,7 +62,11 @@ export type Permission =
   | 'dispatch:view'
   | 'dispatch:manage'
   | 'availability:view'
-  | 'availability:manage';
+  | 'availability:manage'
+  // Voice training assets — gated separately from generic `settings:update`
+  // so an org can later carve out a compliance-only role that approves /
+  // activates / archives without granting full settings edit.
+  | 'vertical_training_assets:approve';
 
 const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   owner: [
@@ -124,6 +128,7 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'dispatch:manage',
     'availability:view',
     'availability:manage',
+    'vertical_training_assets:approve',
   ],
   dispatcher: [
     'users:list',

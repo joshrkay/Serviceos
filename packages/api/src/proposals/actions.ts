@@ -1,16 +1,76 @@
-import { Proposal, ProposalRepository } from './proposal';
+import { Proposal, ProposalRepository, missingFieldsFor } from './proposal';
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from './lifecycle';
 import { validateProposalPayload } from './contracts';
 import { Role, hasPermission } from '../auth/rbac';
 import { AppError, ForbiddenError, ValidationError, NotFoundError } from '../shared/errors';
 import { AppointmentRepository, updateAppointment } from '../appointments/appointment';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { logProposalEvent } from './audit';
+
+export interface BatchApproveResult {
+  approved: string[];
+  failed: { id: string; reason: string }[];
+}
+
+/**
+ * P2-035 — Batch proposal approval (APPROVE ALL).
+ *
+ * Iterates the IDs and delegates to `approveProposal` per ID. There is NO
+ * cross-proposal transaction: partial success is the desired outcome (the
+ * P6-028 "tech goes out, four customers need rescheduling" scenario should
+ * approve everything the owner can approve and surface the rest as
+ * `failed` rather than rolling everything back).
+ *
+ * Each successful approval emits its own `proposal.approved` audit event
+ * through the existing `approveProposal` helper — there is no separate
+ * "batch" audit row by design. Downstream consumers (timeline, notifier)
+ * index on the singular events, and collapsing here would silently break
+ * them.
+ *
+ * RBAC is enforced per-proposal inside `approveProposal`. The route also
+ * gates with `requirePermission('proposals:approve')` so unauthorized
+ * callers 403 at the boundary; the per-proposal check is the second
+ * layer that survives a future route refactor.
+ */
+export async function approveProposalsBatch(
+  proposalRepo: ProposalRepository,
+  tenantId: string,
+  proposalIds: string[],
+  actorId: string,
+  actorRole: Role,
+  auditRepo?: AuditRepository,
+): Promise<BatchApproveResult> {
+  const approved: string[] = [];
+  const failed: { id: string; reason: string }[] = [];
+
+  for (const id of proposalIds) {
+    try {
+      await approveProposal(proposalRepo, tenantId, id, actorId, actorRole, auditRepo);
+      approved.push(id);
+    } catch (err) {
+      // Surface the error code when available (e.g. NOT_FOUND, FORBIDDEN,
+      // VALIDATION_ERROR). Callers — both the HTTP layer and the inbox UI —
+      // pivot on these. Falls back to message for non-AppError throwables.
+      const reason =
+        err instanceof AppError
+          ? err.code
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      failed.push({ id, reason });
+    }
+  }
+
+  return { approved, failed };
+}
 
 export async function approveProposal(
   proposalRepo: ProposalRepository,
   tenantId: string,
   proposalId: string,
   actorId: string,
-  actorRole: Role
+  actorRole: Role,
+  auditRepo?: AuditRepository,
 ): Promise<Proposal> {
   if (!hasPermission(actorRole, 'proposals:approve')) {
     throw new ForbiddenError();
@@ -19,6 +79,21 @@ export async function approveProposal(
   const proposal = await proposalRepo.findById(tenantId, proposalId);
   if (!proposal) {
     throw new NotFoundError('Proposal', proposalId);
+  }
+
+  // A proposal with unfilled required fields can't be approved — the
+  // operator must resolve the gaps (via editProposal) first. This guard
+  // matters now that drafts are directly approvable from the inbox:
+  // without it a half-extracted voice payload could be approved straight
+  // from 'draft'. Chain-ref fields are intentionally NOT in missingFields
+  // (they resolve at execution time), so a chained dependent stays
+  // approvable.
+  const missing = missingFieldsFor(proposal);
+  if (missing.length > 0) {
+    throw new ValidationError(
+      `Cannot approve proposal with unfilled required fields: ${missing.join(', ')}`,
+      { missingFields: missing },
+    );
   }
 
   const transitioned = transitionProposal(proposal, 'approved', actorId);
@@ -30,6 +105,17 @@ export async function approveProposal(
   });
   if (!updated) {
     throw new NotFoundError('Proposal', proposalId);
+  }
+
+  // D2-1c — audit-log the approval through the existing helper. The
+  // auditRepo arg is optional so legacy call-sites (tests that don't
+  // care about audit rows) compile unchanged; the router-factory always
+  // passes a real repo in production.
+  if (auditRepo) {
+    await logProposalEvent(auditRepo, updated, 'proposal.approved', {
+      id: actorId,
+      role: actorRole,
+    });
   }
 
   return updated;
@@ -48,7 +134,8 @@ export async function undoProposal(
   tenantId: string,
   proposalId: string,
   actorId: string,
-  actorRole: Role
+  actorRole: Role,
+  auditRepo?: AuditRepository,
 ): Promise<Proposal> {
   if (!hasPermission(actorRole, 'proposals:approve')) {
     // Same permission as approve — if you can approve you can undo.
@@ -84,6 +171,15 @@ export async function undoProposal(
     throw new NotFoundError('Proposal', proposalId);
   }
 
+  // D2-1c — audit-log the undo so the timeline preserves the
+  // approve→undo sequence (distinct event from rejected).
+  if (auditRepo) {
+    await logProposalEvent(auditRepo, updated, 'proposal.undone', {
+      id: actorId,
+      role: actorRole,
+    });
+  }
+
   return updated;
 }
 
@@ -95,7 +191,8 @@ export async function rejectProposal(
   actorRole: Role,
   reason: string,
   details?: string,
-  appointmentRepo?: AppointmentRepository
+  appointmentRepo?: AppointmentRepository,
+  auditRepo?: AuditRepository,
 ): Promise<Proposal> {
   if (!hasPermission(actorRole, 'proposals:approve')) {
     throw new ForbiddenError();
@@ -114,6 +211,28 @@ export async function rejectProposal(
   });
   if (!updated) {
     throw new NotFoundError('Proposal', proposalId);
+  }
+
+  // D2-1c — audit-log the rejection. Built inline (vs. logProposalEvent)
+  // so the rejection reason + details ride on metadata; the helper only
+  // carries the proposalType + status by default.
+  if (auditRepo) {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId,
+        actorRole,
+        eventType: 'proposal.rejected',
+        entityType: 'proposal',
+        entityId: updated.id,
+        metadata: {
+          proposalType: updated.proposalType,
+          status: updated.status,
+          rejectionReason: reason,
+          rejectionDetails: details,
+        },
+      }),
+    );
   }
 
   // Releasing the held slot: a rejected create_booking proposal means
@@ -151,7 +270,8 @@ export async function editProposal(
   proposalId: string,
   actorId: string,
   actorRole: Role,
-  edits: Record<string, unknown>
+  edits: Record<string, unknown>,
+  auditRepo?: AuditRepository,
 ): Promise<{ proposal: Proposal; editedFields: string[] }> {
   if (!hasPermission(actorRole, 'proposals:edit')) {
     throw new ForbiddenError();
@@ -182,6 +302,27 @@ export async function editProposal(
   });
   if (!updated) {
     throw new NotFoundError('Proposal', proposalId);
+  }
+
+  // D2-1c — audit-log the edit. Custom event (vs. logProposalEvent) so
+  // editedFields rides on metadata; the inbox + history UI surfaces
+  // which keys changed.
+  if (auditRepo) {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId,
+        actorRole,
+        eventType: 'proposal.edited',
+        entityType: 'proposal',
+        entityId: updated.id,
+        metadata: {
+          proposalType: updated.proposalType,
+          status: updated.status,
+          editedFields,
+        },
+      }),
+    );
   }
 
   return { proposal: updated, editedFields };

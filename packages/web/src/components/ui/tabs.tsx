@@ -1,66 +1,183 @@
-"use client";
+import React, { useId, useRef } from 'react';
+import { cn } from './utils';
 
-import * as React from "react";
-import * as TabsPrimitive from "@radix-ui/react-tabs";
-
-import { cn } from "./utils";
-
-function Tabs({
-  className,
-  ...props
-}: React.ComponentProps<typeof TabsPrimitive.Root>) {
-  return (
-    <TabsPrimitive.Root
-      data-slot="tabs"
-      className={cn("flex flex-col gap-2", className)}
-      {...props}
-    />
-  );
+export interface TabItem {
+  /** Stable identifier for the tab. */
+  value: string;
+  label: React.ReactNode;
+  /** Optional trailing count/badge. */
+  badge?: React.ReactNode;
+  disabled?: boolean;
 }
 
-function TabsList({
+export interface TabsProps {
+  items: TabItem[];
+  value: string;
+  onValueChange: (value: string) => void;
+  /** Visual treatment. `underline` for page-level, `pill` for compact. */
+  variant?: 'underline' | 'pill';
+  className?: string;
+  'aria-label'?: string;
+  /**
+   * Explicit base id for tab/panel ARIA wiring. Pass the same value to the
+   * paired `TabPanel`s (as `tabsId`) so `aria-controls`/`aria-labelledby`
+   * resolve to real elements. Defaults to an auto-generated id.
+   */
+  id?: string;
+}
+
+/**
+ * Accessible tablist with roving tabindex and arrow-key navigation.
+ * Controlled — pair it with separate panels keyed on `value`. Used to
+ * consolidate navigation surfaces (e.g. folding Inbox into Assistant)
+ * without adding routes.
+ */
+export function Tabs({
+  items,
+  value,
+  onValueChange,
+  variant = 'underline',
   className,
-  ...props
-}: React.ComponentProps<typeof TabsPrimitive.List>) {
+  'aria-label': ariaLabel,
+  id,
+}: TabsProps) {
+  const autoId = useId();
+  const baseId = id ?? autoId;
+  // Only wire `aria-controls` when the caller passed an explicit `id`: that's
+  // the sole case where a paired `TabPanel` (given the same value as `tabsId`)
+  // can render the matching `${baseId}-panel-*` element. With the auto id the
+  // caller can't know it, so emitting aria-controls would point assistive tech
+  // at a non-existent panel.
+  const panelsLinked = id != null;
+  const refs = useRef<Record<string, HTMLButtonElement | null>>({});
+
+  function focusByIndex(index: number) {
+    const enabled = items.filter((i) => !i.disabled);
+    if (enabled.length === 0) return;
+    const next = enabled[(index + enabled.length) % enabled.length];
+    refs.current[next.value]?.focus();
+    onValueChange(next.value);
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent, current: string) {
+    const enabled = items.filter((i) => !i.disabled);
+    const idx = enabled.findIndex((i) => i.value === current);
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+      event.preventDefault();
+      focusByIndex(idx + 1);
+    } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      focusByIndex(idx - 1);
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      focusByIndex(0);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      focusByIndex(enabled.length - 1);
+    }
+  }
+
   return (
-    <TabsPrimitive.List
-      data-slot="tabs-list"
+    <div
+      role="tablist"
+      aria-label={ariaLabel}
       className={cn(
-        "bg-muted text-muted-foreground inline-flex h-9 w-fit items-center justify-center rounded-xl p-[3px] flex",
+        variant === 'underline'
+          ? 'flex gap-1 border-b border-slate-200'
+          : 'inline-flex gap-1 rounded-xl bg-slate-100 p-1',
         className,
       )}
-      {...props}
-    />
+    >
+      {items.map((item) => {
+        const selected = item.value === value;
+        return (
+          <button
+            key={item.value}
+            ref={(el) => {
+              refs.current[item.value] = el;
+            }}
+            id={`${baseId}-tab-${item.value}`}
+            role="tab"
+            type="button"
+            aria-selected={selected}
+            aria-controls={panelsLinked ? `${baseId}-panel-${item.value}` : undefined}
+            tabIndex={selected ? 0 : -1}
+            disabled={item.disabled}
+            onClick={() => onValueChange(item.value)}
+            onKeyDown={(e) => handleKeyDown(e, item.value)}
+            className={cn(
+              'inline-flex items-center gap-1.5 whitespace-nowrap text-sm font-medium transition-colors',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40',
+              'disabled:cursor-not-allowed disabled:opacity-40',
+              variant === 'underline'
+                ? cn(
+                    '-mb-px border-b-2 px-3 py-2',
+                    selected
+                      ? 'border-slate-900 text-slate-900'
+                      : 'border-transparent text-slate-500 hover:text-slate-700',
+                  )
+                : cn(
+                    'rounded-lg px-3 py-1.5',
+                    selected
+                      ? 'bg-white text-slate-900 shadow-sm'
+                      : 'text-slate-500 hover:text-slate-700',
+                  ),
+            )}
+          >
+            {item.label}
+            {item.badge != null && (
+              <span
+                className={cn(
+                  'ml-0.5 inline-flex min-w-4 items-center justify-center rounded-full px-1 text-xs',
+                  selected
+                    ? 'bg-slate-900 text-white'
+                    : 'bg-slate-200 text-slate-600',
+                )}
+              >
+                {item.badge}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
-function TabsTrigger({
+export interface TabPanelProps extends React.HTMLAttributes<HTMLDivElement> {
+  /** Must match the corresponding tab's `value`. */
+  value: string;
+  /** The currently selected tab value. */
+  activeValue: string;
+  /**
+   * The parent `Tabs`' `id`. When provided, the panel renders the matching
+   * `id`/`aria-labelledby` so the tab's `aria-controls` resolves correctly.
+   */
+  tabsId?: string;
+}
+
+/** Panel paired with a `Tabs` item; renders only when active. */
+export function TabPanel({
+  value,
+  activeValue,
+  tabsId,
   className,
-  ...props
-}: React.ComponentProps<typeof TabsPrimitive.Trigger>) {
+  children,
+  id,
+  'aria-labelledby': ariaLabelledby,
+  ...rest
+}: TabPanelProps) {
+  if (value !== activeValue) return null;
   return (
-    <TabsPrimitive.Trigger
-      data-slot="tabs-trigger"
-      className={cn(
-        "data-[state=active]:bg-card dark:data-[state=active]:text-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:outline-ring dark:data-[state=active]:border-input dark:data-[state=active]:bg-input/30 text-foreground dark:text-muted-foreground inline-flex h-[calc(100%-1px)] flex-1 items-center justify-center gap-1.5 rounded-xl border border-transparent px-2 py-1 text-sm font-medium whitespace-nowrap transition-[color,box-shadow] focus-visible:ring-[3px] focus-visible:outline-1 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
-        className,
-      )}
-      {...props}
-    />
+    <div
+      role="tabpanel"
+      id={id ?? (tabsId ? `${tabsId}-panel-${value}` : undefined)}
+      aria-labelledby={ariaLabelledby ?? (tabsId ? `${tabsId}-tab-${value}` : undefined)}
+      tabIndex={0}
+      className={cn('outline-none', className)}
+      {...rest}
+    >
+      {children}
+    </div>
   );
 }
-
-function TabsContent({
-  className,
-  ...props
-}: React.ComponentProps<typeof TabsPrimitive.Content>) {
-  return (
-    <TabsPrimitive.Content
-      data-slot="tabs-content"
-      className={cn("flex-1 outline-none", className)}
-      {...props}
-    />
-  );
-}
-
-export { Tabs, TabsList, TabsTrigger, TabsContent };

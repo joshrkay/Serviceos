@@ -3,6 +3,19 @@ import { AssignmentRepository, AppointmentAssignment } from '../appointments/ass
 import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
 import { DispatchLatenessResult } from './lateness';
+import { getDispatchBoardRevision } from './board-revision';
+import { getEditingOnAppointment } from './presence-store';
+
+export interface BoardAppointmentEditing {
+  userId: string;
+  displayName: string;
+  mode: 'viewing' | 'dragging';
+}
+
+export interface BoardCoAssignee {
+  technicianId: string;
+  technicianName: string;
+}
 
 export interface BoardAppointment {
   id: string;
@@ -14,11 +27,25 @@ export interface BoardAppointment {
   technicianName?: string;
   scheduledStart: string;
   scheduledEnd: string;
+  updatedAt: string;
   arrivalWindowStart?: string;
   arrivalWindowEnd?: string;
   status: string;
+  holdPendingApproval?: boolean;
+  holdExpiryAt?: string;
   lateness?: DispatchLatenessResult;
+  editing?: BoardAppointmentEditing | null;
+  /** Non-primary (crew) technicians assigned to this appointment, if any. */
+  coAssignees?: BoardCoAssignee[];
+  /**
+   * A customer-initiated cancel/reschedule proposal is open against this
+   * appointment, awaiting dispatcher confirmation. Drives the "change
+   * requested" badge so the board shows the pending request before approval.
+   */
+  pendingChange?: PendingChangeKind;
 }
+
+export type PendingChangeKind = 'cancel' | 'reschedule';
 
 export interface TechnicianLane {
   technicianId: string;
@@ -40,6 +67,7 @@ export interface BoardSummary {
 
 export interface DispatchBoardData {
   date: string;
+  boardRevision: string;
   unassignedAppointments: BoardAppointment[];
   technicianLanes: TechnicianLane[];
   summary: BoardSummary;
@@ -57,6 +85,14 @@ export interface BoardQueryDependencies {
     jobSummary?: string;
   }>;
   getAppointmentLateness?: (appointment: Appointment, technicianId?: string) => Promise<DispatchLatenessResult | undefined>;
+  /** When set, enriches appointments with `editing` from dispatch presence. */
+  viewingUserId?: string;
+  /**
+   * Resolves which appointments have an open customer-initiated change
+   * request. Returns a map of appointmentId → kind. Wired from the proposal
+   * repository in the route so board-query stays decoupled from proposals.
+   */
+  getPendingChangeRequests?: (appointmentIds: string[]) => Promise<Map<string, PendingChangeKind>>;
 }
 
 function getTimezoneOffsetMs(date: Date, timezone: string): number {
@@ -85,7 +121,14 @@ function toBoardAppointment(
   technicianId?: string,
   technicianName?: string,
   lateness?: DispatchLatenessResult,
+  boardDate?: string,
+  viewingUserId?: string,
+  coAssignees?: BoardCoAssignee[],
+  pendingChange?: PendingChangeKind,
 ): BoardAppointment {
+  const editing = boardDate
+    ? getEditingOnAppointment(appointment.tenantId, boardDate, appointment.id, viewingUserId)
+    : null;
   return {
     id: appointment.id,
     jobId: appointment.jobId,
@@ -96,10 +139,20 @@ function toBoardAppointment(
     technicianName,
     scheduledStart: toISOString(appointment.scheduledStart),
     scheduledEnd: toISOString(appointment.scheduledEnd),
+    updatedAt: toISOString(appointment.updatedAt),
     arrivalWindowStart: appointment.arrivalWindowStart ? toISOString(appointment.arrivalWindowStart) : undefined,
     arrivalWindowEnd: appointment.arrivalWindowEnd ? toISOString(appointment.arrivalWindowEnd) : undefined,
     status: appointment.status,
+    ...(appointment.holdPendingApproval
+      ? { holdPendingApproval: true }
+      : {}),
+    ...(appointment.holdExpiryAt
+      ? { holdExpiryAt: toISOString(appointment.holdExpiryAt) }
+      : {}),
     lateness,
+    editing,
+    ...(coAssignees && coAssignees.length > 0 ? { coAssignees } : {}),
+    ...(pendingChange ? { pendingChange } : {}),
   };
 }
 
@@ -173,6 +226,33 @@ export async function getDispatchBoardData(
     }
   }
 
+  // Fetch technician names in parallel. Includes both lane (primary) techs
+  // and crew (non-primary) techs so co-assignee badges can be labeled.
+  const crewTechIds = [...assignmentMap.values()]
+    .flat()
+    .filter((a) => !a.isPrimary)
+    .map((a) => a.technicianId);
+  const techIds = [...new Set([...technicianAppointments.keys(), ...crewTechIds])];
+  const techNameMap = new Map<string, string>();
+  if (deps.getTechnicianName) {
+    const nameResults = await Promise.all(
+      techIds.map((id) => deps.getTechnicianName!(id).then((name) => ({ id, name })))
+    );
+    for (const { id, name } of nameResults) {
+      techNameMap.set(id, name);
+    }
+  }
+
+  const coAssigneesFor = (appointmentId: string): BoardCoAssignee[] =>
+    (assignmentMap.get(appointmentId) ?? [])
+      .filter((a) => !a.isPrimary)
+      .map((a) => ({ technicianId: a.technicianId, technicianName: techNameMap.get(a.technicianId) ?? a.technicianId }));
+
+  // Open customer-initiated change requests, keyed by appointment id.
+  const pendingChangeMap = deps.getPendingChangeRequests
+    ? await deps.getPendingChangeRequests(appointments.map((a) => a.id))
+    : new Map<string, PendingChangeKind>();
+
   // Build unassigned list
   const unassignedLatenessResults = deps.getAppointmentLateness
     ? await Promise.all(
@@ -184,20 +264,18 @@ export async function getDispatchBoardData(
   );
 
   const unassignedBoard: BoardAppointment[] = unassigned.map((appt) =>
-    toBoardAppointment(appt, displayContextMap.get(appt.id), undefined, undefined, unassignedLatenessMap.get(appt.id))
+    toBoardAppointment(
+      appt,
+      displayContextMap.get(appt.id),
+      undefined,
+      undefined,
+      unassignedLatenessMap.get(appt.id),
+      dateStr,
+      deps.viewingUserId,
+      coAssigneesFor(appt.id),
+      pendingChangeMap.get(appt.id),
+    ),
   );
-
-  // Fetch technician names in parallel
-  const techIds = [...technicianAppointments.keys()];
-  const techNameMap = new Map<string, string>();
-  if (deps.getTechnicianName) {
-    const nameResults = await Promise.all(
-      techIds.map((id) => deps.getTechnicianName!(id).then((name) => ({ id, name })))
-    );
-    for (const { id, name } of nameResults) {
-      techNameMap.set(id, name);
-    }
-  }
 
   // Build technician lanes
   const lanes: TechnicianLane[] = [];
@@ -221,7 +299,11 @@ export async function getDispatchBoardData(
         techId,
         techName,
         latenessByApptId.get(appointment.id),
-      )
+        dateStr,
+        deps.viewingUserId,
+        coAssigneesFor(appointment.id),
+        pendingChangeMap.get(appointment.id),
+      ),
     );
 
     const lane: TechnicianLane = {
@@ -234,7 +316,8 @@ export async function getDispatchBoardData(
 
     // Add availability summary if repos provided
     if (deps.workingHoursRepo) {
-      const dayOfWeek = start.getDay();
+      const [bYear, bMonth, bDay] = dateStr.split('-').map(Number);
+      const dayOfWeek = new Date(Date.UTC(bYear, bMonth - 1, bDay)).getUTCDay();
       const workingHours = await deps.workingHoursRepo.findByTechnicianAndDay(tenantId, techId, dayOfWeek);
 
       let unavailableBlocks: { start: string; end: string; reason?: string }[] = [];
@@ -260,6 +343,7 @@ export async function getDispatchBoardData(
 
   return {
     date: dateStr,
+    boardRevision: getDispatchBoardRevision(tenantId, dateStr),
     unassignedAppointments: unassignedBoard,
     technicianLanes: lanes,
     summary: computeSummary(unassignedBoard, lanes),

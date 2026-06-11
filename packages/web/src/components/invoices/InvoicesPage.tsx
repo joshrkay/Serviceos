@@ -7,13 +7,17 @@ import {
   Phone, Mail, Copy, Check, Pencil, Trash2, MessageSquare,
   ExternalLink, Lock, Building2, Smartphone, Briefcase,
 } from 'lucide-react';
+import type { InvoiceResponse, LineItem as InvoiceLineItem } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { normalizeInvoiceStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
-import { customers } from '../../data/mock-data';
+import { Spinner, EmptyState } from '../ui';
+import { ErrorState } from '../ErrorState';
 import { apiFetch } from '../../utils/api-fetch';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 
 type InvoiceStatus = 'Draft' | 'Sent' | 'Unpaid' | 'Paid' | 'Overdue' | 'Canceled';
 
@@ -30,43 +34,6 @@ interface InvCompat {
   paidDate?: string;
 }
 
-interface ApiLineItem {
-  id?: string;
-  description: string;
-  quantity: number;
-  unitPriceCents: number;
-  totalCents: number;
-}
-
-interface ApiCustomer {
-  id: string;
-  displayName?: string;
-  firstName?: string;
-  lastName?: string;
-  primaryPhone?: string;
-  email?: string;
-}
-
-interface ApiInvoice {
-  id: string;
-  invoiceNumber: string;
-  status: string;
-  jobId?: string;
-  estimateId?: string;
-  totalCents: number;
-  subtotalCents: number;
-  amountDueCents?: number;
-  amountPaidCents?: number;
-  discountCents?: number;
-  dueDate?: string;
-  issuedAt?: string;
-  lineItems?: ApiLineItem[];
-  createdAt?: string;
-  customer?: ApiCustomer;
-  customerId?: string;
-  originatingLeadId?: string;
-}
-
 interface ApiLead {
   id: string;
   source: string;
@@ -75,8 +42,8 @@ interface ApiLead {
   utmCampaign?: string;
 }
 
-/** Convert ApiLineItem to UI LineItem */
-function apiLineToUi(item: ApiLineItem): LineItem {
+/** Convert a shared line item to the UI LineItem shape */
+function apiLineToUi(item: InvoiceLineItem): LineItem {
   return {
     description: item.description,
     qty: item.quantity,
@@ -85,7 +52,7 @@ function apiLineToUi(item: ApiLineItem): LineItem {
 }
 
 /** Build an invoice-compat object for sub-components */
-function buildInvCompat(inv: ApiInvoice, uiStatus: InvoiceStatus) {
+function buildInvCompat(inv: InvoiceResponse, uiStatus: InvoiceStatus, timezone: string) {
   const customerName = inv.customer
     ? (inv.customer.displayName || [inv.customer.firstName, inv.customer.lastName].filter(Boolean).join(' ') || 'Customer')
     : 'Customer';
@@ -93,12 +60,12 @@ function buildInvCompat(inv: ApiInvoice, uiStatus: InvoiceStatus) {
     id: inv.id,
     invoiceNumber: inv.invoiceNumber,
     customer: customerName,
-    customerId: inv.customerId ?? inv.customer?.id ?? '',
+    customerId: inv.customer?.id ?? '',
     description: '',
     status: uiStatus,
     lineItems: (inv.lineItems ?? []).map(apiLineToUi),
     dueDate: inv.dueDate,
-    sentDate: inv.issuedAt ? new Date(inv.issuedAt).toLocaleDateString() : undefined,
+    sentDate: inv.issuedAt ? formatDateInTenantTz(inv.issuedAt, timezone) : undefined,
     paidDate: undefined as string | undefined,
   };
 }
@@ -335,14 +302,13 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent, apiId }: {
   /** When set, the sheet calls the real /api/invoices/:id/send endpoint. */
   apiId?: string;
 }) {
-  const customer = customers.find(c => c.id === inv.customerId);
   const [channel, setChannel] = useState<'sms' | 'email'>('sms');
-  const [recipient, setRecipient] = useState<string>(customer?.phone ?? '');
+  const [recipient, setRecipient] = useState<string>('');
   const [sending, setSending] = useState(false);
   const [sent,    setSent]    = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
 
-  const firstName = customer?.name.split(' ')[0] ?? 'there';
+  const firstName = inv.customer.split(' ')[0] ?? 'there';
 
   const [msg, setMsg] = useState('');
 
@@ -429,7 +395,7 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent, apiId }: {
                   key={c}
                   onClick={() => {
                     setChannel(c);
-                    setRecipient(c === 'sms' ? customer?.phone ?? '' : customer?.email ?? '');
+                    if (c !== channel) setRecipient('');
                   }}
                   className={`flex items-center gap-1.5 rounded-lg border px-4 py-2 text-sm transition-colors ${
                     channel === c ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
@@ -499,12 +465,34 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent, apiId }: {
   );
 }
 
+type RecordPaymentMethod = 'cash' | 'check' | 'credit_card' | 'bank_transfer' | 'other';
+
+const UI_METHOD_TO_API: Record<'card' | 'ach' | 'cash' | 'check', RecordPaymentMethod> = {
+  card: 'credit_card',
+  ach: 'bank_transfer',
+  cash: 'cash',
+  check: 'check',
+};
+
 // ─── Mark Paid Sheet ──────────────────────────────────────────────────────
-function MarkPaidSheet({ inv, total, onClose, onPaid }: {
-  inv: InvCompat; total: number; onClose: () => void; onPaid: () => void;
+function MarkPaidSheet({
+  invoiceId,
+  amountDueCents,
+  inv,
+  total,
+  onClose,
+  onPaid,
+}: {
+  invoiceId: string;
+  amountDueCents: number;
+  inv: InvCompat;
+  total: number;
+  onClose: () => void;
+  onPaid: () => void | Promise<void>;
 }) {
-  const [method, setMethod] = useState<'card' | 'ach' | 'cash' | 'check'>('card');
+  const [method, setMethod] = useState<'card' | 'ach' | 'cash' | 'check'>('cash');
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const METHODS = [
     { key: 'card',  label: 'Credit / Debit card', icon: CreditCard },
@@ -513,9 +501,37 @@ function MarkPaidSheet({ inv, total, onClose, onPaid }: {
     { key: 'check', label: 'Check',                 icon: FileText },
   ] as const;
 
-  function handleSave() {
+  async function handleSave() {
+    const amountCents = amountDueCents > 0 ? amountDueCents : Math.round(total * 100);
+    if (amountCents <= 0) {
+      setError('Nothing due on this invoice.');
+      return;
+    }
     setSaving(true);
-    setTimeout(() => { setSaving(false); onPaid(); onClose(); }, 1200);
+    setError(null);
+    try {
+      const res = await apiFetch('/api/payments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          invoiceId,
+          amountCents,
+          method: UI_METHOD_TO_API[method],
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(
+          typeof body?.message === 'string' ? body.message : `Payment failed (HTTP ${res.status})`,
+        );
+      }
+      await onPaid();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to record payment');
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -562,8 +578,11 @@ function MarkPaidSheet({ inv, total, onClose, onPaid }: {
             />
           </div>
 
+          {error && <p className="text-xs text-red-600">{error}</p>}
+
           <button
-            onClick={handleSave}
+            type="button"
+            onClick={() => void handleSave()}
             disabled={saving}
             className="flex items-center justify-center gap-2 w-full rounded-xl bg-green-600 text-white py-3.5 text-sm hover:bg-green-700 transition-colors"
           >
@@ -605,8 +624,8 @@ function OriginAttributionLine({ leadId }: { leadId: string }) {
 // ─── Invoice Detail ───────────────────────────────────────────────────────
 function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () => void }) {
   const navigate = useNavigate();
-  const { data: inv, isLoading, error } = useDetailQuery<ApiInvoice>('/api/invoices', invoiceId);
-  const { mutate: transitionInvoice } = useMutation<{ status: string }, ApiInvoice>('POST', `/api/invoices/${invoiceId}/transition`);
+  const tz = useTenantTimezone();
+  const { data: inv, isLoading, error, refetch } = useDetailQuery<InvoiceResponse>('/api/invoices', invoiceId);
 
   const [lineItems, setLineItems] = useState<LineItem[]>([]);
   const [sendOpen,  setSendOpen]  = useState(false);
@@ -666,7 +685,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
 
   const apiStatus   = paid ? 'paid' : inv.status;
   const uiStatus    = normalizeInvoiceStatus(apiStatus) as InvoiceStatus;
-  const invCompat   = buildInvCompat(inv, uiStatus);
+  const invCompat   = buildInvCompat(inv, uiStatus, tz);
   const apiLineItems = inv.lineItems ?? [];
   const uiLineItems = lineItems.length > 0 ? lineItems : apiLineItems.map(apiLineToUi);
 
@@ -674,7 +693,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
   const customer   = inv.customer;
   const status: InvoiceStatus = uiStatus;
   const editable   = status === 'Draft';
-  const paymentLink = `pay.fieldly.app/${inv.invoiceNumber.toLowerCase()}`;
+  const paymentLink = `pay.rivet.ai/${inv.invoiceNumber.toLowerCase()}`;
 
   return (
     <>
@@ -764,7 +783,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
                     {notes.map(n => (
                       <div key={n.id} className="px-4 py-3">
                         <p className="text-sm text-slate-700 leading-snug">{n.content}</p>
-                        <p className="text-xs text-slate-400 mt-1">{new Date(n.createdAt).toLocaleString()}</p>
+                        <p className="text-xs text-slate-400 mt-1">{formatDateTimeInTenantTz(n.createdAt, tz)}</p>
                       </div>
                     ))}
                   </div>
@@ -902,12 +921,14 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
       )}
       {markOpen && (
         <MarkPaidSheet
+          invoiceId={inv.id}
+          amountDueCents={inv.amountDueCents ?? Math.round(total * 100)}
           inv={invCompat}
           total={total}
           onClose={() => setMarkOpen(false)}
           onPaid={async () => {
             setPaid(true);
-            await transitionInvoice({ status: 'paid' });
+            await refetch();
           }}
         />
       )}
@@ -940,6 +961,7 @@ const INVOICE_LIST_REFRESH_MS = 30_000;
 
 export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {
   const navigate = useNavigate();
+  const tz = useTenantTimezone();
   const [tab,      setTab]      = useState<InvoiceStatus | 'All'>('All');
   const [selected, setSelected] = useState<string | null>(defaultSelectedId ?? null);
 
@@ -950,7 +972,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
     setSelected(defaultSelectedId ?? null);
   }, [defaultSelectedId]);
 
-  const { data, total, isLoading, error, setFilters, refetch } = useListQuery<ApiInvoice>('/api/invoices');
+  const { data, total, isLoading, error, setFilters, refetch } = useListQuery<InvoiceResponse>('/api/invoices');
 
   // P5-018 — Auto-refresh loop. Webhooks update the DB; the dispatcher
   // sees the change on the next poll. Pause polling while a detail
@@ -996,8 +1018,8 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
     ? normalizedData
     : normalizedData.filter(i => i.uiStatus === tab);
 
-  const totalUnpaid  = normalizedData.filter(i => i.uiStatus === 'Unpaid' || i.uiStatus === 'Overdue').reduce((s, i) => s + i.totalCents, 0);
-  const totalPaid    = normalizedData.filter(i => i.uiStatus === 'Paid').reduce((s, i) => s + i.totalCents, 0);
+  const totalUnpaid  = normalizedData.filter(i => i.uiStatus === 'Unpaid' || i.uiStatus === 'Overdue').reduce((s, i) => s + i.totals.totalCents, 0);
+  const totalPaid    = normalizedData.filter(i => i.uiStatus === 'Paid').reduce((s, i) => s + i.totals.totalCents, 0);
   const overdueCount = normalizedData.filter(i => i.uiStatus === 'Overdue').length;
 
   return (
@@ -1068,14 +1090,11 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
         {/* Loading / Error */}
         {isLoading && (
           <div className="flex items-center justify-center py-16">
-            <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+            <Spinner size="md" className="text-slate-900" label="Loading invoices" />
           </div>
         )}
         {error && (
-          <div className="flex flex-col items-center py-12 gap-2 text-center">
-            <p className="text-sm text-red-500">Failed to load invoices</p>
-            <button onClick={refetch} className="text-xs text-blue-500 hover:underline">Retry</button>
-          </div>
+          <ErrorState message="Failed to load invoices" onRetry={refetch} />
         )}
 
         {/* List */}
@@ -1110,7 +1129,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
                         <p className="text-xs text-slate-400 mt-0.5 truncate">{inv.invoiceNumber}</p>
                       </div>
                       <div className="flex flex-col items-end gap-1 shrink-0">
-                        <p className="text-sm text-slate-800">{centsToDisplay(inv.totalCents)}</p>
+                        <p className="text-sm text-slate-800">{centsToDisplay(inv.totals.totalCents)}</p>
                         <StatusBadge status={status} size="sm" />
                       </div>
                     </div>
@@ -1122,7 +1141,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
                       )}
                       {inv.issuedAt && (
                         <span className="flex items-center gap-1 text-xs text-slate-400">
-                          <Send size={10} /> Sent {new Date(inv.issuedAt).toLocaleDateString()}
+                          <Send size={10} /> Sent {formatDateInTenantTz(inv.issuedAt, tz)}
                         </span>
                       )}
                       {status === 'Draft' && (
@@ -1135,7 +1154,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
               );
             })}
             {filtered.length === 0 && (
-              <p className="py-12 text-center text-sm text-slate-400">No invoices</p>
+              <EmptyState title="No invoices" />
             )}
           </div>
         )}

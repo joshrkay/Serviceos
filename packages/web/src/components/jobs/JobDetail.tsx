@@ -8,8 +8,9 @@ import {
   CheckCircle2, Circle, MoreHorizontal, Zap, Calendar, User, Clock,
   ChevronDown,
 } from 'lucide-react';
-import { calcMaterialsTotal, calcEstimateTotal, estimates } from '../../data/mock-data';
 import type { Job, JobActivity, MaterialItem, Customer, Technician } from '../../data/mock-data';
+import type { JobDetailResponse } from '@ai-service-os/shared';
+import { calcMaterialsTotal, calcEstimateTotalFromLines } from '../../utils/job-ui-math';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { useApiClient } from '../../lib/apiClient';
@@ -17,48 +18,7 @@ import { useWorkerTerm } from '../../hooks/useWorkerTerm';
 import { normalizeJobStatus } from '../../utils/statusNormalize';
 import { apiFetch } from '../../utils/api-fetch';
 
-interface ApiJobDetail {
-  id: string;
-  jobNumber: string;
-  summary: string;
-  problemDescription?: string;
-  status: string;
-  priority?: string;
-  customerId?: string;
-  locationId?: string;
-  assignedTechnicianId?: string;
-  scheduledStart?: string;
-  createdAt?: string;
-  serviceType?: string;
-  customer?: {
-    id: string;
-    displayName?: string;
-    firstName?: string;
-    lastName?: string;
-    primaryPhone?: string;
-    email?: string;
-    communicationNotes?: string;
-    locations?: Array<{ id?: string; street1?: string; street2?: string; city?: string; state?: string; postalCode?: string; isPrimary?: boolean; label?: string }>;
-  };
-  location?: {
-    id?: string;
-    street1?: string;
-    city?: string;
-    state?: string;
-    postalCode?: string;
-    isPrimary?: boolean;
-    label?: string;
-  };
-  technician?: {
-    id: string;
-    firstName?: string;
-    lastName?: string;
-    color?: string;
-  };
-  lineItems?: Array<{ description: string; quantity: number; unitPriceCents: number; totalCents: number }>;
-}
-
-function buildJobCompat(api: ApiJobDetail): Job {
+function buildJobCompat(api: JobDetailResponse): Job {
   const techName = api.technician
     ? [api.technician.firstName, api.technician.lastName].filter(Boolean).join(' ')
     : undefined;
@@ -89,7 +49,7 @@ function buildJobCompat(api: ApiJobDetail): Job {
   };
 }
 
-function buildCustomerCompat(api: ApiJobDetail['customer']): Customer | undefined {
+function buildCustomerCompat(api: JobDetailResponse['customer']): Customer | undefined {
   if (!api) return undefined;
   const name = api.displayName || [api.firstName, api.lastName].filter(Boolean).join(' ') || 'Customer';
   const primaryLocation = api.locations?.find(l => l.isPrimary) ?? api.locations?.[0];
@@ -109,6 +69,8 @@ function buildCustomerCompat(api: ApiJobDetail['customer']): Customer | undefine
   };
 }
 import { StatusBadge } from '../shared/StatusBadge';
+import { Spinner, EmptyState } from '../ui';
+import { ErrorState } from '../ErrorState';
 import { ActivityTimeline } from './ActivityTimeline';
 import { AddEntrySheet } from './AddEntrySheet';
 import { MaterialsSheet } from './MaterialsSheet';
@@ -445,11 +407,42 @@ function DescriptionCard({ job }: { job: Job }) {
 
 // ─── Estimate Scope Card ──────────────────────────────────────────────────
 function EstimateScopeCard({ estimateId, onOpen }: { estimateId: string; onOpen: () => void }) {
-  const estimate = estimates.find(e => e.id === estimateId);
+  const [estimate, setEstimate] = useState<{
+    estimateNumber: string;
+    status: string;
+    lineItems: Array<{ description: string; qty: number; rate: number }>;
+  } | null>(null);
+  const [open, setOpen] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const res = await apiFetch(`/api/estimates/${estimateId}`);
+      if (!res.ok || cancelled) return;
+      const body = await res.json();
+      const items = (body.lineItems ?? []).map(
+        (li: { description: string; quantity: number; unitPriceCents: number }) => ({
+          description: li.description,
+          qty: li.quantity,
+          rate: li.unitPriceCents / 100,
+        }),
+      );
+      if (!cancelled && items.length > 0) {
+        setEstimate({
+          estimateNumber: body.estimateNumber ?? estimateId,
+          status: body.status ?? 'draft',
+          lineItems: items,
+        });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [estimateId]);
+
   if (!estimate) return null;
 
-  const total    = calcEstimateTotal(estimate);
-  const [open, setOpen] = useState(true);
+  const total = calcEstimateTotalFromLines(estimate.lineItems);
 
   return (
     <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
@@ -460,7 +453,7 @@ function EstimateScopeCard({ estimateId, onOpen }: { estimateId: string; onOpen:
           <span className="text-xs bg-indigo-50 text-indigo-700 border border-indigo-100 rounded-full px-2 py-0.5">
             {estimate.estimateNumber}
           </span>
-          <StatusBadge status={estimate.status} size="sm" />
+          <StatusBadge status={estimate.status as 'Draft'} size="sm" />
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <button onClick={onOpen} className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors">
@@ -621,10 +614,7 @@ function MaterialsTable({ materials, onEdit, onSuppliers }: { materials: Materia
 }
 
 // ─── Site Media ───────────────────────────────────────────────────────────
-const MOCK_DOCUMENTS = [
-  { id: 'doc-1', name: 'Work order #1042.pdf',     size: '84 KB',  date: 'Mar 10' },
-  { id: 'doc-2', name: 'Permit – Austin HVAC.pdf', size: '210 KB', date: 'Mar 8'  },
-];
+const MOCK_DOCUMENTS: Array<{ id: string; name: string; size: string; date: string }> = [];
 
 function SiteMedia({ media, onAdd, onLightbox }: {
   media: CapturedMedia[]; onAdd: () => void; onLightbox: (i: number) => void;
@@ -952,8 +942,8 @@ export function JobDetailView({ id }: { id: string }) {
   const apiFetch = useApiClient();
   const workerTerm = useWorkerTerm();
 
-  const { data: apiJob, isLoading, error, refetch: refetchJob } = useDetailQuery<ApiJobDetail>('/api/jobs', id);
-  const { mutate: transitionJob } = useMutation<{ status: string }, ApiJobDetail>('POST', `/api/jobs/${id}/transition`);
+  const { data: apiJob, isLoading, error, refetch: refetchJob } = useDetailQuery<JobDetailResponse>('/api/jobs', id);
+  const { mutate: transitionJob } = useMutation<{ status: string }, JobDetailResponse>('POST', `/api/jobs/${id}/transition`);
 
   const job      = apiJob ? buildJobCompat(apiJob) : null;
   const customer = apiJob?.customer ? buildCustomerCompat(apiJob.customer) : undefined;
@@ -1047,18 +1037,34 @@ export function JobDetailView({ id }: { id: string }) {
   if (isLoading) {
     return (
       <div className="h-full flex items-center justify-center">
-        <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+        <Spinner size="md" className="text-slate-900" label="Loading job" />
       </div>
     );
   }
 
-  if (error || !job) {
+  if (error) {
     return (
       <div className="h-full overflow-y-auto pb-20 p-6">
         <button onClick={() => navigate('/jobs')} className="flex items-center gap-2 text-sm text-slate-500 mb-4">
           <ArrowLeft size={14} /> Back
         </button>
-        <p className="text-slate-400">{error ? 'Failed to load job.' : 'Job not found.'}</p>
+        <ErrorState message="Failed to load job." onRetry={refetchJob} />
+      </div>
+    );
+  }
+
+  if (!job) {
+    return (
+      <div className="h-full overflow-y-auto pb-20 p-6">
+        <button onClick={() => navigate('/jobs')} className="flex items-center gap-2 text-sm text-slate-500 mb-4">
+          <ArrowLeft size={14} /> Back
+        </button>
+        <EmptyState
+          title="Job not found."
+          description="This job may have been deleted, or you don't have access to it."
+          actionLabel="Back to jobs"
+          onAction={() => navigate('/jobs')}
+        />
       </div>
     );
   }

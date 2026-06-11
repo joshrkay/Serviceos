@@ -53,6 +53,21 @@ describe('P6-002 — Appointment card model', () => {
     expect(screen.getByTestId('appointment-arrival')).toBeInTheDocument();
   });
 
+  it('shows a "Cancel requested" badge when a cancellation is pending', () => {
+    render(<AppointmentCard appointment={{ ...mockAppointment, pendingChange: 'cancel' }} />);
+    expect(screen.getByTestId('appointment-pending-change-badge')).toHaveTextContent('Cancel requested');
+  });
+
+  it('shows a "Reschedule requested" badge when a reschedule is pending', () => {
+    render(<AppointmentCard appointment={{ ...mockAppointment, pendingChange: 'reschedule' }} />);
+    expect(screen.getByTestId('appointment-pending-change-badge')).toHaveTextContent('Reschedule requested');
+  });
+
+  it('omits the pending-change badge by default', () => {
+    render(<AppointmentCard appointment={mockAppointment} />);
+    expect(screen.queryByTestId('appointment-pending-change-badge')).not.toBeInTheDocument();
+  });
+
   it('applies dragging class when isDragging', () => {
     render(<AppointmentCard appointment={mockAppointment} isDragging={true} />);
     const card = screen.getByTestId('appointment-card');
@@ -69,6 +84,45 @@ describe('P6-002 — Appointment card model', () => {
     const inProgress = { ...mockAppointment, status: 'in_progress' };
     render(<AppointmentCard appointment={inProgress} />);
     expect(screen.getByTestId('appointment-status')).toHaveTextContent('in progress');
+  });
+
+  describe('crew co-assignees', () => {
+    const withCrew: AppointmentCardData = {
+      ...mockAppointment,
+      coAssignees: [{ technicianId: 'tech-2', technicianName: 'Jane Doe' }],
+    };
+
+    it('does not render the crew row when there are no co-assignees and no add handler', () => {
+      render(<AppointmentCard appointment={mockAppointment} />);
+      expect(screen.queryByTestId('appointment-crew')).not.toBeInTheDocument();
+    });
+
+    it('renders a badge for each co-assignee', () => {
+      render(<AppointmentCard appointment={withCrew} />);
+      const badges = screen.getAllByTestId('appointment-coassignee-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toHaveTextContent('Jane Doe');
+    });
+
+    it('renders an add-crew button only when onAddCrew is provided', () => {
+      const onAddCrew = vi.fn();
+      render(<AppointmentCard appointment={mockAppointment} onAddCrew={onAddCrew} />);
+      const btn = screen.getByTestId('appointment-add-crew');
+      btn.click();
+      expect(onAddCrew).toHaveBeenCalledWith('appt-1');
+    });
+
+    it('renders a remove control on badges when onRemoveCoAssignee is provided', () => {
+      const onRemove = vi.fn();
+      render(<AppointmentCard appointment={withCrew} onRemoveCoAssignee={onRemove} />);
+      screen.getByTestId('appointment-coassignee-remove').click();
+      expect(onRemove).toHaveBeenCalledWith('appt-1', 'tech-2');
+    });
+
+    it('omits the remove control when onRemoveCoAssignee is absent', () => {
+      render(<AppointmentCard appointment={withCrew} />);
+      expect(screen.queryByTestId('appointment-coassignee-remove')).not.toBeInTheDocument();
+    });
   });
 
   describe('P6-026 — conflict badge', () => {

@@ -11,18 +11,51 @@ import {
   listEstimatesWithMeta,
   getEstimate,
   updateEstimate,
+  reviseEstimate,
   transitionEstimateStatus,
+  softDeleteEstimate,
+  cloneEstimate,
   EstimateRepository,
   EstimateStatus,
+  EstimateMutationDeps,
   DEFAULT_ESTIMATE_LIMIT,
   MAX_ESTIMATE_LIMIT,
 } from '../estimates/estimate';
-import { AuditRepository } from '../audit/audit';
+import { DocumentRevisionRepository } from '../ai/document-revision';
+import { EditDeltaRepository } from '../estimates/edit-delta';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { getNextEstimateNumber, SettingsRepository } from '../settings/settings';
 import { SendService } from '../notifications/send-service';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository } from '../proposals/proposal';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
+import { JobRepository } from '../jobs/job';
+import { InvoiceRepository } from '../invoices/invoice';
+import { PaymentRepository } from '../invoices/payment';
+import { convertEstimateToInvoice } from '../invoices/convert-estimate';
+import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
+import { createLogger } from '../logging/logger';
+
+const logger = createLogger({
+  service: 'estimates-route',
+  environment: process.env.NODE_ENV || 'development',
+});
+
+/**
+ * Optimistic-concurrency version supplied by the client for an estimate
+ * edit/revise. Read from the `If-Match` header (the convention the
+ * proposals route uses) and falling back to a body `expectedVersion`.
+ * Returns undefined when absent or malformed — the service then skips the
+ * version check, preserving backward compatibility for callers that don't
+ * participate in optimistic locking.
+ */
+function parseExpectedVersion(req: AuthenticatedRequest): number | undefined {
+  const header = req.get?.('If-Match');
+  const raw = header ?? (req.body as { expectedVersion?: unknown } | undefined)?.expectedVersion;
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
 
 /**
  * Optional AI dependencies. When provided, mounts POST /suggest, which
@@ -42,9 +75,60 @@ export function createEstimateRouter(
   auditRepo: AuditRepository,
   ownership: TenantOwnership,
   sendService?: SendService,
-  aiDeps?: EstimateAIDeps
+  aiDeps?: EstimateAIDeps,
+  // §6 Time-to-Cash. Optional so legacy harnesses still build; the
+  // money-state rollup fires only when both repos are wired.
+  moneyStateDeps?: { jobRepo: JobRepository; invoiceRepo: InvoiceRepository },
+  // Edit/revision history. When wired, edits and revisions snapshot a
+  // document revision + edit delta. Optional so legacy harnesses build.
+  revisionDeps?: { docRevisionRepo: DocumentRevisionRepository; editDeltaRepo: EditDeltaRepository },
+  // Convert-to-invoice deposit credit. Optional so legacy harnesses
+  // build; when wired alongside moneyStateDeps the convert route credits
+  // a paid deposit onto the new invoice.
+  paymentRepo?: PaymentRepository,
 ): Router {
   const router = Router();
+
+  const jobRepo = moneyStateDeps?.jobRepo;
+
+  // Build the per-request mutation deps (audit + revision history + the
+  // deposit lock). The deposit-paid amount comes from the linked job so
+  // assertEstimateEditable can refuse edits once money has been collected.
+  const buildMutationDeps = async (
+    tenantId: string,
+    estimateId: string,
+    req: AuthenticatedRequest,
+  ): Promise<EstimateMutationDeps> => {
+    let depositPaidCents = 0;
+    if (jobRepo) {
+      const est = await estimateRepo.findById(tenantId, estimateId);
+      if (est) {
+        const job = await jobRepo.findById(tenantId, est.jobId);
+        depositPaidCents = job?.depositPaidCents ?? 0;
+      }
+    }
+    return {
+      auditRepo,
+      docRevisionRepo: revisionDeps?.docRevisionRepo,
+      editDeltaRepo: revisionDeps?.editDeltaRepo,
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role ?? 'unknown',
+      depositPaidCents,
+      logger,
+    };
+  };
+
+  // §6 Time-to-Cash. estimateRepo + auditRepo are already in scope;
+  // the caller supplies the job + invoice repos.
+  const refreshDeps: RefreshJobMoneyStateDeps | undefined = moneyStateDeps
+    ? {
+        jobRepo: moneyStateDeps.jobRepo,
+        estimateRepo,
+        invoiceRepo: moneyStateDeps.invoiceRepo,
+        auditRepo,
+        logger,
+      }
+    : undefined;
 
   router.post(
     '/',
@@ -173,7 +257,14 @@ export function createEstimateRouter(
 
   const updateHandler = async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const result = await updateEstimate(req.auth!.tenantId, req.params.id, req.body, estimateRepo);
+      const mutationDeps = await buildMutationDeps(req.auth!.tenantId, req.params.id, req);
+      const result = await updateEstimate(
+        req.auth!.tenantId,
+        req.params.id,
+        { ...req.body, expectedVersion: parseExpectedVersion(req) },
+        estimateRepo,
+        mutationDeps,
+      );
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
         return;
@@ -201,6 +292,182 @@ export function createEstimateRouter(
     updateHandler
   );
 
+  // POST /:id/revise — edit an already-SENT estimate. Snapshots the
+  // prior version, bumps `version`, stamps `last_revised_at`, and keeps
+  // the estimate in 'sent' (the view link is preserved). The caller is
+  // expected to re-send (POST /:id/send) so the customer is re-notified;
+  // the public approve path compares `version` to block a stale accept.
+  router.post(
+    '/:id/revise',
+    requireAuth,
+    requireTenant,
+    requirePermission('estimates:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const mutationDeps = await buildMutationDeps(req.auth!.tenantId, req.params.id, req);
+        const result = await reviseEstimate(
+          req.auth!.tenantId,
+          req.params.id,
+          { ...req.body, expectedVersion: parseExpectedVersion(req) },
+          estimateRepo,
+          mutationDeps,
+        );
+        if (!result) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
+          return;
+        }
+        res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  // DELETE /:id — soft-delete an estimate. Accepted estimates are
+  // refused (clone instead). Hidden from all reads afterward.
+  router.delete(
+    '/:id',
+    requireAuth,
+    requireTenant,
+    requirePermission('estimates:delete'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const mutationDeps = await buildMutationDeps(req.auth!.tenantId, req.params.id, req);
+        const result = await softDeleteEstimate(
+          req.auth!.tenantId,
+          req.params.id,
+          estimateRepo,
+          mutationDeps,
+          refreshDeps,
+        );
+        if (!result) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
+          return;
+        }
+        res.status(204).send();
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  // POST /:id/clone — copy an estimate into a fresh draft on the same
+  // job (new estimate number, reset lifecycle). Returns the new draft.
+  router.post(
+    '/:id/clone',
+    requireAuth,
+    requireTenant,
+    requirePermission('estimates:create'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const estimateNumber = await getNextEstimateNumber(req.auth!.tenantId, settingsRepo);
+        const result = await cloneEstimate(
+          req.auth!.tenantId,
+          req.params.id,
+          estimateNumber,
+          req.auth!.userId,
+          estimateRepo,
+          auditRepo,
+        );
+        if (!result) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
+          return;
+        }
+        res.status(201).json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  // POST /:id/convert-to-invoice — create a draft invoice from an
+  // accepted estimate. Idempotent (returns the existing linked invoice on
+  // re-call). Bills the customer's locked good-better-best selection and
+  // credits any paid deposit. Also auto-expires the job's other open
+  // estimates so only the converted one remains live.
+  router.post(
+    '/:id/convert-to-invoice',
+    requireAuth,
+    requireTenant,
+    requirePermission('invoices:create'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!jobRepo || !moneyStateDeps) {
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Invoice conversion is not configured for this environment',
+          });
+          return;
+        }
+        const invoice = await convertEstimateToInvoice(req.auth!.tenantId, req.params.id, {
+          estimateRepo,
+          invoiceRepo: moneyStateDeps.invoiceRepo,
+          jobRepo,
+          settingsRepo,
+          auditRepo,
+          paymentRepo,
+          moneyStateDeps: refreshDeps,
+          actorId: req.auth!.userId,
+          logger,
+        });
+        if (!invoice) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
+          return;
+        }
+        // Auto-expire the job's other still-open (sent) estimates so the
+        // converted one is the single live offer. Best-effort. The invoice
+        // already carries the jobId and the source estimateId, so no extra
+        // estimate lookup is needed. Money-state is refreshed once after the
+        // loop rather than per sibling.
+        try {
+          const siblings = await estimateRepo.findByJob(req.auth!.tenantId, invoice.jobId);
+          let expiredAny = false;
+          for (const sib of siblings) {
+            if (sib.id !== invoice.estimateId && sib.status === 'sent') {
+              await transitionEstimateStatus(
+                req.auth!.tenantId,
+                sib.id,
+                'expired',
+                estimateRepo,
+              );
+              expiredAny = true;
+              await auditRepo.create(
+                createAuditEvent({
+                  tenantId: req.auth!.tenantId,
+                  actorId: req.auth!.userId,
+                  actorRole: req.auth!.role ?? 'unknown',
+                  eventType: 'estimate.expired',
+                  entityType: 'estimate',
+                  entityId: sib.id,
+                  metadata: {
+                    estimateNumber: sib.estimateNumber,
+                    reason: 'sibling_converted',
+                    convertedEstimateId: invoice.estimateId,
+                  },
+                }),
+              );
+            }
+          }
+          if (expiredAny && refreshDeps) {
+            await refreshJobMoneyStateSafe(req.auth!.tenantId, invoice.jobId, req.auth!.userId, refreshDeps);
+          }
+        } catch (siblingErr) {
+          logger.warn('estimate convert: sibling auto-expire failed', {
+            estimateId: req.params.id,
+            error: siblingErr instanceof Error ? siblingErr.message : String(siblingErr),
+          });
+        }
+        res.status(201).json(invoice);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
   router.post(
     '/:id/transition',
     requireAuth,
@@ -213,7 +480,13 @@ export function createEstimateRouter(
           res.status(400).json({ error: 'VALIDATION_ERROR', message: 'status is required' });
           return;
         }
-        const result = await transitionEstimateStatus(req.auth!.tenantId, req.params.id, status, estimateRepo);
+        const result = await transitionEstimateStatus(
+          req.auth!.tenantId,
+          req.params.id,
+          status,
+          estimateRepo,
+          refreshDeps,
+        );
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
           return;
@@ -343,6 +616,20 @@ export function createEstimateRouter(
           estimateId: req.params.id,
           ...parsed.data,
         });
+        // §6 Time-to-Cash. sendEstimate transitions the estimate to
+        // 'sent' inside SendService (not via transitionEstimateStatus),
+        // so the rollup is triggered explicitly here. Best-effort.
+        if (refreshDeps) {
+          const sent = await estimateRepo.findById(req.auth!.tenantId, req.params.id);
+          if (sent) {
+            await refreshJobMoneyStateSafe(
+              req.auth!.tenantId,
+              sent.jobId,
+              req.auth!.userId,
+              refreshDeps,
+            );
+          }
+        }
         res.status(202).json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);

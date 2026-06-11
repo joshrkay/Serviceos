@@ -1,9 +1,15 @@
 import { Request, Router, Response } from 'express';
 import { z } from 'zod';
 import { toErrorResponse } from '../shared/errors';
+import { extractIp } from '../shared/extract-ip';
 import { FeedbackRequestRepository } from '../feedback/feedback-request';
-import { createFeedbackResponse, FeedbackResponseRepository } from '../feedback/feedback-response';
+import {
+  createFeedbackResponse,
+  FeedbackResponseRepository,
+  publicActorFromToken,
+} from '../feedback/feedback-response';
 import { SettingsRepository } from '../settings/settings';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 const submitSchema = z.object({
   rating: z.number().int().min(1).max(5),
@@ -13,7 +19,12 @@ const submitSchema = z.object({
 export function createPublicFeedbackRouter(
   requestRepo: FeedbackRequestRepository,
   responseRepo: FeedbackResponseRepository,
-  settingsRepo: SettingsRepository
+  settingsRepo: SettingsRepository,
+  /**
+   * D2-1d — audit logging for the public feedback submission. Optional
+   * so harnesses that don't wire it (older route tests) still build.
+   */
+  auditRepo?: AuditRepository,
 ): Router {
   const router = Router();
 
@@ -79,7 +90,57 @@ export function createPublicFeedbackRouter(
 
       await responseRepo.create(response);
       await requestRepo.markSubmitted(request.tenantId, request.id);
-      res.status(201).json({ ok: true });
+
+      if (auditRepo) {
+        // D2-1d — token-scoped public actor; we never persist the raw
+        // token, just a 12-char SHA-256 prefix so the audit row can be
+        // correlated to the originating link.
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId: request.tenantId,
+            actorId: publicActorFromToken(req.params.token),
+            actorRole: 'customer',
+            eventType: 'feedback_response.submitted',
+            entityType: 'feedback_response',
+            entityId: response.id,
+            metadata: {
+              requestId: request.id,
+              jobId: request.jobId,
+              rating: response.rating,
+              hasComment: Boolean(response.comment),
+              ipAddress: extractIp(req),
+              userAgent: req.headers['user-agent'],
+            },
+          }),
+        );
+      }
+
+      // Surface the tenant's public review links only to satisfied
+      // customers (4★+), mirroring the Settings copy ("Customers with a
+      // 4+ rating will see a button linking here"). Empty/unset links are
+      // omitted so the feedback page renders no button.
+      //
+      // Best-effort: the feedback is already persisted above, so a failure
+      // reading settings here must NOT turn a successful submission into a
+      // 500 (a retry would then 409 — a broken-looking form). On any error
+      // we just omit the review links and still return 201.
+      let reviewUrls: { google?: string; yelp?: string } | undefined;
+      if (parsed.rating >= 4) {
+        try {
+          const settings = await settingsRepo.findByTenant(request.tenantId);
+          const google = settings?.googleReviewUrl?.trim();
+          const yelp = settings?.yelpReviewUrl?.trim();
+          if (google || yelp) {
+            reviewUrls = {};
+            if (google) reviewUrls.google = google;
+            if (yelp) reviewUrls.yelp = yelp;
+          }
+        } catch {
+          /* settings read failed — omit review links, submission still succeeded */
+        }
+      }
+
+      res.status(201).json({ ok: true, ...(reviewUrls ? { reviewUrls } : {}) });
     } catch (err) {
       const { statusCode, body } = toErrorResponse(err);
       res.status(statusCode).json(body);

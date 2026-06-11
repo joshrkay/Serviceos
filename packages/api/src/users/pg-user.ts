@@ -19,6 +19,8 @@ function mapRow(row: Record<string, unknown>): User {
     // Phase 12 — column added in migration 063. Default false applies
     // at the column level.
     canFieldServe: Boolean(row.can_field_serve ?? false),
+    // P1-022 — column added in migration 109. NULL when no mobile on file.
+    mobileNumber: (row.mobile_number as string | null) ?? undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -40,6 +42,7 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
       const result = await client.query(
         `SELECT id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                 COALESCE(can_field_serve, false) AS can_field_serve,
+                mobile_number,
                 created_at, updated_at
          FROM users
          ${where}
@@ -55,10 +58,68 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
       const result = await client.query(
         `SELECT id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                 COALESCE(can_field_serve, false) AS can_field_serve,
+                mobile_number,
                 created_at, updated_at
          FROM users
          WHERE id = $1`,
         [id],
+      );
+      return result.rows.length > 0
+        ? mapRow(result.rows[0] as Record<string, unknown>)
+        : null;
+    });
+  }
+
+  /**
+   * P1-022 — bind an inbound communication to a user by mobile number.
+   *
+   * `e164` MUST already be normalized via `normalizeMobileE164()`; the
+   * stored column holds the same canonical E.164 form.
+   *
+   * Defense-in-depth: the WHERE clause filters on `tenant_id` explicitly in
+   * addition to RLS, so a mobile registered in one tenant can never resolve
+   * a user in another even if this runs in a context where RLS were ever
+   * misconfigured. Returns null when no user in this tenant has that mobile.
+   */
+  async findByMobileNumber(tenantId: string, e164: string): Promise<User | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT id, tenant_id, clerk_user_id, email, role, first_name, last_name,
+                COALESCE(can_field_serve, false) AS can_field_serve,
+                mobile_number,
+                created_at, updated_at
+         FROM users
+         WHERE tenant_id = $1
+           AND mobile_number = $2`,
+        [tenantId, e164],
+      );
+      return result.rows.length > 0
+        ? mapRow(result.rows[0] as Record<string, unknown>)
+        : null;
+    });
+  }
+
+  /**
+   * P1-022 — write (or clear) the normalized E.164 mobile number for a user.
+   * Callers MUST pass a value already run through `normalizeMobileE164()`,
+   * or `null` to clear. Tenant-scoped in the WHERE clause. Returns the
+   * updated row, or null when the user wasn't found in this tenant.
+   */
+  async setMobileNumber(
+    tenantId: string,
+    id: string,
+    e164: string | null,
+  ): Promise<User | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE users SET mobile_number = $1, updated_at = NOW()
+         WHERE id = $2
+           AND tenant_id = $3
+         RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
+                   COALESCE(can_field_serve, false) AS can_field_serve,
+                   mobile_number,
+                   created_at, updated_at`,
+        [e164, id, tenantId],
       );
       return result.rows.length > 0
         ? mapRow(result.rows[0] as Record<string, unknown>)
@@ -94,6 +155,7 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
            )
          RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                    COALESCE(can_field_serve, false) AS can_field_serve,
+                   mobile_number,
                    created_at, updated_at`,
         [newRole, id, tenantId],
       );
@@ -130,6 +192,7 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
          WHERE id = $${paramIndex}
          RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                    COALESCE(can_field_serve, false) AS can_field_serve,
+                   mobile_number,
                    created_at, updated_at`,
         params,
       );

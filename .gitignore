@@ -3,8 +3,15 @@ dist/
 *.js.map
 *.d.ts
 
+# Ephemeral H5 voice-load report (regenerated on each run; do not commit
+# a single run's capture — staging numbers belong in voice-capacity.md).
+voice-load-report.json
+
 # Multi-agent dispatch worktrees (created by /dispatch-story; ephemeral)
 .claude/worktrees/
+
+# Visual brainstorming companion (mockups persist locally, not in git)
+.superpowers/
 !jest.config.ts
 !**/vite-env.d.ts
 .env
@@ -36,6 +43,8 @@ e2e/fixtures/.journey-fixtures.env
 
 # Voice Quality v1 corpus runner — generated JSON report (VQ-009)
 packages/api/voice-quality-report.json
+packages/api/voice-quality-vitest.json
+packages/api/.voice-quality-verdicts/
 # Voice Quality v1 Layer 2 corpus runner — generated reports (VQ2-016)
 packages/api/voice-quality-layer2-report.json
 packages/api/voice-quality-layer2-vitest-report.json

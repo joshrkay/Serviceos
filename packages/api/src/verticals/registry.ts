@@ -68,6 +68,30 @@ export interface ObjectionScript {
 
 export type ObjectionScriptList = readonly ObjectionScript[];
 
+/**
+ * §P2-3 — Vertical-specific conversational repair templates. When the
+ * FSM's intent-capture state encounters low confidence, it picks the
+ * matching template and speaks it instead of a generic "say that again?"
+ * reprompt.
+ *
+ * Currently wired in the FSM:
+ *   - low_intent_confidence — used when intent classifier confidence < TAU_INT
+ *   - low_audio_confidence  — used on Deepgram confidence_low event
+ *
+ * Reserved for future work (Theme B in the Sound Human spec):
+ *   - ambiguous_service_type — when intent is clear but specifics are not
+ *   - ambiguous_entity       — when a name/number was partially captured
+ *
+ * The unused triggers are still populated in vertical packs so the data
+ * is ready when the wiring lands; they are not dead data.
+ */
+export interface RepairTemplate {
+  /** When the FSM low-confidence signal matches this trigger, pick this template. */
+  trigger: 'low_intent_confidence' | 'low_audio_confidence' | 'ambiguous_service_type' | 'ambiguous_entity';
+  /** TTS text spoken to the caller. Use plain English; no SSML for now. */
+  text: string;
+}
+
 export interface VerticalPack extends CanonicalVerticalPack {
   type: VerticalType;
   name: string;
@@ -78,6 +102,23 @@ export interface VerticalPack extends CanonicalVerticalPack {
   intakeQuestions?: IntakeQuestionList;
   /** §3E — Optional. Packs without objection scripts still load. */
   objectionScripts?: ObjectionScriptList;
+  /**
+   * Tokens to boost in the Deepgram streaming STT URL via the
+   * `keywords` query parameter. Each entry is `term:weight` where
+   * weight is 1-10. Boosting raises Deepgram's prior probability for
+   * the term so HVAC/plumbing jargon does not get mis-transcribed
+   * or clipped at endpoint detection.
+   *
+   * Example: ['furnace:3', 'compressor:3', 'condenser:3'].
+   */
+  sttKeywords?: ReadonlyArray<string>;
+  /**
+   * §P2-3 — Vertical-aware repair templates for low-confidence reprompts.
+   * Sourced directly from the rich pack (like sttKeywords) — NOT stored
+   * in canonical registry metadata and therefore must be read from the
+   * in-memory pack factory, not round-tripped through adaptToCanonical.
+   */
+  repairTemplates?: ReadonlyArray<RepairTemplate>;
 }
 
 export interface VerticalPackRepository {
@@ -144,8 +185,8 @@ export function validateVerticalPack(pack: Partial<VerticalPack>): string[] {
   const errors: string[] = [];
   if (!pack.verticalType && !pack.type) errors.push('verticalType is required');
   const type = pack.verticalType || pack.type;
-  if (type && !['hvac', 'plumbing'].includes(type)) {
-    errors.push('verticalType must be hvac or plumbing');
+  if (type && !['hvac', 'plumbing', 'electrical'].includes(type)) {
+    errors.push('verticalType must be hvac, plumbing, or electrical');
   }
   if (!pack.displayName && !pack.name) errors.push('displayName is required');
   if (!pack.version) errors.push('version is required');

@@ -129,6 +129,53 @@ cd /home/user/Serviceos && \
 
 ---
 
+## P1-022 — Add `mobile_number` to users for inbound identity binding
+
+**Wave:** Wave-C blocker B4 (see `docs/superpowers/plans/2026-05-17-wave-c-bad-day-recovery.md`)
+**Migration number reserved:** `109_users_mobile_number` (was `101`; bumped — main advanced to migration 108, and `101` is now `101_google_reviews`)
+**Forbidden files:**
+- `packages/api/src/sms/tech-status/**` (P6-028 consumes — does not modify users)
+- `packages/api/src/voice/triage/**` (P8-016 consumes for owner-cell paging)
+- `packages/api/src/auth/**` (no auth-system changes — this is a data field)
+- `packages/shared/**`
+
+**Allowed files (concrete list):**
+- `packages/api/src/db/schema.ts` (modify — add key `109_users_mobile_number`)
+- `packages/api/src/users/user.ts` (modify — add `mobileNumber?: string`)
+- `packages/api/src/users/pg-user.ts` (modify — read/write column + `findByMobileNumber()`)
+- `packages/api/src/users/pg-user.test.ts` (modify — add coverage)
+- `packages/api/src/shared/phone/normalize.ts` (new)
+- `packages/api/src/shared/phone/normalize.test.ts` (new)
+
+**Verification gate (single command):**
+```bash
+cd /home/user/Serviceos && \
+  npx tsc --project packages/api/tsconfig.build.json --noEmit && \
+  npm test --workspace=packages/api -- --run -t "P1-022|mobile_number|findByMobileNumber|normalize"
+```
+
+**Pre-flight:** none.
+
+**Risk note:**
+- **Partial unique index allows multiple NULLs.** This is the desired behavior — users without a mobile shouldn't conflict with each other. Verify the index syntax compiles in Postgres 14+ and the migration is replayable.
+- **Tenant-scoped uniqueness.** Two users in different tenants CAN share a mobile (e.g., a human registered in two ServiceOS tenants).
+- **E.164 storage.** The column stores normalized E.164 (`+15551234567`). Callers pass raw input through `normalize()` before storage and before lookup.
+- **Defense-in-depth.** `findByMobileNumber(tenantId, e164)` always filters by `tenant_id` in the WHERE clause, not just relying on RLS.
+
+**Implementation hints:**
+1. Read the existing `pg-user.ts` first to see column-read/write patterns and the snake_case/camelCase mapping helper in `pg-base.ts`.
+2. The `normalize` helper covers common US formats: `(555) 123-4567`, `555-123-4567`, `555.123.4567`, `5551234567`, `+1-555-123-4567`. Reject obviously bad input (too short, contains letters) with a typed error.
+3. **Migration body** (final form):
+   ```sql
+   ALTER TABLE users ADD COLUMN IF NOT EXISTS mobile_number TEXT;
+   CREATE UNIQUE INDEX IF NOT EXISTS users_mobile_unique
+     ON users (tenant_id, mobile_number)
+     WHERE mobile_number IS NOT NULL;
+   ```
+4. RLS on `users` already exists (verify in `schema.ts`); no new policy needed.
+
+---
+
 ## Universal pre-flight checks
 
 Same as `p0-dispatch-addendum.md` § Universal pre-flight checks. Apply to every Phase 1 story before launching the dispatch agent.

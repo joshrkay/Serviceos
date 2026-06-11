@@ -33,6 +33,13 @@ import { lookupAgreements } from '../ai/skills/lookup-agreements';
 import { lookupAccountSummary } from '../ai/skills/lookup-account-summary';
 import { lookupCustomer } from '../ai/skills/lookup-customer';
 import { lookupEstimates } from '../ai/skills/lookup-estimates';
+import { lookupLeads } from '../ai/skills/lookup-leads';
+import { lookupRevenue } from '../ai/skills/lookup-revenue';
+import { lookupCatalog } from '../ai/skills/lookup-catalog';
+import { lookupAvailability } from '../ai/skills/lookup-availability';
+import type { AvailabilityFinder } from '../ai/tasks/availability-finder';
+import type { MoneyDashboardRepository } from '../reports/money-dashboard';
+import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { JobRepository } from '../jobs/job';
 import type { AppointmentRepository } from '../appointments/appointment';
 import type { InvoiceRepository } from '../invoices/invoice';
@@ -42,6 +49,7 @@ import type { EstimateRepository } from '../estimates/estimate';
 import type { LookupEventService } from '../lookup-events/lookup-event-service';
 import type { LLMGateway } from '../ai/gateway/gateway';
 import { discloseRecording } from '../ai/skills/disclose-recording';
+import { t, type Language } from '../ai/i18n/i18n';
 import { identifyCaller } from '../ai/skills/identify-caller';
 import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
 import { confirmIntent } from '../ai/skills/confirm-intent';
@@ -51,7 +59,11 @@ import {
   lookupExecutedEvent,
 } from '../ai/voice-quality/events';
 import { TAU_INT } from '../ai/agents/customer-calling/transitions';
-import type { CallingAgentEvent, SideEffect } from '../ai/agents/customer-calling/types';
+import type {
+  CallingAgentContext,
+  CallingAgentEvent,
+  SideEffect,
+} from '../ai/agents/customer-calling/types';
 import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 // Aliased to avoid name collision with the private `deriveCallOutcome` method
 // on this class — see line 1828. The imported function takes the typed
@@ -73,10 +85,15 @@ import type { TenantCredentialResolver } from '../integrations/credentials';
 import { MEDIA_STREAM_PATH } from './media-streams/twilio-mediastream-server';
 import type { VoiceRepository, CallOutcome } from '../voice/voice-service';
 import type { VoicePersona, VoicePersonaResolver } from '../settings/voice-persona-resolver';
+import { resolveEscalationSettings } from '../settings/settings';
+import type { WhisperCache } from './whisper-cache';
 import {
   createVoiceTurnProcessor,
   type VoiceTurnProcessor,
 } from '../ai/voice-turn';
+import type { RepairTemplate } from '../verticals/registry';
+import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
+import type { SettingsRepository } from '../settings/settings';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -152,6 +169,11 @@ export interface TwilioAdapterDeps {
   /** VQ-006: read-only customer + estimate lookups. */
   customerRepo?: CustomerRepository;
   estimateRepo?: EstimateRepository;
+  /** Full-app voice coverage: owner-scoped revenue + catalog lookups. */
+  moneyDashboardRepo?: MoneyDashboardRepository;
+  catalogRepo?: CatalogItemRepository;
+  /** When wired, lookup_availability speaks the next open slots. */
+  availabilityFinder?: AvailabilityFinder;
   /** P11-001: when wired, every lookup invocation writes a row. */
   lookupEvents?: LookupEventService;
   /**
@@ -206,33 +228,77 @@ export interface TwilioAdapterDeps {
    * blocked by a settings lookup failure.
    */
   voicePersonaResolver?: VoicePersonaResolver;
+  /**
+   * §10 onboarding — fired after voice_sessions.ended_at is stamped.
+   * Drives the 30-minute upgrade nudge (banner + optional email).
+   * Failures are swallowed so call termination is never blocked by
+   * the nudge check.
+   */
+  onSessionEnded?: (event: {
+    tenantId: string;
+    callSid?: string;
+    channel: 'voice_inbound' | 'inapp_voice';
+  }) => Promise<void>;
+  /**
+   * §P2-3 — Resolves the vertical-specific repair templates for a tenant.
+   * When present, the templates are threaded into the FSM context at
+   * session creation so low-confidence reprompts use vertical-aware copy.
+   * When absent, the FSM falls back to the generic "say that again" prompt.
+   */
+  repairTemplatesResolver?: (tenantId: string) => Promise<ReadonlyArray<RepairTemplate>>;
+  /**
+   * F8 — per-tenant escalation settings repository. When wired, the
+   * processor loads channel preferences before each `escalateToHuman`
+   * call. Optional so existing test fixtures continue to work.
+   */
+  settingsRepo?: SettingsRepository;
+  whisperCache?: WhisperCache;
+  deliveryProvider?: { sendSms(args: { to: string; body: string }): Promise<unknown> };
 }
 
 /**
  * Build the full telephony greeting.
  *
- * When `persona.greeting` is set the tenant owns the entire opening
- * line — no extra CTA is appended. `disclosureText` (recording notice)
- * is always appended afterward regardless of which branch is taken,
- * since disclosure is a compliance requirement that cannot be opted out.
+ * `disclosureText` (recording notice) is always appended after the
+ * greeting when present — it is a compliance requirement that cannot
+ * be opted out.
  *
  * Branch priority:
- *   1. Custom greeting → `${greeting} ${disclosureText}`
- *   2. Agent name only → `Thank you for calling ${name}. This is ${agentName}. ${disclosure} How can I help you today?`
- *   3. Neither         → `Thank you for calling ${name}. ${disclosure} How can I help you today?`
+ *   1. Custom greeting (`persona.greeting` set):
+ *        Returns `${persona.greeting} ${disclosureText}` (trimmed).
+ *        The tenant owns the entire opening line — NO CTA is appended.
+ *        The result is returned as-is so the tenant's chosen wording
+ *        is preserved verbatim.
+ *   2. Agent name only (`persona.agentName` set, no custom greeting):
+ *        `Thank you for calling ${name}. This is ${agentName}. ${disclosure} How can I help you today?`
+ *        A CTA is appended if the assembled string does not already end with `?`.
+ *   3. Neither:
+ *        `Thank you for calling ${name}. ${disclosure} How can I help you today?`
+ *        A CTA is appended if the assembled string does not already end with `?`.
  */
 export function buildTelephonyGreeting(
   businessName: string,
   disclosureText: string,
-  persona?: VoicePersona | null
+  persona?: VoicePersona | null,
+  language: Language = 'en'
 ): string {
+  const disclosure = disclosureText.trim();
+
+  // Branch 1 — tenant owns the entire opening line. Return without CTA
+  // append. The custom greeting is used verbatim (the tenant authored it
+  // in their own language), so we do NOT localize this branch.
   if (persona?.greeting) {
-    return `${persona.greeting} ${disclosureText}`;
+    const greeting = persona.greeting.trim();
+    return disclosure ? `${greeting} ${disclosure}`.trim() : greeting;
   }
+
+  // Branch 2 / 3 — assemble a localized default greeting, then ensure it
+  // ends with a CTA (the ES CTA already ends with '?').
   const opener = persona?.agentName
-    ? `Thank you for calling ${businessName}. This is ${persona.agentName}.`
-    : `Thank you for calling ${businessName}.`;
-  return `${opener} ${disclosureText} How can I help you today?`;
+    ? t('greeting.opener_named', language, { business: businessName, agent: persona.agentName })
+    : t('greeting.opener_default', language, { business: businessName });
+  const assembled = disclosure ? `${opener} ${disclosure}`.trim() : opener;
+  return assembled.endsWith('?') ? assembled : `${assembled} ${t('greeting.cta', language)}`;
 }
 
 function intentToProposalType(intent: string | undefined): ProposalType {
@@ -241,6 +307,7 @@ function intentToProposalType(intent: string | undefined): ProposalType {
     case 'update_invoice': return 'update_invoice';
     case 'issue_invoice': return 'issue_invoice';
     case 'send_invoice': return 'send_invoice';
+    case 'send_estimate': return 'send_estimate';
     case 'record_payment': return 'record_payment';
     case 'draft_estimate': return 'draft_estimate';
     case 'update_estimate': return 'update_estimate';
@@ -252,6 +319,15 @@ function intentToProposalType(intent: string | undefined): ProposalType {
     case 'create_job': return 'create_job';
     case 'add_note': return 'add_note';
     case 'emergency_dispatch': return 'emergency_dispatch';
+    case 'update_customer': return 'update_customer';
+    case 'log_expense': return 'log_expense';
+    case 'convert_lead': return 'convert_lead';
+    case 'confirm_appointment': return 'confirm_appointment';
+    case 'mark_lead_lost': return 'mark_lead_lost';
+    case 'add_service_location': return 'add_service_location';
+    case 'log_time_entry': return 'log_time_entry';
+    case 'notify_delay': return 'notify_delay';
+    case 'request_feedback': return 'request_feedback';
     default: return 'voice_clarification';
   }
 }
@@ -309,6 +385,13 @@ interface BuildTwimlOpts {
    * so Twilio's built-in recognizer picks the right phonetic model.
    */
   language?: 'en' | 'es';
+  /**
+   * P11-002: per-tenant TTS voice override (settings.ttsVoiceEn/Es).
+   * When set, the `<Say voice>` uses it instead of the language-derived
+   * default Polly voice. The `<Gather>` STT locale still follows
+   * `language`.
+   */
+  voiceOverride?: string;
 }
 
 const GATHER_VOICE_EN = 'Polly.Joanna';
@@ -361,8 +444,9 @@ export function buildTwiML(
       // audible feedback rather than silence; a real prompt registry is a
       // follow-up.
       const sayText = text.length > 0 ? text : '...';
-      const voice = opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN;
-      parts.push(`<Say voice="${voice}">${xmlEscape(sayText)}</Say>`);
+      const voice =
+        opts.voiceOverride ?? (opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
+      parts.push(`<Say voice="${xmlEscape(voice)}">${xmlEscape(sayText)}</Say>`);
     } else if (fx.type === 'end_session') {
       parts.push('<Hangup/>');
       ended = true;
@@ -374,7 +458,9 @@ export function buildTwiML(
         payload: fx.payload,
       });
     }
-    // audit_log / create_proposal / start_transcription → no TwiML
+    // audit_log / create_proposal / start_transcription / emit_quality_event
+    // → no TwiML (Gather path has no event bus; telemetry only fires when
+    // Media Streams is active).
   }
 
   if (!ended) {
@@ -435,6 +521,7 @@ export class TwilioGatherAdapter {
     this.processor = createVoiceTurnProcessor({
       ...this.deps,
       pendingTransferTwiml: this.pendingTransferTwiml,
+      callerPhoneResolver: (session) => this.callerIdBySession.get(session.id),
       // Wire the existing fire-and-forget summary path. Preserves the
       // legacy behavior where a terminated turn kicks off the
       // end-of-call summary in the background. The `async` wrapper is
@@ -450,6 +537,54 @@ export class TwilioGatherAdapter {
         });
       },
     });
+  }
+
+  private async resolveEscalationTriggers(
+    tenantId: string,
+  ): Promise<CallingAgentContext['escalationTriggers'] | undefined> {
+    if (!this.deps.settingsRepo) return undefined;
+    try {
+      const settings = await this.deps.settingsRepo.findByTenant(tenantId);
+      const esc = resolveEscalationSettings(settings);
+      return {
+        trigger_low_confidence: esc.trigger_low_confidence,
+        trigger_explicit_request: esc.trigger_explicit_request,
+        trigger_keyword_frustration: esc.trigger_keyword_frustration,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * P11-002 — resolve the spoken language + TTS voice for a new call from
+   * the tenant settings (default_language + tts_voice_en/es). Customer-level
+   * overrides for voice are a follow-up; the greeting/STT use the tenant
+   * default. Falls back to 'en' with no voice override.
+   */
+  private async resolveTenantLanguage(
+    tenantId: string,
+  ): Promise<{ language: Language; ttsVoice?: string; supportedLanguages?: Language[] }> {
+    if (!this.deps.settingsRepo) return { language: 'en' };
+    try {
+      const settings = await this.deps.settingsRepo.findByTenant(tenantId);
+      // The tenant's explicit default_language is always honored — it IS the
+      // tenant's opt-in. The supported_languages stack gates CALLER auto-
+      // detection (a Spanish-speaking caller on an English-only tenant), not
+      // the tenant's own configured greeting language.
+      const language: Language = settings?.defaultLanguage === 'es' ? 'es' : 'en';
+      const ttsVoice =
+        (language === 'es' ? settings?.ttsVoiceEs : settings?.ttsVoiceEn) ?? undefined;
+      // Thread the opt-in stack for the auto-detect gate, always including the
+      // pinned language so the gate can never contradict the greeting.
+      const baseStack: Language[] = settings?.supportedLanguages ?? ['en'];
+      const supportedLanguages = baseStack.includes(language)
+        ? baseStack
+        : [...baseStack, language];
+      return { language, ttsVoice, supportedLanguages };
+    } catch {
+      return { language: 'en' };
+    }
   }
 
   /**
@@ -478,8 +613,14 @@ export class TwilioGatherAdapter {
     if (existing && existing.tenantId === opts.tenantId) {
       return this.buildStreamTwiML({ sessionId: existing.id, callSid: opts.callSid });
     }
+    const repairTemplates = this.deps.repairTemplatesResolver
+      ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
+      : [];
+    const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
+      ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
+      ...(escalationTriggers ? { escalationTriggers } : {}),
     });
     // initializeStreamSession reads callerIdBySession to drive
     // identifyCaller/lead creation; without this, every media-stream
@@ -530,11 +671,18 @@ export class TwilioGatherAdapter {
 
     const from = this.callerIdBySession.get(session.id) ?? '';
 
+    // P11-002: resolve + pin the spoken language + TTS voice (tenant default).
+    const { language, ttsVoice, supportedLanguages } = await this.resolveTenantLanguage(opts.tenantId);
+    session.language = language;
+    session.ttsVoice = ttsVoice;
+    if (supportedLanguages) session.supportedLanguages = supportedLanguages;
+
     // 1. Recording disclosure (text only — TTS synthesizes the audio).
     const disclosure = await discloseRecording({
       tenantId: opts.tenantId,
       channel: 'telephony',
       businessName: this.deps.businessName,
+      language,
     });
 
     // 2. Identify caller by phone number.
@@ -584,6 +732,7 @@ export class TwilioGatherAdapter {
       this.deps.businessName,
       disclosure.disclosureText,
       persona,
+      language,
     );
     for (const fx of sideEffects) {
       if (fx.type === 'tts_play' && fx.payload.text === 'greeting') {
@@ -688,12 +837,56 @@ export class TwilioGatherAdapter {
         { type: 'end_session', payload: { reason: 'session_not_found' } },
       ];
     }
+
+    // Always append utterance to transcript first so it is captured
+    // regardless of the path below (frustration escalation or normal turn).
+    this.deps.store.appendTranscript(opts.sessionId, {
+      speaker: 'caller',
+      text: opts.speechResult,
+      ts: Date.now(),
+    });
+
+    // B3.2 — keyword frustration check BEFORE intent classification.
+    // Route through the processor so notify_oncall (and any escalation
+    // side effects added by the FSM) actually fire — the mediastream
+    // adapter's emitSideEffects only handles tts_play/quality events.
+    const frustration = detectFrustration(opts.speechResult);
+    const triggers = session.machine.currentContext.escalationTriggers;
+    if (
+      frustration.matched &&
+      (!triggers || triggers.trigger_keyword_frustration)
+    ) {
+      const sideEffects = session.machine.dispatch({
+        type: 'frustration_detected',
+        source: 'keyword',
+        detail: frustration.keyword,
+      });
+      await this.processor.executeSideEffects(session, sideEffects, opts.tenantId);
+      return sideEffects;
+    }
+
     return this.processor.speechTurn({
       session,
       speechResult: opts.speechResult,
       callSid: opts.callSid,
       tenantId: opts.tenantId,
     });
+  }
+
+  /**
+   * Deliver side effects produced by an out-of-band FSM dispatch (e.g. the
+   * mediastream adapter's async LLM-sentiment escalation, which dispatches
+   * `frustration_detected` outside a normal speech turn). Routes them through
+   * the same processor path a normal turn uses so `notify_oncall` and
+   * `audit_log` actually fire — the mediastream adapter's `emitSideEffects`
+   * only renders `tts_play`.
+   */
+  async deliverOutOfBandEffects(
+    session: VoiceSession,
+    effects: SideEffect[],
+    tenantId: string,
+  ): Promise<void> {
+    await this.processor.executeSideEffects(session, effects, tenantId);
   }
 
   /**
@@ -718,13 +911,23 @@ export class TwilioGatherAdapter {
         sessionId: existing.id,
       });
       return buildTwiML(
-        [{ type: 'tts_play', payload: { text: 'One moment, please.' } }],
-        { gatherActionUrl: this.gatherUrl(existing.id) },
+        [{ type: 'tts_play', payload: { text: t('greeting.one_moment', existing.language ?? 'en') } }],
+        {
+          gatherActionUrl: this.gatherUrl(existing.id),
+          ...(existing.language ? { language: existing.language } : {}),
+          ...(existing.ttsVoice ? { voiceOverride: existing.ttsVoice } : {}),
+        },
       );
     }
 
+    const repairTemplatesForInbound = this.deps.repairTemplatesResolver
+      ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
+      : [];
+    const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
+      ...(repairTemplatesForInbound.length > 0 ? { repairTemplates: repairTemplatesForInbound } : {}),
+      ...(escalationTriggers ? { escalationTriggers } : {}),
     });
     this.persistVoiceSessionRow(session, opts.callSid);
 
@@ -733,11 +936,20 @@ export class TwilioGatherAdapter {
     // primaryPhone without re-prompting.
     this.callerIdBySession.set(session.id, opts.from ?? '');
 
+    // P11-002: resolve spoken language + TTS voice (tenant default) and pin
+    // them on the session so the greeting, disclosure, and every TwiML build
+    // speak it in the right language/voice.
+    const { language, ttsVoice, supportedLanguages } = await this.resolveTenantLanguage(opts.tenantId);
+    session.language = language;
+    session.ttsVoice = ttsVoice;
+    if (supportedLanguages) session.supportedLanguages = supportedLanguages;
+
     // 1. Disclose recording (text generation; no TTS — Twilio <Say> handles audio).
     const disclosure = await discloseRecording({
       tenantId: opts.tenantId,
       channel: 'telephony',
       businessName: this.deps.businessName,
+      language,
     });
 
     // 2. Identify caller. Skill requires a Pool; if we don't have one (dev),
@@ -792,6 +1004,7 @@ export class TwilioGatherAdapter {
       this.deps.businessName,
       disclosure.disclosureText,
       persona,
+      language,
     );
 
     const expanded = sideEffectsAll.map((fx) => {
@@ -866,6 +1079,8 @@ export class TwilioGatherAdapter {
       transferTwiml ??
       buildTwiML(expanded, {
         gatherActionUrl: this.gatherUrl(session.id),
+        ...(session.language ? { language: session.language } : {}),
+        ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
         ...(this.deps.recordingCallbackPath
           ? { recordingStatusCallback: this.recordingCallbackUrl() }
           : {}),
@@ -921,12 +1136,27 @@ export class TwilioGatherAdapter {
       );
     }
 
-    // 1. Append caller utterance to transcript.
+    // 1. Append caller utterance to transcript first — must happen before
+    //    any early-exit path so the utterance is never lost.
     this.deps.store.appendTranscript(opts.sessionId, {
       speaker: 'caller',
       text: opts.speechResult,
       ts: Date.now(),
     });
+
+    // B3.2 — keyword frustration check on the PSTN/Gather path, mirroring
+    // the same guard in processCallerUtterance (WS path). Runs after the
+    // transcript append so the triggering utterance is always captured.
+    const gatherFrustration = detectFrustration(opts.speechResult);
+    if (gatherFrustration.matched) {
+      const frustrationEffects = session.machine.dispatch({
+        type: 'frustration_detected',
+        source: 'keyword',
+        detail: gatherFrustration.keyword,
+      });
+      await this.processor.executeSideEffects(session, frustrationEffects, opts.tenantId);
+      return this.finalizeTwiml(session, frustrationEffects, opts.sessionId);
+    }
 
     const sideEffectsAll: SideEffect[] = [];
     const currentState = session.machine.currentState;
@@ -1162,7 +1392,11 @@ export class TwilioGatherAdapter {
       return transferTwiml;
     }
 
-    const twiml = buildTwiML(sideEffects, { gatherActionUrl: this.gatherUrl(sessionId) });
+    const twiml = buildTwiML(sideEffects, {
+      gatherActionUrl: this.gatherUrl(sessionId),
+      ...(session.language ? { language: session.language } : {}),
+      ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
+    });
     const ttsLast = [...sideEffects].reverse().find((e) => e.type === 'tts_play');
     if (ttsLast && typeof ttsLast.payload.text === 'string') {
       // Capture the agent's reply so summarizeSession sees both sides
@@ -1374,6 +1608,79 @@ export class TwilioGatherAdapter {
             lookupExecutedEvent(intentType, Date.now() - startMs, true),
           );
           return result.summary;
+        }
+        case 'lookup_leads': {
+          if (!this.deps.leadRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupLeads(
+            { tenantId, sessionId: session.id },
+            {
+              leadRepo: this.deps.leadRepo,
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_revenue': {
+          if (!this.deps.moneyDashboardRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupRevenue(
+            { tenantId, sessionId: session.id },
+            {
+              moneyDashboardRepo: this.deps.moneyDashboardRepo,
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_catalog': {
+          if (!this.deps.catalogRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupCatalog(
+            { tenantId, sessionId: session.id },
+            {
+              catalogRepo: this.deps.catalogRepo,
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_availability': {
+          if (!this.deps.availabilityFinder) {
+            return this.lookupNotWiredFallback();
+          }
+          const from = new Date();
+          const result = await lookupAvailability(
+            {
+              tenantId,
+              searchFrom: from,
+              searchTo: new Date(from.getTime() + 14 * 24 * 60 * 60 * 1000),
+              durationMs: 2 * 60 * 60 * 1000,
+            },
+            this.deps.availabilityFinder,
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
+          return result.status === 'unavailable'
+            ? this.lookupNotWiredFallback()
+            : result.message;
         }
         default:
           return this.lookupNotWiredFallback();
@@ -1655,6 +1962,19 @@ export class TwilioGatherAdapter {
   }
 
   /**
+   * Store a pending <Dial> TwiML string for the given session. Called by
+   * `TwilioMediaStreamAdapter` via a deps callback so both the gather
+   * adapter (which reads via `takePendingTransferTwiml`) and the media-stream
+   * adapter (which writes during `handleEscalateWithContext`) share the same
+   * in-memory Map. Without this, the Dial TwiML would be written to
+   * `state.pendingTransferTwiml` on the media-stream adapter where nothing
+   * ever reads it — the call would hang on hold forever.
+   */
+  setPendingTransferTwiml(sessionId: string, twiml: string): void {
+    this.pendingTransferTwiml.set(sessionId, twiml);
+  }
+
+  /**
    * B2 — derive the typed CallOutcome from FSM state, stash it on the
    * session, and kick off the best-effort `voice_sessions` persist.
    *
@@ -1725,6 +2045,17 @@ export class TwilioGatherAdapter {
       });
     } catch {
       /* swallow — outcome stamping is best-effort */
+    }
+    if (this.deps.onSessionEnded) {
+      try {
+        await this.deps.onSessionEnded({
+          tenantId: session.tenantId,
+          channel: session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
+          ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
+        });
+      } catch {
+        /* swallow — nudge check must never block call end */
+      }
     }
   }
 

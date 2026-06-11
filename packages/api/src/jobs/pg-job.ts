@@ -6,6 +6,7 @@ import {
   JobListOptions,
   JobListResult,
   JobRepository,
+  JobMoneyState,
   DEFAULT_JOB_LIMIT,
   MAX_JOB_LIMIT,
 } from './job';
@@ -35,9 +36,15 @@ function mapRow(row: Record<string, unknown>): Job {
       (row.deposit_stripe_payment_link_id as string | null) ?? undefined,
     depositStripePaymentLinkUrl:
       (row.deposit_stripe_payment_link_url as string | null) ?? undefined,
+    // Hennessy — payment-link UX. Migration 138.
+    depositStripePaymentLinkExpiresAt: row.deposit_stripe_payment_link_expires_at
+      ? new Date(row.deposit_stripe_payment_link_expires_at as string)
+      : undefined,
     // Tier 4 (Deposit rules — PR 3c). Migration 081.
     depositCreditedToInvoiceId:
       (row.deposit_credited_to_invoice_id as string | null) ?? undefined,
+    // §6 Time-to-Cash. Migration 095; DEFAULT 'no_estimate' for legacy rows.
+    moneyState: (row.money_state as JobMoneyState | null) ?? 'no_estimate',
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -218,8 +225,12 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
         // Tier 4 (Deposit rules — PR 3b). Migration 080.
         depositStripePaymentLinkId: 'deposit_stripe_payment_link_id',
         depositStripePaymentLinkUrl: 'deposit_stripe_payment_link_url',
+        // Hennessy — payment-link UX. Migration 138.
+        depositStripePaymentLinkExpiresAt: 'deposit_stripe_payment_link_expires_at',
         // Tier 4 (Deposit rules — PR 3c). Migration 081.
         depositCreditedToInvoiceId: 'deposit_credited_to_invoice_id',
+        // §6 Time-to-Cash. Migration 095.
+        moneyState: 'money_state',
         updatedAt: 'updated_at',
       };
 

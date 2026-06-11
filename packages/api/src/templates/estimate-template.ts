@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { LineItem, buildLineItem, calculateDocumentTotals, DocumentTotals } from '../shared/billing-engine';
 import { VerticalType } from '../verticals/registry';
 import { ValidationError } from '../shared/errors';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 export interface EstimateTemplate {
   id: string;
@@ -80,7 +81,9 @@ export function validateTemplateInput(input: CreateTemplateInput): string[] {
 
 export async function createTemplate(
   input: CreateTemplateInput,
-  repository: EstimateTemplateRepository
+  repository: EstimateTemplateRepository,
+  auditRepo?: AuditRepository,
+  actorRole?: string
 ): Promise<EstimateTemplate> {
   const errors = validateTemplateInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
@@ -103,7 +106,53 @@ export async function createTemplate(
     updatedAt: new Date(),
   };
 
-  return repository.create(template);
+  const created = await repository.create(template);
+
+  if (auditRepo) {
+    const event = createAuditEvent({
+      tenantId: created.tenantId,
+      actorId: input.createdBy,
+      actorRole: actorRole ?? 'unknown',
+      eventType: 'estimate_template.created',
+      entityType: 'estimate_template',
+      entityId: created.id,
+      metadata: {
+        name: created.name,
+        verticalType: created.verticalType,
+        categoryId: created.categoryId,
+      },
+    });
+    await auditRepo.create(event);
+  }
+
+  return created;
+}
+
+// D2-1b: Update wrapper that emits estimate_template.updated.
+export async function updateTemplate(
+  repository: EstimateTemplateRepository,
+  tenantId: string,
+  id: string,
+  updates: Partial<EstimateTemplate>,
+  actor?: { userId: string; role: string },
+  auditRepo?: AuditRepository
+): Promise<EstimateTemplate | null> {
+  const updated = await repository.update(tenantId, id, updates);
+
+  if (auditRepo && actor && updated) {
+    const event = createAuditEvent({
+      tenantId,
+      actorId: actor.userId,
+      actorRole: actor.role,
+      eventType: 'estimate_template.updated',
+      entityType: 'estimate_template',
+      entityId: id,
+      metadata: { changes: Object.keys(updates).filter((k) => k !== 'updatedAt') },
+    });
+    await auditRepo.create(event);
+  }
+
+  return updated;
 }
 
 export function instantiateTemplate(template: EstimateTemplate): {

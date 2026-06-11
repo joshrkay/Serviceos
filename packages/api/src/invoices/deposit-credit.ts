@@ -110,6 +110,11 @@ export async function applyDepositCreditToInvoice(
       processedBy: 'system',
       createdAt: now,
       updatedAt: now,
+      refundedAmountCents: 0,
+      refundedAt: null,
+      lastRefundStripeId: null,
+      reversedAt: null,
+      reversalReason: null,
     };
     await paymentRepo.create(payment);
     paymentWritten = true;
