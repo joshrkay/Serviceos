@@ -117,7 +117,11 @@ describe('Postgres integration — proposal_sms_events (P2-034)', () => {
   it('breaks created_at ties by insertion order (seq)', async () => {
     const pA = await seedProposal(tenant.tenantId);
     const pB = await seedProposal(tenant.tenantId);
-    const sameInstant = new Date('2026-06-11T16:00:00Z');
+    // Must be the newest outbound event in this shared tenant for LIMIT 1 to
+    // target it. A hardcoded instant is a time bomb: it passed (2026-06-11)
+    // and the round-trip test above stamps real now(), which then sorted
+    // newer and broke CI. Stay relative to the wall clock instead.
+    const sameInstant = new Date(Date.now() + 60 * 60 * 1000);
     for (const proposalIdAtTie of [pA, pB]) {
       await repo.create(
         createProposalSmsEvent({
