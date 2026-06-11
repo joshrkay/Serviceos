@@ -157,6 +157,31 @@ type TargetResolution =
  * pending proposal — a `Y` meant for one piece of work could silently
  * approve another. Stale target → truthful "already handled" instead.
  */
+/**
+ * The open edit session, IF it is still the owner's live conversation.
+ * When a newer proposal SMS went out after the session opened, replies
+ * now belong to that newer message — a `Y` meant for the new proposal
+ * must not be swallowed as edit text for the old one. The stale session
+ * is consumed (audited) and the reply falls through to normal targeting.
+ */
+async function findActiveEditSession(
+  deps: ProposalSmsReplyDeps,
+  ctx: InboundSmsContext,
+): Promise<{ id: string; proposalId: string } | null> {
+  const now = deps.now ? deps.now() : new Date();
+  const session = await deps.smsEventRepo.findOpenEditSession(ctx.tenantId, now);
+  if (!session) return null;
+  const [latest] = await deps.smsEventRepo.findRecentOutbound(ctx.tenantId, 1);
+  if (latest && latest.createdAt.getTime() > session.createdAt.getTime()) {
+    await deps.smsEventRepo.markConsumed(ctx.tenantId, session.id, now);
+    await audit(deps, ctx, 'proposal.sms_edit_session_superseded', session.proposalId, {
+      supersededByProposalId: latest.proposalId,
+    });
+    return null;
+  }
+  return session;
+}
+
 async function resolveTargetProposal(
   deps: ProposalSmsReplyDeps,
   tenantId: string,
@@ -329,8 +354,7 @@ export async function handleProposalSmsReply(
   // to $200", "fix the date"), which routes here instead of the fallback.
   // Without this, such a message would re-open a session and ask "What
   // should I change?" forever.
-  const sessionNow = deps.now ? deps.now() : new Date();
-  const session = await deps.smsEventRepo.findOpenEditSession(ctx.tenantId, sessionNow);
+  const session = await findActiveEditSession(deps, ctx);
   if (session) {
     return handleEditRequest(deps, ctx, session.id, session.proposalId);
   }
@@ -538,8 +562,7 @@ export async function handleProposalSmsFallback(
     return { handled: false, handler: HANDLER_NAME, reason: 'not_owner' };
   }
 
-  const now = deps.now ? deps.now() : new Date();
-  const session = await deps.smsEventRepo.findOpenEditSession(ctx.tenantId, now);
+  const session = await findActiveEditSession(deps, ctx);
   if (session) {
     return handleEditRequest(deps, ctx, session.id, session.proposalId);
   }
@@ -567,7 +590,7 @@ export async function handleProposalSmsFallback(
       direction: 'outbound',
       kind: 'clarification_sent',
       body,
-      now,
+      now: deps.now ? deps.now() : new Date(),
     }),
   );
   await audit(deps, ctx, 'proposal.sms_clarification_sent', proposal.id, {});

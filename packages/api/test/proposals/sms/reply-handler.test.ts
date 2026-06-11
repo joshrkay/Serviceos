@@ -417,6 +417,48 @@ describe('edit session flow', () => {
     expect(h.sent.some((s) => s.body.includes('What should I change'))).toBe(false);
   });
 
+  it('a newer proposal SMS supersedes an open edit session — Y approves the new proposal', async () => {
+    const h = makeHarness({ interpretEdit: async () => ({ message: 'X' }) });
+    const older = await seedPendingProposal(h, TENANT, {}, new Date('2026-06-11T15:00:00Z'));
+    h.deps.now = () => new Date('2026-06-11T15:01:00Z');
+    await handleProposalSmsReply(ctx('EDIT'), h.deps); // session opens for `older`
+
+    // A new proposal is rendered + texted while the session is open.
+    const newer = await seedPendingProposal(h, TENANT, {}, new Date('2026-06-11T15:02:00Z'));
+
+    h.deps.now = () => new Date('2026-06-11T15:03:00Z');
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    // The Y belongs to the newer message — never edit text for the older one.
+    expect(result).toMatchObject({ handled: true, reason: 'approved' });
+    expect((await h.proposalRepo.findById(TENANT, newer.id))?.status).toBe('approved');
+    expect((await h.proposalRepo.findById(TENANT, older.id))?.status).toBe(
+      'ready_for_review',
+    );
+    expect(h.smsEventRepo.events.find((e) => e.kind === 'edit_request')).toBeUndefined();
+    const session = h.smsEventRepo.events.find((e) => e.kind === 'edit_session_opened');
+    expect(session?.consumedAt).toBeInstanceOf(Date);
+    expect(h.auditRepo.getAll().map((e) => e.eventType)).toContain(
+      'proposal.sms_edit_session_superseded',
+    );
+  });
+
+  it('free text after a superseding render becomes clarification, not an edit', async () => {
+    const h = makeHarness({ interpretEdit: async () => ({ message: 'X' }) });
+    await seedPendingProposal(h, TENANT, {}, new Date('2026-06-11T15:00:00Z'));
+    h.deps.now = () => new Date('2026-06-11T15:01:00Z');
+    await handleProposalSmsReply(ctx('EDIT'), h.deps);
+    const newer = await seedPendingProposal(h, TENANT, {}, new Date('2026-06-11T15:02:00Z'));
+
+    h.deps.now = () => new Date('2026-06-11T15:03:00Z');
+    const result = await handleProposalSmsFallback(ctx('huh what is this'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'clarification_sent' });
+    expect(h.smsEventRepo.events.find((e) => e.kind === 'edit_request')).toBeUndefined();
+    const nudge = h.smsEventRepo.events.find((e) => e.kind === 'clarification_sent');
+    expect(nudge?.proposalId).toBe(newer.id);
+  });
+
   it('an edit session consumes on first message — no spam extension', async () => {
     const h = makeHarness({ interpretEdit: async () => null });
     await seedPendingProposal(h);
