@@ -108,12 +108,14 @@ export class EstimateTaskHandler implements TaskHandler {
         const items = (await this.catalogRepo.listByTenant(context.tenantId)).filter(
           (i) => i.archivedAt === null,
         );
-        const resolutions = resolveLineItems(
-          lineItems.map((li) => String(li.description ?? '')),
-          items,
-        );
-        catalogOutcome = applyCatalogPricing(lineItems, resolutions, 'unitPrice');
-        payload.lineItems = catalogOutcome.lineItems;
+        if (items.length > 0) {
+          const resolutions = resolveLineItems(
+            lineItems.map((li) => String(li.description ?? '')),
+            items,
+          );
+          catalogOutcome = applyCatalogPricing(lineItems, resolutions, 'unitPrice');
+          payload.lineItems = catalogOutcome.lineItems;
+        }
       } catch {
         catalogOutcome = undefined;
       }

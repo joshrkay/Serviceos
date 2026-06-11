@@ -5,6 +5,7 @@ import { Proposal, ProposalRepository, createProposal, CreateProposalInput, Prop
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
 import { routeUnsupervisedProposal } from '../proposals/auto-approve';
+import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
 import type { AuditRepository } from '../audit/audit';
 import type { UnsupervisedProposalRouting } from '../settings/settings';
 import { ConflictError } from '../shared/errors';
@@ -116,6 +117,11 @@ export interface RecentReferentProvider {
   forConversation(tenantId: string, conversationId: string): Promise<ConversationReferent[]>;
 }
 
+export interface UnsupervisedRoutingDeps extends RouteUnsupervisedProposalDeps {
+  resolveOwnerPhone?: (tenantId: string) => Promise<string | null | undefined>;
+  resolveRouting?: (tenantId: string) => Promise<UnsupervisedProposalRouting | undefined>;
+}
+
 export interface VoiceActionRouterDeps {
   gateway: LLMGateway;
   proposalRepo: ProposalRepository;
@@ -225,6 +231,12 @@ export interface VoiceActionRouterDeps {
    * without it keep the pre-resolver behavior.
    */
   entityResolver?: EntityResolver;
+  /**
+   * P12-004 — routes review-held proposals when no supervisor is present.
+   * Production sends a one-tap approval SMS for queue_and_sms tenants and
+   * records the unsupervised routing audit event. Optional for tests.
+   */
+  unsupervisedRouting?: UnsupervisedRoutingDeps;
 }
 
 // P11-001: lookup_* intents are READ-ONLY and never produce a
@@ -976,7 +988,12 @@ async function processSegment(
   // to thread presence can't slip an auto-approved (→ auto-executing) proposal
   // past an unsupervised tenant. No-op in the normal case (the handler already
   // computed 'ready_for_review').
-  return { kind: 'proposal', proposal: holdIfUnsupervised(annotated, supervisorPresent), classification };
+  return {
+    kind: 'proposal',
+    proposal: holdIfUnsupervised(annotated, supervisorPresent),
+    classification,
+    supervisorPresent,
+  };
 }
 
 /**

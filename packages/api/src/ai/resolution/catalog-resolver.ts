@@ -374,9 +374,11 @@ export function applyCatalogPricing(
       const item = resolution.match;
       const next: Record<string, unknown> = {
         ...li,
+        description: item.name,
         [priceField]: item.unitPriceCents,
         catalogItemId: item.id,
         pricingSource: 'catalog' satisfies PricingSource,
+        needsPricing: false,
         category: contractCategory(item),
       };
       if (priceField === 'unitPriceCents') {
@@ -391,7 +393,11 @@ export function applyCatalogPricing(
       return;
     }
     if (resolution.tier === 'ambiguous' && resolution.candidates) {
-      out.push({ ...li, pricingSource: 'ambiguous' satisfies PricingSource });
+      out.push({
+        ...li,
+        pricingSource: 'ambiguous' satisfies PricingSource,
+        needsPricing: true,
+      });
       missingFields.push(`lineItems[${idx}].catalogItemId`);
       catalogResolution[idx] = resolution.candidates.map((c) => ({
         id: c.item.id,
@@ -401,7 +407,11 @@ export function applyCatalogPricing(
       }));
       return;
     }
-    out.push({ ...li, pricingSource: 'uncatalogued' satisfies PricingSource });
+    out.push({
+      ...li,
+      pricingSource: 'uncatalogued' satisfies PricingSource,
+      needsPricing: true,
+    });
     anyUncatalogued = true;
   });
 
