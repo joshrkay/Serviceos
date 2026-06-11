@@ -72,6 +72,31 @@ delivery**, plus a set of **launch-readiness blockers** that undermine trust
 
 ---
 
+## ✅ Shipped since (2026-06-11) — money/voice trust
+
+Two Tier-A-class gaps closed on `claude/tender-hamilton-pjhcbv`:
+
+- **Catalog-grounded AI pricing (P22).** Previously `draft_invoice` /
+  `draft_estimate` trusted LLM-invented `unitPrice` figures verbatim, and a
+  ≥0.9-confidence draft auto-approved. Now every drafted line item resolves
+  against the tenant's active catalog (`ai/resolution/catalog-resolver.ts`,
+  pure + 42 tests): matches take the catalog price, ambiguous matches force
+  `draft` with a candidate picker, uncatalogued lines cap confidence at 0.85
+  so an invented price always lands in front of a human. Jobber/ServiceTitan
+  price from the price book — now so do we, by construction.
+- **Entity resolution wired ("three Bobs", P8).** `PgEntityResolver` existed
+  but was never instantiated; free-text customer/job references flowed to
+  execution unresolved. Now wired into the voice action router: resolved →
+  verified UUID on the task context; ambiguous → one-tap
+  `voice_clarification` picker (`reason: 'ambiguous_entity'`); not_found →
+  `sourceContext.pendingReference`. Wiring exposed and fixed schema-mismatch
+  SQL in the resolver (queried nonexistent `customers.name` / `jobs.title`).
+- **Mobile estimate approval hardening.** Unbreakable descriptions
+  (model/serial numbers) pushed Rate/Total out of view on ≤390px phones —
+  the customer couldn't see what they were approving. Fixed + measured by
+  Playwright at 320/390px (`e2e/estimate-approval-mobile.spec.ts`), with
+  44px glove-friendly tap targets enforced.
+
 ## The Top 10 (prioritized)
 
 ### Tier A — Trust & money integrity (codebase)

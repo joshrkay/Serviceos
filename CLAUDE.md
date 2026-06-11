@@ -16,6 +16,9 @@ README explaining why):
 - /service-os-agent — Python LangGraph prototype with known defects.
 - /supabase_migration.sql — schema for the service-os-app prototype only;
   unrelated to the canonical in-code migrations (packages/api/src/db/schema.ts).
+- /rewrite — parallel ground-up rebuild (first-principles, command bus).
+  NOT the deploy target; never apply story/feature work there unless the
+  task says so explicitly. Canonical work goes in /packages.
 
 ## Core Patterns
 - All money: integer cents, never floating point
@@ -24,6 +27,28 @@ README explaining why):
 - All mutations: emit audit events
 - All AI calls: route through LLM gateway (packages/api/src/ai/gateway)
 - All proposals: typed payloads validated by Zod contracts
+- All AI-drafted line-item prices: grounded in the tenant catalog via
+  packages/api/src/ai/resolution/catalog-resolver.ts — never trust an
+  LLM-emitted price without resolution (uncatalogued lines must cap
+  confidence below the auto-approve threshold)
+- All free-text entity references on voice paths: resolved via the
+  entity resolver (packages/api/src/ai/resolution); ambiguity becomes a
+  one-tap voice_clarification, never a silent guess
+
+## Code Hygiene & Testing (mandatory)
+- Remove dead code as part of every change: unused exports, imports,
+  interfaces, fixtures, and "built but never wired" modules. When wiring
+  a dormant module, delete its null/stub stand-ins (re-grep usage first).
+- New or changed pure logic requires unit tests in the same commit.
+  Voice/AI behavior changes need handler-level tests with a mocked
+  gateway/repos; DB-touching changes need a Docker-gated integration
+  test (packages/api/test/integration/, runs in PR CI).
+- Tests that mock the DB are never the only proof a query works — the
+  entity resolver shipped with nonexistent column names because its Pool
+  was mocked. Pin real columns with an integration test.
+- Mobile/public UI changes: ≥44px tap targets (min-h-11), no horizontal
+  overflow at 320px. Pin with a jsdom class-contract test + a Playwright
+  viewport test (pattern: e2e/estimate-approval-mobile.spec.ts).
 
 ## Story Execution Rules
 - Only modify files listed in "Allowed files/modules"
