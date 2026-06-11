@@ -62,14 +62,6 @@ export const EDIT_SESSION_TTL_MS = 10 * 60 * 1000;
 /** One clarification nudge per proposal, then escalate silently. */
 const CLARIFICATION_LIMIT = 1;
 
-/**
- * How many recent outbound renders to scan when resolving which proposal
- * a reply targets. The first whose proposal is still reviewable wins, so
- * a reply lands on the newest actionable proposal even if a more recent
- * one was meanwhile approved from the dashboard.
- */
-const RECENT_OUTBOUND_SCAN = 5;
-
 const HANDLER_NAME = 'proposal-reply';
 
 export interface ProposalSmsReplyDeps {
@@ -150,20 +142,31 @@ function isReviewable(proposal: Proposal): boolean {
   return proposal.status === 'ready_for_review' || proposal.status === 'draft';
 }
 
+type TargetResolution =
+  | { kind: 'none' }
+  | { kind: 'already_handled'; proposal: Proposal }
+  | { kind: 'reviewable'; proposal: Proposal };
+
 /**
- * Resolve which proposal an inbound reply targets: the most recently
- * rendered outbound SMS whose proposal is still reviewable.
+ * Resolve which proposal an inbound reply targets: the most recent
+ * outbound render, and ONLY that one. An SMS reply carries no proposal
+ * identifier, so the latest message we sent is the only thing the owner
+ * can be answering. If that proposal was meanwhile handled (dashboard
+ * approval, a re-sent Y), the reply must NOT fall through to an older
+ * pending proposal — a `Y` meant for one piece of work could silently
+ * approve another. Stale target → truthful "already handled" instead.
  */
-async function findTargetProposal(
+async function resolveTargetProposal(
   deps: ProposalSmsReplyDeps,
   tenantId: string,
-): Promise<Proposal | null> {
-  const recent = await deps.smsEventRepo.findRecentOutbound(tenantId, RECENT_OUTBOUND_SCAN);
-  for (const event of recent) {
-    const proposal = await deps.proposalRepo.findById(tenantId, event.proposalId);
-    if (proposal && isReviewable(proposal)) return proposal;
-  }
-  return null;
+): Promise<TargetResolution> {
+  const [latest] = await deps.smsEventRepo.findRecentOutbound(tenantId, 1);
+  if (!latest) return { kind: 'none' };
+  const proposal = await deps.proposalRepo.findById(tenantId, latest.proposalId);
+  if (!proposal) return { kind: 'none' };
+  return isReviewable(proposal)
+    ? { kind: 'reviewable', proposal }
+    : { kind: 'already_handled', proposal };
 }
 
 async function reply(
@@ -331,8 +334,8 @@ export async function handleProposalSmsReply(
     return handleEditRequest(deps, ctx, session.id, session.proposalId);
   }
 
-  const proposal = await findTargetProposal(deps, ctx.tenantId);
-  if (!proposal) {
+  const target = await resolveTargetProposal(deps, ctx.tenantId);
+  if (target.kind === 'none') {
     await audit(deps, ctx, 'proposal.sms_reply_no_pending', '', {
       intent: parsed.intent,
     });
@@ -343,6 +346,19 @@ export async function handleProposalSmsReply(
     );
     return { handled: true, handler: HANDLER_NAME, reason: 'no_pending_proposal' };
   }
+  if (target.kind === 'already_handled') {
+    await audit(deps, ctx, 'proposal.sms_reply_stale_target', target.proposal.id, {
+      intent: parsed.intent,
+      proposalStatus: target.proposal.status,
+    });
+    await reply(
+      deps,
+      ctx.fromE164,
+      `"${target.proposal.summary}" was already handled — this didn't change anything. Check your review queue for anything else waiting.`,
+    );
+    return { handled: true, handler: HANDLER_NAME, reason: 'already_handled' };
+  }
+  const proposal = target.proposal;
 
   switch (parsed.intent) {
     case 'approve':
@@ -501,10 +517,13 @@ export async function handleProposalSmsFallback(
     return handleEditRequest(deps, ctx, session.id, session.proposalId);
   }
 
-  const proposal = await findTargetProposal(deps, ctx.tenantId);
-  if (!proposal) {
+  // Only nudge while the latest render is still actionable — clarifying
+  // about an already-handled proposal would just confuse the owner.
+  const target = await resolveTargetProposal(deps, ctx.tenantId);
+  if (target.kind !== 'reviewable') {
     return { handled: false, handler: HANDLER_NAME, reason: 'no_context' };
   }
+  const proposal = target.proposal;
 
   const nudges = await deps.smsEventRepo.countClarifications(ctx.tenantId, proposal.id);
   if (nudges >= CLARIFICATION_LIMIT) {

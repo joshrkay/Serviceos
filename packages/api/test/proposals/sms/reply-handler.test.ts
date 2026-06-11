@@ -68,6 +68,7 @@ async function seedPendingProposal(
   h: Harness,
   tenantId = TENANT,
   overrides: Partial<Parameters<typeof createProposal>[0]> = {},
+  renderedAt?: Date,
 ): Promise<Proposal> {
   const base = createProposal({
     tenantId,
@@ -91,6 +92,7 @@ async function seedPendingProposal(
       direction: 'outbound',
       kind: 'proposal_rendered',
       body: 'Book Mrs Lee Tuesday 2pm. Reply Y to approve, N to reject, EDIT to change.',
+      ...(renderedAt ? { now: renderedAt } : {}),
     }),
   );
   return proposal;
@@ -152,11 +154,34 @@ describe('handleProposalSmsReply — approve', () => {
     const second = await handleProposalSmsReply(ctx('Y'), h.deps);
 
     // The approved proposal is no longer reviewable, so the second reply
-    // truthfully reports there is nothing pending — no double transition.
-    expect(second).toMatchObject({ handled: true, reason: 'no_pending_proposal' });
+    // truthfully reports it was already handled — no double transition.
+    expect(second).toMatchObject({ handled: true, reason: 'already_handled' });
     const updated = await h.proposalRepo.findById(TENANT, proposal.id);
     expect(updated?.status).toBe('approved');
-    expect(h.sent[1].body).toContain('Nothing is waiting');
+    expect(h.sent[1].body).toContain('already handled');
+  });
+
+  it('never falls through to an older pending proposal when the newest render was handled', async () => {
+    const h = makeHarness();
+    // Older proposal A is still pending; newer proposal B was rendered
+    // after it and then approved from the dashboard.
+    const older = await seedPendingProposal(h, TENANT, {}, new Date('2026-06-11T15:00:00Z'));
+    const newer = await seedPendingProposal(h, TENANT, {}, new Date('2026-06-11T15:05:00Z'));
+    await h.proposalRepo.updateStatus(TENANT, newer.id, 'approved', {
+      approvedAt: new Date(),
+    });
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    // The reply binds to the newest render ONLY — it must not approve A.
+    expect(result).toMatchObject({ handled: true, reason: 'already_handled' });
+    expect((await h.proposalRepo.findById(TENANT, older.id))?.status).toBe(
+      'ready_for_review',
+    );
+    expect(h.sent[0].body).toContain('already handled');
+    expect(h.auditRepo.getAll().map((e) => e.eventType)).toContain(
+      'proposal.sms_reply_stale_target',
+    );
   });
 
   it('blocks approval when required fields are missing and says so', async () => {
