@@ -379,7 +379,10 @@ export function applyCatalogPricing(
         pricingSource: 'catalog' satisfies PricingSource,
         category: contractCategory(item),
       };
-      if ('totalCents' in li) {
+      if (priceField === 'unitPriceCents') {
+        // Invoice contract carries totalCents per line; recompute it from
+        // the authoritative price (also prices lines the LLM left
+        // price-less, which the handler would otherwise drop).
         const qty = Number(li.quantity ?? 1) || 1;
         next.totalCents = Math.round(item.unitPriceCents * qty);
       }

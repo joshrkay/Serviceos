@@ -1407,6 +1407,9 @@ export function createApp(): express.Express {
     thresholdResolver,
     tenantSchedulingResolver,
     appointmentRepo,
+    // P22 — catalog grounding: drafted invoice/estimate line items get
+    // priced from the tenant's catalog instead of trusting the LLM.
+    catalogRepo,
     // Lets reschedule/cancel/confirm scope appointment resolution to the
     // verified caller's own appointments (appointment → job → customerId).
     jobRepo,
@@ -2768,6 +2771,8 @@ export function createApp(): express.Express {
       proposalRepo,
       // QA-2026-06-05 (AST-05): read-only query intents answer from data.
       invoiceRepo,
+      // P22 — catalog grounding for assistant-drafted invoices/estimates.
+      catalogRepo,
       // §3B/3D/3E — assistant chat shares the operator-side resolver
       // shim with the voice-action-router so the same vertical context
       // reaches both text and voice classification paths.

@@ -93,12 +93,24 @@ export const createBookingPayloadSchema = z.object({
   appointmentId: z.string().uuid(),
 });
 
-const lineItemSchema = z.object({
-  description: z.string().min(1),
-  quantity: z.number(),
-  unitPrice: z.number(),
-  category: z.string().optional(),
-});
+// One price field is required, but which one depends on the producer:
+// the estimate path emits `unitPrice` (integer cents) while the invoice
+// path normalizes to the executor's `unitPriceCents`. P22 adds
+// `catalogItemId` + `pricingSource` so the review UI and audit trail
+// can show WHERE a price came from (catalog-resolved vs LLM-invented).
+const lineItemSchema = z
+  .object({
+    description: z.string().min(1),
+    quantity: z.number(),
+    unitPrice: z.number().optional(),
+    unitPriceCents: z.number().int().min(0).optional(),
+    category: z.string().optional(),
+    catalogItemId: z.string().uuid().optional(),
+    pricingSource: z.enum(['catalog', 'ambiguous', 'uncatalogued', 'manual']).optional(),
+  })
+  .refine((li) => li.unitPrice !== undefined || li.unitPriceCents !== undefined, {
+    message: 'line item requires unitPrice or unitPriceCents',
+  });
 
 export const draftEstimatePayloadSchema = z.object({
   customerId: z.string().uuid(),

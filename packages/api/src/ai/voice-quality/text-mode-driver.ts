@@ -286,6 +286,9 @@ export class TextModeDriver implements AgentDriver {
       gateway: deps.gateway,
       proposalRepo: deps.proposalRepo,
       ...(deps.appointmentRepo ? { appointmentRepo: deps.appointmentRepo } : {}),
+      // P22 — catalog grounding so corpus scripts can assert that drafted
+      // invoice/estimate lines carry catalog prices, not LLM-invented ones.
+      ...(deps.catalogRepo ? { catalogRepo: deps.catalogRepo } : {}),
       // Thread the fixture's tenant timezone so spoken times resolve in the
       // tenant zone, and pin the scheduling clock to the fixture's call
       // moment so relative/absolute booking dates are deterministic.

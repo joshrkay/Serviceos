@@ -34,6 +34,7 @@ import { SlotConflictChecker } from '../ai/tasks/slot-conflict-checker';
 import { AvailabilityFinder } from '../ai/tasks/availability-finder';
 import { AppointmentRepository } from '../appointments/appointment';
 import { JobRepository } from '../jobs/job';
+import { CatalogItemRepository } from '../catalog/catalog-item';
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
 import { CreateCustomerTaskHandler, TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
@@ -194,6 +195,15 @@ export interface VoiceActionRouterDeps {
    * the flag. Optional, like every other dep here.
    */
   multiActionEnabled?: (tenantId: string) => Promise<boolean>;
+  /**
+   * P22 catalog grounding for the draft_invoice / draft_estimate
+   * handlers. When present, drafted line items are resolved against the
+   * tenant's active catalog and matched prices override the LLM's
+   * numbers (ambiguous → operator picks; uncatalogued → confidence
+   * capped below auto-approve). Optional so tests without a catalog
+   * keep the pre-P22 behavior.
+   */
+  catalogRepo?: CatalogItemRepository;
 }
 
 // P11-001: lookup_* intents are READ-ONLY and never produce a
@@ -303,8 +313,8 @@ class IssueInvoiceTaskHandler implements TaskHandler {
 
 function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandler> {
   const handlers = new Map<ProposalType, TaskHandler>();
-  handlers.set('draft_invoice', new InvoiceTaskHandler(deps.gateway));
-  handlers.set('draft_estimate', new EstimateTaskHandler(deps.gateway));
+  handlers.set('draft_invoice', new InvoiceTaskHandler(deps.gateway, deps.catalogRepo));
+  handlers.set('draft_estimate', new EstimateTaskHandler(deps.gateway, deps.catalogRepo));
   handlers.set(
     'create_appointment',
     new CreateAppointmentAITaskHandler(
