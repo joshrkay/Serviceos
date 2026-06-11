@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect } from 'react';
-import { FileText, Camera, Mic, X, Send, Square, Check } from 'lucide-react';
+import { FileText, Camera, Mic, X, Send, Square } from 'lucide-react';
 import { SheetOverlay } from './JobSheets';
-import { CameraCapture } from '../shared/CameraCapture';
+import { CaptureSheet } from '../attachments/CaptureSheet';
 import type { JobActivity } from '../../data/mock-data';
-import type { CapturedMedia } from '../shared/CameraCapture';
+import type { Attachment, AttachmentCategory, AttachmentEntityType } from '../../api/attachments';
 
 type EntryMode = 'note' | 'photo' | 'voice';
 
@@ -33,7 +33,7 @@ export function AddEntrySheet({ author, authorInitials, authorColor, onClose, on
 
   // Photo state
   const [cameraOpen, setCameraOpen]     = useState(false);
-  const [captured, setCaptured]         = useState<CapturedMedia[]>([]);
+  const [captured, setCaptured]         = useState<Attachment[]>([]);
 
   // Voice state
   const [recording, setRecording]       = useState(false);
@@ -97,10 +97,33 @@ export function AddEntrySheet({ author, authorInitials, authorColor, onClose, on
 
   if (cameraOpen) {
     return (
-      <CameraCapture
-        onClose={media => {
-          if (media.length > 0) setCaptured(prev => [...prev, ...media]);
-          setCameraOpen(false);
+      <CaptureSheet
+        entityType="job"
+        entityId="local-timeline-entry"
+        onClose={() => setCameraOpen(false)}
+        uploader={async (
+          entityType: AttachmentEntityType,
+          entityId: string,
+          file: File,
+          category: AttachmentCategory,
+          caption?: string,
+        ) => {
+          const local: Attachment = {
+            id: `local-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            fileId: `local-file-${Date.now()}`,
+            entityType,
+            entityId,
+            kind: 'photo',
+            category,
+            caption,
+            source: 'app',
+            downloadUrl: URL.createObjectURL(file),
+            filename: file.name,
+            contentType: file.type,
+            sizeBytes: file.size,
+          };
+          setCaptured(prev => [...prev, local]);
+          return local;
         }}
       />
     );
@@ -180,13 +203,7 @@ export function AddEntrySheet({ author, authorInitials, authorColor, onClose, on
               <div className="grid grid-cols-3 gap-2">
                 {captured.map((item, i) => (
                   <div key={item.id} className="relative aspect-square rounded-xl overflow-hidden bg-slate-100">
-                    {item.type === 'photo' ? (
-                      <img src={item.url} className="w-full h-full object-cover" alt={`capture ${i + 1}`} />
-                    ) : (
-                      <div className="w-full h-full bg-slate-800 flex items-center justify-center">
-                        <span className="text-white text-xs">Video</span>
-                      </div>
-                    )}
+                    <img src={item.downloadUrl} className="w-full h-full object-cover" alt={`capture ${i + 1}`} />
                   </div>
                 ))}
                 <button
