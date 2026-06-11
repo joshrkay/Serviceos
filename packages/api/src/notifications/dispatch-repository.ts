@@ -20,7 +20,9 @@ export type DispatchEntityType =
   | 'payment_receipt'
   | 'invoice_overdue'
   | 'delay_notice'
-  | 'appointment_en_route';
+  | 'appointment_en_route'
+  // RV-061 — owner end-of-day digest SMS (entity_id = daily_digests.id).
+  | 'daily_digest';
 export type DispatchChannel = 'sms' | 'email';
 export type DispatchStatus = 'sent' | 'delivered' | 'failed' | 'bounced';
 

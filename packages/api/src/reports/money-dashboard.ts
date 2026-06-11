@@ -80,7 +80,7 @@ const MONTH_RE = /^(\d{4})-(\d{2})$/;
  * subtract it. One round-trip handles DST too since we're using the
  * formatter's awareness of the zone at that exact instant.
  */
-function localMidnightToUTC(year: number, monthIndex: number, day: number, timezone: string): Date {
+export function localMidnightToUTC(year: number, monthIndex: number, day: number, timezone: string): Date {
   const utcMidnight = Date.UTC(year, monthIndex, day);
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: timezone,
@@ -144,47 +144,107 @@ function inWindow(d: Date, start: Date, end: Date): boolean {
   return t >= start.getTime() && t < end.getTime();
 }
 
-export function computeMoneyDashboardSummary(input: MoneyDashboardInput): MoneyDashboardSummary {
-  const { start, end, priorStart, priorEnd } = resolveMonthWindow(input.month, input.timezone);
+const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
-  const completed = input.payments.filter((p) => p.status === 'completed');
+export interface DayWindow {
+  start: Date;
+  end: Date;
+}
 
-  // D2-4 — refunds are NOT a status flip; they accumulate on the original
-  // payment's `refundedAmountCents` and carry a `refundedAt` timestamp.
-  // Bucket gross by `receivedAt` (when the cash arrived) and subtract
-  // refunds bucketed by `refundedAt` (when the cash left). A refund
-  // dated outside the window doesn't reduce THIS window's net even if
-  // the original payment is inside it — that's the whole point of
-  // tracking refunds as separate events.
-  function refundsInWindow(windowStart: Date, windowEnd: Date): number {
-    return completed
-      .filter((p) => (p.refundedAmountCents ?? 0) > 0 && p.refundedAt)
-      .filter((p) => inWindow(p.refundedAt!, windowStart, windowEnd))
-      .reduce((sum, p) => sum + (p.refundedAmountCents ?? 0), 0);
+/**
+ * RV-060 — resolve the [start, end) UTC instants for one tenant-local
+ * calendar day. Built on the SAME `localMidnightToUTC` the month window
+ * uses, so the end-of-day digest buckets payments by exactly the same
+ * tenant-tz midnight boundaries as the money dashboard (the digest's
+ * numbers must never disagree with the dashboard's for the same day).
+ */
+export function resolveDayWindow(date: string, timezone = 'America/New_York'): DayWindow {
+  const match = DATE_RE.exec(date);
+  if (!match) throw new Error("date must be a 'YYYY-MM-DD' string");
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  if (monthIndex < 0 || monthIndex > 11) {
+    throw new Error("date must be a 'YYYY-MM-DD' string with month 01-12");
   }
+  return {
+    start: localMidnightToUTC(year, monthIndex, day, timezone),
+    // Date.UTC handles day overflow (e.g. Jan 31 + 1 → Feb 1).
+    end: localMidnightToUTC(year, monthIndex, day + 1, timezone),
+  };
+}
 
+export interface WindowRevenue {
+  grossRevenueCents: number;
+  refundsCents: number;
+  revenueCents: number;
+}
+
+/**
+ * The single revenue computation both the month dashboard and the daily
+ * digest (RV-060) run. D2-4 — refunds are NOT a status flip; they
+ * accumulate on the original payment's `refundedAmountCents` and carry a
+ * `refundedAt` timestamp. Bucket gross by `receivedAt` (when the cash
+ * arrived) and subtract refunds bucketed by `refundedAt` (when the cash
+ * left). A refund dated outside the window doesn't reduce THIS window's
+ * net even if the original payment is inside it — that's the whole point
+ * of tracking refunds as separate events.
+ */
+export function computeWindowRevenue(
+  payments: Payment[],
+  start: Date,
+  end: Date,
+): WindowRevenue {
+  const completed = payments.filter((p) => p.status === 'completed');
   const grossRevenueCents = completed
     .filter((p) => inWindow(p.receivedAt, start, end))
     .reduce((sum, p) => sum + p.amountCents, 0);
-  const refundsCents = refundsInWindow(start, end);
-  const revenueCents = grossRevenueCents - refundsCents;
+  const refundsCents = completed
+    .filter((p) => (p.refundedAmountCents ?? 0) > 0 && p.refundedAt)
+    .filter((p) => inWindow(p.refundedAt!, start, end))
+    .reduce((sum, p) => sum + (p.refundedAmountCents ?? 0), 0);
+  return { grossRevenueCents, refundsCents, revenueCents: grossRevenueCents - refundsCents };
+}
 
-  const priorGross = completed
-    .filter((p) => inWindow(p.receivedAt, priorStart, priorEnd))
-    .reduce((sum, p) => sum + p.amountCents, 0);
-  const priorRefunds = refundsInWindow(priorStart, priorEnd);
-  const priorMonthRevenueCents = priorGross - priorRefunds;
+/** Invoice statuses that still owe money — the outstanding/overdue base set. */
+export function isInvoiceOwing(invoice: Invoice): boolean {
+  return invoice.status === 'open' || invoice.status === 'partially_paid';
+}
+
+/**
+ * The single overdue predicate both the dashboard's `overdueCents` and the
+ * digest's overdue-invoice count apply: still owing AND past its due date.
+ */
+export function isInvoiceOverdue(invoice: Invoice, now: Date): boolean {
+  return (
+    isInvoiceOwing(invoice) &&
+    invoice.dueDate !== undefined &&
+    invoice.dueDate.getTime() < now.getTime()
+  );
+}
+
+export function computeMoneyDashboardSummary(input: MoneyDashboardInput): MoneyDashboardSummary {
+  const { start, end, priorStart, priorEnd } = resolveMonthWindow(input.month, input.timezone);
+
+  const { grossRevenueCents, refundsCents, revenueCents } = computeWindowRevenue(
+    input.payments,
+    start,
+    end,
+  );
+  const priorMonthRevenueCents = computeWindowRevenue(
+    input.payments,
+    priorStart,
+    priorEnd,
+  ).revenueCents;
 
   const expensesCents = input.expenses
     .filter((e) => inWindow(e.spentAt, start, end))
     .reduce((sum, e) => sum + e.amountCents, 0);
 
-  const owing = input.invoices.filter(
-    (i) => i.status === 'open' || i.status === 'partially_paid',
-  );
+  const owing = input.invoices.filter(isInvoiceOwing);
   const outstandingCents = owing.reduce((sum, i) => sum + i.amountDueCents, 0);
   const overdueCents = owing
-    .filter((i) => i.dueDate !== undefined && i.dueDate.getTime() < input.now.getTime())
+    .filter((i) => isInvoiceOverdue(i, input.now))
     .reduce((sum, i) => sum + i.amountDueCents, 0);
 
   return {
