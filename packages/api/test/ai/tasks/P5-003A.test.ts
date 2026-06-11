@@ -7,6 +7,12 @@ import {
 } from '../../../src/ai/tasks/invoice-task';
 import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import { TaskContext } from '../../../src/ai/tasks/task-handlers';
+import {
+  CatalogItem,
+  CatalogItemRepository,
+  createCatalogItem,
+  InMemoryCatalogItemRepository,
+} from '../../../src/catalog/catalog-item';
 
 function createMockGateway(responseContent: string): LLMGateway {
   return {
@@ -244,5 +250,175 @@ describe('P5-003A — Invoice draft generation from work context', () => {
       const result = buildPartialInvoicePayload({ customerId: 123, lineItems: [] });
       expect(result.customerId).toBeUndefined();
     });
+  });
+});
+
+// ─── P22: catalog grounding ──────────────────────────────────────────────
+// Money comes from the tenant's price book, not the LLM. These cases pin
+// the four resolution outcomes (catalog override, ambiguous → draft,
+// uncatalogued → confidence cap, price-less rescue) plus failure/absence
+// degradation.
+describe('P22 — InvoiceTaskHandler catalog grounding', () => {
+  function seededCatalog(): {
+    repo: InMemoryCatalogItemRepository;
+    heater: CatalogItem;
+    airFilter: CatalogItem;
+    waterFilter: CatalogItem;
+  } {
+    const repo = new InMemoryCatalogItemRepository();
+    const heater = createCatalogItem({
+      tenantId: 'tenant-1',
+      name: 'Water Heater Install',
+      category: 'Labor',
+      unit: 'each',
+      unitPriceCents: 185_000,
+    });
+    const airFilter = createCatalogItem({
+      tenantId: 'tenant-1',
+      name: 'Air Filter',
+      category: 'Parts',
+      unit: 'each',
+      unitPriceCents: 2_000,
+    });
+    const waterFilter = createCatalogItem({
+      tenantId: 'tenant-1',
+      name: 'Water Filter',
+      category: 'Parts',
+      unit: 'each',
+      unitPriceCents: 3_500,
+    });
+    void repo.create(heater);
+    void repo.create(airFilter);
+    void repo.create(waterFilter);
+    return { repo, heater, airFilter, waterFilter };
+  }
+
+  function aiOutput(lineItems: unknown[], confidence = 0.95): string {
+    return JSON.stringify({
+      customerId: '00000000-0000-0000-0000-000000000001',
+      jobId: '00000000-0000-0000-0000-000000000002',
+      lineItems,
+      confidence_score: confidence,
+    });
+  }
+
+  it('catalog match OVERRIDES the LLM-invented price and recomputes totalCents', async () => {
+    const { repo, heater } = seededCatalog();
+    const gateway = createMockGateway(
+      aiOutput([{ description: 'Water Heater Install', quantity: 2, unitPrice: 99_900 }]),
+    );
+    const handler = new InvoiceTaskHandler(gateway, repo);
+
+    const { proposal } = await handler.handle(baseContext);
+
+    const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+    expect(line.unitPriceCents).toBe(185_000);
+    expect(line.totalCents).toBe(370_000);
+    expect(line.catalogItemId).toBe(heater.id);
+    expect(line.pricingSource).toBe('catalog');
+    expect(line.category).toBe('labor');
+    expect(proposal.confidenceFactors).toContain('catalog_priced');
+    // Catalog-grounded, unambiguous, 0.95 confidence → still auto-approves.
+    expect(proposal.status).toBe('approved');
+  });
+
+  it('ambiguous match keeps the LLM price, forces draft, and surfaces candidates', async () => {
+    const { repo, airFilter, waterFilter } = seededCatalog();
+    const gateway = createMockGateway(
+      aiOutput([{ description: 'filter', quantity: 1, unitPrice: 2_500 }]),
+    );
+    const handler = new InvoiceTaskHandler(gateway, repo);
+
+    const { proposal } = await handler.handle(baseContext);
+
+    const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+    expect(line.unitPriceCents).toBe(2_500); // LLM price preserved, never silently replaced
+    expect(line.pricingSource).toBe('ambiguous');
+    expect(proposal.status).toBe('draft'); // missingFields gate
+    const ctx = proposal.sourceContext as Record<string, unknown>;
+    expect(ctx.missingFields).toEqual(['lineItems[0].catalogItemId']);
+    const candidates = (ctx.catalogResolution as Record<number, Array<{ id: string }>>)[0];
+    expect(candidates.map((c) => c.id).sort()).toEqual([airFilter.id, waterFilter.id].sort());
+  });
+
+  it('uncatalogued line caps confidence below auto-approve even at 0.95', async () => {
+    const { repo } = seededCatalog();
+    const gateway = createMockGateway(
+      aiOutput([{ description: 'mystery flux capacitor', quantity: 1, unitPrice: 42_000 }]),
+    );
+    const handler = new InvoiceTaskHandler(gateway, repo);
+
+    const { proposal } = await handler.handle(baseContext);
+
+    const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+    expect(line.unitPriceCents).toBe(42_000); // LLM price kept (user-confirmed policy)
+    expect(line.pricingSource).toBe('uncatalogued');
+    expect(proposal.confidenceScore).toBeLessThanOrEqual(0.85);
+    expect(proposal.status).not.toBe('approved');
+    expect(proposal.confidenceFactors).toContain('uncatalogued_line_item');
+  });
+
+  it('rescues a price-less LLM line when the catalog can price it', async () => {
+    const { repo, heater } = seededCatalog();
+    const gateway = createMockGateway(
+      aiOutput([{ description: 'Water Heater Install', quantity: 1 }]), // no unitPrice at all
+    );
+    const handler = new InvoiceTaskHandler(gateway, repo);
+
+    const { proposal } = await handler.handle(baseContext);
+
+    const lines = proposal.payload.lineItems as Array<Record<string, unknown>>;
+    expect(lines).toHaveLength(1); // pre-P22 behavior dropped this line entirely
+    expect(lines[0].unitPriceCents).toBe(185_000);
+    expect(lines[0].totalCents).toBe(185_000);
+    expect(lines[0].catalogItemId).toBe(heater.id);
+  });
+
+  it('still drops price-less lines the catalog cannot rescue', async () => {
+    const { repo } = seededCatalog();
+    const gateway = createMockGateway(
+      aiOutput([
+        { description: 'mystery widget', quantity: 1 }, // no price, no match
+        { description: 'Water Heater Install', quantity: 1, unitPrice: 1 },
+      ]),
+    );
+    const handler = new InvoiceTaskHandler(gateway, repo);
+
+    const { proposal } = await handler.handle(baseContext);
+
+    const lines = proposal.payload.lineItems as Array<Record<string, unknown>>;
+    expect(lines).toHaveLength(1);
+    expect(lines[0].description).toBe('Water Heater Install');
+  });
+
+  it('degrades to LLM pricing when the catalog read throws', async () => {
+    const failingRepo = {
+      listByTenant: vi.fn().mockRejectedValue(new Error('db down')),
+    } as unknown as CatalogItemRepository;
+    const gateway = createMockGateway(
+      aiOutput([{ description: 'Water Heater Install', quantity: 1, unitPrice: 99_900 }]),
+    );
+    const handler = new InvoiceTaskHandler(gateway, failingRepo);
+
+    const { proposal } = await handler.handle(baseContext);
+
+    const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+    expect(line.unitPriceCents).toBe(99_900);
+    expect(line.pricingSource).toBeUndefined();
+    expect(proposal.confidenceFactors).not.toContain('uncatalogued_line_item');
+  });
+
+  it('without a catalog repo, behavior is unchanged (regression pin)', async () => {
+    const gateway = createMockGateway(
+      aiOutput([{ description: 'Water Heater Install', quantity: 1, unitPrice: 99_900 }]),
+    );
+    const handler = new InvoiceTaskHandler(gateway); // no repo
+
+    const { proposal } = await handler.handle(baseContext);
+
+    const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+    expect(line.unitPriceCents).toBe(99_900);
+    expect(line).not.toHaveProperty('pricingSource');
+    expect(line).not.toHaveProperty('catalogItemId');
   });
 });

@@ -109,16 +109,18 @@ function disputeCreated(opts: { piId: string }) {
 describe('payment_intent.succeeded — async (ACH/bank) settlement', () => {
   let invoiceRepo: InMemoryInvoiceRepository;
   let paymentRepo: InMemoryPaymentRepository;
+  let auditRepo: InMemoryAuditRepository;
   let app: express.Express;
 
   beforeEach(async () => {
     invoiceRepo = new InMemoryInvoiceRepository();
     paymentRepo = new InMemoryPaymentRepository();
+    auditRepo = new InMemoryAuditRepository();
     await invoiceRepo.create(makeOpenInvoice());
     app = buildApp({
       invoiceRepo,
       paymentRepo,
-      auditRepo: new InMemoryAuditRepository(),
+      auditRepo,
       stripeWebhookSecret: STRIPE_SECRET,
     });
   });
@@ -135,6 +137,32 @@ describe('payment_intent.succeeded — async (ACH/bank) settlement', () => {
     expect(payments).toHaveLength(1);
     expect(payments[0].method).toBe('bank_transfer');
     expect(payments[0].providerReference).toBe('pi_ach_1');
+  });
+
+  it('B6 — audits the webhook-sourced payment with a system actor', async () => {
+    const res = await postSigned(app, piSucceeded({ piId: 'pi_ach_audit', amount: 10000 }));
+    expect(res.status).toBe(200);
+
+    const events = auditRepo.getAll();
+    const recorded = events.find((e) => e.eventType === 'payment.recorded');
+    expect(recorded).toBeDefined();
+    expect(recorded!.actorRole).toBe('system');
+    expect(recorded!.actorId).toBe('stripe_webhook');
+    expect(recorded!.entityType).toBe('invoice');
+    expect(recorded!.entityId).toBe(INVOICE_ID);
+    expect(recorded!.correlationId).toBe('pi_ach_audit');
+    expect(recorded!.metadata).toMatchObject({
+      amountCents: 10000,
+      method: 'bank_transfer',
+      providerReference: 'pi_ach_audit',
+      newInvoiceStatus: 'paid',
+    });
+
+    const statusChange = events.find((e) => e.eventType === 'invoice.status_changed');
+    expect(statusChange).toBeDefined();
+    expect(statusChange!.actorRole).toBe('system');
+    expect(statusChange!.correlationId).toBe('pi_ach_audit');
+    expect(statusChange!.metadata).toMatchObject({ oldStatus: 'open', newStatus: 'paid' });
   });
 
   it('does not double-record when a card payment already recorded this payment_intent', async () => {

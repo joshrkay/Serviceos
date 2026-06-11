@@ -5,7 +5,7 @@ import { CreateInvoiceScheduleExecutionHandler } from './invoice-schedule-handle
 import { InvoiceScheduleRepository } from '../../invoices/invoice-schedule';
 import { BatchInvoiceExecutionHandler } from './batch-invoice-handler';
 import { UpdateInvoiceExecutionHandler } from './update-invoice-handler';
-import { IssueInvoiceExecutionHandler } from '../handlers/issue-invoice';
+import { IssueInvoiceExecutionHandler } from './issue-invoice-handler';
 import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
 import { RescheduleAppointmentExecutionHandler } from './reschedule-handler';
@@ -29,7 +29,8 @@ import { ServiceCreditRepository } from '../../reputation/service-credit';
 import { NoteRepository } from '../../notes/note';
 import { PaymentRepository } from '../../invoices/payment';
 import { ExpenseRepository } from '../../expenses/expense';
-import { AuditRepository } from '../../audit/audit';
+import { AuditRepository, createAuditEvent } from '../../audit/audit';
+import { ConflictError } from '../../shared/errors';
 import { JobRepository, createJob } from '../../jobs/job';
 import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
@@ -315,13 +316,60 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     }, this.appointmentRepo);
 
     if (this.assignmentRepo && payload.technicianId && typeof payload.technicianId === 'string') {
-      await assignTechnician({
-        tenantId: context.tenantId,
-        appointmentId: appointment.id,
-        technicianId: payload.technicianId,
-        technicianRole: 'technician',
-        assignedBy: context.executedBy,
-      }, this.assignmentRepo, { appointmentRepo: this.appointmentRepo, auditRepo: this.auditRepo });
+      try {
+        await assignTechnician({
+          tenantId: context.tenantId,
+          appointmentId: appointment.id,
+          technicianId: payload.technicianId,
+          technicianRole: 'technician',
+          assignedBy: context.executedBy,
+        }, this.assignmentRepo, { appointmentRepo: this.appointmentRepo, auditRepo: this.auditRepo });
+      } catch (err) {
+        // Atomicity guard: the pre-flight feasibility check above is subject
+        // to a TOCTOU race; the authoritative protection is the DB EXCLUDE
+        // constraint `no_double_booking` (migration 131), which surfaces here
+        // as a ConflictError from assignTechnician. The repositories don't
+        // share a client/transaction, so we compensate instead: cancel the
+        // appointment we just created so a failed booking never leaves an
+        // orphan unassigned appointment behind. The compensation itself must
+        // never mask the original failure, and its outcome is audited so an
+        // operator can find any orphan it failed to clean up.
+        let compensated = true;
+        try {
+          await this.appointmentRepo.update(context.tenantId, appointment.id, {
+            status: 'canceled',
+            updatedAt: new Date(),
+          });
+        } catch {
+          compensated = false;
+        }
+        if (this.auditRepo) {
+          try {
+            await this.auditRepo.create(
+              createAuditEvent({
+                tenantId: context.tenantId,
+                actorId: context.executedBy,
+                actorRole: 'system',
+                eventType: compensated
+                  ? 'appointment.compensation_canceled'
+                  : 'appointment.compensation_failed',
+                entityType: 'appointment',
+                entityId: appointment.id,
+                metadata: {
+                  reason: 'assignment_failed_after_create',
+                  conflict: err instanceof ConflictError,
+                },
+              }),
+            );
+          } catch {
+            // Audit emission is best-effort here; the original error wins.
+          }
+        }
+        if (err instanceof ConflictError) {
+          return { success: false, error: err.message };
+        }
+        throw err;
+      }
     }
 
     const channels: Array<'sms' | 'email'> = Array.isArray(payload.notificationChannels)
@@ -540,7 +588,14 @@ export function createExecutionHandlerRegistry(deps?: {
   // touch these don't have to provide the dep.
   if (deps?.invoiceRepo) {
     handlers.push(new UpdateInvoiceExecutionHandler(deps.invoiceRepo));
-    handlers.push(new IssueInvoiceExecutionHandler(deps.invoiceRepo, moneyStateDeps));
+    // P22-002 — issue_invoice: draft → open with tenant payment terms,
+    // tenant-timezone due date, and an invoice.issued audit event.
+    handlers.push(new IssueInvoiceExecutionHandler(
+      deps.invoiceRepo,
+      deps.settingsRepo,
+      deps.auditRepo,
+      moneyStateDeps,
+    ));
   }
   if (deps?.estimateRepo) {
     handlers.push(new UpdateEstimateExecutionHandler(

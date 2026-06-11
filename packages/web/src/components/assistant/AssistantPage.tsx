@@ -264,6 +264,17 @@ function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
                   throw new Error(`Approve failed: ${response.status} ${response.statusText}`);
                 }
               }}
+              onReject={async () => {
+                // Same authenticated client + throw-on-failure contract as
+                // approve: AIProposalCard reverts its "Rejected" state and
+                // shows an error toast when this rejects.
+                const response = await apiFetch(`/api/proposals/${msg.proposal!.id}/reject`, {
+                  method: 'POST',
+                });
+                if (!response.ok) {
+                  throw new Error(`Reject failed: ${response.status} ${response.statusText}`);
+                }
+              }}
             />
           </div>
         )}

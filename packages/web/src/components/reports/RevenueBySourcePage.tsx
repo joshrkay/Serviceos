@@ -134,7 +134,7 @@ export function RevenueBySourcePage() {
         </div>
 
         {/* Table */}
-        <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+        <div className="rounded-xl border border-slate-200 bg-white overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 border-b border-slate-200">
               <tr className="text-xs text-slate-500">

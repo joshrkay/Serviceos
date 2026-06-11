@@ -318,12 +318,19 @@ Supported intents (return exactly ONE):
                            (number or customer name).
                            Examples: "Add a site visit to estimate EST-0001"
                                      "Remove the old heater from the Johnson estimate"
-- "issue_invoice"       — user wants to SEND/ISSUE an existing DRAFT invoice to
-                           the customer. May reference the invoice explicitly by
+- "issue_invoice"       — user wants to ISSUE/FINALIZE an existing DRAFT
+                           invoice: make it official and payable (draft → open,
+                           issued and due dates stamped). Issue = make official;
+                           send = deliver (see send_invoice). First-time
+                           "send/get the bill out" phrasings imply issuing.
+                           May reference the invoice explicitly by
                            number or customer name, or implicitly ("the one we
                            just drafted", "that invoice", "the Acme invoice").
-                           Examples: "Send invoice 1024 to the customer"
+                           Examples: "Issue invoice 1024"
                                      "Issue the Acme invoice"
+                                     "Finalize the Smith invoice"
+                                     "Make the Jones invoice official"
+                                     "Send out the bill for the Acme job"
                                      "Send the invoice we just drafted"
 - "unknown"             — anything else: genuinely ambiguous transcripts,
                            or commands without a clear target. Note that
@@ -393,14 +400,19 @@ Supported intents (return exactly ONE):
                            Examples: "Note on the Rodriguez job: customer
                                       wants a call before we arrive"
                                      "Add a note to Smith's file: prefers SMS"
-- "send_invoice"        — user wants to SEND an existing invoice to a
-                           customer (email or SMS). This is a customer
-                           comms action — never auto-execute, always
+- "send_invoice"        — user wants to SEND/DELIVER an existing invoice to a
+                           customer (email or SMS). Send = deliver to the
+                           customer; issue = make official/payable (see
+                           issue_invoice). Prefer send_invoice when a delivery
+                           channel or recipient is named, or the invoice is
+                           already issued ("resend", "email it again"). This is
+                           a customer comms action — never auto-execute, always
                            require a screen-tap approval. Extract the
                            invoice reference and sendChannel.
                            Examples: "Send invoice INV-0042 to Sarah"
                                      "Email the Jones invoice"
                                      "Text the Miller invoice to them"
+                                     "Resend the Acme invoice by email"
 - "send_estimate"       — user wants to SEND an existing estimate to a
                            customer (email or SMS). This is a customer
                            comms action — never auto-execute, always
@@ -622,7 +634,12 @@ Distinctions that matter:
   "add/remove/update" plus a reference to an EXISTING invoice or estimate
   = update_invoice or update_estimate. Any phrasing starting a NEW one
   = create_invoice or draft_estimate.
-- "send/issue/deliver an invoice" = issue_invoice, NOT create_invoice.
+- "send/issue/deliver an invoice" is never create_invoice. Within the pair:
+  issue_invoice = make a DRAFT invoice official and payable ("issue",
+  "finalize", "make official", "send out the bill" for the first time);
+  send_invoice = deliver/redeliver to the customer over a channel ("email
+  the invoice", "text it to them", "resend"). When a channel or recipient
+  is named, prefer send_invoice; bare "issue/finalize" = issue_invoice.
 - Invoice vs estimate — the operator usually says which. When they say
   "invoice" or use an "INV-" prefix, use the invoice intent; when they say
   "estimate/quote" or "EST-", use the estimate intent. When genuinely
