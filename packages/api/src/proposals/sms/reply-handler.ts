@@ -238,6 +238,21 @@ async function handleApprove(
   proposal: Proposal,
 ): Promise<HandlerResult> {
   await recordInbound(deps, ctx, proposal.id, 'reply_approve');
+
+  // A recorded-but-unapplied edit request means the owner asked for a
+  // change that needs the review queue — approving now would execute the
+  // stale payload they were told required manual handling. (A successful
+  // SMS edit re-renders and unblocks; rejecting stays allowed.)
+  if (await deps.smsEventRepo.hasUnappliedEditRequest(ctx.tenantId, proposal.id)) {
+    await audit(deps, ctx, 'proposal.sms_approve_blocked_pending_edit', proposal.id, {});
+    await reply(
+      deps,
+      ctx.fromE164,
+      'You asked to change this one — your note is attached. Review and approve it in your queue.',
+    );
+    return { handled: true, handler: HANDLER_NAME, reason: 'approve_blocked_pending_edit' };
+  }
+
   try {
     const approved = await approveProposal(
       deps.proposalRepo,

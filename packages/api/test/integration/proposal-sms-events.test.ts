@@ -114,6 +114,38 @@ describe('Postgres integration — proposal_sms_events (P2-034)', () => {
     expect(await repo.findOpenEditSession(tenant.tenantId, OWNER, now)).toBeNull();
   });
 
+  it('tracks unapplied edit requests (blocks SMS approval until re-rendered)', async () => {
+    const editProposalId = await seedProposal(tenant.tenantId);
+    expect(await repo.hasUnappliedEditRequest(tenant.tenantId, editProposalId)).toBe(false);
+
+    const t0 = new Date('2026-06-11T15:00:00Z');
+    await repo.create(
+      createProposalSmsEvent({
+        tenantId: tenant.tenantId,
+        proposalId: editProposalId,
+        direction: 'inbound',
+        kind: 'edit_request',
+        messageSid: 'SM-edit-req-1',
+        fromPhone: '5125550100',
+        body: 'make it $200',
+        now: t0,
+      }),
+    );
+    expect(await repo.hasUnappliedEditRequest(tenant.tenantId, editProposalId)).toBe(true);
+
+    await repo.create(
+      createProposalSmsEvent({
+        tenantId: tenant.tenantId,
+        proposalId: editProposalId,
+        direction: 'outbound',
+        kind: 'reapproval_rendered',
+        body: 'Updated: ...',
+        now: new Date(t0.getTime() + 1000),
+      }),
+    );
+    expect(await repo.hasUnappliedEditRequest(tenant.tenantId, editProposalId)).toBe(false);
+  });
+
   it('counts clarification nudges per proposal', async () => {
     expect(await repo.countClarifications(tenant.tenantId, proposalId)).toBe(0);
     await repo.create(

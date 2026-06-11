@@ -363,6 +363,35 @@ describe('edit session flow', () => {
     );
   });
 
+  it('Y after a failed edit capture does NOT approve the stale payload', async () => {
+    const h = makeHarness({ interpretEdit: async () => null });
+    const proposal = await seedPendingProposal(h);
+    await handleProposalSmsReply(ctx('EDIT'), h.deps);
+    await handleProposalSmsFallback(ctx('make it $200'), h.deps); // recorded for manual review
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'approve_blocked_pending_edit' });
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe(
+      'ready_for_review',
+    );
+    expect(h.sent.at(-1)?.body).toContain('queue');
+    // Rejecting the stale version stays allowed — it is the safe direction.
+    const rejection = await handleProposalSmsReply(ctx('N changed my mind'), h.deps);
+    expect(rejection).toMatchObject({ handled: true, reason: 'rejected' });
+  });
+
+  it('a successful SMS edit re-render unblocks approval', async () => {
+    const h = makeHarness({ interpretEdit: async () => ({ customerName: 'Mr Chen' }) });
+    await seedPendingProposal(h);
+    await handleProposalSmsReply(ctx('EDIT'), h.deps);
+    await handleProposalSmsFallback(ctx('change to Mr Chen'), h.deps);
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'approved' });
+  });
+
   it('the session window is fixed — a message after expiry is not an edit', async () => {
     const h = makeHarness({ interpretEdit: async () => ({ customerName: 'X' }) });
     const proposal = await seedPendingProposal(h);

@@ -104,6 +104,14 @@ export interface ProposalSmsEventRepository {
   ): Promise<ProposalSmsEvent | null>;
   /** How many clarification nudges this proposal has already received. */
   countClarifications(tenantId: string, proposalId: string): Promise<number>;
+  /**
+   * True when the proposal has an `edit_request` not yet followed by a
+   * `reapproval_rendered` — the owner asked for a change that could not
+   * be applied over SMS. While true, an SMS `Y` must NOT approve: the
+   * owner would be executing the stale payload they were told needs the
+   * review queue. Ties (equal timestamps) resolve to applied.
+   */
+  hasUnappliedEditRequest(tenantId: string, proposalId: string): Promise<boolean>;
   /** Close an edit session (idempotent). */
   markConsumed(tenantId: string, id: string, at: Date): Promise<void>;
 }
@@ -157,6 +165,19 @@ export class InMemoryProposalSmsEventRepository
         e.proposalId === proposalId &&
         e.kind === 'clarification_sent',
     ).length;
+  }
+
+  async hasUnappliedEditRequest(tenantId: string, proposalId: string): Promise<boolean> {
+    const latestOf = (kind: ProposalSmsEventKind): number | null => {
+      const times = this.events
+        .filter((e) => e.tenantId === tenantId && e.proposalId === proposalId && e.kind === kind)
+        .map((e) => e.createdAt.getTime());
+      return times.length > 0 ? Math.max(...times) : null;
+    };
+    const editRequest = latestOf('edit_request');
+    if (editRequest === null) return false;
+    const reapproval = latestOf('reapproval_rendered');
+    return reapproval === null || editRequest > reapproval;
   }
 
   async markConsumed(tenantId: string, id: string, at: Date): Promise<void> {
@@ -260,6 +281,26 @@ export class PgProposalSmsEventRepository
         [tenantId, proposalId],
       );
       return (result.rows[0] as { count: number }).count;
+    });
+  }
+
+  async hasUnappliedEditRequest(tenantId: string, proposalId: string): Promise<boolean> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT
+           MAX(created_at) FILTER (WHERE kind = 'edit_request')        AS edit_request_at,
+           MAX(created_at) FILTER (WHERE kind = 'reapproval_rendered') AS reapproval_at
+         FROM proposal_sms_events
+         WHERE tenant_id = $1 AND proposal_id = $2`,
+        [tenantId, proposalId],
+      );
+      const row = result.rows[0] as {
+        edit_request_at: string | null;
+        reapproval_at: string | null;
+      };
+      if (!row.edit_request_at) return false;
+      if (!row.reapproval_at) return true;
+      return new Date(row.edit_request_at).getTime() > new Date(row.reapproval_at).getTime();
     });
   }
 
