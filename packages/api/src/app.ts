@@ -388,6 +388,13 @@ import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import { registerKeywordHandler } from './sms/inbound-dispatch';
+import {
+  registerProposalReplySms,
+  PgProposalSmsEventRepository,
+  InMemoryProposalSmsEventRepository,
+  createProposalSmsEvent,
+  createLlmEditInterpreter,
+} from './proposals/sms';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -1141,6 +1148,48 @@ export function createApp(): express.Express {
       );
     }
   }
+
+  // ── P2-034 wiring — SMS approval transport ───────────────────────────────
+  // Outbound: the unsupervised queue_and_sms body now carries reply tokens
+  // (Y / N / EDIT) and each render is persisted to proposal_sms_events.
+  // Inbound: the owner's reply (verified against tenant_settings.owner_phone)
+  // approves/rejects through the EXISTING proposal actions, or opens a
+  // 10-minute edit session interpreted by the LLM gateway and re-rendered
+  // for re-approval. Free text with no context gets one clarification nudge.
+  const proposalSmsEventRepo = pool
+    ? new PgProposalSmsEventRepository(pool)
+    : new InMemoryProposalSmsEventRepository();
+  registerProposalReplySms(
+    {
+      proposalRepo,
+      smsEventRepo: proposalSmsEventRepo,
+      settingsRepo,
+      userRepo,
+      auditRepo,
+      appointmentRepo,
+      ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
+      interpretEdit: createLlmEditInterpreter(llmGateway),
+    },
+    { overwrite: true },
+    // YES is also the compliance opt-in keyword — registerProposalReplySms
+    // upgrades the plain START handler to the opt-in-first composite.
+    { dncRepo },
+  );
+  const recordProposalSmsRender = async (args: {
+    tenantId: string;
+    proposalId: string;
+    body: string;
+  }): Promise<void> => {
+    await proposalSmsEventRepo.create(
+      createProposalSmsEvent({
+        tenantId: args.tenantId,
+        proposalId: args.proposalId,
+        direction: 'outbound',
+        kind: 'proposal_rendered',
+        body: args.body,
+      }),
+    );
+  };
   // Voice intents (add_note, send_invoice, record_payment) execute
   // against real domain repositories. Invoice delivery routes through
   // SendService when configured; resolveInvoiceDeliveryProvider throws at
@@ -1484,6 +1533,9 @@ export function createApp(): express.Express {
       resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
       resolveRouting: async (tenantId: string) =>
         (await settingsRepo.findByTenant(tenantId))?.unsupervisedProposalRouting,
+      // P2-034 — persist each outbound render so inbound Y/N/EDIT replies
+      // can resolve which proposal the owner is answering.
+      recordSmsEvent: recordProposalSmsRender,
     },
   });
   workerRegistry.set(
@@ -1634,6 +1686,9 @@ export function createApp(): express.Express {
       auditRepo,
       ...(oneTapSecret ? { secret: oneTapSecret } : {}),
       consumeNonce: consumeOneTapNonce,
+      // P2-034 — a pending manual edit request blocks the link too, not
+      // just SMS Y replies; both paths approve the same stale payload.
+      smsEventRepo: proposalSmsEventRepo,
     }),
   );
 

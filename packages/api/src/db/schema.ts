@@ -3924,6 +3924,57 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_integrations
       ADD COLUMN IF NOT EXISTS credentials JSONB NOT NULL DEFAULT '{}';
   `,
+
+  '156_proposal_sms_events': `
+    -- P2-034: SMS approval transport. Append-only record of the SMS
+    -- conversation around a proposal (outbound renders, inbound
+    -- approve/reject replies, edit sessions, clarification nudges).
+    -- Read paths: latest outbound render (which proposal is the owner
+    -- replying to?) and open edit session (unconsumed, unexpired).
+    CREATE TABLE IF NOT EXISTS proposal_sms_events (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID NOT NULL REFERENCES proposals(id),
+      direction TEXT NOT NULL CHECK (direction IN ('outbound','inbound')),
+      kind TEXT NOT NULL CHECK (kind IN (
+        'proposal_rendered','reapproval_rendered','clarification_sent',
+        'reply_approve','reply_reject','edit_session_opened','edit_request'
+      )),
+      message_sid TEXT,
+      body TEXT NOT NULL,
+      expires_at TIMESTAMPTZ,
+      consumed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_proposal_sms_events_tenant_recent
+      ON proposal_sms_events (tenant_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_proposal_sms_events_proposal
+      ON proposal_sms_events (tenant_id, proposal_id);
+    ALTER TABLE proposal_sms_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE proposal_sms_events FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_proposal_sms_events ON proposal_sms_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '157_proposal_sms_events_from_phone': `
+    -- P2-034 review fix: edit sessions must be scoped to the sender.
+    -- Tenants can have two approvers (owner + backup supervisor); a
+    -- tenant-wide open session let approver B's Y/N be consumed as
+    -- approver A's edit instruction. Normalized sender digits, set on
+    -- inbound events; outbound rows stay NULL.
+    ALTER TABLE proposal_sms_events
+      ADD COLUMN IF NOT EXISTS from_phone TEXT;
+  `,
+
+  '158_proposal_sms_events_seq': `
+    -- P2-034 review fix: created_at has millisecond precision, so
+    -- back-to-back renders (multi-action chains) can tie and "the latest
+    -- outbound render" — which decides what a Y/N reply targets — becomes
+    -- nondeterministic. BIGSERIAL backfills existing rows in insertion
+    -- order and gives every new row a monotonic tiebreaker.
+    ALTER TABLE proposal_sms_events
+      ADD COLUMN IF NOT EXISTS seq BIGSERIAL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

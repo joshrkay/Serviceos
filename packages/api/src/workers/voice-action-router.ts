@@ -5,6 +5,7 @@ import { Proposal, ProposalRepository, createProposal, CreateProposalInput, Prop
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
 import { routeUnsupervisedProposal } from '../proposals/auto-approve';
+import { renderProposalSms } from '../proposals/sms/render';
 import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
 import type { AuditRepository } from '../audit/audit';
 import type { UnsupervisedProposalRouting } from '../settings/settings';
@@ -120,6 +121,15 @@ export interface RecentReferentProvider {
 export interface UnsupervisedRoutingDeps extends RouteUnsupervisedProposalDeps {
   resolveOwnerPhone?: (tenantId: string) => Promise<string | null | undefined>;
   resolveRouting?: (tenantId: string) => Promise<UnsupervisedProposalRouting | undefined>;
+  /**
+   * P2-034 — records the outbound proposal SMS (`proposal_sms_events`,
+   * kind `proposal_rendered`) that anchors the inbound reply transport.
+   */
+  recordSmsEvent?: (args: {
+    tenantId: string;
+    proposalId: string;
+    body: string;
+  }) => Promise<void>;
 }
 
 export interface VoiceActionRouterDeps {
@@ -1309,22 +1319,47 @@ export function createVoiceActionRouterWorker(
           try {
             const routing = await ur.resolveRouting?.(tenantId);
             const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
+            const proposal = outcome.proposal;
             await routeUnsupervisedProposal(
               {
                 auditRepo: ur.auditRepo,
                 ...(ur.sendSms ? { sendSms: ur.sendSms } : {}),
                 ...(ur.secret ? { secret: ur.secret } : {}),
                 ...(ur.buildApproveUrl ? { buildApproveUrl: ur.buildApproveUrl } : {}),
+                // P2-034 — persist the outbound render so the inbound
+                // Y/N/EDIT reply handler can resolve which proposal the
+                // owner is answering.
+                ...(ur.recordSmsEvent
+                  ? {
+                      onSmsSent: async ({ body }: { body: string }) =>
+                        ur.recordSmsEvent!({
+                          tenantId,
+                          proposalId: proposal.id,
+                          body,
+                        }),
+                    }
+                  : {}),
               },
               {
                 tenantId,
-                proposalId: outcome.proposal.id,
+                proposalId: proposal.id,
                 ...(routing ? { routing } : {}),
                 // Operator voice recordings are not a live inbound call, so
                 // `escalate_to_oncall` falls back to queue_only here by design.
                 channel: 'other',
                 ...(ownerPhone ? { ownerPhone } : {}),
-                summaryText: outcome.proposal.summary,
+                summaryText: proposal.summary,
+                // P2-034 — full reply-token body (summary + facts +
+                // "Reply Y/N/EDIT" + the one-tap link).
+                renderSmsBody: (approveUrl: string) =>
+                  renderProposalSms(
+                    {
+                      proposalType: proposal.proposalType,
+                      summary: proposal.summary,
+                      payload: proposal.payload,
+                    },
+                    { approveUrl },
+                  ),
               },
             );
           } catch (err) {

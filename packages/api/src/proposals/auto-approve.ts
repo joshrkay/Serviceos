@@ -295,6 +295,12 @@ export interface RouteUnsupervisedProposalDeps {
   buildApproveUrl?: (token: string) => string;
   /** HMAC secret for the one-tap token. Required for queue_and_sms SMS. */
   secret?: string;
+  /**
+   * P2-034 — invoked after the owner SMS goes out so the caller can record
+   * the outbound `proposal_sms_events` row that anchors the reply transport
+   * (the inbound Y/N/EDIT handler resolves "which proposal?" from it).
+   */
+  onSmsSent?: (sent: { body: string; expiresAt: Date }) => Promise<void>;
 }
 
 export interface RouteUnsupervisedProposalInput {
@@ -308,6 +314,12 @@ export interface RouteUnsupervisedProposalInput {
   ownerPhone?: string | null;
   /** Short human label for the SMS body, e.g. "New booking for Jane D." */
   summaryText?: string;
+  /**
+   * P2-034 — full SMS body builder (proposal summary + key facts + reply
+   * tokens + the one-tap link). When absent the legacy link-only body is
+   * sent, so existing callers keep their exact behavior.
+   */
+  renderSmsBody?: (approveUrl: string) => string;
   nowMs?: number;
 }
 
@@ -352,12 +364,18 @@ export async function routeUnsupervisedProposal(
         ? deps.buildApproveUrl(token)
         : `/p/approve?token=${encodeURIComponent(token)}`;
       const summary = input.summaryText ?? 'A proposal needs your approval';
-      await deps.sendSms(
-        input.ownerPhone,
-        `${summary}. Tap to approve (link expires in 30 min): ${url}`,
-      );
+      const body = input.renderSmsBody
+        ? input.renderSmsBody(url)
+        : `${summary}. Tap to approve (link expires in 30 min): ${url}`;
+      await deps.sendSms(input.ownerPhone, body);
       smsSent = true;
       approveLinkExpiresAt = expiresAt;
+      // P2-034 — anchor the reply transport. Recorded only after a
+      // successful send; a failure here surfaces to the caller's
+      // best-effort wrapper rather than silently losing the anchor.
+      if (deps.onSmsSent) {
+        await deps.onSmsSent({ body, expiresAt });
+      }
     }
     // No phone / no SMS seam: the proposal still sits in ready_for_review —
     // behaviorally queue_only, but we record the requested routing in audit.

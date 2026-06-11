@@ -219,6 +219,12 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['154_call_me_back_session_idempotency', 'a08d1ad3f4a42adb17e2fd5ea464b52fb87721d3dd5fe534c662dd787228c65e'],
   // QA-2026-06-10: credentials column + google_business provider missing from tenant_integrations
   ['155_tenant_integrations_google_business', 'd626700ea571d2691927cf6adf43704b3bc44aecde7071f3895c1cf801cf2a7f'],
+  // P2-034: SMS approval transport — proposal_sms_events
+  ['156_proposal_sms_events', '57fcfceeddded524d51d9d941e139b094dc684e818ea6c5772d561710a72d469'],
+  // P2-034 review: sender-scoped edit sessions
+  ['157_proposal_sms_events_from_phone', 'ba440770da6030cbbeb747578d33763768ef56191219f082b3b5233a6d204561'],
+  // P2-034 review: monotonic tiebreaker for latest-render ordering
+  ['158_proposal_sms_events_seq', '69e5325add052650a0355aeddab03b016018bf3d3272f63601b468ba32a67b9d'],
 ];
 
 function hashMigration(value: string): string {

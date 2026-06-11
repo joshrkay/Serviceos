@@ -411,3 +411,81 @@ describe('P12-004 — routeUnsupervisedProposal', () => {
     expect(events).toHaveLength(1);
   });
 });
+
+describe('P2-034 — routeUnsupervisedProposal SMS transport seams', () => {
+  const base = {
+    tenantId: 'tenant-1',
+    proposalId: 'prop-1',
+    channel: 'other' as const,
+    ownerPhone: '+15555550100',
+  };
+
+  it('renderSmsBody builds the body around the one-tap URL and onSmsSent records it', async () => {
+    const audit = new InMemoryAuditRepository();
+    const sms: { to: string; body: string }[] = [];
+    const recorded: { body: string; expiresAt: Date }[] = [];
+
+    const result = await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        sendSms: async (to, body) => {
+          sms.push({ to, body });
+        },
+        buildApproveUrl: (token) => `https://app.test/p/approve?token=${token}`,
+        onSmsSent: async (sent) => {
+          recorded.push(sent);
+        },
+      },
+      {
+        ...base,
+        renderSmsBody: (url) => `Custom body. Reply Y/N/EDIT. ${url}`,
+      },
+    );
+
+    expect(result.smsSent).toBe(true);
+    expect(sms[0].body).toMatch(/^Custom body\. Reply Y\/N\/EDIT\. https:\/\/app\.test/);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].body).toBe(sms[0].body);
+    expect(recorded[0].expiresAt).toEqual(result.approveLinkExpiresAt);
+  });
+
+  it('keeps the legacy link-only body when renderSmsBody is absent', async () => {
+    const audit = new InMemoryAuditRepository();
+    const sms: { to: string; body: string }[] = [];
+
+    await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        sendSms: async (to, body) => {
+          sms.push({ to, body });
+        },
+        buildApproveUrl: (token) => `https://app.test/p/approve?token=${token}`,
+      },
+      { ...base, summaryText: 'New booking for Jane D.' },
+    );
+
+    expect(sms[0].body).toBe(
+      `New booking for Jane D.. Tap to approve (link expires in 30 min): ${sms[0].body.split(': ')[1]}`,
+    );
+  });
+
+  it('does not invoke onSmsSent when no SMS goes out', async () => {
+    const audit = new InMemoryAuditRepository();
+    let called = 0;
+
+    await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        onSmsSent: async () => {
+          called += 1;
+        },
+      },
+      { ...base, ownerPhone: null },
+    );
+
+    expect(called).toBe(0);
+  });
+});
