@@ -1,29 +1,39 @@
 /**
  * RV-003 — Repository-layer cross-tenant leak integration tests.
  *
- * The existing RLS tests (rls-tenant-isolation.test.ts, rls-runtime-audit.test.ts)
- * verify DB-level RLS enforcement via raw SQL through an unprivileged role.
- * This file closes the remaining gap: it exercises the *actual repository
- * classes* (PgCustomerRepository, PgJobRepository, PgEstimateRepository,
+ * This file has two layers of coverage:
+ *
+ * Layer 1 — Repository API: exercises the actual repository classes
+ * (PgCustomerRepository, PgJobRepository, PgEstimateRepository,
  * PgInvoiceRepository, PgProposalRepository, PgFileRepository,
  * PgTenantFeatureFlagRepository) to confirm that each repo's own
- * `findByTenant` / `findById` methods never surface rows that belong to
- * a different tenant — and that withTenant correctly applies RLS context.
+ * `findByTenant` / `findById` methods never surface rows belonging to a
+ * different tenant.
+ *
+ * Layer 2 — Raw RLS cross-checks: probes the DB-level RLS policies via an
+ * unprivileged role (`rls_app_runtime`, NOBYPASSRLS) to confirm the policies
+ * themselves enforce isolation — not just the application layer. The test pool
+ * connects as a SUPERUSER, which bypasses RLS unconditionally, so raw probes
+ * MUST run through the unprivileged role using the asTenant helper (same
+ * pattern as rls-tenant-isolation.test.ts:28-45).
  *
  * Pattern:
- *   1. Seed tenant A + tenant B with one fixture each.
+ *   1. Seed tenant A + tenant B with one fixture each (as superuser — no RLS).
  *   2. Call the repo method scoped to tenant A, assert B's row is absent.
  *   3. Call scoped to tenant B, assert A's row is absent.
  *   4. Call findById for a B-owned id but scoped to A — expect null.
+ *   5. Raw RLS cross-check through unprivileged role (asTenant).
+ *   6. GUC-unset coverage: assert fail-closed behaviour when no tenant
+ *      context is set (policies use current_setting without missing_ok →
+ *      error thrown).
  *
  * Docker gate: the test suite runs only when the integration testcontainer
  * is available (TEST_DB_URL set by global-setup). The shared getSharedTestDb()
  * helper throws if TEST_DB_URL is missing, which causes a clear beforeAll
- * failure rather than a silent skip. This matches the pattern used by every
- * other file in test/integration/.
+ * failure rather than a silent skip.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgJobRepository } from '../../src/jobs/pg-job';
@@ -35,6 +45,34 @@ import { PgFileRepository } from '../../src/files/pg-file';
 import { PgTenantFeatureFlagRepository } from '../../src/flags/pg-tenant-feature-flags';
 import { InMemoryFeatureFlagRepository } from '../../src/flags/feature-flags';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
+
+const APP_ROLE = 'rls_app_runtime';
+
+/**
+ * Run `fn` on a connection that behaves like the production app: an
+ * unprivileged role (NOBYPASSRLS) with `app.current_tenant_id` set for the
+ * duration of a transaction. Mirrors the pattern in
+ * rls-tenant-isolation.test.ts:28-45. Always rolls back so tests are
+ * side-effect free.
+ */
+async function asTenant<T>(
+  pool: Pool,
+  tenantId: string | null,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+    if (tenantId !== null) {
+      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    }
+    return await fn(client);
+  } finally {
+    await client.query('ROLLBACK').catch(() => undefined);
+    client.release();
+  }
+}
 
 describe('repository-layer cross-tenant leak (RV-003)', () => {
   let pool: Pool;
@@ -59,6 +97,17 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
+
+    // Unprivileged role used by the raw RLS cross-checks and GUC-unset tests.
+    // Idempotent — other integration test files may create the same role in
+    // the same shared container. Pattern from rls-tenant-isolation.test.ts:69-75.
+    await pool.query(`DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${APP_ROLE}') THEN
+        CREATE ROLE ${APP_ROLE} NOLOGIN NOBYPASSRLS;
+      END IF;
+    END $$;`);
+    await pool.query(`GRANT USAGE ON SCHEMA public TO ${APP_ROLE}`);
+    await pool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${APP_ROLE}`);
 
     tenantA = await createTestTenant(pool);
     tenantB = await createTestTenant(pool);
@@ -457,23 +506,69 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
     });
 
     it('tenant A flag row is invisible to tenant B via RLS (raw query cross-check)', async () => {
-      // Use a raw connection scoped to tenant B to confirm tenant A's flag row
-      // is filtered by the RLS policy — not merely hidden by app-level logic.
-      const client = await pool.connect();
-      try {
-        await client.query(
-          `SELECT set_config('app.current_tenant_id', $1, false)`,
-          [tenantB.tenantId],
-        );
-        const res = await client.query(
+      // The test pool connects as a SUPERUSER, which bypasses RLS
+      // unconditionally (FORCE ROW LEVEL SECURITY does not apply to
+      // superusers). Running the assertion through the shared pool would
+      // always return count=1, making the check vacuously wrong.
+      // Instead we use asTenant (SET LOCAL ROLE rls_app_runtime — NOBYPASSRLS)
+      // which is the same pattern used by rls-tenant-isolation.test.ts:28-45.
+      const n = await asTenant(pool, tenantB.tenantId, async (client) => {
+        const res = await client.query<{ n: number }>(
           `SELECT count(*)::int AS n FROM tenant_feature_flags
            WHERE tenant_id = $1 AND flag_key = $2`,
           [tenantA.tenantId, FLAG_KEY],
         );
-        // Row belongs to tenant A; tenant B's GUC must filter it out entirely
-        expect(res.rows[0].n).toBe(0);
+        return res.rows[0].n;
+      });
+      // Row belongs to tenant A; tenant B's GUC must filter it out entirely.
+      expect(n).toBe(0);
+    });
+  });
+
+  // ── GUC-unset (fail-closed) coverage ──────────────────────────────────────
+  //
+  // Nothing in the repo previously tested what happens when no tenant context
+  // is set at all. Both policies below use:
+  //   current_setting('app.current_tenant_id')::UUID
+  // without the `, true` (missing_ok) flag, so Postgres raises an error when
+  // the GUC is unset rather than silently returning NULL / zero rows. This is
+  // the correct fail-closed behaviour — the tests below pin it.
+  describe('GUC-unset fail-closed behaviour (no app.current_tenant_id)', () => {
+    it('SELECT on customers throws when GUC is not set (fail-closed policy)', async () => {
+      // customers policy (schema.ts migration 014, line ~332-333):
+      //   USING (tenant_id = current_setting('app.current_tenant_id')::UUID)
+      // No missing_ok → current_setting raises "unrecognized configuration
+      // parameter" when the GUC has never been set in this transaction.
+      // We verify the error is thrown, not that zero rows are returned.
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+        // Explicitly reset the GUC so it is unset within this transaction.
+        await client.query(`RESET app.current_tenant_id`);
+        await expect(
+          client.query('SELECT count(*) FROM customers'),
+        ).rejects.toThrow();
       } finally {
-        await client.query(`RESET app.current_tenant_id`).catch(() => {});
+        await client.query('ROLLBACK').catch(() => undefined);
+        client.release();
+      }
+    });
+
+    it('SELECT on tenant_feature_flags throws when GUC is not set (fail-closed policy)', async () => {
+      // tenant_feature_flags policy (schema.ts migration 159, line ~3992-3993):
+      //   USING (tenant_id = current_setting('app.current_tenant_id')::UUID)
+      // No missing_ok → same fail-closed error as customers above.
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+        await client.query(`RESET app.current_tenant_id`);
+        await expect(
+          client.query('SELECT count(*) FROM tenant_feature_flags'),
+        ).rejects.toThrow();
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined);
         client.release();
       }
     });
