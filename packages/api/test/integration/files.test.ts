@@ -103,6 +103,78 @@ describe('Postgres integration — files', () => {
     });
   });
 
+  // RV-006: pins the real migration-161 column names (width, height,
+  // thumbnail_s3_key, exif_stripped, content_hash) — in-memory tests alone
+  // can't prove the SQL matches the schema.
+  describe('image pipeline columns (RV-006)', () => {
+    function baseRecord() {
+      const id = crypto.randomUUID();
+      return {
+        id,
+        tenantId: tenant.tenantId,
+        filename: 'photo.jpg',
+        contentType: 'image/heic',
+        sizeBytes: 1000,
+        storageBucket: 'test-bucket',
+        storageKey: `uploads/${id}.jpg`,
+        uploadedBy: tenant.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+    }
+
+    it('updatePipelineResults stamps all pipeline columns', async () => {
+      const fileRecord = await fileRepo.create(baseRecord());
+      expect(fileRecord.exifStripped).toBe(false);
+      expect(fileRecord.contentHash).toBeUndefined();
+
+      const updated = await fileRepo.updatePipelineResults(tenant.tenantId, fileRecord.id, {
+        contentHash: 'a'.repeat(64),
+        width: 640,
+        height: 480,
+        thumbnailS3Key: `${fileRecord.storageKey}.thumb.jpg`,
+        exifStripped: true,
+        contentType: 'image/jpeg',
+        sizeBytes: 2000,
+      });
+
+      expect(updated).not.toBeNull();
+      expect(updated!.width).toBe(640);
+      expect(updated!.height).toBe(480);
+      expect(updated!.thumbnailS3Key).toBe(`${fileRecord.storageKey}.thumb.jpg`);
+      expect(updated!.exifStripped).toBe(true);
+      expect(updated!.contentHash).toBe('a'.repeat(64));
+      expect(updated!.contentType).toBe('image/jpeg');
+      expect(updated!.sizeBytes).toBe(2000);
+    });
+
+    it('updatePipelineResults hash-only path leaves other columns untouched', async () => {
+      const fileRecord = await fileRepo.create(baseRecord());
+      const updated = await fileRepo.updatePipelineResults(tenant.tenantId, fileRecord.id, {
+        contentHash: 'b'.repeat(64),
+      });
+      expect(updated!.contentHash).toBe('b'.repeat(64));
+      expect(updated!.width).toBeUndefined();
+      expect(updated!.thumbnailS3Key).toBeUndefined();
+      expect(updated!.exifStripped).toBe(false);
+      expect(updated!.contentType).toBe('image/heic');
+    });
+
+    it('findByContentHash returns matching files newest-first, tenant-scoped', async () => {
+      const hash = crypto.randomUUID().replace(/-/g, '');
+      const a = await fileRepo.create(baseRecord());
+      await fileRepo.updatePipelineResults(tenant.tenantId, a.id, { contentHash: hash });
+      const b = await fileRepo.create(baseRecord());
+      await fileRepo.updatePipelineResults(tenant.tenantId, b.id, { contentHash: hash });
+
+      const matches = await fileRepo.findByContentHash(tenant.tenantId, hash);
+      expect(matches.map((f) => f.id).sort()).toEqual([a.id, b.id].sort());
+
+      const otherTenant = await createTestTenant(pool);
+      expect(await fileRepo.findByContentHash(otherTenant.tenantId, hash)).toHaveLength(0);
+    });
+  });
+
   describe('tenant isolation', () => {
     it('rejects cross-tenant access', async () => {
       const otherTenant = await createTestTenant(pool);
