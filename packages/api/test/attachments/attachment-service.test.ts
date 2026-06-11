@@ -41,7 +41,12 @@ class FakeStorageProvider implements StorageProvider {
   }
 }
 
-function makeFileRecord(tenantId: string, overrides: Partial<FileRecord> = {}): FileRecord {
+function makeFileRecord(
+  tenantId: string,
+  entityType = 'job',
+  entityId = 'x',
+  overrides: Partial<FileRecord> = {}
+): FileRecord {
   const id = overrides.id ?? uuidv4();
   return {
     id,
@@ -50,7 +55,9 @@ function makeFileRecord(tenantId: string, overrides: Partial<FileRecord> = {}): 
     contentType: 'image/jpeg',
     sizeBytes: 1024,
     storageBucket: 'test-bucket',
-    storageKey: `${tenantId}/attachments/job/x/${id}-photo.jpg`,
+    storageKey: `${tenantId}/attachments/${entityType}/${entityId}/${id}-photo.jpg`,
+    entityType,
+    entityId,
     uploadedBy: ACTOR.userId,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -90,8 +97,12 @@ describe('AttachmentService', () => {
     );
   });
 
-  async function seedFile(tenantId = TENANT_A): Promise<FileRecord> {
-    return fileRepo.create(makeFileRecord(tenantId));
+  async function seedFile(
+    tenantId = TENANT_A,
+    entityType = 'job',
+    entityId = jobId
+  ): Promise<FileRecord> {
+    return fileRepo.create(makeFileRecord(tenantId, entityType, entityId));
   }
 
   describe('attach', () => {
@@ -154,7 +165,7 @@ describe('AttachmentService', () => {
     });
 
     it('validates invoice entities through the invoice lookup', async () => {
-      const file = await seedFile();
+      const file = await seedFile(TENANT_A, 'invoice', invoiceId);
       const attachment = await service.attach(TENANT_A, ACTOR, {
         fileId: file.id,
         entityType: 'invoice',
@@ -300,7 +311,7 @@ describe('AttachmentService', () => {
 
   describe('pair', () => {
     async function seedAttachment(entityId: string, entityType: 'job' | 'invoice' = 'job') {
-      const file = await seedFile();
+      const file = await seedFile(TENANT_A, entityType, entityId);
       return service.attach(TENANT_A, ACTOR, {
         fileId: file.id,
         entityType,
@@ -363,7 +374,7 @@ describe('AttachmentService', () => {
       const a = await seedAttachment(jobId);
       // Tenant B attachment, created directly through the repo (lookups are
       // tenant-agnostic stubs here; the tenant boundary is what we test).
-      const fileB = await fileRepo.create(makeFileRecord(TENANT_B));
+      const fileB = await fileRepo.create(makeFileRecord(TENANT_B, 'job', jobId));
       const b = await attachmentRepo.create(TENANT_B, {
         fileId: fileB.id,
         entityType: 'job',
@@ -377,6 +388,70 @@ describe('AttachmentService', () => {
       // No partial pairing happened.
       const reloaded = await attachmentRepo.findById(TENANT_A, a.id);
       expect(reloaded!.pairGroupId).toBeUndefined();
+    });
+
+    it('clears pair fields on orphaned members when re-pairing (A-B paired, pair(A,C) → B has null pair fields)', async () => {
+      const a = await seedAttachment(jobId);
+      const b = await seedAttachment(jobId);
+      const c = await seedAttachment(jobId);
+
+      // First pair: A-B
+      await service.pair(TENANT_A, ACTOR, a.id, b.id, 'before');
+      const bAfterFirst = await attachmentRepo.findById(TENANT_A, b.id);
+      expect(bAfterFirst!.pairGroupId).toBeTruthy();
+
+      // Re-pair: A-C (B should be orphaned and have null pair fields)
+      const result = await service.pair(TENANT_A, ACTOR, a.id, c.id, 'before');
+      expect(result.attachment.pairGroupId).toBe(result.pairGroupId);
+      expect(result.other.pairGroupId).toBe(result.pairGroupId);
+
+      const bAfterRePair = await attachmentRepo.findById(TENANT_A, b.id);
+      expect(bAfterRePair!.pairGroupId).toBeUndefined();
+      expect(bAfterRePair!.pairRole).toBeUndefined();
+    });
+  });
+
+  describe('listForEntity (portalVisibleOnly)', () => {
+    it('filters to only portal-visible attachments when portalVisibleOnly is true', async () => {
+      const fileA = await seedFile();
+      const fileB = await seedFile();
+      const attA = await service.attach(TENANT_A, ACTOR, {
+        fileId: fileA.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+      await service.attach(TENANT_A, ACTOR, {
+        fileId: fileB.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+      // Make only attA portal-visible
+      await service.setPortalVisibility(TENANT_A, ACTOR, attA.id, true);
+
+      const visible = await service.listForEntity(TENANT_A, 'job', jobId, {
+        portalVisibleOnly: true,
+      });
+      expect(visible).toHaveLength(1);
+      expect(visible[0].id).toBe(attA.id);
+
+      const all = await service.listForEntity(TENANT_A, 'job', jobId);
+      expect(all).toHaveLength(2);
+    });
+
+    it('returns all non-archived when portalVisibleOnly is false or omitted', async () => {
+      const file = await seedFile();
+      await service.attach(TENANT_A, ACTOR, {
+        fileId: file.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+      const result = await service.listForEntity(TENANT_A, 'job', jobId, {
+        portalVisibleOnly: false,
+      });
+      expect(result).toHaveLength(1);
     });
   });
 });

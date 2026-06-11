@@ -17,6 +17,7 @@ import {
   Attachment,
   AttachmentEntityType,
   AttachmentPairRole,
+  AttachmentPairTargetNotFoundError,
   AttachmentRepository,
   CreateAttachmentInput,
   ListByEntityOptions,
@@ -105,10 +106,18 @@ export class AttachmentService {
     entityId: string,
     options?: ListByEntityOptions
   ): Promise<AttachmentWithUrl[]> {
-    const attachments = await this.repo.listByEntity(tenantId, entityType, entityId, options);
+    // Fetch attachments and all files for this entity in two queries (not N+1).
+    // findByEntity returns all file rows for the entity in a single query;
+    // we build a lookup map so each attachment can resolve its file in O(1).
+    const [attachments, fileRows] = await Promise.all([
+      this.repo.listByEntity(tenantId, entityType, entityId, options),
+      this.fileRepo.findByEntity(tenantId, entityType, entityId),
+    ]);
+    const fileMap = new Map(fileRows.map((f) => [f.id, f]));
+
     return Promise.all(
       attachments.map(async (attachment) => {
-        const file = await this.fileRepo.findById(tenantId, attachment.fileId);
+        const file = fileMap.get(attachment.fileId) ?? null;
         if (!file) {
           // File was deleted out from under us — surface a placeholder entry
           // so galleries can still show metadata + offer to archive the
@@ -229,9 +238,12 @@ export class AttachmentService {
         pairGroupId
       ));
     } catch (err) {
-      // The atomic pair() throws when either row is not found in this tenant.
-      // Re-raise as NotFoundError so the service contract is unchanged.
-      throw new NotFoundError('Attachment', (err as Error).message.includes(id) ? id : otherId);
+      // Catch ONLY the typed sentinel thrown when a target row is not found.
+      // All other errors (DB failures, etc.) rethrow unchanged.
+      if (err instanceof AttachmentPairTargetNotFoundError) {
+        throw new NotFoundError('Attachment', err.attachmentId);
+      }
+      throw err;
     }
 
     await this.auditRepo.create(

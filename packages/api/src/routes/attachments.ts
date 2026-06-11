@@ -35,8 +35,13 @@ import { requireAuth, requirePermission, requireTenant } from '../middleware/aut
 import { toErrorResponse } from '../shared/errors';
 import { validate } from '../shared/validation';
 
+// Presign is restricted to the entity types that have wired entity-existence
+// lookups today. Extend this tuple alongside the service entityLookups map
+// in app.ts when later tasks add support for more entity types.
+const PRESIGN_ENTITY_TYPES = ['job', 'invoice', 'estimate'] as const;
+
 const presignSchema = z.object({
-  entityType: z.enum(ATTACHMENT_ENTITY_TYPES),
+  entityType: z.enum(PRESIGN_ENTITY_TYPES),
   entityId: z.string().uuid(),
   filename: z.string().min(1),
   contentType: z.string().min(1),
@@ -240,7 +245,7 @@ export function createAttachmentsRouter(deps: AttachmentsRouterDeps): Router {
     '/:id/visibility',
     requireAuth,
     requireTenant,
-    requirePermission('files:upload'),
+    requirePermission('attachments:visibility'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const body = validate(visibilitySchema, req.body ?? {});

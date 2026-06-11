@@ -297,4 +297,93 @@ describe('job-photo dual-write shadow into attachments (RV-005)', () => {
     expect(mapJobPhotoCategoryToAttachmentCategory('completion')).toBe('completion');
     expect(mapJobPhotoCategoryToAttachmentCategory('other')).toBe('other');
   });
+
+  it('archives the shadow attachment row when a job photo is deleted', async () => {
+    const fileRepo = new InMemoryFileRepository();
+    const photoRepo = new InMemoryJobPhotoRepository();
+    const attachmentRepo = new InMemoryAttachmentRepository();
+    const service = new JobPhotoService(
+      photoRepo,
+      fileRepo,
+      new FakeStorageProvider(),
+      attachmentRepo
+    );
+    const file = await seedFile(fileRepo);
+
+    const photo = await service.attachPhotoToJob(
+      TENANT, JOB_ID, file.id, 'before', undefined, undefined, USER_ID
+    );
+    // Shadow row exists and is not archived yet.
+    const shadowsBefore = await attachmentRepo.listByEntity(TENANT, 'job', JOB_ID);
+    expect(shadowsBefore).toHaveLength(1);
+
+    const deleted = await service.deleteJobPhoto(TENANT, JOB_ID, photo.id);
+    expect(deleted).toBe(true);
+
+    // Shadow row should now be archived (excluded from default list).
+    const shadowsAfter = await attachmentRepo.listByEntity(TENANT, 'job', JOB_ID);
+    expect(shadowsAfter).toHaveLength(0);
+
+    const allShadows = await attachmentRepo.listByEntity(TENANT, 'job', JOB_ID, {
+      includeArchived: true,
+    });
+    expect(allShadows).toHaveLength(1);
+    expect(allShadows[0].archivedAt).toBeInstanceOf(Date);
+  });
+
+  it('delete succeeds when there is no matching shadow row', async () => {
+    const fileRepo = new InMemoryFileRepository();
+    const photoRepo = new InMemoryJobPhotoRepository();
+    const attachmentRepo = new InMemoryAttachmentRepository();
+    const service = new JobPhotoService(
+      photoRepo,
+      fileRepo,
+      new FakeStorageProvider(),
+      attachmentRepo
+    );
+    const file = await seedFile(fileRepo);
+    // Create job photo WITHOUT shadow write (call repo directly)
+    const photo = await photoRepo.create({
+      tenantId: TENANT,
+      jobId: JOB_ID,
+      uploadedByUserId: USER_ID,
+      fileId: file.id,
+      category: 'after',
+    });
+
+    // No shadow row exists — delete should still succeed
+    const deleted = await service.deleteJobPhoto(TENANT, JOB_ID, photo.id);
+    expect(deleted).toBe(true);
+    expect(await photoRepo.findById(TENANT, photo.id)).toBeNull();
+  });
+
+  it('shadow-archive failure does not break job-photo delete', async () => {
+    const fileRepo = new InMemoryFileRepository();
+    const photoRepo = new InMemoryJobPhotoRepository();
+    const attachmentRepo = new InMemoryAttachmentRepository();
+    const service = new JobPhotoService(
+      photoRepo,
+      fileRepo,
+      new FakeStorageProvider(),
+      attachmentRepo
+    );
+    const file = await seedFile(fileRepo);
+    const photo = await service.attachPhotoToJob(
+      TENANT, JOB_ID, file.id, 'before', undefined, undefined, USER_ID
+    );
+
+    // Make archive throw
+    attachmentRepo.archive = async () => {
+      throw new Error('archive is broken');
+    };
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const deleted = await service.deleteJobPhoto(TENANT, JOB_ID, photo.id);
+      expect(deleted).toBe(true);
+      expect(await photoRepo.findById(TENANT, photo.id)).toBeNull();
+      expect(errorSpy).toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
 });

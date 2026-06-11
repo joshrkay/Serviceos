@@ -10,6 +10,18 @@
  */
 import { v4 as uuidv4 } from 'uuid';
 
+/**
+ * Typed sentinel thrown by repo.pair() when one of the target attachment
+ * rows is not found in the tenant. The service catches ONLY this class and
+ * maps it to NotFoundError; all other errors rethrow unchanged.
+ */
+export class AttachmentPairTargetNotFoundError extends Error {
+  constructor(public readonly attachmentId: string) {
+    super(`Attachment not found: ${attachmentId}`);
+    this.name = 'AttachmentPairTargetNotFoundError';
+  }
+}
+
 export const ATTACHMENT_ENTITY_TYPES = [
   'job',
   'invoice',
@@ -76,11 +88,24 @@ export interface CreateAttachmentInput {
 
 export interface ListByEntityOptions {
   includeArchived?: boolean;
+  /** When true, only attachments with portal_visible = true are returned. */
+  portalVisibleOnly?: boolean;
 }
+
 
 export interface AttachmentRepository {
   create(tenantId: string, input: CreateAttachmentInput): Promise<Attachment>;
   findById(tenantId: string, id: string): Promise<Attachment | null>;
+  /**
+   * Find the most-recent non-archived attachment for a given fileId + entity
+   * combination. Used by dual-write delete to locate the shadow attachment row.
+   */
+  findByFileId(
+    tenantId: string,
+    fileId: string,
+    entityType: AttachmentEntityType,
+    entityId: string
+  ): Promise<Attachment | null>;
   listByEntity(
     tenantId: string,
     entityType: AttachmentEntityType,
@@ -92,7 +117,10 @@ export interface AttachmentRepository {
   setPortalVisibility(tenantId: string, id: string, visible: boolean): Promise<Attachment | null>;
   /**
    * Atomically update both attachments in a before/after pair within a single
-   * transaction. Throws (rolls back) if either row is not found in this tenant.
+   * transaction. Throws AttachmentPairTargetNotFoundError (rolls back) if
+   * either row is not found in this tenant. Also clears pair_group_id and
+   * pair_role from any OTHER rows that previously shared either attachment's
+   * old pair group, so re-pairing never leaves orphaned pair members.
    */
   pair(
     tenantId: string,
@@ -139,6 +167,25 @@ export class InMemoryAttachmentRepository implements AttachmentRepository {
     return { ...attachment };
   }
 
+  async findByFileId(
+    tenantId: string,
+    fileId: string,
+    entityType: AttachmentEntityType,
+    entityId: string
+  ): Promise<Attachment | null> {
+    const found = Array.from(this.attachments.values())
+      .filter(
+        (a) =>
+          a.tenantId === tenantId &&
+          a.fileId === fileId &&
+          a.entityType === entityType &&
+          a.entityId === entityId &&
+          !a.archivedAt
+      )
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    return found.length > 0 ? { ...found[0] } : null;
+  }
+
   async listByEntity(
     tenantId: string,
     entityType: AttachmentEntityType,
@@ -151,7 +198,8 @@ export class InMemoryAttachmentRepository implements AttachmentRepository {
           a.tenantId === tenantId &&
           a.entityType === entityType &&
           a.entityId === entityId &&
-          (options?.includeArchived ? true : !a.archivedAt)
+          (options?.includeArchived ? true : !a.archivedAt) &&
+          (options?.portalVisibleOnly ? a.portalVisible : true)
       )
       .sort(
         (a, b) =>
@@ -194,12 +242,39 @@ export class InMemoryAttachmentRepository implements AttachmentRepository {
   ): Promise<{ attachment: Attachment; other: Attachment }> {
     const attachment = this.attachments.get(id);
     if (!attachment || attachment.tenantId !== tenantId) {
-      throw new Error(`Attachment not found: ${id}`);
+      throw new AttachmentPairTargetNotFoundError(id);
     }
     const other = this.attachments.get(otherId);
     if (!other || other.tenantId !== tenantId) {
-      throw new Error(`Attachment not found: ${otherId}`);
+      throw new AttachmentPairTargetNotFoundError(otherId);
     }
+
+    // Collect old pair group ids before mutating.
+    const oldGroupIds = new Set<string>();
+    if (attachment.pairGroupId) oldGroupIds.add(attachment.pairGroupId);
+    if (other.pairGroupId) oldGroupIds.add(other.pairGroupId);
+
+    // Clear pair fields on any OTHER rows that shared either old pair group,
+    // so re-pairing never leaves orphaned pair members.
+    if (oldGroupIds.size > 0) {
+      for (const [rowId, row] of this.attachments.entries()) {
+        if (
+          rowId !== id &&
+          rowId !== otherId &&
+          row.tenantId === tenantId &&
+          row.pairGroupId &&
+          oldGroupIds.has(row.pairGroupId)
+        ) {
+          this.attachments.set(rowId, {
+            ...row,
+            pairGroupId: undefined,
+            pairRole: undefined,
+            updatedAt: new Date(),
+          });
+        }
+      }
+    }
+
     const updatedAttachment: Attachment = {
       ...attachment,
       pairGroupId,

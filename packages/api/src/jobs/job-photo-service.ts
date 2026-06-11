@@ -150,6 +150,29 @@ export class JobPhotoService {
   async deleteJobPhoto(tenantId: string, jobId: string, photoId: string): Promise<boolean> {
     const photo = await this.repo.findById(tenantId, photoId);
     if (!photo || photo.jobId !== jobId) return false;
-    return this.repo.delete(tenantId, photoId);
+    const deleted = await this.repo.delete(tenantId, photoId);
+
+    // RV-005 dual-write: archive the shadow attachment row when deleting a
+    // job photo. Best-effort — a failure here must not break the delete.
+    if (deleted && this.attachmentRepo) {
+      try {
+        const shadow = await this.attachmentRepo.findByFileId(
+          tenantId,
+          photo.fileId,
+          'job',
+          jobId
+        );
+        if (shadow) {
+          await this.attachmentRepo.archive(tenantId, shadow.id);
+        }
+      } catch (err) {
+        console.error(
+          `RV-005 attachments shadow archive failed for job photo ${photoId}:`,
+          err
+        );
+      }
+    }
+
+    return deleted;
   }
 }

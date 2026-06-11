@@ -247,33 +247,77 @@ describe('PgAttachmentRepository.pair', () => {
   const PAIR_GROUP_ID = '77777777-7777-7777-7777-777777777777';
 
   it('runs both UPDATEs inside a transaction and returns both mapped rows', async () => {
-    let callIndex = 0;
-    const rows = [
-      attachmentRow({ pair_group_id: PAIR_GROUP_ID, pair_role: 'before' }),
-      attachmentRow({ id: OTHER_ID, pair_group_id: PAIR_GROUP_ID, pair_role: 'after' }),
-    ];
+    const row1 = attachmentRow({ pair_group_id: PAIR_GROUP_ID, pair_role: 'before' });
+    const row2 = attachmentRow({ id: OTHER_ID, pair_group_id: PAIR_GROUP_ID, pair_role: 'after' });
+    let pairUpdateCount = 0;
     const { pool, calls } = makeMockPool((sql, _params) => {
       if (sql.includes('app.current_tenant_id') || sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK' || sql.includes('RESET')) {
         return { rows: [] };
       }
-      // Return the appropriate row for each UPDATE call
-      const row = rows[callIndex++] ?? rows[rows.length - 1];
-      return { rows: [row], rowCount: 1 };
+      // SELECT for old pair_group_ids returns no rows (attachments have no prior groups)
+      if (sql.includes('SELECT pair_group_id')) return { rows: [] };
+      // Orphan-clearing UPDATE (runs only when old groups exist — skipped here)
+      if (sql.includes('SET pair_group_id = NULL')) return { rows: [], rowCount: 0 };
+      // Pair-assignment UPDATEs (pair_group_id = $3 in SET clause)
+      if (sql.includes('pair_group_id = $3')) {
+        pairUpdateCount++;
+        return { rows: [pairUpdateCount === 1 ? row1 : row2], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
     });
     const repo = new PgAttachmentRepository(pool);
     const result = await repo.pair(TENANT, ATTACHMENT_ID, 'before', OTHER_ID, 'after', PAIR_GROUP_ID);
 
-    const updates = calls.filter((c) => c.sql.includes('UPDATE attachments'));
-    expect(updates).toHaveLength(2);
-    expect(updates[0].sql).toContain('pair_group_id = $3');
-    expect(updates[0].sql).toContain('pair_role = $4');
-    expect(updates[0].sql).toContain('tenant_id = $1');
-    expect(updates[0].params).toEqual([TENANT, ATTACHMENT_ID, PAIR_GROUP_ID, 'before']);
-    expect(updates[1].params).toEqual([TENANT, OTHER_ID, PAIR_GROUP_ID, 'after']);
+    // Two pair-assignment UPDATEs (the orphan-clearing UPDATE is skipped when
+    // no previous pair groups exist).
+    const pairUpdates = calls.filter(
+      (c) => c.sql.includes('UPDATE attachments') && c.sql.includes('pair_group_id = $3')
+    );
+    expect(pairUpdates).toHaveLength(2);
+    expect(pairUpdates[0].sql).toContain('pair_group_id = $3');
+    expect(pairUpdates[0].sql).toContain('pair_role = $4');
+    expect(pairUpdates[0].sql).toContain('tenant_id = $1');
+    expect(pairUpdates[0].params).toEqual([TENANT, ATTACHMENT_ID, PAIR_GROUP_ID, 'before']);
+    expect(pairUpdates[1].params).toEqual([TENANT, OTHER_ID, PAIR_GROUP_ID, 'after']);
     expect(result.attachment.pairGroupId).toBe(PAIR_GROUP_ID);
     expect(result.attachment.pairRole).toBe('before');
     expect(result.other.pairGroupId).toBe(PAIR_GROUP_ID);
     expect(result.other.pairRole).toBe('after');
+  });
+
+  it('clears pair fields on orphaned members before re-pairing', async () => {
+    const OLD_GROUP_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+    const ORPHAN_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+    const row1 = attachmentRow({ pair_group_id: PAIR_GROUP_ID, pair_role: 'before' });
+    const row2 = attachmentRow({ id: OTHER_ID, pair_group_id: PAIR_GROUP_ID, pair_role: 'after' });
+    let pairUpdateCount = 0;
+    const { pool, calls } = makeMockPool((sql, _params) => {
+      if (sql.includes('app.current_tenant_id') || sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK' || sql.includes('RESET')) {
+        return { rows: [] };
+      }
+      // SELECT for old pair_group_ids returns the old group
+      if (sql.includes('SELECT pair_group_id')) {
+        return { rows: [{ pair_group_id: OLD_GROUP_ID }, { pair_group_id: OLD_GROUP_ID }] };
+      }
+      // Orphan-clearing UPDATE
+      if (sql.includes('SET pair_group_id = NULL')) return { rows: [], rowCount: 1 };
+      // Pair-assignment UPDATEs
+      pairUpdateCount++;
+      return { rows: [pairUpdateCount === 1 ? row1 : row2], rowCount: 1 };
+    });
+    const repo = new PgAttachmentRepository(pool);
+    await repo.pair(TENANT, ATTACHMENT_ID, 'before', OTHER_ID, 'after', PAIR_GROUP_ID);
+
+    const orphanClear = calls.find(
+      (c) => c.sql.includes('UPDATE attachments') && c.sql.includes('pair_group_id = NULL')
+    );
+    expect(orphanClear).toBeDefined();
+    expect(orphanClear!.sql).toContain('pair_group_id = ANY');
+    expect(orphanClear!.sql).toContain('id <> ALL');
+    // The old group ids and the two attachment ids are passed as params
+    expect(orphanClear!.params[0]).toBe(TENANT);
+    // Unused: ORPHAN_ID is not in the params here (it's in the DB, not the query params)
+    void ORPHAN_ID;
   });
 
   it('throws and rolls back when the first row is not found', async () => {

@@ -47,18 +47,24 @@ interface BuildOpts {
   fileRepo: InMemoryFileRepository;
   attachmentRepo: InMemoryAttachmentRepository;
   auditRepo: InMemoryAuditRepository;
+  /** Defaults to 'owner'. Pass 'technician' or 'dispatcher' to test RBAC. */
+  role?: string;
+  /** When true, no auth is injected (simulates unauthenticated request). */
+  noAuth?: boolean;
 }
 
 function buildApp(opts: BuildOpts): Express {
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
-    (req as AuthenticatedRequest).auth = {
-      userId: `user-${opts.tenantId}`,
-      sessionId: `session-${opts.tenantId}`,
-      tenantId: opts.tenantId,
-      role: 'owner',
-    };
+    if (!opts.noAuth) {
+      (req as AuthenticatedRequest).auth = {
+        userId: `user-${opts.tenantId}`,
+        sessionId: `session-${opts.tenantId}`,
+        tenantId: opts.tenantId,
+        role: opts.role ?? 'owner',
+      };
+    }
     next();
   });
   const storage = new FakeStorageProvider();
@@ -409,6 +415,153 @@ describe('attachments router (RV-005)', () => {
         .post(`/api/attachments/${a.body.id}/pair`)
         .send({ otherId: attachedB.body.id, role: 'before' });
       expect(res.status).toBe(404);
+    });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RBAC tests — pin the route → permission mapping so swapping permissions
+// breaks tests (Items 3 and 7).
+// ─────────────────────────────────────────────────────────────────────────────
+describe('attachments router RBAC (RV-005)', () => {
+  let fileRepo: InMemoryFileRepository;
+  let attachmentRepo: InMemoryAttachmentRepository;
+  let auditRepo: InMemoryAuditRepository;
+
+  beforeEach(() => {
+    fileRepo = new InMemoryFileRepository();
+    attachmentRepo = new InMemoryAttachmentRepository();
+    auditRepo = new InMemoryAuditRepository();
+  });
+
+  function ownerApp() {
+    return buildApp({ tenantId: TENANT_A, fileRepo, attachmentRepo, auditRepo, role: 'owner' });
+  }
+  function techApp() {
+    return buildApp({ tenantId: TENANT_A, fileRepo, attachmentRepo, auditRepo, role: 'technician' });
+  }
+  function noAuthApp() {
+    return buildApp({ tenantId: TENANT_A, fileRepo, attachmentRepo, auditRepo, noAuth: true });
+  }
+
+  // Helper: presign + attach with owner, return the attachment id
+  async function seedAttachment() {
+    const app = ownerApp();
+    const pre = await request(app).post('/api/attachments/presign').send({
+      entityType: 'job',
+      entityId: JOB_ID,
+      filename: 'x.jpg',
+      contentType: 'image/jpeg',
+      sizeBytes: 512,
+    });
+    const att = await request(app).post('/api/attachments').send({
+      fileId: pre.body.fileId,
+      entityType: 'job',
+      entityId: JOB_ID,
+      kind: 'photo',
+    });
+    return att.body.id as string;
+  }
+
+  // ── POST /:id/archive ──────────────────────────────────────────────────────
+  // Permission: files:delete
+  describe('POST /:id/archive', () => {
+    it('401 when no auth', async () => {
+      const id = await seedAttachment();
+      const res = await request(noAuthApp()).post(`/api/attachments/${id}/archive`);
+      expect(res.status).toBe(401);
+    });
+
+    it('403 for technician (missing files:delete)', async () => {
+      const id = await seedAttachment();
+      const res = await request(techApp()).post(`/api/attachments/${id}/archive`);
+      expect(res.status).toBe(403);
+    });
+
+    it('200 for owner', async () => {
+      const id = await seedAttachment();
+      const res = await request(ownerApp()).post(`/api/attachments/${id}/archive`);
+      expect(res.status).toBe(200);
+    });
+  });
+
+  // ── POST /:id/visibility ───────────────────────────────────────────────────
+  // Permission: attachments:visibility (owner only — Item 3)
+  describe('POST /:id/visibility', () => {
+    it('401 when no auth', async () => {
+      const id = await seedAttachment();
+      const res = await request(noAuthApp())
+        .post(`/api/attachments/${id}/visibility`)
+        .send({ visible: true });
+      expect(res.status).toBe(401);
+    });
+
+    it('403 for technician (missing attachments:visibility)', async () => {
+      const id = await seedAttachment();
+      const res = await request(techApp())
+        .post(`/api/attachments/${id}/visibility`)
+        .send({ visible: true });
+      expect(res.status).toBe(403);
+    });
+
+    it('200 for owner', async () => {
+      const id = await seedAttachment();
+      const res = await request(ownerApp())
+        .post(`/api/attachments/${id}/visibility`)
+        .send({ visible: true });
+      expect(res.status).toBe(200);
+    });
+  });
+
+  // ── POST /presign ──────────────────────────────────────────────────────────
+  // Permission: files:upload
+  describe('POST /presign', () => {
+    it('401 when no auth', async () => {
+      const res = await request(noAuthApp()).post('/api/attachments/presign').send({
+        entityType: 'job',
+        entityId: JOB_ID,
+        filename: 'x.jpg',
+        contentType: 'image/jpeg',
+        sizeBytes: 512,
+      });
+      expect(res.status).toBe(401);
+    });
+  });
+
+  // ── Presign entity restriction (Item 8) ───────────────────────────────────
+  describe('POST /presign entity type restriction', () => {
+    it('400 for unsupported entity type (expense)', async () => {
+      const res = await request(ownerApp()).post('/api/attachments/presign').send({
+        entityType: 'expense',
+        entityId: uuidv4(),
+        filename: 'receipt.pdf',
+        contentType: 'application/pdf',
+        sizeBytes: 1024,
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('VALIDATION_ERROR');
+    });
+
+    it('400 for unsupported entity type (customer)', async () => {
+      const res = await request(ownerApp()).post('/api/attachments/presign').send({
+        entityType: 'customer',
+        entityId: uuidv4(),
+        filename: 'photo.jpg',
+        contentType: 'image/jpeg',
+        sizeBytes: 1024,
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it('201 for job (supported)', async () => {
+      const res = await request(ownerApp()).post('/api/attachments/presign').send({
+        entityType: 'job',
+        entityId: JOB_ID,
+        filename: 'x.jpg',
+        contentType: 'image/jpeg',
+        sizeBytes: 512,
+      });
+      expect(res.status).toBe(201);
     });
   });
 });

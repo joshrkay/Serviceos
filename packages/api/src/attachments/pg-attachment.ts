@@ -13,6 +13,7 @@ import {
   AttachmentEntityType,
   AttachmentKind,
   AttachmentPairRole,
+  AttachmentPairTargetNotFoundError,
   AttachmentRepository,
   AttachmentSource,
   CreateAttachmentInput,
@@ -89,6 +90,26 @@ export class PgAttachmentRepository extends PgBaseRepository implements Attachme
     });
   }
 
+  async findByFileId(
+    tenantId: string,
+    fileId: string,
+    entityType: AttachmentEntityType,
+    entityId: string
+  ): Promise<Attachment | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM attachments
+         WHERE tenant_id = $1 AND file_id = $2 AND entity_type = $3 AND entity_id = $4
+           AND archived_at IS NULL
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [tenantId, fileId, entityType, entityId]
+      );
+      if (result.rows.length === 0) return null;
+      return mapRow(result.rows[0]);
+    });
+  }
+
   async listByEntity(
     tenantId: string,
     entityType: AttachmentEntityType,
@@ -96,11 +117,13 @@ export class PgAttachmentRepository extends PgBaseRepository implements Attachme
     options?: ListByEntityOptions
   ): Promise<Attachment[]> {
     const archivedFilter = options?.includeArchived ? '' : 'AND archived_at IS NULL';
+    const visibleFilter = options?.portalVisibleOnly ? 'AND portal_visible = true' : '';
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
         `SELECT * FROM attachments
          WHERE tenant_id = $1 AND entity_type = $2 AND entity_id = $3
          ${archivedFilter}
+         ${visibleFilter}
          ORDER BY sort_order ASC, created_at ASC`,
         [tenantId, entityType, entityId]
       );
@@ -150,6 +173,29 @@ export class PgAttachmentRepository extends PgBaseRepository implements Attachme
     pairGroupId: string
   ): Promise<{ attachment: Attachment; other: Attachment }> {
     return this.withTenantTransaction(tenantId, async (client) => {
+      // Fetch current pair group ids inside the transaction before mutating.
+      const oldGroupsRes = await client.query(
+        `SELECT pair_group_id FROM attachments
+         WHERE tenant_id = $1 AND id = ANY($2::uuid[]) AND pair_group_id IS NOT NULL`,
+        [tenantId, [id, otherId]]
+      );
+      const oldGroupIds = (oldGroupsRes.rows as Array<{ pair_group_id: string }>)
+        .map((r) => r.pair_group_id)
+        .filter(Boolean);
+
+      // Clear orphaned pair members that shared either old group (excluding the
+      // two rows we are about to re-pair).
+      if (oldGroupIds.length > 0) {
+        await client.query(
+          `UPDATE attachments
+           SET pair_group_id = NULL, pair_role = NULL, updated_at = now()
+           WHERE tenant_id = $1
+             AND pair_group_id = ANY($2::uuid[])
+             AND id <> ALL($3::uuid[])`,
+          [tenantId, oldGroupIds, [id, otherId]]
+        );
+      }
+
       const r1 = await client.query(
         `UPDATE attachments
          SET pair_group_id = $3, pair_role = $4, updated_at = now()
@@ -158,7 +204,7 @@ export class PgAttachmentRepository extends PgBaseRepository implements Attachme
         [tenantId, id, pairGroupId, role]
       );
       if (r1.rowCount === 0) {
-        throw new Error(`Attachment not found: ${id}`);
+        throw new AttachmentPairTargetNotFoundError(id);
       }
       const r2 = await client.query(
         `UPDATE attachments
@@ -168,7 +214,7 @@ export class PgAttachmentRepository extends PgBaseRepository implements Attachme
         [tenantId, otherId, pairGroupId, otherRole]
       );
       if (r2.rowCount === 0) {
-        throw new Error(`Attachment not found: ${otherId}`);
+        throw new AttachmentPairTargetNotFoundError(otherId);
       }
       return { attachment: mapRow(r1.rows[0]), other: mapRow(r2.rows[0]) };
     });
