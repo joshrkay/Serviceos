@@ -271,6 +271,10 @@ import { createPublicPaymentsRouter } from './routes/public-payments';
 import { createOneTapApproveRouter } from './routes/one-tap-approve';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
+import { runDailyDigestSweep, DIGEST_SWEEP_INTERVAL_MS } from './workers/daily-digest-worker';
+import { PgDailyDigestRepository } from './digest/pg-daily-digest';
+import { InMemoryDailyDigestRepository, type DailyDigestPayload } from './digest/digest-service';
+import { composeBrandVoiceMessage } from './ai/brand-voice/composer';
 import { runOverdueInvoiceSweep } from './workers/overdue-invoice-worker';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
 import { PgReviewRepository } from './reputation/pg-review';
@@ -1434,6 +1438,7 @@ export function createApp(): express.Express {
     googleReviews: 590006,
     batchInvoice: 590007,
     callMeBack: 590008,
+    dailyDigest: 590009,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -3120,6 +3125,87 @@ export function createApp(): express.Express {
       });
     });
   }, 3_600_000));
+
+  // RV-061 (F-9) — end-of-day digest sweep. Every 15 minutes, tenants whose
+  // tenant-local digest_time fell in the just-passed bucket get their digest
+  // computed (same query functions as the money dashboard), narrated via the
+  // brand-voice composer (deterministic fallback when the LLM fails), stored
+  // idempotently on (tenant, date), and sent to the owner's phone with
+  // one-tap approve links. Same setInterval + leader-lock driver as the
+  // other sweeps; in-memory dev returns no tenants so it no-ops locally.
+  const dailyDigestLogger = createLogger({
+    service: 'daily-digest-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  const dailyDigestRepo = pool
+    ? new PgDailyDigestRepository(pool)
+    : new InMemoryDailyDigestRepository();
+  // Capture as const so the closure narrows (messageDelivery is a let).
+  const digestDelivery = messageDelivery;
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.dailyDigest, async () => {
+      await runDailyDigestSweep({
+        settingsRepo,
+        digestRepo: dailyDigestRepo,
+        computeDeps: {
+          paymentRepo,
+          invoiceRepo,
+          estimateRepo,
+          jobRepo,
+          appointmentRepo,
+          proposalRepo,
+          customerRepo,
+          settingsRepo,
+        },
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        // Narrative through the brand-voice composer ONLY when a real LLM
+        // provider is configured — the mock gateway's canned JSON must not
+        // become an owner-facing narrative. Composer failures fall back to
+        // the deterministic template inside the worker.
+        ...(config.AI_PROVIDER_API_KEY
+          ? {
+              composeNarrative: async (tenantId: string, payload: DailyDigestPayload) => {
+                const result = await composeBrandVoiceMessage(
+                  {
+                    tenantId,
+                    intent: 'digest_narrative',
+                    // PII opt-in: counts only — no customer names or amounts
+                    // beyond the aggregate figures the owner already sees.
+                    context: {
+                      moneyInCents: payload.revenueCents,
+                      jobsCompleted: payload.jobsCompletedCount,
+                      tomorrowVisits: payload.tomorrow.appointmentCount,
+                      tomorrowFirstStart: payload.tomorrow.firstStartIso ?? 'none scheduled',
+                      approvalsWaiting: payload.pendingApprovals.totalCount,
+                      overdueInvoices: payload.overdueInvoicesCount,
+                      unbilledCompletedJobs: payload.unbilledJobs.length,
+                    },
+                    maxChars: 420,
+                  },
+                  { gateway: llmGateway, settingsRepo },
+                );
+                return result.text;
+              },
+            }
+          : {}),
+        ...(digestDelivery ? { delivery: digestDelivery } : {}),
+        dispatchRepo,
+        ...(oneTapSecret ? { oneTapSecret } : {}),
+        buildApproveUrl: (token: string) =>
+          `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
+        publicBaseUrl,
+        logger: dailyDigestLogger,
+      });
+    }).catch((err) => {
+      dailyDigestLogger.error('Daily-digest sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, DIGEST_SWEEP_INTERVAL_MS));
 
   // §6 Time-to-Cash: overdue-invoice sweep. Hourly — invoice due dates
   // have day granularity, so an hourly check surfaces newly-overdue
