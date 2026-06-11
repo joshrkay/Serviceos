@@ -358,27 +358,32 @@ export async function handleProposalSmsReply(
   deps: ProposalSmsReplyDeps,
 ): Promise<HandlerResult> {
   const parsed = parseProposalSmsReply(ctx.body);
-  if (parsed.intent === 'unrecognized') {
-    // Defensive — the dispatcher only routes registered tokens here.
-    return { handled: false, handler: HANDLER_NAME, reason: 'unrecognized_keyword' };
-  }
 
   const phones = await resolveApproverPhones(deps, ctx.tenantId);
   if (!isApprover(phones, ctx.fromE164)) {
-    await audit(deps, ctx, 'proposal.sms_reply_unverified_mobile', '', {
-      intent: parsed.intent,
-    });
+    if (parsed.intent !== 'unrecognized') {
+      await audit(deps, ctx, 'proposal.sms_reply_unverified_mobile', '', {
+        intent: parsed.intent,
+      });
+    }
     return { handled: false, handler: HANDLER_NAME, reason: 'unknown_mobile' };
   }
 
   // An open edit session captures EVERYTHING the owner sends next — the
   // instruction often starts with a registered token ("change the price
-  // to $200", "fix the date"), which routes here instead of the fallback.
-  // Without this, such a message would re-open a session and ask "What
-  // should I change?" forever.
+  // to $200", "fix the date", "START at 9 tomorrow"), which can route
+  // here (directly or via the START/YES composite) instead of the
+  // fallback. The session check therefore runs BEFORE the unrecognized
+  // bail-out, or such instructions would be swallowed.
   const session = await findActiveEditSession(deps, ctx);
   if (session) {
     return handleEditRequest(deps, ctx, session.id, session.proposalId);
+  }
+
+  if (parsed.intent === 'unrecognized') {
+    // No session to capture it — let the dispatcher's fallback (or the
+    // composite's compliance behavior) take over.
+    return { handled: false, handler: HANDLER_NAME, reason: 'unrecognized_keyword' };
   }
 
   const target = await resolveTargetProposal(deps, ctx.tenantId);
@@ -618,6 +623,16 @@ export async function handleProposalSmsFallback(
   }
 
   const body = 'Didn’t catch that. Reply Y to approve, N to reject, or EDIT to change it.';
+  // Send FIRST — recording an undelivered nudge would burn the one
+  // allowed clarification and silently escalate the next unclear reply.
+  try {
+    await reply(deps, ctx.fromE164, body);
+  } catch (err) {
+    await audit(deps, ctx, 'proposal.sms_clarification_send_failed', proposal.id, {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { handled: true, handler: HANDLER_NAME, reason: 'clarification_send_failed' };
+  }
   await deps.smsEventRepo.create(
     createProposalSmsEvent({
       tenantId: ctx.tenantId,
@@ -629,7 +644,6 @@ export async function handleProposalSmsFallback(
     }),
   );
   await audit(deps, ctx, 'proposal.sms_clarification_sent', proposal.id, {});
-  await reply(deps, ctx.fromE164, body);
   return { handled: true, handler: HANDLER_NAME, reason: 'clarification_sent' };
 }
 

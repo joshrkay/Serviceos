@@ -510,6 +510,27 @@ describe('edit session flow', () => {
     expect(session).not.toBeNull();
   });
 
+  it('an open session captures unrecognized-token instructions routed to the keyword handler', async () => {
+    // "START at 9 tomorrow" reaches handleProposalSmsReply via the
+    // START/YES compliance composite; the session must capture it even
+    // though the parser calls it unrecognized.
+    const h = makeHarness({
+      interpretEdit: async ({ instruction }) => {
+        expect(instruction).toBe('START at 9 tomorrow');
+        return { customerName: 'Mr Chen' };
+      },
+    });
+    const proposal = await seedPendingProposal(h);
+    await handleProposalSmsReply(ctx('EDIT'), h.deps);
+
+    const result = await handleProposalSmsReply(ctx('START at 9 tomorrow'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'edited' });
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.payload.customerName).toBe(
+      'Mr Chen',
+    );
+  });
+
   it('a newer proposal SMS supersedes an open edit session — Y approves the new proposal', async () => {
     const h = makeHarness({ interpretEdit: async () => ({ message: 'X' }) });
     const older = await seedPendingProposal(h, TENANT, {}, new Date('2026-06-11T15:00:00Z'));
@@ -583,6 +604,26 @@ describe('clarification flow (fallback)', () => {
     expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe(
       'ready_for_review',
     );
+  });
+
+  it('a failed nudge send does not burn the clarification limit', async () => {
+    const h = makeHarness();
+    await seedPendingProposal(h);
+    h.deps.sendSms = async () => {
+      throw new Error('twilio down');
+    };
+
+    const first = await handleProposalSmsFallback(ctx('huh?'), h.deps);
+    expect(first).toMatchObject({ handled: true, reason: 'clarification_send_failed' });
+    expect(h.smsEventRepo.events.find((e) => e.kind === 'clarification_sent')).toBeUndefined();
+
+    // Delivery recovers — the next unclear reply still gets the one nudge.
+    h.deps.sendSms = async (to, body) => {
+      h.sent.push({ to, body });
+    };
+    const second = await handleProposalSmsFallback(ctx('what??'), h.deps);
+    expect(second).toMatchObject({ handled: true, reason: 'clarification_sent' });
+    expect(h.sent).toHaveLength(1);
   });
 
   it('declines silently for non-owner free text', async () => {
