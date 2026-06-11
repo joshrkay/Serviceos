@@ -81,8 +81,9 @@ describe('Postgres integration — proposal_sms_events (P2-034)', () => {
     expect(found?.createdAt).toBeInstanceOf(Date);
   });
 
-  it('open edit session honors expiry and consumption', async () => {
+  it('open edit session honors sender scoping, expiry and consumption', async () => {
     const now = new Date();
+    const OWNER = '5125550100';
     const session = await repo.create(
       createProposalSmsEvent({
         tenantId: tenant.tenantId,
@@ -90,22 +91,27 @@ describe('Postgres integration — proposal_sms_events (P2-034)', () => {
         direction: 'inbound',
         kind: 'edit_session_opened',
         messageSid: 'SM-edit-1',
+        fromPhone: OWNER,
         body: 'EDIT',
         expiresAt: new Date(now.getTime() + 10 * 60 * 1000),
       }),
     );
 
-    const open = await repo.findOpenEditSession(tenant.tenantId, now);
+    const open = await repo.findOpenEditSession(tenant.tenantId, OWNER, now);
     expect(open?.id).toBe(session.id);
+    expect(open?.fromPhone).toBe(OWNER);
+
+    // Another approver's number never sees this session.
+    expect(await repo.findOpenEditSession(tenant.tenantId, '5125550111', now)).toBeNull();
 
     // After the window the session is gone even unconsumed.
     const afterExpiry = new Date(now.getTime() + 11 * 60 * 1000);
-    expect(await repo.findOpenEditSession(tenant.tenantId, afterExpiry)).toBeNull();
+    expect(await repo.findOpenEditSession(tenant.tenantId, OWNER, afterExpiry)).toBeNull();
 
     // Consumption closes it inside the window too. markConsumed is idempotent.
     await repo.markConsumed(tenant.tenantId, session.id, now);
     await repo.markConsumed(tenant.tenantId, session.id, now);
-    expect(await repo.findOpenEditSession(tenant.tenantId, now)).toBeNull();
+    expect(await repo.findOpenEditSession(tenant.tenantId, OWNER, now)).toBeNull();
   });
 
   it('counts clarification nudges per proposal', async () => {

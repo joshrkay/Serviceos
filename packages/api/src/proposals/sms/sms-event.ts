@@ -41,6 +41,12 @@ export interface ProposalSmsEvent {
   kind: ProposalSmsEventKind;
   /** Twilio MessageSid — inbound always; outbound when the provider returns one. */
   messageSid?: string;
+  /**
+   * Normalized sender digits (shared/phone normalizePhone), inbound rows
+   * only. Scopes edit sessions to the approver who opened them — a tenant
+   * can have two approvers (owner + backup supervisor).
+   */
+  fromPhone?: string;
   body: string;
   /** Only set on `edit_session_opened` rows. */
   expiresAt?: Date;
@@ -55,6 +61,7 @@ export interface CreateProposalSmsEventInput {
   direction: ProposalSmsDirection;
   kind: ProposalSmsEventKind;
   messageSid?: string;
+  fromPhone?: string;
   body: string;
   expiresAt?: Date;
   now?: Date;
@@ -70,6 +77,7 @@ export function createProposalSmsEvent(
     direction: input.direction,
     kind: input.kind,
     ...(input.messageSid ? { messageSid: input.messageSid } : {}),
+    ...(input.fromPhone ? { fromPhone: input.fromPhone } : {}),
     body: input.body,
     ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
     createdAt: input.now ?? new Date(),
@@ -84,8 +92,16 @@ export interface ProposalSmsEventRepository {
    * first one whose proposal is still actionable.
    */
   findRecentOutbound(tenantId: string, limit: number): Promise<ProposalSmsEvent[]>;
-  /** The open (unexpired, unconsumed) edit session for this tenant, if any. */
-  findOpenEditSession(tenantId: string, now: Date): Promise<ProposalSmsEvent | null>;
+  /**
+   * The open (unexpired, unconsumed) edit session opened by this sender
+   * (normalized digits), if any. Sender-scoped so one approver's session
+   * never captures another approver's reply.
+   */
+  findOpenEditSession(
+    tenantId: string,
+    fromPhone: string,
+    now: Date,
+  ): Promise<ProposalSmsEvent | null>;
   /** How many clarification nudges this proposal has already received. */
   countClarifications(tenantId: string, proposalId: string): Promise<number>;
   /** Close an edit session (idempotent). */
@@ -115,12 +131,17 @@ export class InMemoryProposalSmsEventRepository
       .map((e) => ({ ...e }));
   }
 
-  async findOpenEditSession(tenantId: string, now: Date): Promise<ProposalSmsEvent | null> {
+  async findOpenEditSession(
+    tenantId: string,
+    fromPhone: string,
+    now: Date,
+  ): Promise<ProposalSmsEvent | null> {
     const open = this.events
       .filter(
         (e) =>
           e.tenantId === tenantId &&
           e.kind === 'edit_session_opened' &&
+          e.fromPhone === fromPhone &&
           !e.consumedAt &&
           e.expiresAt !== undefined &&
           e.expiresAt.getTime() > now.getTime(),
@@ -152,6 +173,7 @@ function mapRow(row: Record<string, unknown>): ProposalSmsEvent {
     direction: row.direction as ProposalSmsDirection,
     kind: row.kind as ProposalSmsEventKind,
     ...(row.message_sid ? { messageSid: row.message_sid as string } : {}),
+    ...(row.from_phone ? { fromPhone: row.from_phone as string } : {}),
     body: row.body as string,
     ...(row.expires_at ? { expiresAt: new Date(row.expires_at as string) } : {}),
     ...(row.consumed_at ? { consumedAt: new Date(row.consumed_at as string) } : {}),
@@ -171,9 +193,9 @@ export class PgProposalSmsEventRepository
     return this.withTenant(event.tenantId, async (client) => {
       const result = await client.query(
         `INSERT INTO proposal_sms_events (
-           id, tenant_id, proposal_id, direction, kind, message_sid, body,
-           expires_at, consumed_at, created_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           id, tenant_id, proposal_id, direction, kind, message_sid,
+           from_phone, body, expires_at, consumed_at, created_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
          RETURNING *`,
         [
           event.id,
@@ -182,6 +204,7 @@ export class PgProposalSmsEventRepository
           event.direction,
           event.kind,
           event.messageSid ?? null,
+          event.fromPhone ?? null,
           event.body,
           event.expiresAt ?? null,
           event.consumedAt ?? null,
@@ -207,17 +230,22 @@ export class PgProposalSmsEventRepository
     });
   }
 
-  async findOpenEditSession(tenantId: string, now: Date): Promise<ProposalSmsEvent | null> {
+  async findOpenEditSession(
+    tenantId: string,
+    fromPhone: string,
+    now: Date,
+  ): Promise<ProposalSmsEvent | null> {
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
         `SELECT * FROM proposal_sms_events
           WHERE tenant_id = $1
             AND kind = 'edit_session_opened'
+            AND from_phone = $2
             AND consumed_at IS NULL
-            AND expires_at > $2
+            AND expires_at > $3
           ORDER BY created_at DESC
           LIMIT 1`,
-        [tenantId, now],
+        [tenantId, fromPhone, now],
       );
       if (result.rows.length === 0) return null;
       return mapRow(result.rows[0] as Record<string, unknown>);

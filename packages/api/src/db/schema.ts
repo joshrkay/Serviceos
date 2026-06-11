@@ -3955,6 +3955,16 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_proposal_sms_events ON proposal_sms_events
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '157_proposal_sms_events_from_phone': `
+    -- P2-034 review fix: edit sessions must be scoped to the sender.
+    -- Tenants can have two approvers (owner + backup supervisor); a
+    -- tenant-wide open session let approver B's Y/N be consumed as
+    -- approver A's edit instruction. Normalized sender digits, set on
+    -- inbound events; outbound rows stay NULL.
+    ALTER TABLE proposal_sms_events
+      ADD COLUMN IF NOT EXISTS from_phone TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

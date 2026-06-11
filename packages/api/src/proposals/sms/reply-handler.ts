@@ -158,18 +158,24 @@ type TargetResolution =
  * approve another. Stale target → truthful "already handled" instead.
  */
 /**
- * The open edit session, IF it is still the owner's live conversation.
- * When a newer proposal SMS went out after the session opened, replies
- * now belong to that newer message — a `Y` meant for the new proposal
- * must not be swallowed as edit text for the old one. The stale session
- * is consumed (audited) and the reply falls through to normal targeting.
+ * The open edit session, IF it is still the sender's live conversation.
+ * Sender-scoped: a tenant can have two approvers (owner + backup), and
+ * one approver's session must never capture the other's Y/N. And when a
+ * newer proposal SMS went out after the session opened, replies now
+ * belong to that newer message — a `Y` meant for the new proposal must
+ * not be swallowed as edit text for the old one. A superseded session is
+ * consumed (audited) and the reply falls through to normal targeting.
  */
 async function findActiveEditSession(
   deps: ProposalSmsReplyDeps,
   ctx: InboundSmsContext,
 ): Promise<{ id: string; proposalId: string } | null> {
   const now = deps.now ? deps.now() : new Date();
-  const session = await deps.smsEventRepo.findOpenEditSession(ctx.tenantId, now);
+  const session = await deps.smsEventRepo.findOpenEditSession(
+    ctx.tenantId,
+    normalizePhone(ctx.fromE164),
+    now,
+  );
   if (!session) return null;
   const [latest] = await deps.smsEventRepo.findRecentOutbound(ctx.tenantId, 1);
   if (latest && latest.createdAt.getTime() > session.createdAt.getTime()) {
@@ -218,6 +224,7 @@ async function recordInbound(
       direction: 'inbound',
       kind,
       messageSid: ctx.messageSid,
+      fromPhone: normalizePhone(ctx.fromE164),
       body: ctx.body,
       ...(expiresAt ? { expiresAt } : {}),
       ...(deps.now ? { now: deps.now() } : {}),

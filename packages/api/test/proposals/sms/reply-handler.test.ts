@@ -27,6 +27,7 @@ import {
 } from '../../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import type { SettingsRepository } from '../../../src/settings/settings';
+import type { UserRepository } from '../../../src/users/user';
 import type { InboundSmsContext } from '../../../src/sms/inbound-dispatch';
 
 const TENANT = 't-1';
@@ -308,7 +309,7 @@ describe('edit session flow', () => {
     const result = await handleProposalSmsReply(ctx('EDIT'), h.deps);
 
     expect(result).toMatchObject({ handled: true, reason: 'edit_session_opened' });
-    const session = await h.smsEventRepo.findOpenEditSession(TENANT, now);
+    const session = await h.smsEventRepo.findOpenEditSession(TENANT, "5125550100", now);
     expect(session?.proposalId).toBe(proposal.id);
     expect(session?.expiresAt?.getTime()).toBe(now.getTime() + EDIT_SESSION_TTL_MS);
     expect(h.sent[0].body).toContain('What should I change');
@@ -417,6 +418,43 @@ describe('edit session flow', () => {
     expect(h.sent.some((s) => s.body.includes('What should I change'))).toBe(false);
   });
 
+  it("the backup supervisor's Y is not captured by the owner's edit session", async () => {
+    const BACKUP_PHONE = '+15125550111';
+    const h = makeHarness({
+      settingsRepo: {
+        findByTenant: async () => ({
+          ownerPhone: OWNER_PHONE,
+          backupSupervisorUserId: 'u-backup',
+        }),
+      } as unknown as SettingsRepository,
+      userRepo: {
+        findById: async () => ({ id: 'u-backup', mobileNumber: BACKUP_PHONE }),
+      } as unknown as UserRepository,
+      interpretEdit: async () => ({ customerName: 'X' }),
+    });
+    const proposal = await seedPendingProposal(h);
+    await handleProposalSmsReply(ctx('EDIT'), h.deps); // owner opens a session
+
+    // The backup's Y inside the window is a decision, not edit text.
+    const result = await handleProposalSmsReply(
+      ctx('Y', { fromE164: BACKUP_PHONE }),
+      h.deps,
+    );
+
+    expect(result).toMatchObject({ handled: true, reason: 'approved' });
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('approved');
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.payload.customerName).toBe(
+      'Mrs Lee',
+    );
+    // The owner's session is theirs alone and remains open.
+    const session = await h.smsEventRepo.findOpenEditSession(
+      TENANT,
+      '5125550100',
+      new Date(),
+    );
+    expect(session).not.toBeNull();
+  });
+
   it('a newer proposal SMS supersedes an open edit session — Y approves the new proposal', async () => {
     const h = makeHarness({ interpretEdit: async () => ({ message: 'X' }) });
     const older = await seedPendingProposal(h, TENANT, {}, new Date('2026-06-11T15:00:00Z'));
@@ -467,7 +505,7 @@ describe('edit session flow', () => {
     await handleProposalSmsReply(ctx('EDIT'), h.deps);
 
     await handleProposalSmsFallback(ctx('first change'), h.deps);
-    const session = await h.smsEventRepo.findOpenEditSession(TENANT, now);
+    const session = await h.smsEventRepo.findOpenEditSession(TENANT, "5125550100", now);
     expect(session).toBeNull();
   });
 });

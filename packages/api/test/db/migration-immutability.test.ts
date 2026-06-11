@@ -221,6 +221,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['155_tenant_integrations_google_business', 'd626700ea571d2691927cf6adf43704b3bc44aecde7071f3895c1cf801cf2a7f'],
   // P2-034: SMS approval transport — proposal_sms_events
   ['156_proposal_sms_events', '57fcfceeddded524d51d9d941e139b094dc684e818ea6c5772d561710a72d469'],
+  // P2-034 review: sender-scoped edit sessions
+  ['157_proposal_sms_events_from_phone', 'ba440770da6030cbbeb747578d33763768ef56191219f082b3b5233a6d204561'],
 ];
 
 function hashMigration(value: string): string {
