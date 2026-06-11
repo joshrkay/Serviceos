@@ -3,20 +3,25 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CaptureSheet } from './CaptureSheet';
 
+let mockCaptureCounter = 0;
+
 vi.mock('../shared/CameraCapture', () => ({
-  CameraCapture: ({ onClose }: { onClose: (media: Array<{ id: string; type: 'photo'; url: string; capturedAt: string }>) => void }) => (
-    <button
-      type="button"
-      onClick={() => onClose([{
-        id: 'capture-1',
-        type: 'photo',
-        url: 'data:image/jpeg;base64,eA==',
-        capturedAt: '2026-06-11T00:00:00.000Z',
-      }])}
-    >
-      Mock shutter done
-    </button>
-  ),
+  CameraCapture: ({ onClose }: { onClose: (media: Array<{ id: string; type: 'photo'; url: string; capturedAt: string }>) => void }) => {
+    const captureId = `capture-${++mockCaptureCounter}`;
+    return (
+      <button
+        type="button"
+        onClick={() => onClose([{
+          id: captureId,
+          type: 'photo',
+          url: 'data:image/jpeg;base64,eA==',
+          capturedAt: '2026-06-11T00:00:00.000Z',
+        }])}
+      >
+        Mock shutter done
+      </button>
+    );
+  },
 }));
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -31,6 +36,7 @@ describe('CaptureSheet', () => {
   let originalLocalStorage: PropertyDescriptor | undefined;
 
   beforeEach(() => {
+    mockCaptureCounter = 0;
     vi.restoreAllMocks();
     originalLocalStorage = Object.getOwnPropertyDescriptor(window, 'localStorage');
     storage = {};
@@ -117,5 +123,55 @@ describe('CaptureSheet', () => {
     expect(screen.getByRole('button', { name: 'Before' }).className).toContain('min-h-11');
     expect(screen.getByRole('button', { name: /add another photo/i }).className).toContain('min-h-11');
     expect(document.body.innerHTML).not.toContain('w-screen');
+  });
+
+  it('primary button in error state skips already-done items — no duplicate presign/PUT/attach', async () => {
+    // Two captures: items run concurrently so both presigns fire before any PUT.
+    // Item 0 succeeds, item 1 fails on first Confirm; primary re-click must only retry item 1.
+    vi.mocked(fetch)
+      // First Confirm (concurrent): item 0 presign, item 1 presign
+      .mockResolvedValueOnce(jsonResponse({ fileId: 'f1', uploadUrl: 'https://upload.test/file-1' }, 201))
+      .mockResolvedValueOnce(jsonResponse({ fileId: 'f2', uploadUrl: 'https://upload.test/file-2' }, 201))
+      // First Confirm: item 0 PUT succeeds, item 1 PUT fails
+      .mockResolvedValueOnce(new Response(null, { status: 200 }))
+      .mockResolvedValueOnce(new Response(null, { status: 500 }))
+      // First Confirm: item 0 attach succeeds (item 1 threw at PUT, so no attach for it)
+      .mockResolvedValueOnce(jsonResponse({ id: 'a1', fileId: 'f1', entityType: 'estimate', entityId: 'e1', kind: 'photo' }, 201))
+      // Second Confirm (primary, only item 1): presign, PUT, attach
+      .mockResolvedValueOnce(jsonResponse({ fileId: 'f3', uploadUrl: 'https://upload.test/file-3' }, 201))
+      .mockResolvedValueOnce(new Response(null, { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'a3', fileId: 'f3', entityType: 'estimate', entityId: 'e1', kind: 'photo' }, 201));
+
+    const onAttached = vi.fn();
+    render(<CaptureSheet entityType="estimate" entityId="e1" onAttached={onAttached} />);
+
+    // Capture item 0
+    fireEvent.click(screen.getByText('Mock shutter done'));
+    // Add item 1 via "Add another photo" -> mock camera -> done
+    fireEvent.click(screen.getByRole('button', { name: /add another photo/i }));
+    fireEvent.click(screen.getByText('Mock shutter done'));
+
+    // First Confirm — item 0 succeeds, item 1 fails
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Some uploads failed');
+
+    // onAttached called exactly once for the succeeded item
+    await waitFor(() => expect(onAttached).toHaveBeenCalledTimes(1));
+    expect(onAttached).toHaveBeenCalledWith(expect.objectContaining({ id: 'a1' }));
+
+    // Primary button re-click — must NOT re-upload item 0 (already done)
+    const fetchCallsBeforeRetry = vi.mocked(fetch).mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }));
+
+    await waitFor(() => expect(onAttached).toHaveBeenCalledTimes(2));
+    expect(onAttached).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'a3' }));
+
+    // Exactly 3 more fetch calls (presign + PUT + attach) for the one failed item only
+    const fetchCallsForRetry = vi.mocked(fetch).mock.calls.length - fetchCallsBeforeRetry;
+    expect(fetchCallsForRetry).toBe(3);
+
+    // Ensure item 0's upload URL was NOT called again
+    const allUrls = vi.mocked(fetch).mock.calls.map((call) => call[0] as string);
+    expect(allUrls.filter((url) => url === 'https://upload.test/file-1')).toHaveLength(1);
   });
 });

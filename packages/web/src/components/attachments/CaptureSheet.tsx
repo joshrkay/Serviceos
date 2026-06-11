@@ -34,13 +34,6 @@ export interface CaptureSheetProps {
   onAttached?: (attachment: Attachment) => void;
   defaultCategory?: AttachmentCategory;
   onClose?: () => void;
-  uploader?: (
-    entityType: AttachmentEntityType,
-    entityId: string,
-    file: File,
-    category: AttachmentCategory,
-    caption?: string,
-  ) => Promise<Attachment>;
 }
 
 function readStoredCategory(): AttachmentCategory | null {
@@ -61,7 +54,7 @@ function dataUrlToFile(url: string, filename: string): File {
   return new File([bytes], filename, { type: contentType });
 }
 
-export function mediaToFile(media: CapturedMedia, index: number): File {
+function mediaToFile(media: CapturedMedia, index: number): File {
   const ext = media.type === 'photo' ? 'jpg' : 'webm';
   const type = media.type === 'photo' ? 'image/jpeg' : 'video/webm';
   const filename = `${media.type}-${index + 1}-${Date.now()}.${ext}`;
@@ -75,7 +68,6 @@ export function CaptureSheet({
   onAttached,
   defaultCategory,
   onClose,
-  uploader = uploadAttachment,
 }: CaptureSheetProps) {
   const [capturing, setCapturing] = useState(true);
   const [items, setItems] = useState<PendingCapture[]>([]);
@@ -109,7 +101,7 @@ export function CaptureSheet({
       const item = items[index];
       if (!item) return;
       try {
-        const attachment = await uploader(
+        const attachment = await uploadAttachment(
           entityType,
           entityId,
           mediaToFile(item.media, index),
@@ -253,7 +245,12 @@ export function CaptureSheet({
 
           <button
             type="button"
-            onClick={() => status === 'done' ? onClose?.() : uploadItems()}
+            onClick={() => {
+              if (status === 'done') { onClose?.(); return; }
+              // Only upload items that are not already done — prevents re-presign/PUT/attach for succeeded items
+              const pendingIndices = items.flatMap((item, index) => item.state !== 'done' ? [index] : []);
+              uploadItems(pendingIndices);
+            }}
             disabled={status === 'uploading' || items.length === 0}
             className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 text-sm text-white transition-colors hover:bg-slate-700 disabled:opacity-50"
           >
