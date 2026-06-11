@@ -4027,6 +4027,21 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_attachments ON attachments
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // RV-006: image post-process pipeline outputs. The async worker stamps
+  // dimensions (post EXIF-rotation), the 480px thumbnail key, whether EXIF
+  // was stripped (false = non-image or graceful-degraded unsupported
+  // format), and the SHA-256 of the final stored object. content_hash
+  // doubles as the worker's idempotency marker and powers the attach-time
+  // dedupe lookup, hence the (tenant_id, content_hash) index.
+  '161_files_image_pipeline_columns': `
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS width INT;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS height INT;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS thumbnail_s3_key TEXT;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS exif_stripped BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS content_hash TEXT;
+    CREATE INDEX IF NOT EXISTS idx_files_tenant_content_hash ON files(tenant_id, content_hash);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
