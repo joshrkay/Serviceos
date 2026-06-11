@@ -215,14 +215,35 @@ describe('attachments router (RV-005)', () => {
     });
 
     it('404s when the target entity does not exist', async () => {
-      const pre = await presign();
-      const res = await attach(pre.body.fileId, { entityId: uuidv4() });
+      // Presign for an entityId that is not in the lookup (so the entity-mismatch
+      // guard passes and assertEntityExists fires → 404).
+      const unknownJobId = uuidv4();
+      const pre = await presign({ entityId: unknownJobId });
+      const res = await attach(pre.body.fileId, { entityId: unknownJobId });
       expect(res.status).toBe(404);
     });
 
     it('400s with NOT_SUPPORTED for entity types pending later tasks', async () => {
-      const pre = await presign();
-      const res = await attach(pre.body.fileId, { entityType: 'expense', entityId: uuidv4() });
+      // Presign is restricted to supported entity types; seed the file record
+      // directly so the entity-mismatch guard passes, then let assertEntityExists
+      // fire the NOT_SUPPORTED error.
+      const expenseId = uuidv4();
+      const fileId = uuidv4();
+      await fileRepo.create({
+        id: fileId,
+        tenantId: TENANT_A,
+        filename: 'receipt.pdf',
+        contentType: 'application/pdf',
+        sizeBytes: 1024,
+        storageBucket: BUCKET,
+        storageKey: `${TENANT_A}/attachments/expense/${expenseId}/${fileId}-receipt.pdf`,
+        entityType: 'expense',
+        entityId: expenseId,
+        uploadedBy: `user-${TENANT_A}`,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      const res = await attach(fileId, { entityType: 'expense', entityId: expenseId });
       expect(res.status).toBe(400);
       expect(res.body.error).toBe('NOT_SUPPORTED');
     });

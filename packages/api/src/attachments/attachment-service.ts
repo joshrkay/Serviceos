@@ -72,6 +72,21 @@ export class AttachmentService {
     const file = await this.fileRepo.findById(tenantId, input.fileId);
     if (!file) throw new NotFoundError('File', input.fileId);
 
+    // Enforce the invariant that a file may only be attached to the entity it
+    // was presigned for. A file presigned for job A but attached to job B
+    // would resolve as a false orphan placeholder in listForEntity (which uses
+    // fileRepo.findByEntity scoped to the target entity). Reject at write time
+    // so callers get a clear error rather than a silent empty downloadUrl.
+    if (file.entityType !== input.entityType || file.entityId !== input.entityId) {
+      throw new ValidationError(
+        'File was presigned for a different entity and cannot be attached here',
+        {
+          file: { entityType: file.entityType, entityId: file.entityId },
+          requested: { entityType: input.entityType, entityId: input.entityId },
+        }
+      );
+    }
+
     await this.assertEntityExists(tenantId, input.entityType, input.entityId);
 
     const attachment = await this.repo.create(tenantId, {

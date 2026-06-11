@@ -152,12 +152,15 @@ describe('AttachmentService', () => {
     });
 
     it('rejects when the target entity does not exist', async () => {
-      const file = await seedFile();
+      // Seed the file for the nonexistent job so the entity-mismatch guard
+      // passes and the entity-existence check fires instead.
+      const unknownJobId = uuidv4();
+      const file = await seedFile(TENANT_A, 'job', unknownJobId);
       await expect(
         service.attach(TENANT_A, ACTOR, {
           fileId: file.id,
           entityType: 'job',
-          entityId: uuidv4(),
+          entityId: unknownJobId,
           kind: 'photo',
         })
       ).rejects.toBeInstanceOf(NotFoundError);
@@ -177,12 +180,15 @@ describe('AttachmentService', () => {
     });
 
     it('returns NOT_SUPPORTED for entity types without a wired lookup', async () => {
-      const file = await seedFile();
+      // Seed the file for the same expense entity so the entity-mismatch guard
+      // passes and assertEntityExists fires to give NOT_SUPPORTED.
+      const expenseId = uuidv4();
+      const file = await seedFile(TENANT_A, 'expense', expenseId);
       const err = await service
         .attach(TENANT_A, ACTOR, {
           fileId: file.id,
           entityType: 'expense',
-          entityId: uuidv4(),
+          entityId: expenseId,
           kind: 'photo',
         })
         .catch((e: unknown) => e);
@@ -190,6 +196,38 @@ describe('AttachmentService', () => {
       expect((err as AppError).code).toBe('NOT_SUPPORTED');
       expect((err as AppError).statusCode).toBe(400);
       expect(auditRepo.getAll()).toHaveLength(0);
+    });
+
+    it('rejects a file presigned for job A when attached to job B (entity mismatch → ValidationError, no attachment created)', async () => {
+      const jobA = jobId; // already in knownJobs
+      const jobB = uuidv4();
+      knownJobs.add(jobB);
+      // File was presigned for job A
+      const file = await seedFile(TENANT_A, 'job', jobA);
+      await expect(
+        service.attach(TENANT_A, ACTOR, {
+          fileId: file.id,
+          entityType: 'job',
+          entityId: jobB, // different job
+          kind: 'photo',
+        })
+      ).rejects.toBeInstanceOf(ValidationError);
+      // No audit event, no attachment row
+      expect(auditRepo.getAll()).toHaveLength(0);
+      expect(await attachmentRepo.listByEntity(TENANT_A, 'job', jobB)).toHaveLength(0);
+    });
+
+    it('accepts a file when entity type and entity id both match the presigned values (control case)', async () => {
+      const file = await seedFile(TENANT_A, 'job', jobId);
+      const attachment = await service.attach(TENANT_A, ACTOR, {
+        fileId: file.id,
+        entityType: 'job',
+        entityId: jobId,
+        kind: 'photo',
+      });
+      expect(attachment.fileId).toBe(file.id);
+      expect(attachment.entityId).toBe(jobId);
+      expect(auditRepo.getAll()).toHaveLength(1);
     });
   });
 
