@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { toast } from 'sonner';
 
 interface EscalationSettings {
@@ -32,6 +32,7 @@ interface Props {
 }
 
 export function CallRoutingSheet({ open, onOpenChange }: Props) {
+  const apiFetch = useApiClient();
   const [settings, setSettings] = useState<EscalationSettings>(DEFAULTS);
   const updateSeqRef = useRef(0);
 

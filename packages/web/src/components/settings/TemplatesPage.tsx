@@ -7,7 +7,7 @@ import {
   TrendingUp, Mail, Clock, Edit3, RotateCcw, ArrowRight,
   Star, AlertCircle, BarChart2, Globe, CheckCircle2, Info,
 } from 'lucide-react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { useMe } from '../../hooks/useMe';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -771,6 +771,7 @@ export function LiveTemplateDetailModal({
   onClose: () => void;
   onSaved: (next: LiveEstimateTemplate) => void;
 }) {
+  const apiFetch = useApiClient();
   const [message, setMessage] = useState(template.defaultCustomerMessage ?? '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -895,6 +896,7 @@ export function LiveTemplateDetailModal({
 }
 
 export function LiveTemplatesSection() {
+  const apiFetch = useApiClient();
   const { me } = useMe();
   const canEdit = me?.role === 'owner';
   const [templates, setTemplates] = useState<LiveEstimateTemplate[] | null>(null);

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 export interface CustomerOption {
   id: string;
@@ -30,6 +30,7 @@ export function CustomerPicker({
   debounceMs = 300,
   required,
 }: CustomerPickerProps) {
+  const apiFetch = useApiClient();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<CustomerOption[]>([]);
   const [open, setOpen] = useState(false);

@@ -16,7 +16,7 @@
 import { useEffect, useState } from 'react';
 import { X, FileText } from 'lucide-react';
 import { toast } from 'sonner';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 type Strategy = 'none' | 'percentage' | 'fixed';
 type TimingPolicy = 'before_approval' | 'after_approval';
@@ -60,6 +60,7 @@ function parsePositiveNumber(raw: string): number | null {
 }
 
 export function DepositRulesSheet({ onClose }: DepositRulesSheetProps) {
+  const apiFetch = useApiClient();
   const [fields, setFields] = useState<DepositRulesFields>(EMPTY);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);

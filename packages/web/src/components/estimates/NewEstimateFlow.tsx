@@ -5,7 +5,7 @@ import {
   Mic, Camera, Image, Sparkles, RotateCcw, StopCircle,
   Pencil, Minus, ListChecks,
 } from 'lucide-react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { useListQuery } from '../../hooks/useListQuery';
 
 type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
@@ -149,6 +149,7 @@ const MANUAL_CATALOG: Record<ServiceType, CatalogItem[]> = {
 // On any failure (no auth, 503 not-configured, network), falls back to
 // the local mock generator so the wizard remains usable in dev/demo.
 async function suggestEstimate(input: string, svcHint?: ServiceType): Promise<AIResult> {
+  const apiFetch = useApiClient();
   try {
     const res = await apiFetch('/api/estimates/suggest', {
       method: 'POST',
@@ -446,6 +447,7 @@ function AIResultCard({ result, editable, onToggleEdit, onUpdateItems }: {
 
 // ─── Voice input ──────────────────────────────────────────────────────────────
 function VoiceInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r: AIResult) => void }) {
+  const apiFetch = useApiClient();
   const [phase,      setPhase]      = useState<VoicePhase>('idle');
   const [seconds,    setSeconds]    = useState(0);
   const [transcript, setTranscript] = useState('');

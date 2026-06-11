@@ -25,7 +25,7 @@
 import { useEffect, useState } from 'react';
 import { X, Zap, ChevronDown } from 'lucide-react';
 import { toast } from 'sonner';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import type { Mode } from '@ai-service-os/shared';
 
 type ThresholdMap = Partial<Record<Mode, number>>;
@@ -81,6 +81,7 @@ interface AIApprovalRulesSheetProps {
 }
 
 export function AIApprovalRulesSheet({ onClose }: AIApprovalRulesSheetProps) {
+  const apiFetch = useApiClient();
   const [thresholds, setThresholds] = useState<ThresholdMap>({});
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [loading, setLoading] = useState(true);

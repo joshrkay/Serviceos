@@ -9,7 +9,7 @@
 
 import { useState, useEffect } from 'react';
 import { RefreshCw } from 'lucide-react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 
@@ -45,6 +45,7 @@ const ENTITY_LABEL: Record<string, string> = {
 };
 
 export function DispatchLogPage() {
+  const apiFetch = useApiClient();
   const tz = useTenantTimezone();
   const [dispatches, setDispatches] = useState<MessageDispatch[]>([]);
   const [total, setTotal] = useState(0);

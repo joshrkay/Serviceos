@@ -17,7 +17,7 @@
 import { useEffect, useState } from 'react';
 import { X, FileText } from 'lucide-react';
 import { toast } from 'sonner';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 interface TerminologyFields {
   estimateTerm: string;
@@ -56,6 +56,7 @@ interface TerminologySheetProps {
 }
 
 export function TerminologySheet({ onClose }: TerminologySheetProps) {
+  const apiFetch = useApiClient();
   const [fields, setFields] = useState<TerminologyFields>(EMPTY);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);

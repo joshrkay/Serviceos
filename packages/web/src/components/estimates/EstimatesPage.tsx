@@ -8,7 +8,7 @@ import {
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { printEstimateDocument } from '../../lib/estimatePdf';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
@@ -264,6 +264,7 @@ function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
   items: LineItem[];
   onLineItemAccepted?: (item: LineItem) => void;
 }) {
+  const apiFetch = useApiClient();
   const [triggered, setTriggered] = useState(false);
   const [loading, setLoading]     = useState(false);
   const [hints, setHints]         = useState<AISuggestion[]>([]);
@@ -770,6 +771,7 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
 
 // ─── Estimate Detail ──────────────────────────────────────────────────────
 function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: () => void }) {
+  const apiFetch = useApiClient();
   const navigate = useNavigate();
   const tz = useTenantTimezone();
   const { data: est, isLoading, error, refetch } = useDetailQuery<ApiEstimate>('/api/estimates', estimateId);

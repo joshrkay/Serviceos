@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
-import { apiFetch } from '../utils/api-fetch';
+import { useApiClient } from '../lib/apiClient';
 
 /**
  * Tenant timezone context.
@@ -50,6 +50,7 @@ export function TenantTimezoneProvider({
   children,
   overrideTimezone,
 }: TenantTimezoneProviderProps): React.ReactElement {
+  const apiFetch = useApiClient();
   const [timezone, setTimezone] = useState<string>(overrideTimezone ?? FALLBACK_TZ);
   const [loading, setLoading] = useState<boolean>(!overrideTimezone);
 

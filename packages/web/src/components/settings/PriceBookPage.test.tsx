@@ -4,7 +4,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PriceBookPage } from './PriceBookPage';
 
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
-vi.mock('../../utils/api-fetch', () => ({ apiFetch: vi.fn() }));
+const _sharedApiFetchMock = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/api-fetch', () => ({ apiFetch: _sharedApiFetchMock }));
+vi.mock('../../lib/apiClient', () => ({
+  useApiClient: () => _sharedApiFetchMock,
+}));
 
 import { useListQuery } from '../../hooks/useListQuery';
 import { apiFetch } from '../../utils/api-fetch';

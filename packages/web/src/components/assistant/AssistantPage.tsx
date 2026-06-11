@@ -1,4 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { useApiClient } from '../../lib/apiClient';
+// Non-component helper `sendToConversationAPI` lives in this file and
+// can't use the hook variant. The module-level `apiFetch` has the same
+// 401-retry + public-path-skip behavior post-PR #472, so it's safe here.
 import { apiFetch } from '../../utils/api-fetch';
 import {
   Send, Mic, Paperclip, Sparkles, Check, Zap,
@@ -161,6 +165,7 @@ function VoiceWaveform({ duration }: { duration: number }) {
 
 // ─── Message Bubble ─────────────────────────────────────────────
 function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
+  const apiFetch = useApiClient();
   const [reaction, setReaction] = useState<'up' | 'down' | null>(null);
   const [showActions, setShowActions] = useState(false);
   const isUser = msg.role === 'user';
@@ -341,6 +346,7 @@ function getSupportedAudioMimeType(): string | null {
 }
 
 async function createSignedAudioUpload(blob: Blob) {
+  const apiFetch = useApiClient();
   const filename = `voice-${Date.now()}.${blob.type.includes('mp4') ? 'm4a' : 'webm'}`;
   // MediaRecorder emits "audio/webm;codecs=opus" but the backend whitelist
   // keys on the base type only. Strip codec params before sending.
@@ -389,6 +395,7 @@ async function createSignedAudioUpload(blob: Blob) {
 }
 
 async function pollRecordingUntilDone(recordingId: string) {
+  const apiFetch = useApiClient();
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < VOICE_POLL_TIMEOUT_MS) {
@@ -416,6 +423,7 @@ function VoiceRecordingBar({ onCancel, onSend }: {
   onCancel: () => void;
   onSend: (transcript: string, duration: number) => void;
 }) {
+  const apiFetch = useApiClient();
   const [seconds, setSeconds] = useState(0);
   const [phase, setPhase] = useState<'idle' | 'recording' | 'uploading' | 'transcribing'>('idle');
   const [error, setError] = useState<string | null>(null);

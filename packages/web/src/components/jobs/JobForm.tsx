@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { CustomerPicker, CustomerOption } from '../forms/CustomerPicker';
 
 const PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const;
@@ -38,6 +38,7 @@ const initial: State = {
 const inputCls = 'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';
 
 export function JobForm({ onCreated, onCancel }: JobFormProps) {
+  const apiFetch = useApiClient();
   const [form, setForm] = useState<State>(initial);
   const [locations, setLocations] = useState<ServiceLocationOption[]>([]);
   const [locationsLoading, setLocationsLoading] = useState(false);

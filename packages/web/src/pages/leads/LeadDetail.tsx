@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { LanguageBadge } from '../../components/customers/LanguageBadge';
 import { formatCurrency } from '../../utils/currency';
 
@@ -35,6 +35,7 @@ export interface LeadDetailProps {
 }
 
 export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
+  const apiFetch = useApiClient();
   const [lead, setLead] = useState<Lead | null>(null);
   const [isLoading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);

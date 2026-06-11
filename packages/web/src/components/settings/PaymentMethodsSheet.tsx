@@ -10,7 +10,7 @@
 import { useEffect, useState } from 'react';
 import { X, CreditCard, AlertCircle } from 'lucide-react';
 import { toast } from 'sonner';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 interface ConnectAccountView {
   accountId: string | null;
@@ -38,6 +38,7 @@ const STATUS_COLOR: Record<ConnectAccountView['status'], string> = {
 };
 
 export function PaymentMethodsSheet({ onClose }: PaymentMethodsSheetProps) {
+  const apiFetch = useApiClient();
   const [view, setView] = useState<ConnectAccountView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');

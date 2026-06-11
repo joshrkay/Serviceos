@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'rea
 import { Archive, Pencil, Upload, X } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
 import { formatCurrency } from '../../utils/currency';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 interface PriceBookItem {
   id: string;
@@ -132,6 +132,7 @@ const EMPTY_RESULT = {
 };
 
 export function PriceBookPage() {
+  const apiFetch = useApiClient();
   const listQuery = useListQuery<PriceBookItem>('/api/catalog/items', { pageSize: 200 });
   const {
     data = [],

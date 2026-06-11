@@ -4,7 +4,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const apiFetchMock = vi.fn();
 vi.mock('../../utils/api-fetch', () => ({
-  apiFetch: (...args: unknown[]) => apiFetchMock(...args),
+  apiFetch: apiFetchMock,
+}));
+vi.mock('../../lib/apiClient', () => ({
+  useApiClient: () => apiFetchMock,
 }));
 
 const toastSuccess = vi.fn();

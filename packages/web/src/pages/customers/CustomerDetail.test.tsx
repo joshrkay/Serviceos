@@ -7,8 +7,12 @@ import { CustomerDetail } from './CustomerDetail';
 vi.mock('../../hooks/useDetailQuery', () => ({
   useDetailQuery: vi.fn(),
 }));
+const _sharedApiFetchMock = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/api-fetch', () => ({
-  apiFetch: vi.fn(),
+  apiFetch: _sharedApiFetchMock,
+}));
+vi.mock('../../lib/apiClient', () => ({
+  useApiClient: () => _sharedApiFetchMock,
 }));
 vi.mock('../../components/customers/CommunicationTimeline', () => ({
   CommunicationTimeline: () => <div>Timeline</div>,

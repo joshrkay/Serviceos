@@ -2,9 +2,12 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter, Routes, Route } from 'react-router';
 
-const apiFetchMock = vi.fn();
+const apiFetchMock = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/api-fetch', () => ({
-  apiFetch: (...args: unknown[]) => apiFetchMock(...args),
+  apiFetch: apiFetchMock,
+}));
+vi.mock('../../lib/apiClient', () => ({
+  useApiClient: () => apiFetchMock,
 }));
 
 vi.mock('sonner', () => ({

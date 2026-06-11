@@ -5,7 +5,10 @@ import { TenantTimezoneProvider, useTenantTimezone, useTenantTimezoneState } fro
 const fetchMock = vi.fn();
 
 vi.mock('../utils/api-fetch', () => ({
-  apiFetch: (...args: unknown[]) => fetchMock(...args),
+  apiFetch: fetchMock,
+}));
+vi.mock('../lib/apiClient', () => ({
+  useApiClient: () => fetchMock,
 }));
 
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {

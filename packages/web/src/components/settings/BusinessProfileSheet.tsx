@@ -12,7 +12,7 @@
 import { useEffect, useState } from 'react';
 import { X, Building2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 interface BusinessProfileFields {
   businessName: string;
@@ -45,6 +45,7 @@ interface BusinessProfileSheetProps {
 }
 
 export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetProps) {
+  const apiFetch = useApiClient();
   const [fields, setFields] = useState<BusinessProfileFields>(EMPTY);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);

@@ -6,7 +6,7 @@ import {
   LineItemDraft,
   toLineItemPayload,
 } from '../../components/forms/LineItemEditor';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { formatCurrency as formatCents } from '../../utils/currency';
 
 interface LineItem {
@@ -43,6 +43,7 @@ interface EstimateDetailProps {
 }
 
 export function EstimateDetail({ estimateId, onBack }: EstimateDetailProps) {
+  const apiFetch = useApiClient();
   const { data, isLoading, error, refetch } = useDetailQuery<Estimate>('/api/estimates', estimateId);
 
   // P11-007 — line-item edit toggle.

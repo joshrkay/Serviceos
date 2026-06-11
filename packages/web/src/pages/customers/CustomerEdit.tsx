@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 const CHANNELS = ['email', 'sms', 'phone', 'mail'] as const;
 
@@ -40,6 +40,7 @@ const empty: FormState = {
  * coerces blanks to null.
  */
 export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProps) {
+  const apiFetch = useApiClient();
   const [form, setForm] = useState<FormState>(empty);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

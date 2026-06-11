@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { LeadStageColumn } from '../../components/leads/LeadStageColumn';
 import { LeadCardData } from '../../components/leads/LeadCard';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 const STAGES: { key: string; label: string }[] = [
   { key: 'new', label: 'New' },
@@ -38,6 +38,7 @@ export interface LeadListProps {
 }
 
 export function LeadList({ onSelectLead, onNewLead }: LeadListProps) {
+  const apiFetch = useApiClient();
   const [leads, setLeads] = useState<LeadResponse[]>([]);
   const [isLoading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);

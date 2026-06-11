@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from 'react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 export interface CancelDialogProps {
   appointmentId: string;
@@ -14,6 +14,7 @@ export interface CancelDialogProps {
  * PUTs status='cancelled' + cancelReason to the API.
  */
 export function CancelDialog({ appointmentId, onSaved, onCancel }: CancelDialogProps) {
+  const apiFetch = useApiClient();
   const [reason, setReason] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);

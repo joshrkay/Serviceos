@@ -5,7 +5,7 @@ import {
   ChevronRight, ClipboardList, Pencil, Zap, Send, FileText,
   Plus,
 } from 'lucide-react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { useMutation } from '../../hooks/useMutation';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
@@ -338,6 +338,7 @@ export function NewJobFlow({
   onOpenEstimate?:  () => void;
   preSelectedCustomerId?: string;
 }) {
+  const apiFetch = useApiClient();
   const { technicians: techRoster } = useTechnicianRoster();
   const [step,     setStep]     = useState<FlowStep>('start');
   const [customerOptions, setCustomerOptions] = useState<Customer[]>([]);

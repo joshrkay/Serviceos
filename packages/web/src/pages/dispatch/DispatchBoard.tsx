@@ -16,7 +16,7 @@ import {
   ProposedProposalType,
   TimeRangeDisplay,
 } from '../../components/dispatch/ConfirmProposalDialog';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { AddCrewDialog } from '../../components/dispatch/AddCrewDialog';
 import { useCreateCrewProposal } from '../../components/dispatch/useCreateCrewProposal';
 import {
@@ -94,6 +94,7 @@ function isSameLaneNoOp(sorted: AppointmentCardData[], draggedId: string, insert
 }
 
 export function DispatchBoard() {
+  const apiFetch = useApiClient();
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [filters, setFilters] = useState<DispatchFilterValues>({});
   const dateParam = toDateParam(selectedDate);

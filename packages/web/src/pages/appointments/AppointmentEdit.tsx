@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { RescheduleDialog } from '../../components/appointments/RescheduleDialog';
 import { CancelDialog } from '../../components/appointments/CancelDialog';
 import { ReassignDialog } from '../../components/appointments/ReassignDialog';
@@ -16,6 +16,7 @@ function NotifyDelayDialog({
   onDone: () => void;
   onCancel: () => void;
 }) {
+  const apiFetch = useApiClient();
   const [minutes, setMinutes] = useState<DelayMinutes>(20);
   const [status, setStatus] = useState<'idle' | 'sending' | 'done' | 'error'>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -117,6 +118,7 @@ export interface AppointmentEditProps {
  * mounts its own dialog component which owns the PUT call.
  */
 export function AppointmentEdit({ appointmentId, onSaved, onBack }: AppointmentEditProps) {
+  const apiFetch = useApiClient();
   const [data, setData] = useState<Appointment | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

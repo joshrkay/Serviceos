@@ -3,7 +3,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { SchedulePage } from './SchedulePage';
 
-vi.mock('../../utils/api-fetch', () => ({ apiFetch: vi.fn() }));
+const _sharedApiFetchMock = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/api-fetch', () => ({ apiFetch: _sharedApiFetchMock }));
+vi.mock('../../lib/apiClient', () => ({
+  useApiClient: () => _sharedApiFetchMock,
+}));
 
 const ROSTER = {
   technicians: [

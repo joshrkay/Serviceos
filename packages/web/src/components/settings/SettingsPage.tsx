@@ -9,7 +9,7 @@ import {
 import { toast } from 'sonner';
 import { QuickBooksModal } from './QuickBooksModal';
 import { SuppliersSheet } from '../jobs/SuppliersSheet';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { useMe } from '../../hooks/useMe';
 import { SupervisorBackupSection } from './SupervisorBackupSection';
 import { BusinessProfileSheet } from './BusinessProfileSheet';
@@ -30,6 +30,7 @@ import {
 import { businessInitial } from '../../utils/business-initial';
 
 export function SettingsPage() {
+  const apiFetch = useApiClient();
   const navigate = useNavigate();
   const { signOut } = useClerk();
   const { me } = useMe();

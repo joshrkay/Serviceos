@@ -1,8 +1,9 @@
 import { useEscalationStream } from '../../hooks/useEscalationStream';
 import { EscalationPanel } from './EscalationPanel';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 export function EscalationPanelHost() {
+  const apiFetch = useApiClient();
   const { activeEscalations, dismissEscalation } = useEscalationStream();
 
   const handleOutcome = async (

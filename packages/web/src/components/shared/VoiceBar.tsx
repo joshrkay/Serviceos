@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useImperativeHandle, forwardRef } from 'react';
 import { Mic, X, Send, Sparkles } from 'lucide-react';
 import { useNavigate } from 'react-router';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { matchVoiceCommand } from '../../hooks/useVoiceCommands';
 import { useTTS } from '../../hooks/useTTS';
 
@@ -57,6 +57,7 @@ function getSupportedAudioMimeType(): string | null {
 }
 
 async function createSignedAudioUpload(blob: Blob) {
+  const apiFetch = useApiClient();
   const filename = `voice-${Date.now()}.${blob.type.includes('mp4') ? 'm4a' : 'webm'}`;
   // MediaRecorder emits "audio/webm;codecs=opus" but the backend whitelist
   // keys on the base type only. Strip codec params before sending.
@@ -102,6 +103,7 @@ async function createSignedAudioUpload(blob: Blob) {
 }
 
 async function pollRecordingUntilDone(recordingId: string) {
+  const apiFetch = useApiClient();
   const startedAt = Date.now();
   while (Date.now() - startedAt < VOICE_POLL_TIMEOUT_MS) {
     const res = await apiFetch(`/api/voice/recordings/${recordingId}`);
@@ -121,6 +123,7 @@ interface VoiceBarProps {
 }
 
 export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function VoiceBar({ variant = 'mobile' }, ref) {
+  const apiFetch = useApiClient();
   const navigate = useNavigate();
   const [phase, setPhase] = useState<BarPhase>('idle');
   const [transcript, setTranscript] = useState('');

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 export interface TechnicianAppointment {
   id: string;
@@ -168,6 +168,7 @@ function answerScheduleQuestion(question: string, appointments: TechnicianAppoin
 }
 
 export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
+  const apiFetch = useApiClient();
   const navigate = useNavigate();
   const [appointments, setAppointments] = useState<TechnicianAppointment[]>([]);
   const [isLoading, setIsLoading] = useState(true);

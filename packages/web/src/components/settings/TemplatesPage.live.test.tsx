@@ -12,7 +12,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const apiFetchMock = vi.fn();
 vi.mock('../../utils/api-fetch', () => ({
-  apiFetch: (...args: unknown[]) => apiFetchMock(...args),
+  apiFetch: apiFetchMock,
+}));
+vi.mock('../../lib/apiClient', () => ({
+  useApiClient: () => apiFetchMock,
 }));
 
 // useMe controls the owner gate; default to owner unless a test overrides.

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 interface UserOption {
   id: string;
@@ -28,6 +28,7 @@ export function ReassignDialog({
   onSaved,
   onCancel,
 }: ReassignDialogProps) {
+  const apiFetch = useApiClient();
   const [users, setUsers] = useState<UserOption[]>([]);
   const [usersError, setUsersError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string>(initialAssignedUserId ?? '');

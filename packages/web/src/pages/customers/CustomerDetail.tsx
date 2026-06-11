@@ -4,7 +4,7 @@ import { DetailPage } from '../../components/DetailPage';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { CommunicationTimeline } from '../../components/customers/CommunicationTimeline';
 import { LanguageBadge } from '../../components/customers/LanguageBadge';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 interface Customer {
   id: string;
@@ -70,6 +70,7 @@ function formatLocation(location: ServiceLocation): string {
 }
 
 export function CustomerDetail({ customerId, onBack, onEdit, onArchived }: CustomerDetailProps) {
+  const apiFetch = useApiClient();
   const { data, isLoading, error, refetch } = useDetailQuery<Customer>('/api/customers', customerId);
   const [locations, setLocations] = useState<ServiceLocation[]>([]);
   const [locationsError, setLocationsError] = useState<string | null>(null);

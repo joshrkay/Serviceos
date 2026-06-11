@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { FileText, Loader } from 'lucide-react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { formatCurrency } from '../../utils/currency';
 import {
   LineItemEditor,
@@ -71,6 +71,7 @@ function makeId() {
 }
 
 export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
+  const apiFetch = useApiClient();
   const [form, setForm] = useState<State>(() => ({
     jobId: '',
     estimateId: '',

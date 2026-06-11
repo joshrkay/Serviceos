@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState } from 'react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 export interface RescheduleDialogProps {
   appointmentId: string;
@@ -31,6 +31,7 @@ export function RescheduleDialog({
   onSaved,
   onCancel,
 }: RescheduleDialogProps) {
+  const apiFetch = useApiClient();
   const [start, setStart] = useState(() => toLocalInputValue(initialStart));
   const [end, setEnd] = useState(() => toLocalInputValue(initialEnd));
   const [error, setError] = useState<string | null>(null);

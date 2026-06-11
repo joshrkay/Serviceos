@@ -1,7 +1,7 @@
 import { useEffect, useState, FormEvent } from 'react';
 import { Trash2, AlertCircle, ShieldOff } from 'lucide-react';
 import { toast } from 'sonner';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 
@@ -33,6 +33,7 @@ interface Props {
 }
 
 export function DncListSheet({ open, onOpenChange }: Props) {
+  const apiFetch = useApiClient();
   const tz = useTenantTimezone();
   const [entries, setEntries] = useState<DncEntry[]>([]);
   const [loading, setLoading] = useState(false);

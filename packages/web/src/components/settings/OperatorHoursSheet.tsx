@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { toast } from 'sonner';
 import type { BusinessHours } from '../../types/onboarding';
 
@@ -22,6 +22,7 @@ interface Props {
 }
 
 export function OperatorHoursSheet({ open, onOpenChange }: Props) {
+  const apiFetch = useApiClient();
   const [hours, setHours] = useState<BusinessHours>({});
   const [saving, setSaving] = useState(false);
 

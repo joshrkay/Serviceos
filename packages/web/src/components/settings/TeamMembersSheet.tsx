@@ -10,7 +10,7 @@
 import { useEffect, useState } from 'react';
 import { X, Users, Pencil, UserPlus } from 'lucide-react';
 import { toast } from 'sonner';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 type Role = 'owner' | 'dispatcher' | 'technician';
 
@@ -61,6 +61,7 @@ function displayName(u: TeamUser): string {
 }
 
 export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProps) {
+  const apiFetch = useApiClient();
   const [users, setUsers] = useState<TeamUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');

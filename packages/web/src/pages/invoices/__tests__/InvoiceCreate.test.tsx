@@ -4,8 +4,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { InvoiceCreate } from '../InvoiceCreate';
 
+const _sharedApiFetchMock = vi.hoisted(() => vi.fn());
 vi.mock('../../../utils/api-fetch', () => ({
-  apiFetch: vi.fn(),
+  apiFetch: _sharedApiFetchMock,
+}));
+vi.mock('../../../lib/apiClient', () => ({
+  useApiClient: () => _sharedApiFetchMock,
 }));
 
 vi.mock('../../../hooks/useListQuery', () => ({

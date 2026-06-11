@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { X, Check, Receipt } from 'lucide-react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { type UiLineItem } from '../../lib/lineItems';
 
 export interface ConvertToInvoiceInput {
@@ -24,6 +24,7 @@ export function ConvertToInvoiceSheet({
   onClose: () => void;
   onConverted: (invoiceId: string) => void;
 }) {
+  const apiFetch = useApiClient();
   const [loading, setLoading] = useState(false);
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);

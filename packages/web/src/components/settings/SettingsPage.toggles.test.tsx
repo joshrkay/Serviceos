@@ -5,7 +5,10 @@ import { MemoryRouter } from 'react-router';
 
 const apiFetchMock = vi.fn();
 vi.mock('../../utils/api-fetch', () => ({
-  apiFetch: (...args: unknown[]) => apiFetchMock(...args),
+  apiFetch: apiFetchMock,
+}));
+vi.mock('../../lib/apiClient', () => ({
+  useApiClient: () => apiFetchMock,
 }));
 
 const fetchLanguageMock = vi.fn();

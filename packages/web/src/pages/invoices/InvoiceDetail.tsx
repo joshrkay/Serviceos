@@ -10,7 +10,7 @@ import {
   LineItemDraft,
   toLineItemPayload,
 } from '../../components/forms/LineItemEditor';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { formatCurrency as formatCents } from '../../utils/currency';
 
 interface LineItem {
@@ -81,6 +81,7 @@ interface InvoiceDetailProps {
 }
 
 export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
+  const apiFetch = useApiClient();
   const { data, isLoading, error, refetch } = useDetailQuery<Invoice>('/api/invoices', invoiceId);
   const [showPaymentForm, setShowPaymentForm] = React.useState(false);
   const [submitError, setSubmitError] = React.useState<string | null>(null);

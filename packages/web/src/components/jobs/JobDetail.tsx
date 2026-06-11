@@ -15,7 +15,6 @@ import { useMutation } from '../../hooks/useMutation';
 import { useApiClient } from '../../lib/apiClient';
 import { useWorkerTerm } from '../../hooks/useWorkerTerm';
 import { normalizeJobStatus } from '../../utils/statusNormalize';
-import { apiFetch } from '../../utils/api-fetch';
 
 interface ApiJobDetail {
   id: string;
@@ -445,6 +444,7 @@ function DescriptionCard({ job }: { job: Job }) {
 
 // ─── Estimate Scope Card ──────────────────────────────────────────────────
 function EstimateScopeCard({ estimateId, onOpen }: { estimateId: string; onOpen: () => void }) {
+  const apiFetch = useApiClient();
   const [estimate, setEstimate] = useState<{
     estimateNumber: string;
     status: string;

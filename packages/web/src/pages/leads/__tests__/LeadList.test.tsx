@@ -3,8 +3,12 @@ import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { LeadList } from '../LeadList';
 
+const _sharedApiFetchMock = vi.hoisted(() => vi.fn());
 vi.mock('../../../utils/api-fetch', () => ({
-  apiFetch: vi.fn(),
+  apiFetch: _sharedApiFetchMock,
+}));
+vi.mock('../../../lib/apiClient', () => ({
+  useApiClient: () => _sharedApiFetchMock,
 }));
 
 import { apiFetch } from '../../../utils/api-fetch';

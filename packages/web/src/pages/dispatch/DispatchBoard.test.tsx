@@ -8,7 +8,7 @@ vi.mock('../../hooks/useDispatchBoard', () => ({
 }));
 
 vi.mock('@clerk/clerk-react', () => ({
-  useAuth: () => ({ userId: 'test-user', getToken: vi.fn().mockResolvedValue(null) }),
+  useAuth: () => ({ userId: 'test-user', getToken: vi.fn().mockResolvedValue("test-token") }),
   useUser: () => ({ user: { id: 'test-user' } }),
 }));
 

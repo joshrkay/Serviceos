@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router';
 import { ChevronLeft, Star, MessageSquare } from 'lucide-react';
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts';
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '../ui/chart';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 type FeedbackResponse = {
   id: string;
@@ -35,6 +35,7 @@ function formatRelative(iso: string): string {
 }
 
 export function FeedbackDashboard() {
+  const apiFetch = useApiClient();
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');

@@ -4,6 +4,10 @@ import {
   Check, Phone, Mail, ChevronDown, ChevronUp, CheckCircle2, X,
   MapPin, FileText, Calendar, Clock, User, Download,
 } from 'lucide-react';
+// Public customer-facing route (no Clerk session) — keep the
+// module-level `apiFetch` instead of `useApiClient`. apiFetch's
+// public-path branch skips Authorization on the `/public/...`
+// endpoints this page hits, which is exactly what we want here.
 import { apiFetch } from '../../utils/api-fetch';
 import { printEstimateDocument } from '../../lib/estimatePdf';
 

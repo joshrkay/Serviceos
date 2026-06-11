@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from 'react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 const SOURCES = [
   'web_form',
@@ -52,6 +52,7 @@ function parseDollarCents(value: string): number | undefined {
 }
 
 export function LeadCreate({ onCreated, onCancel }: LeadCreateProps) {
+  const apiFetch = useApiClient();
   const [form, setForm] = useState<FormState>(empty);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);

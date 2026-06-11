@@ -12,7 +12,7 @@ import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { normalizeInvoiceStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 
@@ -524,6 +524,7 @@ function MarkPaidSheet({
   onClose: () => void;
   onPaid: () => void | Promise<void>;
 }) {
+  const apiFetch = useApiClient();
   const [method, setMethod] = useState<'card' | 'ach' | 'cash' | 'check'>('cash');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -657,6 +658,7 @@ function OriginAttributionLine({ leadId }: { leadId: string }) {
 
 // ─── Invoice Detail ───────────────────────────────────────────────────────
 function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () => void }) {
+  const apiFetch = useApiClient();
   const navigate = useNavigate();
   const tz = useTenantTimezone();
   const { data: inv, isLoading, error, refetch } = useDetailQuery<ApiInvoice>('/api/invoices', invoiceId);

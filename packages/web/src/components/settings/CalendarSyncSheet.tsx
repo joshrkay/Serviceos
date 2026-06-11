@@ -9,7 +9,7 @@
 import { useEffect, useState } from 'react';
 import { X, Calendar, AlertCircle } from 'lucide-react';
 import { toast } from 'sonner';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 
 interface CalendarIntegrationView {
   id: string;
@@ -26,6 +26,7 @@ interface CalendarSyncSheetProps {
 }
 
 export function CalendarSyncSheet({ onClose }: CalendarSyncSheetProps) {
+  const apiFetch = useApiClient();
   const [integration, setIntegration] = useState<CalendarIntegrationView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');

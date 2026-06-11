@@ -4,7 +4,7 @@ import {
   Bell, CheckCircle, X, MapPin, Briefcase,
 } from 'lucide-react';
 import { useNavigate } from 'react-router';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatInTenantTz, formatTimeInTenantTz } from '../../utils/formatInTenantTz';
@@ -65,6 +65,7 @@ function overlap(a: ApiAppointment, b: ApiAppointment): boolean {
 
 /** Delay notification form */
 function DelaySheet({ appointmentId, onClose }: { appointmentId: string; onClose: () => void }) {
+  const apiFetch = useApiClient();
   const [minutes, setMinutes] = useState<10 | 15 | 20 | 60>(20);
   const [sending, setSending] = useState(false);
   const [sent,    setSent]    = useState(false);
@@ -141,6 +142,7 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
   onClose: () => void;
   technicians: { id: string; name: string }[];
 }) {
+  const apiFetch = useApiClient();
   const [jobId,    setJobId]    = useState('');
   const [techId,   setTechId]   = useState('');
   useEffect(() => {
@@ -257,6 +259,7 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
 }
 
 export function SchedulePage() {
+  const apiFetch = useApiClient();
   const navigate = useNavigate();
   const { technicians } = useTechnicianRoster();
   const tz = useTenantTimezone();

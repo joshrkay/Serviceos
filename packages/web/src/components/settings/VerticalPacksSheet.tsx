@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { X, Zap, Check } from 'lucide-react';
-import { apiFetch } from '../../utils/api-fetch';
+import { useApiClient } from '../../lib/apiClient';
 import { toast } from 'sonner';
 
 interface PackActivation {
@@ -26,6 +26,7 @@ const AVAILABLE_PACKS = [
 ];
 
 export function VerticalPacksSheet({ onClose }: { onClose: () => void }) {
+  const apiFetch = useApiClient();
   const [activePacks, setActivePacks] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(true);
   const [toggling, setToggling] = useState<string | null>(null);

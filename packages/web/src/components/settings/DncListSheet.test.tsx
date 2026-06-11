@@ -12,7 +12,10 @@ import { DncListSheet } from './DncListSheet';
 const apiFetchMock = vi.fn();
 
 vi.mock('../../utils/api-fetch', () => ({
-  apiFetch: (...args: unknown[]) => apiFetchMock(...args),
+  apiFetch: apiFetchMock,
+}));
+vi.mock('../../lib/apiClient', () => ({
+  useApiClient: () => apiFetchMock,
 }));
 
 vi.mock('sonner', () => ({
