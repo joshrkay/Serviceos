@@ -797,7 +797,183 @@ Deliver the core voice loop end-to-end for both directions.
 
 ---
 
-## 9. Success Metrics
+## 9. Vertical Expansion Roadmap
+
+### The expansion thesis
+
+The core platform — voice AI, proposal system, supervisor agent, invoicing, CRM, memberships, brand voice — does not change per vertical. What changes is the **vertical pack**: terminology, emergency indicators, estimate templates, intake questions, compliance flags, and specialist scheduling behaviors.
+
+Every new vertical is mostly a pack plus targeted feature additions. The platform investment compounds: what we build for electrical (permit markers, compliance guardrails) makes the pest-control permit-tracking story easier. What we build for pest control (true route optimization, recurring-first billing) accelerates the painting and handyman scheduling work.
+
+The ICP stays the same across every vertical: **1–3 person shop, owner-operator, no dedicated office staff.** The common pain is identical — a tradesperson doing all their own back-office work, from a truck, with their phone. The vertical-specific content is how the AI sounds and what it knows about the job.
+
+---
+
+### Wave 1 (Now): HVAC + Plumbing
+
+The proving ground. Emergency-driven, high-ticket, relationship-heavy. The perfect sandbox for the AI trust model because the cost of a wrong booking or a mis-priced estimate is immediately visible. If the system works here it works anywhere.
+
+| | HVAC | Plumbing |
+|--|------|---------|
+| Revenue model | Dispatch fee + repair/install | Dispatch fee + repair/install |
+| Average ticket | $200–$2,000 | $150–$1,500 |
+| Urgency pattern | Seasonal peaks (no heat, no cool) | Emergency-random (leaks, floods, burst pipes) |
+| AI superpower | Equipment history → repair-vs-replace context | MMS-to-quote (photo damage assessment) + severity triage |
+| Scheduling density | 3–5 jobs/day | 3–6 jobs/day |
+| Key differentiator vs. competitors | Equipment registry on every call | Plumbing severity triage from call description |
+
+---
+
+### Wave 2: Electrical + Pest Control
+
+#### Electrical
+
+Architecturally the closest to HVAC/plumbing — same dispatch-fee model, same job density, same emergency-driven demand. Electricians going independent are a natural expansion of the Persona 3 ICP ("going independent from a large company").
+
+**What's new in the pack:**
+
+| Feature | How it works |
+|---------|-------------|
+| Permit-aware estimates | Permit line item auto-added with confidence marker: *"This scope typically requires a permit pull — add ~$150 and confirm with local AHJ before finalizing"* |
+| Two-person job detection | Certain job types (panel upgrade, service entrance, commercial) flagged in booking proposal: *"This job typically requires 2 licensed techs — scheduling Carlos only, verify"* |
+| Compliance guardrail | AI never gives NEC code advice or certifies code compliance. Surfaces compliance questions as confidence markers only: *"Code requirement for this scope: unclear — confirm with AHJ"* |
+| EV charger / panel upgrade templates | High-ticket tiered estimates pre-built: service panel size options, charger amp levels, permit included vs. excluded |
+| License verification flag | Dispatch proposal includes tech's license status for scope: *"Carlos is licensed for this scope in AZ — confirm if out-of-county job"* |
+
+**Emergency indicators:** Arcing, burning smell, smoke, complete outage (cold/medical context), sparks, electrical fire, flickering breakers.
+
+**Competitive position:** No dedicated AI-first platform exists for small electrical contractors. ServiceTitan serves enterprise. Jobber is horizontal. We go deep on voice + compliance surfacing before anyone else.
+
+**ICP:** Master electrician going independent; 1–2 licensed electricians; $300K–$1M revenue; primarily residential + light commercial.
+
+**Platform investment (estimate):** 2–3 weeks. New vertical pack + permit marker + two-person flag + compliance guardrail. No scheduling model changes.
+
+---
+
+#### Pest Control
+
+The most architecturally distinct vertical in Wave 2. This is not a trades business — it's a **route-dense recurring-service business**. The platform must flex in three areas to serve it well.
+
+**How pest control is different:**
+
+| Dimension | Trades (HVAC/Plumbing/Electrical) | Pest Control |
+|-----------|----------------------------------|--------------|
+| Revenue model | One-off service + optional plan | Recurring plan = primary; one-off = upsell |
+| Jobs per day | 3–6 | 10–18 |
+| Avg. job duration | 1–4 hours | 20–60 minutes |
+| Route optimization | Nice-to-have | Required from day 1 |
+| Customer relationship | Called when needed | Auto-renewed relationship; churn = revenue loss |
+| Scheduling cadence | Reactive (customer calls when broken) | Proactive (system schedules next treatment automatically) |
+| Treatment tracking | N/A | Regulatory requirement in most states |
+| Re-treatment commitment | N/A | Contractual ("free re-service within 30 days") |
+
+**What's new in the pack + platform:**
+
+| Feature | How it works | Platform change required |
+|---------|-------------|--------------------------|
+| Route optimization | Morning dispatch proposes optimal stop sequence → one-tap approve | Real routing engine (Google Maps Directions API, not just drive-time feasibility) |
+| Recurring-first scheduling | Plan enrollment auto-generates service schedule for the year | Memberships engine scheduling extension |
+| Treatment log | What was applied, where, concentration, re-entry interval → logged on job | New treatment record on job model |
+| Re-treatment timer | Alert when a treated property is within its re-service guarantee window | Background job, surface in digest |
+| Service agreement renewal | Auto-renew proposal (Stripe off_session) 30 days before expiration | Memberships engine — already being built |
+| Infestation classification | Intent classification: rodent / insect / termite / mosquito / general → routes to right treatment protocol | Vertical pack extension |
+| Commercial pest flag | Restaurant / food-processing / healthcare accounts trigger extra compliance markers | Account type extension |
+| Chemical inventory | What's on the truck by product → deduct on treatment log | Truck inventory extension (already planned for trades) |
+
+**Emergency indicators:** Active infestation in healthcare/food-service setting, bed bug discovery (hotel), visible rodent in occupied living space (medical context).
+
+**Competitive position:** PestPac, ServSuite, and FieldRoutes are vertical-specific and entrenched but have zero AI voice capability. *"Answers your phone, books your route, logs the treatment, and re-enrolls the customer"* is a story none of them can tell.
+
+**ICP:** Owner-operator with 1–3 routes; $200K–$800K revenue; mix of residential plans and commercial accounts.
+
+**Platform investment (estimate):** 4–6 weeks. Route optimization engine is the biggest investment; treatment log + re-treatment timer are additive; recurring-first scheduling extends the memberships engine.
+
+---
+
+### Wave 3: Painting + Handyman
+
+#### Painting
+
+Photo-first quoting, multi-day scheduling, and project-based revenue. The market is enormous (estimated 200,000+ contractors in the US) and almost entirely underserved by modern software.
+
+**What's new:**
+
+| Feature | How it works | Platform change |
+|---------|-------------|-----------------|
+| Photo-to-quote (paint) | Room/surface photos → AI estimates coverage area, surface type, prep complexity → line items (hours + gallons) | Extends MMS-to-quote (already in platform) |
+| Room-by-room breakdown | Estimate splits by room; customer can approve whole or partial | Estimate line-item grouping |
+| Multi-day blocking | A 3-day job books 3 consecutive slots, not 3 single appointments | Scheduler: multi-day job model |
+| 50% deposit standard | Estimate acceptance auto-captures 50% deposit | Already supported; surface as painting default in onboarding |
+| Weather-aware exterior flag | Outdoor jobs get a weather-risk marker on the booking proposal in cold/rainy regions | Weather API check on schedule generation |
+| Material + color tracking | Colors, brands, and gallons used logged on job → stored on property | Job notes structured field + property record |
+| Seasonal revenue awareness | Exterior painting is summer-heavy; digest includes season utilization summary | Vertical pack + digest template |
+
+**ICP:** Owner with 1–2 crews; $250K–$1.2M revenue; mix of exterior, interior, residential, and light commercial.
+
+**Platform investment (estimate):** 3–4 weeks. Multi-day blocking is the primary scheduler change; photo-to-quote extends existing; material tracking is additive.
+
+---
+
+#### Handyman
+
+High volume, low repeatability, T&M (time and materials) as default billing. The handyman market is vast and fragmented — the typical operator is terrible at invoicing and collecting.
+
+**What's new:**
+
+| Feature | How it works | Platform change |
+|---------|-------------|-----------------|
+| T&M billing as default | Estimate and invoice built from hourly rate + materials, not catalog SKUs | Billing model: T&M as first-class (catalog resolver falls back to T&M for uncatalogued scopes) |
+| Task list per appointment | "Honey-do list" — multiple small tasks tracked per visit | Job model: task list sub-items per appointment |
+| Fine-grained slot durations | 30-minute slot granularity (not 2-hour blocks) | Scheduler: configurable slot size per tenant |
+| Skill/task guardrail | AI flags tasks that likely require a licensed trade: *"This may require a licensed plumber — confirm Carlos is licensed for this scope"* | Vertical pack intent classifier + confidence marker |
+| Scope-add voice flow | Common mid-job addition: *"They want me to also replace the bathroom faucet — add it to the ticket"* → proposal | Already supported; optimize for frequency at handyman density |
+
+**ICP:** Solo or 2–3 techs; $150K–$600K revenue; primarily residential; high booking volume (4–8 jobs/day for solo operators).
+
+**Platform investment (estimate):** 3–4 weeks. T&M billing is the primary change; task-list model and slot granularity are scheduler extensions.
+
+---
+
+### Platform investment summary by wave
+
+| Wave | Verticals | New platform capabilities required | Estimated investment |
+|------|-----------|-------------------------------------|---------------------|
+| 1 | HVAC + Plumbing | — (baseline) | — |
+| 2a | Electrical | Permit marker, two-person flag, compliance guardrail | 2–3 weeks |
+| 2b | Pest Control | Route optimization, treatment log, re-treatment timer, recurring-first scheduling | 4–6 weeks |
+| 3a | Painting | Multi-day blocking, weather flag, material tracking | 3–4 weeks |
+| 3b | Handyman | T&M billing, task-list model, fine-grained slot duration | 3–4 weeks |
+
+**What stays the same across all verticals:**
+- Core AI architecture and LLM gateway
+- Proposal system + supervisor agent + trust model
+- Invoicing, payments, Stripe integration
+- CRM + communication + brand voice
+- SMS approval transport + end-of-day digest
+- Memberships engine
+- Client hub (token-gated portal)
+- Review management + correction loop
+
+The platform investment per vertical decreases as the core matures. By Wave 3, most of the scaffolding for multi-day blocking and T&M billing will have been partially built for the pest control route work and painting photo quoting. The verticals compound.
+
+---
+
+### Competitive position by vertical
+
+| Vertical | Primary incumbent | Their AI capability | Our edge |
+|----------|------------------|---------------------|----------|
+| HVAC | ServiceTitan, Jobber, Housecall Pro | Chat assistant, Jobber AI Receptionist (hand-off) | AI runs the back office; equipment history on every call |
+| Plumbing | Jobber, Housecall Pro, ServiceTitan | Same as HVAC | MMS-to-quote; severity triage from call |
+| Electrical | Jobber, ServiceTitan (enterprise) | Minimal | First AI-first platform with permit/compliance surfacing |
+| Pest Control | PestPac, ServSuite, FieldRoutes | None | First voice AI answering phone + booking routes + logging treatments |
+| Painting | Jobber, Workiz, Estimate Rocket | Minimal | Photo-first AI quoting; multi-day voice scheduling |
+| Handyman | Jobber, Housecall Pro, TaskEasy | Minimal | T&M voice invoicing; task-list honey-do model |
+
+The pattern: every adjacent vertical has entrenched vertical software with zero AI voice capability, or horizontal software (Jobber) that goes wide but not deep. We go deep on AI-first voice back office in every vertical we enter.
+
+---
+
+## 10. Success Metrics
 
 ### North star
 
@@ -854,7 +1030,7 @@ Deliver the core voice loop end-to-end for both directions.
 
 ---
 
-## 10. Risk Register
+## 11. Risk Register
 
 | # | Risk | Mitigation |
 |---|------|-----------|
@@ -873,7 +1049,7 @@ Deliver the core voice loop end-to-end for both directions.
 
 ---
 
-## 11. Competitive Positioning Summary
+## 12. Competitive Positioning Summary
 
 | | Jobber | ServiceTitan | Avoca | **Rivet / ServiceOS** |
 |---|---|---|---|---|
@@ -895,7 +1071,7 @@ Deliver the core voice loop end-to-end for both directions.
 
 ---
 
-## 12. Glossary
+## 13. Glossary
 
 | Term | Definition |
 |------|-----------|
@@ -909,18 +1085,19 @@ Deliver the core voice loop end-to-end for both directions.
 | **Client hub** | The token-gated customer portal for estimate approval and invoice payment. No login required. |
 | **Digest** | The end-of-day SMS summary delivered 6–9pm tenant-local. The dashboard. |
 | **Brand voice** | The locked tone, register, and lexical profile for all AI utterances. Captured in onboarding, locked after setup, validated on every outbound message. |
-| **Wave** | A delivery phase: Hardening → Phase 1 (voice promise) → Phase 2 (Jobber gaps) → Phase 3 (field & money depth). |
+| **Wave** | A delivery phase. Platform waves: Hardening → Phase 1 (voice promise) → Phase 2 (Jobber gaps) → Phase 3 (field & money depth). Vertical waves: Wave 1 (HVAC + Plumbing) → Wave 2 (Electrical + Pest Control) → Wave 3 (Painting + Handyman). |
 | **Entity resolver** | The module that resolves free-text customer/job/account references from voice to verified database UUIDs. Ambiguity triggers a one-tap clarification. |
 
 ---
 
-## 13. Document History
+## 14. Document History
 
 | Version | Date | Summary |
 |---------|------|---------|
 | 1.0 | 2026-03 | Initial 8-phase execution catalog. |
 | 2.0 | 2026-05-17 | Re-framed around AI back office strategy. Added 11 new stories (SMS approval, supervisor agent, digest, review monitoring, dropped-call recovery, vulnerability triage, correction loop, brand voice, tech status). |
 | 3.0 | 2026-06-11 | **Voice-first reframe** — voice elevated to primary interface (both directions); SMS is async approval/notification channel. Added full Jobber feature parity map. Added job costing, memberships depth, client hub (lightweight portal), native mobile strategy. Updated ICP to include "going independent" persona. 6-month roadmap with phased priorities. Updated all 16 product decisions. |
+| 3.1 | 2026-06-11 | **Vertical expansion roadmap** (§9) — Wave 2: Electrical + Pest Control; Wave 3: Painting + Handyman. Per-vertical feature delta, platform investment estimates, ICP definitions, and competitive position by vertical. Pest control identified as architecturally distinct (route-dense, recurring-first); route optimization promoted from "post-PMF deferred" to Wave 2 required. |
 
 **Next review:** After Phase 1 exit (weeks 5–6), before Phase 2 kick-off.  
 **Change protocol:** PRD changes require a recorded decision in `docs/decisions.md` and a paired update to `docs/strategy/day-in-the-life.md` if the change affects the customer experience.
