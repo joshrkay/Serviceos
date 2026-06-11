@@ -335,6 +335,22 @@ async function handleEditOpen(
   proposal: Proposal,
 ): Promise<HandlerResult> {
   const now = deps.now ? deps.now() : new Date();
+  // Send FIRST, persist after. A session recorded before a failed prompt
+  // would be found by the dispatcher's fall-through for this same EDIT
+  // message and consume the literal "EDIT" as a bogus edit request —
+  // blocking later approval over a change the owner never dictated.
+  try {
+    await reply(
+      deps,
+      ctx.fromE164,
+      'What should I change? Reply with the change in one message (within 10 minutes).',
+    );
+  } catch (err) {
+    await audit(deps, ctx, 'proposal.sms_edit_prompt_send_failed', proposal.id, {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { handled: true, handler: HANDLER_NAME, reason: 'edit_prompt_send_failed' };
+  }
   await recordInbound(
     deps,
     ctx,
@@ -345,11 +361,6 @@ async function handleEditOpen(
   await audit(deps, ctx, 'proposal.sms_edit_session_opened', proposal.id, {
     proposalType: proposal.proposalType,
   });
-  await reply(
-    deps,
-    ctx.fromE164,
-    'What should I change? Reply with the change in one message (within 10 minutes).',
-  );
   return { handled: true, handler: HANDLER_NAME, reason: 'edit_session_opened' };
 }
 

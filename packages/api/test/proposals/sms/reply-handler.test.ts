@@ -606,6 +606,30 @@ describe('clarification flow (fallback)', () => {
     );
   });
 
+  it('a failed edit-prompt send opens no session and leaves approval unblocked', async () => {
+    const h = makeHarness({ interpretEdit: async () => ({ customerName: 'X' }) });
+    const proposal = await seedPendingProposal(h);
+    h.deps.sendSms = async () => {
+      throw new Error('twilio down');
+    };
+
+    const result = await handleProposalSmsReply(ctx('EDIT'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'edit_prompt_send_failed' });
+    expect(
+      h.smsEventRepo.events.find((e) => e.kind === 'edit_session_opened'),
+    ).toBeUndefined();
+    expect(h.smsEventRepo.events.find((e) => e.kind === 'edit_request')).toBeUndefined();
+
+    // Delivery recovers — a plain Y still approves (nothing was blocked).
+    h.deps.sendSms = async (to, body) => {
+      h.sent.push({ to, body });
+    };
+    const approval = await handleProposalSmsReply(ctx('Y'), h.deps);
+    expect(approval).toMatchObject({ handled: true, reason: 'approved' });
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('approved');
+  });
+
   it('a failed nudge send does not burn the clarification limit', async () => {
     const h = makeHarness();
     await seedPendingProposal(h);
