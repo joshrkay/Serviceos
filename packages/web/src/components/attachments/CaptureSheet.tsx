@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useId, useMemo, useRef, useState } from 'react';
 import { Camera, CheckCircle2, RotateCcw, Send, X } from 'lucide-react';
 import {
   ATTACHMENT_CATEGORIES,
@@ -8,6 +8,7 @@ import {
   uploadAttachment,
 } from '../../api/attachments';
 import { CameraCapture, CapturedMedia } from '../shared/CameraCapture';
+import { useFocusTrap } from '../ui/overlay';
 
 const LAST_CATEGORY_KEY = 'serviceos.attachments.lastCategory';
 
@@ -78,25 +79,9 @@ export function CaptureSheet({
   const titleId = useId();
   const uploadingRef = useRef(false);
 
-  // Focus the sheet container on mount so keyboard users land inside
-  useEffect(() => {
-    if (!capturing) {
-      titleRef.current?.focus();
-    }
-  }, [capturing]);
-
-  // Escape key closes the sheet
-  useEffect(() => {
-    if (capturing) return;
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
-        event.stopPropagation();
-        onClose?.();
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [capturing, onClose]);
+  // Focus trap: moves focus into the sheet on open, cycles Tab within it,
+  // fires Escape -> onClose, and returns focus to the triggering element on close.
+  useFocusTrap(containerRef, !capturing, onClose ?? (() => {}));
 
   const status = useMemo(() => {
     if (items.some((item) => item.state === 'uploading')) return 'uploading';
@@ -256,7 +241,7 @@ export function CaptureSheet({
               <p className="text-sm text-red-700">Some uploads failed.</p>
               <button
                 type="button"
-                onClick={() => uploadItems(items.flatMap((item, index) => item.state === 'error' ? [index] : []))}
+                onClick={() => void uploadItems(items.flatMap((item, index) => item.state === 'error' ? [index] : []))}
                 className="mt-2 inline-flex min-h-11 items-center gap-2 rounded-lg bg-red-600 px-3 text-sm text-white"
               >
                 <RotateCcw size={14} /> Retry failed

@@ -121,8 +121,51 @@ describe('CaptureSheet', () => {
     render(<CaptureSheet entityType="estimate" entityId="e1" onClose={onClose} />);
     fireEvent.click(screen.getByText('Mock shutter done'));
 
-    fireEvent.keyDown(document, { key: 'Escape' });
+    // useFocusTrap listens on the dialog node, not document
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns focus to the triggering element after the sheet closes', () => {
+    const onClose = vi.fn();
+
+    function Wrapper() {
+      const [open, setOpen] = React.useState(false);
+      return (
+        <>
+          <button type="button" id="trigger" onClick={() => setOpen(true)}>
+            Open sheet
+          </button>
+          {open && (
+            <CaptureSheet
+              entityType="estimate"
+              entityId="e1"
+              onClose={() => {
+                onClose();
+                setOpen(false);
+              }}
+            />
+          )}
+        </>
+      );
+    }
+
+    render(<Wrapper />);
+    const trigger = screen.getByRole('button', { name: 'Open sheet' });
+    // Explicitly focus the trigger so useFocusTrap can capture it as previouslyFocused
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    // advance past the camera mock to the review sheet
+    fireEvent.click(screen.getByText('Mock shutter done'));
+
+    const dialog = screen.getByRole('dialog');
+    // Close via Escape
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    // Focus must have returned to the triggering button
+    expect(document.activeElement).toBe(trigger);
   });
 
   it('sheet has role=dialog, aria-modal=true, and aria-labelledby pointing to title', () => {
