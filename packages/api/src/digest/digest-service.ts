@@ -24,6 +24,7 @@ import type { ProposalRepository, Proposal } from '../proposals/proposal';
 import type { CustomerRepository } from '../customers/customer';
 import type { SettingsRepository } from '../settings/settings';
 import { prioritizeProposals } from '../proposals/prioritization';
+import { AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS } from '../proposals/auto-approve';
 import { findJobsRequiringInvoicing } from '../invoices/invoicing-queue';
 import {
   resolveDayWindow,
@@ -44,6 +45,19 @@ export interface DigestPendingApproval {
   customerName?: string;
   /** Best-effort from the proposal payload — absent when not derivable. */
   amountCents?: number;
+  /**
+   * Forwarded from `payload._meta.overallConfidence` when present.
+   * Used by the worker to suppress one-tap links for low/very_low proposals
+   * (they must be reviewed in-app); absent when _meta is not present.
+   */
+  overallConfidence?: string;
+  /**
+   * True when the proposal's confidence is too low for a one-tap link.
+   * The web digest view uses this to route the operator to the in-app
+   * review flow instead of offering a one-tap approve button.
+   * Absent (falsy) when one-tap is allowed.
+   */
+  reviewInApp?: true;
 }
 
 export interface DigestUnbilledJob {
@@ -90,6 +104,21 @@ export const DIGEST_MAX_UNBILLED_JOBS = 10;
 
 const AMOUNT_KEYS = ['amountCents', 'totalCents', 'priceCents'] as const;
 
+/**
+ * Set built from `AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS` for O(1) lookup.
+ * Using the exported constant keeps the blocking definition in one place.
+ */
+const BLOCKING_CONFIDENCE_LEVELS_SET: ReadonlySet<string> = new Set(
+  AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS as readonly string[],
+);
+
+function extractOverallConfidence(payload: Record<string, unknown>): string | undefined {
+  const meta = payload._meta;
+  if (meta === null || typeof meta !== 'object') return undefined;
+  const overall = (meta as Record<string, unknown>).overallConfidence;
+  return typeof overall === 'string' ? overall : undefined;
+}
+
 function extractAmountCents(payload: Record<string, unknown>): number | undefined {
   const totals = payload.totals;
   if (totals && typeof totals === 'object') {
@@ -119,12 +148,17 @@ function extractCustomerName(proposal: Proposal): string | undefined {
 export function summarizeProposalForDigest(proposal: Proposal): DigestPendingApproval {
   const amountCents = extractAmountCents(proposal.payload ?? {});
   const customerName = extractCustomerName(proposal);
+  const overallConfidence = extractOverallConfidence(proposal.payload ?? {});
   return {
     proposalId: proposal.id,
     proposalType: proposal.proposalType,
     summary: proposal.summary,
     ...(customerName !== undefined ? { customerName } : {}),
     ...(amountCents !== undefined ? { amountCents } : {}),
+    ...(overallConfidence !== undefined ? { overallConfidence } : {}),
+    ...(overallConfidence !== undefined && BLOCKING_CONFIDENCE_LEVELS_SET.has(overallConfidence)
+      ? { reviewInApp: true as const }
+      : {}),
   };
 }
 
@@ -271,17 +305,21 @@ export function renderDigestSms(input: RenderDigestSmsInput): string {
   // the "+N more" marker for whatever doesn't fit) stays within budget.
   // No punctuation ever directly follows a one-tap URL — a trailing '.'
   // would be swallowed into the link by SMS clients and corrupt the token.
+  // When any one-tap link is present, append "(links expire in 30 min)"
+  // once after the approvals block so operators know the links are time-limited.
   const entries = approvalLinks.map(
     (l, i) => ` [${i + 1}] ${approvalLabel(l.approval)} ${l.url}`,
   );
+  const expiryNote = approvalLinks.length > 0 ? ' (links expire in 30 min)' : '';
   let included = entries.length;
   while (included >= 0) {
     const rest = total - included;
     const moreMarker = rest > 0 ? ` +${rest} more` : '';
+    const linkNote = included > 0 ? expiryNote : '';
     const body =
       `${head} Approvals: ${total} waiting —` +
       entries.slice(0, included).join('') +
-      `${moreMarker}${flags}${tail}`;
+      `${moreMarker}${linkNote}${flags}${tail}`;
     if (body.length <= maxChars) return body;
     included--;
   }
@@ -333,7 +371,7 @@ export async function computeDigestPayload(
 
   const paymentsFrom = new Date(today.start.getTime() - PAYMENT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
 
-  const [payments, completedJobs, tomorrowAppointments, openInvoices, partiallyPaidInvoices, pendingProposals, unbilledCandidates] =
+  const [payments, completedJobs, tomorrowAppointments, openInvoices, partiallyPaidInvoices, readyProposals, draftProposals, unbilledCandidates] =
     await Promise.all([
       deps.paymentRepo.findByTenant(tenantId, {
         status: 'completed',
@@ -349,8 +387,13 @@ export async function computeDigestPayload(
       deps.invoiceRepo.findByTenant(tenantId, { status: 'open' }),
       deps.invoiceRepo.findByTenant(tenantId, { status: 'partially_paid' }),
       deps.proposalRepo.findByStatus(tenantId, 'ready_for_review'),
+      deps.proposalRepo.findByStatus(tenantId, 'draft'),
       findJobsRequiringInvoicing(tenantId, deps),
     ]);
+
+  // Combine both actionable statuses — mirrors the inbox's dual-fetch so the
+  // digest and the inbox always agree on what needs attention.
+  const pendingProposals = [...readyProposals, ...draftProposals];
 
   // Money in today — the dashboard's own window-revenue function over the
   // dashboard's own tenant-tz day boundaries.

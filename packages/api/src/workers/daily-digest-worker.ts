@@ -32,7 +32,7 @@ import type { Logger } from '../logging/logger';
 import type { SettingsRepository, TenantSettings } from '../settings/settings';
 import type { MessageDeliveryProvider } from '../notifications/delivery-provider';
 import type { DispatchRepository } from '../notifications/dispatch-repository';
-import { createOneTapApproveToken } from '../proposals/auto-approve';
+import { createOneTapApproveToken, AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS } from '../proposals/auto-approve';
 import {
   buildFallbackNarrative,
   computeDigestPayload,
@@ -84,26 +84,69 @@ export interface IsDigestDueInput {
   intervalMs?: number;
 }
 
+export interface DigestDueResult {
+  due: boolean;
+  /**
+   * The tenant-local calendar date the digest should be filed under.
+   *
+   * When the matching bucket crossed local midnight (wrap branch: target
+   * falls in the tail of the previous day, e.g. 23:55 in a 00:05 bucket),
+   * the digest belongs to the day that ENDED — `localDateString(now −
+   * intervalMs)` — not the new day that started.  In all other cases this
+   * equals `localDateString(now)`.
+   */
+  effectiveDate: string;
+}
+
+/**
+ * Returns `{ due, effectiveDate }` for the tenant-local `digestTime` bucket
+ * `(now − interval, now]`, measured in tenant-local minutes-of-day (wraps
+ * across local midnight).
+ *
+ * `effectiveDate` is the correct YYYY-MM-DD to use for the digest record:
+ * for wrap-branch matches (target > prevMin in the midnight-straddle case)
+ * the digest belongs to the previous local day.
+ *
+ * For backward-compatibility `isDigestDue` still accepts the same input and
+ * returns a plain boolean; the sweep uses `checkDigestDue` to get the date.
+ */
+export function checkDigestDue(input: IsDigestDueInput): DigestDueResult {
+  const intervalMs = input.intervalMs ?? DIGEST_SWEEP_INTERVAL_MS;
+  const target = parseDigestTimeMinutes(input.digestTime);
+  if (target === null) return { due: false, effectiveDate: localDateString(input.now, input.timezone) };
+  const nowMin = localMinutesOfDay(input.now, input.timezone);
+  const prevInstant = new Date(input.now.getTime() - intervalMs);
+  const prevMin = localMinutesOfDay(prevInstant, input.timezone);
+  if (prevMin === nowMin) {
+    const due = target === nowMin;
+    return { due, effectiveDate: localDateString(input.now, input.timezone) };
+  }
+  if (prevMin < nowMin) {
+    // Normal (non-wrapping) bucket — digest belongs to today.
+    const due = target > prevMin && target <= nowMin;
+    return { due, effectiveDate: localDateString(input.now, input.timezone) };
+  }
+  // Bucket wraps local midnight (e.g. prev 23:50 → now 00:05).
+  // target > prevMin  → the digest time fell in the PREVIOUS day's tail.
+  // target <= nowMin  → the digest time fell in the NEW day's head.
+  if (target > prevMin) {
+    // Matched in the previous day's tail — date it to the day that ended.
+    return { due: true, effectiveDate: localDateString(prevInstant, input.timezone) };
+  }
+  if (target <= nowMin) {
+    // Matched in the new day's head — date it to today.
+    return { due: true, effectiveDate: localDateString(input.now, input.timezone) };
+  }
+  return { due: false, effectiveDate: localDateString(input.now, input.timezone) };
+}
+
 /**
  * True when the tenant-local `digestTime` wall-clock falls inside the
  * just-passed bucket `(now − interval, now]`, measured in tenant-local
  * minutes-of-day (wraps across local midnight).
  */
 export function isDigestDue(input: IsDigestDueInput): boolean {
-  const intervalMs = input.intervalMs ?? DIGEST_SWEEP_INTERVAL_MS;
-  const target = parseDigestTimeMinutes(input.digestTime);
-  if (target === null) return false;
-  const nowMin = localMinutesOfDay(input.now, input.timezone);
-  const prevMin = localMinutesOfDay(new Date(input.now.getTime() - intervalMs), input.timezone);
-  if (prevMin === nowMin) {
-    // Degenerate sub-minute interval: only an exact match is due.
-    return target === nowMin;
-  }
-  if (prevMin < nowMin) {
-    return target > prevMin && target <= nowMin;
-  }
-  // Bucket wraps local midnight (e.g. prev 23:50 → now 00:05).
-  return target > prevMin || target <= nowMin;
+  return checkDigestDue(input).due;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -207,9 +250,42 @@ async function processTenant(
     return { generated: false, sent: false, skipped: false };
   }
 
-  const timezone = settings.timezone || 'America/New_York';
-  const digestDate = localDateString(now, timezone);
+  const rawTimezone = settings.timezone || 'America/New_York';
+  // Guard against invalid IANA timezone strings stored in tenant settings.
+  // Intl throws a RangeError for unknown zones; we fall back to the default
+  // and emit a structured warn log ONCE per tenant per sweep (not per tick).
+  const DEFAULT_TIMEZONE = 'America/New_York';
+  let timezone = rawTimezone;
+  try {
+    // Probe the zone with a cheap, side-effect-free format call.
+    new Intl.DateTimeFormat('en-US', { timeZone: rawTimezone }).format(now);
+  } catch {
+    deps.logger.warn('Daily-digest sweep: invalid tenant timezone, falling back to default', {
+      tenantId,
+      invalidTimezone: rawTimezone,
+      fallbackTimezone: DEFAULT_TIMEZONE,
+    });
+    timezone = DEFAULT_TIMEZONE;
+  }
 
+  // Use checkDigestDue to determine BOTH whether the digest is due AND the
+  // correct local calendar date for the digest record.  When the matching
+  // bucket crosses local midnight (e.g. 23:55 digest_time, bucket 23:50→00:05),
+  // the digest belongs to the day that ENDED, not the new day that started.
+  const dueResult = checkDigestDue({
+    digestTime: settings.digestTime ?? '18:00',
+    timezone,
+    now,
+    intervalMs,
+  });
+
+  // For the retry path we need to know the date *before* deciding whether to
+  // skip.  If the current sweep isn't due and there's no un-sent stored row,
+  // bail early.  We only look up the stored row once we know the effective date.
+  const digestDate = dueResult.effectiveDate;
+
+  // Also check the current local-day for the case where a previous un-sent
+  // row exists from a normal (non-midnight-wrap) prior sweep.
   const existing = await deps.digestRepo.findByTenantAndDate(tenantId, digestDate);
   if (existing?.smsDispatchId) {
     // Already generated AND sent today — re-delivery / overlap no-op.
@@ -225,13 +301,7 @@ async function processTenant(
     // recomputing, regardless of the due bucket.
     record = existing;
   } else {
-    const due = isDigestDue({
-      digestTime: settings.digestTime ?? '18:00',
-      timezone,
-      now,
-      intervalMs,
-    });
-    if (!due) return { generated: false, sent: false, skipped: false };
+    if (!dueResult.due) return { generated: false, sent: false, skipped: false };
 
     const payload = await computeDigestPayload(tenantId, digestDate, deps.computeDeps);
     const narrative = await composeNarrativeSafe(tenantId, payload, deps);
@@ -302,6 +372,23 @@ async function sendDigestSms(
     return false;
   }
 
+  // Before sending, check whether a dispatch already exists for this digest.
+  // This guards the retry path: a prior sweep that stored the row but crashed
+  // before claiming `setSmsDispatchId` must not re-send the SMS.
+  const existingDispatches = await deps.dispatchRepo.findByEntity(tenantId, 'daily_digest', record.id);
+  if (existingDispatches.length > 0) {
+    const prior = existingDispatches[0]; // sorted sent_at DESC by the repo
+    const claimed = await deps.digestRepo.setSmsDispatchId(tenantId, record.digestDate, prior.id);
+    if (!claimed) {
+      deps.logger.info('Daily-digest sweep: dispatch already claimed by another sender (retry path)', {
+        tenantId,
+        digestDate: record.digestDate,
+        dispatchId: prior.id,
+      });
+    }
+    return true;
+  }
+
   const body = renderDigestSms({
     payload: record.payload,
     deepLinkUrl: `${deps.publicBaseUrl.replace(/\/+$/, '')}/digest/${record.digestDate}`,
@@ -316,17 +403,33 @@ async function sendDigestSms(
     idempotencyKey,
   });
 
-  const dispatch = await deps.dispatchRepo.create({
-    tenantId,
-    entityType: 'daily_digest',
-    entityId: record.id,
-    channel: 'sms',
-    recipient: settings.ownerPhone,
-    provider: result.provider,
-    providerMessageId: result.providerMessageId,
-    status: 'sent',
-    idempotencyKey,
-  });
+  let dispatch;
+  try {
+    dispatch = await deps.dispatchRepo.create({
+      tenantId,
+      entityType: 'daily_digest',
+      entityId: record.id,
+      channel: 'sms',
+      recipient: settings.ownerPhone,
+      provider: result.provider,
+      providerMessageId: result.providerMessageId,
+      status: 'sent',
+      idempotencyKey,
+    });
+  } catch (createErr) {
+    // Unique-violation: another concurrent sender committed the dispatch row
+    // first. Look it up and claim it so setSmsDispatchId still fires.
+    deps.logger.info('Daily-digest sweep: dispatch create unique-violation, looking up existing row', {
+      tenantId,
+      digestDate: record.digestDate,
+      error: createErr instanceof Error ? createErr.message : String(createErr),
+    });
+    const fallbackDispatches = await deps.dispatchRepo.findByEntity(tenantId, 'daily_digest', record.id);
+    if (fallbackDispatches.length === 0) {
+      throw createErr; // unexpected — rethrow for observability
+    }
+    dispatch = fallbackDispatches[0];
+  }
 
   const claimed = await deps.digestRepo.setSmsDispatchId(
     tenantId,
@@ -344,6 +447,11 @@ async function sendDigestSms(
   return true;
 }
 
+/** Levels that suppress one-tap links — reuse the blocking constant. */
+const BLOCKING_CONFIDENCE_SET: ReadonlySet<string> = new Set(
+  AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS as readonly string[],
+);
+
 function buildApprovalLinks(
   tenantId: string,
   payload: DailyDigestPayload,
@@ -352,13 +460,24 @@ function buildApprovalLinks(
   if (!deps.oneTapSecret || !deps.buildApproveUrl) return [];
   const buildUrl = deps.buildApproveUrl;
   const secret = deps.oneTapSecret;
-  return payload.pendingApprovals.top.map((approval) => {
+  const links: DigestSmsApprovalLink[] = [];
+  for (const approval of payload.pendingApprovals.top) {
+    // Proposals with low/very_low confidence must NOT get a one-tap link —
+    // they require in-app review. The digest deep link covers them.
+    // Absent _meta (overallConfidence undefined) → link is allowed.
+    if (
+      approval.overallConfidence !== undefined &&
+      BLOCKING_CONFIDENCE_SET.has(approval.overallConfidence)
+    ) {
+      continue;
+    }
     // TTL is clamped to ≤30 min inside createOneTapApproveToken.
     const { token } = createOneTapApproveToken({
       proposalId: approval.proposalId,
       tenantId,
       secret,
     });
-    return { approval, url: buildUrl(token) };
-  });
+    links.push({ approval, url: buildUrl(token) });
+  }
+  return links;
 }

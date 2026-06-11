@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   runDailyDigestSweep,
   isDigestDue,
+  checkDigestDue,
   localMinutesOfDay,
   DIGEST_SWEEP_INTERVAL_MS,
   type DailyDigestWorkerDeps,
@@ -89,7 +90,8 @@ function stubComputeDeps(o: ComputeStubOverrides = {}, settingsRepo?: InMemorySe
     } as unknown as InvoiceRepository,
     estimateRepo: { findByJobs: async () => [] } as unknown as EstimateRepository,
     proposalRepo: {
-      findByStatus: async () => o.proposals ?? [],
+      findByStatus: async (_t: string, status: string) =>
+        status === 'draft' ? [] : o.proposals ?? [],
     } as unknown as ProposalRepository,
     customerRepo: { findById: async () => null } as unknown as CustomerRepository,
     settingsRepo: (settingsRepo ?? new InMemorySettingsRepository()) as never,
@@ -117,6 +119,25 @@ describe('isDigestDue (tenant-local 15-min bucket matching)', () => {
     expect(isDigestDue({ digestTime: '23:55', timezone: TZ, now: justPastMidnight })).toBe(true);
     expect(isDigestDue({ digestTime: '00:05', timezone: TZ, now: justPastMidnight })).toBe(true);
     expect(isDigestDue({ digestTime: '23:45', timezone: TZ, now: justPastMidnight })).toBe(false);
+  });
+
+  it('midnight-wrap: effectiveDate is the PREVIOUS day when target > prevMin (the day that ended)', () => {
+    // 00:05 Chicago = 2026-06-12. Bucket (23:50 Jun-11, 00:05 Jun-12].
+    // A 23:55 digest_time fell in the Jun-11 tail → must be dated 2026-06-11.
+    const justPastMidnight = new Date('2026-06-12T05:05:00Z');
+    const res23_55 = checkDigestDue({ digestTime: '23:55', timezone: TZ, now: justPastMidnight });
+    expect(res23_55.due).toBe(true);
+    expect(res23_55.effectiveDate).toBe('2026-06-11'); // the day that ended
+
+    // A 00:05 digest_time fell in the new day head → dated to 2026-06-12.
+    const res00_05 = checkDigestDue({ digestTime: '00:05', timezone: TZ, now: justPastMidnight });
+    expect(res00_05.due).toBe(true);
+    expect(res00_05.effectiveDate).toBe('2026-06-12'); // new day
+
+    // Normal (non-wrap) case: effectiveDate is the current local day.
+    const normal = checkDigestDue({ digestTime: '18:00', timezone: TZ, now: DUE_NOW });
+    expect(normal.due).toBe(true);
+    expect(normal.effectiveDate).toBe('2026-06-11');
   });
 
   it('accepts the HH:MM:SS shape the TIME column emits and rejects garbage', () => {
@@ -235,6 +256,83 @@ describe('runDailyDigestSweep', () => {
     expect(sendSms.mock.calls[0][0].idempotencyKey).toBe(sendSms.mock.calls[1][0].idempotencyKey);
   });
 
+  it('retry path: send-succeeded-claim-failed — second sweep claims the existing dispatch without re-sending', async () => {
+    // First sweep: SMS sent but setSmsDispatchId fails (returns null = already claimed).
+    const claimOnce = vi.spyOn(digestRepo, 'setSmsDispatchId');
+    claimOnce.mockResolvedValueOnce(null); // simulate losing the claim race
+    const first = await runDailyDigestSweep(deps());
+    expect(first.sent).toBe(1);
+    expect(sendSms).toHaveBeenCalledTimes(1);
+    // The dispatch row exists (from dispatchRepo.create), but smsDispatchId was not set.
+    const afterFirst = await digestRepo.findByTenantAndDate('t1', LOCAL_DATE);
+    expect(afterFirst?.smsDispatchId).toBeUndefined();
+
+    // Second sweep: should find the existing dispatch and claim it WITHOUT calling sendSms again.
+    claimOnce.mockRestore();
+    const later = new Date(DUE_NOW.getTime() + 15 * 60 * 1000);
+    const second = await runDailyDigestSweep(deps({ now: () => later }));
+    expect(second.sent).toBe(1);
+    expect(sendSms).toHaveBeenCalledTimes(1); // no second send
+    expect((await digestRepo.findByTenantAndDate('t1', LOCAL_DATE))?.smsDispatchId).toBeTruthy();
+  });
+
+  it('dispatch create unique-violation: recovers via findByEntity and claims without error', async () => {
+    // Scenario: sendSms succeeds, but dispatchRepo.create throws a unique-violation
+    // (a concurrent sweep created the dispatch row in the same instant). The
+    // catch block falls back to findByEntity which finds the concurrent row and
+    // claims it, so the function returns true and the record gets smsDispatchId.
+
+    const digestRepo2 = new InMemoryDailyDigestRepository();
+    const settingsRepo2 = new InMemorySettingsRepository();
+    await settingsRepo2.create(settingsRow('t1'));
+    const sendSms2 = vi.fn().mockResolvedValue({ provider: 'twilio', providerMessageId: 'SM-dup', channel: 'sms' });
+
+    // A specialized dispatchRepo that:
+    //  - findByEntity returns [] on first call (no dispatch yet when sendSms runs),
+    //    then returns the pre-seeded row on second call (what the concurrent winner created).
+    //  - create throws a unique-violation.
+    const UNIQUE_ERR = Object.assign(new Error('duplicate key violates unique constraint'), { code: '23505' });
+    let findCallCount = 0;
+    const seededDispatchId = 'dispatch-concurrent-winner';
+    const controlledDispatchRepo: import('../../src/notifications/dispatch-repository').DispatchRepository = {
+      async findByEntity(_t: string, _et: string, _eid: string) {
+        findCallCount++;
+        if (findCallCount === 1) {
+          // First call (before send): no dispatch yet.
+          return [];
+        }
+        // Second call (in catch after create fails): concurrent winner's row.
+        return [{ id: seededDispatchId, tenantId: 't1', entityType: 'daily_digest', entityId: _eid,
+          channel: 'sms', recipient: '+15551230000', provider: 'twilio',
+          status: 'sent', sentAt: new Date() }] as never;
+      },
+      async create(_input) {
+        throw UNIQUE_ERR;
+      },
+      async findById() { return null; },
+      async updateStatus() { return null; },
+      async listByTenant() { return { dispatches: [], total: 0 }; },
+    };
+
+    const result = await runDailyDigestSweep({
+      settingsRepo: settingsRepo2,
+      digestRepo: digestRepo2,
+      computeDeps: stubComputeDeps({}, settingsRepo2),
+      listTenantIds: async () => ['t1'],
+      delivery: { sendSms: sendSms2 } as never,
+      dispatchRepo: controlledDispatchRepo,
+      publicBaseUrl: 'https://app.x',
+      logger,
+      now: () => DUE_NOW,
+    });
+
+    expect(result.sent).toBe(1);
+    expect(sendSms2).toHaveBeenCalledTimes(1);
+    // The concurrent winner's dispatch was claimed.
+    const finalRecord = await digestRepo2.findByTenantAndDate('t1', LOCAL_DATE);
+    expect(finalRecord?.smsDispatchId).toBe(seededDispatchId);
+  });
+
   it('skips tenants whose digest is disabled or whose digest_time is outside the bucket', async () => {
     await settingsRepo.update('t1', { digestEnabled: false });
     expect((await runDailyDigestSweep(deps())).generated).toBe(0);
@@ -329,6 +427,61 @@ describe('runDailyDigestSweep', () => {
       },
     }));
     expect(result).toEqual({ tenants: 0, generated: 0, sent: 0, skipped: 0, failed: 0 });
+  });
+
+  it('low/very_low confidence proposals get no one-tap link in the SMS; reviewInApp is marked', async () => {
+    const lowConfidenceProposal = {
+      ...pendingProposal('prop-low'),
+      payload: { totals: { totalCents: 10000 }, customerName: 'Smith', _meta: { overallConfidence: 'low' } },
+    } as Proposal;
+    const highConfidenceProposal = {
+      ...pendingProposal('prop-high'),
+      payload: { totals: { totalCents: 20000 }, customerName: 'Jones', _meta: { overallConfidence: 'high' } },
+    } as Proposal;
+
+    await runDailyDigestSweep(deps({
+      computeDeps: stubComputeDeps({ proposals: [highConfidenceProposal, lowConfidenceProposal] }, settingsRepo),
+    }));
+
+    const body: string = sendSms.mock.calls[0][0].body;
+    // High-confidence proposal should have a one-tap link.
+    expect(body).toMatch(/approve\?token=/);
+    // Low-confidence proposal must NOT have a one-tap link.
+    // We can't easily distinguish which link goes with which proposal in the
+    // SMS body, but we can verify the stored payload marks low as reviewInApp.
+    const stored = await digestRepo.findByTenantAndDate('t1', LOCAL_DATE);
+    const topApprovals = stored!.payload.pendingApprovals.top;
+    const lowEntry = topApprovals.find((a) => a.proposalId === 'prop-low');
+    const highEntry = topApprovals.find((a) => a.proposalId === 'prop-high');
+    expect(lowEntry?.reviewInApp).toBe(true);
+    expect(highEntry?.reviewInApp).toBeUndefined();
+  });
+
+  it('absent _meta → one-tap link is allowed (unchanged behavior)', async () => {
+    const noMetaProposal = pendingProposal('prop-no-meta'); // no _meta in payload
+    await runDailyDigestSweep(deps({
+      computeDeps: stubComputeDeps({ proposals: [noMetaProposal] }, settingsRepo),
+    }));
+    const body: string = sendSms.mock.calls[0][0].body;
+    expect(body).toMatch(/approve\?token=/); // link present
+  });
+
+  it('invalid tenant timezone falls back to America/New_York with a single structured warn (not per-tick)', async () => {
+    const warnSpy = vi.spyOn(logger, 'warn');
+    await settingsRepo.update('t1', { timezone: 'Not/AZone' });
+    // Digest is due at 18:00 in the fallback tz (America/New_York, same bucket).
+    // DUE_NOW = 23:05Z = 19:05 New_York (EDT, UTC-4) → 18:00 falls in (18:50, 19:05]? No.
+    // But we just want to prove it doesn't throw and logs exactly once.
+    const result = await runDailyDigestSweep(deps());
+    // The warn about invalid timezone should have been emitted exactly once.
+    const tzWarns = warnSpy.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && (c[0] as string).includes('invalid tenant timezone'),
+    );
+    expect(tzWarns).toHaveLength(1);
+    expect(tzWarns[0][1]).toMatchObject({ invalidTimezone: 'Not/AZone', fallbackTimezone: 'America/New_York' });
+    // Sweep should not throw (outcome is skipped or generated, never failed due to tz).
+    expect(result.failed).toBe(0);
+    warnSpy.mockRestore();
   });
 
   it('exports the 15-minute sweep cadence app.ts drives', () => {

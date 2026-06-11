@@ -4055,16 +4055,6 @@ export const MIGRATIONS = {
     ALTER TABLE daily_digests FORCE ROW LEVEL SECURITY;
     CREATE POLICY tenant_isolation_daily_digests ON daily_digests
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
-    ALTER TABLE message_dispatches
-      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
-    ALTER TABLE message_dispatches
-      ADD CONSTRAINT message_dispatches_entity_type_check
-        CHECK (entity_type IN (
-          'estimate', 'invoice', 'appointment_confirmation',
-          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
-          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
-          'daily_digest'
-        ));
   `,
 
   // RV-063 (F-9): per-tenant digest delivery settings. Opt-in
@@ -4079,6 +4069,25 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS digest_channel TEXT NOT NULL DEFAULT 'sms'
         CHECK (digest_channel IN ('sms','none'));
+  `,
+
+  // RV-061 (F-9): widen message_dispatches entity_type CHECK to allow
+  // 'daily_digest' (owner end-of-day digest SMS, entity_id = daily_digests.id).
+  // Mirrors the prior widenings in 092_extend_dispatch_entity_types and
+  // 125_dispatch_entity_en_route — kept separate from 162_create_daily_digests
+  // so the table-creation and the constraint change are independently
+  // reviewable and reversible.
+  '164_dispatch_entity_daily_digest': `
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_entity_type_check
+        CHECK (entity_type IN (
+          'estimate', 'invoice', 'appointment_confirmation',
+          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
+          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
+          'daily_digest'
+        ));
   `,
 };
 

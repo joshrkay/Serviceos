@@ -70,7 +70,10 @@ interface DepsOverrides {
   appointments?: Appointment[];
   openInvoices?: Invoice[];
   partiallyPaidInvoices?: Invoice[];
+  /** 'ready_for_review' proposals (default bucket). */
   pendingProposals?: Proposal[];
+  /** 'draft' proposals — treated identically to ready_for_review in the digest. */
+  draftProposals?: Proposal[];
   estimatesByJob?: Estimate[];
   invoicesByJob?: Invoice[];
   customerNames?: Record<string, string>;
@@ -99,7 +102,10 @@ function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
       findByJobs: async () => o.estimatesByJob ?? [],
     } as unknown as EstimateRepository,
     proposalRepo: {
-      findByStatus: async () => o.pendingProposals ?? [],
+      findByStatus: async (_t: string, status: string) =>
+        status === 'draft'
+          ? o.draftProposals ?? []
+          : o.pendingProposals ?? [],
     } as unknown as ProposalRepository,
     customerRepo: {
       findById: async (_t: string, id: string) =>
@@ -277,6 +283,21 @@ describe('computeDigestPayload', () => {
     });
   });
 
+  it('counts and prioritizes BOTH ready_for_review and draft proposals (inbox parity)', async () => {
+    const readyProposal = proposal({ id: 'ready-1', status: 'ready_for_review', proposalType: 'draft_estimate', summary: 'Ready estimate', payload: { totals: { totalCents: 20000 } } });
+    const draftVoiceProposal = proposal({ id: 'draft-voice-1', status: 'draft', proposalType: 'voice_clarification', summary: 'Draft voice proposal' });
+    const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+      pendingProposals: [readyProposal],
+      draftProposals: [draftVoiceProposal],
+    }));
+    // Total must reflect both statuses combined.
+    expect(result.pendingApprovals.totalCount).toBe(2);
+    // Top includes both (only 2, so all fit).
+    const ids = result.pendingApprovals.top.map((a) => a.proposalId);
+    expect(ids).toContain('ready-1');
+    expect(ids).toContain('draft-voice-1');
+  });
+
   it('falls back to America/New_York when the tenant has no settings row', async () => {
     const result = await computeDigestPayload(TENANT, DATE, makeDeps({ settings: null }));
     expect(result.timezone).toBe('America/New_York');
@@ -300,6 +321,33 @@ describe('summarizeProposalForDigest', () => {
       ).customerName,
     ).toBe('Jane');
     expect(summarizeProposalForDigest(proposal({ payload: {} })).customerName).toBeUndefined();
+  });
+
+  it('preserves overallConfidence from _meta and marks reviewInApp for low/very_low', () => {
+    // high confidence → no reviewInApp, overallConfidence preserved
+    const high = summarizeProposalForDigest(proposal({ payload: { _meta: { overallConfidence: 'high' } } }));
+    expect(high.overallConfidence).toBe('high');
+    expect(high.reviewInApp).toBeUndefined();
+
+    // medium confidence → no reviewInApp
+    const medium = summarizeProposalForDigest(proposal({ payload: { _meta: { overallConfidence: 'medium' } } }));
+    expect(medium.overallConfidence).toBe('medium');
+    expect(medium.reviewInApp).toBeUndefined();
+
+    // low confidence → reviewInApp: true
+    const low = summarizeProposalForDigest(proposal({ payload: { _meta: { overallConfidence: 'low' } } }));
+    expect(low.overallConfidence).toBe('low');
+    expect(low.reviewInApp).toBe(true);
+
+    // very_low confidence → reviewInApp: true
+    const veryLow = summarizeProposalForDigest(proposal({ payload: { _meta: { overallConfidence: 'very_low' } } }));
+    expect(veryLow.overallConfidence).toBe('very_low');
+    expect(veryLow.reviewInApp).toBe(true);
+
+    // absent _meta → no overallConfidence, no reviewInApp (unchanged behavior)
+    const absent = summarizeProposalForDigest(proposal({ payload: {} }));
+    expect(absent.overallConfidence).toBeUndefined();
+    expect(absent.reviewInApp).toBeUndefined();
   });
 });
 
@@ -372,7 +420,7 @@ describe('renderDigestSms', () => {
   const longUrl = (i: number) =>
     `https://api.example.com/public/proposals/one-tap-approve?token=${'x'.repeat(160)}${i}`;
 
-  it('includes counts, top approvals with one-tap links, flags, and the digest deep link', () => {
+  it('includes counts, top approvals with one-tap links, flags, expiry note, and the digest deep link', () => {
     const payload = basePayload({
       pendingApprovals: {
         totalCount: 3,
@@ -401,6 +449,8 @@ describe('renderDigestSms', () => {
     expect(body).toContain('[1] draft estimate $450 Lopez https://x.co/t0');
     expect(body).toContain('https://x.co/t1');
     expect(body).toContain('https://x.co/t2');
+    // Expiry notice must appear when one-tap links are present.
+    expect(body).toContain('(links expire in 30 min)');
     expect(body).toContain('Flags: 2 overdue, 1 unbilled.');
     expect(body).toContain('https://app.example.com/digest/2026-06-10');
   });
@@ -436,6 +486,23 @@ describe('renderDigestSms', () => {
       approvalLinks: [],
     });
     expect(body).not.toContain('Approvals');
+    expect(body).not.toContain('links expire');
+    expect(body.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
+  });
+
+  it('omits expiry note when approvals exist but all are low-confidence (no links produced)', () => {
+    const payload = basePayload({
+      pendingApprovals: {
+        totalCount: 1,
+        top: [{ proposalId: 'p1', proposalType: 'draft_estimate', summary: 's', reviewInApp: true }],
+      },
+    });
+    const body = renderDigestSms({
+      payload,
+      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
+      approvalLinks: [], // no links (all filtered by confidence)
+    });
+    expect(body).not.toContain('links expire');
     expect(body.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
   });
 });
