@@ -265,6 +265,7 @@ async function handleApprove(
       SMS_REPLY_ACTOR_ID,
       'owner',
       deps.auditRepo,
+      'sms', // RV-073 — inbound SMS reply approval
     );
   } catch (err) {
     if (err instanceof ValidationError) {
@@ -344,6 +345,7 @@ async function handleReject(
       undefined,
       deps.appointmentRepo,
       deps.auditRepo,
+      'sms', // RV-073 — inbound SMS reply rejection
     );
   } catch (err) {
     await audit(deps, ctx, 'proposal.sms_reject_failed', proposal.id, {

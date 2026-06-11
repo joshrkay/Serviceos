@@ -199,3 +199,20 @@ describe('GET /public/proposals/one-tap-approve', () => {
     expect(stored?.status).toBe('approved');
   });
 });
+
+describe('RV-073 — one-tap approvals tag channel one_tap', () => {
+  it('proposal.approved audit metadata carries channel one_tap', async () => {
+    const { app, auditRepo, proposal } = await makeApp();
+    const { token } = mint(proposal.id);
+
+    const res = await request(app)
+      .get('/public/proposals/one-tap-approve')
+      .query({ token });
+    expect(res.status).toBe(200);
+
+    const events = await auditRepo.findByEntity(TENANT, 'proposal', proposal.id);
+    const approvedEvent = events.find((e) => e.eventType === 'proposal.approved');
+    expect(approvedEvent).toBeDefined();
+    expect(approvedEvent!.metadata).toMatchObject({ channel: 'one_tap' });
+  });
+});

@@ -13,6 +13,23 @@ export interface BatchApproveResult {
 }
 
 /**
+ * RV-073 — the transport an approval/rejection decision arrived on.
+ * Recorded in the `proposal.approved` / `proposal.rejected` audit-event
+ * metadata so the timeline can answer "HOW was this approved?".
+ *
+ *   'ui'      — dashboard / inbox screen-tap (routes/proposals.ts)
+ *   'sms'     — inbound SMS reply Y/N (proposals/sms/reply-handler.ts)
+ *   'one_tap' — HMAC one-tap link (routes/one-tap-approve.ts)
+ *   'voice'   — spoken approval on a verified owner call (RV-071)
+ *
+ * When absent, the channel key is OMITTED from the audit metadata
+ * (rather than defaulting to 'ui') — least invasive for existing audit
+ * consumers and truthful for legacy call sites that have not been
+ * updated to declare their transport.
+ */
+export type ApprovalChannel = 'ui' | 'sms' | 'one_tap' | 'voice';
+
+/**
  * P2-035 — Batch proposal approval (APPROVE ALL).
  *
  * Iterates the IDs and delegates to `approveProposal` per ID. There is NO
@@ -39,13 +56,14 @@ export async function approveProposalsBatch(
   actorId: string,
   actorRole: Role,
   auditRepo?: AuditRepository,
+  channel?: ApprovalChannel,
 ): Promise<BatchApproveResult> {
   const approved: string[] = [];
   const failed: { id: string; reason: string }[] = [];
 
   for (const id of proposalIds) {
     try {
-      await approveProposal(proposalRepo, tenantId, id, actorId, actorRole, auditRepo);
+      await approveProposal(proposalRepo, tenantId, id, actorId, actorRole, auditRepo, channel);
       approved.push(id);
     } catch (err) {
       // Surface the error code when available (e.g. NOT_FOUND, FORBIDDEN,
@@ -71,6 +89,7 @@ export async function approveProposal(
   actorId: string,
   actorRole: Role,
   auditRepo?: AuditRepository,
+  channel?: ApprovalChannel,
 ): Promise<Proposal> {
   if (!hasPermission(actorRole, 'proposals:approve')) {
     throw new ForbiddenError();
@@ -112,10 +131,18 @@ export async function approveProposal(
   // care about audit rows) compile unchanged; the router-factory always
   // passes a real repo in production.
   if (auditRepo) {
-    await logProposalEvent(auditRepo, updated, 'proposal.approved', {
-      id: actorId,
-      role: actorRole,
-    });
+    await logProposalEvent(
+      auditRepo,
+      updated,
+      'proposal.approved',
+      {
+        id: actorId,
+        role: actorRole,
+      },
+      // RV-073 — record HOW the approval arrived. Omitted entirely when
+      // the call site has not declared a channel (legacy behavior).
+      channel ? { channel } : undefined,
+    );
   }
 
   return updated;
@@ -193,6 +220,7 @@ export async function rejectProposal(
   details?: string,
   appointmentRepo?: AppointmentRepository,
   auditRepo?: AuditRepository,
+  channel?: ApprovalChannel,
 ): Promise<Proposal> {
   if (!hasPermission(actorRole, 'proposals:approve')) {
     throw new ForbiddenError();
@@ -230,6 +258,9 @@ export async function rejectProposal(
           status: updated.status,
           rejectionReason: reason,
           rejectionDetails: details,
+          // RV-073 — transport the rejection arrived on. Omitted when the
+          // call site has not declared one (legacy behavior).
+          ...(channel ? { channel } : {}),
         },
       }),
     );

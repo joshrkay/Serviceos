@@ -199,6 +199,7 @@ export function createProposalsRouter(
           req.auth!.userId,
           req.auth!.role as Role,
           auditRepo,
+          'ui', // RV-073 — batch approvals come from the inbox screen
         );
         res.json(result);
       } catch (err) {
@@ -222,6 +223,7 @@ export function createProposalsRouter(
           req.auth!.userId,
           req.auth!.role as Role,
           auditRepo,
+          'ui', // RV-073 — dashboard screen-tap approval
         );
         res.json(result);
       } catch (err) {
@@ -249,6 +251,7 @@ export function createProposalsRouter(
           parsed.details,
           appointmentRepo,
           auditRepo,
+          'ui', // RV-073 — dashboard screen-tap rejection
         );
         res.json(result);
       } catch (err) {
