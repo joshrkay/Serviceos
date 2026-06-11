@@ -4,7 +4,6 @@
  * CANONICAL tenant-leak suite: every new tenant-scoped table MUST append a
  * case here. Some findById cross-tenant cases intentionally duplicate
  * per-entity test files — that consolidation is deliberate.
- * Pending: `attachments` table — append its leak case here once RV-005 lands.
  * Policies fail CLOSED on unset GUC by erroring (no missing_ok), which is
  * stronger than the plan's "zero rows" wording — this is intentional.
  *
@@ -13,7 +12,7 @@
  * Layer 1 — Repository API: exercises the actual repository classes
  * (PgCustomerRepository, PgJobRepository, PgEstimateRepository,
  * PgInvoiceRepository, PgProposalRepository, PgFileRepository,
- * PgTenantFeatureFlagRepository) to confirm that each repo's own
+ * PgTenantFeatureFlagRepository, PgAttachmentRepository) to confirm that each repo's own
  * `findByTenant` / `findById` methods never surface rows belonging to a
  * different tenant.
  *
@@ -52,6 +51,7 @@ import { PgEstimateRepository } from '../../src/estimates/pg-estimate';
 import { PgInvoiceRepository } from '../../src/invoices/pg-invoice';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgFileRepository } from '../../src/files/pg-file';
+import { PgAttachmentRepository } from '../../src/attachments/pg-attachment';
 import { PgTenantFeatureFlagRepository } from '../../src/flags/pg-tenant-feature-flags';
 import { InMemoryFeatureFlagRepository } from '../../src/flags/feature-flags';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
@@ -96,6 +96,7 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
   let invoiceA: string;
   let proposalA: string;
   let fileA: string;
+  let attachmentA: string;
 
   // fixture IDs for tenant B
   let customerB: string;
@@ -104,6 +105,7 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
   let invoiceB: string;
   let proposalB: string;
   let fileB: string;
+  let attachmentB: string;
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
@@ -129,6 +131,7 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
     const invoiceRepo = new PgInvoiceRepository(pool);
     const proposalRepo = new PgProposalRepository(pool);
     const fileRepo = new PgFileRepository(pool);
+    const attachmentRepo = new PgAttachmentRepository(pool);
 
     // ── Seed tenant A ──────────────────────────────────────────────────────
     customerA = crypto.randomUUID();
@@ -238,6 +241,21 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
       updatedAt: new Date(),
     });
 
+    // RV-005: attachments — pins the real column names (the repo unit test
+    // mocks the pool, so this is the only proof the INSERT/SELECT shapes
+    // match migration 160).
+    const createdAttachmentA = await attachmentRepo.create(tenantA.tenantId, {
+      fileId: fileA,
+      entityType: 'job',
+      entityId: jobA,
+      kind: 'photo',
+      category: 'before',
+      caption: 'tenant A before photo',
+      uploadedBy: tenantA.userId,
+      source: 'app',
+    });
+    attachmentA = createdAttachmentA.id;
+
     // ── Seed tenant B ──────────────────────────────────────────────────────
     customerB = crypto.randomUUID();
     await customerRepo.create({
@@ -345,6 +363,18 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
       createdAt: new Date(),
       updatedAt: new Date(),
     });
+
+    const createdAttachmentB = await attachmentRepo.create(tenantB.tenantId, {
+      fileId: fileB,
+      entityType: 'job',
+      entityId: jobB,
+      kind: 'photo',
+      category: 'after',
+      caption: 'tenant B after photo',
+      uploadedBy: tenantB.userId,
+      source: 'app',
+    });
+    attachmentB = createdAttachmentB.id;
   });
 
   afterAll(async () => {
@@ -498,6 +528,58 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
     });
   });
 
+  // ── attachments (RV-005, migration 160) ────────────────────────────────────
+  describe('PgAttachmentRepository', () => {
+    it('listByEntity(A, job, jobA) returns A fixture and NOT B fixture', async () => {
+      const repo = new PgAttachmentRepository(pool);
+      const rows = await repo.listByEntity(tenantA.tenantId, 'job', jobA);
+      const ids = rows.map((r) => r.id);
+      expect(ids).toContain(attachmentA);
+      expect(ids).not.toContain(attachmentB);
+    });
+
+    it('listByEntity(B, job, jobB) returns B fixture and NOT A fixture', async () => {
+      const repo = new PgAttachmentRepository(pool);
+      const rows = await repo.listByEntity(tenantB.tenantId, 'job', jobB);
+      const ids = rows.map((r) => r.id);
+      expect(ids).toContain(attachmentB);
+      expect(ids).not.toContain(attachmentA);
+    });
+
+    it('findById scoped to A cannot retrieve B row', async () => {
+      const repo = new PgAttachmentRepository(pool);
+      const found = await repo.findById(tenantA.tenantId, attachmentB);
+      expect(found).toBeNull();
+    });
+
+    it('archive/setPortalVisibility/setPair scoped to A cannot mutate B row', async () => {
+      const repo = new PgAttachmentRepository(pool);
+      expect(await repo.archive(tenantA.tenantId, attachmentB)).toBeNull();
+      expect(await repo.setPortalVisibility(tenantA.tenantId, attachmentB, true)).toBeNull();
+      expect(
+        await repo.setPair(tenantA.tenantId, attachmentB, crypto.randomUUID(), 'after')
+      ).toBeNull();
+
+      // B's row is untouched.
+      const intact = await repo.findById(tenantB.tenantId, attachmentB);
+      expect(intact).not.toBeNull();
+      expect(intact!.archivedAt).toBeUndefined();
+      expect(intact!.portalVisible).toBe(false);
+      expect(intact!.pairGroupId).toBeUndefined();
+    });
+
+    it('tenant A attachment row is invisible to tenant B via RLS (raw query cross-check)', async () => {
+      const n = await asTenant(pool, tenantB.tenantId, async (client) => {
+        const res = await client.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM attachments WHERE id = $1`,
+          [attachmentA],
+        );
+        return res.rows[0].n;
+      });
+      expect(n).toBe(0);
+    });
+  });
+
   // ── tenant_feature_flags ───────────────────────────────────────────────────
   describe('PgTenantFeatureFlagRepository (migration 159)', () => {
     const FLAG_KEY = 'rv-003-isolation-test-flag';
@@ -582,6 +664,24 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
         await client.query(`RESET app.current_tenant_id`);
         await expect(
           client.query('SELECT count(*) FROM tenant_feature_flags'),
+        ).rejects.toThrow(/unrecognized configuration parameter|invalid input syntax for type uuid/);
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined);
+        client.release();
+      }
+    });
+
+    it('SELECT on attachments throws when GUC is not set (fail-closed policy)', async () => {
+      // attachments policy (schema.ts migration 160):
+      //   USING (tenant_id = current_setting('app.current_tenant_id')::UUID)
+      // No missing_ok → same fail-closed error as customers above.
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+        await client.query(`RESET app.current_tenant_id`);
+        await expect(
+          client.query('SELECT count(*) FROM attachments'),
         ).rejects.toThrow(/unrecognized configuration parameter|invalid input syntax for type uuid/);
       } finally {
         await client.query('ROLLBACK').catch(() => undefined);

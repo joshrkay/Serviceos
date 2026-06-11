@@ -3992,6 +3992,41 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_tenant_feature_flags ON tenant_feature_flags
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // RV-005: generalized attachments foundation — photos & documents linked
+  // to any supported entity. `job_photos` stays untouched for back-compat;
+  // new surfaces (invoice/estimate photo UX, voice attach, portal galleries)
+  // read this table. `pair_group_id`/`pair_role` model before/after pairs;
+  // `archived_at` is a soft delete (the underlying files row + S3 object
+  // remain, mirroring the job-photos delete semantics).
+  '160_create_attachments': `
+    CREATE TABLE IF NOT EXISTS attachments (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      file_id UUID NOT NULL REFERENCES files(id),
+      entity_type TEXT NOT NULL CHECK (entity_type IN ('job','invoice','estimate','form_response','expense','agreement_run','customer')),
+      entity_id UUID NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('photo','document')),
+      caption TEXT,
+      category TEXT CHECK (category IN ('before','after','problem','completion','receipt','signature','other')),
+      pair_group_id UUID,
+      pair_role TEXT CHECK (pair_role IN ('before','after')),
+      portal_visible BOOLEAN NOT NULL DEFAULT false,
+      annotated_file_id UUID REFERENCES files(id),
+      uploaded_by UUID,
+      source TEXT NOT NULL DEFAULT 'app' CHECK (source IN ('app','voice','portal','sms')),
+      sort_order INT NOT NULL DEFAULT 0,
+      archived_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_attachments_tenant_entity ON attachments(tenant_id, entity_type, entity_id);
+    CREATE INDEX IF NOT EXISTS idx_attachments_tenant_pair_group ON attachments(tenant_id, pair_group_id);
+    ALTER TABLE attachments ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE attachments FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_attachments ON attachments
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

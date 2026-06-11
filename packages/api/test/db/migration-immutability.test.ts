@@ -227,6 +227,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['158_proposal_sms_events_seq', '69e5325add052650a0355aeddab03b016018bf3d3272f63601b468ba32a67b9d'],
   // RV-001: per-tenant feature flag overrides table
   ['159_create_tenant_feature_flags', 'd30f579a89e543e42fec2f499dfd30b170994696d5f08b43b838a1cff483a319'],
+  // RV-005: generalized attachments foundation (photos & documents on any entity)
+  ['160_create_attachments', '5283aee6fdcb9db04a0cca209e75416fbabcbbf6db26f89339c282539b21c77c'],
 ];
 
 function hashMigration(value: string): string {
