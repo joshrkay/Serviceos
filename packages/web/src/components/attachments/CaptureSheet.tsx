@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Camera, CheckCircle2, RotateCcw, Send, X } from 'lucide-react';
 import {
   ATTACHMENT_CATEGORIES,
@@ -31,7 +31,7 @@ interface PendingCapture {
 export interface CaptureSheetProps {
   entityType: AttachmentEntityType;
   entityId: string;
-  onAttached?: (attachment: Attachment) => void;
+  onAttached?: (attachment: Attachment, previewUrl?: string) => void;
   defaultCategory?: AttachmentCategory;
   onClose?: () => void;
 }
@@ -55,11 +55,9 @@ function dataUrlToFile(url: string, filename: string): File {
 }
 
 function mediaToFile(media: CapturedMedia, index: number): File {
-  const ext = media.type === 'photo' ? 'jpg' : 'webm';
-  const type = media.type === 'photo' ? 'image/jpeg' : 'video/webm';
-  const filename = `${media.type}-${index + 1}-${Date.now()}.${ext}`;
+  const filename = `photo-${index + 1}-${Date.now()}.jpg`;
   if (media.url.startsWith('data:')) return dataUrlToFile(media.url, filename);
-  return new File([media.url], filename, { type });
+  return dataUrlToFile(media.url, filename);
 }
 
 export function CaptureSheet({
@@ -75,12 +73,30 @@ export function CaptureSheet({
   const [category, setCategory] = useState<AttachmentCategory>(
     readStoredCategory() ?? defaultCategory ?? 'other',
   );
+  const titleRef = useRef<HTMLParagraphElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const uploadingRef = useRef(false);
 
+  // Focus the sheet container on mount so keyboard users land inside
   useEffect(() => {
-    if (typeof window.localStorage?.setItem === 'function') {
-      window.localStorage.setItem(LAST_CATEGORY_KEY, category);
+    if (!capturing) {
+      titleRef.current?.focus();
     }
-  }, [category]);
+  }, [capturing]);
+
+  // Escape key closes the sheet
+  useEffect(() => {
+    if (capturing) return;
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        event.stopPropagation();
+        onClose?.();
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [capturing, onClose]);
 
   const status = useMemo(() => {
     if (items.some((item) => item.state === 'uploading')) return 'uploading';
@@ -90,6 +106,8 @@ export function CaptureSheet({
   }, [items]);
 
   async function uploadItems(indices?: number[]) {
+    if (uploadingRef.current) return;
+    uploadingRef.current = true;
     const targetIndices = indices ?? items.map((_, index) => index);
     setItems((prev) =>
       prev.map((item, index) =>
@@ -108,7 +126,7 @@ export function CaptureSheet({
           category,
           caption,
         );
-        onAttached?.(attachment);
+        onAttached?.(attachment, item.media.url);
         setItems((prev) => prev.map((entry, i) => (
           i === index ? { ...entry, state: 'done', error: undefined } : entry
         )));
@@ -120,6 +138,7 @@ export function CaptureSheet({
         )));
       }
     }));
+    uploadingRef.current = false;
   }
 
   if (capturing) {
@@ -142,14 +161,21 @@ export function CaptureSheet({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/40" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex flex-col justify-end bg-black/40"
+      onClick={onClose}
+    >
       <div
+        ref={containerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         className="max-h-[92vh] overflow-y-auto rounded-t-2xl bg-white shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
           <div>
-            <p className="text-sm text-slate-900">Attach photos</p>
+            <p id={titleId} ref={titleRef} tabIndex={-1} className="text-sm text-slate-900 outline-none">Attach photos</p>
             <p className="text-xs text-slate-400">{items.length} ready</p>
           </div>
           <button
@@ -166,21 +192,15 @@ export function CaptureSheet({
           <div className="grid grid-cols-3 gap-2" data-testid="capture-preview-grid">
             {items.map((item, index) => (
               <div key={item.media.id} className="relative aspect-square overflow-hidden rounded-xl bg-slate-100">
-                {item.media.type === 'photo' ? (
-                  <img
-                    src={item.media.url}
-                    alt={`Captured photo ${index + 1}`}
-                    className="h-full w-full object-cover"
-                  />
-                ) : (
-                  <div className="flex h-full w-full items-center justify-center bg-slate-800 text-xs text-white">
-                    Video
-                  </div>
-                )}
+                <img
+                  src={item.media.url}
+                  alt={`Captured photo ${index + 1}`}
+                  className="h-full w-full object-cover"
+                />
                 {item.state !== 'ready' && (
                   <div className="absolute inset-0 flex items-center justify-center bg-black/45">
                     <span className="rounded-full bg-white px-2 py-1 text-xs text-slate-800">
-                      {item.state === 'uploading' ? 'Uploading' : item.state === 'done' ? 'Attached' : 'Retry'}
+                      {item.state === 'uploading' ? 'Uploading' : item.state === 'done' ? 'Attached' : 'Failed'}
                     </span>
                   </div>
                 )}
@@ -203,7 +223,13 @@ export function CaptureSheet({
                 <button
                   key={item}
                   type="button"
-                  onClick={() => setCategory(item)}
+                  aria-pressed={category === item}
+                  onClick={() => {
+                    setCategory(item);
+                    if (typeof window.localStorage?.setItem === 'function') {
+                      window.localStorage.setItem(LAST_CATEGORY_KEY, item);
+                    }
+                  }}
                   className={`min-h-11 shrink-0 rounded-full px-3 text-xs transition-colors ${
                     category === item
                       ? 'bg-blue-600 text-white'
@@ -221,6 +247,7 @@ export function CaptureSheet({
             onChange={(event) => setCaption(event.target.value)}
             rows={2}
             placeholder="Caption (optional)"
+            aria-label="Caption"
             className="w-full resize-none rounded-xl border border-slate-200 px-3 py-3 text-sm outline-none focus:border-blue-400"
           />
 
@@ -249,7 +276,7 @@ export function CaptureSheet({
               if (status === 'done') { onClose?.(); return; }
               // Only upload items that are not already done — prevents re-presign/PUT/attach for succeeded items
               const pendingIndices = items.flatMap((item, index) => item.state !== 'done' ? [index] : []);
-              uploadItems(pendingIndices);
+              void uploadItems(pendingIndices);
             }}
             disabled={status === 'uploading' || items.length === 0}
             className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 text-sm text-white transition-colors hover:bg-slate-700 disabled:opacity-50"

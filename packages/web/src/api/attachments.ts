@@ -38,11 +38,9 @@ export interface Attachment {
   caption?: string;
   category?: AttachmentCategory;
   portalVisible?: boolean;
-  portal_visible?: boolean;
   source?: AttachmentSource;
   sortOrder?: number;
   archivedAt?: string;
-  archived_at?: string;
   createdAt?: string;
   updatedAt?: string;
   downloadUrl?: string;
@@ -115,6 +113,9 @@ export async function uploadAttachment(
     contentType,
     sizeBytes: file.size,
   });
+  // Uses the global fetch (NOT apiFetch) for the S3 PUT because the
+  // presigned URL already contains its own auth and adding a Bearer
+  // token would invalidate the signature.
   const put = await fetch(presign.uploadUrl, {
     method: 'PUT',
     body: file,

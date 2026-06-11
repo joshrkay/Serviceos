@@ -13,15 +13,19 @@ interface AttachmentSectionProps {
 }
 
 function isArchived(attachment: Attachment): boolean {
-  return Boolean(attachment.archivedAt ?? attachment.archived_at);
+  return Boolean(attachment.archivedAt);
 }
 
 function isPortalVisible(attachment: Attachment): boolean {
-  return Boolean(attachment.portalVisible ?? attachment.portal_visible);
+  return Boolean(attachment.portalVisible);
+}
+
+interface OptimisticAttachment extends Attachment {
+  previewUrl?: string;
 }
 
 export function AttachmentSection({ entityType, entityId }: AttachmentSectionProps) {
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachments, setAttachments] = useState<OptimisticAttachment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [captureOpen, setCaptureOpen] = useState(false);
@@ -62,34 +66,37 @@ export function AttachmentSection({ entityType, entityId }: AttachmentSectionPro
         )}
         {!loading && !error && attachments.length > 0 && (
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3" data-testid="attachment-grid">
-            {attachments.map((attachment) => (
-              <figure key={attachment.id} className="overflow-hidden rounded-xl border border-slate-100 bg-slate-50">
-                <div className="relative aspect-square bg-slate-100">
-                  {attachment.downloadUrl ? (
-                    <img
-                      src={attachment.downloadUrl}
-                      alt={attachment.caption || attachment.filename || 'Attachment'}
-                      className="h-full w-full object-cover"
-                    />
-                  ) : (
-                    <div className="flex h-full w-full items-center justify-center">
-                      <ImageIcon size={22} className="text-slate-300" />
-                    </div>
+            {attachments.map((attachment) => {
+              const imgSrc = attachment.previewUrl ?? attachment.downloadUrl;
+              return (
+                <figure key={attachment.id} className="overflow-hidden rounded-xl border border-slate-100 bg-slate-50">
+                  <div className="relative aspect-square bg-slate-100">
+                    {imgSrc ? (
+                      <img
+                        src={imgSrc}
+                        alt={attachment.caption || attachment.filename || 'Attachment'}
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center">
+                        <ImageIcon size={22} className="text-slate-300" />
+                      </div>
+                    )}
+                    {isPortalVisible(attachment) && (
+                      <span className="absolute left-2 top-2 inline-flex items-center gap-1 rounded-full bg-white/95 px-2 py-1 text-[10px] text-slate-700 shadow-sm">
+                        <Eye size={10} /> Visible to customer
+                      </span>
+                    )}
+                  </div>
+                  {(attachment.caption || attachment.category) && (
+                    <figcaption className="px-2 py-2">
+                      {attachment.caption && <p className="truncate text-xs text-slate-700">{attachment.caption}</p>}
+                      {attachment.category && <p className="text-[10px] uppercase tracking-wide text-slate-400">{attachment.category}</p>}
+                    </figcaption>
                   )}
-                  {isPortalVisible(attachment) && (
-                    <span className="absolute left-2 top-2 inline-flex items-center gap-1 rounded-full bg-white/95 px-2 py-1 text-[10px] text-slate-700 shadow-sm">
-                      <Eye size={10} /> Visible to customer
-                    </span>
-                  )}
-                </div>
-                {(attachment.caption || attachment.category) && (
-                  <figcaption className="px-2 py-2">
-                    {attachment.caption && <p className="truncate text-xs text-slate-700">{attachment.caption}</p>}
-                    {attachment.category && <p className="text-[10px] uppercase tracking-wide text-slate-400">{attachment.category}</p>}
-                  </figcaption>
-                )}
-              </figure>
-            ))}
+                </figure>
+              );
+            })}
           </div>
         )}
 
@@ -107,9 +114,15 @@ export function AttachmentSection({ entityType, entityId }: AttachmentSectionPro
         <CaptureSheet
           entityType={entityType}
           entityId={entityId}
-          onClose={() => setCaptureOpen(false)}
-          onAttached={(attachment) => {
-            setAttachments((prev) => [attachment, ...prev].filter((item) => !isArchived(item)));
+          onClose={() => {
+            setCaptureOpen(false);
+            void load();
+          }}
+          onAttached={(attachment, previewUrl) => {
+            setAttachments((prev) => {
+              const optimistic: OptimisticAttachment = { ...attachment, previewUrl };
+              return [optimistic, ...prev].filter((item) => !isArchived(item));
+            });
           }}
         />
       )}

@@ -77,22 +77,64 @@ describe('CaptureSheet', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /confirm/i }));
 
-    await waitFor(() => expect(onAttached).toHaveBeenCalledWith(expect.objectContaining({ id: 'a1' })));
+    await waitFor(() => expect(onAttached).toHaveBeenCalledWith(expect.objectContaining({ id: 'a1' }), 'data:image/jpeg;base64,eA=='));
     expect(fetch).toHaveBeenNthCalledWith(1, '/api/attachments/presign', expect.any(Object));
     expect(fetch).toHaveBeenNthCalledWith(2, 'https://upload.test/file', expect.objectContaining({ method: 'PUT' }));
     expect(fetch).toHaveBeenNthCalledWith(3, '/api/attachments', expect.any(Object));
   });
 
-  it('persists the selected category and defaults the next sheet to it', () => {
+  it('persists the selected category only on chip click, not on open', () => {
     const { unmount } = render(<CaptureSheet entityType="estimate" entityId="e1" />);
+    // After mount but before any chip click, nothing should be persisted
+    expect(window.localStorage.setItem).not.toHaveBeenCalled();
+
     fireEvent.click(screen.getByText('Mock shutter done'));
+    // After advancing to review sheet, still no persistence until chip clicked
+    expect(window.localStorage.setItem).not.toHaveBeenCalled();
+
     fireEvent.click(screen.getByRole('button', { name: 'Before' }));
     expect(window.localStorage.getItem('serviceos.attachments.lastCategory')).toBe('before');
     unmount();
 
     render(<CaptureSheet entityType="invoice" entityId="i1" />);
     fireEvent.click(screen.getByText('Mock shutter done'));
-    expect(screen.getByRole('button', { name: 'Before' }).className).toContain('bg-blue-600');
+    expect(screen.getByRole('button', { name: 'Before' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('chip aria-pressed reflects selection', () => {
+    render(<CaptureSheet entityType="estimate" entityId="e1" />);
+    fireEvent.click(screen.getByText('Mock shutter done'));
+
+    const beforeBtn = screen.getByRole('button', { name: 'Before' });
+    const otherBtn = screen.getByRole('button', { name: 'Other' });
+    // Default is 'other' (no stored category)
+    expect(otherBtn).toHaveAttribute('aria-pressed', 'true');
+    expect(beforeBtn).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(beforeBtn);
+    expect(beforeBtn).toHaveAttribute('aria-pressed', 'true');
+    expect(otherBtn).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('Escape key closes the sheet', () => {
+    const onClose = vi.fn();
+    render(<CaptureSheet entityType="estimate" entityId="e1" onClose={onClose} />);
+    fireEvent.click(screen.getByText('Mock shutter done'));
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('sheet has role=dialog, aria-modal=true, and aria-labelledby pointing to title', () => {
+    render(<CaptureSheet entityType="estimate" entityId="e1" />);
+    fireEvent.click(screen.getByText('Mock shutter done'));
+
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    const labelId = dialog.getAttribute('aria-labelledby');
+    expect(labelId).toBeTruthy();
+    const titleEl = document.getElementById(labelId!);
+    expect(titleEl).toHaveTextContent('Attach photos');
   });
 
   it('shows optimistic uploading state and a retry affordance after an error', async () => {
@@ -112,7 +154,20 @@ describe('CaptureSheet', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Some uploads failed');
     fireEvent.click(screen.getByRole('button', { name: /retry failed/i }));
 
-    await waitFor(() => expect(onAttached).toHaveBeenCalledWith(expect.objectContaining({ id: 'a2' })));
+    await waitFor(() => expect(onAttached).toHaveBeenCalledWith(expect.objectContaining({ id: 'a2' }), expect.any(String)));
+  });
+
+  it('overlay label reads "Failed" (not "Retry") on error state', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({ fileId: 'f1', uploadUrl: 'https://upload.test/file' }, 201))
+      .mockResolvedValueOnce(new Response(null, { status: 500 }));
+
+    render(<CaptureSheet entityType="estimate" entityId="e1" />);
+    fireEvent.click(screen.getByText('Mock shutter done'));
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }));
+
+    expect(await screen.findByText('Failed')).toBeInTheDocument();
+    expect(screen.queryByText('Retry')).not.toBeInTheDocument();
   });
 
   it('keeps mobile tap targets at min-h-11 and avoids horizontal viewport classes', () => {
@@ -157,14 +212,14 @@ describe('CaptureSheet', () => {
 
     // onAttached called exactly once for the succeeded item
     await waitFor(() => expect(onAttached).toHaveBeenCalledTimes(1));
-    expect(onAttached).toHaveBeenCalledWith(expect.objectContaining({ id: 'a1' }));
+    expect(onAttached).toHaveBeenCalledWith(expect.objectContaining({ id: 'a1' }), expect.any(String));
 
     // Primary button re-click — must NOT re-upload item 0 (already done)
     const fetchCallsBeforeRetry = vi.mocked(fetch).mock.calls.length;
     fireEvent.click(screen.getByRole('button', { name: /confirm/i }));
 
     await waitFor(() => expect(onAttached).toHaveBeenCalledTimes(2));
-    expect(onAttached).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'a3' }));
+    expect(onAttached).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'a3' }), expect.any(String));
 
     // Exactly 3 more fetch calls (presign + PUT + attach) for the one failed item only
     const fetchCallsForRetry = vi.mocked(fetch).mock.calls.length - fetchCallsBeforeRetry;
