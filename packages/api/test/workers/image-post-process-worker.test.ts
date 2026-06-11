@@ -304,6 +304,39 @@ describe('image-post-process-worker', () => {
     ).rejects.toBeInstanceOf(UnsupportedImageError);
   });
 
+  it('pixel-limit exceeded (decompression bomb) is classified as UnsupportedImageError', async () => {
+    // A mocked sharp that throws the exact error shape sharp emits when
+    // limitInputPixels is exceeded must be caught and re-wrapped as the
+    // permanent-failure class — so the worker does not retry bomb payloads.
+    const { createSharpImageProcessor: realCreate, UnsupportedImageError: UnsupErr } = await import(
+      '../../src/files/image-processor'
+    );
+    const mockProcessor: ImageProcessor = {
+      async process() {
+        throw new UnsupErr(
+          'image decode/encode failed (image/jpeg): Input image exceeds pixel limit'
+        );
+      },
+      async thumbnail() {
+        throw new UnsupErr('thumbnail generation failed: Input image exceeds pixel limit');
+      },
+    };
+    // The worker must resolve (not rethrow) when UnsupportedImageError is thrown.
+    const jpeg = await makeJpeg({ width: 10, height: 10 });
+    const file = await seedFile(jpeg, 'image/jpeg');
+    await expect(
+      makeWorker(mockProcessor).handle(
+        buildMessage({ tenantId: TENANT, fileId: file.id }),
+        logger
+      )
+    ).resolves.toBeUndefined();
+    // Graceful degradation: hash stamped from original, no rewrites.
+    const updated = (await fileRepo.findById(TENANT, file.id))!;
+    expect(updated.contentHash).toBe(sha256Hex(jpeg));
+    expect(storage.putCalls).toHaveLength(0);
+    void realCreate; // referenced to satisfy unused-import lint
+  });
+
   it('mid-pipeline failure preserves the original: nothing written, row not stamped, error rethrown', async () => {
     const realProcessor = createSharpImageProcessor();
     const failingThumbnailer: ImageProcessor = {

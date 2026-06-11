@@ -27,12 +27,17 @@
  *     rethrows into the queue's retry/DLQ semantics.
  *   - Idempotent: content_hash is the last field stamped by every path, so
  *     a row that already has it is "processed" and redeliveries no-op.
+ *   - Known window: if both putObject calls succeed but updatePipelineResults
+ *     then fails, a redelivery will reprocess the already-converted JPEG —
+ *     producing one extra q85 re-encode of a JPEG (no corruption, no data
+ *     loss; the idempotency guard re-stamps identical values on the second
+ *     run once the DB write eventually succeeds).
  */
 import { createHash } from 'crypto';
 import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { FileRepository, StorageProvider, normalizeContentType } from '../files/file-service';
-import { ImageProcessor, UnsupportedImageError } from '../files/image-processor';
+import { ImageProcessor, ProcessedImage, UnsupportedImageError } from '../files/image-processor';
 
 export const IMAGE_POST_PROCESS_TYPE = 'image_post_process';
 
@@ -110,7 +115,7 @@ export function createImagePostProcessWorker(
 
       // ── Process to buffers FIRST. Nothing is written until both the
       // re-encoded image and the thumbnail exist in memory.
-      let processed;
+      let processed: ProcessedImage;
       let thumbnail: Buffer;
       try {
         processed = await deps.processor.process(original, file.contentType);

@@ -1606,7 +1606,16 @@ export function createApp(): express.Express {
   // matching worker by message.type. This is the single consumer for the
   // queue — multiple setInterval poll loops would race for the same row
   // under PgQueue's FOR UPDATE SKIP LOCKED semantics and waste cycles.
+  //
+  // In-flight guard: setInterval fires every 250ms regardless of whether the
+  // previous async callback has resolved. Without the guard, slow workers
+  // (e.g. the image pipeline holding large in-memory buffers) can stack up
+  // unbounded concurrent ticks → OOM. The boolean flag ensures at most one
+  // tick body runs at a time; overlapping ticks are silently skipped.
+  let pollInFlight = false;
   registerInterval(setInterval(async () => {
+    if (pollInFlight) return;
+    pollInFlight = true;
     try {
       const message = await queue.receive();
       if (!message) return;
@@ -1631,6 +1640,8 @@ export function createApp(): express.Express {
       workerLogger.error('Queue poll failed', {
         error: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      pollInFlight = false;
     }
   }, 250));
 
