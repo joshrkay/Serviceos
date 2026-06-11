@@ -29,8 +29,10 @@
  *      .voice_approval_challenge` (interim JSONB home — see
  *      settings.ts). Unset → polite refusal + a one-tap approve SMS
  *      minted through the EXISTING `routeUnsupervisedProposal` machinery.
- *      Max 3 failed challenge attempts per voice session; 3rd failure
- *      locks money/irreversible approvals for the rest of the session.
+ *      Max 3 failed challenge attempts per voice session — counted on
+ *      `VoiceApprovalSessionState` (session level, survives dialogue
+ *      cancel/restart); the 3rd failure locks money/irreversible
+ *      approvals for the rest of the session.
  *   6. Pending-edit parity — approval is blocked while
  *      `hasUnappliedEditRequest` (same guard as SMS reply and one-tap).
  */
@@ -45,6 +47,7 @@ import { createAuditEvent, type AuditRepository } from '../../audit/audit';
 import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
 import { ValidationError } from '../../shared/errors';
+import { createLogger } from '../../logging/logger';
 import { classifyVoiceApproval, classifyStrictConfirm } from '../tts/readback';
 import {
   PendingProposalResolver,
@@ -52,7 +55,12 @@ import {
   parseOrdinalReference,
 } from '../resolution/pending-proposal-resolver';
 
-/** Synthetic actor for voice approvals (no Clerk session — identity is the verified owner line). */
+const logger = createLogger({
+  service: 'ai.tasks.proposal-approval',
+  environment: process.env.NODE_ENV || 'development',
+});
+
+/** Synthetic actor for voice approvals (no Clerk session — identity is the recognized owner line (caller-ID match; see approver-identity.ts)). */
 export const VOICE_APPROVAL_ACTOR_ID = 'voice_approval';
 
 export type VoiceApprovalAction = 'approve' | 'reject';
@@ -79,11 +87,6 @@ export interface PendingVoiceApproval {
   /** Ordered candidate ids exactly as read out (ordinal anchor). */
   orderedIds?: string[];
   /**
-   * Number of failed challenge attempts in this voice session (challenge stage).
-   * Max 3 — on the 3rd failure the session is locked for money/irreversible.
-   */
-  challengeFailCount?: number;
-  /**
    * True when the confirm re-ask has already been issued once (strict-confirm
    * stage). Second non-strict reply → keep pending, exit dialogue.
    */
@@ -91,12 +94,25 @@ export interface PendingVoiceApproval {
 }
 
 /**
- * Per-session flag set when the challenge lockout fires. Callers must carry
- * this on the voice session and pass it in via `VoiceApprovalSessionRef`.
- * Once true, money/irreversible approval dialogues are refused for the rest
- * of the session without prompting a new challenge.
+ * Session-level voice-approval state. Callers must carry this on the voice
+ * session, pass it in via `VoiceApprovalSessionRef`, and merge each turn's
+ * `VoiceApprovalTurnResult.sessionState` back into it. Unlike
+ * `PendingVoiceApproval` it is NEVER cleared when a dialogue resolves —
+ * canceling and restarting the approval dialogue must not reset it.
  */
 export interface VoiceApprovalSessionState {
+  /**
+   * Failed challenge attempts in this VOICE SESSION (across restarted
+   * dialogues — session-level so a cancel/restart cannot reset it).
+   * Max 3 per session; the 3rd failure sets `challengeLockedOut`.
+   */
+  challengeFailCount?: number;
+  /**
+   * Set when the challenge lockout fires (3rd failed attempt this session).
+   * Once true, money/irreversible approval dialogues are refused for the
+   * rest of the session without prompting a new challenge. Capture-class
+   * proposals (no challenge required) remain voice-approvable.
+   */
   challengeLockedOut?: boolean;
 }
 
@@ -115,7 +131,8 @@ export type VoiceApprovalOutcome =
   | 'approved'
   | 'rejected'
   | 'kept_for_later'
-  | 'approve_failed';
+  | 'approve_failed'
+  | 'reject_failed';
 
 export interface VoiceApprovalTurnResult {
   /** TTS-ready line for this turn. */
@@ -345,12 +362,18 @@ const NOT_FOUND_LINE =
 const KEEP_FOR_LATER_LINE =
   "No problem — I'll keep it in your review queue for later.";
 
-function clarificationLine(candidates: Proposal[]): string {
-  const listed = candidates
-    .slice(0, 5)
-    .map((p, i) => `${i + 1}: ${p.summary}`)
-    .join('. ');
-  return `I found ${candidates.length} pending: ${listed}. Which one?`;
+/**
+ * `totalCount` is the PRE-cap candidate count so the spoken line is
+ * truthful when more matched than we read out ("I found 8 — here are
+ * the first 5"), instead of misreporting the capped list length.
+ */
+function clarificationLine(candidates: Proposal[], totalCount: number): string {
+  const shown = candidates.slice(0, 5);
+  const listed = shown.map((p, i) => `${i + 1}: ${p.summary}`).join('. ');
+  if (totalCount > shown.length) {
+    return `I found ${totalCount} pending — here are the first ${shown.length}: ${listed}. Which one?`;
+  }
+  return `I found ${totalCount} pending: ${listed}. Which one?`;
 }
 
 /**
@@ -406,7 +429,12 @@ async function sendOneTapFallback(
       },
     );
     return result.smsSent;
-  } catch {
+  } catch (err) {
+    logger.warn('voice approval one-tap SMS fallback failed', {
+      tenantId: ref.tenantId,
+      proposalId: proposal.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
     return false;
   }
 }
@@ -574,7 +602,7 @@ async function executeReject(
     return {
       speak: 'Couldn’t reject that — it may already be handled. Check your review queue.',
       pending: null,
-      outcome: 'approve_failed',
+      outcome: 'reject_failed',
       proposalId,
     };
   }
@@ -640,7 +668,7 @@ export async function startVoiceApproval(
         candidateCount: candidates.length,
       });
       return {
-        speak: clarificationLine(candidates),
+        speak: clarificationLine(candidates, candidates.length),
         pending: {
           action: input.action,
           stage: 'disambiguate',
@@ -677,9 +705,12 @@ export async function startVoiceApproval(
         await audit(deps, input, 'proposal.voice_approval_clarification', '', {
           action: input.action,
           candidateCount: candidates.length,
+          totalPending: pending.length,
         });
         return {
-          speak: clarificationLine(candidates),
+          // Thread the PRE-cap total so the spoken count is truthful
+          // when more than 5 proposals are pending (M3).
+          speak: clarificationLine(candidates, pending.length),
           pending: {
             action: input.action,
             stage: 'disambiguate',
@@ -902,7 +933,30 @@ export async function continueVoiceApproval(
       : input.utterance.trim().toLowerCase() === challenge.toLowerCase()
     : false;
   if (!matched) {
-    const failCount = (pending.challengeFailCount ?? 0) + 1;
+    // An explicit cancel ("cancel", "never mind") with NO digits exits the
+    // dialogue without burning an attempt — the proposal stays pending.
+    // Digit-bearing utterances are always treated as code attempts so a
+    // passphrase containing a negation word can't be misread as a cancel.
+    if (
+      spokenDigits(input.utterance).length === 0 &&
+      classifyVoiceApproval(input.utterance) === 'cancel'
+    ) {
+      await audit(deps, input, 'proposal.voice_approval_declined', proposal.id, {
+        action: pending.action,
+        stage: 'challenge',
+      });
+      return {
+        speak: KEEP_FOR_LATER_LINE,
+        pending: null,
+        outcome: 'kept_for_later',
+        proposalId: proposal.id,
+      };
+    }
+    // SESSION-level fail counter (I1): lives on VoiceApprovalSessionState,
+    // not on the per-dialogue PendingVoiceApproval, so canceling and
+    // restarting the dialogue cannot reset it — the 3rd wrong code in the
+    // CALL trips the lockout, however many dialogues it was spread across.
+    const failCount = (input.sessionState?.challengeFailCount ?? 0) + 1;
     const maxAttempts = 3;
     if (failCount >= maxAttempts) {
       // 3rd failure — lock the session and send the SMS fallback.
@@ -918,7 +972,7 @@ export async function continueVoiceApproval(
         pending: null,
         outcome: 'challenge_lockout',
         proposalId: proposal.id,
-        sessionState: { challengeLockedOut: true },
+        sessionState: { challengeFailCount: failCount, challengeLockedOut: true },
       };
     }
     await audit(deps, input, 'proposal.voice_approval_challenge_failed', proposal.id, {
@@ -926,9 +980,10 @@ export async function continueVoiceApproval(
     });
     return {
       speak: 'That code didn’t match — try again.',
-      pending: { ...pending, challengeFailCount: failCount },
+      pending,
       outcome: 'challenge_failed',
       proposalId: proposal.id,
+      sessionState: { challengeFailCount: failCount },
     };
   }
   await audit(deps, input, 'proposal.voice_approval_challenge_passed', proposal.id);

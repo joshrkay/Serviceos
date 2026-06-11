@@ -1006,6 +1006,14 @@ export function createVoiceTurnProcessor(
     result: VoiceApprovalTurnResult,
   ): SideEffect[] {
     session.pendingVoiceApproval = result.pending ?? undefined;
+    // Merge (never replace) session-level mutations: a turn that only
+    // bumps challengeFailCount must not drop an earlier challengeLockedOut.
+    if (result.sessionState) {
+      session.voiceApprovalState = {
+        ...session.voiceApprovalState,
+        ...result.sessionState,
+      };
+    }
     return [{ type: 'tts_play', payload: { text: result.speak, source: 'voice_approval' } }];
   }
 
@@ -1025,6 +1033,9 @@ export function createVoiceTurnProcessor(
       tenantId,
       sessionId: session.id,
       ownerSession: session.machine.currentContext.ownerSession === true,
+      // Session-level lockout / fail-counter state — without this the
+      // challenge lockout is dead code (the task can't see prior failures).
+      sessionState: session.voiceApprovalState,
       utterance: speechResult,
       pending,
     });
@@ -1075,6 +1086,9 @@ export function createVoiceTurnProcessor(
       tenantId: args.tenantId,
       sessionId: session.id,
       ownerSession,
+      // Session-level lockout state: a locked session refuses fresh
+      // money/irreversible dialogues immediately (capture-class still works).
+      sessionState: session.voiceApprovalState,
       action: args.intentType === 'reject_proposal' ? 'reject' : 'approve',
       reference,
     });
@@ -1203,7 +1217,8 @@ export function createVoiceTurnProcessor(
             verticalPromptSection,
             planPromptSection,
             // RV-071 — the owner-approval prompt section is appended ONLY
-            // on verified owner sessions, keeping every other call's
+            // on a recognized owner line (caller-ID match; see
+            // approver-identity.ts), keeping every other call's
             // prompt byte-identical (cassettes / gateway cache).
             ...(session.machine.currentContext.ownerSession === true
               ? { ownerSession: true }

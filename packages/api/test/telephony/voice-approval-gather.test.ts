@@ -224,6 +224,96 @@ describe('RV-071 — owner approval over Gather (end to end)', () => {
     expect(denied!.metadata).toMatchObject({ reason: 'not_owner_session' });
   });
 
+  it('3 wrong codes across RESTARTED dialogues → session lockout; capture-class still approvable (C1/I1/I2)', async () => {
+    const approvePayment = (reference: string) =>
+      JSON.stringify({
+        intentType: 'approve_proposal',
+        confidence: 0.95,
+        extractedEntities: { proposalReference: reference },
+      });
+    // One classifier response per turn that reaches classifyIntent —
+    // in-flight approval dialogues consume turns WITHOUT the classifier.
+    const gateway = gatewayReturning([
+      approvePayment('the Acme payment'), // turn 1 — start dialogue 1
+      approvePayment('the Acme payment'), // restart after cancel — dialogue 2
+      approvePayment('the payment'), // fresh approve in locked session
+      APPROVE_CLASSIFICATION, // capture-class Henderson estimate
+    ]);
+    const h = makeHarness({ gateway, challenge: '4271' });
+    const estimate = await seedPending(h.proposalRepo); // capture-class
+    const payment = createProposal({
+      tenantId: TENANT,
+      proposalType: 'record_payment',
+      payload: { customerName: 'Acme Corp', amountCents: 20000 },
+      summary: 'Record $200 payment from Acme',
+      createdBy: 'voice',
+    });
+    await h.proposalRepo.create(payment);
+    await h.proposalRepo.updateStatus(TENANT, payment.id, 'ready_for_review');
+    const sessionId = await startCall(h, OWNER_PHONE, 'CA-lock-1');
+    const turn = (speechResult: string) =>
+      h.adapter.handleGather({
+        sessionId,
+        callSid: 'CA-lock-1',
+        speechResult,
+        confidence: 0.9,
+        tenantId: TENANT,
+      });
+
+    // Dialogue 1: readback → yes → challenge → two wrong codes.
+    expect(await turn('approve the Acme payment')).toContain('Acme Corp');
+    expect(await turn('yes')).toContain('approval code');
+    expect(await turn('0 0 0 0')).toContain('didn’t match');
+    expect(await turn('1 1 1 1')).toContain('didn’t match');
+    const session = h.store.get(sessionId)!;
+    expect(session.voiceApprovalState).toMatchObject({ challengeFailCount: 2 });
+
+    // Cancel — exits the dialogue without burning an attempt…
+    expect((await turn('cancel')).toLowerCase()).toContain('later');
+    expect(session.pendingVoiceApproval).toBeUndefined();
+    // …and the SESSION-level counter survives the cancel/restart.
+    expect(session.voiceApprovalState).toMatchObject({ challengeFailCount: 2 });
+
+    // Dialogue 2 (restarted): readback → yes → 3rd wrong code → LOCKOUT.
+    expect(await turn('approve the Acme payment')).toContain('Acme Corp');
+    expect(await turn('yes')).toContain('approval code');
+    const lockoutTwiml = await turn('2 2 2 2');
+    expect(lockoutTwiml).toContain('Too many incorrect codes');
+    expect(session.voiceApprovalState).toMatchObject({
+      challengeLockedOut: true,
+      challengeFailCount: 3,
+    });
+    const lockoutEvent = h.auditRepo
+      .getAll()
+      .find((e) => e.eventType === 'proposal.voice_challenge_lockout');
+    expect(lockoutEvent).toBeDefined();
+    expect(lockoutEvent!.metadata).toMatchObject({ attemptCount: 3, oneTapSmsSent: true });
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].to).toBe(OWNER_PHONE);
+    expect((await h.proposalRepo.findById(TENANT, payment.id))?.status).toBe(
+      'ready_for_review',
+    );
+
+    // A fresh money approval in the same session is refused IMMEDIATELY —
+    // no readback, no new challenge prompt.
+    const refusedTwiml = await turn('approve the payment');
+    expect(refusedTwiml.toLowerCase()).toContain('security');
+    expect(refusedTwiml).not.toContain('approval code');
+    expect(session.pendingVoiceApproval).toBeUndefined();
+    const refusedEvent = h.auditRepo
+      .getAll()
+      .find((e) => e.eventType === 'proposal.voice_approve_refused_challenge_lockout');
+    expect(refusedEvent).toBeDefined();
+    expect((await h.proposalRepo.findById(TENANT, payment.id))?.status).toBe(
+      'ready_for_review',
+    );
+
+    // Capture-class approval in the SAME locked session still works.
+    expect(await turn('approve the Henderson estimate')).toContain('Henderson Family LLC');
+    expect(await turn('yes')).toContain('Approved');
+    expect((await h.proposalRepo.findById(TENANT, estimate.id))?.status).toBe('approved');
+  });
+
   it('money-class with no challenge configured → refusal + one-tap SMS, never an approval', async () => {
     const gateway = gatewayReturning([
       JSON.stringify({

@@ -20,7 +20,8 @@ export interface BatchApproveResult {
  *   'ui'      — dashboard / inbox screen-tap (routes/proposals.ts)
  *   'sms'     — inbound SMS reply Y/N (proposals/sms/reply-handler.ts)
  *   'one_tap' — HMAC one-tap link (routes/one-tap-approve.ts)
- *   'voice'   — spoken approval on a verified owner call (RV-071)
+ *   'voice'   — spoken approval on a recognized owner line
+ *               (caller-ID match; see approver-identity.ts) (RV-071)
  *
  * When absent, the channel key is OMITTED from the audit metadata
  * (rather than defaulting to 'ui') — least invasive for existing audit

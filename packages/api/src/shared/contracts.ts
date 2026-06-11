@@ -359,7 +359,8 @@ export const updateSettingsSchema = z.object({
       llm_sentiment_threshold: z.number().min(0).max(1),
       after_hours_voice_mode: z.enum(['voicemail', 'ai_answering']),
       // RV-071 — spoken challenge (PIN/passphrase) gating money/
-      // irreversible VOICE approvals on the verified owner line.
+      // irreversible VOICE approvals on the recognized owner line
+      // (caller-ID match; see approver-identity.ts).
       // Interim home in this JSONB (no new migration); min length keeps
       // out trivially guessable one-digit codes. Unset → those voice
       // approvals are refused with a one-tap SMS fallback (fail-safe).

@@ -192,6 +192,16 @@ export interface VoiceSession {
    * time). Cleared whenever a turn resolves the dialogue.
    */
   pendingVoiceApproval?: import('../../tasks/proposal-approval-task').PendingVoiceApproval;
+  /**
+   * RV-071 — session-scoped voice-approval state (challenge fail counter
+   * + lockout flag). Adapter-side like `pendingVoiceApproval` and lives
+   * exactly as long as the session, but is NEVER cleared when a dialogue
+   * resolves: three wrong challenge codes anywhere in the call must lock
+   * money/irreversible approvals for the rest of the session, even across
+   * cancelled-and-restarted dialogues. Merged (not replaced) from each
+   * turn's `VoiceApprovalTurnResult.sessionState`.
+   */
+  voiceApprovalState?: import('../../tasks/proposal-approval-task').VoiceApprovalSessionState;
   /** Set after `endSession()` to short-circuit further input. */
   ended: boolean;
   /**

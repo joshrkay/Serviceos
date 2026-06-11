@@ -31,7 +31,8 @@ export interface EscalationSettings {
   /**
    * RV-071 — spoken challenge (e.g. a PIN like "4271") required before a
    * money-class or irreversible-class proposal can be APPROVED BY VOICE on
-   * a verified owner line. When unset, money/irreversible voice approvals
+   * a recognized owner line (caller-ID match; see approver-identity.ts).
+   * When unset, money/irreversible voice approvals
    * are politely refused and the owner gets a one-tap approve SMS instead.
    *
    * INTERIM HOME: rides the existing `tenant_settings.escalation_settings`

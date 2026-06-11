@@ -107,6 +107,9 @@ export function buildReadbackScript(proposal: Proposal): string {
  * audit-friendly behavior for a security-sensitive approval gate.
  * Ambiguous replies return 'unknown' and the client falls back to
  * screen-tap UX.
+ *
+ * NOT for the RV-071 confirm stage — use classifyStrictConfirm; this one
+ * accepts embedded approve words.
  */
 export type VoiceApprovalDecision = 'approve' | 'cancel' | 'repeat' | 'edit' | 'unknown';
 

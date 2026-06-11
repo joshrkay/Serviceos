@@ -434,7 +434,9 @@ describe('RV-071 — money/irreversible challenge', () => {
     expect(failed.outcome).toBe('challenge_failed');
     // Dialogue kept pending for retry (not null on first failure)
     expect(failed.pending).not.toBeNull();
-    expect(failed.pending).toMatchObject({ stage: 'challenge', challengeFailCount: 1 });
+    expect(failed.pending).toMatchObject({ stage: 'challenge' });
+    // I1 — the fail counter is SESSION-level state, not dialogue state.
+    expect(failed.sessionState).toMatchObject({ challengeFailCount: 1 });
     expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
   });
 
@@ -586,6 +588,23 @@ describe('RV-071 — resolution edges', () => {
 
     expect(result.outcome).toBe('readback');
     expect(result.speak).toContain('Henderson Family LLC');
+  });
+
+  it('clarification speaks the TRUE total when more than 5 are pending (M3)', async () => {
+    const h = makeHarness();
+    for (let i = 1; i <= 6; i++) {
+      await seedPending(h.proposalRepo, { summary: `Estimate ${i} — job ${i}` });
+    }
+
+    const result = await startVoiceApproval(h.deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'approve it', // no signals → list path
+    });
+
+    expect(result.outcome).toBe('clarification');
+    expect(result.speak).toContain('I found 6 pending — here are the first 5:');
+    expect(result.pending!.orderedIds).toHaveLength(5);
   });
 
   it('nothing pending → truthful line, no dialogue', async () => {
@@ -742,22 +761,25 @@ describe('RV-071 — challenge attempt cap (max 3) and session lockout', () => {
       pending: challengePending,
     });
     expect(fail1.outcome).toBe('challenge_failed');
-    expect(fail1.pending).toMatchObject({ stage: 'challenge', challengeFailCount: 1 });
-    expect(fail1.sessionState).toBeUndefined();
+    expect(fail1.pending).toMatchObject({ stage: 'challenge' });
+    // I1 — counter lives on the SESSION state the caller must merge+thread.
+    expect(fail1.sessionState).toMatchObject({ challengeFailCount: 1 });
 
     // Failure 2
     const fail2 = await continueVoiceApproval(h.deps, {
       ...ref,
+      sessionState: fail1.sessionState,
       utterance: '1 2 3 4',
       pending: fail1.pending!,
     });
     expect(fail2.outcome).toBe('challenge_failed');
-    expect(fail2.pending).toMatchObject({ stage: 'challenge', challengeFailCount: 2 });
-    expect(fail2.sessionState).toBeUndefined();
+    expect(fail2.pending).toMatchObject({ stage: 'challenge' });
+    expect(fail2.sessionState).toMatchObject({ challengeFailCount: 2 });
 
     // Correct code on 3rd attempt → approved
     const approved = await continueVoiceApproval(h.deps, {
       ...ref,
+      sessionState: fail2.sessionState,
       utterance: 'four two seven one',
       pending: fail2.pending!,
     });
@@ -770,25 +792,32 @@ describe('RV-071 — challenge attempt cap (max 3) and session lockout', () => {
     const { proposal, challengePending } = await reachChallengeStage(h);
 
     let pending = challengePending;
+    let sessionState: VoiceApprovalSessionState | undefined;
     for (let i = 1; i <= 2; i++) {
       const r = await continueVoiceApproval(h.deps, {
         ...ref,
+        sessionState,
         utterance: '0 0 0 0',
         pending,
       });
       expect(r.outcome).toBe('challenge_failed');
       pending = r.pending!;
+      sessionState = { ...sessionState, ...r.sessionState };
     }
 
     // 3rd failure → lockout
     const lockout = await continueVoiceApproval(h.deps, {
       ...ref,
+      sessionState,
       utterance: '0 0 0 0',
       pending,
     });
     expect(lockout.outcome).toBe('challenge_lockout');
     expect(lockout.pending).toBeNull();
-    expect(lockout.sessionState).toMatchObject({ challengeLockedOut: true });
+    expect(lockout.sessionState).toMatchObject({
+      challengeLockedOut: true,
+      challengeFailCount: 3,
+    });
 
     // SMS fallback was sent
     expect(h.sent).toHaveLength(1);
@@ -813,11 +842,23 @@ describe('RV-071 — challenge attempt cap (max 3) and session lockout', () => {
 
     // Reach lockout
     let pending = challengePending;
+    let sessionState: VoiceApprovalSessionState | undefined;
     for (let i = 1; i <= 2; i++) {
-      const r = await continueVoiceApproval(h.deps, { ...ref, utterance: '0 0 0 0', pending });
+      const r = await continueVoiceApproval(h.deps, {
+        ...ref,
+        sessionState,
+        utterance: '0 0 0 0',
+        pending,
+      });
       pending = r.pending!;
+      sessionState = { ...sessionState, ...r.sessionState };
     }
-    const lockout = await continueVoiceApproval(h.deps, { ...ref, utterance: '0 0 0 0', pending });
+    const lockout = await continueVoiceApproval(h.deps, {
+      ...ref,
+      sessionState,
+      utterance: '0 0 0 0',
+      pending,
+    });
     expect(lockout.outcome).toBe('challenge_lockout');
     const lockedState: VoiceApprovalSessionState = lockout.sessionState!;
 
@@ -836,6 +877,67 @@ describe('RV-071 — challenge attempt cap (max 3) and session lockout', () => {
     expect(refused.outcome).toBe('challenge_lockout');
     expect(refused.pending).toBeNull();
     expect((await h.proposalRepo.findById(TENANT, proposal2.id))?.status).toBe('ready_for_review');
+  });
+
+  it('fail counter SURVIVES dialogue cancel/restart — 3rd failure across dialogues locks (I1)', async () => {
+    const h = makeMoneyProposalHarness();
+    const { proposal, challengePending } = await reachChallengeStage(h);
+
+    // Two failures in the first dialogue.
+    let sessionState: VoiceApprovalSessionState | undefined;
+    let pending = challengePending;
+    for (const code of ['0 0 0 0', '1 1 1 1']) {
+      const r = await continueVoiceApproval(h.deps, {
+        ...ref,
+        sessionState,
+        utterance: code,
+        pending,
+      });
+      expect(r.outcome).toBe('challenge_failed');
+      pending = r.pending!;
+      sessionState = { ...sessionState, ...r.sessionState };
+    }
+
+    // Explicit cancel exits the dialogue WITHOUT burning an attempt.
+    const cancelled = await continueVoiceApproval(h.deps, {
+      ...ref,
+      sessionState,
+      utterance: 'cancel that',
+      pending,
+    });
+    expect(cancelled.outcome).toBe('kept_for_later');
+    expect(cancelled.pending).toBeNull();
+    expect(cancelled.sessionState).toBeUndefined();
+
+    // Restart a brand-new dialogue against the same target.
+    const restart = await startVoiceApproval(h.deps, {
+      ...ref,
+      sessionState,
+      action: 'approve',
+      reference: 'the Acme payment',
+    });
+    expect(restart.outcome).toBe('readback');
+    const confirm = await continueVoiceApproval(h.deps, {
+      ...ref,
+      sessionState,
+      utterance: 'yes',
+      pending: restart.pending!,
+    });
+    expect(confirm.outcome).toBe('challenge_prompt');
+
+    // 3rd wrong code OF THE SESSION (1st of this dialogue) → lockout.
+    const lockout = await continueVoiceApproval(h.deps, {
+      ...ref,
+      sessionState,
+      utterance: '2 2 2 2',
+      pending: confirm.pending!,
+    });
+    expect(lockout.outcome).toBe('challenge_lockout');
+    expect(lockout.sessionState).toMatchObject({
+      challengeLockedOut: true,
+      challengeFailCount: 3,
+    });
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
   });
 });
 

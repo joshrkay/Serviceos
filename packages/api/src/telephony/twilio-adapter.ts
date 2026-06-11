@@ -670,8 +670,8 @@ export class TwilioGatherAdapter {
       ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
       : [];
     const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
-    // RV-070 — owner-line recognition happens at session establishment,
-    // from the verified caller-ID only.
+    // RV-070 — owner-line recognition happens at session establishment:
+    // recognized owner line (caller-ID match; see approver-identity.ts).
     const ownerSession = await this.resolveOwnerSession(opts.tenantId, opts.from);
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
@@ -981,8 +981,8 @@ export class TwilioGatherAdapter {
       ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
       : [];
     const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
-    // RV-070 — owner-line recognition happens at session establishment,
-    // from the verified caller-ID only.
+    // RV-070 — owner-line recognition happens at session establishment:
+    // recognized owner line (caller-ID match; see approver-identity.ts).
     const ownerSession = await this.resolveOwnerSession(opts.tenantId, opts.from);
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,

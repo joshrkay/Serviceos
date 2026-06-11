@@ -1004,7 +1004,8 @@ export async function classifyIntent(
     });
   }
   // RV-071 — owner-approval intents are documented to the model ONLY on a
-  // verified owner session. Appended last so non-owner calls keep
+  // recognized owner line (caller-ID match; see approver-identity.ts).
+  // Appended last so non-owner calls keep
   // byte-identical messages (cassette hashes / gateway cache keys).
   if (context.ownerSession === true) {
     systemMessages.push({ role: 'system', content: OWNER_APPROVAL_PROMPT_SECTION });
