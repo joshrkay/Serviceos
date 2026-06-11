@@ -418,6 +418,21 @@ describe('edit session flow', () => {
     expect(result).toMatchObject({ handled: true, reason: 'approved' });
   });
 
+  it('unblocks even when the clock ticks between edit_request and reapproval', async () => {
+    // Production clocks advance between the two rows; a stale reapproval
+    // timestamp would leave hasUnappliedEditRequest() true forever.
+    const h = makeHarness({ interpretEdit: async () => ({ customerName: 'Mr Chen' }) });
+    let tick = new Date('2026-06-11T15:00:00Z').getTime();
+    h.deps.now = () => new Date((tick += 1)); // every clock read is 1ms later
+    await seedPendingProposal(h);
+    await handleProposalSmsReply(ctx('EDIT'), h.deps);
+    await handleProposalSmsFallback(ctx('change to Mr Chen'), h.deps);
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'approved' });
+  });
+
   it('the session window is fixed — a message after expiry is not an edit', async () => {
     const h = makeHarness({ interpretEdit: async () => ({ customerName: 'X' }) });
     const proposal = await seedPendingProposal(h);

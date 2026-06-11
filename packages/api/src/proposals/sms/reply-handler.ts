@@ -515,7 +515,6 @@ async function applyEditInstruction(
   proposal: Proposal,
   instruction: string,
 ): Promise<HandlerResult> {
-  const now = deps.now ? deps.now() : new Date();
   await recordInbound(deps, ctx, proposal.id, 'edit_request');
 
   if (deps.interpretEdit) {
@@ -577,7 +576,11 @@ async function applyEditInstruction(
             direction: 'outbound',
             kind: 'reapproval_rendered',
             body,
-            now,
+            // Fresh clock read — a timestamp captured before the
+            // edit_request row's own would leave hasUnappliedEditRequest()
+            // true forever and block the Y this SMS just invited. Ties
+            // resolve to applied, so >= is enough.
+            now: deps.now ? deps.now() : new Date(),
           }),
         );
         await audit(deps, ctx, 'proposal.sms_edited', updated.id, { editedFields });
