@@ -218,6 +218,40 @@ describe('handleProposalSmsReply — approve', () => {
   });
 });
 
+describe('handleProposalSmsReply — mutation vs notification failures', () => {
+  it('a failed confirmation send after a successful approval still reports approved', async () => {
+    const h = makeHarness();
+    const proposal = await seedPendingProposal(h);
+    h.deps.sendSms = async () => {
+      throw new Error('twilio down');
+    };
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'approved' });
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('approved');
+    expect(h.auditRepo.getAll().map((e) => e.eventType)).toContain(
+      'proposal.sms_approved_notify_failed',
+    );
+  });
+
+  it('a failed confirmation send after a successful rejection still reports rejected', async () => {
+    const h = makeHarness();
+    const proposal = await seedPendingProposal(h);
+    h.deps.sendSms = async () => {
+      throw new Error('twilio down');
+    };
+
+    const result = await handleProposalSmsReply(ctx('N too expensive'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'rejected' });
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('rejected');
+    expect(h.auditRepo.getAll().map((e) => e.eventType)).toContain(
+      'proposal.sms_rejected_notify_failed',
+    );
+  });
+});
+
 describe('handleProposalSmsReply — reject', () => {
   it('rejects with the trailing text as the reason', async () => {
     const h = makeHarness();

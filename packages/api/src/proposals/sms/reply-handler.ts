@@ -253,8 +253,12 @@ async function handleApprove(
     return { handled: true, handler: HANDLER_NAME, reason: 'approve_blocked_pending_edit' };
   }
 
+  // The try covers ONLY the mutation. A failed confirmation send after a
+  // successful approval must never tell the owner the approval failed —
+  // the proposal is approved and will execute.
+  let approved: Proposal;
   try {
-    const approved = await approveProposal(
+    approved = await approveProposal(
       deps.proposalRepo,
       ctx.tenantId,
       proposal.id,
@@ -262,11 +266,6 @@ async function handleApprove(
       'owner',
       deps.auditRepo,
     );
-    await audit(deps, ctx, 'proposal.sms_approved', proposal.id, {
-      proposalType: proposal.proposalType,
-    });
-    await reply(deps, ctx.fromE164, `Approved — "${approved.summary}" will run shortly.`);
-    return { handled: true, handler: HANDLER_NAME, reason: 'approved' };
   } catch (err) {
     if (err instanceof ValidationError) {
       // Missing required fields — truthful, with the next step.
@@ -290,6 +289,39 @@ async function handleApprove(
     );
     return { handled: true, handler: HANDLER_NAME, reason: 'approve_failed' };
   }
+
+  await notifyBestEffort(deps, ctx, proposal.id, 'proposal.sms_approved', {
+    proposalType: proposal.proposalType,
+  }, `Approved — "${approved.summary}" will run shortly.`);
+  return { handled: true, handler: HANDLER_NAME, reason: 'approved' };
+}
+
+/**
+ * Post-mutation audit + confirmation SMS. Best-effort by design: the
+ * state change is already committed, so a provider hiccup here must not
+ * surface as a failure (an audit of the notify failure is attempted, and
+ * even that is allowed to fail silently rather than misreport).
+ */
+async function notifyBestEffort(
+  deps: ProposalSmsReplyDeps,
+  ctx: InboundSmsContext,
+  proposalId: string,
+  eventType: string,
+  metadata: Record<string, unknown>,
+  confirmation: string,
+): Promise<void> {
+  try {
+    await audit(deps, ctx, eventType, proposalId, metadata);
+    await reply(deps, ctx.fromE164, confirmation);
+  } catch (err) {
+    try {
+      await audit(deps, ctx, `${eventType}_notify_failed`, proposalId, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } catch {
+      // Auditing the notify failure failed too — nothing further to do.
+    }
+  }
 }
 
 async function handleReject(
@@ -299,8 +331,10 @@ async function handleReject(
   reason: string,
 ): Promise<HandlerResult> {
   await recordInbound(deps, ctx, proposal.id, 'reply_reject');
+  // Same separation as approve: the catch covers only the mutation.
+  let rejected: Proposal;
   try {
-    const rejected = await rejectProposal(
+    rejected = await rejectProposal(
       deps.proposalRepo,
       ctx.tenantId,
       proposal.id,
@@ -311,11 +345,6 @@ async function handleReject(
       deps.appointmentRepo,
       deps.auditRepo,
     );
-    await audit(deps, ctx, 'proposal.sms_rejected', proposal.id, {
-      proposalType: proposal.proposalType,
-    });
-    await reply(deps, ctx.fromE164, `Rejected — "${rejected.summary}" won't run.`);
-    return { handled: true, handler: HANDLER_NAME, reason: 'rejected' };
   } catch (err) {
     await audit(deps, ctx, 'proposal.sms_reject_failed', proposal.id, {
       error: err instanceof Error ? err.message : String(err),
@@ -327,6 +356,11 @@ async function handleReject(
     );
     return { handled: true, handler: HANDLER_NAME, reason: 'reject_failed' };
   }
+
+  await notifyBestEffort(deps, ctx, proposal.id, 'proposal.sms_rejected', {
+    proposalType: proposal.proposalType,
+  }, `Rejected — "${rejected.summary}" won't run.`);
+  return { handled: true, handler: HANDLER_NAME, reason: 'rejected' };
 }
 
 async function handleEditOpen(
