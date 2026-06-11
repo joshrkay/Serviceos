@@ -422,3 +422,81 @@ describe('P22 — InvoiceTaskHandler catalog grounding', () => {
     expect(line).not.toHaveProperty('catalogItemId');
   });
 });
+
+// ─── RV-007 (F-4): Confidence Marker `_meta` ─────────────────────────────
+describe('RV-007 — InvoiceTaskHandler populates payload._meta', () => {
+  it('sets overallConfidence from the task confidence score (overall-only without catalog signals)', async () => {
+    const gateway = createMockGateway(JSON.stringify(validAiOutput)); // 0.85
+    const handler = new InvoiceTaskHandler(gateway);
+
+    const { proposal } = await handler.handle(baseContext);
+
+    const meta = proposal.payload._meta as Record<string, unknown>;
+    expect(meta).toBeDefined();
+    expect(meta.overallConfidence).toBe('high'); // 0.85 ≥ 0.8
+    expect(meta.fieldConfidence).toBeUndefined();
+    expect(meta.markers).toBeUndefined();
+  });
+
+  it('uncatalogued line → fieldConfidence low on its unitPriceCents + a marker with reason', async () => {
+    const repo = new InMemoryCatalogItemRepository();
+    void repo.create(
+      createCatalogItem({
+        tenantId: 'tenant-1',
+        name: 'Water Heater Install',
+        category: 'Labor',
+        unit: 'each',
+        unitPriceCents: 185_000,
+      }),
+    );
+    const gateway = createMockGateway(
+      JSON.stringify({
+        ...validAiOutput,
+        lineItems: [
+          { description: 'Water Heater Install', quantity: 1, unitPrice: 999 },
+          { description: 'mystery flux capacitor', quantity: 1, unitPrice: 42_000 },
+        ],
+        confidence_score: 0.95,
+      }),
+    );
+    const handler = new InvoiceTaskHandler(gateway, repo);
+
+    const { proposal } = await handler.handle(baseContext);
+
+    const meta = proposal.payload._meta as {
+      overallConfidence: string;
+      fieldConfidence?: Record<string, string>;
+      markers?: Array<{ path: string; reason: string }>;
+    };
+    expect(meta.fieldConfidence).toEqual({ 'lineItems[1].unitPriceCents': 'low' });
+    expect(meta.markers).toHaveLength(1);
+    expect(meta.markers![0].path).toBe('lineItems[1].unitPriceCents');
+    expect(meta.markers![0].reason).toContain('mystery flux capacitor');
+    expect(meta.markers![0].reason).toContain('catalog');
+  });
+
+  it('field paths index the FINAL line items (after the drop-unpriced filter)', async () => {
+    const repo = new InMemoryCatalogItemRepository(); // empty catalog → no resolution pass
+    const gateway = createMockGateway(
+      JSON.stringify({
+        ...validAiOutput,
+        lineItems: [
+          { description: 'priceless garbage', quantity: 1 }, // dropped (no price)
+          { description: 'real work', quantity: 1, unitPrice: 5_000 },
+        ],
+        confidence_score: 0.95,
+      }),
+    );
+    const handler = new InvoiceTaskHandler(gateway, repo);
+
+    const { proposal } = await handler.handle(baseContext);
+
+    const lines = proposal.payload.lineItems as Array<Record<string, unknown>>;
+    expect(lines).toHaveLength(1); // unpriced line dropped
+    const meta = proposal.payload._meta as Record<string, unknown>;
+    // Empty catalog → no pricingSource stamped → overall-only meta, and
+    // crucially no marker pointing at a dropped index.
+    expect(meta.overallConfidence).toBe('high');
+    expect(meta.fieldConfidence).toBeUndefined();
+  });
+});

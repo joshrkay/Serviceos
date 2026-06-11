@@ -1,11 +1,13 @@
 import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
-import { assessConfidence } from '../guardrails/confidence';
+import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
+import type { ProposalConfidenceMeta } from '../../proposals/contracts';
 import type { CatalogItem, CatalogItemRepository } from '../../catalog/catalog-item';
 import {
   applyCatalogPricing,
   CatalogPricingOutcome,
+  lineItemConfidenceSignals,
   resolveLineItems,
   UNCATALOGUED_CONFIDENCE_CAP,
 } from '../resolution/catalog-resolver';
@@ -200,6 +202,27 @@ export class InvoiceTaskHandler implements TaskHandler {
       // ≥0.9 confidence score into autonomous auto-approval.
       confidenceScore = Math.min(confidenceScore, UNCATALOGUED_CONFIDENCE_CAP);
     }
+
+    // RV-007 — Confidence Marker `_meta`. Overall level is the mapped
+    // task confidence (post-cap); per-field signals translate the
+    // catalog resolver's pricingSource outcomes (uncatalogued/ambiguous
+    // lines → 'low' + a marker). Computed from the FINAL line items —
+    // after the drop-unpriced filter above — so the paths index the
+    // stored payload. No new confidence computation.
+    const signals = lineItemConfidenceSignals(
+      Array.isArray(payload.lineItems)
+        ? (payload.lineItems as Array<Record<string, unknown>>)
+        : [],
+      'unitPriceCents',
+    );
+    const meta: ProposalConfidenceMeta = {
+      overallConfidence: getConfidenceLevel(confidenceScore),
+      ...(Object.keys(signals.fieldConfidence).length > 0
+        ? { fieldConfidence: signals.fieldConfidence }
+        : {}),
+      ...(signals.markers.length > 0 ? { markers: signals.markers } : {}),
+    };
+    payload._meta = meta;
 
     const sourceContext: Record<string, unknown> = {
       ...(context.conversationId ? { conversationId: context.conversationId } : {}),
