@@ -1,18 +1,25 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { PgFeatureFlagRepository } from './pg-feature-flags';
+import {
+  FeatureFlagRepository,
+  InMemoryFeatureFlagStore,
+  isFeatureEnabled,
+} from './feature-flags';
 
 /**
  * RV-001 — Per-tenant feature flag overrides.
  *
  * Resolution order for isEnabledForTenant:
  *   1. tenant_feature_flags row for (tenant_id, flag_key)  — RLS-scoped read
- *   2. platform _feature_flags row (global, no RLS)
+ *   2. platform _feature_flags row evaluated via isFeatureEnabled (honours
+ *      environments and tenantIds scoping, not just the raw enabled bit)
  *   3. false
  *
- * An in-process 30-second cache (keyed by tenantId + flagKey) avoids a
- * DB round-trip on every gated request. setTenantFlag busts the cache
- * immediately for that key so callers see the new value right away.
+ * Cache note: the in-process 30-second TTL is per-process only. In
+ * multi-instance deployments each process caches independently, so
+ * different instances may serve stale values for up to 30 s after a write.
+ * setTenantFlag busts the local cache immediately so the writing process
+ * sees the new value right away.
  */
 
 const CACHE_TTL_MS = 30_000;
@@ -22,6 +29,7 @@ interface CacheEntry {
   expiresAt: number;
 }
 
+/** Bounded by tenants × flag keys; flag keys are code constants so growth is predictable. */
 type CacheKey = `${string}:${string}`;
 
 function cacheKey(tenantId: string, flagKey: string): CacheKey {
@@ -29,16 +37,16 @@ function cacheKey(tenantId: string, flagKey: string): CacheKey {
 }
 
 export class PgTenantFeatureFlagRepository extends PgBaseRepository {
-  private readonly platformRepo: PgFeatureFlagRepository;
+  private readonly platformRepo: FeatureFlagRepository;
   private readonly cache = new Map<CacheKey, CacheEntry>();
 
   /**
-   * @param tenantPool  Pool used for tenant-scoped reads (withTenant sets RLS context)
-   * @param platformPool  Pool used for global _feature_flags reads (may be the same pool)
+   * @param pool          Pool used for tenant-scoped reads (withTenant sets RLS context)
+   * @param platformFlags Repository used for global _feature_flags reads
    */
-  constructor(tenantPool: Pool, platformPool: Pool) {
-    super(tenantPool);
-    this.platformRepo = new PgFeatureFlagRepository(platformPool);
+  constructor(pool: Pool, platformFlags: FeatureFlagRepository) {
+    super(pool);
+    this.platformRepo = platformFlags;
   }
 
   /**
@@ -46,11 +54,12 @@ export class PgTenantFeatureFlagRepository extends PgBaseRepository {
    *
    * Resolution order:
    *  1. Tenant override row in tenant_feature_flags (RLS-filtered read)
-   *  2. Platform flag in _feature_flags
+   *  2. Platform flag evaluated via isFeatureEnabled (environments + tenantIds honoured)
    *  3. false
    *
-   * Reads are cached for CACHE_TTL_MS (30 s). setTenantFlag busts the
-   * cache immediately for the affected key.
+   * Cache note: reads are cached for CACHE_TTL_MS (30 s) per-process only.
+   * Multi-instance deployments may serve stale values for up to 30 s.
+   * setTenantFlag busts the local cache immediately for the affected key.
    */
   async isEnabledForTenant(tenantId: string, flagKey: string): Promise<boolean> {
     const key = cacheKey(tenantId, flagKey);
@@ -66,11 +75,11 @@ export class PgTenantFeatureFlagRepository extends PgBaseRepository {
   }
 
   private async _resolve(tenantId: string, flagKey: string): Promise<boolean> {
-    // 1. Check tenant override (RLS-scoped)
+    // 1. Check tenant override (RLS-scoped, belt-and-braces composite PK lookup)
     const tenantOverride = await this.withTenant(tenantId, async (client) => {
       const result = await client.query(
-        `SELECT enabled FROM tenant_feature_flags WHERE flag_key = $1`,
-        [flagKey]
+        `SELECT enabled FROM tenant_feature_flags WHERE tenant_id = $1 AND flag_key = $2`,
+        [tenantId, flagKey]
       );
       if (result.rows.length === 0) return null;
       return result.rows[0].enabled as boolean;
@@ -80,10 +89,15 @@ export class PgTenantFeatureFlagRepository extends PgBaseRepository {
       return tenantOverride;
     }
 
-    // 2. Fall back to platform flag
+    // 2. Fall back to platform flag — evaluated with full isFeatureEnabled semantics
+    //    (honours environments and tenantIds scoping, not just the raw enabled bit)
     const platformFlag = await this.platformRepo.get(flagKey);
     if (platformFlag !== null) {
-      return platformFlag.enabled;
+      const store = new InMemoryFeatureFlagStore([platformFlag]);
+      return isFeatureEnabled(store, flagKey, {
+        environment: process.env.NODE_ENV ?? 'development',
+        tenantId,
+      });
     }
 
     // 3. Default: disabled

@@ -7,6 +7,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { Pool, PoolClient, QueryResult } from 'pg';
 import { PgTenantFeatureFlagRepository } from '../../src/flags/pg-tenant-feature-flags';
+import type { FeatureFlag, FeatureFlagRepository } from '../../src/flags/feature-flags';
 
 type CapturedCall = { sql: string; params: unknown[] };
 type Responder = (sql: string, params: unknown[]) => { rows: Record<string, unknown>[]; rowCount?: number };
@@ -31,13 +32,19 @@ function makeMockPool(responder: Responder) {
 }
 
 const TENANT = '11111111-1111-1111-1111-111111111111';
+const TENANT_B = '22222222-2222-2222-2222-222222222222';
 const isContext = (sql: string) => sql.includes('app.current_tenant_id');
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-/** Simulates a platform flag row from _feature_flags */
-function platformFlagRows(enabled: boolean) {
-  return [{ name: 'my-flag', enabled, environments: null, tenant_ids: null, description: null }];
+/** Build a minimal FeatureFlagRepository stub returning a single flag (or null). */
+function makePlatformRepo(flag: FeatureFlag | null): FeatureFlagRepository {
+  return {
+    list: async () => (flag ? [flag] : []),
+    get: async (name: string) => (flag && flag.name === name ? flag : null),
+    upsert: async (f: FeatureFlag) => f,
+    delete: async () => false,
+  };
 }
 
 /** Simulates a tenant override row from tenant_feature_flags */
@@ -54,16 +61,14 @@ function tenantOverrideRow(enabled: boolean) {
 }
 
 /**
- * Build a mock pool that:
+ * Build a mock pool that handles tenant-scoped queries only (no platform repo).
  *  - responds to SET app.current_tenant_id with []
  *  - responds to RESET app.current_tenant_id with []
  *  - responds to tenant_feature_flags SELECT with tenantRows
- *  - responds to _feature_flags SELECT (platform) with platformRows
  *  - responds to upsert with upsertRows
  */
-function makeRepoPool(opts: {
+function makeTenantPool(opts: {
   tenantRows: Record<string, unknown>[];
-  platformRows: Record<string, unknown>[];
   upsertRows?: Record<string, unknown>[];
 }) {
   return makeMockPool((sql) => {
@@ -74,10 +79,6 @@ function makeRepoPool(opts: {
     if (sql.includes('tenant_feature_flags') && sql.includes('INSERT')) {
       return { rows: opts.upsertRows ?? [] };
     }
-    // platform flag query
-    if (sql.includes('_feature_flags')) {
-      return { rows: opts.platformRows };
-    }
     return { rows: [] };
   });
 }
@@ -86,76 +87,108 @@ function makeRepoPool(opts: {
 
 describe('PgTenantFeatureFlagRepository.isEnabledForTenant', () => {
   it('RV-001-01: tenant override true beats platform false', async () => {
-    const { pool } = makeRepoPool({
-      tenantRows: tenantOverrideRow(true),
-      platformRows: platformFlagRows(false),
-    });
-    const repo = new PgTenantFeatureFlagRepository(pool, pool);
+    const { pool } = makeTenantPool({ tenantRows: tenantOverrideRow(true) });
+    const platformRepo = makePlatformRepo({ name: 'my-flag', enabled: false });
+    const repo = new PgTenantFeatureFlagRepository(pool, platformRepo);
     expect(await repo.isEnabledForTenant(TENANT, 'my-flag')).toBe(true);
   });
 
   it('RV-001-02: tenant override false beats platform true', async () => {
-    const { pool } = makeRepoPool({
-      tenantRows: tenantOverrideRow(false),
-      platformRows: platformFlagRows(true),
-    });
-    const repo = new PgTenantFeatureFlagRepository(pool, pool);
+    const { pool } = makeTenantPool({ tenantRows: tenantOverrideRow(false) });
+    const platformRepo = makePlatformRepo({ name: 'my-flag', enabled: true });
+    const repo = new PgTenantFeatureFlagRepository(pool, platformRepo);
     expect(await repo.isEnabledForTenant(TENANT, 'my-flag')).toBe(false);
   });
 
   it('RV-001-03: missing tenant override falls back to platform true', async () => {
-    const { pool } = makeRepoPool({
-      tenantRows: [],
-      platformRows: platformFlagRows(true),
-    });
-    const repo = new PgTenantFeatureFlagRepository(pool, pool);
+    const { pool } = makeTenantPool({ tenantRows: [] });
+    const platformRepo = makePlatformRepo({ name: 'my-flag', enabled: true });
+    const repo = new PgTenantFeatureFlagRepository(pool, platformRepo);
     expect(await repo.isEnabledForTenant(TENANT, 'my-flag')).toBe(true);
   });
 
   it('RV-001-04: missing tenant override falls back to platform false', async () => {
-    const { pool } = makeRepoPool({
-      tenantRows: [],
-      platformRows: platformFlagRows(false),
-    });
-    const repo = new PgTenantFeatureFlagRepository(pool, pool);
+    const { pool } = makeTenantPool({ tenantRows: [] });
+    const platformRepo = makePlatformRepo({ name: 'my-flag', enabled: false });
+    const repo = new PgTenantFeatureFlagRepository(pool, platformRepo);
     expect(await repo.isEnabledForTenant(TENANT, 'my-flag')).toBe(false);
   });
 
   it('RV-001-05: missing both tenant override and platform flag returns false', async () => {
-    const { pool } = makeRepoPool({
-      tenantRows: [],
-      platformRows: [],
-    });
-    const repo = new PgTenantFeatureFlagRepository(pool, pool);
+    const { pool } = makeTenantPool({ tenantRows: [] });
+    const platformRepo = makePlatformRepo(null);
+    const repo = new PgTenantFeatureFlagRepository(pool, platformRepo);
     expect(await repo.isEnabledForTenant(TENANT, 'unknown-flag')).toBe(false);
   });
 
   it('RV-001-06: sets tenant context for the tenant override query', async () => {
-    const { pool, calls } = makeRepoPool({
-      tenantRows: tenantOverrideRow(true),
-      platformRows: [],
-    });
-    const repo = new PgTenantFeatureFlagRepository(pool, pool);
+    const { pool, calls } = makeTenantPool({ tenantRows: tenantOverrideRow(true) });
+    const platformRepo = makePlatformRepo(null);
+    const repo = new PgTenantFeatureFlagRepository(pool, platformRepo);
     await repo.isEnabledForTenant(TENANT, 'my-flag');
     const contextCall = calls.find((c) => c.sql.includes('app.current_tenant_id'));
     expect(contextCall).toBeDefined();
     expect(contextCall!.sql).toContain(TENANT);
   });
 
-  it('RV-001-07: uses parameterized query for tenant override read', async () => {
-    const { pool, calls } = makeRepoPool({
-      tenantRows: tenantOverrideRow(true),
-      platformRows: [],
-    });
-    const repo = new PgTenantFeatureFlagRepository(pool, pool);
+  it('RV-001-07: uses composite PK lookup for tenant override read (tenant_id = $1 AND flag_key = $2)', async () => {
+    const { pool, calls } = makeTenantPool({ tenantRows: tenantOverrideRow(true) });
+    const platformRepo = makePlatformRepo(null);
+    const repo = new PgTenantFeatureFlagRepository(pool, platformRepo);
     await repo.isEnabledForTenant(TENANT, 'my-flag');
     const selectCall = calls.find(
       (c) => c.sql.includes('tenant_feature_flags') && c.sql.includes('SELECT')
     );
     expect(selectCall).toBeDefined();
-    // flag_key should be a parameter, not interpolated
+    // Must use parameterized query — no literal values interpolated
     expect(selectCall!.sql).not.toContain('my-flag');
+    expect(selectCall!.sql).not.toContain(TENANT);
+    // Must include both columns in WHERE (composite PK lookup)
+    expect(selectCall!.sql).toMatch(/tenant_id\s*=\s*\$1/);
+    expect(selectCall!.sql).toMatch(/flag_key\s*=\s*\$2/);
+    // Both values must be parameters
+    expect(selectCall!.params).toContain(TENANT);
     expect(selectCall!.params).toContain('my-flag');
+  });
+
+  it('RV-001-15: platform flag scoped to tenantIds:[A] is FALSE for tenant B via fallback', async () => {
+    const { pool } = makeTenantPool({ tenantRows: [] }); // no tenant override
+    const platformRepo = makePlatformRepo({
+      name: 'my-flag',
+      enabled: true,
+      tenantIds: [TENANT], // only scoped to TENANT (A), not TENANT_B (B)
+    });
+    const repo = new PgTenantFeatureFlagRepository(pool, platformRepo);
+    // tenant B should NOT get the flag even though platform enabled=true
+    expect(await repo.isEnabledForTenant(TENANT_B, 'my-flag')).toBe(false);
+  });
+
+  it('RV-001-16: platform flag scoped to tenantIds:[A] is TRUE for tenant A via fallback', async () => {
+    const { pool } = makeTenantPool({ tenantRows: [] }); // no tenant override
+    const platformRepo = makePlatformRepo({
+      name: 'my-flag',
+      enabled: true,
+      tenantIds: [TENANT],
+    });
+    const repo = new PgTenantFeatureFlagRepository(pool, platformRepo);
+    expect(await repo.isEnabledForTenant(TENANT, 'my-flag')).toBe(true);
+  });
+
+  it('RV-001-17: platform flag scoped to environments is respected via fallback', async () => {
+    const originalEnv = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = 'production';
+      const { pool } = makeTenantPool({ tenantRows: [] });
+      const platformRepo = makePlatformRepo({
+        name: 'my-flag',
+        enabled: true,
+        environments: ['staging'], // not 'production'
+      });
+      const repo = new PgTenantFeatureFlagRepository(pool, platformRepo);
+      expect(await repo.isEnabledForTenant(TENANT, 'my-flag')).toBe(false);
+    } finally {
+      process.env.NODE_ENV = originalEnv;
+    }
   });
 });
 
@@ -168,10 +201,10 @@ describe('PgTenantFeatureFlagRepository cache', () => {
         callCount++;
         return { rows: tenantOverrideRow(true) };
       }
-      if (sql.includes('_feature_flags')) return { rows: [] };
       return { rows: [] };
     });
-    const repo = new PgTenantFeatureFlagRepository(pool, pool);
+    const platformRepo = makePlatformRepo(null);
+    const repo = new PgTenantFeatureFlagRepository(pool, platformRepo);
     const first = await repo.isEnabledForTenant(TENANT, 'my-flag');
     const second = await repo.isEnabledForTenant(TENANT, 'my-flag');
     expect(first).toBe(true);
@@ -193,10 +226,10 @@ describe('PgTenantFeatureFlagRepository cache', () => {
           rows: [{ tenant_id: TENANT, flag_key: 'my-flag', enabled: false, updated_by: null, updated_at: new Date().toISOString() }],
         };
       }
-      if (sql.includes('_feature_flags')) return { rows: [] };
       return { rows: [] };
     });
-    const repo = new PgTenantFeatureFlagRepository(pool, pool);
+    const platformRepo = makePlatformRepo(null);
+    const repo = new PgTenantFeatureFlagRepository(pool, platformRepo);
 
     // populate cache
     await repo.isEnabledForTenant(TENANT, 'my-flag');
@@ -220,10 +253,10 @@ describe('PgTenantFeatureFlagRepository cache', () => {
           callCount++;
           return { rows: tenantOverrideRow(true) };
         }
-        if (sql.includes('_feature_flags')) return { rows: [] };
         return { rows: [] };
       });
-      const repo = new PgTenantFeatureFlagRepository(pool, pool);
+      const platformRepo = makePlatformRepo(null);
+      const repo = new PgTenantFeatureFlagRepository(pool, platformRepo);
 
       // Populate cache
       await repo.isEnabledForTenant(TENANT, 'my-flag');
@@ -246,12 +279,12 @@ describe('PgTenantFeatureFlagRepository cache', () => {
 
 describe('PgTenantFeatureFlagRepository.setTenantFlag', () => {
   it('RV-001-10: upsert uses ON CONFLICT clause', async () => {
-    const { pool, calls } = makeRepoPool({
+    const { pool, calls } = makeTenantPool({
       tenantRows: [],
-      platformRows: [],
       upsertRows: [{ tenant_id: TENANT, flag_key: 'my-flag', enabled: true, updated_by: null, updated_at: new Date().toISOString() }],
     });
-    const repo = new PgTenantFeatureFlagRepository(pool, pool);
+    const platformRepo = makePlatformRepo(null);
+    const repo = new PgTenantFeatureFlagRepository(pool, platformRepo);
     await repo.setTenantFlag(TENANT, 'my-flag', true);
     const upsert = calls.find(
       (c) => c.sql.includes('tenant_feature_flags') && c.sql.includes('INSERT')
@@ -262,12 +295,12 @@ describe('PgTenantFeatureFlagRepository.setTenantFlag', () => {
   });
 
   it('RV-001-11: upsert passes tenantId and flagKey as parameters (no interpolation)', async () => {
-    const { pool, calls } = makeRepoPool({
+    const { pool, calls } = makeTenantPool({
       tenantRows: [],
-      platformRows: [],
       upsertRows: [{ tenant_id: TENANT, flag_key: 'my-flag', enabled: false, updated_by: null, updated_at: new Date().toISOString() }],
     });
-    const repo = new PgTenantFeatureFlagRepository(pool, pool);
+    const platformRepo = makePlatformRepo(null);
+    const repo = new PgTenantFeatureFlagRepository(pool, platformRepo);
     await repo.setTenantFlag(TENANT, 'my-flag', false);
     const upsert = calls.find(
       (c) => c.sql.includes('tenant_feature_flags') && c.sql.includes('INSERT')
@@ -279,13 +312,13 @@ describe('PgTenantFeatureFlagRepository.setTenantFlag', () => {
   });
 
   it('RV-001-12: upsert sets updated_by when provided', async () => {
-    const UPDATED_BY = '22222222-2222-2222-2222-222222222222';
-    const { pool, calls } = makeRepoPool({
+    const UPDATED_BY = '33333333-3333-3333-3333-333333333333';
+    const { pool, calls } = makeTenantPool({
       tenantRows: [],
-      platformRows: [],
       upsertRows: [{ tenant_id: TENANT, flag_key: 'feat', enabled: true, updated_by: UPDATED_BY, updated_at: new Date().toISOString() }],
     });
-    const repo = new PgTenantFeatureFlagRepository(pool, pool);
+    const platformRepo = makePlatformRepo(null);
+    const repo = new PgTenantFeatureFlagRepository(pool, platformRepo);
     await repo.setTenantFlag(TENANT, 'feat', true, UPDATED_BY);
     const upsert = calls.find(
       (c) => c.sql.includes('tenant_feature_flags') && c.sql.includes('INSERT')
@@ -305,10 +338,10 @@ describe('PgTenantFeatureFlagRepository.setTenantFlag', () => {
         tenantRowEnabled = false;
         return { rows: [{ tenant_id: TENANT, flag_key: 'my-flag', enabled: false, updated_by: null, updated_at: new Date().toISOString() }] };
       }
-      if (sql.includes('_feature_flags')) return { rows: [] };
       return { rows: [] };
     });
-    const repo = new PgTenantFeatureFlagRepository(pool, pool);
+    const platformRepo = makePlatformRepo(null);
+    const repo = new PgTenantFeatureFlagRepository(pool, platformRepo);
 
     const before = await repo.isEnabledForTenant(TENANT, 'my-flag');
     expect(before).toBe(true);
