@@ -19,6 +19,10 @@ import {
   createProposal,
 } from '../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import {
+  InMemoryProposalSmsEventRepository,
+  createProposalSmsEvent,
+} from '../../src/proposals/sms/sms-event';
 
 const TENANT = 't-1';
 const SECRET = 'test-one-tap-secret';
@@ -26,6 +30,7 @@ const SECRET = 'test-one-tap-secret';
 async function makeApp() {
   const proposalRepo = new InMemoryProposalRepository();
   const auditRepo = new InMemoryAuditRepository();
+  const smsEventRepo = new InMemoryProposalSmsEventRepository();
 
   const base = createProposal({
     tenantId: TENANT,
@@ -51,9 +56,10 @@ async function makeApp() {
       auditRepo,
       secret: SECRET,
       consumeNonce: createInMemoryNonceStore(),
+      smsEventRepo,
     }),
   );
-  return { app, proposalRepo, auditRepo, proposal };
+  return { app, proposalRepo, auditRepo, smsEventRepo, proposal };
 }
 
 function mint(proposalId: string, ttlMs?: number) {
@@ -86,6 +92,38 @@ describe('GET /public/proposals/one-tap-approve', () => {
     const types = events.map((e) => e.eventType);
     expect(types).toContain('proposal.approved');
     expect(types).toContain('proposal.one_tap_approved');
+  });
+
+  it('returns 409 and does not approve while a manual edit request is pending (P2-034)', async () => {
+    const { app, proposalRepo, auditRepo, smsEventRepo, proposal } = await makeApp();
+    // The owner asked for a change over SMS that could not be applied.
+    await smsEventRepo.create(
+      createProposalSmsEvent({
+        tenantId: TENANT,
+        proposalId: proposal.id,
+        direction: 'inbound',
+        kind: 'edit_request',
+        messageSid: 'SM-edit-1',
+        fromPhone: '5125550100',
+        body: 'make it $200',
+      }),
+    );
+    const { token } = mint(proposal.id);
+
+    const res = await request(app)
+      .get('/public/proposals/one-tap-approve')
+      .query({ token });
+
+    expect(res.status).toBe(409);
+    expect(res.text).toContain('Review and approve it in your queue');
+    expect((await proposalRepo.findById(TENANT, proposal.id))?.status).toBe(
+      'ready_for_review',
+    );
+    const types = (await auditRepo.findByEntity(TENANT, 'proposal', proposal.id)).map(
+      (e) => e.eventType,
+    );
+    expect(types).toContain('proposal.one_tap_blocked_pending_edit');
+    expect(types).not.toContain('proposal.approved');
   });
 
   it('is single-use: the second hit with the same token returns 410', async () => {

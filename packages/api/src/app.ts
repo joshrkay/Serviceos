@@ -1686,6 +1686,9 @@ export function createApp(): express.Express {
       auditRepo,
       ...(oneTapSecret ? { secret: oneTapSecret } : {}),
       consumeNonce: consumeOneTapNonce,
+      // P2-034 — a pending manual edit request blocks the link too, not
+      // just SMS Y replies; both paths approve the same stale payload.
+      smsEventRepo: proposalSmsEventRepo,
     }),
   );
 

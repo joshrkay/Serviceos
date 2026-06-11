@@ -15,12 +15,14 @@
  * Responses are minimal mobile-friendly HTML:
  *   200 — approved (or already approved via this same path)
  *   401 — malformed / bad signature / tenant mismatch
+ *   409 — a manual edit request is pending (approve from the queue)
  *   410 — expired or already used (single-use nonce consumed)
  */
 import { Router, Request, Response } from 'express';
 import { verifyOneTapApproveToken } from '../proposals/auto-approve';
 import { approveProposal } from '../proposals/actions';
 import type { ProposalRepository } from '../proposals/proposal';
+import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
 import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import type { Role } from '../auth/rbac';
 import { createLogger } from '../logging/logger';
@@ -45,6 +47,13 @@ export interface OneTapApproveRouterDeps {
    * single-instance dev may use `createInMemoryNonceStore()`.
    */
   consumeNonce: (nonce: string) => boolean | Promise<boolean>;
+  /**
+   * P2-034 — when the owner's SMS edit could not be applied (recorded as
+   * an unapplied `edit_request`), approval is blocked over SMS *and* via
+   * this link: both would execute the stale payload the owner was told
+   * needs the review queue. Optional so pre-P2-034 wiring keeps working.
+   */
+  smsEventRepo?: Pick<ProposalSmsEventRepository, 'hasUnappliedEditRequest'>;
 }
 
 function page(title: string, body: string): string {
@@ -99,6 +108,40 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
               : verified.reason === 'already_used'
                 ? 'This approval link was already used.'
                 : 'This approval link is not valid.',
+          ),
+        );
+      return;
+    }
+
+    // P2-034 — pending manual edit: the owner asked to change this
+    // proposal and the change awaits the review queue. Approving from
+    // the (older) link would execute the stale payload. The nonce is
+    // already consumed — the link stays single-use either way.
+    if (
+      deps.smsEventRepo &&
+      (await deps.smsEventRepo.hasUnappliedEditRequest(
+        verified.tenantId,
+        verified.proposalId,
+      ))
+    ) {
+      await deps.auditRepo.create(
+        createAuditEvent({
+          tenantId: verified.tenantId,
+          actorId: ONE_TAP_ACTOR_ID,
+          actorRole: 'system',
+          eventType: 'proposal.one_tap_blocked_pending_edit',
+          entityType: 'proposal',
+          entityId: verified.proposalId,
+          metadata: { channel: 'sms_one_tap' },
+        }),
+      );
+      res
+        .status(409)
+        .type('html')
+        .send(
+          page(
+            'Change pending',
+            'You asked to change this proposal — your note is attached. Review and approve it in your queue.',
           ),
         );
       return;
