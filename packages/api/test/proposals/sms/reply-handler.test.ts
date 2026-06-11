@@ -381,6 +381,32 @@ describe('edit session flow', () => {
     expect(rejection).toMatchObject({ handled: true, reason: 'rejected' });
   });
 
+  it('a failed re-approval send keeps approval blocked (edit applied, never delivered)', async () => {
+    const h = makeHarness({ interpretEdit: async () => ({ customerName: 'Mr Chen' }) });
+    const proposal = await seedPendingProposal(h);
+    await handleProposalSmsReply(ctx('EDIT'), h.deps);
+    // The re-approval send (and only it) fails — e.g. Twilio outage.
+    h.deps.sendSms = async (_to, body) => {
+      if (body.includes('Updated:')) throw new Error('twilio down');
+      h.sent.push({ to: _to, body });
+    };
+
+    const result = await handleProposalSmsFallback(ctx('change to Mr Chen'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'reapproval_send_failed' });
+    // The edit IS applied…
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.payload.customerName).toBe(
+      'Mr Chen',
+    );
+    // …but no unsent render was recorded, so Y stays blocked.
+    expect(h.smsEventRepo.events.find((e) => e.kind === 'reapproval_rendered')).toBeUndefined();
+    h.deps.sendSms = async (to, body) => {
+      h.sent.push({ to, body });
+    };
+    const approval = await handleProposalSmsReply(ctx('Y'), h.deps);
+    expect(approval).toMatchObject({ handled: true, reason: 'approve_blocked_pending_edit' });
+  });
+
   it('a successful SMS edit re-render unblocks approval', async () => {
     const h = makeHarness({ interpretEdit: async () => ({ customerName: 'Mr Chen' }) });
     await seedPendingProposal(h);

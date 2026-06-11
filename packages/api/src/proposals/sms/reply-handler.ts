@@ -540,6 +540,20 @@ async function applyEditInstruction(
           },
           { reapproval: true },
         );
+        // Send FIRST, record after — mirroring the queue_and_sms anchor.
+        // Recording an unsent render would unblock `Y` (and make it the
+        // latest target) against text the owner never received.
+        try {
+          await reply(deps, ctx.fromE164, body);
+        } catch (sendErr) {
+          // The edit IS applied; only the re-approval delivery failed.
+          // Leave the edit_request unanswered so approval stays blocked
+          // until the owner sees the updated text (queue or retry).
+          await audit(deps, ctx, 'proposal.sms_reapproval_send_failed', updated.id, {
+            error: sendErr instanceof Error ? sendErr.message : String(sendErr),
+          });
+          return { handled: true, handler: HANDLER_NAME, reason: 'reapproval_send_failed' };
+        }
         await deps.smsEventRepo.create(
           createProposalSmsEvent({
             tenantId: ctx.tenantId,
@@ -551,7 +565,6 @@ async function applyEditInstruction(
           }),
         );
         await audit(deps, ctx, 'proposal.sms_edited', updated.id, { editedFields });
-        await reply(deps, ctx.fromE164, body);
         return { handled: true, handler: HANDLER_NAME, reason: 'edited' };
       }
     } catch (err) {
