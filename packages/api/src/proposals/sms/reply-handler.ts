@@ -320,6 +320,17 @@ export async function handleProposalSmsReply(
     return { handled: false, handler: HANDLER_NAME, reason: 'unknown_mobile' };
   }
 
+  // An open edit session captures EVERYTHING the owner sends next — the
+  // instruction often starts with a registered token ("change the price
+  // to $200", "fix the date"), which routes here instead of the fallback.
+  // Without this, such a message would re-open a session and ask "What
+  // should I change?" forever.
+  const sessionNow = deps.now ? deps.now() : new Date();
+  const session = await deps.smsEventRepo.findOpenEditSession(ctx.tenantId, sessionNow);
+  if (session) {
+    return handleEditRequest(deps, ctx, session.id, session.proposalId);
+  }
+
   const proposal = await findTargetProposal(deps, ctx.tenantId);
   if (!proposal) {
     await audit(deps, ctx, 'proposal.sms_reply_no_pending', '', {
@@ -339,6 +350,11 @@ export async function handleProposalSmsReply(
     case 'reject':
       return handleReject(deps, ctx, proposal, parsed.remainder);
     case 'edit':
+      // "EDIT make it $200" carries the instruction inline — apply it
+      // directly instead of a pointless "What should I change?" round trip.
+      if (parsed.remainder) {
+        return applyEditInstruction(deps, ctx, proposal, ctx.body);
+      }
       return handleEditOpen(deps, ctx, proposal);
     default:
       return { handled: false, handler: HANDLER_NAME, reason: 'unrecognized_keyword' };
@@ -395,11 +411,26 @@ async function handleEditRequest(
     return { handled: true, handler: HANDLER_NAME, reason: 'edit_target_gone' };
   }
 
+  return applyEditInstruction(deps, ctx, proposal, ctx.body);
+}
+
+/**
+ * Apply a free-text edit instruction to a reviewable proposal. Shared by
+ * the open-session capture (instruction is the whole next message) and
+ * the inline "EDIT make it $200" form.
+ */
+async function applyEditInstruction(
+  deps: ProposalSmsReplyDeps,
+  ctx: InboundSmsContext,
+  proposal: Proposal,
+  instruction: string,
+): Promise<HandlerResult> {
+  const now = deps.now ? deps.now() : new Date();
   await recordInbound(deps, ctx, proposal.id, 'edit_request');
 
   if (deps.interpretEdit) {
     try {
-      const edits = await deps.interpretEdit({ proposal, instruction: ctx.body });
+      const edits = await deps.interpretEdit({ proposal, instruction });
       if (edits && Object.keys(edits).length > 0) {
         // editProposal Zod-validates the merged payload — a hallucinated
         // delta fails closed into the manual-review path below.

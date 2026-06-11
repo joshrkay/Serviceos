@@ -64,7 +64,11 @@ export function createLlmEditInterpreter(
       }
       const delta: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-        if (key in proposal.payload) delta[key] = value;
+        // Own-property check — `in` would also accept prototype keys like
+        // `toString`/`constructor` coming back from the model.
+        if (Object.prototype.hasOwnProperty.call(proposal.payload, key)) {
+          delta[key] = value;
+        }
       }
       return Object.keys(delta).length > 0 ? delta : null;
     } catch {

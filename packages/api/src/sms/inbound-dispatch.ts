@@ -140,7 +140,11 @@ export async function dispatchInboundSms(
     return { handled: false, reason: 'no_matching_handler' };
   }
 
-  const entry = registry.get(firstToken.toLowerCase());
+  // Strip surrounding punctuation so "Yes!", "OK.", '"approve"' route to
+  // their keyword like the bare word does — handlers' own parsers are
+  // punctuation-tolerant, but they never run if the lookup misses here.
+  const token = firstToken.toLowerCase().replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
+  const entry = token ? registry.get(token) : undefined;
   if (!entry) {
     const viaFallback = await runFallback(ctx);
     if (viaFallback?.handled) return viaFallback;

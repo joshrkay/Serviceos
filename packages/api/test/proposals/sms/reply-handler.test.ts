@@ -352,6 +352,43 @@ describe('edit session flow', () => {
     );
   });
 
+  it('captures an instruction that starts with an edit keyword during an open session', async () => {
+    // "change the price..." routes to the KEYWORD handler (first token is a
+    // registered edit token); with a session open it must be treated as the
+    // instruction, not re-open another session.
+    const h = makeHarness({
+      interpretEdit: async ({ instruction }) => {
+        expect(instruction).toBe('change it to Mr Chen');
+        return { customerName: 'Mr Chen' };
+      },
+    });
+    const proposal = await seedPendingProposal(h);
+    await handleProposalSmsReply(ctx('EDIT'), h.deps);
+
+    const result = await handleProposalSmsReply(ctx('change it to Mr Chen'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'edited' });
+    const updated = await h.proposalRepo.findById(TENANT, proposal.id);
+    expect(updated?.payload.customerName).toBe('Mr Chen');
+    // No second "What should I change?" prompt was sent.
+    expect(h.sent.filter((s) => s.body.includes('What should I change'))).toHaveLength(1);
+  });
+
+  it('applies an inline "EDIT <instruction>" without a round trip', async () => {
+    const h = makeHarness({
+      interpretEdit: async () => ({ customerName: 'Mr Chen' }),
+    });
+    const proposal = await seedPendingProposal(h);
+
+    const result = await handleProposalSmsReply(ctx('EDIT make it for Mr Chen'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'edited' });
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.payload.customerName).toBe(
+      'Mr Chen',
+    );
+    expect(h.sent.some((s) => s.body.includes('What should I change'))).toBe(false);
+  });
+
   it('an edit session consumes on first message — no spam extension', async () => {
     const h = makeHarness({ interpretEdit: async () => null });
     await seedPendingProposal(h);

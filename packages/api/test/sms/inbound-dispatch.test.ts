@@ -195,3 +195,26 @@ describe('P2-034 — fallback handler', () => {
     expect(() => registerFallbackHandler({ ...fb, name: 'b' }, { overwrite: true })).not.toThrow();
   });
 });
+
+describe('P2-034 — punctuation-tolerant keyword lookup', () => {
+  it.each(['Yes!', 'OK.', '"approve"', '  y. '])(
+    'routes %s to the registered bare keyword',
+    async (body) => {
+      const handle = vi.fn(async () => ({ handled: true, handler: 'proposal-reply' }));
+      registerKeywordHandler({ keywords: ['yes', 'ok', 'approve', 'y'], handle });
+
+      const result = await dispatchInboundSms({ ...ctxBase, body });
+      expect(result.handled).toBe(true);
+      expect(handle).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('a punctuation-only first token does not match any keyword', async () => {
+    const handle = vi.fn(async () => ({ handled: true }));
+    registerKeywordHandler({ keywords: ['yes'], handle });
+
+    const result = await dispatchInboundSms({ ...ctxBase, body: '!!! yes' });
+    expect(result.handled).toBe(false);
+    expect(handle).not.toHaveBeenCalled();
+  });
+});

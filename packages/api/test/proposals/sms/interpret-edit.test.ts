@@ -52,6 +52,7 @@ describe('createLlmEditInterpreter', () => {
     ['array', '[1,2]'],
     ['empty object', '{}'],
     ['all-unknown keys', '{"madeUp": 1}'],
+    ['prototype-chain keys only', '{"toString": 1, "constructor": 2, "__proto__": {"x": 1}}'],
   ])('returns null on %s output', async (_label, content) => {
     const interpret = createLlmEditInterpreter(gatewayReturning(content));
     await expect(
