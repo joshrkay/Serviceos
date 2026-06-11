@@ -224,3 +224,121 @@ describe('P2-002 — Typed proposal contracts', () => {
     });
   });
 });
+
+// ─── RV-007 (F-4): Confidence Marker `_meta` ─────────────────────────────
+// `_meta` is an OPTIONAL fragment on EVERY payload, validated once at the
+// validateProposalPayload choke point (the per-type schemas are strip-mode
+// and ignore it). Old payloads without `_meta` must keep validating.
+describe('RV-007 — payload _meta confidence marker', () => {
+  const customerPayload = {
+    name: 'John Doe',
+    email: 'john@example.com',
+    phone: '555-1234',
+  };
+
+  it('validates a payload carrying a full, valid _meta', () => {
+    const result = validateProposalPayload('create_customer', {
+      ...customerPayload,
+      _meta: {
+        overallConfidence: 'high',
+        fieldConfidence: { 'lineItems[0].unitPrice': 'low', name: 'medium' },
+        markers: [{ path: 'lineItems[0].unitPrice', reason: 'not in catalog' }],
+      },
+    });
+    expect(result.valid).toBe(true);
+    expect(result.errors).toBeUndefined();
+  });
+
+  it('validates an overall-only _meta (fieldConfidence/markers optional)', () => {
+    for (const level of ['high', 'medium', 'low', 'very_low']) {
+      const result = validateProposalPayload('create_customer', {
+        ...customerPayload,
+        _meta: { overallConfidence: level },
+      });
+      expect(result.valid).toBe(true);
+    }
+  });
+
+  it('still validates a payload WITHOUT _meta (old proposals unchanged)', () => {
+    const result = validateProposalPayload('create_customer', customerPayload);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toBeUndefined();
+  });
+
+  it('rejects an unknown overallConfidence level', () => {
+    const result = validateProposalPayload('create_customer', {
+      ...customerPayload,
+      _meta: { overallConfidence: 'sorta_sure' },
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors!.some((e) => e.includes('_meta.overallConfidence'))).toBe(true);
+  });
+
+  it('rejects _meta missing overallConfidence', () => {
+    const result = validateProposalPayload('create_customer', {
+      ...customerPayload,
+      _meta: { fieldConfidence: { name: 'high' } },
+    });
+    expect(result.valid).toBe(false);
+  });
+
+  it('rejects a bad fieldConfidence level', () => {
+    const result = validateProposalPayload('create_customer', {
+      ...customerPayload,
+      _meta: { overallConfidence: 'high', fieldConfidence: { name: 0.9 } },
+    });
+    expect(result.valid).toBe(false);
+  });
+
+  it('enforces the markers shape (path + reason both required, non-empty)', () => {
+    const missingReason = validateProposalPayload('create_customer', {
+      ...customerPayload,
+      _meta: { overallConfidence: 'medium', markers: [{ path: 'name' }] },
+    });
+    expect(missingReason.valid).toBe(false);
+
+    const emptyPath = validateProposalPayload('create_customer', {
+      ...customerPayload,
+      _meta: {
+        overallConfidence: 'medium',
+        markers: [{ path: '', reason: 'why' }],
+      },
+    });
+    expect(emptyPath.valid).toBe(false);
+
+    const notAnArray = validateProposalPayload('create_customer', {
+      ...customerPayload,
+      _meta: { overallConfidence: 'medium', markers: { path: 'x', reason: 'y' } },
+    });
+    expect(notAnArray.valid).toBe(false);
+  });
+
+  it('applies to refined (ZodEffects) schemas too — create_appointment', () => {
+    const base = {
+      jobId: uuidv4(),
+      scheduledStart: '2026-04-01T09:00:00Z',
+      scheduledEnd: '2026-04-01T11:00:00Z',
+    };
+    expect(
+      validateProposalPayload('create_appointment', {
+        ...base,
+        _meta: { overallConfidence: 'medium' },
+      }).valid,
+    ).toBe(true);
+    expect(
+      validateProposalPayload('create_appointment', {
+        ...base,
+        _meta: { overallConfidence: 'nope' },
+      }).valid,
+    ).toBe(false);
+  });
+
+  it('assertValidProposalPayload throws on a malformed _meta', () => {
+    expect(() =>
+      assertValidProposalPayload('create_customer', {
+        ...customerPayload,
+        _meta: { overallConfidence: 'bogus' },
+      }),
+    ).toThrow(ValidationError);
+  });
+});

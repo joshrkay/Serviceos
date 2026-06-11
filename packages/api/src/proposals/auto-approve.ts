@@ -113,6 +113,51 @@ export function shouldAutoApprove(
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// RV-007 (F-4) — Confidence Marker auto-approve guard.
+//
+// AI task handlers stamp `payload._meta.overallConfidence` with the level
+// from the single confidence vocabulary (src/ai/guardrails/confidence.ts:
+// high | medium | low | very_low). A proposal carrying a 'low' or
+// 'very_low' overall level must NEVER auto-approve, regardless of how the
+// numeric confidence score compares to the resolved threshold.
+//
+// This guard is ADDITIVE only:
+//   - payloads without `_meta` (all pre-RV-007 proposals) are untouched —
+//     the numeric-threshold rules apply exactly as before;
+//   - 'medium' does NOT block (per F-4 it renders as a marker downstream);
+//   - a malformed `_meta` never blocks and never throws — the payload
+//     contract gate (assertValidProposalPayload) rejects it upstream.
+//
+// `decideInitialStatus` (proposals/proposal.ts) is the single place that
+// can return 'approved', so the check is applied there — every
+// auto-approve path flows through it.
+// ───────────────────────────────────────────────────────────────────────────
+
+import type { ConfidenceLevel } from '../ai/guardrails/confidence';
+
+/** Levels that hard-block auto-approval (F-4: only low / very_low block). */
+export const AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS: readonly ConfidenceLevel[] = [
+  'low',
+  'very_low',
+];
+
+/**
+ * True when `payload._meta.overallConfidence` is a blocking level.
+ * Pure observer — tolerates any payload shape (absent/malformed `_meta`
+ * returns false, preserving pre-RV-007 behavior exactly).
+ */
+export function confidenceMetaBlocksAutoApprove(payload: unknown): boolean {
+  if (payload === null || typeof payload !== 'object') return false;
+  const meta = (payload as Record<string, unknown>)._meta;
+  if (meta === null || typeof meta !== 'object') return false;
+  const overall = (meta as Record<string, unknown>).overallConfidence;
+  return (
+    typeof overall === 'string' &&
+    (AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS as readonly string[]).includes(overall)
+  );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // Phase 12 — one-tap re-approve token (SMS deep link)
 //
 // When a proposal is routed via `queue_and_sms`, the owner gets an SMS with

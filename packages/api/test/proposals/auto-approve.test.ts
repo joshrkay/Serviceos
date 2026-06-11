@@ -489,3 +489,227 @@ describe('P2-034 — routeUnsupervisedProposal SMS transport seams', () => {
     expect(called).toBe(0);
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// RV-007 (F-4) — Confidence Marker auto-approve guard
+//
+// `payload._meta.overallConfidence` of 'low' / 'very_low' must NEVER
+// auto-approve, regardless of the numeric score vs threshold. 'medium'
+// does NOT block (it renders as a marker downstream). Payloads without
+// `_meta` keep today's numeric-threshold behavior exactly.
+// ───────────────────────────────────────────────────────────────────────────
+
+import { confidenceMetaBlocksAutoApprove } from '../../src/proposals/auto-approve';
+
+describe('RV-007 — confidenceMetaBlocksAutoApprove', () => {
+  it('blocks on low and very_low', () => {
+    expect(confidenceMetaBlocksAutoApprove({ _meta: { overallConfidence: 'low' } })).toBe(true);
+    expect(confidenceMetaBlocksAutoApprove({ _meta: { overallConfidence: 'very_low' } })).toBe(
+      true,
+    );
+  });
+
+  it('does not block on high or medium', () => {
+    expect(confidenceMetaBlocksAutoApprove({ _meta: { overallConfidence: 'high' } })).toBe(false);
+    expect(confidenceMetaBlocksAutoApprove({ _meta: { overallConfidence: 'medium' } })).toBe(
+      false,
+    );
+  });
+
+  it('never blocks (and never throws) on absent or malformed _meta', () => {
+    expect(confidenceMetaBlocksAutoApprove(undefined)).toBe(false);
+    expect(confidenceMetaBlocksAutoApprove(null)).toBe(false);
+    expect(confidenceMetaBlocksAutoApprove('low')).toBe(false);
+    expect(confidenceMetaBlocksAutoApprove({})).toBe(false);
+    expect(confidenceMetaBlocksAutoApprove({ _meta: null })).toBe(false);
+    expect(confidenceMetaBlocksAutoApprove({ _meta: 'low' })).toBe(false);
+    expect(confidenceMetaBlocksAutoApprove({ _meta: {} })).toBe(false);
+    expect(confidenceMetaBlocksAutoApprove({ _meta: { overallConfidence: 42 } })).toBe(false);
+  });
+});
+
+describe('RV-007 — decideInitialStatus confidence-marker guard', () => {
+  // create_customer is capture-class; autonomous tier is the only path
+  // that can reach 'approved'.
+  const base = {
+    proposalType: 'create_customer' as const,
+    sourceTrustTier: 'autonomous' as const,
+  };
+
+  it.each(['low', 'very_low'] as const)(
+    '%s blocks auto-approve at ANY score, in every supervisor mode path',
+    (level) => {
+      const payload = { name: 'X', _meta: { overallConfidence: level } };
+
+      // Legacy path (no mode threaded) — 0.99 clears 0.9 numerically.
+      expect(decideInitialStatus({ ...base, confidenceScore: 0.99, payload })).toBe('draft');
+
+      // Mode-aware paths — 1.0 clears every threshold numerically.
+      for (const mode of ['supervisor', 'both', 'tech'] as const) {
+        expect(
+          decideInitialStatus({
+            ...base,
+            confidenceScore: 1.0,
+            supervisorMode: mode,
+            supervisorPresent: true,
+            payload,
+          }),
+        ).toBe('draft');
+      }
+
+      // Tenant override path — even a permissive 0.5 override is beaten.
+      expect(
+        decideInitialStatus({
+          ...base,
+          confidenceScore: 0.99,
+          supervisorMode: 'supervisor',
+          supervisorPresent: true,
+          tenantThresholdOverride: { supervisor: 0.5 },
+          payload,
+        }),
+      ).toBe('draft');
+
+      // Unsupervised path: a blocked proposal is NOT a "would have
+      // auto-approved" — it lands in 'draft', not 'ready_for_review'.
+      expect(
+        decideInitialStatus({
+          ...base,
+          confidenceScore: 0.99,
+          supervisorMode: 'supervisor',
+          supervisorPresent: false,
+          payload,
+        }),
+      ).toBe('draft');
+    },
+  );
+
+  it('medium does NOT block (F-4: only low/very_low block)', () => {
+    expect(
+      decideInitialStatus({
+        ...base,
+        confidenceScore: 0.96,
+        supervisorMode: 'supervisor',
+        supervisorPresent: true,
+        payload: { name: 'X', _meta: { overallConfidence: 'medium' } },
+      }),
+    ).toBe('approved');
+  });
+
+  it('high does not block either', () => {
+    expect(
+      decideInitialStatus({
+        ...base,
+        confidenceScore: 0.96,
+        supervisorMode: 'tech',
+        supervisorPresent: true,
+        payload: { name: 'X', _meta: { overallConfidence: 'high' } },
+      }),
+    ).toBe('approved');
+  });
+
+  it('regression pin — absent _meta keeps today\'s behavior per supervisor mode path', () => {
+    const payload = { name: 'X' }; // no _meta
+
+    // Legacy (no mode): 0.91 approves, 0.89 drafts.
+    expect(decideInitialStatus({ ...base, confidenceScore: 0.91, payload })).toBe('approved');
+    expect(decideInitialStatus({ ...base, confidenceScore: 0.89, payload })).toBe('draft');
+
+    // supervisor (0.90): boundary inclusive.
+    expect(
+      decideInitialStatus({
+        ...base,
+        confidenceScore: 0.9,
+        supervisorMode: 'supervisor',
+        supervisorPresent: true,
+        payload,
+      }),
+    ).toBe('approved');
+
+    // both (0.92).
+    expect(
+      decideInitialStatus({
+        ...base,
+        confidenceScore: 0.92,
+        supervisorMode: 'both',
+        supervisorPresent: true,
+        payload,
+      }),
+    ).toBe('approved');
+    expect(
+      decideInitialStatus({
+        ...base,
+        confidenceScore: 0.91,
+        supervisorMode: 'both',
+        supervisorPresent: true,
+        payload,
+      }),
+    ).toBe('draft');
+
+    // tech (0.95).
+    expect(
+      decideInitialStatus({
+        ...base,
+        confidenceScore: 0.95,
+        supervisorMode: 'tech',
+        supervisorPresent: true,
+        payload,
+      }),
+    ).toBe('approved');
+    expect(
+      decideInitialStatus({
+        ...base,
+        confidenceScore: 0.94,
+        supervisorMode: 'tech',
+        supervisorPresent: true,
+        payload,
+      }),
+    ).toBe('draft');
+
+    // Unsupervised: still routes to ready_for_review (unchanged).
+    expect(
+      decideInitialStatus({
+        ...base,
+        confidenceScore: 0.96,
+        supervisorMode: 'supervisor',
+        supervisorPresent: false,
+        payload,
+      }),
+    ).toBe('ready_for_review');
+
+    // No payload threaded at all (legacy callers): unchanged.
+    expect(decideInitialStatus({ ...base, confidenceScore: 0.91 })).toBe('approved');
+  });
+});
+
+// Wiring proof: createProposal threads its payload into decideInitialStatus,
+// so the guard holds on the real proposal-creation path (the single entry
+// every AI task handler uses).
+import { createProposal } from '../../src/proposals/proposal';
+
+describe('RV-007 — createProposal wiring', () => {
+  const baseInput = {
+    tenantId: 't1',
+    proposalType: 'create_customer' as const,
+    summary: 's',
+    createdBy: 'u1',
+    sourceTrustTier: 'autonomous' as const,
+    confidenceScore: 0.99,
+    supervisorMode: 'supervisor' as const,
+    supervisorPresent: true,
+  };
+
+  it('low _meta forces draft even at 0.99 confidence', () => {
+    const p = createProposal({
+      ...baseInput,
+      payload: { name: 'X', _meta: { overallConfidence: 'low' } },
+    });
+    expect(p.status).toBe('draft');
+    expect(p.approvedAt).toBeUndefined();
+  });
+
+  it('same proposal without _meta still auto-approves (regression pin)', () => {
+    const p = createProposal({ ...baseInput, payload: { name: 'X' } });
+    expect(p.status).toBe('approved');
+    expect(p.approvedAt).toBeInstanceOf(Date);
+  });
+});

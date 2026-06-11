@@ -23,6 +23,56 @@ import {
 // package (per the spec — single source of truth, re-exported via the
 // shared barrel). Do NOT redefine it locally.
 import { reviewResponseProposalPayloadSchema } from '@ai-service-os/shared';
+// RV-007 (F-4) — the confidence vocabulary is owned by the guardrails
+// module (score→level mapping lives there too). Re-exported here so
+// proposal-layer consumers don't reach into src/ai for the type.
+import { CONFIDENCE_LEVELS } from '../ai/guardrails/confidence';
+export type { ConfidenceLevel } from '../ai/guardrails/confidence';
+
+// ───────────────────────────────────────────────────────────────────────────
+// RV-007 (F-4) — Confidence Marker `_meta` on proposal payloads.
+//
+// A reusable, OPTIONAL fragment carried inside the payload itself:
+//
+//   _meta: {
+//     overallConfidence: 'high' | 'medium' | 'low' | 'very_low',
+//     fieldConfidence?:  Record<payload path, ConfidenceLevel>,
+//     markers?:          Array<{ path, reason }>,
+//   }
+//
+// Attachment choice: every schema in PROPOSAL_TYPE_SCHEMAS is a Zod
+// strip-mode object (several wrapped in `.refine()` → ZodEffects, which
+// cannot be `.extend()`ed), so an unknown `_meta` key already passes
+// each per-type schema untouched. Rather than rewriting ~40 schemas,
+// `_meta` is validated once at the shared choke point —
+// `validateProposalPayload` / `assertValidProposalPayload` — via the
+// envelope below. Old payloads without `_meta` keep validating; a
+// present-but-malformed `_meta` is rejected for every proposal type.
+// ───────────────────────────────────────────────────────────────────────────
+
+export const confidenceLevelSchema = z.enum(CONFIDENCE_LEVELS);
+
+export const proposalConfidenceMetaSchema = z.object({
+  overallConfidence: confidenceLevelSchema,
+  /** Per-field certainty keyed by payload path, e.g. "lineItems[0].unitPrice". */
+  fieldConfidence: z.record(confidenceLevelSchema).optional(),
+  /** Human-readable callouts the review UI / SMS / voice readback render. */
+  markers: z
+    .array(
+      z.object({
+        path: z.string().min(1),
+        reason: z.string().min(1),
+      }),
+    )
+    .optional(),
+});
+
+export type ProposalConfidenceMeta = z.infer<typeof proposalConfidenceMetaSchema>;
+
+/** `_meta` is optional on EVERY payload; other keys pass through untouched. */
+const confidenceMetaEnvelopeSchema = z
+  .object({ _meta: proposalConfidenceMetaSchema.optional() })
+  .passthrough();
 
 export const createCustomerPayloadSchema = z.object({
   name: z.string().min(1),
@@ -392,11 +442,30 @@ export function validateProposalPayload(
     return { valid: false, errors: [`Unknown proposal type: ${proposalType}`] };
   }
 
+  const errors: string[] = [];
+
   const result = schema.safeParse(payload);
   if (!result.success) {
-    const errors = result.error.issues.map(
-      (i) => `${i.path.join('.')}: ${i.message}`
+    errors.push(
+      ...result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`)
     );
+  }
+
+  // RV-007 — validate the optional `_meta` confidence-marker fragment for
+  // every proposal type. The per-type schemas are strip-mode, so they
+  // ignore `_meta`; this envelope is the single gate that rejects a
+  // malformed one. Skipped for non-object payloads (the per-type schema
+  // already rejects those).
+  if (typeof payload === 'object' && payload !== null) {
+    const metaResult = confidenceMetaEnvelopeSchema.safeParse(payload);
+    if (!metaResult.success) {
+      errors.push(
+        ...metaResult.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`)
+      );
+    }
+  }
+
+  if (errors.length > 0) {
     return { valid: false, errors };
   }
 
