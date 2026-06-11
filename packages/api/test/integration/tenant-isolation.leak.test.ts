@@ -1,6 +1,13 @@
 /**
  * RV-003 — Repository-layer cross-tenant leak integration tests.
  *
+ * CANONICAL tenant-leak suite: every new tenant-scoped table MUST append a
+ * case here. Some findById cross-tenant cases intentionally duplicate
+ * per-entity test files — that consolidation is deliberate.
+ * Pending: `attachments` table — append its leak case here once RV-005 lands.
+ * Policies fail CLOSED on unset GUC by erroring (no missing_ok), which is
+ * stronger than the plan's "zero rows" wording — this is intentional.
+ *
  * This file has two layers of coverage:
  *
  * Layer 1 — Repository API: exercises the actual repository classes
@@ -25,7 +32,10 @@
  *   5. Raw RLS cross-check through unprivileged role (asTenant).
  *   6. GUC-unset coverage: assert fail-closed behaviour when no tenant
  *      context is set (policies use current_setting without missing_ok →
- *      error thrown).
+ *      error thrown). Two possible error shapes:
+ *        • GUC never set in session  → "unrecognized configuration parameter"
+ *        • GUC set then RESET on a pooled connection → empty string →
+ *          `''::uuid` cast error → "invalid input syntax for type uuid"
  *
  * Docker gate: the test suite runs only when the integration testcontainer
  * is available (TEST_DB_URL set by global-setup). The shared getSharedTestDb()
@@ -533,6 +543,12 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
   // without the `, true` (missing_ok) flag, so Postgres raises an error when
   // the GUC is unset rather than silently returning NULL / zero rows. This is
   // the correct fail-closed behaviour — the tests below pin it.
+  //
+  // Two possible error shapes depending on connection history:
+  //   • GUC never set in this session  → "unrecognized configuration parameter"
+  //   • GUC set then RESET on a pooled connection → empty string →
+  //     `''::uuid` cast → "invalid input syntax for type uuid"
+  // The regex below accepts both.
   describe('GUC-unset fail-closed behaviour (no app.current_tenant_id)', () => {
     it('SELECT on customers throws when GUC is not set (fail-closed policy)', async () => {
       // customers policy (schema.ts migration 014, line ~332-333):
@@ -548,7 +564,7 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
         await client.query(`RESET app.current_tenant_id`);
         await expect(
           client.query('SELECT count(*) FROM customers'),
-        ).rejects.toThrow();
+        ).rejects.toThrow(/unrecognized configuration parameter|invalid input syntax for type uuid/);
       } finally {
         await client.query('ROLLBACK').catch(() => undefined);
         client.release();
@@ -566,7 +582,7 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
         await client.query(`RESET app.current_tenant_id`);
         await expect(
           client.query('SELECT count(*) FROM tenant_feature_flags'),
-        ).rejects.toThrow();
+        ).rejects.toThrow(/unrecognized configuration parameter|invalid input syntax for type uuid/);
       } finally {
         await client.query('ROLLBACK').catch(() => undefined);
         client.release();
