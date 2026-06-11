@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   runDailyDigestSweep,
-  isDigestDue,
   checkDigestDue,
   localMinutesOfDay,
   DIGEST_SWEEP_INTERVAL_MS,
@@ -99,26 +98,26 @@ function stubComputeDeps(o: ComputeStubOverrides = {}, settingsRepo?: InMemorySe
   };
 }
 
-describe('isDigestDue (tenant-local 15-min bucket matching)', () => {
+describe('checkDigestDue (tenant-local 15-min bucket matching)', () => {
   it('fires when the local digest_time is inside the just-passed bucket (now inclusive)', () => {
-    expect(isDigestDue({ digestTime: '18:00', timezone: TZ, now: DUE_NOW })).toBe(true);
+    expect(checkDigestDue({ digestTime: '18:00', timezone: TZ, now: DUE_NOW }).due).toBe(true);
     // Exactly at `now` local wall clock.
-    expect(isDigestDue({ digestTime: '18:05', timezone: TZ, now: DUE_NOW })).toBe(true);
+    expect(checkDigestDue({ digestTime: '18:05', timezone: TZ, now: DUE_NOW }).due).toBe(true);
   });
 
   it('does not fire outside the bucket (already-fired earlier slot, or future slot)', () => {
     // 17:50 is the exclusive lower bound of (17:50, 18:05].
-    expect(isDigestDue({ digestTime: '17:50', timezone: TZ, now: DUE_NOW })).toBe(false);
-    expect(isDigestDue({ digestTime: '18:06', timezone: TZ, now: DUE_NOW })).toBe(false);
-    expect(isDigestDue({ digestTime: '12:00', timezone: TZ, now: DUE_NOW })).toBe(false);
+    expect(checkDigestDue({ digestTime: '17:50', timezone: TZ, now: DUE_NOW }).due).toBe(false);
+    expect(checkDigestDue({ digestTime: '18:06', timezone: TZ, now: DUE_NOW }).due).toBe(false);
+    expect(checkDigestDue({ digestTime: '12:00', timezone: TZ, now: DUE_NOW }).due).toBe(false);
   });
 
   it('handles the bucket wrapping local midnight', () => {
     // 00:05 local in Chicago → bucket (23:50, 00:05].
     const justPastMidnight = new Date('2026-06-12T05:05:00Z');
-    expect(isDigestDue({ digestTime: '23:55', timezone: TZ, now: justPastMidnight })).toBe(true);
-    expect(isDigestDue({ digestTime: '00:05', timezone: TZ, now: justPastMidnight })).toBe(true);
-    expect(isDigestDue({ digestTime: '23:45', timezone: TZ, now: justPastMidnight })).toBe(false);
+    expect(checkDigestDue({ digestTime: '23:55', timezone: TZ, now: justPastMidnight }).due).toBe(true);
+    expect(checkDigestDue({ digestTime: '00:05', timezone: TZ, now: justPastMidnight }).due).toBe(true);
+    expect(checkDigestDue({ digestTime: '23:45', timezone: TZ, now: justPastMidnight }).due).toBe(false);
   });
 
   it('midnight-wrap: effectiveDate is the PREVIOUS day when target > prevMin (the day that ended)', () => {
@@ -140,9 +139,39 @@ describe('isDigestDue (tenant-local 15-min bucket matching)', () => {
     expect(normal.effectiveDate).toBe('2026-06-11');
   });
 
+  it('DST fall-back: prevMin > nowMin but date unchanged → due:false (not a midnight crossing)', () => {
+    // Reproduced fixture: America/Chicago 2026-11-01, clocks fall back at 2 AM.
+    // At 07:05Z the local time is 01:05 CST (UTC-6). 15 min earlier (06:50Z) it
+    // was 01:50 CDT (UTC-5). prevMin=110 > nowMin=65 — looks like a midnight wrap,
+    // but both instants share the same local calendar date 2026-11-01.
+    // digestTime 18:00 (=1080) > prevMin (110) → without the date-equality guard
+    // this would wrongly fire due:true.
+    const dstFallBackNow = new Date('2026-11-01T07:05:00Z');
+    const result = checkDigestDue({
+      digestTime: '18:00',
+      timezone: 'America/Chicago',
+      now: dstFallBackNow,
+      intervalMs: 15 * 60 * 1000,
+    });
+    expect(result.due).toBe(false);
+    expect(result.effectiveDate).toBe('2026-11-01');
+
+    // The genuine 18:00 digest still fires correctly at 00:05Z (next day in UTC),
+    // which is 18:05 CST → bucket (17:50, 18:05].
+    const genuineDue = new Date('2026-11-02T00:05:00Z'); // 18:05 CST
+    const genuine = checkDigestDue({
+      digestTime: '18:00',
+      timezone: 'America/Chicago',
+      now: genuineDue,
+      intervalMs: 15 * 60 * 1000,
+    });
+    expect(genuine.due).toBe(true);
+    expect(genuine.effectiveDate).toBe('2026-11-01');
+  });
+
   it('accepts the HH:MM:SS shape the TIME column emits and rejects garbage', () => {
-    expect(isDigestDue({ digestTime: '18:00:00', timezone: TZ, now: DUE_NOW })).toBe(true);
-    expect(isDigestDue({ digestTime: 'whenever', timezone: TZ, now: DUE_NOW })).toBe(false);
+    expect(checkDigestDue({ digestTime: '18:00:00', timezone: TZ, now: DUE_NOW }).due).toBe(true);
+    expect(checkDigestDue({ digestTime: 'whenever', timezone: TZ, now: DUE_NOW }).due).toBe(false);
   });
 
   it('localMinutesOfDay reads tenant wall-clock minutes', () => {
@@ -271,7 +300,8 @@ describe('runDailyDigestSweep', () => {
     claimOnce.mockRestore();
     const later = new Date(DUE_NOW.getTime() + 15 * 60 * 1000);
     const second = await runDailyDigestSweep(deps({ now: () => later }));
-    expect(second.sent).toBe(1);
+    expect(second.sent).toBe(0);
+    expect(second.claimed).toBe(1); // claimed from existing dispatch, not re-sent
     expect(sendSms).toHaveBeenCalledTimes(1); // no second send
     expect((await digestRepo.findByTenantAndDate('t1', LOCAL_DATE))?.smsDispatchId).toBeTruthy();
   });
@@ -280,7 +310,7 @@ describe('runDailyDigestSweep', () => {
     // Scenario: sendSms succeeds, but dispatchRepo.create throws a unique-violation
     // (a concurrent sweep created the dispatch row in the same instant). The
     // catch block falls back to findByEntity which finds the concurrent row and
-    // claims it, so the function returns true and the record gets smsDispatchId.
+    // claims it, so the function returns 'sent' and the record gets smsDispatchId.
 
     const digestRepo2 = new InMemoryDailyDigestRepository();
     const settingsRepo2 = new InMemorySettingsRepository();
@@ -426,7 +456,7 @@ describe('runDailyDigestSweep', () => {
         throw new Error('tenants table unavailable');
       },
     }));
-    expect(result).toEqual({ tenants: 0, generated: 0, sent: 0, skipped: 0, failed: 0 });
+    expect(result).toEqual({ tenants: 0, generated: 0, sent: 0, claimed: 0, skipped: 0, failed: 0 });
   });
 
   it('low/very_low confidence proposals get no one-tap link in the SMS; reviewInApp is marked', async () => {
@@ -469,9 +499,8 @@ describe('runDailyDigestSweep', () => {
   it('invalid tenant timezone falls back to America/New_York with a single structured warn (not per-tick)', async () => {
     const warnSpy = vi.spyOn(logger, 'warn');
     await settingsRepo.update('t1', { timezone: 'Not/AZone' });
-    // Digest is due at 18:00 in the fallback tz (America/New_York, same bucket).
-    // DUE_NOW = 23:05Z = 19:05 New_York (EDT, UTC-4) → 18:00 falls in (18:50, 19:05]? No.
-    // But we just want to prove it doesn't throw and logs exactly once.
+    // We just want to prove it doesn't throw and logs exactly once; the
+    // actual due/skip outcome depends on the fallback tz and is not asserted.
     const result = await runDailyDigestSweep(deps());
     // The warn about invalid timezone should have been emitted exactly once.
     const tzWarns = warnSpy.mock.calls.filter(

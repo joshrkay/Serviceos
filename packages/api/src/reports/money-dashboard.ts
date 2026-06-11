@@ -139,7 +139,7 @@ export function resolveMonthWindow(month: string, timezone = 'America/New_York')
   return { start, end, priorStart, priorEnd: start };
 }
 
-function inWindow(d: Date, start: Date, end: Date): boolean {
+export function inWindow(d: Date, start: Date, end: Date): boolean {
   const t = d.getTime();
   return t >= start.getTime() && t < end.getTime();
 }

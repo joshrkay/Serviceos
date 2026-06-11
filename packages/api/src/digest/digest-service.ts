@@ -29,6 +29,7 @@ import { findJobsRequiringInvoicing } from '../invoices/invoicing-queue';
 import {
   resolveDayWindow,
   computeWindowRevenue,
+  inWindow,
   isInvoiceOwing,
   isInvoiceOverdue,
 } from '../reports/money-dashboard';
@@ -105,12 +106,14 @@ export const DIGEST_MAX_UNBILLED_JOBS = 10;
 const AMOUNT_KEYS = ['amountCents', 'totalCents', 'priceCents'] as const;
 
 /**
- * Set built from `AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS` for O(1) lookup.
- * Using the exported constant keeps the blocking definition in one place.
+ * True when `level` is a blocking confidence level (low / very_low).
+ * Single source of truth — used both here (summarizeProposalForDigest) and
+ * by the worker (buildApprovalLinks). Exported so both sites share one
+ * definition with no duplicate set construction.
  */
-const BLOCKING_CONFIDENCE_LEVELS_SET: ReadonlySet<string> = new Set(
-  AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS as readonly string[],
-);
+export function isBlockingConfidence(level: string | undefined): boolean {
+  return level !== undefined && (AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS as readonly string[]).includes(level);
+}
 
 function extractOverallConfidence(payload: Record<string, unknown>): string | undefined {
   const meta = payload._meta;
@@ -156,9 +159,7 @@ export function summarizeProposalForDigest(proposal: Proposal): DigestPendingApp
     ...(customerName !== undefined ? { customerName } : {}),
     ...(amountCents !== undefined ? { amountCents } : {}),
     ...(overallConfidence !== undefined ? { overallConfidence } : {}),
-    ...(overallConfidence !== undefined && BLOCKING_CONFIDENCE_LEVELS_SET.has(overallConfidence)
-      ? { reviewInApp: true as const }
-      : {}),
+    ...(isBlockingConfidence(overallConfidence) ? { reviewInApp: true as const } : {}),
   };
 }
 
@@ -399,10 +400,7 @@ export async function computeDigestPayload(
   // dashboard's own tenant-tz day boundaries.
   const revenue = computeWindowRevenue(payments, today.start, today.end);
   const paymentsCount = payments.filter(
-    (p) =>
-      p.status === 'completed' &&
-      p.receivedAt.getTime() >= today.start.getTime() &&
-      p.receivedAt.getTime() < today.end.getTime(),
+    (p) => p.status === 'completed' && inWindow(p.receivedAt, today.start, today.end),
   ).length;
 
   // Jobs completed today. Jobs carry no completion timestamp; 'completed'
