@@ -438,6 +438,64 @@ describe('edit session flow', () => {
     expect(rejection).toMatchObject({ handled: true, reason: 'rejected' });
   });
 
+  // RV-004 (P2-034-parity): SMS Y-reply while a manual edit is pending —
+  // explicit parity test verifying all three observable effects: no approval
+  // call, blocked-reply SMS, and the sms_approve_blocked_pending_edit audit
+  // event (mirrors the one_tap_blocked_pending_edit event on the one-tap route).
+  it('RV-004: Y-reply while edit pending emits the audit event and blocks approveProposal', async () => {
+    const h = makeHarness({ interpretEdit: async () => null });
+    const proposal = await seedPendingProposal(h);
+    // Seed an unapplied edit request directly (no open session needed — this
+    // is the post-session state where interpretation failed or returned null).
+    await h.smsEventRepo.create(
+      createProposalSmsEvent({
+        tenantId: TENANT,
+        proposalId: proposal.id,
+        direction: 'inbound',
+        kind: 'edit_request',
+        messageSid: 'SM-edit-seed',
+        fromPhone: '5125550100',
+        body: 'lower the price',
+      }),
+    );
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    // 1. The result is a clean block — never an error path.
+    expect(result).toMatchObject({ handled: true, reason: 'approve_blocked_pending_edit' });
+    // 2. approveProposal was NOT called — status is still reviewable.
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe(
+      'ready_for_review',
+    );
+    // 3. The owner receives an SMS explaining the block (not a generic error).
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].to).toBe(OWNER_PHONE);
+    expect(h.sent[0].body).toContain('queue');
+    // 4. The audit event is emitted (parity with proposal.one_tap_blocked_pending_edit).
+    const auditTypes = h.auditRepo.getAll().map((e) => e.eventType);
+    expect(auditTypes).toContain('proposal.sms_approve_blocked_pending_edit');
+    expect(auditTypes).not.toContain('proposal.approved');
+  });
+
+  // RV-004 regression: Y with NO pending edit still approves (existing behavior intact).
+  // This test mirrors the parametric suite above but is an explicit regression guard
+  // for the parity fix — a pending-edit guard must not fire when there is no
+  // unapplied edit_request.
+  it('RV-004 regression: Y-reply with no pending edit approves normally', async () => {
+    const h = makeHarness();
+    const proposal = await seedPendingProposal(h);
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'approved' });
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('approved');
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].body).toContain('Approved');
+    const auditTypes = h.auditRepo.getAll().map((e) => e.eventType);
+    expect(auditTypes).toContain('proposal.approved');
+    expect(auditTypes).not.toContain('proposal.sms_approve_blocked_pending_edit');
+  });
+
   it('a failed re-approval send keeps approval blocked (edit applied, never delivered)', async () => {
     const h = makeHarness({ interpretEdit: async () => ({ customerName: 'Mr Chen' }) });
     const proposal = await seedPendingProposal(h);
