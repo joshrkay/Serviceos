@@ -278,6 +278,32 @@ describe('Blocker 6 — recordPayment emits audit events', () => {
     expect(statusChange!.metadata).toMatchObject({ oldStatus: 'open', newStatus: 'paid' });
   });
 
+  it('audits the open → partially_paid transition on a partial payment', async () => {
+    await recordPayment(
+      { tenantId: 'tenant-1', invoiceId, amountCents: 4000, method: 'cash', processedBy: 'user-1' },
+      invoiceRepo,
+      paymentRepo,
+      undefined,
+      undefined,
+      auditRepo,
+      { actorRole: 'owner', correlationId: 'corr-partial' },
+    );
+
+    const events = auditRepo.getAll();
+    const recorded = events.find((e) => e.eventType === 'payment.recorded');
+    expect(recorded).toBeDefined();
+    expect(recorded!.metadata).toMatchObject({
+      amountCents: 4000,
+      method: 'cash',
+      newInvoiceStatus: 'partially_paid',
+    });
+
+    const statusChange = events.find((e) => e.eventType === 'invoice.status_changed');
+    expect(statusChange).toBeDefined();
+    expect(statusChange!.metadata).toMatchObject({ oldStatus: 'open', newStatus: 'partially_paid' });
+    expect(statusChange!.correlationId).toBe('corr-partial');
+  });
+
   it('defaults actorRole to system and emits no status_changed when status is unchanged', async () => {
     // A partial payment of an already partially_paid invoice keeps status
     // 'partially_paid' on the second call → no status_changed event.

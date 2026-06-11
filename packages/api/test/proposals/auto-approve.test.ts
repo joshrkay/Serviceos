@@ -186,3 +186,228 @@ describe('P12-004 — decideInitialStatus integration via auto-approve', () => {
     ).toBe('draft');
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// P12-004 — one-tap re-approve token + unsupervised routing
+// ───────────────────────────────────────────────────────────────────────────
+
+import {
+  createOneTapApproveToken,
+  verifyOneTapApproveToken,
+  createInMemoryNonceStore,
+  routeUnsupervisedProposal,
+  ONE_TAP_APPROVE_MAX_TTL_MS,
+} from '../../src/proposals/auto-approve';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+
+const SECRET = 'test-secret';
+
+describe('P12-004 — one-tap approve token (HMAC, single-use, TTL)', () => {
+  it('round-trips a valid token bound to proposal + tenant', async () => {
+    const { token } = createOneTapApproveToken({
+      proposalId: 'prop-1',
+      tenantId: 'tenant-1',
+      secret: SECRET,
+    });
+    const result = await verifyOneTapApproveToken({
+      token,
+      secret: SECRET,
+      expectedTenantId: 'tenant-1',
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(result).toEqual({ ok: true, proposalId: 'prop-1', tenantId: 'tenant-1' });
+  });
+
+  it('rejects a tampered payload (bad signature)', async () => {
+    const { token } = createOneTapApproveToken({
+      proposalId: 'prop-1',
+      tenantId: 'tenant-1',
+      secret: SECRET,
+    });
+    const [payload, sig] = token.split('.');
+    const forged = Buffer.from(
+      JSON.stringify({ p: 'prop-EVIL', t: 'tenant-1', n: 'x', e: Date.now() + 60000 }),
+    ).toString('base64url');
+    const result = await verifyOneTapApproveToken({
+      token: `${forged}.${sig}`,
+      secret: SECRET,
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(result).toEqual({ ok: false, reason: 'bad_signature' });
+    expect(payload).toBeTruthy();
+  });
+
+  it('rejects a token signed with a different secret', async () => {
+    const { token } = createOneTapApproveToken({
+      proposalId: 'p',
+      tenantId: 't',
+      secret: 'other-secret',
+    });
+    const result = await verifyOneTapApproveToken({
+      token,
+      secret: SECRET,
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(result).toEqual({ ok: false, reason: 'bad_signature' });
+  });
+
+  it('rejects a tenant mismatch', async () => {
+    const { token } = createOneTapApproveToken({
+      proposalId: 'p',
+      tenantId: 'tenant-A',
+      secret: SECRET,
+    });
+    const result = await verifyOneTapApproveToken({
+      token,
+      secret: SECRET,
+      expectedTenantId: 'tenant-B',
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(result).toEqual({ ok: false, reason: 'tenant_mismatch' });
+  });
+
+  it('expires after the TTL and clamps TTL to 30 minutes', async () => {
+    const now = 1_000_000;
+    const { token, expiresAt } = createOneTapApproveToken({
+      proposalId: 'p',
+      tenantId: 't',
+      secret: SECRET,
+      ttlMs: 99 * 60 * 1000, // requested 99 min — must clamp to 30
+      nowMs: now,
+    });
+    expect(expiresAt.getTime()).toBe(now + ONE_TAP_APPROVE_MAX_TTL_MS);
+
+    const expired = await verifyOneTapApproveToken({
+      token,
+      secret: SECRET,
+      nowMs: now + ONE_TAP_APPROVE_MAX_TTL_MS, // exactly at expiry → expired
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(expired).toEqual({ ok: false, reason: 'expired' });
+  });
+
+  it('is single-use — second verification fails with already_used', async () => {
+    const { token } = createOneTapApproveToken({
+      proposalId: 'p',
+      tenantId: 't',
+      secret: SECRET,
+    });
+    const consumeNonce = createInMemoryNonceStore();
+    const first = await verifyOneTapApproveToken({ token, secret: SECRET, consumeNonce });
+    expect(first.ok).toBe(true);
+    const second = await verifyOneTapApproveToken({ token, secret: SECRET, consumeNonce });
+    expect(second).toEqual({ ok: false, reason: 'already_used' });
+  });
+
+  it('rejects malformed tokens', async () => {
+    const result = await verifyOneTapApproveToken({
+      token: 'not-a-token',
+      secret: SECRET,
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(result).toEqual({ ok: false, reason: 'malformed' });
+  });
+});
+
+describe('P12-004 — routeUnsupervisedProposal', () => {
+  const base = {
+    tenantId: 'tenant-1',
+    proposalId: 'prop-1',
+    channel: 'voice_inbound' as const,
+    ownerPhone: '+15555550100',
+  };
+
+  function deps() {
+    const audit = new InMemoryAuditRepository();
+    const sms: { to: string; body: string }[] = [];
+    let escalations = 0;
+    return {
+      audit,
+      sms,
+      getEscalations: () => escalations,
+      routeDeps: {
+        auditRepo: audit,
+        secret: SECRET,
+        sendSms: async (to: string, body: string) => {
+          sms.push({ to, body });
+        },
+        escalateToOnCall: async () => {
+          escalations += 1;
+        },
+        buildApproveUrl: (token: string) => `https://app.test/p/approve?token=${token}`,
+      },
+    };
+  }
+
+  it('queue_and_sms (default) sends a one-tap SMS and emits the audit event', async () => {
+    const d = deps();
+    const result = await routeUnsupervisedProposal(d.routeDeps, { ...base });
+    expect(result.effectiveRouting).toBe('queue_and_sms');
+    expect(result.smsSent).toBe(true);
+    expect(d.sms).toHaveLength(1);
+    expect(d.sms[0].to).toBe('+15555550100');
+    expect(d.sms[0].body).toContain('https://app.test/p/approve?token=');
+
+    const events = await d.audit.findByEntity('tenant-1', 'proposal', 'prop-1');
+    expect(events).toHaveLength(1);
+    expect(events[0].eventType).toBe('unsupervised_proposal_routed');
+    expect(events[0].metadata).toMatchObject({
+      requestedRouting: 'queue_and_sms',
+      effectiveRouting: 'queue_and_sms',
+      smsSent: true,
+    });
+  });
+
+  it('queue_only sends no SMS but still audits', async () => {
+    const d = deps();
+    const result = await routeUnsupervisedProposal(d.routeDeps, {
+      ...base,
+      routing: 'queue_only',
+    });
+    expect(result.smsSent).toBe(false);
+    expect(d.sms).toHaveLength(0);
+    const events = await d.audit.findByEntity('tenant-1', 'proposal', 'prop-1');
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata).toMatchObject({ effectiveRouting: 'queue_only' });
+  });
+
+  it('escalate_to_oncall on a voice call invokes the escalation seam', async () => {
+    const d = deps();
+    const result = await routeUnsupervisedProposal(d.routeDeps, {
+      ...base,
+      routing: 'escalate_to_oncall',
+    });
+    expect(result.escalated).toBe(true);
+    expect(d.getEscalations()).toBe(1);
+    expect(d.sms).toHaveLength(0);
+  });
+
+  it('escalate_to_oncall on a non-call channel falls back to queue_only', async () => {
+    const d = deps();
+    const result = await routeUnsupervisedProposal(d.routeDeps, {
+      ...base,
+      channel: 'inapp',
+      routing: 'escalate_to_oncall',
+    });
+    expect(result.effectiveRouting).toBe('queue_only');
+    expect(result.escalated).toBe(false);
+    expect(d.getEscalations()).toBe(0);
+    const events = await d.audit.findByEntity('tenant-1', 'proposal', 'prop-1');
+    expect(events[0].metadata).toMatchObject({
+      requestedRouting: 'escalate_to_oncall',
+      effectiveRouting: 'queue_only',
+    });
+  });
+
+  it('queue_and_sms with no owner phone degrades gracefully (no SMS, still audited)', async () => {
+    const d = deps();
+    const result = await routeUnsupervisedProposal(d.routeDeps, {
+      ...base,
+      ownerPhone: null,
+    });
+    expect(result.smsSent).toBe(false);
+    expect(d.sms).toHaveLength(0);
+    const events = await d.audit.findByEntity('tenant-1', 'proposal', 'prop-1');
+    expect(events).toHaveLength(1);
+  });
+});

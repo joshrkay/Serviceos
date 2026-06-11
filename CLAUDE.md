@@ -9,7 +9,8 @@ Canonical product (deployed on Railway):
 Deployment: /railway.toml + /Dockerfile (Railway is the deploy target).
 See /docs/deployment.md.
 
-NOT deployed / experimental — do not mistake for production (each has a
+NOT deployed / experimental — quarantined under /experiments (see
+/experiments/README.md); do not mistake for production (each has a
 README explaining why):
 - /infra — AWS CDK stacks; built but deployed by nothing.
 - /service-os-app — Next.js prototype that bypasses the proposal/audit gate.

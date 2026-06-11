@@ -62,6 +62,16 @@ function buildPartialInvoicePayload(parsed: Record<string, unknown> | null): Rec
   return payload;
 }
 
+/**
+ * P22-001 — optional catalog context for draft_invoice. When wired,
+ * the tenant's active catalog is injected into the LLM prompt and
+ * resolved line items take the catalog's exact `unitPriceCents`
+ * (overwriting any LLM guess). When absent: pre-P22 behavior.
+ */
+export interface InvoiceTaskDeps {
+  catalogRepo?: CatalogItemRepository;
+}
+
 export class InvoiceTaskHandler implements TaskHandler {
   readonly taskType = 'draft_invoice' as const;
   private readonly gateway: LLMGateway;
@@ -80,7 +90,8 @@ export class InvoiceTaskHandler implements TaskHandler {
   }
 
   async handle(context: TaskContext): Promise<TaskResult> {
-    const userMessage = this.buildUserMessage(context);
+    const catalogItems = await this.fetchCatalog(context.tenantId);
+    const userMessage = this.buildUserMessage(context, catalogItems);
 
     const llmResponse = await this.gateway.complete({
       taskType: 'draft_invoice',
@@ -219,12 +230,16 @@ export class InvoiceTaskHandler implements TaskHandler {
     return { proposal, taskType: this.taskType };
   }
 
-  private buildUserMessage(context: TaskContext): string {
+  private buildUserMessage(context: TaskContext, catalogItems: CatalogItem[] = []): string {
     const parts: string[] = [];
     parts.push(`Request: ${context.message}`);
     if (context.existingEntities && Object.keys(context.existingEntities).length > 0) {
       parts.push(`Context entities: ${JSON.stringify(context.existingEntities)}`);
     }
+    // P22-001: compact catalog table (name | unit | price), capped at
+    // 150 items with truncation noted in the section itself.
+    const catalogSection = buildCatalogPromptSection(catalogItems);
+    if (catalogSection) parts.push(catalogSection);
     return parts.join('\n');
   }
 }

@@ -264,6 +264,7 @@ import { createPublicEstimatesRouter } from './routes/public-estimates';
 import { PublicInvoiceService } from './invoices/public-invoice-service';
 import { createPublicInvoicesRouter } from './routes/public-invoices';
 import { createPublicPaymentsRouter } from './routes/public-payments';
+import { createOneTapApproveRouter } from './routes/one-tap-approve';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
 import { runOverdueInvoiceSweep } from './workers/overdue-invoice-worker';
@@ -980,6 +981,50 @@ export function createApp(): express.Express {
       })
     : undefined;
 
+  // ── P12-004 wiring — one-tap approve (unsupervised queue_and_sms) ────────
+  // HMAC secret for the single-use approve token in the owner SMS. In prod /
+  // staging it must be configured explicitly; dev falls back to a fixed
+  // secret so the flow is exercisable without env setup.
+  const oneTapSecret =
+    process.env.ONE_TAP_APPROVE_SECRET ??
+    (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging'
+      ? undefined
+      : 'dev-one-tap-approve-secret');
+  const oneTapApiBaseUrl = (
+    process.env.PUBLIC_API_URL ?? process.env.APP_PUBLIC_URL ?? 'http://localhost:3000'
+  ).replace(/\/+$/, '');
+  // Durable single-use nonce store: reuse the webhook_events idempotency
+  // primitive (unique index on (source, idempotency_key), INSERT … ON
+  // CONFLICT DO NOTHING) so a one-tap link stays single-use across restarts
+  // and across instances. In-memory repo backs dev without a DATABASE_URL.
+  const consumeOneTapNonce = async (nonce: string): Promise<boolean> => {
+    const receipt = await webhookEventRepo.recordReceipt(
+      'one_tap_approve',
+      nonce,
+      'one_tap_approve_nonce',
+      {},
+    );
+    return receipt.inserted;
+  };
+  // Capture as const so the SMS closure narrows (messageDelivery is a let).
+  const oneTapDelivery = messageDelivery;
+  const oneTapSmsSender = oneTapDelivery
+    ? async (to: string, body: string): Promise<void> => {
+        await oneTapDelivery.sendSms({ to, body });
+      }
+    : undefined;
+  // Owner/backup-supervisor phone for the unsupervised SMS: tenant_settings
+  // owner_phone first, then the backup supervisor's mobile_number.
+  const resolveUnsupervisedOwnerPhone = async (tenantId: string): Promise<string | null> => {
+    const settings = await settingsRepo.findByTenant(tenantId);
+    if (settings?.ownerPhone) return settings.ownerPhone;
+    if (settings?.backupSupervisorUserId) {
+      const backup = await userRepo.findById(tenantId, settings.backupSupervisorUserId);
+      return backup?.mobileNumber ?? null;
+    }
+    return null;
+  };
+
   const workerLogger = createLogger({
     service: 'transcription-worker',
     environment: process.env.NODE_ENV || 'development',
@@ -1426,6 +1471,20 @@ export function createApp(): express.Express {
     // constructed, `operatorVerticalPromptResolver` is assigned and the
     // shim starts returning live data on the next classifier call.
     verticalPromptResolver: operatorVerticalResolverShim,
+    // P12-004 — unsupervised proposal routing: when no supervisor is
+    // present and the tenant routing is queue_and_sms (default), send the
+    // owner a one-tap approve SMS with a signed single-use link. Audit
+    // event `unsupervised_proposal_routed` fires on every routed proposal.
+    unsupervisedRouting: {
+      auditRepo,
+      ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
+      ...(oneTapSecret ? { secret: oneTapSecret } : {}),
+      buildApproveUrl: (token: string) =>
+        `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
+      resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
+      resolveRouting: async (tenantId: string) =>
+        (await settingsRepo.findByTenant(tenantId))?.unsupervisedProposalRouting,
+    },
   });
   workerRegistry.set(
     voiceActionRouterWorker.type,
@@ -1562,6 +1621,21 @@ export function createApp(): express.Express {
     moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: requestLogger },
   });
   app.use('/public/estimates', createPublicEstimatesRouter(publicEstimateService));
+
+  // P12-004 — public one-tap proposal approval (token-gated, single-use).
+  // The owner SMS from the unsupervised queue_and_sms routing links here.
+  // Approval flows through the existing approveProposal path (status guard,
+  // undo window, audit, execution worker); the signed nonce is consumed
+  // durably via webhook_events so links are single-use across instances.
+  app.use(
+    '/public/proposals',
+    createOneTapApproveRouter({
+      proposalRepo,
+      auditRepo,
+      ...(oneTapSecret ? { secret: oneTapSecret } : {}),
+      consumeNonce: consumeOneTapNonce,
+    }),
+  );
 
   // Public unauthenticated invoice payment flow (token-authenticated).
   // Stripe Payment Link creation is enabled when STRIPE_SECRET_KEY is set.

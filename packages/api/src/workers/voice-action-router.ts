@@ -4,6 +4,9 @@ import { LLMGateway } from '../ai/gateway/gateway';
 import { Proposal, ProposalRepository, createProposal, CreateProposalInput, ProposalType } from '../proposals/proposal';
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
+import { routeUnsupervisedProposal } from '../proposals/auto-approve';
+import type { AuditRepository } from '../audit/audit';
+import type { UnsupervisedProposalRouting } from '../settings/settings';
 import { ConflictError } from '../shared/errors';
 import { voiceProposalIdempotencyKey } from '../voice/voice-audit';
 import {
@@ -792,7 +795,13 @@ interface SegmentParams {
 }
 
 type SegmentOutcome =
-  | { kind: 'proposal'; proposal: Proposal; classification: IntentClassification }
+  | {
+      kind: 'proposal';
+      proposal: Proposal;
+      classification: IntentClassification;
+      /** Tenant-wide presence at routing time (P12-004 unsupervised routing). */
+      supervisorPresent: boolean;
+    }
   // The classifier could not route this segment — a voice_clarification
   // was emitted in its place (single path) or should be (chain path; see
   // processChain). `classification` is returned so the caller can decide.
@@ -1268,6 +1277,46 @@ export function createVoiceActionRouterWorker(
           classifierConfidence: outcome.classification.confidence,
           proposalConfidence: outcome.proposal.confidenceScore,
         });
+
+        // P12-004 — unsupervised routing. The proposal just queued with no
+        // supervisor on the wall: apply the tenant-configured routing
+        // (`queue_and_sms` default → one-tap approve SMS to the owner) and
+        // emit the `unsupervised_proposal_routed` audit event. Best-effort:
+        // a routing failure never fails the (already persisted) proposal.
+        if (
+          deps.unsupervisedRouting &&
+          !outcome.supervisorPresent &&
+          outcome.proposal.status === 'ready_for_review'
+        ) {
+          const ur = deps.unsupervisedRouting;
+          try {
+            const routing = await ur.resolveRouting?.(tenantId);
+            const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
+            await routeUnsupervisedProposal(
+              {
+                auditRepo: ur.auditRepo,
+                ...(ur.sendSms ? { sendSms: ur.sendSms } : {}),
+                ...(ur.secret ? { secret: ur.secret } : {}),
+                ...(ur.buildApproveUrl ? { buildApproveUrl: ur.buildApproveUrl } : {}),
+              },
+              {
+                tenantId,
+                proposalId: outcome.proposal.id,
+                ...(routing ? { routing } : {}),
+                // Operator voice recordings are not a live inbound call, so
+                // `escalate_to_oncall` falls back to queue_only here by design.
+                channel: 'other',
+                ...(ownerPhone ? { ownerPhone } : {}),
+                summaryText: outcome.proposal.summary,
+              },
+            );
+          } catch (err) {
+            log.warn('voice-action-router: unsupervised routing failed', {
+              proposalId: outcome.proposal.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
       }
     },
     {
