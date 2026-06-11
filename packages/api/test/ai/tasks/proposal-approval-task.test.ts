@@ -16,6 +16,7 @@ import {
   VOICE_APPROVAL_ACTOR_ID,
   type VoiceApprovalDeps,
   type PendingVoiceApproval,
+  type VoiceApprovalSessionState,
 } from '../../../src/ai/tasks/proposal-approval-task';
 import {
   createProposal,
@@ -189,22 +190,41 @@ describe('RV-071 — explicit affirmative required on the next turn', () => {
     },
   );
 
-  it.each(['hmm', 'uh let me think', 'what time is it tomorrow', ''])(
-    'anything else ("%s") takes NO action and keeps the proposal pending',
+  it.each(['hmm', 'uh let me think', 'what time is it tomorrow'])(  // non-empty non-strict
+    'non-strict non-empty ("%s") → re-ask once, then kept_for_later',
     async (utterance) => {
       const h = makeHarness();
       const { pending, proposal } = await startAndGetPending(h);
 
-      const result = await continueVoiceApproval(h.deps, { ...ref, utterance, pending });
+      // First non-strict → re-ask
+      const reask = await continueVoiceApproval(h.deps, { ...ref, utterance, pending });
+      expect(reask.outcome).toBe('confirm_reask');
+      expect(reask.pending).not.toBeNull();
+      expect(reask.speak.toLowerCase()).toContain('just to be safe');
+      expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
 
-      expect(result.outcome).toBe('kept_for_later');
-      expect(result.pending).toBeNull();
-      expect(result.speak.toLowerCase()).toContain('later');
-      expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe(
-        'ready_for_review',
-      );
+      // Second non-strict → kept_for_later
+      const final = await continueVoiceApproval(h.deps, { ...ref, utterance, pending: reask.pending! });
+      expect(final.outcome).toBe('kept_for_later');
+      expect(final.pending).toBeNull();
+      expect(final.speak.toLowerCase()).toContain('later');
+      expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
     },
   );
+
+  it('empty/silence on confirm → re-ask once, then kept_for_later', async () => {
+    const h = makeHarness();
+    const { pending, proposal } = await startAndGetPending(h);
+
+    const reask = await continueVoiceApproval(h.deps, { ...ref, utterance: '', pending });
+    expect(reask.outcome).toBe('confirm_reask');
+    expect(reask.pending).not.toBeNull();
+
+    const final = await continueVoiceApproval(h.deps, { ...ref, utterance: '', pending: reask.pending! });
+    expect(final.outcome).toBe('kept_for_later');
+    expect(final.pending).toBeNull();
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+  });
 
   it('"no" declines without rejecting — the proposal stays pending', async () => {
     const h = makeHarness();
@@ -385,7 +405,7 @@ describe('RV-071 — money/irreversible challenge', () => {
     expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('approved');
   });
 
-  it('wrong PIN → no approval, dialogue cleared', async () => {
+  it('wrong PIN → challenge_failed, dialogue kept for retry (up to 3 attempts)', async () => {
     const h = makeHarness({ challenge: '4271' });
     const proposal = await seedPending(h.proposalRepo, {
       proposalType: 'cancel_appointment', // irreversible-class
@@ -412,7 +432,9 @@ describe('RV-071 — money/irreversible challenge', () => {
       pending: confirm.pending!,
     });
     expect(failed.outcome).toBe('challenge_failed');
-    expect(failed.pending).toBeNull();
+    // Dialogue kept pending for retry (not null on first failure)
+    expect(failed.pending).not.toBeNull();
+    expect(failed.pending).toMatchObject({ stage: 'challenge', challengeFailCount: 1 });
     expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
   });
 
@@ -600,5 +622,258 @@ describe('RV-071 — spokenDigits', () => {
     // Compound number words are unsupported by design — the partial
     // extraction can never equal a full PIN, so verification fails closed.
     expect(spokenDigits('forty-two')).toBe('2');
+  });
+});
+
+// ─── Strict-confirm retargeting guard ────────────────────────────────────────
+
+describe('RV-071 — strict-confirm retargeting guard', () => {
+  async function startAndGetPending(h: Harness): Promise<{ pending: PendingVoiceApproval; proposal: Proposal }> {
+    const proposal = await seedPending(h.proposalRepo);
+    const start = await startVoiceApproval(h.deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Henderson estimate',
+    });
+    expect(start.outcome).toBe('readback');
+    return { pending: start.pending!, proposal };
+  }
+
+  it('retargeting utterance → re-ask once, then kept_for_later', async () => {
+    const h = makeHarness();
+    const { pending, proposal } = await startAndGetPending(h);
+
+    // First: retargeting utterance triggers re-ask
+    const reask = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: 'approve the acme invoice instead',
+      pending,
+    });
+    expect(reask.outcome).toBe('confirm_reask');
+    expect(reask.pending).not.toBeNull();
+    expect(reask.speak.toLowerCase()).toContain('just to be safe');
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+
+    // Second non-strict → dialogue exits
+    const final = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: 'yes and also send the invoice',
+      pending: reask.pending!,
+    });
+    expect(final.outcome).toBe('kept_for_later');
+    expect(final.pending).toBeNull();
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+  });
+
+  it('strict affirmative after re-ask still approves', async () => {
+    const h = makeHarness();
+    const { pending, proposal } = await startAndGetPending(h);
+
+    const reask = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: 'approve the acme invoice instead',
+      pending,
+    });
+    expect(reask.outcome).toBe('confirm_reask');
+
+    const approved = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: 'yes',
+      pending: reask.pending!,
+    });
+    expect(approved.outcome).toBe('approved');
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('approved');
+  });
+
+  it('"no" / explicit negation still cancels immediately (no re-ask)', async () => {
+    const h = makeHarness();
+    const { pending, proposal } = await startAndGetPending(h);
+
+    const result = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: 'no',
+      pending,
+    });
+    expect(result.outcome).toBe('kept_for_later');
+    expect(result.pending).toBeNull();
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+  });
+});
+
+// ─── Challenge attempt cap & session lockout ──────────────────────────────────
+
+describe('RV-071 — challenge attempt cap (max 3) and session lockout', () => {
+  function makeMoneyProposalHarness(opts: { challenge?: string; withOneTap?: boolean } = {}) {
+    return makeHarness({ challenge: opts.challenge ?? '4271', withOneTap: opts.withOneTap });
+  }
+
+  async function reachChallengeStage(
+    h: Harness,
+    proposalType: Parameters<typeof seedPending>[1]['proposalType'] = 'record_payment',
+  ) {
+    const proposal = await seedPending(h.proposalRepo, {
+      proposalType,
+      payload: { customerName: 'Acme Corp', amountCents: 20000 },
+      summary: 'Record $200 payment from Acme',
+    });
+    const start = await startVoiceApproval(h.deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Acme payment',
+    });
+    expect(start.outcome).toBe('readback');
+    const confirm = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: 'yes',
+      pending: start.pending!,
+    });
+    expect(confirm.outcome).toBe('challenge_prompt');
+    return { proposal, challengePending: confirm.pending! };
+  }
+
+  it('2 failures then correct code → approved (under the cap)', async () => {
+    const h = makeMoneyProposalHarness();
+    const { proposal, challengePending } = await reachChallengeStage(h);
+
+    // Failure 1
+    const fail1 = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: '0 0 0 0',
+      pending: challengePending,
+    });
+    expect(fail1.outcome).toBe('challenge_failed');
+    expect(fail1.pending).toMatchObject({ stage: 'challenge', challengeFailCount: 1 });
+    expect(fail1.sessionState).toBeUndefined();
+
+    // Failure 2
+    const fail2 = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: '1 2 3 4',
+      pending: fail1.pending!,
+    });
+    expect(fail2.outcome).toBe('challenge_failed');
+    expect(fail2.pending).toMatchObject({ stage: 'challenge', challengeFailCount: 2 });
+    expect(fail2.sessionState).toBeUndefined();
+
+    // Correct code on 3rd attempt → approved
+    const approved = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: 'four two seven one',
+      pending: fail2.pending!,
+    });
+    expect(approved.outcome).toBe('approved');
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('approved');
+  });
+
+  it('3rd failure → challenge_lockout, SMS fallback sent, session locked', async () => {
+    const h = makeMoneyProposalHarness();
+    const { proposal, challengePending } = await reachChallengeStage(h);
+
+    let pending = challengePending;
+    for (let i = 1; i <= 2; i++) {
+      const r = await continueVoiceApproval(h.deps, {
+        ...ref,
+        utterance: '0 0 0 0',
+        pending,
+      });
+      expect(r.outcome).toBe('challenge_failed');
+      pending = r.pending!;
+    }
+
+    // 3rd failure → lockout
+    const lockout = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: '0 0 0 0',
+      pending,
+    });
+    expect(lockout.outcome).toBe('challenge_lockout');
+    expect(lockout.pending).toBeNull();
+    expect(lockout.sessionState).toMatchObject({ challengeLockedOut: true });
+
+    // SMS fallback was sent
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].to).toBe('+15125550100');
+
+    // Audit event for lockout (not the challenge value)
+    const lockoutEvent = h.auditRepo
+      .getAll()
+      .find((e) => e.eventType === 'proposal.voice_challenge_lockout');
+    expect(lockoutEvent).toBeDefined();
+    expect(lockoutEvent!.metadata).toMatchObject({ attemptCount: 3 });
+    // The attempted PIN value must NOT appear in audit metadata
+    expect(JSON.stringify(lockoutEvent!.metadata)).not.toContain('0000');
+
+    // Proposal still pending
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+  });
+
+  it('subsequent money approval attempt in locked session is refused immediately', async () => {
+    const h = makeMoneyProposalHarness();
+    const { challengePending } = await reachChallengeStage(h);
+
+    // Reach lockout
+    let pending = challengePending;
+    for (let i = 1; i <= 2; i++) {
+      const r = await continueVoiceApproval(h.deps, { ...ref, utterance: '0 0 0 0', pending });
+      pending = r.pending!;
+    }
+    const lockout = await continueVoiceApproval(h.deps, { ...ref, utterance: '0 0 0 0', pending });
+    expect(lockout.outcome).toBe('challenge_lockout');
+    const lockedState: VoiceApprovalSessionState = lockout.sessionState!;
+
+    // Try a fresh money approval in the same (now locked) session
+    const proposal2 = await seedPending(h.proposalRepo, {
+      proposalType: 'record_payment',
+      payload: { customerName: 'Beta Corp', amountCents: 5000 },
+      summary: 'Record $50 payment from Beta Corp',
+    });
+    const refused = await startVoiceApproval(h.deps, {
+      ...ref,
+      sessionState: lockedState,
+      action: 'approve',
+      reference: 'the Beta payment',
+    });
+    expect(refused.outcome).toBe('challenge_lockout');
+    expect(refused.pending).toBeNull();
+    expect((await h.proposalRepo.findById(TENANT, proposal2.id))?.status).toBe('ready_for_review');
+  });
+});
+
+// ─── Stage assert (challenge stage action invariant) ─────────────────────────
+
+describe('RV-071 — stage assert: challenge stage requires action=approve', () => {
+  it('impossible state (action=reject, stage=challenge) → kept_for_later + audit warn', async () => {
+    const h = makeHarness({ challenge: '4271' });
+    const proposal = await seedPending(h.proposalRepo, {
+      proposalType: 'record_payment',
+      payload: { customerName: 'Acme Corp', amountCents: 20000 },
+      summary: 'Record $200 payment from Acme',
+    });
+
+    // Construct the structurally impossible state directly
+    const impossiblePending: PendingVoiceApproval = {
+      action: 'reject',
+      stage: 'challenge',
+      proposalId: proposal.id,
+    };
+
+    const result = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: '4271',
+      pending: impossiblePending,
+    });
+
+    expect(result.outcome).toBe('kept_for_later');
+    expect(result.pending).toBeNull();
+
+    // Audit event for the invariant violation
+    const auditEvent = h.auditRepo
+      .getAll()
+      .find((e) => e.eventType === 'proposal.voice_approval_stage_invariant_violated');
+    expect(auditEvent).toBeDefined();
+    expect(auditEvent!.metadata).toMatchObject({ stage: 'challenge', action: 'reject' });
+
+    // Proposal must NOT be rejected (the action was blocked)
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
   });
 });

@@ -2,11 +2,15 @@
  * RV-071 — owner voice approval task.
  *
  * The dialogue engine behind "approve the Henderson estimate" on a
- * VERIFIED owner line (RV-070's `ownerSession`). Channel-agnostic and
- * session-storage-agnostic: callers (the voice-turn processor and the
+ * transport-identified owner line (RV-070's `ownerSession`). Channel-agnostic
+ * and session-storage-agnostic: callers (the voice-turn processor and the
  * Gather adapter) hold the returned `PendingVoiceApproval` on the voice
  * session and feed the next utterance back in. The task never trusts an
  * utterance for identity and never acts without an explicit affirmative.
+ *
+ * Security note — PIN-in-transcript surface: spoken PINs necessarily appear
+ * in the call transcript; transcript encryption (AES-256-GCM) is the at-rest
+ * control; excluding the challenge turn from summaries is a tracked follow-up.
  *
  * Safety model (D1):
  *   1. Routing gate — only reachable when `ownerSession` is true; the
@@ -15,15 +19,18 @@
  *      one clarification, ordinals only against the just-spoken list).
  *   3. READBACK — composed from the PROPOSAL PAYLOAD (type, customer,
  *      key facts, amount), never from the owner's utterance.
- *   4. Explicit affirmative on the NEXT turn (deterministic
- *      `classifyVoiceApproval`, not an LLM) before `approveProposal`
- *      runs with channel 'voice'. Anything else → no action, the
- *      proposal stays pending, the agent offers to keep it for later.
+ *   4. Strict-affirmative confirm stage (deterministic `classifyStrictConfirm`,
+ *      not an LLM) before `approveProposal` runs with channel 'voice'.
+ *      Retargeting utterances ("approve the Acme invoice instead") → one
+ *      re-ask. Second non-strict reply → keep pending, exit dialogue.
+ *      Anything else → no action, the proposal stays pending.
  *   5. Money/irreversible classes additionally require the spoken
  *      challenge from `tenant_settings.escalation_settings
  *      .voice_approval_challenge` (interim JSONB home — see
  *      settings.ts). Unset → polite refusal + a one-tap approve SMS
  *      minted through the EXISTING `routeUnsupervisedProposal` machinery.
+ *      Max 3 failed challenge attempts per voice session; 3rd failure
+ *      locks money/irreversible approvals for the rest of the session.
  *   6. Pending-edit parity — approval is blocked while
  *      `hasUnappliedEditRequest` (same guard as SMS reply and one-tap).
  */
@@ -38,7 +45,7 @@ import { createAuditEvent, type AuditRepository } from '../../audit/audit';
 import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
 import { ValidationError } from '../../shared/errors';
-import { classifyVoiceApproval } from '../tts/readback';
+import { classifyVoiceApproval, classifyStrictConfirm } from '../tts/readback';
 import {
   PendingProposalResolver,
   extractReferenceSignals,
@@ -71,6 +78,26 @@ export interface PendingVoiceApproval {
   proposalId?: string;
   /** Ordered candidate ids exactly as read out (ordinal anchor). */
   orderedIds?: string[];
+  /**
+   * Number of failed challenge attempts in this voice session (challenge stage).
+   * Max 3 — on the 3rd failure the session is locked for money/irreversible.
+   */
+  challengeFailCount?: number;
+  /**
+   * True when the confirm re-ask has already been issued once (strict-confirm
+   * stage). Second non-strict reply → keep pending, exit dialogue.
+   */
+  confirmReaskIssued?: boolean;
+}
+
+/**
+ * Per-session flag set when the challenge lockout fires. Callers must carry
+ * this on the voice session and pass it in via `VoiceApprovalSessionRef`.
+ * Once true, money/irreversible approval dialogues are refused for the rest
+ * of the session without prompting a new challenge.
+ */
+export interface VoiceApprovalSessionState {
+  challengeLockedOut?: boolean;
 }
 
 export type VoiceApprovalOutcome =
@@ -83,6 +110,8 @@ export type VoiceApprovalOutcome =
   | 'readback'
   | 'challenge_prompt'
   | 'challenge_failed'
+  | 'challenge_lockout'
+  | 'confirm_reask'
   | 'approved'
   | 'rejected'
   | 'kept_for_later'
@@ -95,6 +124,11 @@ export interface VoiceApprovalTurnResult {
   pending: PendingVoiceApproval | null;
   outcome: VoiceApprovalOutcome;
   proposalId?: string;
+  /**
+   * Session-level state mutations from this turn. Callers must merge this
+   * into their VoiceApprovalSessionState. Absent when no session state changes.
+   */
+  sessionState?: Partial<VoiceApprovalSessionState>;
 }
 
 export interface OneTapFallbackDeps {
@@ -132,6 +166,8 @@ export interface VoiceApprovalSessionRef {
   sessionId: string;
   /** RV-070 — MUST be true; re-checked here as defense in depth. */
   ownerSession: boolean;
+  /** Session-level state (challenge lockout etc.) carried from previous turns. */
+  sessionState?: VoiceApprovalSessionState;
 }
 
 // ─── Readback (payload-derived, never utterance-derived) ────────────────────
@@ -400,6 +436,23 @@ async function prepareResolvedTarget(
     };
   }
 
+  // Challenge lockout — 3 failed attempts this session; refuse without prompting.
+  if (action === 'approve' && requiresChallenge(proposal) && ref.sessionState?.challengeLockedOut) {
+    const smsSent = await sendOneTapFallback(deps, ref, proposal);
+    await audit(deps, ref, 'proposal.voice_approve_refused_challenge_lockout', proposal.id, {
+      proposalType: proposal.proposalType,
+      oneTapSmsSent: smsSent,
+    });
+    return {
+      speak: smsSent
+        ? "For security, I can’t take that approval by voice right now — I’ve sent you a text link instead."
+        : "For security, I can’t take that approval by voice right now. Use the app or your review queue.",
+      pending: null,
+      outcome: 'challenge_lockout',
+      proposalId: proposal.id,
+    };
+  }
+
   // Money/irreversible approvals need the spoken challenge; without one
   // configured they are politely refused and the one-tap SMS goes out.
   if (action === 'approve' && requiresChallenge(proposal)) {
@@ -546,11 +599,6 @@ export interface StartVoiceApprovalInput extends VoiceApprovalSessionRef {
    * signal extractor strips intent verbs/fillers).
    */
   reference: string;
-  /**
-   * Ordered ids from session context (e.g. a digest the agent just read)
-   * so "approve the second one" works as an opener too.
-   */
-  orderedIds?: string[];
 }
 
 export async function startVoiceApproval(
@@ -573,7 +621,6 @@ export async function startVoiceApproval(
   const { result, pending } = await resolver.resolve({
     tenantId: input.tenantId,
     reference: input.reference,
-    ...(input.orderedIds ? { orderedIds: input.orderedIds } : {}),
   });
 
   switch (result.kind) {
@@ -658,16 +705,24 @@ export interface ContinueVoiceApprovalInput extends VoiceApprovalSessionRef {
 
 /**
  * The reject readback asks "— reject it?", so the natural affirmative is
- * "yes, reject it" — but `classifyVoiceApproval` counts "reject" as a
+ * "yes, reject it" — but `classifyStrictConfirm` counts "reject" as a
  * cancel word. Strip the echoed verb for the reject flow, and accept the
  * bare echo ("reject"/"reject it") as an affirmative.
+ *
+ * Returns: 'approve' | 'reject' | 'reask' | 'unknown' (strict semantics).
  */
-function confirmDecision(action: VoiceApprovalAction, utterance: string): ReturnType<typeof classifyVoiceApproval> {
+function strictConfirmDecision(
+  action: VoiceApprovalAction,
+  utterance: string,
+): ReturnType<typeof classifyStrictConfirm> | 'repeat' {
+  // Repeat is a special case that bypasses strict-confirm — re-speak
+  // the readback without consuming the re-ask slot.
+  if (classifyVoiceApproval(utterance) === 'repeat') return 'repeat';
   if (action === 'reject') {
     if (/^\s*(please\s+)?reject( it| that( one)?)?[.! ]*$/i.test(utterance)) return 'approve';
-    return classifyVoiceApproval(utterance.replace(/\breject(ing|ed)?\b/gi, ' '));
+    return classifyStrictConfirm(utterance.replace(/\breject(ing|ed)?\b/gi, ' '));
   }
-  return classifyVoiceApproval(utterance);
+  return classifyStrictConfirm(utterance);
 }
 
 export async function continueVoiceApproval(
@@ -727,9 +782,14 @@ export async function continueVoiceApproval(
     };
   }
 
-  // 'confirm' — explicit affirmative or nothing happens.
+  // 'confirm' — strict affirmative required to prevent retargeting attacks.
+  // Policy: approval ONLY when utterance is a short affirmative (≤3 words,
+  // approve-word set only, no other content). Anything else → one re-ask;
+  // second non-strict reply → keep pending, exit. Negation always cancels.
   if (pending.stage === 'confirm') {
-    const decision = confirmDecision(pending.action, input.utterance);
+    const decision = strictConfirmDecision(pending.action, input.utterance);
+
+    // Repeat — re-speak the readback without consuming the re-ask slot.
     if (decision === 'repeat') {
       return {
         speak: composeReadback(proposal, pending.action),
@@ -738,8 +798,9 @@ export async function continueVoiceApproval(
         proposalId: proposal.id,
       };
     }
-    if (decision !== 'approve') {
-      // Silence, "hmm", a topic change, or an explicit no → NO ACTION.
+
+    // Negation dominates — keep pending, exit without re-ask.
+    if (decision === 'reject') {
       await audit(deps, input, 'proposal.voice_approval_declined', proposal.id, {
         action: pending.action,
         decision,
@@ -752,6 +813,39 @@ export async function continueVoiceApproval(
       };
     }
 
+    // Non-strict, non-negating utterance → one re-ask opportunity.
+    if (decision === 'reask' || decision === 'unknown') {
+      if (!pending.confirmReaskIssued) {
+        // Issue the re-ask exactly once.
+        const shortForm = proposal.summary.length > 60
+          ? `${proposal.summary.slice(0, 57)}…`
+          : proposal.summary;
+        const reaskAction = pending.action === 'approve' ? 'approve' : 'reject';
+        await audit(deps, input, 'proposal.voice_approval_confirm_reask', proposal.id, {
+          action: pending.action,
+        });
+        return {
+          speak: `Just to be safe — say yes to ${reaskAction} "${shortForm}", or no to leave it pending.`,
+          pending: { ...pending, confirmReaskIssued: true },
+          outcome: 'confirm_reask',
+          proposalId: proposal.id,
+        };
+      }
+      // Second non-strict reply → keep pending, exit dialogue.
+      await audit(deps, input, 'proposal.voice_approval_declined', proposal.id, {
+        action: pending.action,
+        decision,
+        reaskExhausted: true,
+      });
+      return {
+        speak: KEEP_FOR_LATER_LINE,
+        pending: null,
+        outcome: 'kept_for_later',
+        proposalId: proposal.id,
+      };
+    }
+
+    // decision === 'approve' — strict affirmative confirmed.
     if (pending.action === 'approve' && requiresChallenge(proposal)) {
       const challenge = await readChallenge(deps, input.tenantId);
       if (!challenge) {
@@ -788,6 +882,18 @@ export async function continueVoiceApproval(
   // 'challenge' — verify the spoken code against the configured value.
   // Digit challenges ("4271") compare on extracted digits so "four two
   // seven one" passes; non-digit passphrases compare case-insensitively.
+
+  // Stage assert: action MUST be 'approve' here — 'reject' never reaches
+  // the challenge stage (the confirm handler routes reject directly to
+  // executeReject). Structurally impossible today; make it impossible tomorrow.
+  if (pending.action !== 'approve') {
+    await audit(deps, input, 'proposal.voice_approval_stage_invariant_violated', proposal.id, {
+      stage: pending.stage,
+      action: pending.action,
+    });
+    return { speak: KEEP_FOR_LATER_LINE, pending: null, outcome: 'kept_for_later', proposalId: proposal.id };
+  }
+
   const challenge = await readChallenge(deps, input.tenantId);
   const expectedDigits = challenge ? spokenDigits(challenge) : '';
   const matched = challenge
@@ -796,10 +902,31 @@ export async function continueVoiceApproval(
       : input.utterance.trim().toLowerCase() === challenge.toLowerCase()
     : false;
   if (!matched) {
-    await audit(deps, input, 'proposal.voice_approval_challenge_failed', proposal.id);
+    const failCount = (pending.challengeFailCount ?? 0) + 1;
+    const maxAttempts = 3;
+    if (failCount >= maxAttempts) {
+      // 3rd failure — lock the session and send the SMS fallback.
+      const smsSent = await sendOneTapFallback(deps, input, proposal);
+      await audit(deps, input, 'proposal.voice_challenge_lockout', proposal.id, {
+        attemptCount: failCount,
+        oneTapSmsSent: smsSent,
+      });
+      return {
+        speak: smsSent
+          ? "Too many incorrect codes — I can’t take that approval by voice this call. I’ve sent you a text link."
+          : "Too many incorrect codes — I can’t take that approval by voice this call. Use the app or your review queue.",
+        pending: null,
+        outcome: 'challenge_lockout',
+        proposalId: proposal.id,
+        sessionState: { challengeLockedOut: true },
+      };
+    }
+    await audit(deps, input, 'proposal.voice_approval_challenge_failed', proposal.id, {
+      attemptCount: failCount,
+    });
     return {
-      speak: 'That code didn’t match, so I’ll leave it in your queue — you can approve it in the app.',
-      pending: null,
+      speak: 'That code didn’t match — try again.',
+      pending: { ...pending, challengeFailCount: failCount },
       outcome: 'challenge_failed',
       proposalId: proposal.id,
     };

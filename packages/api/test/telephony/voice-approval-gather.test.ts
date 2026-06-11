@@ -154,7 +154,7 @@ describe('RV-071 — owner approval over Gather (end to end)', () => {
     expect(session.pendingVoiceApproval).toBeUndefined();
   });
 
-  it('a non-affirmative second turn keeps the proposal pending', async () => {
+  it('a non-strict second turn triggers re-ask; second non-strict clears dialogue', async () => {
     const gateway = gatewayReturning([APPROVE_CLASSIFICATION]);
     const h = makeHarness({ gateway });
     const proposal = await seedPending(h.proposalRepo);
@@ -167,15 +167,27 @@ describe('RV-071 — owner approval over Gather (end to end)', () => {
       confidence: 0.9,
       tenantId: TENANT,
     });
-    const twiml = await h.adapter.handleGather({
+    // First non-strict → re-ask
+    const twiml1 = await h.adapter.handleGather({
       sessionId,
       callSid: 'CA-appr-2',
       speechResult: 'hmm actually what does my Thursday look like',
       confidence: 0.9,
       tenantId: TENANT,
     });
+    expect(twiml1.toLowerCase()).toContain('just to be safe');
+    // Dialogue still active
+    expect(h.store.get(sessionId)!.pendingVoiceApproval).toBeDefined();
 
-    expect(twiml.toLowerCase()).toContain('later');
+    // Second non-strict → kept_for_later, dialogue cleared
+    const twiml2 = await h.adapter.handleGather({
+      sessionId,
+      callSid: 'CA-appr-2',
+      speechResult: 'hmm actually what does my Thursday look like',
+      confidence: 0.9,
+      tenantId: TENANT,
+    });
+    expect(twiml2.toLowerCase()).toContain('later');
     expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe(
       'ready_for_review',
     );

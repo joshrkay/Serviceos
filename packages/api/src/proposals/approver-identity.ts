@@ -9,8 +9,14 @@
  * `proposals/sms/reply-handler.ts` (which now imports it) so the two
  * channels can never drift.
  *
- * Identity is ALWAYS the verified transport-level phone (inbound SMS
- * `From`, or telephony caller-ID), never message/utterance content.
+ * Caller-ID / SMS From are spoofable; this is deliberately the same trust
+ * level as the existing SMS approval channel (plan D1 — one trust model,
+ * two transports). Money/irreversible voice approvals therefore additionally
+ * require the spoken challenge.
+ *
+ * Identity is ALWAYS the transport-level phone (inbound SMS `From`, or
+ * telephony caller-ID), never message/utterance content. This provides
+ * transport-level identification, not cryptographic identity proof.
  */
 import type { SettingsRepository } from '../settings/settings';
 import type { UserRepository } from '../users/user';
@@ -53,6 +59,8 @@ export function isApprover(phones: string[], fromE164: string): boolean {
  * Convenience composition: is this inbound caller/sender phone an approver
  * for the tenant? Used by the telephony adapters to stamp
  * `ownerSession: true` on the FSM session context (RV-070).
+ * Note: matching is transport-level (caller-ID / SMS From) — not
+ * identity-proof.
  */
 export async function isApproverPhone(
   deps: ApproverIdentityDeps,
