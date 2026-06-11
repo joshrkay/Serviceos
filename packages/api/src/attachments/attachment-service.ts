@@ -217,10 +217,22 @@ export class AttachmentService {
     const pairGroupId = uuidv4();
     const otherRole: AttachmentPairRole = role === 'before' ? 'after' : 'before';
 
-    const updated = await this.repo.setPair(tenantId, id, pairGroupId, role);
-    if (!updated) throw new NotFoundError('Attachment', id);
-    const updatedOther = await this.repo.setPair(tenantId, otherId, pairGroupId, otherRole);
-    if (!updatedOther) throw new NotFoundError('Attachment', otherId);
+    let updated: Attachment;
+    let updatedOther: Attachment;
+    try {
+      ({ attachment: updated, other: updatedOther } = await this.repo.pair(
+        tenantId,
+        id,
+        role,
+        otherId,
+        otherRole,
+        pairGroupId
+      ));
+    } catch (err) {
+      // The atomic pair() throws when either row is not found in this tenant.
+      // Re-raise as NotFoundError so the service contract is unchanged.
+      throw new NotFoundError('Attachment', (err as Error).message.includes(id) ? id : otherId);
+    }
 
     await this.auditRepo.create(
       createAuditEvent({

@@ -4013,7 +4013,7 @@ export const MIGRATIONS = {
       pair_role TEXT CHECK (pair_role IN ('before','after')),
       portal_visible BOOLEAN NOT NULL DEFAULT false,
       annotated_file_id UUID REFERENCES files(id),
-      uploaded_by UUID,
+      uploaded_by TEXT,
       source TEXT NOT NULL DEFAULT 'app' CHECK (source IN ('app','voice','portal','sms')),
       sort_order INT NOT NULL DEFAULT 0,
       archived_at TIMESTAMPTZ,

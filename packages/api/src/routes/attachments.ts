@@ -43,29 +43,15 @@ const presignSchema = z.object({
   sizeBytes: z.number().int().positive(),
 });
 
-const attachSchema = z
-  .object({
-    fileId: z.string().uuid().optional(),
-    // Alternative to fileId: the client already PUT the object (e.g. via an
-    // out-of-band presign) and asks us to create the files row here.
-    s3Key: z.string().min(1).optional(),
-    filename: z.string().min(1).optional(),
-    contentType: z.string().min(1).optional(),
-    sizeBytes: z.number().int().positive().optional(),
-    entityType: z.enum(ATTACHMENT_ENTITY_TYPES),
-    entityId: z.string().uuid(),
-    kind: z.enum(ATTACHMENT_KINDS),
-    caption: z.string().optional(),
-    category: z.enum(ATTACHMENT_CATEGORIES).optional(),
-    source: z.enum(ATTACHMENT_SOURCES).optional(),
-  })
-  .refine((body) => Boolean(body.fileId) !== Boolean(body.s3Key), {
-    message: 'Provide exactly one of fileId or s3Key',
-  })
-  .refine(
-    (body) => !body.s3Key || (body.filename && body.contentType && body.sizeBytes),
-    { message: 'filename, contentType and sizeBytes are required with s3Key' }
-  );
+const attachSchema = z.object({
+  fileId: z.string().uuid(),
+  entityType: z.enum(ATTACHMENT_ENTITY_TYPES),
+  entityId: z.string().uuid(),
+  kind: z.enum(ATTACHMENT_KINDS),
+  caption: z.string().optional(),
+  category: z.enum(ATTACHMENT_CATEGORIES).optional(),
+  source: z.enum(ATTACHMENT_SOURCES).optional(),
+});
 
 const listQuerySchema = z.object({
   entityType: z.enum(ATTACHMENT_ENTITY_TYPES),
@@ -192,43 +178,8 @@ export function createAttachmentsRouter(deps: AttachmentsRouterDeps): Router {
         const body = validate(attachSchema, req.body ?? {});
         const tenantId = req.auth!.tenantId;
 
-        let fileId = body.fileId;
-        if (!fileId) {
-          // s3Key path: object already uploaded; create the files row here.
-          const uploadRequest = {
-            tenantId,
-            uploadedBy: req.auth!.userId,
-            filename: body.filename!,
-            contentType: body.contentType!,
-            sizeBytes: body.sizeBytes!,
-            entityType: body.entityType,
-            entityId: body.entityId,
-          };
-          const errors = validateUpload(uploadRequest);
-          if (errors.length > 0) {
-            res.status(400).json({ error: 'VALIDATION_ERROR', message: errors.join(', ') });
-            return;
-          }
-          const now = new Date();
-          const created = await fileRepo.create({
-            id: uuidv4(),
-            tenantId,
-            filename: body.filename!,
-            contentType: body.contentType!,
-            sizeBytes: body.sizeBytes!,
-            storageBucket: bucket,
-            storageKey: body.s3Key!,
-            entityType: body.entityType,
-            entityId: body.entityId,
-            uploadedBy: req.auth!.userId,
-            createdAt: now,
-            updatedAt: now,
-          });
-          fileId = created.id;
-        }
-
         const attachment = await service.attach(tenantId, actorOf(req), {
-          fileId,
+          fileId: body.fileId,
           entityType: body.entityType,
           entityId: body.entityId,
           kind: body.kind,

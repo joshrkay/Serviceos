@@ -183,7 +183,12 @@ describe('attachments router (RV-005)', () => {
       expect(events).toContain('attachment.uploaded');
     });
 
-    it('creates the files row inline when s3Key + metadata are provided instead of fileId', async () => {
+    it('rejects requests containing s3Key (cross-tenant exfiltration vector — fileId required)', async () => {
+      // The attach endpoint accepts fileId only; s3Key is unknown and must be
+      // rejected. Zod strict mode is not used here (the schema uses .object()
+      // without .strict()), so unknown keys are stripped silently. The schema
+      // requires fileId to be a valid UUID — a request without fileId (only
+      // s3Key) therefore fails required-field validation.
       const res = await request(app)
         .post('/api/attachments')
         .send({
@@ -194,32 +199,7 @@ describe('attachments router (RV-005)', () => {
           entityType: 'job',
           entityId: JOB_ID,
           kind: 'document',
-          source: 'voice',
         });
-
-      expect(res.status).toBe(201);
-      expect(res.body.kind).toBe('document');
-      expect(res.body.source).toBe('voice');
-      const file = await fileRepo.findById(TENANT_A, res.body.fileId);
-      expect(file).not.toBeNull();
-      expect(file!.storageKey).toBe(
-        `${TENANT_A}/attachments/job/${JOB_ID}/external-upload.pdf`
-      );
-    });
-
-    it('rejects when both fileId and s3Key are provided', async () => {
-      const pre = await presign();
-      const res = await attach(pre.body.fileId, { s3Key: 'some/key' });
-      expect(res.status).toBe(400);
-    });
-
-    it('rejects s3Key without file metadata', async () => {
-      const res = await request(app).post('/api/attachments').send({
-        s3Key: 'some/key',
-        entityType: 'job',
-        entityId: JOB_ID,
-        kind: 'document',
-      });
       expect(res.status).toBe(400);
     });
 

@@ -90,12 +90,18 @@ export interface AttachmentRepository {
   /** Soft delete: sets archived_at. Returns null when not found in tenant. */
   archive(tenantId: string, id: string): Promise<Attachment | null>;
   setPortalVisibility(tenantId: string, id: string, visible: boolean): Promise<Attachment | null>;
-  setPair(
+  /**
+   * Atomically update both attachments in a before/after pair within a single
+   * transaction. Throws (rolls back) if either row is not found in this tenant.
+   */
+  pair(
     tenantId: string,
     id: string,
-    pairGroupId: string,
-    pairRole: AttachmentPairRole
-  ): Promise<Attachment | null>;
+    role: AttachmentPairRole,
+    otherId: string,
+    otherRole: AttachmentPairRole,
+    pairGroupId: string
+  ): Promise<{ attachment: Attachment; other: Attachment }>;
 }
 
 export function buildAttachment(tenantId: string, input: CreateAttachmentInput): Attachment {
@@ -178,16 +184,36 @@ export class InMemoryAttachmentRepository implements AttachmentRepository {
     return { ...updated };
   }
 
-  async setPair(
+  async pair(
     tenantId: string,
     id: string,
-    pairGroupId: string,
-    pairRole: AttachmentPairRole
-  ): Promise<Attachment | null> {
+    role: AttachmentPairRole,
+    otherId: string,
+    otherRole: AttachmentPairRole,
+    pairGroupId: string
+  ): Promise<{ attachment: Attachment; other: Attachment }> {
     const attachment = this.attachments.get(id);
-    if (!attachment || attachment.tenantId !== tenantId) return null;
-    const updated: Attachment = { ...attachment, pairGroupId, pairRole, updatedAt: new Date() };
-    this.attachments.set(id, updated);
-    return { ...updated };
+    if (!attachment || attachment.tenantId !== tenantId) {
+      throw new Error(`Attachment not found: ${id}`);
+    }
+    const other = this.attachments.get(otherId);
+    if (!other || other.tenantId !== tenantId) {
+      throw new Error(`Attachment not found: ${otherId}`);
+    }
+    const updatedAttachment: Attachment = {
+      ...attachment,
+      pairGroupId,
+      pairRole: role,
+      updatedAt: new Date(),
+    };
+    const updatedOther: Attachment = {
+      ...other,
+      pairGroupId,
+      pairRole: otherRole,
+      updatedAt: new Date(),
+    };
+    this.attachments.set(id, updatedAttachment);
+    this.attachments.set(otherId, updatedOther);
+    return { attachment: { ...updatedAttachment }, other: { ...updatedOther } };
   }
 }

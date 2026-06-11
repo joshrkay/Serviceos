@@ -127,7 +127,22 @@ describe('PgAttachmentRepository.create', () => {
     expect(insert.params[10]).toBe(0);
   });
 
-  it('stores NULL uploaded_by when the actor id is not UUID-shaped (Clerk ids)', async () => {
+  it('stores the Clerk id directly as uploaded_by (TEXT column accepts any string)', async () => {
+    const clerkId = 'user_2abcDEF123';
+    const { pool, calls } = makeAttachmentPool([attachmentRow({ uploaded_by: clerkId })]);
+    const repo = new PgAttachmentRepository(pool);
+    await repo.create(TENANT, {
+      fileId: FILE_ID,
+      entityType: 'job',
+      entityId: ENTITY_ID,
+      kind: 'photo',
+      uploadedBy: clerkId,
+    });
+    const insert = calls.find((c) => c.sql.includes('INSERT INTO attachments'))!;
+    expect(insert.params[8]).toBe(clerkId);
+  });
+
+  it('stores NULL uploaded_by when no uploadedBy is provided', async () => {
     const { pool, calls } = makeAttachmentPool([attachmentRow({ uploaded_by: null })]);
     const repo = new PgAttachmentRepository(pool);
     await repo.create(TENANT, {
@@ -135,7 +150,6 @@ describe('PgAttachmentRepository.create', () => {
       entityType: 'job',
       entityId: ENTITY_ID,
       kind: 'photo',
-      uploadedBy: 'user_2abcDEF123',
     });
     const insert = calls.find((c) => c.sql.includes('INSERT INTO attachments'))!;
     expect(insert.params[8]).toBeNull();
@@ -228,27 +242,50 @@ describe('PgAttachmentRepository.setPortalVisibility', () => {
   });
 });
 
-describe('PgAttachmentRepository.setPair', () => {
-  it('UPDATEs pair_group_id + pair_role scoped by tenant_id', async () => {
-    const pairGroupId = '77777777-7777-7777-7777-777777777777';
-    const { pool, calls } = makeAttachmentPool([
-      attachmentRow({ pair_group_id: pairGroupId, pair_role: 'before' }),
-    ]);
-    const repo = new PgAttachmentRepository(pool);
-    const updated = await repo.setPair(TENANT, ATTACHMENT_ID, pairGroupId, 'before');
+describe('PgAttachmentRepository.pair', () => {
+  const OTHER_ID = '88888888-8888-8888-8888-888888888888';
+  const PAIR_GROUP_ID = '77777777-7777-7777-7777-777777777777';
 
-    const update = calls.find((c) => c.sql.includes('UPDATE attachments'))!;
-    expect(update.sql).toContain('pair_group_id = $3');
-    expect(update.sql).toContain('pair_role = $4');
-    expect(update.sql).toContain('tenant_id = $1');
-    expect(update.params).toEqual([TENANT, ATTACHMENT_ID, pairGroupId, 'before']);
-    expect(updated!.pairGroupId).toBe(pairGroupId);
-    expect(updated!.pairRole).toBe('before');
+  it('runs both UPDATEs inside a transaction and returns both mapped rows', async () => {
+    let callIndex = 0;
+    const rows = [
+      attachmentRow({ pair_group_id: PAIR_GROUP_ID, pair_role: 'before' }),
+      attachmentRow({ id: OTHER_ID, pair_group_id: PAIR_GROUP_ID, pair_role: 'after' }),
+    ];
+    const { pool, calls } = makeMockPool((sql, _params) => {
+      if (sql.includes('app.current_tenant_id') || sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK' || sql.includes('RESET')) {
+        return { rows: [] };
+      }
+      // Return the appropriate row for each UPDATE call
+      const row = rows[callIndex++] ?? rows[rows.length - 1];
+      return { rows: [row], rowCount: 1 };
+    });
+    const repo = new PgAttachmentRepository(pool);
+    const result = await repo.pair(TENANT, ATTACHMENT_ID, 'before', OTHER_ID, 'after', PAIR_GROUP_ID);
+
+    const updates = calls.filter((c) => c.sql.includes('UPDATE attachments'));
+    expect(updates).toHaveLength(2);
+    expect(updates[0].sql).toContain('pair_group_id = $3');
+    expect(updates[0].sql).toContain('pair_role = $4');
+    expect(updates[0].sql).toContain('tenant_id = $1');
+    expect(updates[0].params).toEqual([TENANT, ATTACHMENT_ID, PAIR_GROUP_ID, 'before']);
+    expect(updates[1].params).toEqual([TENANT, OTHER_ID, PAIR_GROUP_ID, 'after']);
+    expect(result.attachment.pairGroupId).toBe(PAIR_GROUP_ID);
+    expect(result.attachment.pairRole).toBe('before');
+    expect(result.other.pairGroupId).toBe(PAIR_GROUP_ID);
+    expect(result.other.pairRole).toBe('after');
   });
 
-  it('returns null when the row is not in this tenant', async () => {
-    const { pool } = makeAttachmentPool([]);
+  it('throws and rolls back when the first row is not found', async () => {
+    const { pool } = makeMockPool((sql) => {
+      if (sql.includes('app.current_tenant_id') || sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK' || sql.includes('RESET')) {
+        return { rows: [] };
+      }
+      return { rows: [], rowCount: 0 };
+    });
     const repo = new PgAttachmentRepository(pool);
-    expect(await repo.setPair(TENANT, ATTACHMENT_ID, 'x', 'after')).toBeNull();
+    await expect(
+      repo.pair(TENANT, ATTACHMENT_ID, 'before', OTHER_ID, 'after', PAIR_GROUP_ID)
+    ).rejects.toThrow();
   });
 });

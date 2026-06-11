@@ -552,13 +552,15 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
       expect(found).toBeNull();
     });
 
-    it('archive/setPortalVisibility/setPair scoped to A cannot mutate B row', async () => {
+    it('archive/setPortalVisibility/pair scoped to A cannot mutate B row', async () => {
       const repo = new PgAttachmentRepository(pool);
       expect(await repo.archive(tenantA.tenantId, attachmentB)).toBeNull();
       expect(await repo.setPortalVisibility(tenantA.tenantId, attachmentB, true)).toBeNull();
-      expect(
-        await repo.setPair(tenantA.tenantId, attachmentB, crypto.randomUUID(), 'after')
-      ).toBeNull();
+      // pair() throws (rolls back) when the row is not found in this tenant —
+      // confirm the call rejects and B's row is untouched.
+      await expect(
+        repo.pair(tenantA.tenantId, attachmentB, 'after', crypto.randomUUID(), 'before', crypto.randomUUID())
+      ).rejects.toThrow();
 
       // B's row is untouched.
       const intact = await repo.findById(tenantB.tenantId, attachmentB);
