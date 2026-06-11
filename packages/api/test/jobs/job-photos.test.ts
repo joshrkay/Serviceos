@@ -7,16 +7,20 @@
  */
 import express, { Request, Response, NextFunction, type Express } from 'express';
 import request from 'supertest';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
+import { InMemoryAttachmentRepository } from '../../src/attachments/attachment';
 import {
   InMemoryFileRepository,
   ObjectMetadata,
   StorageProvider,
 } from '../../src/files/file-service';
 import { InMemoryJobPhotoRepository } from '../../src/jobs/job-photo';
-import { JobPhotoService } from '../../src/jobs/job-photo-service';
+import {
+  JobPhotoService,
+  mapJobPhotoCategoryToAttachmentCategory,
+} from '../../src/jobs/job-photo-service';
 import { createJobPhotosRouter } from '../../src/routes/job-photos';
 
 const TENANT_A = 'tenant-photos-a';
@@ -178,5 +182,119 @@ describe('job-photo router (P12-001)', () => {
     // Original tenant still sees the photo.
     const ownList = await request(app).get(`/api/jobs/${jobId}/photos`);
     expect(ownList.body).toHaveLength(1);
+  });
+});
+
+describe('job-photo dual-write shadow into attachments (RV-005)', () => {
+  const TENANT = 'tenant-photos-shadow';
+  const JOB_ID = 'job-shadow-1';
+  const USER_ID = 'user-shadow-1';
+
+  async function seedFile(fileRepo: InMemoryFileRepository) {
+    return fileRepo.create({
+      id: 'file-shadow-1',
+      tenantId: TENANT,
+      filename: 'before.jpg',
+      contentType: 'image/jpeg',
+      sizeBytes: 1024,
+      storageBucket: 'b',
+      storageKey: 'k',
+      uploadedBy: USER_ID,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  }
+
+  it('also creates an attachments row when the optional repo is injected', async () => {
+    const fileRepo = new InMemoryFileRepository();
+    const photoRepo = new InMemoryJobPhotoRepository();
+    const attachmentRepo = new InMemoryAttachmentRepository();
+    const service = new JobPhotoService(
+      photoRepo,
+      fileRepo,
+      new FakeStorageProvider(),
+      attachmentRepo
+    );
+    const file = await seedFile(fileRepo);
+
+    const photo = await service.attachPhotoToJob(
+      TENANT,
+      JOB_ID,
+      file.id,
+      'before',
+      'pipe before fix',
+      undefined,
+      USER_ID
+    );
+    expect(photo.id).toBeTruthy();
+
+    const shadows = await attachmentRepo.listByEntity(TENANT, 'job', JOB_ID);
+    expect(shadows).toHaveLength(1);
+    expect(shadows[0].fileId).toBe(file.id);
+    expect(shadows[0].kind).toBe('photo');
+    expect(shadows[0].source).toBe('app');
+    expect(shadows[0].category).toBe('before');
+    expect(shadows[0].caption).toBe('pipe before fix');
+    expect(shadows[0].uploadedBy).toBe(USER_ID);
+  });
+
+  it('behaves exactly as before when the optional repo is absent', async () => {
+    const fileRepo = new InMemoryFileRepository();
+    const photoRepo = new InMemoryJobPhotoRepository();
+    const service = new JobPhotoService(photoRepo, fileRepo, new FakeStorageProvider());
+    const file = await seedFile(fileRepo);
+
+    const photo = await service.attachPhotoToJob(
+      TENANT,
+      JOB_ID,
+      file.id,
+      'after',
+      undefined,
+      undefined,
+      USER_ID
+    );
+    expect(photo.category).toBe('after');
+    expect(await photoRepo.findById(TENANT, photo.id)).not.toBeNull();
+  });
+
+  it('does not break the job-photo flow when the shadow write fails', async () => {
+    const fileRepo = new InMemoryFileRepository();
+    const photoRepo = new InMemoryJobPhotoRepository();
+    const failingRepo = new InMemoryAttachmentRepository();
+    failingRepo.create = async () => {
+      throw new Error('attachments table is on fire');
+    };
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const service = new JobPhotoService(
+        photoRepo,
+        fileRepo,
+        new FakeStorageProvider(),
+        failingRepo
+      );
+      const file = await seedFile(fileRepo);
+
+      const photo = await service.attachPhotoToJob(
+        TENANT,
+        JOB_ID,
+        file.id,
+        'completion',
+        undefined,
+        undefined,
+        USER_ID
+      );
+      expect(await photoRepo.findById(TENANT, photo.id)).not.toBeNull();
+      expect(errorSpy).toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('maps every job-photo category onto the attachments enum', () => {
+    expect(mapJobPhotoCategoryToAttachmentCategory('before')).toBe('before');
+    expect(mapJobPhotoCategoryToAttachmentCategory('after')).toBe('after');
+    expect(mapJobPhotoCategoryToAttachmentCategory('problem')).toBe('problem');
+    expect(mapJobPhotoCategoryToAttachmentCategory('completion')).toBe('completion');
+    expect(mapJobPhotoCategoryToAttachmentCategory('other')).toBe('other');
   });
 });
