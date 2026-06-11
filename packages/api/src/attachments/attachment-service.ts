@@ -25,6 +25,14 @@ import {
 import { FileRepository, StorageProvider } from '../files/file-service';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { AppError, NotFoundError, ValidationError } from '../shared/errors';
+import { Queue } from '../queues/queue';
+import {
+  IMAGE_POST_PROCESS_TYPE,
+  imagePostProcessIdempotencyKey,
+} from '../workers/image-post-process-worker';
+
+/** RV-006: window for the attach-time content-hash dedupe. */
+const DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export interface AttachmentActor {
   userId: string;
@@ -40,6 +48,11 @@ export interface AttachmentWithUrl extends Attachment {
   filename: string;
   contentType: string;
   sizeBytes: number;
+  /**
+   * RV-006: presigned URL for the 480px thumbnail, present once the image
+   * post-process pipeline has stored one (same TTL as downloadUrl).
+   */
+  thumbnailUrl?: string;
 }
 
 export interface AttachmentPair {
@@ -54,7 +67,13 @@ export class AttachmentService {
     private readonly fileRepo: FileRepository,
     private readonly storage: StorageProvider,
     private readonly auditRepo: AuditRepository,
-    private readonly entityLookups: EntityLookupMap
+    private readonly entityLookups: EntityLookupMap,
+    // RV-006: optional queue for the image post-process pipeline — same
+    // optional-dependency pattern as the dual-write attachmentRepo in
+    // JobPhotoService. When absent (existing call sites / tests), attach
+    // behaves exactly as before; when present, every successful attach
+    // enqueues a failure-isolated image_post_process message.
+    private readonly queue?: Pick<Queue, 'send'>
   ) {}
 
   async attach(
@@ -89,6 +108,24 @@ export class AttachmentService {
 
     await this.assertEntityExists(tenantId, input.entityType, input.entityId);
 
+    // RV-006 dedupe groundwork: if a file with the same (tenant,
+    // content_hash) was attached to the SAME entity within 24h, return that
+    // attachment instead of creating a duplicate — the offline-outbox retry
+    // case where the client re-uploads + re-attaches the same photo.
+    // LIMITATION: content_hash is only stamped by the async post-process
+    // pipeline, so this can only dedupe re-attaches of already-processed
+    // files; a brand-new upload (hash still NULL) always creates a fresh
+    // attachment even if its bytes duplicate an existing object.
+    if (file.contentHash) {
+      const duplicate = await this.findRecentDuplicateAttachment(
+        tenantId,
+        file.contentHash,
+        input.entityType,
+        input.entityId
+      );
+      if (duplicate) return duplicate;
+    }
+
     const attachment = await this.repo.create(tenantId, {
       ...input,
       uploadedBy: input.uploadedBy ?? actor.userId,
@@ -112,7 +149,46 @@ export class AttachmentService {
       })
     );
 
+    // RV-006: kick the image post-process pipeline. Failure-isolated — an
+    // attach must never fail because the queue is down; the worker's
+    // content_hash idempotency marker also makes duplicate enqueues safe.
+    if (this.queue) {
+      try {
+        await this.queue.send(
+          IMAGE_POST_PROCESS_TYPE,
+          { tenantId, fileId: attachment.fileId },
+          imagePostProcessIdempotencyKey(attachment.fileId)
+        );
+      } catch (err) {
+        console.error(
+          `RV-006 image post-process enqueue failed for file ${attachment.fileId}:`,
+          err
+        );
+      }
+    }
+
     return attachment;
+  }
+
+  /**
+   * RV-006: most-recent attachment (within 24h) on the same entity whose
+   * file shares this content hash, or null.
+   */
+  private async findRecentDuplicateAttachment(
+    tenantId: string,
+    contentHash: string,
+    entityType: AttachmentEntityType,
+    entityId: string
+  ): Promise<Attachment | null> {
+    const cutoff = Date.now() - DEDUPE_WINDOW_MS;
+    const matchingFiles = await this.fileRepo.findByContentHash(tenantId, contentHash);
+    for (const candidate of matchingFiles) {
+      const existing = await this.repo.findByFileId(tenantId, candidate.id, entityType, entityId);
+      if (existing && existing.createdAt.getTime() >= cutoff) {
+        return existing;
+      }
+    }
+    return null;
   }
 
   async listForEntity(
@@ -149,9 +225,15 @@ export class AttachmentService {
           file.storageBucket,
           file.storageKey
         );
+        // RV-006: presign the pipeline-generated thumbnail when present
+        // (same provider, same TTL as downloadUrl).
+        const thumbnailUrl = file.thumbnailS3Key
+          ? await this.storage.generateDownloadUrl(file.storageBucket, file.thumbnailS3Key)
+          : undefined;
         return {
           ...attachment,
           downloadUrl,
+          ...(thumbnailUrl ? { thumbnailUrl } : {}),
           filename: file.filename,
           contentType: file.contentType,
           sizeBytes: file.sizeBytes,
