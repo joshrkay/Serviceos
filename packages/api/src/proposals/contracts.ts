@@ -102,6 +102,12 @@ export const createJobPayloadSchema = z.object({
 export const createAppointmentPayloadSchema = z
   .object({
     jobId: z.string().uuid(),
+    // RV-081 — revisit linkage. When present, this appointment is a REVISIT
+    // booked against an EXISTING job (no new job is created): the execution
+    // handler validates the job exists in-tenant and attaches the
+    // appointment to it, overriding `jobId`. Audit metadata marks the
+    // appointment as a revisit.
+    linkedJobId: z.string().uuid().optional(),
     scheduledStart: z.string().min(1),
     scheduledEnd: z.string().min(1),
     technicianId: z.string().uuid().optional(),

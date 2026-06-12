@@ -247,11 +247,23 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     private readonly assignmentRepo?: AssignmentRepository,
     private readonly confirmationNotifier: SchedulingConfirmationNotifier = new NoopSchedulingConfirmationNotifier(),
     private readonly auditRepo?: AuditRepository,
+    // RV-081 — revisit linkage: validates payload.linkedJobId exists
+    // (tenant-scoped) before attaching the appointment to it.
+    private readonly jobRepo?: JobRepository,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
-    if (!payload.jobId || typeof payload.jobId !== 'string') {
+    // RV-081 — a revisit books an appointment against an EXISTING job: when
+    // linkedJobId is present it is the job the appointment attaches to (no
+    // new job is created), overriding jobId.
+    const linkedJobId =
+      typeof payload.linkedJobId === 'string' && payload.linkedJobId.length > 0
+        ? payload.linkedJobId
+        : undefined;
+    const targetJobId =
+      linkedJobId ?? (typeof payload.jobId === 'string' && payload.jobId.length > 0 ? payload.jobId : undefined);
+    if (!targetJobId) {
       return { success: false, error: 'Payload must include a valid jobId' };
     }
     if (!payload.scheduledStart || typeof payload.scheduledStart !== 'string') {
@@ -263,6 +275,24 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
 
     if (!this.appointmentRepo) {
       return { success: true, resultEntityId: uuidv4() };
+    }
+
+    if (linkedJobId) {
+      // Tenant-scoped existence check — a cross-tenant (or deleted) job id
+      // must surface as not-found, never silently book against it.
+      if (!this.jobRepo) {
+        return {
+          success: false,
+          error: 'Revisit linkage requires the job repository to be wired',
+        };
+      }
+      const linkedJob = await this.jobRepo.findById(context.tenantId, linkedJobId);
+      if (!linkedJob) {
+        return {
+          success: false,
+          error: `Linked job ${linkedJobId} not found in this tenant — a revisit must reference an existing job`,
+        };
+      }
     }
 
     const scheduledStart = new Date(payload.scheduledStart);
@@ -307,7 +337,7 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
 
     const appointment = await createAppointment({
       tenantId: context.tenantId,
-      jobId: payload.jobId,
+      jobId: targetJobId,
       scheduledStart,
       scheduledEnd,
       ...(arrivalWindowStart && arrivalWindowEnd && !isNaN(arrivalWindowStart.getTime()) && !isNaN(arrivalWindowEnd.getTime())
@@ -372,6 +402,30 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
           return { success: false, error: err.message };
         }
         throw err;
+      }
+    }
+
+    // RV-081 — audit the revisit linkage so the trail shows this
+    // appointment was booked against an existing job rather than a new one.
+    if (linkedJobId && this.auditRepo) {
+      try {
+        await this.auditRepo.create(
+          createAuditEvent({
+            tenantId: context.tenantId,
+            actorId: context.executedBy,
+            actorRole: 'system',
+            eventType: 'appointment.revisit_linked',
+            entityType: 'appointment',
+            entityId: appointment.id,
+            metadata: {
+              revisit: true,
+              linkedJobId,
+              proposalId: proposal.id,
+            },
+          }),
+        );
+      } catch {
+        // Audit emission is best-effort — the appointment is already booked.
       }
     }
 
@@ -649,7 +703,7 @@ export function createExecutionHandlerRegistry(deps?: {
     new CreateCustomerVoiceExecutionHandler(deps?.customerRepo, deps?.auditRepo),
     new UpdateCustomerExecutionHandler(deps?.customerRepo),
     new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo),
-    new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier, deps?.auditRepo),
+    new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier, deps?.auditRepo, deps?.jobRepo),
     new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
     new DraftEstimateExecutionHandler(deps?.estimateRepo, deps?.settingsRepo),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
