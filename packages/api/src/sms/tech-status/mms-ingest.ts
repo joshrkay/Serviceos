@@ -1,16 +1,25 @@
 /**
  * RV-050 — inbound MMS photo ingestion from registered tech phones.
  *
- * Flow (after the webhook verified the Twilio signature and the dispatcher
- * routed media here):
+ * P0-009 async split: the webhook-side media seam (registerMmsIngestHandler)
+ * does NO identity lookups, NO media fetches and NO storage writes — it
+ * enqueues ONE `mms_ingest` queue message ({tenantId, fromPhone,
+ * messageSid, mediaItems}) keyed on the Twilio MessageSid and returns, so
+ * webhook latency stays in the milliseconds and a Twilio retry-duplicate is
+ * suppressed by the queue's idempotency-key dedupe instead of being lost.
+ * The full pipeline below runs in src/workers/mms-ingest-worker.ts.
+ *
+ * Flow (in the WORKER, via ingestInboundMms):
  *   1. ANTI-SPOOFING: resolve the inbound mobile via P1-022's
  *      findByMobileNumber and require role === 'technician' — same identity
  *      rule as the tech-status handler. Non-tech senders are silently
  *      ignored (no reply, no fetch — the URL is attacker-controlled input
  *      until the sender is verified).
  *   2. Resolve the tech's ACTIVE job: their open time entry's job_id. No
- *      active job-typed entry → reply "clock in first or use the app" and
- *      skip (nothing is stored against a guessed job).
+ *      active job-typed entry → reply "clock in first or use the app"
+ *      (sent through the async outbound SMS dispatch seam — the same
+ *      MessageDelivery transport, now off the webhook request) and skip
+ *      (nothing is stored against a guessed job).
  *   3. Per media item: download via the Twilio media URL (Basic-auth
  *      fetcher seam — same credential pattern as the recording webhook's
  *      fetchRecordingBytes), store the bytes through the files pipeline
@@ -18,17 +27,18 @@
  *      the AttachmentService (source 'sms', kind 'photo', category 'other'
  *      — emits the standard attachment.uploaded audit event).
  *
- * Failure isolation is layered: this function never throws for per-item
- * failures (fetch/store errors are logged and skipped), and the dispatcher
- * additionally wraps the whole handler so even a programming error here can
- * never break normal SMS handling.
+ * Failure isolation is layered: ingestInboundMms never throws for per-item
+ * failures (fetch/store errors are logged and skipped), the dispatcher
+ * wraps the enqueue so even a queue outage can never break normal SMS
+ * handling, and worker-level errors ride the queue's retry/DLQ semantics.
  */
-import type { InboundSmsContext } from '../inbound-dispatch';
+import type { InboundSmsContext, InboundSmsMedia } from '../inbound-dispatch';
 import {
   registerMediaHandler,
   type RegisterKeywordHandlerOptions,
   type MediaHandler,
 } from '../inbound-dispatch';
+import type { Queue } from '../../queues/queue';
 import type { UserRepository } from '../../users/user';
 import type { TimeEntryService } from '../../time-tracking/time-entry-service';
 import type { AttachmentService } from '../../attachments/attachment-service';
@@ -244,18 +254,64 @@ export function createTwilioMediaFetcher(
   };
 }
 
+// ── P0-009 — webhook-side enqueue seam ─────────────────────────────────────
+
+/** Queue message type consumed by src/workers/mms-ingest-worker.ts. */
+export const MMS_INGEST_QUEUE_TYPE = 'mms_ingest';
+
+/** Payload of one enqueued inbound-MMS ingestion job. */
+export interface MmsIngestQueuePayload {
+  tenantId: string;
+  /** Sender in E.164 — identity-gated by the worker, not the webhook. */
+  fromPhone: string;
+  /** Twilio MessageSid — also drives the idempotency key. */
+  messageSid: string;
+  mediaItems: InboundSmsMedia[];
+}
+
 /**
- * Module init — register the MMS ingest handler with the P2-034 dispatcher.
+ * Idempotency key for the enqueue: Twilio MessageSids are globally unique,
+ * so a webhook retry-duplicate for the same inbound MMS collapses onto the
+ * already-queued job (PgQueue: ON CONFLICT (idempotency_key) DO NOTHING).
+ */
+export function mmsIngestIdempotencyKey(messageSid: string): string {
+  return `${MMS_INGEST_QUEUE_TYPE}:${messageSid}`;
+}
+
+export interface MmsIngestEnqueueDeps {
+  queue: Pick<Queue, 'send'>;
+  logger?: Logger;
+}
+
+/**
+ * Module init — register the MMS media handler with the P2-034 dispatcher.
+ * P0-009: the handler only ENQUEUES (no identity lookup, no fetch, no
+ * storage write on the webhook request); the worker owns the pipeline.
  * Mirrors registerTechStatusKeywords; `overwrite` allows repeated createApp
  * calls in the same process (tests).
  */
 export function registerMmsIngestHandler(
-  deps: MmsIngestDeps,
+  deps: MmsIngestEnqueueDeps,
   options: RegisterKeywordHandlerOptions = {},
 ): MediaHandler {
   const handler: MediaHandler = {
     name: 'tech-mms-ingest',
-    handle: (ctx: InboundSmsContext) => ingestInboundMms(ctx, deps),
+    handle: async (ctx: InboundSmsContext) => {
+      const media = ctx.media ?? [];
+      if (media.length === 0) return { outcome: 'ignored_no_media' };
+      const payload: MmsIngestQueuePayload = {
+        tenantId: ctx.tenantId,
+        fromPhone: ctx.fromE164,
+        messageSid: ctx.messageSid,
+        mediaItems: media.map((m) => ({ ...m })),
+      };
+      const messageId = await deps.queue.send(
+        MMS_INGEST_QUEUE_TYPE,
+        payload,
+        mmsIngestIdempotencyKey(ctx.messageSid),
+      );
+      return { outcome: 'enqueued', messageId };
+    },
   };
   registerMediaHandler(handler, options);
   return handler;

@@ -17,12 +17,18 @@ export {
   type TechStatusTodayRepository,
 } from './idempotency';
 // RV-050 — inbound MMS photo ingestion from registered tech phones.
+// P0-009: the registered media handler ENQUEUES; the pipeline runs in
+// src/workers/mms-ingest-worker.ts.
 export {
   ingestInboundMms,
   registerMmsIngestHandler,
   createTwilioMediaFetcher,
+  mmsIngestIdempotencyKey,
   MMS_CLOCK_IN_FIRST_REPLY,
+  MMS_INGEST_QUEUE_TYPE,
   type MmsIngestDeps,
+  type MmsIngestEnqueueDeps,
+  type MmsIngestQueuePayload,
   type MmsIngestResult,
   type MediaFetcher,
 } from './mms-ingest';

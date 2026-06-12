@@ -400,10 +400,12 @@ import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import { registerKeywordHandler } from './sms/inbound-dispatch';
 // RV-050 — inbound MMS photo ingestion from registered tech phones.
+// P0-009: the webhook seam enqueues; the worker runs the pipeline.
 import {
   registerMmsIngestHandler,
   createTwilioMediaFetcher,
 } from './sms/tech-status/mms-ingest';
+import { createMmsIngestWorker } from './workers/mms-ingest-worker';
 import {
   registerProposalReplySms,
   PgProposalSmsEventRepository,
@@ -1540,6 +1542,9 @@ export function createApp(): express.Express {
     thresholdResolver,
     tenantSchedulingResolver,
     appointmentRepo,
+    // RV-042 — lets update_estimate proposals stamp the acceptance-void
+    // marker at creation when they target a currently accepted estimate.
+    estimateRepo,
     // P22 — catalog grounding: drafted invoice/estimate line items get
     // priced from the tenant's catalog instead of trusting the LLM.
     catalogRepo,
@@ -2684,54 +2689,60 @@ export function createApp(): express.Express {
       auditRepo,
     })
   );
-  // RV-050 — inbound MMS photo ingestion. Registers the (single) media
-  // handler with the P2-034 dispatcher: photos texted from a REGISTERED
-  // TECH phone attach to the tech's active job (open time entry); media
-  // bytes are fetched from Twilio with the tenant's subaccount Basic-auth
-  // credentials (same pattern as the recording webhook). Failure-isolated
-  // at the dispatcher — media problems never break normal SMS handling.
-  registerMmsIngestHandler(
-    {
-      userRepo,
-      timeEntries: new TimeEntryService(timeEntryRepo, auditRepo),
-      attachmentService: new AttachmentService(
-        attachmentRepo,
-        fileRepo,
-        storageProvider,
-        auditRepo,
-        {
-          job: async (tenantId, id) => (await jobRepo.findById(tenantId, id)) !== null,
-        },
-        queue,
-      ),
+  // RV-050 — inbound MMS photo ingestion. P0-009 async split: the media
+  // handler registered with the P2-034 dispatcher only ENQUEUES an
+  // `mms_ingest` job (idempotency-keyed on the Twilio MessageSid, so
+  // webhook retry-duplicates dedupe at the queue) and the worker below
+  // runs the pipeline: photos texted from a REGISTERED TECH phone attach
+  // to the tech's active job (open time entry); media bytes are fetched
+  // from Twilio with the tenant's subaccount Basic-auth credentials (same
+  // pattern as the recording webhook). The "clock in first" reply is sent
+  // by the worker through the same MessageDelivery transport. Webhook
+  // latency stays in the ms; failures ride the queue retry/DLQ semantics.
+  registerMmsIngestHandler({ queue }, { overwrite: true });
+  const mmsIngestWorker = createMmsIngestWorker({
+    userRepo,
+    timeEntries: new TimeEntryService(timeEntryRepo, auditRepo),
+    attachmentService: new AttachmentService(
+      attachmentRepo,
       fileRepo,
-      storage: storageProvider,
-      storageBucket,
-      fetchMedia: createTwilioMediaFetcher(async (tenantId) => {
-        const integration = await integrationResolver?.(tenantId, 'twilio');
-        if (
-          !integration ||
-          integration.provider !== 'twilio' ||
-          !integration.subaccountSid ||
-          !integration.authTokenPrimary
-        ) {
-          return null;
-        }
-        return {
-          accountSid: integration.subaccountSid,
-          authToken: integration.authTokenPrimary,
-        };
-      }),
-      ...(messageDelivery
-        ? {
-            sendReply: async (tenantId: string, to: string, body: string) => {
-              await messageDelivery!.sendSms({ to, body, tenantId });
-            },
-          }
-        : {}),
+      storageProvider,
       auditRepo,
-    },
-    { overwrite: true },
+      {
+        job: async (tenantId, id) => (await jobRepo.findById(tenantId, id)) !== null,
+      },
+      queue,
+    ),
+    fileRepo,
+    storage: storageProvider,
+    storageBucket,
+    fetchMedia: createTwilioMediaFetcher(async (tenantId) => {
+      const integration = await integrationResolver?.(tenantId, 'twilio');
+      if (
+        !integration ||
+        integration.provider !== 'twilio' ||
+        !integration.subaccountSid ||
+        !integration.authTokenPrimary
+      ) {
+        return null;
+      }
+      return {
+        accountSid: integration.subaccountSid,
+        authToken: integration.authTokenPrimary,
+      };
+    }),
+    ...(messageDelivery
+      ? {
+          sendReply: async (tenantId: string, to: string, body: string) => {
+            await messageDelivery!.sendSms({ to, body, tenantId });
+          },
+        }
+      : {}),
+    auditRepo,
+  });
+  workerRegistry.set(
+    mmsIngestWorker.type,
+    mmsIngestWorker as import('./queues/queue').WorkerHandler<unknown>,
   );
 
   app.use(
@@ -3053,6 +3064,8 @@ export function createApp(): express.Express {
       proposalRepo,
       // QA-2026-06-05 (AST-05): read-only query intents answer from data.
       invoiceRepo,
+      // RV-042 — acceptance-void marker on update_estimate proposals.
+      estimateRepo,
       // P22 — catalog grounding for assistant-drafted invoices/estimates.
       catalogRepo,
       // §3B/3D/3E — assistant chat shares the operator-side resolver

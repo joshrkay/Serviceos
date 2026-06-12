@@ -6,14 +6,21 @@
  * / category 'other'), no-active-job reply, non-tech sender ignored, fetch
  * failure isolation (incl. at the dispatcher boundary), and the Twilio
  * Basic-auth fetcher seam.
+ *
+ * P0-009: the dispatcher-facing seam (registerMmsIngestHandler) now only
+ * ENQUEUES an `mms_ingest` job keyed on the MessageSid; the pipeline above
+ * runs in the worker (see test/workers/mms-ingest-worker.test.ts).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   ingestInboundMms,
   registerMmsIngestHandler,
   createTwilioMediaFetcher,
+  mmsIngestIdempotencyKey,
   MMS_CLOCK_IN_FIRST_REPLY,
+  MMS_INGEST_QUEUE_TYPE,
   type MmsIngestDeps,
+  type MmsIngestQueuePayload,
 } from '../../src/sms/tech-status/mms-ingest';
 import {
   dispatchInboundSms,
@@ -244,22 +251,52 @@ describe('dispatcher media integration (RV-050)', () => {
     expect(result).toEqual({ handled: false, reason: 'no_matching_handler' });
   });
 
-  it('registerMmsIngestHandler wires ingestInboundMms into the dispatcher', async () => {
-    const findByMobileNumber = vi.fn(async () => null); // unknown sender → ignored
-    registerMmsIngestHandler(
-      {
-        userRepo: { findByMobileNumber },
-        timeEntries: { findActiveEntry: vi.fn(async () => null) },
-        attachmentService: { attach: vi.fn() } as never,
-        fileRepo: { create: vi.fn() } as never,
-        storage: { putObject: vi.fn() } as never,
-        storageBucket: 'b',
-        fetchMedia: vi.fn(),
-      },
-      { overwrite: true },
-    );
+  it('registerMmsIngestHandler ENQUEUES an mms_ingest job (P0-009) — no inline pipeline work', async () => {
+    const send = vi.fn(async () => 'msg-1');
+    registerMmsIngestHandler({ queue: { send } }, { overwrite: true });
+
     await dispatchInboundSms(ctx({ body: '' }));
-    expect(findByMobileNumber).toHaveBeenCalledWith(TENANT, TECH_PHONE);
+
+    expect(send).toHaveBeenCalledTimes(1);
+    const [type, payload, idempotencyKey] = send.mock.calls[0] as unknown as [
+      string,
+      MmsIngestQueuePayload,
+      string,
+    ];
+    expect(type).toBe(MMS_INGEST_QUEUE_TYPE);
+    expect(payload).toEqual({
+      tenantId: TENANT,
+      fromPhone: TECH_PHONE,
+      messageSid: 'SM-mms-1',
+      mediaItems: [{ url: 'https://api.twilio.com/media/ME1', contentType: 'image/jpeg' }],
+    });
+    expect(idempotencyKey).toBe(mmsIngestIdempotencyKey('SM-mms-1'));
+  });
+
+  it('a Twilio retry-duplicate enqueues with the SAME idempotency key (queue dedupes it)', async () => {
+    const send = vi.fn(async () => 'msg-1');
+    registerMmsIngestHandler({ queue: { send } }, { overwrite: true });
+
+    await dispatchInboundSms(ctx({ body: '' }));
+    await dispatchInboundSms(ctx({ body: '' })); // webhook retry, same MessageSid
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls[0][2]).toBe(send.mock.calls[1][2]);
+    expect(send.mock.calls[0][2]).toBe(`${MMS_INGEST_QUEUE_TYPE}:SM-mms-1`);
+  });
+
+  it('a queue outage never breaks SMS handling (dispatcher isolation)', async () => {
+    const send = vi.fn(async () => {
+      throw new Error('queue down');
+    });
+    registerMmsIngestHandler({ queue: { send } }, { overwrite: true });
+    registerKeywordHandler({
+      keywords: ['out'],
+      handle: async () => ({ handled: true, handler: 'tech-status', reason: 'recorded' }),
+    });
+
+    const result = await dispatchInboundSms(ctx({ body: 'OUT' }));
+    expect(result).toEqual({ handled: true, handler: 'tech-status', reason: 'recorded' });
   });
 
   it('media ingestion failures never break keyword handling', async () => {
