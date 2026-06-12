@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { z } from 'zod';
 import {
   validateProposalPayload,
   assertValidProposalPayload,
@@ -364,6 +365,10 @@ describe('PROPOSAL_TYPE_SCHEMAS — no strict-mode schemas', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return (s as any)._def?.unknownKeys === 'strict';
     };
+
+    // Positive control — the detector must fire on a known strict schema so
+    // a future zod-internals change can't make the test pass vacuously.
+    expect(isStrictObject(z.object({}).strict())).toBe(true);
 
     const strictSchemas: string[] = [];
     for (const [type, schema] of Object.entries(PROPOSAL_TYPE_SCHEMAS)) {

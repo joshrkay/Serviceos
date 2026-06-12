@@ -104,9 +104,15 @@ export function editEstimateProposal(
 
   // Strip stale lineItems-scoped _meta entries produced during AI drafting.
   // Human line-item edits (splice / push) shift indices, so any
-  // fieldConfidence keys or markers whose path starts with "lineItems" are
-  // no longer meaningful. overallConfidence is payload-level and is kept.
-  // Non-lineItems markers (e.g. "customerName") are also kept.
+  // fieldConfidence keys or markers whose path starts with "lineItems" or
+  // "lineItems[" are no longer meaningful. overallConfidence is payload-level
+  // and is kept. Non-lineItems markers (e.g. "customerName") are also kept.
+  //
+  // On in-place update_line_item edits the edited entry could in principle
+  // keep its AI marker, but we strip all lineItems-prefixed markers
+  // deliberately: human-reviewed line items do not carry AI confidence
+  // signals, and the over-strip is simpler and safer than fine-grained
+  // per-index tracking.
   const touchedLineItems = editedFields.some(
     (f) => f === 'lineItems' || f.startsWith('lineItems['),
   );
@@ -121,7 +127,7 @@ export function editEstimateProposal(
       if (m.fieldConfidence !== null && typeof m.fieldConfidence === 'object') {
         const fc = { ...(m.fieldConfidence as Record<string, unknown>) };
         for (const key of Object.keys(fc)) {
-          if (key.startsWith('lineItems')) {
+          if (key === 'lineItems' || key.startsWith('lineItems[')) {
             delete fc[key];
           }
         }
@@ -129,7 +135,7 @@ export function editEstimateProposal(
       }
       if (Array.isArray(m.markers)) {
         m.markers = (m.markers as Array<{ path: string; reason: string }>).filter(
-          (marker) => !marker.path.startsWith('lineItems'),
+          (marker) => marker.path !== 'lineItems' && !marker.path.startsWith('lineItems['),
         );
       }
     }

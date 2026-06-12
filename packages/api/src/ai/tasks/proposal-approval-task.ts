@@ -41,9 +41,7 @@ import { actionClassForProposalType } from '../../proposals/proposal';
 import { approveProposal, rejectProposal } from '../../proposals/actions';
 import { routeUnsupervisedProposal } from '../../proposals/auto-approve';
 import { renderProposalSms } from '../../proposals/sms/render';
-import {
-  payloadHeadlineCents as sharedPayloadHeadlineCents,
-} from '../../proposals/payload-money';
+import { payloadHeadlineCents } from '../../proposals/payload-money';
 import type { ProposalSmsEventRepository } from '../../proposals/sms/sms-event';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import { createAuditEvent, type AuditRepository } from '../../audit/audit';
@@ -204,13 +202,6 @@ function formatCents(cents: number): string {
     maximumFractionDigits: 2,
   })}`;
 }
-
-/**
- * Headline money value carried by the payload, in priority order.
- * Re-exported from the shared helper so call sites that import from this
- * module continue to work unchanged.
- */
-export const payloadHeadlineCents = sharedPayloadHeadlineCents;
 
 function payloadCustomerName(payload: Record<string, unknown>): string | null {
   for (const key of ['customerName', 'displayName', 'name']) {
