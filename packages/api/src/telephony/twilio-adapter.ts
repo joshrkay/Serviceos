@@ -20,7 +20,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
-import { classifyIntent, isLookupIntent, isVoiceApprovalIntent } from '../ai/orchestration/intent-classifier';
+import { classifyIntent, isLookupIntent, isVoiceApprovalIntent, isVoiceEditIntent } from '../ai/orchestration/intent-classifier';
 import {
   CreateCustomerVoiceTaskHandler,
   CREATE_CUSTOMER_CONFIRMATION_TTS,
@@ -269,8 +269,12 @@ export interface TwilioAdapterDeps {
   /**
    * RV-071 — pending-edit parity guard for voice approvals (same repo
    * method the SMS reply transport and one-tap route use).
+   * RV-225 — `create` (when wired, i.e. the full repo) additionally lets
+   * the voice edit dialogue record edit_request / reapproval_rendered
+   * events so unapplied voice edits block approval on every channel.
    */
-  smsEventRepo?: Pick<ProposalSmsEventRepository, 'hasUnappliedEditRequest'>;
+  smsEventRepo?: Pick<ProposalSmsEventRepository, 'hasUnappliedEditRequest'> &
+    Partial<Pick<ProposalSmsEventRepository, 'create'>>;
   /**
    * RV-071 — one-tap SMS fallback for refused money/irreversible voice
    * approvals (same secret/sender/URL/owner-phone wiring as P12-004
@@ -1394,6 +1398,24 @@ export class TwilioGatherAdapter {
           tenantId: opts.tenantId,
         });
         sideEffectsAll.push(...approvalFx);
+        await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+        return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+      }
+
+      // RV-225 — owner voice edit ("change the second line to $200").
+      // Same out-of-FSM routing + hard ownerSession gate as the approval
+      // intents; the edit applies through the existing editProposal path
+      // and the proposal stays pending.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        isVoiceEditIntent(classifierEvent.intentType)
+      ) {
+        const editFx = await this.processor.handleVoiceEditIntent(session, {
+          entities: classifierEvent.entities,
+          utterance: opts.speechResult,
+          tenantId: opts.tenantId,
+        });
+        sideEffectsAll.push(...editFx);
         await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
         return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
       }

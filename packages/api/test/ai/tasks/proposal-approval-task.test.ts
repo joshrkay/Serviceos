@@ -1125,3 +1125,182 @@ describe('ITEM 5(b) — post-lockout one-tap SMS send-once flag', () => {
     expect(second.sessionState).toBeUndefined();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RV-225 — voice edit dialogue ("change the second line to $200")
+// RV-226 — edit-then-approve sequencing
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { startVoiceEdit } from '../../../src/ai/tasks/proposal-approval-task';
+import { InMemoryProposalSmsEventRepository } from '../../../src/proposals/sms/sms-event';
+import type { ProposalEditInterpreter } from '../../../src/proposals/edit-interpreter';
+
+const CUSTOMER_UUID = 'b3b8a9a2-7c1d-4e8f-9a1b-2c3d4e5f6a7b';
+
+interface EditHarness {
+  deps: VoiceApprovalDeps;
+  proposalRepo: InMemoryProposalRepository;
+  auditRepo: InMemoryAuditRepository;
+  smsEvents: InMemoryProposalSmsEventRepository;
+  interpreterCalls: { proposalId: string; instruction: string }[];
+}
+
+function makeEditHarness(opts: {
+  delta?: Record<string, unknown> | null;
+  interpreter?: ProposalEditInterpreter | false;
+} = {}): EditHarness {
+  const proposalRepo = new InMemoryProposalRepository();
+  const auditRepo = new InMemoryAuditRepository();
+  const smsEvents = new InMemoryProposalSmsEventRepository();
+  const interpreterCalls: { proposalId: string; instruction: string }[] = [];
+  const interpreter: ProposalEditInterpreter = async ({ proposal, instruction }) => {
+    interpreterCalls.push({ proposalId: proposal.id, instruction });
+    return opts.delta ?? null;
+  };
+  const deps: VoiceApprovalDeps = {
+    proposalRepo,
+    auditRepo,
+    settingsRepo: stubSettingsRepo(),
+    smsEventRepo: smsEvents,
+    ...(opts.interpreter === false
+      ? {}
+      : { editInterpreter: opts.interpreter ?? interpreter }),
+  };
+  return { deps, proposalRepo, auditRepo, smsEvents, interpreterCalls };
+}
+
+/** Contract-valid draft_estimate payload (editProposal Zod-validates the merge). */
+async function seedEditablePending(repo: InMemoryProposalRepository): Promise<Proposal> {
+  return seedPending(repo, {
+    payload: {
+      customerId: CUSTOMER_UUID,
+      customerName: 'Henderson Family LLC',
+      lineItems: [{ description: 'Water heater replacement', quantity: 1, unitPrice: 45000 }],
+      totalCents: 45000,
+    },
+  });
+}
+
+describe('RV-225 — voice edit dialogue', () => {
+  it('interprets the delta through the shared seam and applies it via editProposal', async () => {
+    const h = makeEditHarness({ delta: { totalCents: 20000 } });
+    const proposal = await seedEditablePending(h.proposalRepo);
+
+    const result = await startVoiceEdit(h.deps, {
+      ...ref,
+      reference: 'the Henderson estimate',
+      instruction: 'change the total to 200 dollars',
+    });
+
+    expect(result.outcome).toBe('edited');
+    expect(result.proposalId).toBe(proposal.id);
+    // Delta interpretation reuse: the shared interpreter got the resolved
+    // proposal + the owner's verbatim instruction.
+    expect(h.interpreterCalls).toEqual([
+      { proposalId: proposal.id, instruction: 'change the total to 200 dollars' },
+    ]);
+
+    // Edit applied through the existing path; proposal STAYS pending.
+    const stored = await h.proposalRepo.findById(TENANT, proposal.id);
+    expect(stored?.payload.totalCents).toBe(20000);
+    expect(stored?.status).toBe('ready_for_review');
+
+    // Readback speaks the EDITED values (payload provenance, not utterance).
+    expect(result.speak).toContain('$200.00');
+    expect(result.speak).not.toContain('$450.00');
+    expect(result.speak.toLowerCase()).toContain('pending');
+
+    // Audit: the existing proposal.edited event (actions.ts) under the
+    // voice actor + the voice-specific event with editedFields.
+    const events = h.auditRepo.getAll();
+    const edited = events.find((e) => e.eventType === 'proposal.edited');
+    expect(edited?.actorId).toBe(VOICE_APPROVAL_ACTOR_ID);
+    const voiceEdited = events.find((e) => e.eventType === 'proposal.voice_edited');
+    expect(voiceEdited?.metadata).toMatchObject({ editedFields: ['totalCents'] });
+
+    // The applied edit clears the pending-edit block (edit_request followed
+    // by reapproval_rendered — same insertion-order contract as SMS).
+    expect(await h.smsEvents.hasUnappliedEditRequest(TENANT, proposal.id)).toBe(false);
+  });
+
+  it('non-owner sessions cannot trigger an edit (layered gate, same as approve)', async () => {
+    const h = makeEditHarness({ delta: { totalCents: 20000 } });
+    const proposal = await seedEditablePending(h.proposalRepo);
+
+    const result = await startVoiceEdit(h.deps, {
+      ...ref,
+      ownerSession: false,
+      reference: 'the Henderson estimate',
+      instruction: 'change the total to 200 dollars',
+    });
+
+    expect(result.outcome).toBe('denied_not_owner');
+    expect(h.interpreterCalls).toHaveLength(0);
+    const stored = await h.proposalRepo.findById(TENANT, proposal.id);
+    expect(stored?.payload.totalCents).toBe(45000);
+    expect(
+      h.auditRepo.getAll().some((e) => e.eventType === 'proposal.voice_edit_denied_not_owner'),
+    ).toBe(true);
+  });
+
+  it('a null delta records the request (note attached) instead of guessing', async () => {
+    const h = makeEditHarness({ delta: null });
+    const proposal = await seedEditablePending(h.proposalRepo);
+
+    const result = await startVoiceEdit(h.deps, {
+      ...ref,
+      reference: 'the Henderson estimate',
+      instruction: 'make it nicer somehow',
+    });
+
+    expect(result.outcome).toBe('edit_recorded');
+    expect(result.speak.toLowerCase()).toContain('review queue');
+    // Unapplied request blocks approval on every channel.
+    expect(await h.smsEvents.hasUnappliedEditRequest(TENANT, proposal.id)).toBe(true);
+    // The instruction is attached for the review queue.
+    const stored = await h.proposalRepo.findById(TENANT, proposal.id);
+    expect(
+      (stored?.sourceContext as Record<string, Record<string, unknown>>).pendingVoiceEditRequest,
+    ).toMatchObject({ instruction: 'make it nicer somehow' });
+    // Payload untouched.
+    expect(stored?.payload.totalCents).toBe(45000);
+  });
+
+  it('a contract-violating delta fails closed into the recorded-note path', async () => {
+    // draft_estimate requires lineItems min(1) — an emptying delta must fail
+    // Zod validation inside editProposal and never corrupt the payload.
+    const h = makeEditHarness({ delta: { lineItems: [] } });
+    const proposal = await seedEditablePending(h.proposalRepo);
+
+    const result = await startVoiceEdit(h.deps, {
+      ...ref,
+      reference: 'the Henderson estimate',
+      instruction: 'remove all the line items',
+    });
+
+    expect(result.outcome).toBe('edit_recorded');
+    const stored = await h.proposalRepo.findById(TENANT, proposal.id);
+    expect((stored?.payload.lineItems as unknown[]).length).toBe(1);
+    expect(await h.smsEvents.hasUnappliedEditRequest(TENANT, proposal.id)).toBe(true);
+    expect(h.auditRepo.getAll().some((e) => e.eventType === 'proposal.voice_edit_failed')).toBe(true);
+  });
+
+  it('with several pending and no usable reference, asks ONE clarification without editing', async () => {
+    const h = makeEditHarness({ delta: { totalCents: 20000 } });
+    await seedEditablePending(h.proposalRepo);
+    await seedPending(h.proposalRepo, {
+      summary: 'Invoice for Acme — spring service',
+      proposalType: 'draft_invoice',
+      payload: { customerName: 'Acme Corp', totalCents: 9900 },
+    });
+
+    const result = await startVoiceEdit(h.deps, {
+      ...ref,
+      reference: 'change it to 200',
+      instruction: 'change it to 200',
+    });
+
+    expect(['clarification', 'not_found']).toContain(result.outcome);
+    expect(h.interpreterCalls).toHaveLength(0);
+  });
+});

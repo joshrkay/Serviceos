@@ -571,7 +571,7 @@ describe('intent-classifier — classifyIntent', () => {
 
 // ─── RV-071 — owner approval intents ─────────────────────────────────────────
 
-import { OWNER_APPROVAL_PROMPT_SECTION, isVoiceApprovalIntent } from '../../../src/ai/orchestration/intent-classifier';
+import { OWNER_APPROVAL_PROMPT_SECTION, isVoiceApprovalIntent, isVoiceEditIntent } from '../../../src/ai/orchestration/intent-classifier';
 
 describe('RV-071 — approve_proposal / reject_proposal intents', () => {
   it('parseClassifierJson accepts approve_proposal with a proposalReference', () => {
@@ -599,7 +599,48 @@ describe('RV-071 — approve_proposal / reject_proposal intents', () => {
     expect(isVoiceApprovalIntent('reject_proposal')).toBe(true);
     expect(isVoiceApprovalIntent('confirm')).toBe(false);
     expect(isVoiceApprovalIntent('create_invoice')).toBe(false);
+    expect(isVoiceApprovalIntent('edit_proposal')).toBe(false);
     expect(isVoiceApprovalIntent(undefined)).toBe(false);
+  });
+
+  // RV-225 — edit_proposal owner intent
+  it('parseClassifierJson accepts edit_proposal with proposalReference + editInstruction', () => {
+    const out = parseClassifierJson(JSON.stringify({
+      intentType: 'edit_proposal',
+      confidence: 0.91,
+      extractedEntities: {
+        proposalReference: 'the Henderson estimate',
+        editInstruction: 'change the second line to 200 dollars',
+      },
+    }));
+    expect(out?.intentType).toBe('edit_proposal');
+    expect(out?.extractedEntities?.proposalReference).toBe('the Henderson estimate');
+    expect(out?.extractedEntities?.editInstruction).toBe('change the second line to 200 dollars');
+  });
+
+  it('isVoiceEditIntent matches exactly edit_proposal', () => {
+    expect(isVoiceEditIntent('edit_proposal')).toBe(true);
+    expect(isVoiceEditIntent('approve_proposal')).toBe(false);
+    expect(isVoiceEditIntent('update_estimate')).toBe(false);
+    expect(isVoiceEditIntent(undefined)).toBe(false);
+  });
+
+  it('the owner section documents edit_proposal; the base prompt never does', async () => {
+    const gateway = mockGateway(JSON.stringify({
+      intentType: 'edit_proposal',
+      confidence: 0.9,
+      extractedEntities: { editInstruction: 'change it to 200' },
+    }));
+    const result = await classifyIntent(
+      'change the second line to 200 dollars',
+      { tenantId: 't1', ownerSession: true },
+      gateway,
+    );
+    expect(result.intentType).toBe('edit_proposal');
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+    expect(systemMessages[1].content).toContain('edit_proposal');
+    expect(systemMessages[0].content).not.toContain('edit_proposal');
   });
 
   it('ownerSession: true appends the owner prompt section as a SEPARATE system message', async () => {
@@ -641,6 +682,9 @@ describe('RV-071 — approve_proposal / reject_proposal intents', () => {
     expect(messagesA.filter((m: { role: string }) => m.role === 'system')).toHaveLength(1);
     for (const m of messagesA) {
       expect(m.content).not.toContain('approve_proposal');
+      // RV-225 — the edit intent rides the same owner-only system message;
+      // non-owner prompts must stay byte-identical.
+      expect(m.content).not.toContain('edit_proposal');
     }
   });
 });
