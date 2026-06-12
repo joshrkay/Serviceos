@@ -311,7 +311,7 @@ describe('voice-action-router — RV-221 chain SMS routing', () => {
     expect(body).toContain('1)');
     expect(body).toContain('2)');
     // Track E truthful copy: Y approves the head only.
-    expect(body).toContain('Reply Y to approve 1); the rest follow in your queue.');
+    expect(body).toContain('Reply Y to approve the setup steps; starred items follow separately.');
     expect(body).toContain('https://api.example.com/approve?token=');
 
     // The outbound render anchors on the HEAD member, kind proposal_rendered —

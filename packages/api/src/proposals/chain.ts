@@ -1,4 +1,5 @@
 import { Proposal, ProposalType } from './proposal';
+import type { AddNotePayload } from './contracts/notes';
 
 /**
  * Multi-action chaining — shared types + helpers.
@@ -187,7 +188,14 @@ export const ENTITY_KIND_TO_PAYLOAD_PATH: Partial<
   draft_estimate: { customerId: 'customerId', jobId: 'jobId' },
   draft_invoice: { customerId: 'customerId', jobId: 'jobId', estimateId: 'estimateId' },
   add_service_location: { customerId: 'customerId' },
-  add_note: { customerId: 'customerId', jobId: 'jobId' },
+  // Two refs into one add_note would overwrite targetId/targetKind; the decomposer does not wire that shape today.
+  add_note: {
+    customerId: 'targetId',
+    jobId: 'targetId',
+    invoiceId: 'targetId',
+    estimateId: 'targetId',
+    appointmentId: 'targetId',
+  },
   // RV-220 — comms/money chain tails. The contract fields are
   // `.uuid().optional()` + reference fallback; the ref token transiently
   // occupies the id field until execution-time resolution swaps in the
@@ -251,6 +259,9 @@ export function applyChainMetadata(
   // gaps, so they are intentionally kept out of missingFields.
   for (const ref of meta.chainRefs) {
     proposal.payload[ref.payloadPath] = buildChainRefToken(ref.parentChainIndex, ref.entityKind);
+    if (proposal.proposalType === 'add_note' && ref.payloadPath === 'targetId') {
+      proposal.payload.targetKind = targetKindForNoteRef(ref.entityKind);
+    }
   }
 
   proposal.sourceContext = {
@@ -269,5 +280,22 @@ export function applyChainMetadata(
   if (meta.chainRefs.length > 0) {
     proposal.status = 'draft';
     proposal.approvedAt = undefined;
+  }
+}
+
+function targetKindForNoteRef(entityKind: ChainEntityKind): AddNotePayload['targetKind'] {
+  switch (entityKind) {
+    case 'customerId':
+      return 'customer';
+    case 'jobId':
+      return 'job';
+    case 'invoiceId':
+      return 'invoice';
+    case 'estimateId':
+      return 'estimate';
+    case 'appointmentId':
+      return 'appointment';
+    case 'leadId':
+      throw new Error('add_note chain refs do not support leadId');
   }
 }

@@ -41,7 +41,13 @@ import type {
 } from '../../sms/inbound-dispatch';
 import type { Proposal, ProposalRepository } from '../proposal';
 import { actionClassForProposalType } from '../proposal';
-import { approveProposal, rejectProposal, editProposal } from '../actions';
+import {
+  approveChainSet,
+  editProposal,
+  formatChainSetApprovalMessage,
+  rejectProposal,
+  summarizeChainSetResult,
+} from '../actions';
 import { confidenceMetaBlocksAutoApprove } from '../auto-approve';
 import { chainRefFieldsTouchedByDelta } from '../edit-interpreter';
 import type { SettingsRepository } from '../../settings/settings';
@@ -299,9 +305,10 @@ async function handleApprove(
   // The try covers ONLY the mutation. A failed confirmation send after a
   // successful approval must never tell the owner the approval failed —
   // the proposal is approved and will execute.
-  let approved: Proposal;
+  let approvedSummary = proposal.summary;
+  let summary: ReturnType<typeof summarizeChainSetResult>;
   try {
-    approved = await approveProposal(
+    const result = await approveChainSet(
       deps.proposalRepo,
       ctx.tenantId,
       proposal.id,
@@ -309,7 +316,10 @@ async function handleApprove(
       'owner',
       deps.auditRepo,
       'sms', // RV-073 — inbound SMS reply approval
+      (tenantId, proposalId) => deps.smsEventRepo.hasUnappliedEditRequest(tenantId, proposalId),
     );
+    summary = summarizeChainSetResult(result);
+    approvedSummary = result.approved[0]?.summary ?? proposal.summary;
   } catch (err) {
     if (err instanceof ValidationError) {
       // Missing required fields — truthful, with the next step.
@@ -334,10 +344,31 @@ async function handleApprove(
     return { handled: true, handler: HANDLER_NAME, reason: 'approve_failed' };
   }
 
-  await notifyBestEffort(deps, ctx, proposal.id, 'proposal.sms_approved', {
-    proposalType: proposal.proposalType,
-  }, `Approved — "${approved.summary}" will run shortly.`);
+  await notifyBestEffort(
+    deps,
+    ctx,
+    proposal.id,
+    'proposal.sms_approved',
+    {
+      proposalType: proposal.proposalType,
+      approvedCount: summary.approvedCount,
+      skippedCount: summary.followCount,
+      skipped: summary.skipped,
+    },
+    approvalConfirmation(summary, approvedSummary),
+  );
+
   return { handled: true, handler: HANDLER_NAME, reason: 'approved' };
+}
+
+function approvalConfirmation(
+  summary: ReturnType<typeof summarizeChainSetResult>,
+  fallbackSummary: string,
+): string {
+  return formatChainSetApprovalMessage(
+    summary,
+    `Approved — "${fallbackSummary}" will run shortly.`,
+  );
 }
 
 /**
