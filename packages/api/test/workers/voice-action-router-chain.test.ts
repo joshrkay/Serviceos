@@ -1,9 +1,14 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   createVoiceActionRouterWorker,
   VoiceActionRouterPayload,
 } from '../../src/workers/voice-action-router';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import {
+  setSupervisorPresenceLoader,
+  _resetSupervisorPresenceCache,
+} from '../../src/ai/supervisor-presence';
 import { QueueMessage } from '../../src/queues/queue';
 import { createMockLLMGateway } from '../../src/ai/gateway/factory';
 import { chainMetaFor } from '../../src/proposals/chain';
@@ -189,5 +194,135 @@ describe('voice-action-router — multi-action chaining', () => {
     expect(afterSecond.length).toBe(2);
     const decomposeCallsAfterSecond = spy.mock.calls.filter(([req]) => req.taskType === 'decompose_transcript').length;
     expect(decomposeCallsAfterSecond).toBe(decomposeCallsAfterFirst); // skipped before decompose
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RV-221 — unsupervised chain routing: ONE summarized SMS per chain,
+// anchored on the head member.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('voice-action-router — RV-221 chain SMS routing', () => {
+  afterEach(() => {
+    _resetSupervisorPresenceCache();
+    setSupervisorPresenceLoader(null);
+  });
+
+  function chainProviderImpl(opts: { lowConfidenceJob?: boolean } = {}) {
+    const decomposition = JSON.stringify({
+      segments: [
+        { index: 0, text: 'create a customer named Jane Doe', dependsOn: [] },
+        { index: 1, text: 'open a job for Jane', dependsOn: [0], dependencyEntityKind: 'customerId' },
+      ],
+    });
+    const classifications = [
+      JSON.stringify({ intentType: 'create_customer', confidence: 0.95, extractedEntities: { displayName: 'Jane Doe' } }),
+      JSON.stringify({ intentType: 'create_job', confidence: 0.9, extractedEntities: { jobTitle: 'Service' } }),
+    ];
+    let classifyCall = 0;
+    return async (req: { taskType?: string }) => {
+      let content = '{}';
+      if (req.taskType === 'decompose_transcript') content = decomposition;
+      else if (req.taskType === 'classify_intent') {
+        content = classifications[Math.min(classifyCall++, classifications.length - 1)];
+      }
+      return { content, model: 'mock', provider: 'mock', tokenUsage: { input: 10, output: 10, total: 20 }, latencyMs: 1 };
+    };
+  }
+
+  function makeRoutedWorker(
+    repo: InMemoryProposalRepository,
+    auditRepo: InMemoryAuditRepository,
+    sendSms: ReturnType<typeof vi.fn>,
+    recordSmsEvent: ReturnType<typeof vi.fn>,
+    gateway: Parameters<typeof createVoiceActionRouterWorker>[0]['gateway'],
+  ) {
+    return createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo: repo,
+      multiActionEnabled: async () => true,
+      unsupervisedRouting: {
+        auditRepo,
+        sendSms: sendSms as unknown as (to: string, body: string) => Promise<void>,
+        secret: 'test-secret',
+        buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
+        resolveOwnerPhone: async () => '+15125550100',
+        resolveRouting: async () => 'queue_and_sms',
+        recordSmsEvent: recordSmsEvent as unknown as (args: {
+          tenantId: string;
+          proposalId: string;
+          body: string;
+          kind: string;
+        }) => Promise<void>,
+      },
+    });
+  }
+
+  it('unsupervised: sends EXACTLY ONE summary SMS anchored on the chain head', async () => {
+    setSupervisorPresenceLoader(async () => false);
+    const { gateway, provider } = createMockLLMGateway();
+    vi.spyOn(provider, 'complete').mockImplementation(chainProviderImpl() as never);
+
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const sendSms = vi.fn(async () => {});
+    const recordSmsEvent = vi.fn(async () => {});
+    const worker = makeRoutedWorker(repo, auditRepo, sendSms, recordSmsEvent, gateway);
+
+    await worker.handle(
+      makeMessage('create a customer named Jane Doe and open a job for her'),
+      silentLogger(),
+    );
+
+    const all = await repo.findByTenant('tenant-1');
+    expect(all).toHaveLength(2);
+    const head = all.find((p) => p.proposalType === 'create_customer')!;
+
+    // ONE SMS for the whole chain — the summary form, with the one-tap link.
+    expect(sendSms).toHaveBeenCalledTimes(1);
+    const [to, body] = sendSms.mock.calls[0] as unknown as [string, string];
+    expect(to).toBe('+15125550100');
+    expect(body).toContain('2 linked actions:');
+    expect(body).toContain('1)');
+    expect(body).toContain('2)');
+    expect(body).toContain('Reply Y to approve, N to reject, EDIT to change.');
+    expect(body).toContain('https://api.example.com/approve?token=');
+
+    // The outbound render anchors on the HEAD member, kind proposal_rendered —
+    // an inbound Y approves the head; dependents follow chain resolution.
+    expect(recordSmsEvent).toHaveBeenCalledTimes(1);
+    expect(recordSmsEvent.mock.calls[0][0]).toMatchObject({
+      tenantId: 'tenant-1',
+      proposalId: head.id,
+      kind: 'proposal_rendered',
+    });
+
+    // Routing audit lands on the head proposal.
+    const routed = auditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'unsupervised_proposal_routed');
+    expect(routed).toHaveLength(1);
+    expect(routed[0].entityId).toBe(head.id);
+  });
+
+  it('supervised: no chain SMS is sent', async () => {
+    setSupervisorPresenceLoader(async () => true);
+    const { gateway, provider } = createMockLLMGateway();
+    vi.spyOn(provider, 'complete').mockImplementation(chainProviderImpl() as never);
+
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const sendSms = vi.fn(async () => {});
+    const recordSmsEvent = vi.fn(async () => {});
+    const worker = makeRoutedWorker(repo, auditRepo, sendSms, recordSmsEvent, gateway);
+
+    await worker.handle(
+      makeMessage('create a customer named Jane Doe and open a job for her'),
+      silentLogger(),
+    );
+
+    expect(await repo.findByTenant('tenant-1')).toHaveLength(2);
+    expect(sendSms).not.toHaveBeenCalled();
+    expect(recordSmsEvent).not.toHaveBeenCalled();
   });
 });

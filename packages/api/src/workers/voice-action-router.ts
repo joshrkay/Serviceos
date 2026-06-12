@@ -4,8 +4,8 @@ import { LLMGateway } from '../ai/gateway/gateway';
 import { Proposal, ProposalRepository, createProposal, CreateProposalInput, ProposalType } from '../proposals/proposal';
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
-import { routeUnsupervisedProposal } from '../proposals/auto-approve';
-import { renderProposalSms } from '../proposals/sms/render';
+import { routeUnsupervisedProposal, confidenceMetaBlocksAutoApprove } from '../proposals/auto-approve';
+import { renderProposalSms, renderChainSms } from '../proposals/sms/render';
 import type { OutboundAnchorKind } from '../proposals/sms/sms-event';
 import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
 import type { AuditRepository } from '../audit/audit';
@@ -1064,6 +1064,11 @@ async function processChain(
   // they happen — they are independent records, not chain members.
   const built: { proposal: Proposal; chainIndex: number; refCount: number; type: string }[] = [];
 
+  // RV-221 — tenant-wide presence at chain-creation time. Every segment
+  // resolves the same value (one isSupervisorPresent per segment, cached);
+  // tracked here so the chain can be routed ONCE after persistence.
+  let supervisorPresent = true;
+
   for (const segment of segments) {
     const outcome = await processSegment(
       deps,
@@ -1082,6 +1087,7 @@ async function processChain(
     }
 
     const proposal = outcome.proposal;
+    supervisorPresent = outcome.supervisorPresent;
 
     // Build the dependency edges this segment can actually consume. The
     // decomposer suggests (parentIndex, entityKind); we only wire an
@@ -1146,6 +1152,83 @@ async function processChain(
     chainLength,
     createdCount: built.length,
   });
+
+  // RV-221 — unsupervised routing for the WHOLE chain: one summarized SMS
+  // (renderChainSms) instead of per-member sends. The HEAD member (first
+  // persisted, lowest chain index) anchors the outbound render, so the
+  // inbound Y / N / EDIT replies and the one-tap link act on the head;
+  // chained dependents stay 'draft' (forced by applyChainMetadata) and
+  // follow the existing chain-resolution execution ordering once approved
+  // from the queue. Money/comms members are listed but marked "approval
+  // follows separately" by the renderer.
+  //
+  // Gate: unlike the single-action path (which only routes proposals that
+  // WOULD have auto-approved, i.e. 'ready_for_review'), a chain never has
+  // an auto-approve path — its dependents are structurally forced to
+  // 'draft' — so the head is routed while still reviewable (draft or
+  // ready_for_review). A single chain falls back silently to the queue
+  // when no routing deps / phone are wired (same as the single path).
+  //
+  // RV-074 composition: when ANY member carries a blocking confidence
+  // level, that member's payload is handed to routeUnsupervisedProposal so
+  // the existing predicate suppresses the one-tap token and anchors the
+  // send as `review_required_rendered` — and renderChainSms emits the
+  // matching review-in-app form for the whole chain.
+  const head = built[0].proposal;
+  if (
+    deps.unsupervisedRouting &&
+    !supervisorPresent &&
+    (head.status === 'ready_for_review' || head.status === 'draft')
+  ) {
+    const ur = deps.unsupervisedRouting;
+    const tenantId = base.tenantId;
+    try {
+      const routing = await ur.resolveRouting?.(tenantId);
+      const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
+      const ordered = built.map((b) => b.proposal);
+      const blockingMember = ordered.find((p) => confidenceMetaBlocksAutoApprove(p.payload));
+      await routeUnsupervisedProposal(
+        {
+          auditRepo: ur.auditRepo,
+          ...(ur.sendSms ? { sendSms: ur.sendSms } : {}),
+          ...(ur.secret ? { secret: ur.secret } : {}),
+          ...(ur.buildApproveUrl ? { buildApproveUrl: ur.buildApproveUrl } : {}),
+          ...(ur.recordSmsEvent
+            ? {
+                onSmsSent: async ({ body, kind }: { body: string; kind: OutboundAnchorKind }) =>
+                  ur.recordSmsEvent!({ tenantId, proposalId: head.id, body, kind }),
+              }
+            : {}),
+        },
+        {
+          tenantId,
+          proposalId: head.id,
+          ...(routing ? { routing } : {}),
+          channel: 'other',
+          ...(ownerPhone ? { ownerPhone } : {}),
+          summaryText: head.summary,
+          renderSmsBody: (approveUrl: string) =>
+            renderChainSms(
+              ordered.map((p) => ({
+                proposalType: p.proposalType,
+                summary: p.summary,
+                payload: p.payload,
+              })),
+              { approveUrl: approveUrl || undefined },
+            ),
+          // Blocking-member payload (if any) drives the token-suppression /
+          // review_required_rendered anchoring; otherwise the head's.
+          payload: (blockingMember ?? head).payload,
+        },
+      );
+    } catch (err) {
+      log.warn('voice-action-router: chain unsupervised routing failed', {
+        chainId,
+        headProposalId: head.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 }
 
 export function createVoiceActionRouterWorker(

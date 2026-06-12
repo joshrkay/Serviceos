@@ -551,3 +551,142 @@ describe('renderProposalSms — RV-074 confidence markers', () => {
     expect(nullMeta).toBe(noMeta);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RV-221 — chain summary rendering (one SMS per chain)
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { renderChainSms, type ChainSmsMember } from '../../../src/proposals/sms/render';
+
+function member(overrides: Partial<ChainSmsMember> = {}): ChainSmsMember {
+  return {
+    proposalType: 'create_customer',
+    summary: 'Create customer Jane Doe',
+    payload: {},
+    ...overrides,
+  };
+}
+
+describe('renderChainSms — RV-221 chain summaries', () => {
+  it('renders a 2-member capture chain as one numbered summary with the standard reply instructions', () => {
+    const body = renderChainSms(
+      [
+        member(),
+        member({
+          proposalType: 'create_job',
+          summary: 'Open a job for Jane Doe',
+        }),
+      ],
+      { approveUrl: URL },
+    );
+    expect(body).toContain('2 linked actions:');
+    expect(body).toContain('1) Create customer Jane Doe');
+    expect(body).toContain('2) Open a job for Jane Doe');
+    expect(body).toContain('Reply Y to approve, N to reject, EDIT to change.');
+    expect(body).toContain(URL);
+    // No money/comms member → no separate-approval legend.
+    expect(body).not.toContain('Approval follows separately');
+  });
+
+  it('renders a 3-member chain, appends money facts, and marks money/comms members as approved separately', () => {
+    const body = renderChainSms(
+      [
+        member(),
+        member({
+          proposalType: 'create_appointment',
+          summary: 'Book Tuesday 9am for Jane Doe',
+        }),
+        member({
+          proposalType: 'send_estimate',
+          summary: 'Send Jane the estimate',
+          payload: { totalCents: 45000 },
+        }),
+      ],
+      { approveUrl: URL },
+    );
+    expect(body).toContain('3 linked actions:');
+    expect(body).toContain('1) Create customer Jane Doe');
+    expect(body).toContain('2) Book Tuesday 9am for Jane Doe');
+    // Money fact extracted from the payload; comms member flagged.
+    expect(body).toContain('3) Send Jane the estimate ($450.00)*');
+    expect(body).toContain('*Approval follows separately.');
+    expect(body).toContain('Reply Y to approve, N to reject, EDIT to change.');
+    expect(body).toContain(URL);
+  });
+
+  it('marks money-class members (record_payment) the same way', () => {
+    const body = renderChainSms([
+      member(),
+      member({
+        proposalType: 'record_payment',
+        summary: 'Record a payment from Jane',
+        payload: { amountCents: 20000 },
+      }),
+    ]);
+    expect(body).toContain('2) Record a payment from Jane ($200.00)*');
+    expect(body).toContain('*Approval follows separately.');
+  });
+
+  it('a low/very_low member switches the WHOLE SMS to the review-in-app form', () => {
+    const body = renderChainSms(
+      [
+        member(),
+        member({
+          proposalType: 'create_appointment',
+          summary: 'Book Tuesday 9am for Jane Doe',
+          payload: { _meta: { overallConfidence: 'low' } },
+        }),
+        member({
+          proposalType: 'send_estimate',
+          summary: 'Send Jane the estimate',
+          payload: { totalCents: 45000 },
+        }),
+      ],
+      { approveUrl: URL },
+    );
+    // Review form: list survives, but there is NO approve affordance.
+    expect(body).toContain('3 linked actions:');
+    expect(body).toContain('Needs review in app before approval — reply N to reject.');
+    expect(body).not.toContain('Reply Y to approve');
+    expect(body).not.toContain(URL);
+    // Nothing is Y-approvable, so nothing is marked "separately".
+    expect(body).not.toContain('*Approval follows separately.');
+  });
+
+  it('very_low blocks the same as low', () => {
+    const body = renderChainSms(
+      [member({ payload: { _meta: { overallConfidence: 'very_low' } } }), member()],
+      { approveUrl: URL },
+    );
+    expect(body).toContain('Needs review in app before approval — reply N to reject.');
+    expect(body).not.toContain(URL);
+  });
+
+  it('keeps the human-readable part within the 320-char budget — summaries give way, instructions survive', () => {
+    const body = renderChainSms(
+      [
+        member({ summary: 'A'.repeat(300) }),
+        member({ proposalType: 'create_job', summary: 'B'.repeat(300) }),
+        member({ proposalType: 'send_invoice', summary: 'C'.repeat(300), payload: { totalCents: 12345 } }),
+      ],
+      { approveUrl: URL },
+    );
+    const humanPart = body.includes(' Or tap') ? body.slice(0, body.indexOf(' Or tap')) : body;
+    expect(humanPart.length).toBeLessThanOrEqual(PROPOSAL_SMS_MAX_CHARS);
+    expect(body).toContain('Reply Y to approve, N to reject, EDIT to change.');
+    expect(body).toContain(URL);
+    expect(body).toContain('…');
+  });
+
+  it('does not repeat a money fact the summary already carries', () => {
+    const body = renderChainSms([
+      member(),
+      member({
+        proposalType: 'send_invoice',
+        summary: 'Send the $123.45 invoice to Jane',
+        payload: { totalCents: 12345 },
+      }),
+    ]);
+    expect(body.match(/\$123\.45/g)).toHaveLength(1);
+  });
+});
