@@ -506,6 +506,11 @@ export interface DailyDigestRepository {
   ): Promise<{ digest: DailyDigestRecord; inserted: boolean }>;
   findByTenantAndDate(tenantId: string, digestDate: string): Promise<DailyDigestRecord | null>;
   /**
+   * Most recent digest for the tenant by digest_date (RV-062 web view's
+   * `latest` deep link). Returns null when the tenant has no digest yet.
+   */
+  findLatest(tenantId: string): Promise<DailyDigestRecord | null>;
+  /**
    * Status-check claim: sets sms_dispatch_id ONLY when it is still NULL.
    * Returns null when another sender already recorded a dispatch — the
    * second layer of the double-send guard.
@@ -572,6 +577,15 @@ export class InMemoryDailyDigestRepository implements DailyDigestRepository {
   async findByTenantAndDate(tenantId: string, digestDate: string): Promise<DailyDigestRecord | null> {
     const row = this.rows.get(this.key(tenantId, digestDate));
     return row ? { ...row } : null;
+  }
+
+  async findLatest(tenantId: string): Promise<DailyDigestRecord | null> {
+    let latest: DailyDigestRecord | null = null;
+    for (const row of this.rows.values()) {
+      if (row.tenantId !== tenantId) continue;
+      if (latest === null || row.digestDate > latest.digestDate) latest = row;
+    }
+    return latest ? { ...latest } : null;
   }
 
   async setSmsDispatchId(

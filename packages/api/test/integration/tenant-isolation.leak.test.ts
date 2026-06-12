@@ -656,6 +656,21 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
       expect(seenByB?.narrative).toBe('narrative B');
     });
 
+    it('findLatest returns the tenant’s most recent digest and never crosses tenants', async () => {
+      const repo = new PgDailyDigestRepository(pool);
+      // Give tenant A an earlier and a later date; B keeps only DIGEST_DATE.
+      await repo.upsert(tenantA.tenantId, '2026-06-08', digestPayload(50), 'older A');
+      await repo.upsert(tenantA.tenantId, '2026-06-11', digestPayload(150), 'newest A');
+
+      const latestA = await repo.findLatest(tenantA.tenantId);
+      const latestB = await repo.findLatest(tenantB.tenantId);
+      expect(latestA?.digestDate).toBe('2026-06-11');
+      expect(latestA?.narrative).toBe('newest A');
+      // B's latest is its own row, not A's more-recent one.
+      expect(latestB?.tenantId).toBe(tenantB.tenantId);
+      expect(latestB?.digestDate).toBe(DIGEST_DATE);
+    });
+
     it('insertIfAbsent dedupes on (tenant, date) within a tenant but NOT across tenants', async () => {
       const repo = new PgDailyDigestRepository(pool);
       const again = await repo.insertIfAbsent(tenantA.tenantId, DIGEST_DATE, digestPayload(300));

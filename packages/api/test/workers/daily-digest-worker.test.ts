@@ -251,6 +251,7 @@ describe('runDailyDigestSweep', () => {
     const losingRepo: DailyDigestRepository = {
       ...digestRepo,
       findByTenantAndDate: digestRepo.findByTenantAndDate.bind(digestRepo),
+      findLatest: digestRepo.findLatest.bind(digestRepo),
       upsert: digestRepo.upsert.bind(digestRepo),
       setSmsDispatchId: digestRepo.setSmsDispatchId.bind(digestRepo),
       insertIfAbsent: async (tenantId, date, payload, narrative) => {
