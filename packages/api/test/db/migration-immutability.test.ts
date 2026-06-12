@@ -236,6 +236,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // RV-063: per-tenant digest delivery settings (enabled/time/channel)
   ['163_tenant_settings_digest', '3fb34512c152ba262d2e21e4aa84608374156f89c07d5f71e3cd43d38b718836'],
   ['164_dispatch_entity_daily_digest', '4d3ad093b4319cf786bfd047df3d5898720a4d6712e5037704c5a06fffc492e9'],
+  // RV-074: widen proposal_sms_events kind CHECK for 'review_required_rendered'
+  ['165_proposal_sms_events_review_required_kind', '0a1ccd582e840a57ec622344a0a41a690229bfd30b7b9e87b0265c255b1dff56'],
 ];
 
 function hashMigration(value: string): string {

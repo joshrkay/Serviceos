@@ -829,3 +829,139 @@ describe('RV-073 — SMS reply approvals/rejections tag channel sms', () => {
     expect(rejectedEvent!.metadata).toMatchObject({ channel: 'sms' });
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// RV-074 — low/very_low-confidence proposals over SMS.
+//
+// The LOW form ("Needs review in app before approval — reply N to reject")
+// goes out with NO one-tap link, but it MUST anchor the reply transport
+// (kind `review_required_rendered`): the N it solicits has to target THIS
+// proposal, not whatever older render came before. And a Y texted anyway
+// must be re-blocked by the same confidence predicate that suppressed the
+// approve affordance — never approved.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('RV-074 — review_required_rendered (low-confidence) anchoring', () => {
+  async function seedLowConfidenceProposal(
+    h: Harness,
+    renderedAt?: Date,
+  ): Promise<Proposal> {
+    const base = createProposal({
+      tenantId: TENANT,
+      proposalType: 'create_appointment',
+      payload: {
+        jobId: '6f9619ff-8b86-d011-b42d-00c04fc964ff',
+        customerName: 'Mr Vega',
+        scheduledStart: '2026-06-17T19:00:00Z',
+        scheduledEnd: '2026-06-17T20:00:00Z',
+        _meta: { overallConfidence: 'low' },
+      },
+      summary: 'Book Mr Vega Wednesday 2pm',
+      confidenceScore: 0.42,
+      createdBy: 'voice',
+    });
+    const proposal = await h.proposalRepo.create({ ...base, status: 'ready_for_review' });
+    await h.smsEventRepo.create(
+      createProposalSmsEvent({
+        tenantId: TENANT,
+        proposalId: proposal.id,
+        direction: 'outbound',
+        kind: 'review_required_rendered',
+        body: 'Book Mr Vega Wednesday 2pm Needs review in app before approval — reply N to reject.',
+        ...(renderedAt ? { now: renderedAt } : {}),
+      }),
+    );
+    return proposal;
+  }
+
+  it('Y on a low-confidence proposal is blocked with truthful copy + audit, proposal untouched', async () => {
+    const h = makeHarness();
+    // An OLDER normal proposal was rendered first — the Y must not land on it.
+    const older = await seedPendingProposal(h, TENANT, {}, new Date('2026-06-11T15:00:00Z'));
+    const low = await seedLowConfidenceProposal(h, new Date('2026-06-11T15:05:00Z'));
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(result).toMatchObject({
+      handled: true,
+      reason: 'approve_blocked_low_confidence',
+    });
+    // Neither proposal changed state — especially not an approval.
+    expect((await h.proposalRepo.findById(TENANT, low.id))?.status).toBe('ready_for_review');
+    expect((await h.proposalRepo.findById(TENANT, older.id))?.status).toBe('ready_for_review');
+    // Truthful reply: review happens in the app.
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].body).toBe(
+      'This one needs review in the app before it can be approved.',
+    );
+    // Audit trail names the LOW proposal.
+    const blocked = h.auditRepo
+      .getAll()
+      .find((e) => e.eventType === 'proposal.sms_approve_blocked_low_confidence');
+    expect(blocked?.entityId).toBe(low.id);
+    expect(h.auditRepo.getAll().map((e) => e.eventType)).not.toContain('proposal.approved');
+  });
+
+  it('N rejects THE low proposal — not the older rendered one', async () => {
+    const h = makeHarness();
+    const older = await seedPendingProposal(h, TENANT, {}, new Date('2026-06-11T15:00:00Z'));
+    const low = await seedLowConfidenceProposal(h, new Date('2026-06-11T15:05:00Z'));
+
+    const result = await handleProposalSmsReply(ctx('N not real work'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'rejected' });
+    expect((await h.proposalRepo.findById(TENANT, low.id))?.status).toBe('rejected');
+    // The older proposal is untouched — targeting honored the LOW anchor.
+    expect((await h.proposalRepo.findById(TENANT, older.id))?.status).toBe('ready_for_review');
+    const rejected = h.auditRepo
+      .getAll()
+      .find((e) => e.eventType === 'proposal.rejected');
+    expect(rejected?.entityId).toBe(low.id);
+  });
+
+  it('a review_required render supersedes an open edit session — Y targets the LOW proposal (and is blocked)', async () => {
+    const h = makeHarness({ interpretEdit: async () => ({ message: 'X' }) });
+    const older = await seedPendingProposal(h, TENANT, {}, new Date('2026-06-11T15:00:00Z'));
+    h.deps.now = () => new Date('2026-06-11T15:01:00Z');
+    await handleProposalSmsReply(ctx('EDIT'), h.deps); // session opens for `older`
+    h.sent.length = 0;
+
+    // A LOW proposal is rendered + texted while the session is open.
+    const low = await seedLowConfidenceProposal(h, new Date('2026-06-11T15:02:00Z'));
+
+    h.deps.now = () => new Date('2026-06-11T15:03:00Z');
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    // The Y belongs to the newer (LOW) message — not edit text for the older
+    // one, and never an approval of a low-confidence proposal.
+    expect(result).toMatchObject({
+      handled: true,
+      reason: 'approve_blocked_low_confidence',
+    });
+    expect((await h.proposalRepo.findById(TENANT, low.id))?.status).toBe('ready_for_review');
+    expect((await h.proposalRepo.findById(TENANT, older.id))?.status).toBe('ready_for_review');
+    expect(h.smsEventRepo.events.find((e) => e.kind === 'edit_request')).toBeUndefined();
+    const session = h.smsEventRepo.events.find((e) => e.kind === 'edit_session_opened');
+    expect(session?.consumedAt).toBeInstanceOf(Date);
+    const events = h.auditRepo.getAll().map((e) => e.eventType);
+    expect(events).toContain('proposal.sms_edit_session_superseded');
+    expect(events).toContain('proposal.sms_approve_blocked_low_confidence');
+  });
+
+  it('N after a superseding review_required render rejects the LOW proposal', async () => {
+    const h = makeHarness({ interpretEdit: async () => ({ message: 'X' }) });
+    const older = await seedPendingProposal(h, TENANT, {}, new Date('2026-06-11T15:00:00Z'));
+    h.deps.now = () => new Date('2026-06-11T15:01:00Z');
+    await handleProposalSmsReply(ctx('EDIT'), h.deps);
+
+    const low = await seedLowConfidenceProposal(h, new Date('2026-06-11T15:02:00Z'));
+
+    h.deps.now = () => new Date('2026-06-11T15:03:00Z');
+    const result = await handleProposalSmsReply(ctx('N'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'rejected' });
+    expect((await h.proposalRepo.findById(TENANT, low.id))?.status).toBe('rejected');
+    expect((await h.proposalRepo.findById(TENANT, older.id))?.status).toBe('ready_for_review');
+    expect(h.smsEventRepo.events.find((e) => e.kind === 'edit_request')).toBeUndefined();
+  });
+});

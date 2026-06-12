@@ -42,7 +42,7 @@ import { approveProposal, rejectProposal } from '../../proposals/actions';
 import { routeUnsupervisedProposal } from '../../proposals/auto-approve';
 import { renderProposalSms } from '../../proposals/sms/render';
 import { payloadHeadlineCents } from '../../proposals/payload-money';
-import type { ProposalSmsEventRepository } from '../../proposals/sms/sms-event';
+import type { ProposalSmsEventRepository, OutboundAnchorKind } from '../../proposals/sms/sms-event';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import { createAuditEvent, type AuditRepository } from '../../audit/audit';
 import type { SettingsRepository } from '../../settings/settings';
@@ -169,6 +169,7 @@ export interface OneTapFallbackDeps {
     tenantId: string;
     proposalId: string;
     body: string;
+    kind: OutboundAnchorKind;
   }) => Promise<void>;
 }
 
@@ -373,11 +374,18 @@ async function sendOneTapFallback(
         ...(fallback.buildApproveUrl ? { buildApproveUrl: fallback.buildApproveUrl } : {}),
         ...(fallback.recordSmsEvent
           ? {
-              onSmsSent: async ({ body }: { body: string }) =>
+              onSmsSent: async ({
+                body,
+                kind,
+              }: {
+                body: string;
+                kind: OutboundAnchorKind;
+              }) =>
                 fallback.recordSmsEvent!({
                   tenantId: ref.tenantId,
                   proposalId: proposal.id,
                   body,
+                  kind,
                 }),
             }
           : {}),
@@ -398,8 +406,11 @@ async function sendOneTapFallback(
               summary: proposal.summary,
               payload: proposal.payload,
             },
-            { approveUrl },
+            { approveUrl: approveUrl || undefined },
           ),
+        // RV-074 (F-4) — pass payload so the routing site can guard
+        // low/very_low proposals against one-tap Y-able links.
+        payload: proposal.payload,
       },
     );
     return result.smsSent;
