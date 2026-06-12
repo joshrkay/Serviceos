@@ -300,6 +300,3 @@ export function createIntegrationsRouter(deps: IntegrationsRouteDeps): Router {
 
   return router;
 }
-
-/** Pool-only export for typing in app.ts wiring. */
-export type IntegrationsRoutePool = Pool;
