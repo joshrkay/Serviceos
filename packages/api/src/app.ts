@@ -2020,6 +2020,8 @@ export function createApp(): express.Express {
           },
         }
       : {}),
+    // RV-143 — durable tail for the emergency page-retry ladder.
+    callMeBackRepo,
     leadRepo,
     // P11-001: lookup-skill family wiring. Without these the adapter
     // falls back to a "let me get a person to help" line on lookup_*

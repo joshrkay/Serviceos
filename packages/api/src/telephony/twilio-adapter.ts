@@ -95,6 +95,8 @@ import {
 import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
 import { detectEmergency } from '../ai/agents/customer-calling/emergency-detector';
+import { armEmergencyPageLadder } from './emergency-page-retry';
+import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
 import type { SettingsRepository } from '../settings/settings';
 import type { UserRepository } from '../users/user';
 import { isApproverPhone } from '../proposals/approver-identity';
@@ -278,6 +280,12 @@ export interface TwilioAdapterDeps {
    * unsupervised routing). Threaded through to the voice-turn processor.
    */
   voiceApprovalOneTap?: OneTapFallbackDeps;
+  /**
+   * RV-143 — durable exhaustion fallback for the emergency page-retry
+   * ladder (the same repo the call-me-back worker sweeps). Optional;
+   * without it the ladder still pages but has no durable tail.
+   */
+  callMeBackRepo?: CallMeBackRepository;
 }
 
 /**
@@ -954,7 +962,59 @@ export class TwilioGatherAdapter {
       return null;
     }
     await this.processor.executeSideEffects(session, effects, tenantId);
+    this.armEmergencyPageLadder(session, speechResult, tenantId);
     return effects;
+  }
+
+  /**
+   * RV-143 — arm the owner page-retry ladder the moment an emergency
+   * escalation starts. Each tick (2-minute intervals, ×3) re-checks whether
+   * the transfer was answered (the /dial-result success branch stamps
+   * `terminalReason === 'transferred'`); unanswered ticks page the owner
+   * and the exhausted ladder lands a durable URGENT call_me_back task.
+   * No-op without an SMS provider.
+   */
+  private armEmergencyPageLadder(
+    session: VoiceSession,
+    utterance: string,
+    tenantId: string,
+  ): void {
+    const deliveryProvider = this.deps.deliveryProvider;
+    if (!deliveryProvider) return;
+    const callerPhone = this.callerIdBySession.get(session.id) || undefined;
+    const sessionId = session.id;
+    armEmergencyPageLadder(
+      {
+        tenantId,
+        sessionId,
+        ...(session.callSid ? { callSid: session.callSid } : {}),
+        ...(callerPhone ? { callerPhone } : {}),
+        emergencyDescription: utterance.slice(0, 160),
+        businessName: this.deps.businessName,
+      },
+      {
+        sendSms: (args) => deliveryProvider.sendSms(args),
+        resolvePagePhone: async () => {
+          if (!this.deps.settingsRepo) return null;
+          try {
+            const settings = await this.deps.settingsRepo.findByTenant(tenantId);
+            return settings?.ownerPhone ?? settings?.transferNumber ?? null;
+          } catch {
+            return null;
+          }
+        },
+        // Resolved when the dispatcher transfer was ANSWERED. A reaped /
+        // missing session is treated as unresolved — bias toward paging on
+        // an emergency.
+        isResolved: () => {
+          const live = this.deps.store.peek(sessionId);
+          if (!live) return false;
+          return live.terminalReason === 'transferred';
+        },
+        ...(this.deps.callMeBackRepo ? { callMeBackRepo: this.deps.callMeBackRepo } : {}),
+        ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+      },
+    );
   }
 
   async processCallerUtterance(opts: {
