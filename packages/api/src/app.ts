@@ -1323,6 +1323,9 @@ export function createApp(): express.Express {
     timeEntryService: new TimeEntryService(timeEntryRepo, auditRepo),
     feedbackRepo: feedbackRequestRepo,
     delayNotificationService,
+    // RV-141 — emergency_dispatch owner page goes through the same
+    // delivery provider as every other dispatch SMS.
+    ...(messageDelivery ? { emergencySmsSender: messageDelivery } : {}),
   });
   // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
   // default to `proposal-run:{tenant}:{id}` when callers omit one.

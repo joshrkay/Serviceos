@@ -275,6 +275,13 @@ function checkGlobalGuards(
               ...updatedContext.extractedEntities,
               emergencyDescription: event.utterance,
               detectedKeywords: [event.keyword],
+              // Duplicated into entities because the voice-turn processor's
+              // handleCreateProposal persists only {intent, entities,
+              // sessionId, callSid} — the execution handler (RV-141) reads
+              // the customer from here.
+              ...(updatedContext.customerId
+                ? { customerId: updatedContext.customerId }
+                : {}),
             },
             sessionId: updatedContext.sessionId,
             callSid: updatedContext.callSid,

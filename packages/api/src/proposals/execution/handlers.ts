@@ -73,6 +73,10 @@ import { TimeEntryService } from '../../time-tracking/time-entry-service';
 import { FeedbackRequestRepository } from '../../feedback/feedback-request';
 import { DelayNotificationService } from '../../notifications/delay-notifications';
 import { LineItem } from '../../shared/billing-engine';
+import {
+  EmergencyDispatchExecutionHandler,
+  EmergencySmsSender,
+} from './emergency-dispatch-handler';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -498,6 +502,9 @@ export function createExecutionHandlerRegistry(deps?: {
   timeEntryService?: TimeEntryService;
   feedbackRepo?: FeedbackRequestRepository;
   delayNotificationService?: DelayNotificationService;
+  // RV-141 — emergency_dispatch owner page. Optional; absent → the handler
+  // degrades per its own per-dep guards (job-only / passthrough).
+  emergencySmsSender?: EmergencySmsSender;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -579,6 +586,15 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.serviceCreditRepo,
       deps?.googleReplyResolver,
       deps?.reviewPrivateMessageSender,
+      deps?.auditRepo,
+    ),
+    // RV-141 — emergency_dispatch: urgent job + owner SMS page. The
+    // appointment-hold deviation is documented in the handler header.
+    new EmergencyDispatchExecutionHandler(
+      deps?.jobRepo,
+      deps?.locationRepo,
+      deps?.settingsRepo,
+      deps?.emergencySmsSender,
       deps?.auditRepo,
     ),
   ];
