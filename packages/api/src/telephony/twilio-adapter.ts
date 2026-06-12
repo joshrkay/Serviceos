@@ -89,6 +89,7 @@ import { resolveEscalationSettings } from '../settings/settings';
 import type { WhisperCache } from './whisper-cache';
 import {
   createVoiceTurnProcessor,
+  appendAgentTts,
   type VoiceTurnProcessor,
 } from '../ai/voice-turn';
 import type { RepairTemplate } from '../verticals/registry';
@@ -1485,14 +1486,7 @@ export class TwilioGatherAdapter {
     if (transferTwiml) {
       // Still capture any agent TTS line for the transcript so
       // summarizeSession can see "the agent said: connecting you...".
-      const ttsLast = [...sideEffects].reverse().find((e) => e.type === 'tts_play');
-      if (ttsLast && typeof ttsLast.payload.text === 'string') {
-        this.deps.store.appendTranscript(sessionId, {
-          speaker: 'agent',
-          text: ttsLast.payload.text,
-          ts: Date.now(),
-        });
-      }
+      appendAgentTts(this.deps.store, sessionId, sideEffects);
       return transferTwiml;
     }
 
@@ -1501,16 +1495,9 @@ export class TwilioGatherAdapter {
       ...(session.language ? { language: session.language } : {}),
       ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
     });
-    const ttsLast = [...sideEffects].reverse().find((e) => e.type === 'tts_play');
-    if (ttsLast && typeof ttsLast.payload.text === 'string') {
-      // Capture the agent's reply so summarizeSession sees both sides
-      // of the conversation, not just the caller turns.
-      this.deps.store.appendTranscript(sessionId, {
-        speaker: 'agent',
-        text: ttsLast.payload.text,
-        ts: Date.now(),
-      });
-    }
+    // Capture the agent's reply so summarizeSession sees both sides
+    // of the conversation, not just the caller turns.
+    appendAgentTts(this.deps.store, sessionId, sideEffects);
     if (session.machine.currentState === 'terminated' && !session.ended) {
       session.ended = true;
       this.processor.finalizeTerminatedSession(session, sideEffects, 'caller_hangup');

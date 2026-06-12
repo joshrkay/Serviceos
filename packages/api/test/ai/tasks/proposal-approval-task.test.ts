@@ -979,3 +979,149 @@ describe('RV-071 — stage assert: challenge stage requires action=approve', () 
     expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
   });
 });
+
+// ─── ITEM 5 — Voice-channel hardening pins ───────────────────────────────────
+
+describe('ITEM 5(a) — digit-bearing cancel at challenge stage counts as a failed attempt', () => {
+  // "cancel 1 2 3 4" — digit-bearing utterance: the digits are treated as a
+  // code attempt even though the utterance also contains a cancel word.
+  // Only digit-FREE cancels ("cancel", "never mind") exit without penalty.
+  it('"cancel 1 2 3 4" at challenge stage → challenge_failed (not kept_for_later)', async () => {
+    const h = makeHarness({ challenge: '4271' });
+    const proposal = await seedPending(h.proposalRepo, {
+      proposalType: 'record_payment',
+      payload: { customerName: 'Acme Corp', amountCents: 20000 },
+      summary: 'Record $200 payment from Acme',
+    });
+
+    const start = await startVoiceApproval(h.deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Acme payment',
+    });
+    expect(start.outcome).toBe('readback');
+    const confirm = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: 'yes',
+      pending: start.pending!,
+    });
+    expect(confirm.outcome).toBe('challenge_prompt');
+
+    // "cancel 1 2 3 4" — digit-bearing → treated as a code attempt, not a cancel
+    const result = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: 'cancel 1 2 3 4',
+      pending: confirm.pending!,
+    });
+    expect(result.outcome).toBe('challenge_failed');
+    expect(result.sessionState).toMatchObject({ challengeFailCount: 1 });
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+  });
+
+  it('digit-free "cancel" at challenge stage → kept_for_later without burning an attempt', async () => {
+    const h = makeHarness({ challenge: '4271' });
+    await seedPending(h.proposalRepo, {
+      proposalType: 'record_payment',
+      payload: { customerName: 'Acme Corp', amountCents: 20000 },
+      summary: 'Record $200 payment from Acme',
+    });
+
+    const start = await startVoiceApproval(h.deps, { ...ref, action: 'approve', reference: 'the Acme payment' });
+    const confirm = await continueVoiceApproval(h.deps, { ...ref, utterance: 'yes', pending: start.pending! });
+    expect(confirm.outcome).toBe('challenge_prompt');
+
+    const result = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: 'cancel',
+      pending: confirm.pending!,
+    });
+    expect(result.outcome).toBe('kept_for_later');
+    // No attempt burned — sessionState should not be emitted or carry no failCount increment
+    expect(result.sessionState).toBeUndefined();
+  });
+});
+
+describe('ITEM 5(b) — post-lockout one-tap SMS send-once flag', () => {
+  async function reachLockout(h: Harness) {
+    const proposal = await seedPending(h.proposalRepo, {
+      proposalType: 'record_payment',
+      payload: { customerName: 'Acme Corp', amountCents: 20000 },
+      summary: 'Record $200 payment from Acme',
+    });
+    const start = await startVoiceApproval(h.deps, { ...ref, action: 'approve', reference: 'the Acme payment' });
+    const confirm = await continueVoiceApproval(h.deps, { ...ref, utterance: 'yes', pending: start.pending! });
+
+    let pending = confirm.pending!;
+    let sessionState: VoiceApprovalSessionState | undefined;
+    for (let i = 0; i < 3; i++) {
+      const r = await continueVoiceApproval(h.deps, { ...ref, sessionState, utterance: '0 0 0 0', pending });
+      pending = r.pending!;
+      sessionState = { ...sessionState, ...r.sessionState };
+    }
+    expect(sessionState?.challengeLockedOut).toBe(true);
+    return { proposal, lockedState: sessionState! };
+  }
+
+  it('first post-lockout refusal sends the SMS and sets oneTapSmsSentAfterLockout', async () => {
+    const h = makeHarness({ challenge: '4271' });
+    const { lockedState } = await reachLockout(h);
+    const initialSentCount = h.sent.length;
+
+    const proposal2 = await seedPending(h.proposalRepo, {
+      proposalType: 'record_payment',
+      payload: { customerName: 'Beta Corp', amountCents: 5000 },
+      summary: 'Record $50 payment from Beta Corp',
+    });
+
+    const refused = await startVoiceApproval(h.deps, {
+      ...ref,
+      sessionState: lockedState,
+      action: 'approve',
+      reference: 'the Beta payment',
+    });
+    expect(refused.outcome).toBe('challenge_lockout');
+    expect(h.sent.length).toBe(initialSentCount + 1); // SMS sent on first post-lockout attempt
+    expect(refused.sessionState).toMatchObject({ oneTapSmsSentAfterLockout: true });
+    expect((await h.proposalRepo.findById(TENANT, proposal2.id))?.status).toBe('ready_for_review');
+  });
+
+  it('second post-lockout refusal does NOT re-send the SMS; copy says link already sent', async () => {
+    const h = makeHarness({ challenge: '4271' });
+    const { lockedState } = await reachLockout(h);
+
+    await seedPending(h.proposalRepo, {
+      proposalType: 'record_payment',
+      payload: { customerName: 'Beta Corp', amountCents: 5000 },
+      summary: 'Record $50 payment from Beta Corp',
+    });
+
+    // First refusal — sets the flag
+    const first = await startVoiceApproval(h.deps, {
+      ...ref,
+      sessionState: lockedState,
+      action: 'approve',
+      reference: 'the Beta payment',
+    });
+    const sentAfterFirst = h.sent.length;
+    const stateAfterFirst: VoiceApprovalSessionState = { ...lockedState, ...first.sessionState };
+
+    await seedPending(h.proposalRepo, {
+      proposalType: 'record_payment',
+      payload: { customerName: 'Gamma Corp', amountCents: 3000 },
+      summary: 'Record $30 payment from Gamma Corp',
+    });
+
+    // Second refusal — should NOT re-send
+    const second = await startVoiceApproval(h.deps, {
+      ...ref,
+      sessionState: stateAfterFirst,
+      action: 'approve',
+      reference: 'the Gamma payment',
+    });
+    expect(second.outcome).toBe('challenge_lockout');
+    expect(h.sent.length).toBe(sentAfterFirst); // no additional SMS
+    expect(second.speak).toContain('already sent');
+    // sessionState not emitted again (no new changes)
+    expect(second.sessionState).toBeUndefined();
+  });
+});
