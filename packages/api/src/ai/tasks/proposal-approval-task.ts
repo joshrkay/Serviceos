@@ -38,7 +38,14 @@
  */
 import type { Proposal, ProposalRepository } from '../../proposals/proposal';
 import { actionClassForProposalType } from '../../proposals/proposal';
-import { approveChainSet, rejectProposal, editProposal } from '../../proposals/actions';
+import {
+  approveChainSet,
+  type ApproveChainSetResult,
+  editProposal,
+  formatChainSetApprovalMessage,
+  rejectProposal,
+  summarizeChainSetResult,
+} from '../../proposals/actions';
 import { routeUnsupervisedProposal } from '../../proposals/auto-approve';
 import { renderProposalSms, renderReapprovalSms } from '../../proposals/sms/render';
 import { payloadHeadlineCents } from '../../proposals/payload-money';
@@ -583,7 +590,7 @@ async function executeApprove(
   let approved: Proposal;
   let approvedCount = 0;
   let skippedCount = 0;
-  let skipped: { id: string; reason: string }[] = [];
+  let skipped: ApproveChainSetResult['skipped'] = [];
   try {
     const result = await approveChainSet(
       deps.proposalRepo,
@@ -597,10 +604,11 @@ async function executeApprove(
         ? (tenantId, id) => deps.smsEventRepo!.hasUnappliedEditRequest(tenantId, id)
         : undefined,
     );
+    const summary = summarizeChainSetResult(result);
     approved = result.approved[0];
-    approvedCount = result.approved.length;
-    skippedCount = result.skipped.filter((skip) => skip.reason !== 'not_reviewable').length;
-    skipped = result.skipped;
+    approvedCount = summary.approvedCount;
+    skippedCount = summary.followCount;
+    skipped = summary.skipped;
   } catch (err) {
     if (err instanceof ValidationError) {
       await audit(deps, ref, 'proposal.voice_approve_blocked', proposalId, {
@@ -631,14 +639,10 @@ async function executeApprove(
     skipped,
   });
   return {
-    speak:
-      approvedCount > 1 || skippedCount > 0
-        ? `Approved ${approvedCount} linked ${approvedCount === 1 ? 'action' : 'actions'}${
-            skippedCount > 0
-              ? ` — ${skippedCount} ${skippedCount === 1 ? 'follows' : 'follow'} separately.`
-              : '.'
-          }`
-        : `Approved — "${approved.summary}" will run shortly.`,
+    speak: formatChainSetApprovalMessage(
+      { approvedCount, followCount: skippedCount, skipped },
+      `Approved — "${approved.summary}" will run shortly.`,
+    ),
     pending: null,
     outcome: 'approved',
     proposalId: approved.id,

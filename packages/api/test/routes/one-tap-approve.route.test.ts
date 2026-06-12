@@ -281,6 +281,8 @@ describe('GET /public/proposals/one-tap-approve', () => {
         expect.objectContaining({
           eventType: 'proposal.one_tap_approved',
           metadata: expect.objectContaining({
+            approvedCount: 2,
+            skippedCount: 1,
             skipped: [{ id: sendEstimate.id, reason: 'non_capture' }],
           }),
         }),

@@ -1,4 +1,5 @@
 import { Proposal, ProposalType } from './proposal';
+import type { AddNotePayload } from './contracts/notes';
 
 /**
  * Multi-action chaining — shared types + helpers.
@@ -282,7 +283,7 @@ export function applyChainMetadata(
   }
 }
 
-function targetKindForNoteRef(entityKind: ChainEntityKind): string {
+function targetKindForNoteRef(entityKind: ChainEntityKind): AddNotePayload['targetKind'] {
   switch (entityKind) {
     case 'customerId':
       return 'customer';

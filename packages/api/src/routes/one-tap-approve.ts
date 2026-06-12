@@ -23,7 +23,11 @@ import {
   createOneTapApproveToken,
   verifyOneTapApproveToken,
 } from '../proposals/auto-approve';
-import { approveChainSet } from '../proposals/actions';
+import {
+  approveChainSet,
+  formatChainSetApprovalMessage,
+  summarizeChainSetResult,
+} from '../proposals/actions';
 import type { ProposalRepository } from '../proposals/proposal';
 import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
 import {
@@ -345,8 +349,7 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
           : undefined,
       );
       const approved = result.approved[0];
-      const approvedCount = result.approved.length;
-      const skippedCount = result.skipped.filter((skip) => skip.reason !== 'not_reviewable').length;
+      const summary = summarizeChainSetResult(result);
 
       // P12-004 — record that this approval came through the one-tap SMS
       // link specifically (in addition to the standard proposal.approved
@@ -359,7 +362,12 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
           eventType: 'proposal.one_tap_approved',
           entityType: 'proposal',
           entityId: verified.proposalId,
-          metadata: { channel: 'sms_one_tap', skipped: result.skipped },
+          metadata: {
+            channel: 'sms_one_tap',
+            approvedCount: summary.approvedCount,
+            skippedCount: summary.followCount,
+            skipped: summary.skipped,
+          },
         }),
       );
 
@@ -369,13 +377,10 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
         .send(
           page(
             'Approved',
-            approvedCount > 1 || skippedCount > 0
-              ? `Approved ${approvedCount} linked ${approvedCount === 1 ? 'action' : 'actions'}${
-                  skippedCount > 0
-                    ? ` — ${skippedCount} ${skippedCount === 1 ? 'follows' : 'follow'} separately.`
-                    : '.'
-                }`
-              : `”${escapeHtml(approved?.summary ?? 'Proposal')}” has been approved and will execute shortly.`,
+            formatChainSetApprovalMessage(
+              summary,
+              `”${escapeHtml(approved?.summary ?? 'Proposal')}” has been approved and will execute shortly.`,
+            ),
           ),
         );
     } catch (err) {

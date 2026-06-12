@@ -28,7 +28,37 @@ export interface ApproveChainSetResult {
   }[];
 }
 
+export interface ChainSetApprovalSummary {
+  approvedCount: number;
+  /** Skips that require a separate follow-up; excludes already non-reviewable siblings. */
+  followCount: number;
+  skipped: ApproveChainSetResult['skipped'];
+}
+
 export type PendingEditChecker = (tenantId: string, proposalId: string) => Promise<boolean>;
+
+export function summarizeChainSetResult(result: ApproveChainSetResult): ChainSetApprovalSummary {
+  return {
+    approvedCount: result.approved.length,
+    followCount: result.skipped.filter((skip) => skip.reason !== 'not_reviewable').length,
+    skipped: result.skipped,
+  };
+}
+
+export function formatChainSetApprovalMessage(
+  summary: ChainSetApprovalSummary,
+  fallbackMessage: string,
+): string {
+  if (summary.approvedCount > 1 || summary.followCount > 0) {
+    const actionWord = summary.approvedCount === 1 ? 'action' : 'actions';
+    const follows =
+      summary.followCount > 0
+        ? ` — ${summary.followCount} ${summary.followCount === 1 ? 'follows' : 'follow'} separately.`
+        : '.';
+    return `Approved ${summary.approvedCount} linked ${actionWord}${follows}`;
+  }
+  return fallbackMessage;
+}
 
 /**
  * RV-073 — the transport an approval/rejection decision arrived on.
@@ -193,20 +223,7 @@ export async function approveChainSet(
   if (!head) throw new NotFoundError('Proposal', headId);
 
   const headMeta = chainMetaFor(head);
-  if (!headMeta) {
-    const approved = await approveProposal(
-      proposalRepo,
-      tenantId,
-      headId,
-      actorId,
-      actorRole,
-      auditRepo,
-      channel,
-    );
-    return { approved: [approved], skipped: [] };
-  }
-
-  if (headMeta.chainIndex !== 0) {
+  if (!headMeta || headMeta.chainIndex !== 0) {
     const approved = await approveProposal(
       proposalRepo,
       tenantId,
@@ -229,9 +246,6 @@ export async function approveChainSet(
     channel,
   );
   const approved: Proposal[] = [approvedHead];
-  if (!approved.some((p) => p.id === headId)) {
-    throw new AppError('CHAIN_HEAD_APPROVAL_INVARIANT', 'Approved chain set is missing its head', 500);
-  }
   const skipped: ApproveChainSetResult['skipped'] = [];
 
   const siblings = await proposalRepo.findByChain(tenantId, headMeta.chainId);
