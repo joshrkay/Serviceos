@@ -14,6 +14,9 @@ import {
   setSupervisorPresenceLoader,
   _resetSupervisorPresenceCache,
 } from '../../src/ai/supervisor-presence';
+import { complaintSeverity } from '../../src/workers/voice-action-router';
+import { assertValidProposalPayload } from '../../src/proposals/contracts';
+import { missingFieldsFor } from '../../src/proposals/proposal';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { IntentClassification } from '../../src/ai/orchestration/intent-classifier';
@@ -1498,5 +1501,136 @@ describe('RV-051 — voice clock-in confirmation through the router', () => {
     expect(all).toHaveLength(1);
     expect(all[0].proposalType).toBe('voice_clarification');
     expect(all[0].payload.reason).toBe('ambiguous_entity');
+  });
+});
+
+describe('RV-080 — complaint intent routing', () => {
+  function complaintClassification(entities: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      intentType: 'complaint',
+      confidence: 0.9,
+      reasoning: 'caller is reporting dissatisfaction',
+      extractedEntities: entities,
+    });
+  }
+
+  it('creates a [COMPLAINT]-prefixed add_note AND a callback proposal — no new proposal types', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      complaintClassification({
+        customerName: 'Mrs. Patel',
+        noteBody: 'the leak came back two days after the repair',
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'op-1',
+        transcript: 'Mrs. Patel called, really unhappy — the leak came back two days after the repair',
+        conversationId: 'conv-1',
+      }),
+      silentLogger(),
+    );
+
+    const all = await proposalRepo.findByTenant('t-1');
+    expect(all.map((p) => p.proposalType).sort()).toEqual(['add_note', 'callback']);
+
+    const note = all.find((p) => p.proposalType === 'add_note')!;
+    expect(note.payload.body).toBe('[COMPLAINT] the leak came back two days after the repair');
+    expect(note.payload.targetKind).toBe('customer');
+    expect(note.payload.targetReference).toBe('Mrs. Patel');
+    expect(note.summary).toBe('Complaint from Mrs. Patel');
+    // Capture-class, no trust tier → always human-confirmed.
+    expect(note.status).toBe('draft');
+    // Contract-valid against the EXISTING add_note schema.
+    expect(() => assertValidProposalPayload('add_note', note.payload)).not.toThrow();
+
+    const callback = all.find((p) => p.proposalType === 'callback')!;
+    expect(callback.payload.reason).toBe('customer_complaint_followup');
+    expect(callback.payload.transcript).toContain('the leak came back');
+    expect(callback.summary).toBe('Complaint follow-up — call Mrs. Patel back');
+    expect(callback.status).toBe('draft');
+    expect(() => assertValidProposalPayload('callback', callback.payload)).not.toThrow();
+    // Normal severity: no _meta markers on either payload.
+    expect(note.payload._meta).toBeUndefined();
+    expect(callback.payload._meta).toBeUndefined();
+  });
+
+  it('high-severity wording flags _meta.markers with reason complaint_high_severity on BOTH proposals', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      complaintClassification({ customerName: 'Mr. Jones' }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'op-1',
+        transcript: 'Mr. Jones says the job was botched and he wants a refund or he is calling his lawyer',
+      }),
+      silentLogger(),
+    );
+
+    const all = await proposalRepo.findByTenant('t-1');
+    const note = all.find((p) => p.proposalType === 'add_note')!;
+    const callback = all.find((p) => p.proposalType === 'callback')!;
+    for (const proposal of [note, callback]) {
+      const meta = proposal.payload._meta as { markers?: Array<{ reason: string }> };
+      expect(meta?.markers?.[0]?.reason).toBe('complaint_high_severity');
+      // The marker must survive the contract gate.
+      expect(() => assertValidProposalPayload(proposal.proposalType, proposal.payload)).not.toThrow();
+      // Still draft — severity never auto-executes anything.
+      expect(proposal.status).toBe('draft');
+    }
+    expect(note.summary).toBe('HIGH-SEVERITY complaint from Mr. Jones');
+    expect(callback.summary).toBe('HIGH-SEVERITY complaint — call Mr. Jones back');
+  });
+
+  it('verified caller-ID identity pins the note to the caller (targetId, customer)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([complaintClassification({})]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'op-1',
+        transcript: 'I want to file a complaint about the install',
+        customerId: 'cust-verified-1',
+      }),
+      silentLogger(),
+    );
+
+    const note = (await proposalRepo.findByTenant('t-1')).find((p) => p.proposalType === 'add_note')!;
+    expect(note.payload.targetKind).toBe('customer');
+    expect(note.payload.targetId).toBe('cust-verified-1');
+    // Note body falls back to the transcript when the classifier extracted no noteBody.
+    expect(note.payload.body).toBe('[COMPLAINT] I want to file a complaint about the install');
+  });
+
+  it('no resolvable target → note holds in draft with targetId flagged missing', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([complaintClassification({})]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'op-1', transcript: 'someone called to complain about a job' }),
+      silentLogger(),
+    );
+
+    const note = (await proposalRepo.findByTenant('t-1')).find((p) => p.proposalType === 'add_note')!;
+    expect(note.status).toBe('draft');
+    expect(missingFieldsFor(note)).toContain('targetId');
+  });
+
+  it('complaintSeverity: deterministic keyword branch', () => {
+    expect(complaintSeverity('I want my money back, this is going to my attorney')).toBe('high');
+    expect(complaintSeverity('I will report you to the Better Business Bureau')).toBe('high');
+    expect(complaintSeverity('he threatened legal action')).toBe('high');
+    expect(complaintSeverity('the tech left mud on the carpet, please send someone')).toBe('normal');
+    expect(complaintSeverity('')).toBe('normal');
   });
 });

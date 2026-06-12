@@ -75,6 +75,12 @@ export type IntentType =
   // (aging estimates, unpaid invoices, unanswered recovery threads).
   // Read-only; same extendedIntents gating.
   | 'lookup_pending_items'
+  // Phase-2 Track A (RV-080) — caller/operator reports dissatisfaction
+  // with completed work or service. PROPOSAL-DRIVING (pinned-prefix
+  // add_note + callback for owner follow-up — both existing proposal
+  // types, dispatched by a dedicated router handler). Same
+  // extendedIntents gating as the Track A lookups.
+  | 'complaint'
   // P11-002: caller asks to switch the call language ("english please" /
   // "hablo español"). The adapter consumes this as a signal to flip the
   // session language — it is NOT a proposal-driving intent.
@@ -135,6 +141,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'lookup_day_overview',
   'lookup_digest',
   'lookup_pending_items',
+  'complaint',
   'language_switch',
   'operator_request',
   'confirm',
@@ -808,9 +815,20 @@ export const EXTENDED_INTENTS_PROMPT_SECTION = `Extended operator intents (this 
                            Examples: "What am I waiting on?"
                                      "What's still out there?"
                                      "Which estimates haven't been accepted?"
+- "complaint"            — the caller (or an operator relaying a call)
+                           reports DISSATISFACTION with work or service
+                           already delivered: poor workmanship, rude crew,
+                           wrong charge, wants to escalate. Extract the
+                           complaint text into noteBody, the customer into
+                           customerName, and any job into jobReference.
+                           Distinct from emergency_dispatch (active
+                           danger) and from update_* edits.
+                           Examples: "I want to file a complaint about the install"
+                                     "Mrs. Patel called furious about the leak coming back"
+                                     "I'm really unhappy with the work and I want a refund"
 Notes:
-- These are READ-ONLY intents — never classify a command that creates or
-  changes a record as one of them.
+- The lookup_* entries above are READ-ONLY intents — never classify a
+  command that creates or changes a record as one of them.
 - Do not change the JSON output schema.`;
 
 /**
@@ -843,6 +861,17 @@ const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: Rea
     patterns: [
       /\bwhat\s+(?:am\s+i|are\s+we)\s+(?:still\s+)?waiting\s+on\b/i,
       /\bwhat(?:'s| is)\s+(?:still\s+)?(?:out\s+there|outstanding)\s+waiting\b/i,
+    ],
+  },
+  {
+    // Tight, explicit complaint phrasings only — general unhappiness is
+    // left to the LLM (with the prompt section) / escalation paths so a
+    // vague "I'm not happy" never silently becomes a complaint record.
+    intent: 'complaint',
+    patterns: [
+      /\b(?:file|make|register|lodge)\s+a\s+(?:formal\s+)?complaint\b/i,
+      /\bi\s+(?:want|need|would like|'d like)\s+to\s+complain\b/i,
+      /\bi\s+have\s+a\s+complaint\b/i,
     ],
   },
 ];

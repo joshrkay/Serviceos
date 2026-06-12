@@ -654,7 +654,7 @@ import {
 
 describe('Phase-2 Track A — extended operator intents', () => {
   it('parseClassifierJson accepts the new intents', () => {
-    for (const intentType of ['lookup_day_overview', 'lookup_digest', 'lookup_pending_items'] as const) {
+    for (const intentType of ['lookup_day_overview', 'lookup_digest', 'lookup_pending_items', 'complaint'] as const) {
       const out = parseClassifierJson(JSON.stringify({ intentType, confidence: 0.9 }));
       expect(out?.intentType).toBe(intentType);
     }
@@ -670,6 +670,16 @@ describe('Phase-2 Track A — extended operator intents', () => {
     expect(matchExtendedIntentPhrase('What am I waiting on?')).toBe('lookup_pending_items');
     expect(matchExtendedIntentPhrase('what are we still waiting on')).toBe('lookup_pending_items');
     expect(matchExtendedIntentPhrase('I am waiting on a delivery tomorrow')).toBeNull();
+  });
+
+  it('matchExtendedIntentPhrase matches only explicit complaint phrasings', () => {
+    expect(matchExtendedIntentPhrase('I want to file a complaint about the install')).toBe('complaint');
+    expect(matchExtendedIntentPhrase('I would like to complain')).toBe('complaint');
+    expect(matchExtendedIntentPhrase('I have a complaint')).toBe('complaint');
+    // Vague unhappiness is NOT deterministically a complaint — the LLM /
+    // escalation paths own it (e.g. the vague-complaint-escalated corpus
+    // script must keep escalating, not minting records).
+    expect(matchExtendedIntentPhrase("I'm not happy with my last service.")).toBeNull();
   });
 
   it('matchExtendedIntentPhrase matches the canonical digest phrasings only', () => {
