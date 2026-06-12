@@ -23,6 +23,7 @@ export {
   createProposalSmsEvent,
   InMemoryProposalSmsEventRepository,
   PgProposalSmsEventRepository,
+  type OutboundAnchorKind,
 } from './sms-event';
 export { createLlmEditInterpreter } from './interpret-edit';
 

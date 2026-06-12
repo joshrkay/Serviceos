@@ -4104,6 +4104,24 @@ export const MIGRATIONS = {
         ));
   `,
 
+  // RV-074 review fix: widen the proposal_sms_events kind CHECK from 156 to
+  // allow 'review_required_rendered' — the outbound anchor row recorded when
+  // a LOW/VERY_LOW-confidence proposal SMS ("needs review in app — reply N
+  // to reject") goes out. Without an anchor, the reply transport's
+  // findRecentOutbound targeted the previous (older) render, so the N the
+  // message itself solicits would reject the WRONG proposal. Mirrors the
+  // CHECK-widening style of 164_dispatch_entity_daily_digest.
+  '165_proposal_sms_events_review_required_kind': `
+    ALTER TABLE proposal_sms_events
+      DROP CONSTRAINT IF EXISTS proposal_sms_events_kind_check;
+    ALTER TABLE proposal_sms_events
+      ADD CONSTRAINT proposal_sms_events_kind_check
+        CHECK (kind IN (
+          'proposal_rendered','reapproval_rendered','clarification_sent',
+          'reply_approve','reply_reject','edit_session_opened','edit_request',
+          'review_required_rendered'
+        ));
+  `,
   // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy engine).
   // Note: migrations 165 and 166 are reserved by parallel sibling tracks.
   //

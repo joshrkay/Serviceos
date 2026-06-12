@@ -6,6 +6,7 @@ import { assertValidProposalPayload } from '../proposals/contracts';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
 import { routeUnsupervisedProposal } from '../proposals/auto-approve';
 import { renderProposalSms } from '../proposals/sms/render';
+import type { OutboundAnchorKind } from '../proposals/sms/sms-event';
 import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
 import type { AuditRepository } from '../audit/audit';
 import type { UnsupervisedProposalRouting } from '../settings/settings';
@@ -124,12 +125,14 @@ export interface UnsupervisedRoutingDeps extends RouteUnsupervisedProposalDeps {
   resolveRouting?: (tenantId: string) => Promise<UnsupervisedProposalRouting | undefined>;
   /**
    * P2-034 — records the outbound proposal SMS (`proposal_sms_events`,
-   * kind `proposal_rendered`) that anchors the inbound reply transport.
+   * kind `proposal_rendered`, or `review_required_rendered` for the RV-074
+   * low-confidence form) that anchors the inbound reply transport.
    */
   recordSmsEvent?: (args: {
     tenantId: string;
     proposalId: string;
     body: string;
+    kind: OutboundAnchorKind;
   }) => Promise<void>;
 }
 
@@ -1348,11 +1351,18 @@ export function createVoiceActionRouterWorker(
                 // owner is answering.
                 ...(ur.recordSmsEvent
                   ? {
-                      onSmsSent: async ({ body }: { body: string }) =>
+                      onSmsSent: async ({
+                        body,
+                        kind,
+                      }: {
+                        body: string;
+                        kind: OutboundAnchorKind;
+                      }) =>
                         ur.recordSmsEvent!({
                           tenantId,
                           proposalId: proposal.id,
                           body,
+                          kind,
                         }),
                     }
                   : {}),
@@ -1375,8 +1385,11 @@ export function createVoiceActionRouterWorker(
                       summary: proposal.summary,
                       payload: proposal.payload,
                     },
-                    { approveUrl },
+                    { approveUrl: approveUrl || undefined },
                   ),
+                // RV-074 (F-4) — pass payload so the routing site can guard
+                // low/very_low proposals against one-tap Y-able links.
+                payload: proposal.payload,
               },
             );
           } catch (err) {

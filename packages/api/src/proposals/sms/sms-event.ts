@@ -5,6 +5,10 @@
  *
  *   outbound `proposal_rendered`     — the approval request we texted the owner
  *   outbound `reapproval_rendered`   — re-render after an SMS edit
+ *   outbound `review_required_rendered` — RV-074 low/very_low-confidence
+ *     send ("needs review in app — reply N to reject"). No approve
+ *     affordance, but it IS the owner's latest conversation turn, so it
+ *     must anchor reply targeting like any other render.
  *   outbound `clarification_sent`    — the one-time "Reply Y/N/EDIT" nudge
  *   inbound  `reply_approve` / `reply_reject` — the owner's decision
  *   inbound  `edit_session_opened`   — EDIT received; `expiresAt` = +10 min
@@ -27,11 +31,23 @@ export type ProposalSmsDirection = 'outbound' | 'inbound';
 export type ProposalSmsEventKind =
   | 'proposal_rendered'
   | 'reapproval_rendered'
+  | 'review_required_rendered'
   | 'clarification_sent'
   | 'reply_approve'
   | 'reply_reject'
   | 'edit_session_opened'
   | 'edit_request';
+
+/**
+ * The two outbound kinds that anchor the inbound reply transport — the ones
+ * `findRecentOutbound` returns and Y/N/EDIT replies resolve against. Named
+ * centrally to eliminate the five inline `'proposal_rendered' |
+ * 'review_required_rendered'` unions spread across callers.
+ */
+export type OutboundAnchorKind = Extract<
+  ProposalSmsEventKind,
+  'proposal_rendered' | 'review_required_rendered'
+>;
 
 export interface ProposalSmsEvent {
   id: string;
@@ -94,9 +110,10 @@ export function createProposalSmsEvent(
 export interface ProposalSmsEventRepository {
   create(event: ProposalSmsEvent): Promise<ProposalSmsEvent>;
   /**
-   * Most recent outbound `proposal_rendered` / `reapproval_rendered`
-   * events, newest first. The reply handler walks these and acts on the
-   * first one whose proposal is still actionable.
+   * Most recent outbound `proposal_rendered` / `reapproval_rendered` /
+   * `review_required_rendered` events, newest first. The reply handler
+   * walks these and acts on the first one whose proposal is still
+   * actionable.
    */
   findRecentOutbound(tenantId: string, limit: number): Promise<ProposalSmsEvent[]>;
   /**
@@ -148,7 +165,9 @@ export class InMemoryProposalSmsEventRepository
         (e) =>
           e.tenantId === tenantId &&
           e.direction === 'outbound' &&
-          (e.kind === 'proposal_rendered' || e.kind === 'reapproval_rendered'),
+          (e.kind === 'proposal_rendered' ||
+            e.kind === 'reapproval_rendered' ||
+            e.kind === 'review_required_rendered'),
       )
       .sort(bySeqDesc)
       .slice(0, limit)
@@ -258,7 +277,7 @@ export class PgProposalSmsEventRepository
         `SELECT * FROM proposal_sms_events
           WHERE tenant_id = $1
             AND direction = 'outbound'
-            AND kind IN ('proposal_rendered', 'reapproval_rendered')
+            AND kind IN ('proposal_rendered', 'reapproval_rendered', 'review_required_rendered')
           ORDER BY created_at DESC, seq DESC
           LIMIT $2`,
         [tenantId, limit],
