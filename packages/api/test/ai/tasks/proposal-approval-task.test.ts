@@ -24,6 +24,7 @@ import {
   type CreateProposalInput,
   type Proposal,
 } from '../../../src/proposals/proposal';
+import { applyChainMetadata } from '../../../src/proposals/chain';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import type { SettingsRepository } from '../../../src/settings/settings';
 
@@ -177,6 +178,77 @@ describe('RV-071 — explicit affirmative required on the next turn', () => {
     expect(approvedEvent).toBeDefined();
     expect(approvedEvent!.metadata).toMatchObject({ channel: 'voice' });
     expect(approvedEvent!.actorId).toBe(VOICE_APPROVAL_ACTOR_ID);
+  });
+
+  it('"yes" on a chain head approves eligible capture members and speaks the count', async () => {
+    const h = makeHarness();
+    const chainId = 'voice-chain-1';
+    const head = createProposal({
+      tenantId: TENANT,
+      proposalType: 'create_customer',
+      payload: { name: 'Jane Chain' },
+      summary: 'Create Jane Chain',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(head, {
+      chainId,
+      chainIndex: 0,
+      chainLength: 3,
+      dependsOnChainIndices: [],
+      chainRefs: [],
+    });
+    const job = createProposal({
+      tenantId: TENANT,
+      proposalType: 'create_job',
+      payload: { customerId: 'placeholder', title: 'Install' },
+      summary: 'Create install job',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(job, {
+      chainId,
+      chainIndex: 1,
+      chainLength: 3,
+      dependsOnChainIndices: [0],
+      chainRefs: [{ payloadPath: 'customerId', parentChainIndex: 0, entityKind: 'customerId' }],
+    });
+    const sendEstimate = createProposal({
+      tenantId: TENANT,
+      proposalType: 'send_estimate',
+      payload: { estimateId: '550e8400-e29b-41d4-a716-446655440001' },
+      summary: 'Send estimate',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(sendEstimate, {
+      chainId,
+      chainIndex: 2,
+      chainLength: 3,
+      dependsOnChainIndices: [1],
+      chainRefs: [{ payloadPath: 'estimateId', parentChainIndex: 1, entityKind: 'estimateId' }],
+    });
+    await h.proposalRepo.createMany([
+      { ...head, status: 'ready_for_review' },
+      { ...job, status: 'draft' },
+      { ...sendEstimate, status: 'draft' },
+    ]);
+
+    const start = await startVoiceApproval(h.deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'Jane Chain',
+    });
+    expect(start.outcome).toBe('readback');
+    const result = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: 'yes',
+      pending: start.pending!,
+    });
+
+    expect(result.outcome).toBe('approved');
+    expect(result.speak).toContain('Approved 2 linked actions');
+    expect(result.speak).toContain('1 follows separately');
+    expect((await h.proposalRepo.findById(TENANT, head.id))?.status).toBe('approved');
+    expect((await h.proposalRepo.findById(TENANT, job.id))?.status).toBe('approved');
+    expect((await h.proposalRepo.findById(TENANT, sendEstimate.id))?.status).toBe('draft');
   });
 
   it.each(['approve', 'yes, approve it', 'go ahead'])(

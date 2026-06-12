@@ -6,6 +6,7 @@ import {
 } from '../../src/proposals/proposal';
 import {
   approveProposal,
+  approveChainSet,
   rejectProposal,
   editProposal,
   undoProposal,
@@ -236,6 +237,7 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
 
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { approveProposalsBatch } from '../../src/proposals/actions';
+import { applyChainMetadata } from '../../src/proposals/chain';
 
 describe('RV-073 — approval channel audit tagging', () => {
   const tenantId = 'tenant-1';
@@ -356,5 +358,162 @@ describe('RV-073 — approval channel audit tagging', () => {
     for (const event of approvedEvents) {
       expect(event.metadata).toMatchObject({ channel: 'ui' });
     }
+  });
+});
+
+describe('Track E — chain-set approval', () => {
+  const tenantId = 'tenant-chain';
+  const actorId = 'owner-1';
+
+  async function seedChain(repo: InMemoryProposalRepository): Promise<{
+    customer: Proposal;
+    job: Proposal;
+    sendEstimate: Proposal;
+  }> {
+    const chainId = 'chain-approve-1';
+    const customer = createProposal({
+      tenantId,
+      proposalType: 'create_customer',
+      payload: { name: 'Jane Chain' },
+      summary: 'Create Jane Chain',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(customer, {
+      chainId,
+      chainIndex: 0,
+      chainLength: 3,
+      dependsOnChainIndices: [],
+      chainRefs: [],
+    });
+    const job = createProposal({
+      tenantId,
+      proposalType: 'create_job',
+      payload: { customerId: 'placeholder', title: 'Install' },
+      summary: 'Create install job',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(job, {
+      chainId,
+      chainIndex: 1,
+      chainLength: 3,
+      dependsOnChainIndices: [0],
+      chainRefs: [{ payloadPath: 'customerId', parentChainIndex: 0, entityKind: 'customerId' }],
+    });
+    const sendEstimate = createProposal({
+      tenantId,
+      proposalType: 'send_estimate',
+      payload: { estimateId: '550e8400-e29b-41d4-a716-446655440001' },
+      summary: 'Send estimate',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(sendEstimate, {
+      chainId,
+      chainIndex: 2,
+      chainLength: 3,
+      dependsOnChainIndices: [1],
+      chainRefs: [{ payloadPath: 'estimateId', parentChainIndex: 1, entityKind: 'estimateId' }],
+    });
+    await repo.createMany([
+      { ...customer, status: 'ready_for_review' },
+      { ...job, status: 'draft' },
+      { ...sendEstimate, status: 'draft' },
+    ]);
+    return {
+      customer: (await repo.findById(tenantId, customer.id))!,
+      job: (await repo.findById(tenantId, job.id))!,
+      sendEstimate: (await repo.findById(tenantId, sendEstimate.id))!,
+    };
+  }
+
+  it('approves the chain head plus capture siblings in chainIndex order and audits each channel', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const { customer, job, sendEstimate } = await seedChain(repo);
+
+    const result = await approveChainSet(
+      repo,
+      tenantId,
+      customer.id,
+      actorId,
+      'owner',
+      auditRepo,
+      'sms',
+    );
+
+    expect(result.approved.map((p) => p.id)).toEqual([customer.id, job.id]);
+    expect(result.skipped).toEqual([{ id: sendEstimate.id, reason: 'non_capture' }]);
+    expect((await repo.findById(tenantId, customer.id))?.status).toBe('approved');
+    expect((await repo.findById(tenantId, job.id))?.status).toBe('approved');
+    expect((await repo.findById(tenantId, sendEstimate.id))?.status).toBe('draft');
+    const approvedEvents = auditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'proposal.approved');
+    expect(approvedEvents.map((e) => e.entityId)).toEqual([customer.id, job.id]);
+    expect(approvedEvents.every((e) => e.metadata.channel === 'sms')).toBe(true);
+  });
+
+  it('excludes low-confidence capture siblings while approving the rest', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const { customer, job, sendEstimate } = await seedChain(repo);
+    await repo.update(tenantId, job.id, {
+      payload: {
+        ...job.payload,
+        _meta: { overallConfidence: 'low' },
+      },
+    });
+
+    const result = await approveChainSet(
+      repo,
+      tenantId,
+      customer.id,
+      actorId,
+      'owner',
+      auditRepo,
+      'voice',
+    );
+
+    expect(result.approved.map((p) => p.id)).toEqual([customer.id]);
+    expect(result.skipped).toEqual([
+      { id: job.id, reason: 'low_confidence' },
+      { id: sendEstimate.id, reason: 'non_capture' },
+    ]);
+    expect((await repo.findById(tenantId, job.id))?.status).toBe('draft');
+  });
+
+  it('excludes pending-edit capture siblings while approving the rest', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const { customer, job, sendEstimate } = await seedChain(repo);
+
+    const result = await approveChainSet(
+      repo,
+      tenantId,
+      customer.id,
+      actorId,
+      'owner',
+      auditRepo,
+      'sms',
+      async (_tenant, proposalId) => proposalId === job.id,
+    );
+
+    expect(result.approved.map((p) => p.id)).toEqual([customer.id]);
+    expect(result.skipped).toEqual([
+      { id: job.id, reason: 'pending_edit' },
+      { id: sendEstimate.id, reason: 'non_capture' },
+    ]);
+    expect((await repo.findById(tenantId, job.id))?.status).toBe('draft');
+  });
+
+  it('approving a non-head chain member only approves that member', async () => {
+    const repo = new InMemoryProposalRepository();
+    const { customer, job, sendEstimate } = await seedChain(repo);
+
+    const result = await approveChainSet(repo, tenantId, job.id, actorId, 'owner');
+
+    expect(result.approved.map((p) => p.id)).toEqual([job.id]);
+    expect(result.skipped).toEqual([{ id: job.id, reason: 'not_head' }]);
+    expect((await repo.findById(tenantId, customer.id))?.status).toBe('ready_for_review');
+    expect((await repo.findById(tenantId, sendEstimate.id))?.status).toBe('draft');
   });
 });

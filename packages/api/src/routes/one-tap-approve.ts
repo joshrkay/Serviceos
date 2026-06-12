@@ -23,7 +23,7 @@ import {
   createOneTapApproveToken,
   verifyOneTapApproveToken,
 } from '../proposals/auto-approve';
-import { approveProposal } from '../proposals/actions';
+import { approveChainSet } from '../proposals/actions';
 import type { ProposalRepository } from '../proposals/proposal';
 import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
 import {
@@ -331,7 +331,7 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
       // guard, approvedAt stamp (undo window), `proposal.approved` audit
       // event — and the execution worker picks up the approved proposal
       // through its normal idempotent path.
-      const approved = await approveProposal(
+      const result = await approveChainSet(
         deps.proposalRepo,
         verified.tenantId,
         verified.proposalId,
@@ -339,7 +339,14 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
         ONE_TAP_ACTOR_ROLE,
         deps.auditRepo,
         'one_tap', // RV-073 — HMAC one-tap link approval
+        deps.smsEventRepo
+          ? (tenantId, proposalId) =>
+              deps.smsEventRepo!.hasUnappliedEditRequest(tenantId, proposalId)
+          : undefined,
       );
+      const approved = result.approved[0];
+      const approvedCount = result.approved.length;
+      const skippedCount = result.skipped.length;
 
       // P12-004 — record that this approval came through the one-tap SMS
       // link specifically (in addition to the standard proposal.approved
@@ -362,7 +369,13 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
         .send(
           page(
             'Approved',
-            `”${escapeHtml(approved.summary)}” has been approved and will execute shortly.`,
+            approvedCount > 1 || skippedCount > 0
+              ? `Approved ${approvedCount} linked ${approvedCount === 1 ? 'action' : 'actions'}${
+                  skippedCount > 0
+                    ? ` — ${skippedCount} ${skippedCount === 1 ? 'follows' : 'follow'} separately.`
+                    : '.'
+                }`
+              : `”${escapeHtml(approved?.summary ?? 'Proposal')}” has been approved and will execute shortly.`,
           ),
         );
     } catch (err) {

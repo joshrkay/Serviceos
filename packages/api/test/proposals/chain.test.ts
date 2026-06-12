@@ -11,6 +11,7 @@ import {
   type ChainEntityKind,
 } from '../../src/proposals/chain';
 import { createProposal, Proposal } from '../../src/proposals/proposal';
+import { PROPOSAL_TYPE_SCHEMAS } from '../../src/proposals/contracts';
 
 function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
   return {
@@ -174,5 +175,46 @@ describe('applyChainMetadata', () => {
         expect(p.approvedAt).toBeUndefined();
       }
     }
+  });
+
+  it('every mapped payload path exists in that proposal type schema', () => {
+    const unwrap = (schema: any): any => {
+      let current = schema;
+      while (current?._def?.schema || current?._def?.innerType) {
+        current = current._def.schema ?? current._def.innerType;
+      }
+      return current;
+    };
+    for (const [proposalType, kinds] of Object.entries(ENTITY_KIND_TO_PAYLOAD_PATH)) {
+      const objectSchema = unwrap(
+        PROPOSAL_TYPE_SCHEMAS[proposalType as Proposal['proposalType']] as any,
+      );
+      const shape =
+        typeof objectSchema?.shape === 'function' ? objectSchema.shape() : objectSchema?.shape;
+      for (const payloadPath of Object.values(kinds ?? {})) {
+        expect(shape, `${proposalType} schema should expose an object shape`).toBeDefined();
+        expect(Object.keys(shape)).toContain(payloadPath);
+      }
+    }
+  });
+
+  it('writes add_note refs to targetId and sets targetKind for the parent entity', () => {
+    const p = makeProposal({
+      proposalType: 'add_note',
+      payload: { body: 'Call back tomorrow', targetKind: 'customer', targetId: 'placeholder' },
+      status: 'approved',
+      approvedAt: new Date(),
+    });
+    applyChainMetadata(p, {
+      chainId: 'c',
+      chainIndex: 1,
+      chainLength: 2,
+      dependsOnChainIndices: [0],
+      chainRefs: [{ payloadPath: 'targetId', parentChainIndex: 0, entityKind: 'jobId' }],
+    });
+
+    expect(p.payload.targetId).toBe('$ref:chain[0].jobId');
+    expect(p.payload.targetKind).toBe('job');
+    expect(p.status).toBe('draft');
   });
 });

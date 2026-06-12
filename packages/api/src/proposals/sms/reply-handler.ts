@@ -41,7 +41,7 @@ import type {
 } from '../../sms/inbound-dispatch';
 import type { Proposal, ProposalRepository } from '../proposal';
 import { actionClassForProposalType } from '../proposal';
-import { approveProposal, rejectProposal, editProposal } from '../actions';
+import { approveChainSet, rejectProposal, editProposal } from '../actions';
 import { confidenceMetaBlocksAutoApprove } from '../auto-approve';
 import { chainRefFieldsTouchedByDelta } from '../edit-interpreter';
 import type { SettingsRepository } from '../../settings/settings';
@@ -299,9 +299,11 @@ async function handleApprove(
   // The try covers ONLY the mutation. A failed confirmation send after a
   // successful approval must never tell the owner the approval failed —
   // the proposal is approved and will execute.
-  let approved: Proposal;
+  let approvedSummary: string;
+  let approvedCount = 0;
+  let skippedCount = 0;
   try {
-    approved = await approveProposal(
+    const result = await approveChainSet(
       deps.proposalRepo,
       ctx.tenantId,
       proposal.id,
@@ -309,7 +311,11 @@ async function handleApprove(
       'owner',
       deps.auditRepo,
       'sms', // RV-073 — inbound SMS reply approval
+      (tenantId, proposalId) => deps.smsEventRepo.hasUnappliedEditRequest(tenantId, proposalId),
     );
+    approvedCount = result.approved.length;
+    skippedCount = result.skipped.length;
+    approvedSummary = result.approved[0]?.summary ?? proposal.summary;
   } catch (err) {
     if (err instanceof ValidationError) {
       // Missing required fields — truthful, with the next step.
@@ -336,8 +342,26 @@ async function handleApprove(
 
   await notifyBestEffort(deps, ctx, proposal.id, 'proposal.sms_approved', {
     proposalType: proposal.proposalType,
-  }, `Approved — "${approved.summary}" will run shortly.`);
+    approvedCount,
+    skippedCount,
+  }, approvalConfirmation(approvedCount, skippedCount, approvedSummary));
   return { handled: true, handler: HANDLER_NAME, reason: 'approved' };
+}
+
+function approvalConfirmation(
+  approvedCount: number,
+  skippedCount: number,
+  fallbackSummary: string,
+): string {
+  if (approvedCount > 1 || skippedCount > 0) {
+    const actionWord = approvedCount === 1 ? 'action' : 'actions';
+    const follows =
+      skippedCount > 0
+        ? ` — ${skippedCount} ${skippedCount === 1 ? 'follows' : 'follow'} separately.`
+        : '.';
+    return `Approved ${approvedCount} linked ${actionWord}${follows}`;
+  }
+  return `Approved — "${fallbackSummary}" will run shortly.`;
 }
 
 /**

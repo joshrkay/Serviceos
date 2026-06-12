@@ -38,7 +38,7 @@
  */
 import type { Proposal, ProposalRepository } from '../../proposals/proposal';
 import { actionClassForProposalType } from '../../proposals/proposal';
-import { approveProposal, rejectProposal, editProposal } from '../../proposals/actions';
+import { approveChainSet, rejectProposal, editProposal } from '../../proposals/actions';
 import { routeUnsupervisedProposal } from '../../proposals/auto-approve';
 import { renderProposalSms, renderReapprovalSms } from '../../proposals/sms/render';
 import { payloadHeadlineCents } from '../../proposals/payload-money';
@@ -581,8 +581,10 @@ async function executeApprove(
   }
 
   let approved: Proposal;
+  let approvedCount = 0;
+  let skippedCount = 0;
   try {
-    approved = await approveProposal(
+    const result = await approveChainSet(
       deps.proposalRepo,
       ref.tenantId,
       proposalId,
@@ -590,7 +592,13 @@ async function executeApprove(
       'owner',
       deps.auditRepo,
       'voice', // RV-073 — voice approval channel
+      deps.smsEventRepo
+        ? (tenantId, id) => deps.smsEventRepo!.hasUnappliedEditRequest(tenantId, id)
+        : undefined,
     );
+    approved = result.approved[0];
+    approvedCount = result.approved.length;
+    skippedCount = result.skipped.length;
   } catch (err) {
     if (err instanceof ValidationError) {
       await audit(deps, ref, 'proposal.voice_approve_blocked', proposalId, {
@@ -616,9 +624,18 @@ async function executeApprove(
   }
   await audit(deps, ref, 'proposal.voice_approved', approved.id, {
     proposalType: approved.proposalType,
+    approvedCount,
+    skippedCount,
   });
   return {
-    speak: `Approved — "${approved.summary}" will run shortly.`,
+    speak:
+      approvedCount > 1 || skippedCount > 0
+        ? `Approved ${approvedCount} linked ${approvedCount === 1 ? 'action' : 'actions'}${
+            skippedCount > 0
+              ? ` — ${skippedCount} ${skippedCount === 1 ? 'follows' : 'follow'} separately.`
+              : '.'
+          }`
+        : `Approved — "${approved.summary}" will run shortly.`,
     pending: null,
     outcome: 'approved',
     proposalId: approved.id,
