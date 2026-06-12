@@ -1311,3 +1311,119 @@ describe('RV-071 — voice-action-router refuses owner approval intents', () => 
     },
   );
 });
+
+describe('Phase-2 Track A — extended intents routing', () => {
+  it('lookup_day_overview is read-only: no proposal, exactly like sibling lookup_* intents', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'lookup_day_overview',
+        confidence: 0.95,
+        reasoning: 'owner asked for the morning overview',
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+        transcript: 'morning rundown please',
+      }),
+      silentLogger(),
+    );
+
+    // Read-only intent: no proposal AND no clarification — skipped, the
+    // same treatment the sibling lookup_* intents get (P11-001).
+    expect(await proposalRepo.findByTenant('tenant-1')).toHaveLength(0);
+    // Only the classifier ran — no drafting LLM call.
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('sibling lookup intents get the same skip treatment (regression pin)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      JSON.stringify({ intentType: 'lookup_appointments', confidence: 0.95 }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({ tenantId: 'tenant-1', userId: 'user-1', transcript: 'when is my next appointment' }),
+      silentLogger(),
+    );
+
+    expect(await proposalRepo.findByTenant('tenant-1')).toHaveLength(0);
+  });
+
+  it('extendedIntentsEnabled: deterministic phrase routes with NO LLM call at all', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning(['{"intentType":"unknown","confidence":0.1}']);
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      extendedIntentsEnabled: async () => true,
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+        transcript: "What's my day look like?",
+      }),
+      silentLogger(),
+    );
+
+    // Deterministic short-circuit: classified as lookup_day_overview
+    // without touching the gateway, then skipped (read-only).
+    expect(gateway.complete).not.toHaveBeenCalled();
+    expect(await proposalRepo.findByTenant('tenant-1')).toHaveLength(0);
+  });
+
+  it('without the opt-in dep, classifier prompt messages keep the legacy single-system-message shape', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning(['{"intentType":"unknown","confidence":0.9}']);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({ tenantId: 'tenant-1', userId: 'user-1', transcript: "What's my day look like?" }),
+      silentLogger(),
+    );
+
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+    expect(systemMessages).toHaveLength(1);
+    expect(systemMessages[0].content).not.toContain('lookup_day_overview');
+  });
+
+  it('extendedIntentsEnabled resolver failure is non-fatal (falls back to legacy prompt)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'create_invoice',
+        confidence: 0.9,
+        extractedEntities: { customerName: 'Acme' },
+      }),
+      JSON.stringify({
+        customerId: '11111111-1111-4111-8111-111111111111',
+        jobId: '22222222-2222-4222-8222-222222222222',
+        lineItems: [{ description: 'Service call', quantity: 1, unitPriceCents: 45000 }],
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      extendedIntentsEnabled: async () => {
+        throw new Error('flag store down');
+      },
+    });
+
+    await worker.handle(
+      msg({ tenantId: 'tenant-1', userId: 'user-1', transcript: 'create an invoice for Acme' }),
+      silentLogger(),
+    );
+
+    const all = await proposalRepo.findByTenant('tenant-1');
+    expect(all).toHaveLength(1);
+    expect(all[0].proposalType).toBe('draft_invoice');
+  });
+});

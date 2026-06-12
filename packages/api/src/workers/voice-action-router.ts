@@ -13,6 +13,7 @@ import { ConflictError } from '../shared/errors';
 import { voiceProposalIdempotencyKey } from '../voice/voice-audit';
 import {
   classifyIntent,
+  isLookupIntent,
   isVoiceApprovalIntent,
   ExtractedEntities,
   IntentClassification,
@@ -248,6 +249,18 @@ export interface VoiceActionRouterDeps {
    * records the unsupervised routing audit event. Optional for tests.
    */
   unsupervisedRouting?: UnsupervisedRoutingDeps;
+  /**
+   * Phase-2 Track A — per-tenant opt-in for the extended operator intents
+   * (lookup_day_overview / lookup_digest / lookup_pending_items /
+   * complaint). Threaded as `ClassifyContext.extendedIntents` so the
+   * classifier appends the extra prompt section as a SEPARATE system
+   * message and enables the deterministic phrase short-circuits. When
+   * absent or falsy the classifier prompt stays byte-identical to the
+   * pre-Track-A prompt — voice-quality cassettes replay unchanged.
+   * Mirrors `multiActionEnabled`: optional, resolved once per message,
+   * non-fatal on resolver error.
+   */
+  extendedIntentsEnabled?: (tenantId: string) => Promise<boolean>;
 }
 
 // P11-001: lookup_* intents are READ-ONLY and never produce a
@@ -807,6 +820,8 @@ interface SegmentParams {
   recordingId?: string;
   customerId?: string;
   verticalPromptSection?: string;
+  /** Phase-2 Track A — tenant opted in to the extended operator intents. */
+  extendedIntents?: boolean;
   /**
    * When true (single-action path only), thread `recordingId` into the task
    * context — so the held-slot appointment is keyed `voice-hold:<recordingId>`
@@ -853,7 +868,13 @@ async function processSegment(
 
   const classification = await classifyIntent(
     segmentText,
-    { tenantId, ...(params.verticalPromptSection ? { verticalPromptSection: params.verticalPromptSection } : {}) },
+    {
+      tenantId,
+      ...(params.verticalPromptSection ? { verticalPromptSection: params.verticalPromptSection } : {}),
+      // Phase-2 Track A — opt-in only: leaves the classifier prompt
+      // byte-identical for tenants without the flag (cassette hashes).
+      ...(params.extendedIntents ? { extendedIntents: true } : {}),
+    },
     deps.gateway,
   );
 
@@ -882,6 +903,22 @@ async function processSegment(
       log,
     );
     return { kind: 'clarified', classification };
+  }
+
+  // P11-001 / RV-010 — lookup_* intents are READ-ONLY and never produce a
+  // proposal. The voice adapters (twilio-adapter / text-mode-driver)
+  // dispatch them to the lookup-skill family (lookup-day-overview and
+  // siblings in src/ai/skills) and speak the returned summary; this worker
+  // processes recorded memos with no voice back-channel, so its only
+  // correct move is to skip. Previously this fell out of the
+  // INTENT_TO_PROPOSAL_TYPE map by omission (a warn log); the explicit
+  // guard makes the read-only invariant loud, exactly like the RV-071
+  // approval-intent gate below.
+  if (isLookupIntent(classification.intentType)) {
+    log.info('voice-action-router: read-only lookup intent — no proposal to draft', {
+      intent: classification.intentType,
+    });
+    return { kind: 'skipped', classification };
   }
 
   // RV-071 — HARD routing gate: the owner approval intents are only
@@ -1235,6 +1272,21 @@ export function createVoiceActionRouterWorker(
         }
       }
 
+      // Phase-2 Track A — resolve the extended-intents opt-in once per
+      // message (mirrors multiActionEnabled). Non-fatal: a resolver error
+      // degrades to the pre-Track-A classifier prompt.
+      let extendedIntents = false;
+      if (deps.extendedIntentsEnabled) {
+        try {
+          extendedIntents = await deps.extendedIntentsEnabled(tenantId);
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          log.warn('voice-action-router: extendedIntentsEnabled resolver failed, continuing without extended intents', {
+            error: error.message,
+          });
+        }
+      }
+
       // Multi-action chaining (feature-flagged). When enabled AND the
       // utterance decomposes into more than one action, route each
       // segment through the existing single-intent pipeline and link the
@@ -1284,6 +1336,7 @@ export function createVoiceActionRouterWorker(
               recordingId,
               customerId,
               verticalPromptSection,
+              ...(extendedIntents ? { extendedIntents: true } : {}),
             },
             log,
           );
@@ -1302,6 +1355,7 @@ export function createVoiceActionRouterWorker(
           recordingId,
           customerId,
           verticalPromptSection,
+          ...(extendedIntents ? { extendedIntents: true } : {}),
           // Single-action path: apply the per-recording dedup keys.
           applyDedup: true,
         },

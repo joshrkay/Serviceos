@@ -58,6 +58,15 @@ export type IntentType =
   | 'lookup_leads'
   | 'lookup_revenue'
   | 'lookup_catalog'
+  // Phase-2 Track A (RV-010) — owner/operator morning overview ("what's
+  // my day look like?"). Read-only, routed to the lookup-skill family.
+  // Routable ONLY when the calling surface opts in via
+  // `ClassifyContext.extendedIntents` — the prompt section documenting it
+  // is a SEPARATE system message appended only then, so every existing
+  // call path keeps byte-identical prompt messages (voice-quality
+  // cassette hashes / gateway cache keys are unaffected — the RV-071
+  // pattern).
+  | 'lookup_day_overview'
   // P11-002: caller asks to switch the call language ("english please" /
   // "hablo español"). The adapter consumes this as a signal to flip the
   // session language — it is NOT a proposal-driving intent.
@@ -115,6 +124,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'lookup_leads',
   'lookup_revenue',
   'lookup_catalog',
+  'lookup_day_overview',
   'language_switch',
   'operator_request',
   'confirm',
@@ -303,6 +313,21 @@ export interface ClassifyContext {
    * layers enforce the ownerSession check independently.
    */
   ownerSession?: boolean;
+  /**
+   * Phase-2 Track A (RV-010/064/085/080) — opt-in for the extended
+   * operator intents (lookup_day_overview, lookup_digest,
+   * lookup_pending_items, complaint). When true:
+   *   - the EXTENDED_INTENTS_PROMPT_SECTION is appended as a SEPARATE
+   *     system message (non-opted calls keep byte-identical prompt
+   *     messages — voice-quality cassette hashes and gateway cache keys
+   *     are unaffected; same mechanism as RV-071's ownerSession), and
+   *   - the deterministic phrase matcher (matchExtendedIntentPhrase)
+   *     short-circuits stereotyped phrasings ("what's my day look
+   *     like?") without an LLM round-trip.
+   * When absent/false the new intents are never produced — existing
+   * call paths are bit-for-bit unchanged.
+   */
+  extendedIntents?: boolean;
 }
 
 /**
@@ -747,6 +772,52 @@ Notes:
 - Do not change the JSON output schema; proposalReference is just an extra
   optional key inside extractedEntities.`;
 
+/**
+ * Phase-2 Track A — extended operator intents prompt section. Delivered as
+ * a SEPARATE system message, appended ONLY when
+ * `ClassifyContext.extendedIntents` is true, so every non-opted call's
+ * prompt stays byte-identical to the existing prompt (voice-quality
+ * cassettes replay unchanged — the RV-071 mechanism).
+ */
+export const EXTENDED_INTENTS_PROMPT_SECTION = `Extended operator intents (this surface has opted in — these intents exist only on this call):
+- "lookup_day_overview" — the owner/operator asks for a morning overview of
+                           their day: schedule, priorities, overnight events,
+                           pending approvals. Read-only.
+                           Examples: "What's my day look like?"
+                                     "Give me my morning overview"
+                                     "What's on deck today?"
+Notes:
+- These are READ-ONLY intents — never classify a command that creates or
+  changes a record as one of them.
+- Do not change the JSON output schema.`;
+
+/**
+ * Deterministic short-circuit for the stereotyped extended-intent
+ * phrasings (the P18-001 signup-override pattern). Consulted ONLY when
+ * `ClassifyContext.extendedIntents` is true, BEFORE the LLM call — a
+ * matched phrase routes with zero gateway cost and cannot regress with
+ * model drift. Patterns are anchored tight so ordinary commands can
+ * never collapse into a lookup.
+ */
+const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: ReadonlyArray<RegExp> }> = [
+  {
+    intent: 'lookup_day_overview',
+    patterns: [
+      /\bwhat(?:'s| is| does)\s+my\s+day\s+look(?:ing)?\s+like\b/i,
+      /\b(?:give me |what's )?my morning overview\b/i,
+      /\bhow(?:'s| is)\s+my\s+day\s+looking\b/i,
+    ],
+  },
+];
+
+export function matchExtendedIntentPhrase(transcript: string): IntentType | null {
+  if (!transcript) return null;
+  for (const entry of EXTENDED_INTENT_PHRASES) {
+    if (entry.patterns.some((rx) => rx.test(transcript))) return entry.intent;
+  }
+  return null;
+}
+
 /** RV-071 — predicate the voice routing layers use to gate owner approval intents. */
 export function isVoiceApprovalIntent(
   intent: IntentType | string | undefined | null,
@@ -982,6 +1053,20 @@ export async function classifyIntent(
     return unknownResult('empty transcript', 'empty_transcript');
   }
 
+  // Phase-2 Track A — deterministic extended-intent phrasings. Only on
+  // opted-in surfaces, BEFORE the LLM call: no gateway cost, no cassette
+  // interaction, no model-drift regression for the canonical phrasings.
+  if (context.extendedIntents === true) {
+    const matched = matchExtendedIntentPhrase(transcript);
+    if (matched) {
+      return {
+        intentType: matched,
+        confidence: 0.95,
+        reasoning: 'matched deterministic extended-intent phrasing',
+      };
+    }
+  }
+
   // Compose the system prompt: base classifier rules + (optional)
   // tenant vertical context + (optional) caller plan context. Each
   // optional block is delivered as a separate system message so it
@@ -1009,6 +1094,13 @@ export async function classifyIntent(
   // byte-identical messages (cassette hashes / gateway cache keys).
   if (context.ownerSession === true) {
     systemMessages.push({ role: 'system', content: OWNER_APPROVAL_PROMPT_SECTION });
+  }
+  // Phase-2 Track A — extended operator intents are documented to the model
+  // ONLY on opted-in surfaces. Appended last (after the owner section) so
+  // non-opted calls keep byte-identical messages (cassette hashes /
+  // gateway cache keys).
+  if (context.extendedIntents === true) {
+    systemMessages.push({ role: 'system', content: EXTENDED_INTENTS_PROMPT_SECTION });
   }
 
   const response = await gateway.complete({

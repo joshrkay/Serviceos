@@ -644,3 +644,89 @@ describe('RV-071 — approve_proposal / reject_proposal intents', () => {
     }
   });
 });
+
+// eslint-disable-next-line import/first
+import {
+  EXTENDED_INTENTS_PROMPT_SECTION,
+  isLookupIntent,
+  matchExtendedIntentPhrase,
+} from '../../../src/ai/orchestration/intent-classifier';
+
+describe('Phase-2 Track A — extended operator intents', () => {
+  it('parseClassifierJson accepts the new intents', () => {
+    for (const intentType of ['lookup_day_overview'] as const) {
+      const out = parseClassifierJson(JSON.stringify({ intentType, confidence: 0.9 }));
+      expect(out?.intentType).toBe(intentType);
+    }
+  });
+
+  it('isLookupIntent covers the new lookup intents', () => {
+    expect(isLookupIntent('lookup_day_overview')).toBe(true);
+  });
+
+  it('matchExtendedIntentPhrase matches the canonical day-overview phrasings only', () => {
+    expect(matchExtendedIntentPhrase("What's my day look like?")).toBe('lookup_day_overview');
+    expect(matchExtendedIntentPhrase('what does my day look like')).toBe('lookup_day_overview');
+    expect(matchExtendedIntentPhrase("how's my day looking?")).toBe('lookup_day_overview');
+    expect(matchExtendedIntentPhrase('Give me my morning overview')).toBe('lookup_day_overview');
+    // Ordinary commands never collapse into a lookup.
+    expect(matchExtendedIntentPhrase('Create an invoice for Acme for 450 dollars')).toBeNull();
+    expect(matchExtendedIntentPhrase('Schedule my day off next Tuesday')).toBeNull();
+    expect(matchExtendedIntentPhrase('')).toBeNull();
+  });
+
+  it('extendedIntents: deterministic phrase short-circuits WITHOUT an LLM call', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent(
+      "What's my day look like?",
+      { tenantId: 't1', extendedIntents: true },
+      gateway,
+    );
+    expect(result.intentType).toBe('lookup_day_overview');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('extendedIntents: true appends the section as a SEPARATE system message for non-matching transcripts', async () => {
+    const gateway = mockGateway('{"intentType":"lookup_day_overview","confidence":0.85}');
+    const result = await classifyIntent(
+      'morning rundown please, schedule and approvals',
+      { tenantId: 't1', extendedIntents: true },
+      gateway,
+    );
+    expect(result.intentType).toBe('lookup_day_overview');
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+    expect(systemMessages.length).toBe(2);
+    expect(systemMessages[1].content).toBe(EXTENDED_INTENTS_PROMPT_SECTION);
+    // The BASE prompt is untouched — it must not mention the new intents.
+    expect(systemMessages[0].content).not.toContain('lookup_day_overview');
+  });
+
+  it('without extendedIntents the prompt messages are byte-identical to the legacy shape (cassette stability)', async () => {
+    const gatewayA = mockGateway('{"intentType":"unknown","confidence":0.9}');
+    const gatewayB = mockGateway('{"intentType":"unknown","confidence":0.9}');
+
+    await classifyIntent("What's my day look like?", { tenantId: 't1' }, gatewayA);
+    await classifyIntent(
+      "What's my day look like?",
+      { tenantId: 't1', extendedIntents: false },
+      gatewayB,
+    );
+
+    const messagesA = (gatewayA.complete as ReturnType<typeof vi.fn>).mock.calls[0][0].messages;
+    const messagesB = (gatewayB.complete as ReturnType<typeof vi.fn>).mock.calls[0][0].messages;
+    expect(messagesB).toEqual(messagesA);
+    expect(messagesA.filter((m: { role: string }) => m.role === 'system')).toHaveLength(1);
+    for (const m of messagesA) {
+      expect(m.content).not.toContain('lookup_day_overview');
+    }
+  });
+
+  it('without extendedIntents the deterministic matcher never fires (LLM result wins)', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.9}');
+    const result = await classifyIntent("What's my day look like?", { tenantId: 't1' }, gateway);
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('unknown');
+  });
+});
