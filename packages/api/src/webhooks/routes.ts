@@ -1881,6 +1881,17 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     if (kind === 'sms') {
       const fromE164 = (req.body?.From as string | undefined) ?? '';
       const body = (req.body?.Body as string | undefined) ?? '';
+      // RV-050 — MMS media (NumMedia + MediaUrlN / MediaContentTypeN).
+      // Forwarded on the dispatch context; the registered media handler
+      // ingests photos from verified tech phones, failure-isolated.
+      const numMedia = Number.parseInt((req.body?.NumMedia as string | undefined) ?? '0', 10);
+      const media: Array<{ url: string; contentType?: string }> = [];
+      for (let i = 0; i < (Number.isFinite(numMedia) ? numMedia : 0); i++) {
+        const url = req.body?.[`MediaUrl${i}`] as string | undefined;
+        if (typeof url !== 'string' || url.length === 0) continue;
+        const contentType = req.body?.[`MediaContentType${i}`] as string | undefined;
+        media.push({ url, ...(typeof contentType === 'string' ? { contentType } : {}) });
+      }
       let dispatchResult: { handled: boolean; handler?: string; reason?: string };
       try {
         dispatchResult = await dispatchInboundSms({
@@ -1888,6 +1899,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           fromE164,
           body,
           messageSid: eventId,
+          ...(media.length > 0 ? { media } : {}),
         });
       } catch (err) {
         logger.error('Inbound SMS dispatch failed unexpectedly', {

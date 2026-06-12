@@ -16,6 +16,16 @@ export {
   PgTechStatusTodayRepository,
   type TechStatusTodayRepository,
 } from './idempotency';
+// RV-050 — inbound MMS photo ingestion from registered tech phones.
+export {
+  ingestInboundMms,
+  registerMmsIngestHandler,
+  createTwilioMediaFetcher,
+  MMS_CLOCK_IN_FIRST_REPLY,
+  type MmsIngestDeps,
+  type MmsIngestResult,
+  type MediaFetcher,
+} from './mms-ingest';
 
 /**
  * P6-028 — module init. Called once at app bootstrap to register the

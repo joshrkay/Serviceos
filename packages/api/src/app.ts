@@ -399,6 +399,11 @@ import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import { registerKeywordHandler } from './sms/inbound-dispatch';
+// RV-050 — inbound MMS photo ingestion from registered tech phones.
+import {
+  registerMmsIngestHandler,
+  createTwilioMediaFetcher,
+} from './sms/tech-status/mms-ingest';
 import {
   registerProposalReplySms,
   PgProposalSmsEventRepository,
@@ -2679,6 +2684,56 @@ export function createApp(): express.Express {
       auditRepo,
     })
   );
+  // RV-050 — inbound MMS photo ingestion. Registers the (single) media
+  // handler with the P2-034 dispatcher: photos texted from a REGISTERED
+  // TECH phone attach to the tech's active job (open time entry); media
+  // bytes are fetched from Twilio with the tenant's subaccount Basic-auth
+  // credentials (same pattern as the recording webhook). Failure-isolated
+  // at the dispatcher — media problems never break normal SMS handling.
+  registerMmsIngestHandler(
+    {
+      userRepo,
+      timeEntries: new TimeEntryService(timeEntryRepo, auditRepo),
+      attachmentService: new AttachmentService(
+        attachmentRepo,
+        fileRepo,
+        storageProvider,
+        auditRepo,
+        {
+          job: async (tenantId, id) => (await jobRepo.findById(tenantId, id)) !== null,
+        },
+        queue,
+      ),
+      fileRepo,
+      storage: storageProvider,
+      storageBucket,
+      fetchMedia: createTwilioMediaFetcher(async (tenantId) => {
+        const integration = await integrationResolver?.(tenantId, 'twilio');
+        if (
+          !integration ||
+          integration.provider !== 'twilio' ||
+          !integration.subaccountSid ||
+          !integration.authTokenPrimary
+        ) {
+          return null;
+        }
+        return {
+          accountSid: integration.subaccountSid,
+          authToken: integration.authTokenPrimary,
+        };
+      }),
+      ...(messageDelivery
+        ? {
+            sendReply: async (tenantId: string, to: string, body: string) => {
+              await messageDelivery!.sendSms({ to, body, tenantId });
+            },
+          }
+        : {}),
+      auditRepo,
+    },
+    { overwrite: true },
+  );
+
   app.use(
     '/api/appointments',
     createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo, {
