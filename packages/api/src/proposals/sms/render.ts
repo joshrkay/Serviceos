@@ -32,6 +32,12 @@ import { AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS } from '../auto-approve';
 export const PROPOSAL_SMS_MAX_CHARS = 320;
 
 const REPLY_INSTRUCTIONS = 'Reply Y to approve, N to reject, EDIT to change.';
+// RV-071 one-tap fallback: money/comms/irreversible proposals are sent with a
+// signed link as the ONLY approval affordance (the reply-handler's class guard
+// refuses a texted Y for these classes). The copy leads with the link so the
+// owner knows how to approve; N and EDIT remain accurate over SMS.
+const NON_CAPTURE_REPLY_INSTRUCTIONS =
+  'Tap the link to approve, reply N to reject, or EDIT to change.';
 // RV-074 review fix: the low-confidence send anchors the reply transport
 // (review_required_rendered), so "reply N to reject" is correctly targeted
 // at THIS proposal. Approval stays in-app only.
@@ -235,6 +241,14 @@ export function renderProposalSms(
 
   // ── HIGH (or absent _meta): existing behavior, byte-identical ──
   // ── MEDIUM: same structure but (?) on flagged facts + optional Check: line ──
+  // ── Non-capture (money/comms/irreversible): link-based instructions ──
+  // RV-071: the one-tap fallback is the ONLY approve affordance for these
+  // classes. The reply-handler's class guard refuses a texted Y, so we drop
+  // the "Reply Y" prompt and lead with the link instead.
+  const replyInstructions =
+    actionClassForProposalType(input.proposalType) !== 'capture'
+      ? NON_CAPTURE_REPLY_INSTRUCTIONS
+      : REPLY_INSTRUCTIONS;
 
   const facts: string[] = [];
   const customer = extractCustomerName(input.payload);
@@ -286,10 +300,10 @@ export function renderProposalSms(
       factsPart.length -
       checkLine.length -
       1 - // space before instructions
-      REPLY_INSTRUCTIONS.length,
+      replyInstructions.length,
     20,
   );
-  return `${prefix}${truncate(summary, summaryBudget)}${factsPart} ${REPLY_INSTRUCTIONS}${checkLine}${linkPart}`;
+  return `${prefix}${truncate(summary, summaryBudget)}${factsPart} ${replyInstructions}${checkLine}${linkPart}`;
 }
 
 /**

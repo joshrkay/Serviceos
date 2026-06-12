@@ -15,7 +15,7 @@ import {
   renderProposalSms,
   PROPOSAL_SMS_MAX_CHARS,
 } from '../../../src/proposals/sms/render';
-import { VALID_PROPOSAL_TYPES } from '../../../src/proposals/proposal';
+import { VALID_PROPOSAL_TYPES, actionClassForProposalType } from '../../../src/proposals/proposal';
 
 const URL = 'https://api.example.com/public/proposals/one-tap-approve?token=abc123';
 
@@ -26,7 +26,16 @@ describe('renderProposalSms', () => {
         { proposalType, summary: `Proposal of type ${proposalType}`, payload: {} },
         { approveUrl: URL },
       );
-      expect(body).toContain('Reply Y to approve, N to reject, EDIT to change.');
+      if (actionClassForProposalType(proposalType) === 'capture') {
+        expect(body, `${proposalType} should use Y instructions`).toContain(
+          'Reply Y to approve, N to reject, EDIT to change.',
+        );
+      } else {
+        expect(body, `${proposalType} should use link instructions`).toContain(
+          'Tap the link to approve, reply N to reject, or EDIT to change.',
+        );
+        expect(body, `${proposalType} should NOT contain Reply Y`).not.toContain('Reply Y');
+      }
       expect(body).toContain(URL);
     }
   });
@@ -120,6 +129,34 @@ describe('renderProposalSms', () => {
     });
     expect(body).not.toContain('Or tap');
     expect(body).toContain('Reply Y to approve');
+  });
+
+  it('non-capture (money/comms/irreversible) proposals get link-based instructions, no Reply Y', () => {
+    // record_payment = money, send_estimate = comms, cancel_appointment = irreversible
+    for (const proposalType of ['record_payment', 'send_estimate', 'cancel_appointment'] as const) {
+      const body = renderProposalSms(
+        { proposalType, summary: `Pending ${proposalType}`, payload: {} },
+        { approveUrl: URL },
+      );
+      expect(body, `${proposalType} should NOT contain Reply Y`).not.toContain('Reply Y');
+      expect(body, `${proposalType} should contain Tap the link`).toContain(
+        'Tap the link to approve, reply N to reject, or EDIT to change.',
+      );
+      expect(body, `${proposalType} should contain the approve URL`).toContain(URL);
+    }
+  });
+
+  it('capture proposals still get Reply Y instructions', () => {
+    // draft_estimate = capture, create_appointment = capture
+    for (const proposalType of ['draft_estimate', 'create_appointment'] as const) {
+      const body = renderProposalSms(
+        { proposalType, summary: `Pending ${proposalType}`, payload: {} },
+        { approveUrl: URL },
+      );
+      expect(body, `${proposalType} should contain Reply Y`).toContain(
+        'Reply Y to approve, N to reject, EDIT to change.',
+      );
+    }
   });
 });
 

@@ -240,15 +240,12 @@ async function handleApprove(
 
   // Track E (HIGH fix) — action-class guard, the strongest invariant here
   // (a proposal's class never changes). Money / comms / irreversible
-  // proposals are NEVER legitimately rendered with a Y prompt:
-  // decideInitialStatus only returns 'ready_for_review' for capture-class
-  // (everything else lands 'draft'), the single-action unsupervised send
-  // site only routes 'ready_for_review' proposals, and the chain send site
-  // suppresses the token for non-capture heads. So a Y that resolves to a
-  // non-capture proposal can only mean a mis-anchored or future-bug render —
-  // refuse truthfully instead of approving. (The HMAC one-tap link remains
-  // the sanctioned SMS path for these classes — RV-071 voice fallback and
-  // the RV-061 digest mint those deliberately.)
+  // proposals are rendered by the RV-071 one-tap fallback with link-based
+  // instructions ("Tap the link to approve, reply N to reject, or EDIT to
+  // change.") — the Y prompt is deliberately absent. A stray texted Y from
+  // the owner still arrives here (owners type what they know), so this guard
+  // makes it fail closed: the HMAC link is the only sanctioned SMS approval
+  // path for non-capture classes, and a Y cannot substitute for it.
   const actionClass = actionClassForProposalType(proposal.proposalType);
   if (actionClass !== 'capture') {
     await audit(deps, ctx, 'proposal.sms_approve_blocked_action_class', proposal.id, {

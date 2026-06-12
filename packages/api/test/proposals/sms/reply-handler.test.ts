@@ -969,11 +969,11 @@ describe('RV-074 — review_required_rendered (low-confidence) anchoring', () =>
 // ─────────────────────────────────────────────────────────────────────────────
 // Track E — action-class belt-and-braces: a Y that resolves (via the anchor)
 // to a money/comms/irreversible proposal must NEVER approve it, regardless
-// of how the render came to exist. Verified: no legitimate Y-prompt render
-// exists for these classes (decideInitialStatus only returns
-// ready_for_review for capture; the single-action send site gates on
-// ready_for_review; the chain send site suppresses the token for
-// non-capture heads) — so the check is unconditional.
+// of how the Y arrived. The RV-071 one-tap fallback renders these proposals
+// with link-based instructions ("Tap the link to approve…") — no Y prompt —
+// but an owner can still text Y out of habit. The class guard makes that fail
+// closed: the HMAC link is the only sanctioned SMS approval path for these
+// classes.
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('Track E — SMS Y blocked for non-capture action classes', () => {
