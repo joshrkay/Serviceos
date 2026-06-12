@@ -1,4 +1,4 @@
-import { QuickBooksConnect } from '../components/integrations/QuickBooksConnect';
+import { QuickBooksConnect } from '../../components/integrations/QuickBooksConnect';
 
 /**
  * Settings surface for third-party integrations (F17 / P15-001).
