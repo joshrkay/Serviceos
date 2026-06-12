@@ -365,6 +365,13 @@ export interface RouteUnsupervisedProposalInput {
    * sent, so existing callers keep their exact behavior.
    */
   renderSmsBody?: (approveUrl: string) => string;
+  /**
+   * RV-074 (F-4) — proposal payload used to check _meta.overallConfidence.
+   * When present and confidence is low/very_low, the one-tap Y-able link is
+   * suppressed (body becomes the no-approve "needs review in app" form from
+   * renderSmsBody, called without an approveUrl).
+   */
+  payload?: unknown;
   nowMs?: number;
 }
 
@@ -398,28 +405,58 @@ export async function routeUnsupervisedProposal(
   }
 
   if (effective === 'queue_and_sms') {
-    if (deps.sendSms && deps.secret && input.ownerPhone) {
-      const { token, expiresAt } = createOneTapApproveToken({
-        proposalId: input.proposalId,
-        tenantId: input.tenantId,
-        secret: deps.secret,
-        ...(input.nowMs !== undefined ? { nowMs: input.nowMs } : {}),
-      });
-      const url = deps.buildApproveUrl
-        ? deps.buildApproveUrl(token)
-        : `/p/approve?token=${encodeURIComponent(token)}`;
-      const summary = input.summaryText ?? 'A proposal needs your approval';
-      const body = input.renderSmsBody
-        ? input.renderSmsBody(url)
-        : `${summary}. Tap to approve (link expires in 30 min): ${url}`;
-      await deps.sendSms(input.ownerPhone, body);
-      smsSent = true;
-      approveLinkExpiresAt = expiresAt;
-      // P2-034 — anchor the reply transport. Recorded only after a
-      // successful send; a failure here surfaces to the caller's
-      // best-effort wrapper rather than silently losing the anchor.
-      if (deps.onSmsSent) {
-        await deps.onSmsSent({ body, expiresAt });
+    if (deps.sendSms && input.ownerPhone) {
+      // RV-074 (F-4) — low/very_low proposals must never get a Y-able one-tap
+      // link. When the payload carries a blocking confidence level, mint no
+      // token and call renderSmsBody without an approveUrl so the renderer
+      // emits the "needs review in app" form.
+      const isLowConfidence = confidenceMetaBlocksAutoApprove(input.payload);
+
+      let body: string;
+      let expiresAt: Date | undefined;
+
+      if (!isLowConfidence && deps.secret) {
+        // Normal path: mint a one-tap token and include the approve URL.
+        const { token, expiresAt: exp } = createOneTapApproveToken({
+          proposalId: input.proposalId,
+          tenantId: input.tenantId,
+          secret: deps.secret,
+          ...(input.nowMs !== undefined ? { nowMs: input.nowMs } : {}),
+        });
+        expiresAt = exp;
+        const url = deps.buildApproveUrl
+          ? deps.buildApproveUrl(token)
+          : `/p/approve?token=${encodeURIComponent(token)}`;
+        const summary = input.summaryText ?? 'A proposal needs your approval';
+        body = input.renderSmsBody
+          ? input.renderSmsBody(url)
+          : `${summary}. Tap to approve (link expires in 30 min): ${url}`;
+        approveLinkExpiresAt = expiresAt;
+      } else if (isLowConfidence) {
+        // Low/very_low confidence: no token, no Y-able link. The renderer
+        // (renderProposalSms) emits the "needs review in app" form when it
+        // sees the blocking confidence level; pass an empty string so the
+        // renderSmsBody callback signature is satisfied.
+        const summary = input.summaryText ?? 'A proposal needs your approval';
+        body = input.renderSmsBody
+          ? input.renderSmsBody('')
+          : `${summary}. Review in app.`;
+      } else {
+        // No secret and not low confidence: preserve original behavior —
+        // no token to mint, so no SMS goes out.
+        body = '';
+      }
+
+      if (body) {
+        await deps.sendSms(input.ownerPhone, body);
+        smsSent = true;
+        // P2-034 — anchor the reply transport. Recorded only after a
+        // successful send; only relevant when a real approve link was minted
+        // (expiresAt set) — the reply handler needs the expiry to gate Y
+        // responses. Low-confidence sends have no approve link, so no anchor.
+        if (deps.onSmsSent && expiresAt) {
+          await deps.onSmsSent({ body, expiresAt });
+        }
       }
     }
     // No phone / no SMS seam: the proposal still sits in ready_for_review —

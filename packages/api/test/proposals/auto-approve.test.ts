@@ -681,6 +681,109 @@ describe('RV-007 — decideInitialStatus confidence-marker guard', () => {
   });
 });
 
+// ───────────────────────────────────────────────────────────────────────────
+// RV-074 (F-4) — routing-site one-tap guard
+//
+// Low/very_low proposals must never get a Y-able one-tap link in the
+// routeUnsupervisedProposal path.  The predicate reuse is tested here: the
+// same `confidenceMetaBlocksAutoApprove` gate used by decideInitialStatus
+// also governs whether the one-tap token is minted.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('RV-074 — routeUnsupervisedProposal: low/very_low confidence suppresses one-tap link', () => {
+  const baseInput = {
+    tenantId: 'tenant-1',
+    proposalId: 'prop-1',
+    channel: 'other' as const,
+    ownerPhone: '+15555550100',
+  };
+
+  for (const level of ['low', 'very_low'] as const) {
+    it(`${level}: sends SMS without approve URL, no onSmsSent anchor`, async () => {
+      const audit = new InMemoryAuditRepository();
+      const sms: { to: string; body: string }[] = [];
+      const smsSentCalls: { body: string; expiresAt: Date }[] = [];
+
+      const result = await routeUnsupervisedProposal(
+        {
+          auditRepo: audit,
+          secret: SECRET,
+          sendSms: async (to, body) => sms.push({ to, body }),
+          buildApproveUrl: (token) => `https://app.test/p/approve?token=${token}`,
+          onSmsSent: async (sent) => smsSentCalls.push(sent),
+        },
+        {
+          ...baseInput,
+          payload: { _meta: { overallConfidence: level } },
+          renderSmsBody: (approveUrl: string) =>
+            approveUrl
+              ? `Review and approve. ${approveUrl}`
+              : `Low-confidence proposal. Needs review in app. Reply N to reject.`,
+        },
+      );
+
+      expect(result.smsSent).toBe(true);
+      // Body must NOT contain an approve URL
+      expect(sms[0].body).not.toContain('https://app.test/p/approve');
+      // Body contains the no-approve form
+      expect(sms[0].body).toContain('Needs review in app');
+      // No one-tap link expiry (no token was minted)
+      expect(result.approveLinkExpiresAt).toBeUndefined();
+      // onSmsSent is NOT called — no token to anchor
+      expect(smsSentCalls).toHaveLength(0);
+    });
+  }
+
+  it('high confidence (control): sends SMS with approve URL and calls onSmsSent', async () => {
+    const audit = new InMemoryAuditRepository();
+    const sms: { to: string; body: string }[] = [];
+    const smsSentCalls: { body: string; expiresAt: Date }[] = [];
+
+    const result = await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        sendSms: async (to, body) => sms.push({ to, body }),
+        buildApproveUrl: (token) => `https://app.test/p/approve?token=${token}`,
+        onSmsSent: async (sent) => smsSentCalls.push(sent),
+      },
+      {
+        ...baseInput,
+        payload: { _meta: { overallConfidence: 'high' } },
+        renderSmsBody: (approveUrl: string) => `Approve here: ${approveUrl}`,
+      },
+    );
+
+    expect(result.smsSent).toBe(true);
+    expect(sms[0].body).toContain('https://app.test/p/approve');
+    expect(result.approveLinkExpiresAt).toBeInstanceOf(Date);
+    expect(smsSentCalls).toHaveLength(1);
+  });
+
+  it('absent _meta: preserves original behavior (one-tap link sent)', async () => {
+    const audit = new InMemoryAuditRepository();
+    const sms: { to: string; body: string }[] = [];
+
+    const result = await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        sendSms: async (to, body) => sms.push({ to, body }),
+        buildApproveUrl: (token) => `https://app.test/p/approve?token=${token}`,
+      },
+      {
+        ...baseInput,
+        // No payload field threaded — legacy path
+        summaryText: 'A proposal needs your approval',
+      },
+    );
+
+    expect(result.smsSent).toBe(true);
+    expect(sms[0].body).toContain('https://app.test/p/approve');
+    expect(result.approveLinkExpiresAt).toBeInstanceOf(Date);
+  });
+});
+
 // Wiring proof: createProposal threads its payload into decideInitialStatus,
 // so the guard holds on the real proposal-creation path (the single entry
 // every AI task handler uses).

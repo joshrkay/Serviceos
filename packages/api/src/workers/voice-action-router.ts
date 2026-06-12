@@ -1375,8 +1375,11 @@ export function createVoiceActionRouterWorker(
                       summary: proposal.summary,
                       payload: proposal.payload,
                     },
-                    { approveUrl },
+                    { approveUrl: approveUrl || undefined },
                   ),
+                // RV-074 (F-4) — pass payload so the routing site can guard
+                // low/very_low proposals against one-tap Y-able links.
+                payload: proposal.payload,
               },
             );
           } catch (err) {
