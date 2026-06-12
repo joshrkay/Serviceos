@@ -1240,6 +1240,115 @@ describe('RV-142 — injectSafetySayLines', () => {
       injectSafetySayLines(dial, [{ type: 'tts_play', payload: { text: 'hi' } }], {}),
     ).toBe(dial);
   });
+
+  it('speaks the catalogued Spanish 911/transfer lines for an es session', () => {
+    const dial =
+      '<?xml version="1.0" encoding="UTF-8"?><Response><Dial timeout="20" action="/api/telephony/dial-result?sid=s1" method="POST"><Number>+15125550100</Number></Dial></Response>';
+    const out = injectSafetySayLines(
+      dial,
+      [
+        { type: 'tts_play', payload: { text: 'If anyone is in immediate danger, hang up and call 911.', priority: 'safety' } },
+        { type: 'tts_play', payload: { text: "This sounds like an emergency. I'm connecting you with our on-call dispatcher immediately.", priority: 'safety' } },
+      ],
+      { language: 'es' },
+    );
+    // SENTENCE_CATALOG_ES entries, selected by the session language — the
+    // same selector the Polly voice switch uses.
+    expect(out).toContain('llame al 911');
+    expect(out).toContain('despachador de guardia');
+    expect(out).not.toContain('hang up and call 911');
+    expect(out).toContain('Polly.Mia-Neural');
+    // Still spoken before the bridge.
+    expect(out.indexOf('llame al 911')).toBeLessThan(out.indexOf('<Dial'));
+  });
+
+  it('keeps the English 911 line for an en session', () => {
+    const dial = '<?xml version="1.0" encoding="UTF-8"?><Response><Dial>x</Dial></Response>';
+    const out = injectSafetySayLines(
+      dial,
+      [{ type: 'tts_play', payload: { text: 'If anyone is in immediate danger, hang up and call 911.', priority: 'safety' } }],
+      { language: 'en' },
+    );
+    expect(out).toContain('hang up and call 911');
+    expect(out).not.toContain('llame al 911');
+  });
+});
+
+// ─── RV-140 (interim) — streaming interim emergency scan ────────────────────
+
+describe('RV-140 — scanInterimForEmergency (streaming interims)', () => {
+  it('an interim "gas leak" escalates immediately — before any final transcript', async () => {
+    const { adapter, store, gateway } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-int-1' });
+
+    const effects = await adapter.scanInterimForEmergency({
+      sessionId: session.id,
+      speechResult: 'there is a gas leak',
+      tenantId: 'tenant-t1',
+    });
+
+    expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(session.machine.currentState).toBe('escalating');
+    expect(effects).not.toBeNull();
+    const tts = (effects ?? []).filter((fx) => fx.type === 'tts_play');
+    expect((tts[0]?.payload as { text: string }).text).toContain('911');
+  });
+
+  it('a non-emergency interim returns null and never touches the FSM (objection scan stays finals-only)', async () => {
+    const { adapter, store } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-int-2' });
+    const dispatchSpy = vi.spyOn(session.machine, 'dispatch');
+
+    // Contains a recording-objection phrase — interims must NOT pause
+    // recordings; only the emergency keyword table applies here.
+    const effects = await adapter.scanInterimForEmergency({
+      sessionId: session.id,
+      speechResult: 'please stop recording me',
+      tenantId: 'tenant-t1',
+    });
+
+    expect(effects).toBeNull();
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    expect(session.machine.currentState).not.toBe('escalating');
+  });
+
+  it('the final transcript after an interim-fired emergency does not double-page (FSM idempotency)', async () => {
+    const { adapter, store } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-int-3' });
+
+    await adapter.scanInterimForEmergency({
+      sessionId: session.id,
+      speechResult: 'gas leak',
+      tenantId: 'tenant-t1',
+    });
+    expect(session.machine.currentState).toBe('escalating');
+
+    const dispatchSpy = vi.spyOn(session.machine, 'dispatch');
+    await adapter.processCallerUtterance({
+      sessionId: session.id,
+      callSid: 'CA-int-3',
+      speechResult: 'I said there is a gas leak in the basement',
+      tenantId: 'tenant-t1',
+    });
+
+    // The final's emergency dispatch is idempotent: empty effects, no
+    // second notify_oncall / page ladder.
+    const emergencyResults = dispatchSpy.mock.results.filter((_, i) =>
+      (dispatchSpy.mock.calls[i][0] as { type: string }).type === 'emergency_detected');
+    expect(emergencyResults).toHaveLength(1);
+    expect(emergencyResults[0].value).toEqual([]);
+  });
+
+  it('returns null for an unknown session', async () => {
+    const { adapter } = makeAdapter();
+    expect(
+      await adapter.scanInterimForEmergency({
+        sessionId: 'nope',
+        speechResult: 'gas leak',
+        tenantId: 'tenant-t1',
+      }),
+    ).toBeNull();
+  });
 });
 
 // ─── RV-115 — durable recovery context on telephony termination ─────────────

@@ -140,6 +140,22 @@ export interface MediaStreamAdapterDeps {
     callSid: string;
     tenantId: string;
   }) => Promise<SideEffect[]>;
+  /**
+   * RV-140 (interim) — emergency-keyword scan over INTERIM transcripts so a
+   * caller saying "gas leak" escalates the moment the words are recognized,
+   * not seconds later when Deepgram finalizes the utterance. Keywords ONLY —
+   * the recording-objection scan stays finals-only (a half-formed interim
+   * must never pause a recording). Returns the executed escalation side
+   * effects (911 safety line first) or null when nothing matched / the FSM
+   * is already escalating. Wired in production to
+   * `TwilioGatherAdapter.scanInterimForEmergency`.
+   */
+  interimEmergencyScan?: (args: {
+    session: VoiceSession;
+    speechResult: string;
+    callSid: string;
+    tenantId: string;
+  }) => Promise<SideEffect[] | null>;
   /** Audio inactivity teardown (ms). Default 30 minutes. */
   audioIdleTimeoutMs?: number;
   /**
@@ -366,6 +382,17 @@ interface RuntimeState {
    * to `deps.escalationSettings` when null.
    */
   resolvedEscalationSettings: EscalationSettings | null;
+  /**
+   * RV-140 (interim) — debounce for the interim emergency scan. Set once an
+   * interim-detected emergency actually escalated, so the stream of
+   * progressively longer interims for the SAME utterance ("gas", "gas leak",
+   * "gas leak in the…") doesn't re-enter the scan on every frame. The FSM's
+   * own `emergency_detected` guard is the correctness backstop (already
+   * escalating → empty effects, so the final that follows an interim-fired
+   * emergency can't double-page) — this flag just skips redundant lock
+   * round-trips on subsequent interims.
+   */
+  interimEmergencyFired: boolean;
 }
 
 const TWILIO_QUEUE_MAX_MSGS = 200;
@@ -452,6 +479,7 @@ export class TwilioMediaStreamAdapter {
       fillerActive: false,
       pendingTransferTwiml: null,
       resolvedEscalationSettings: null,
+      interimEmergencyFired: false,
     };
   }
 
@@ -660,6 +688,9 @@ export class TwilioMediaStreamAdapter {
       if (this.state.agentSpeaking) {
         this.bargeIn();
       }
+      // RV-140 (interim) — emergency keywords escalate on interims; the
+      // 911 line should not wait for Deepgram to finalize the utterance.
+      await this.maybeRunInterimEmergencyScan(event.transcript);
       return;
     }
     // Final transcript: dispatch into the FSM under the per-session lock
@@ -760,6 +791,47 @@ export class TwilioMediaStreamAdapter {
       this.state.pendingFinalizeEffects = sideEffects;
       this.handleClose('end_session');
     }
+  }
+
+  /**
+   * RV-140 (interim) — run the host's emergency-keyword scan on an interim
+   * transcript. Serialized under the per-session lock (same as speechTurn)
+   * so an escalating interim can't interleave with an in-flight final turn.
+   * On a match, the executed effects (911 line first) are rendered through
+   * the normal TTS path and `interimEmergencyFired` debounces every later
+   * interim/final for this connection — the FSM's idempotent
+   * `emergency_detected` guard already prevents a double-page, the flag
+   * just avoids redundant dispatches.
+   */
+  private async maybeRunInterimEmergencyScan(transcript: string): Promise<void> {
+    if (this.state.interimEmergencyFired) return;
+    const session = this.state.session;
+    const callSid = this.state.callSid;
+    const tenantId = this.state.tenantId;
+    if (!this.deps.interimEmergencyScan || !session || !callSid || !tenantId) return;
+    if (!transcript.trim()) return;
+
+    let effects: SideEffect[] | null = null;
+    try {
+      effects = await this.deps.store.withSessionLock(session.id, () =>
+        this.deps.interimEmergencyScan!({
+          session,
+          speechResult: transcript,
+          callSid,
+          tenantId,
+        }),
+      );
+    } catch (err) {
+      logger.warn('mediastream: interim emergency scan failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+      return;
+    }
+    if (!effects) return;
+
+    this.state.interimEmergencyFired = true;
+    await this.emitSideEffects(effects);
   }
 
   /**

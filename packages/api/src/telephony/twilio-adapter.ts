@@ -95,6 +95,7 @@ import {
 import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
 import { detectEmergency } from '../ai/agents/customer-calling/emergency-detector';
+import { renderTtsText, type SessionLanguage } from '../ai/agents/customer-calling/tts-copy';
 import {
   detectRecordingObjection,
   RECORDING_OBJECTION_ACK,
@@ -553,6 +554,7 @@ export function injectSafetySayLines(
   sideEffects: ReadonlyArray<SideEffect>,
   opts: { language?: 'en' | 'es'; voiceOverride?: string } = {},
 ): string {
+  const lang: SessionLanguage = opts.language === 'es' ? 'es' : 'en';
   const sayParts = sideEffects
     .filter(
       (fx) =>
@@ -563,8 +565,14 @@ export function injectSafetySayLines(
     )
     .map((fx) => {
       const voice =
-        opts.voiceOverride ?? (opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
-      return `<Say voice="${xmlEscape(voice)}">${xmlEscape(String(fx.payload.text))}</Say>`;
+        opts.voiceOverride ?? (lang === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
+      // Localize the safety script by session language — same selector the
+      // Polly voice switch above uses. renderTtsText resolves the FSM's
+      // fixed English sentences against SENTENCE_CATALOG_ES (exact match;
+      // the 911 + transfer lines are catalogued), and passes unknown text
+      // through unchanged, so an 'en' session is a no-op.
+      const text = renderTtsText(String(fx.payload.text), fx.payload, lang);
+      return `<Say voice="${xmlEscape(voice)}">${xmlEscape(text)}</Say>`;
     })
     .join('');
   if (!sayParts) return twiml;
@@ -993,7 +1001,8 @@ export class TwilioGatherAdapter {
     speechResult: string,
     tenantId: string,
   ): Promise<SideEffect[] | null> {
-    const emergency = detectEmergency(speechResult);
+    const emergency = await this.runEmergencyScan(session, speechResult, tenantId);
+    if (emergency.effects) return emergency.effects;
     if (!emergency.matched) {
       // RV-130 — recording objection (checked only when no emergency: the
       // life-safety path always wins the turn).
@@ -1006,22 +1015,63 @@ export class TwilioGatherAdapter {
           { type: 'tts_play', payload: { text: RECORDING_OBJECTION_ACK } },
         ];
       }
-      return null;
     }
+    return null;
+  }
+
+  /**
+   * The EMERGENCY half of the deterministic safety scan (keywords →
+   * `emergency_detected` → executed effects + page ladder). Shared by the
+   * full per-final scan above and the streaming INTERIM scan
+   * (`scanInterimForEmergency`) so both paths page identically.
+   *
+   * `matched: true, effects: null` means the keyword hit but the dispatch
+   * was idempotent-skipped (already escalating → empty effects) or inert
+   * (terminated → event_ignored audit only) — callers fall through to their
+   * normal pipeline so in-transfer / post-call utterances keep their
+   * existing behavior (no double-page).
+   */
+  private async runEmergencyScan(
+    session: VoiceSession,
+    speechResult: string,
+    tenantId: string,
+  ): Promise<{ matched: boolean; effects: SideEffect[] | null }> {
+    const emergency = detectEmergency(speechResult);
+    if (!emergency.matched) return { matched: false, effects: null };
     const effects = session.machine.dispatch({
       type: 'emergency_detected',
       keyword: emergency.keyword ?? 'unknown',
       utterance: speechResult,
     });
     if (effects.length === 0 || session.machine.currentState !== 'escalating') {
-      // Idempotent skip (already escalating → empty effects) or inert
-      // dispatch (terminated → event_ignored audit only). Fall through to
-      // the normal pipeline so in-transfer / post-call utterances keep
-      // their existing behavior (no double-page).
-      return null;
+      return { matched: true, effects: null };
     }
     await this.processor.executeSideEffects(session, effects, tenantId);
     this.armEmergencyPageLadder(session, speechResult, tenantId);
+    return { matched: true, effects };
+  }
+
+  /**
+   * RV-140 (interim) — emergency-keyword scan over a streaming INTERIM
+   * transcript. Keywords-only by design: the recording-objection scan stays
+   * finals-only so a half-formed interim ("...stop record...") can never
+   * pause a recording on a false positive. The FSM's `emergency_detected`
+   * guard is idempotent (already-escalating → empty effects → null here),
+   * so the FINAL transcript that follows an interim-detected emergency
+   * cannot double-page.
+   *
+   * Called by the mediastream adapter under `withSessionLock`. Returns the
+   * executed side effects (911 safety line, notify_oncall, proposal) when
+   * the scan escalated, or null when nothing matched / already escalating.
+   */
+  async scanInterimForEmergency(opts: {
+    sessionId: string;
+    speechResult: string;
+    tenantId: string;
+  }): Promise<SideEffect[] | null> {
+    const session = this.deps.store.get(opts.sessionId);
+    if (!session) return null;
+    const { effects } = await this.runEmergencyScan(session, opts.speechResult, opts.tenantId);
     return effects;
   }
 

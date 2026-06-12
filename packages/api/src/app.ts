@@ -2667,6 +2667,22 @@ export function createApp(): express.Express {
                 speechResult,
                 tenantId,
               }),
+            // RV-130 (CRITICAL) — greeting + recording-disclosure bootstrap
+            // once Deepgram opens. initializeStreamSession speaks the
+            // greeting/disclosure via the stream TTS path AND appends the
+            // implicit recording-consent event to the ledger (the gather
+            // adapter carries consentEvents). Without this hook wired,
+            // flag-enabled streaming calls start silent and ledger nothing.
+            initializeSession: ({ callSid, tenantId }) =>
+              twilioAdapter.initializeStreamSession({ callSid, tenantId }),
+            // RV-140 (interim) — emergency keywords escalate on interim
+            // transcripts (keywords only; objection scan stays finals-only).
+            interimEmergencyScan: ({ session, speechResult, tenantId }) =>
+              twilioAdapter.scanInterimForEmergency({
+                sessionId: session.id,
+                speechResult,
+                tenantId,
+              }),
             // B2: delegate outcome stamping to the gather adapter so all
             // close paths (caller hangup, idle timeout, end_session, WS
             // teardown, slow-consumer disconnect) stamp the same typed
@@ -2693,7 +2709,12 @@ export function createApp(): express.Express {
             // F6c: LLM-backed sentiment classifier. Only fires when
             // escalationSettings.trigger_llm_sentiment is true.
             ...(sentimentClassifierDep ? { sentimentClassifier: sentimentClassifierDep } : {}),
-            // RV-122 — per-turn vulnerability triage (flag-gated inside the hook).
+            // RV-122 — per-turn vulnerability triage (flag-gated inside the
+            // hook). DELIBERATE scope (v1): streaming-only — the hook is
+            // wired into the media-streams adapter exclusively, so Gather
+            // turns don't grade. The Gather path is the legacy/fallback
+            // transport; triage targets the launch transport first, and
+            // extending the hook to _handleGatherLocked is a follow-up.
             ...(vulnerabilityTriageHookDep
               ? { vulnerabilityTriageHook: vulnerabilityTriageHookDep }
               : {}),
@@ -3181,7 +3202,13 @@ export function createApp(): express.Express {
   });
   app.use(
     '/api/voice',
-    createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger, pool ? { pool } : undefined),
+    createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger, {
+      ...(pool ? { pool } : {}),
+      // RV-132 — purged-recording download guard (410 instead of a
+      // dangling S3 404 after the retention worker deletes the object).
+      fileRepo,
+      storage: storageProvider,
+    }),
   );
   app.use(
     '/api/onboarding',
