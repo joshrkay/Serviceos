@@ -593,7 +593,6 @@ export function createProposal(input: CreateProposalInput): Proposal {
       ? payloadWithSupervisorMarker(
           input.payload,
           supervisorDecision.reasons,
-          input.confidenceScore,
         )
       : input.payload;
   // Budget accounting: machine approvals count against the hourly

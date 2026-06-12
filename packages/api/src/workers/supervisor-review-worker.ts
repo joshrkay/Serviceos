@@ -137,10 +137,14 @@ async function annotateProposal(
   }
   const annotation: SupervisorAnnotation = { ...parsed, annotatedAt: now.toISOString() };
 
-  // Narrow-merge fix: re-fetch the FRESH payload immediately before writing so
-  // any concurrent edits made during the (multi-second) LLM window are not
-  // clobbered. We merge ONLY `_meta.supervisorAnnotation` into the fresh
-  // payload — every other field from the sweep-time snapshot is discarded.
+  // Narrow-merge: re-fetch the FRESH payload immediately before writing.
+  // This shrinks the read-modify-write window from multi-second LLM latency
+  // down to single-digit milliseconds, but does NOT eliminate the race — two
+  // concurrent annotation writes can still collide in that small window.
+  // Future fix: push the merge to the repo layer via a server-side
+  // jsonb_set / _meta-merge so the DB handles atomicity.
+  // TODO: revisit findByStatus full-load with a created_at-filtered query
+  // (e.g. WHERE created_at >= now() - interval '24h') when queues grow.
   //
   // Stale-status guard: if the proposal has left ready_for_review between
   // our sweep-read and now, skip the annotation write. A status change is

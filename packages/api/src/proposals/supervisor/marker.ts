@@ -59,14 +59,10 @@ function cloneWithValidMeta(
 /**
  * Append a supervisor marker explaining a block / force_review verdict.
  * Existing markers (and the rest of `_meta`) are preserved.
- *
- * The `confidenceScore` parameter is accepted but intentionally ignored —
- * see module header for why synthesis is always fixed 'medium'.
  */
 export function payloadWithSupervisorMarker(
   payload: Record<string, unknown>,
   reasons: string[],
-  _confidenceScore?: number,
 ): Record<string, unknown> {
   const { next, meta } = cloneWithValidMeta(payload);
   const markers = Array.isArray(meta.markers) ? [...(meta.markers as unknown[])] : [];
@@ -77,14 +73,10 @@ export function payloadWithSupervisorMarker(
 
 /**
  * Write the advisory annotation (annotator worker). Never a status change.
- *
- * The `confidenceScore` parameter is accepted but intentionally ignored —
- * see module header for why synthesis is always fixed 'medium'.
  */
 export function payloadWithSupervisorAnnotation(
   payload: Record<string, unknown>,
   annotation: SupervisorAnnotation,
-  _confidenceScore?: number,
 ): Record<string, unknown> {
   const { next, meta } = cloneWithValidMeta(payload);
   meta.supervisorAnnotation = annotation;

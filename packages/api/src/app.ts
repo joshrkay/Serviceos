@@ -3608,6 +3608,9 @@ export function createApp(): express.Express {
     ...(supervisorFlagGate ? { isEnabledForTenant: supervisorFlagGate } : {}),
     logger: supervisorLogger,
   });
+  // Process-global hook: second createApp() in one process re-binds (last-wins).
+  // Never uninstalled on shutdown — benign: fail-open + fire-and-forget.
+  // Tests must reset via configureSupervisorCreationHook(null).
   configureSupervisorCreationHook(supervisorService);
   // Close the executed-spend loop declared next to the ProposalExecutor.
   supervisorSpendRecorder = (tenantId, proposalId) =>

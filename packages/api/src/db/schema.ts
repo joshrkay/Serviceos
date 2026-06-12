@@ -4105,6 +4105,7 @@ export const MIGRATIONS = {
   `,
 
   // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy engine).
+  // Note: migrations 165 and 166 are reserved by parallel sibling tracks.
   //
   // supervisor_policies: versioned per-tenant rule sets. `rules` is the
   // SupervisorRules JSONB (src/proposals/supervisor/policy.ts) — all keys
