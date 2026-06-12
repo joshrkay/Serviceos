@@ -326,6 +326,11 @@ export const voiceClarificationPayloadSchema = z.object({
       }),
     )
     .optional(),
+  /** Set by the inbox one-tap picker when the operator disambiguates. */
+  resolvedEntityId: z.string().uuid().optional(),
+  resolvedEntityKind: z
+    .enum(['customer', 'job', 'invoice', 'appointment', 'estimate'])
+    .optional(),
 });
 
 export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {

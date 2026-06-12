@@ -3,8 +3,9 @@
  *
  * Postgres-backed entity resolver using pg_trgm similarity() for fuzzy
  * matching. Migration 051_p8_entity_resolution_indexes creates the GIN
- * trigram indexes on customers.name, jobs.title, invoices.invoice_number,
- * and a btree index on appointments.scheduled_for.
+ * trigram indexes on customers.display_name, jobs.summary,
+ * invoices.invoice_number, estimates.estimate_number, and a btree index
+ * on appointments.scheduled_for.
  *
  * Resolution thresholds:
  *   τ_ent = 0.80  — above → `resolved`
@@ -53,8 +54,7 @@ export class PgEntityResolver implements EntityResolver {
       case 'appointment':
         return this.resolveAppointment(tenantId, reference);
       case 'estimate':
-        // No trigram index defined for estimates in migration 051; skip.
-        return { kind: 'skipped' };
+        return this.resolveEstimate(tenantId, reference);
       default:
         return { kind: 'skipped' };
     }
@@ -180,6 +180,47 @@ export class PgEntityResolver implements EntityResolver {
         id: row.id,
         kind: 'invoice' as EntityKind,
         label: row.invoice_number,
+        hint: row.status ?? undefined,
+        score: Number(row.score),
+      }));
+
+      return this.toResult(candidates, reference);
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  private async resolveEstimate(
+    tenantId: string,
+    reference: string,
+  ): Promise<EntityResolverResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+      const { rows } = await client.query<{
+        id: string;
+        estimate_number: string;
+        status: string | null;
+        score: number;
+      }>(
+        `SELECT id, estimate_number, status, similarity(estimate_number, $2) AS score
+           FROM estimates
+          WHERE tenant_id = $1
+            AND similarity(estimate_number, $2) > $3
+          ORDER BY score DESC
+          LIMIT 5`,
+        [tenantId, reference, SIMILARITY_PREFILTER],
+      );
+      await client.query('COMMIT');
+
+      const candidates: EntityCandidate[] = rows.map((row) => ({
+        id: row.id,
+        kind: 'estimate' as EntityKind,
+        label: row.estimate_number,
         hint: row.status ?? undefined,
         score: Number(row.score),
       }));

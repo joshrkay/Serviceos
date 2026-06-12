@@ -7,6 +7,7 @@ import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { CommunicationTimeline } from '../../components/customers/CommunicationTimeline';
 import { LanguageBadge } from '../../components/customers/LanguageBadge';
 import { apiFetch } from '../../utils/api-fetch';
+import { createPortalSession } from '../../api/portal-sessions';
 import {
   Badge,
   Button,
@@ -101,6 +102,8 @@ export function CustomerDetail({
   const [locationForm, setLocationForm] =
     useState<LocationFormState>(emptyLocationForm);
   const [locationSaving, setLocationSaving] = useState(false);
+  const [portalLink, setPortalLink] = useState<string | null>(null);
+  const [portalBusy, setPortalBusy] = useState(false);
 
   const loadLocations = useCallback(async () => {
     setLocationsError(null);
@@ -216,6 +219,22 @@ export function CustomerDetail({
     [customerId, loadLocations, locationForm],
   );
 
+  const handleSendPortalLink = useCallback(async () => {
+    setPortalBusy(true);
+    try {
+      const session = await createPortalSession(customerId);
+      setPortalLink(session.url);
+      await navigator.clipboard.writeText(session.url);
+      toast.success('Portal link copied to clipboard');
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to create portal link',
+      );
+    } finally {
+      setPortalBusy(false);
+    }
+  }, [customerId]);
+
   const handleArchive = useCallback(async () => {
     const res = await apiFetch(`/api/customers/${customerId}/archive`, {
       method: 'POST',
@@ -247,6 +266,12 @@ export function CustomerDetail({
       actions={[
         { label: 'Edit', onClick: () => onEdit?.(), variant: 'primary' },
         {
+          label: portalBusy ? 'Creating link…' : 'Send portal link',
+          onClick: handleSendPortalLink,
+          variant: 'secondary',
+          disabled: portalBusy || data.isArchived,
+        },
+        {
           label: data.isArchived ? 'Archived' : 'Archive',
           onClick: handleArchive,
           variant: 'danger',
@@ -254,6 +279,28 @@ export function CustomerDetail({
         },
       ]}
       sections={[
+        {
+          title: 'Client Hub',
+          content: (
+            <div className="flex flex-col gap-2 text-sm">
+              <p className="text-slate-600">
+                Share a secure link so this customer can view estimates, invoices, and jobs.
+              </p>
+              {portalLink ? (
+                <p className="text-xs text-slate-500 break-all">{portalLink}</p>
+              ) : null}
+              <Button
+                size="sm"
+                variant="outline"
+                loading={portalBusy}
+                disabled={data.isArchived}
+                onClick={handleSendPortalLink}
+              >
+                Copy portal link
+              </Button>
+            </div>
+          ),
+        },
         {
           title: 'Contact Information',
           content: (

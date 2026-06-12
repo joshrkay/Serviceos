@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router';
 import {
   ArrowLeft, Phone, MessageSquare, Navigation,
   MapPin, AlertCircle, AlertTriangle, Package,
-  Play, Video, ChevronLeft, ChevronRight, X, Trash2, ExternalLink,
+  X, ExternalLink,
   Plus, Cpu, Camera, Receipt, Eye, FileText, Mail, Star,
   CheckCircle2, Circle, MoreHorizontal, Zap, Calendar, User, Clock,
   ChevronDown,
@@ -76,8 +76,7 @@ import { AddEntrySheet } from './AddEntrySheet';
 import { MaterialsSheet } from './MaterialsSheet';
 import { CancelNoShowSheet } from './CancelNoShowSheet';
 import { CallScreen, TextSheet, EstimateSheet, InvoiceSheet } from './JobSheets';
-import { CameraCapture } from '../shared/CameraCapture';
-import type { CapturedMedia } from '../shared/CameraCapture';
+import { JobPhotosSection } from './JobPhotosSection';
 import { SuppliersSheet } from './SuppliersSheet';
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
@@ -613,107 +612,6 @@ function MaterialsTable({ materials, onEdit, onSuppliers }: { materials: Materia
   );
 }
 
-// ─── Site Media ───────────────────────────────────────────────────────────
-const MOCK_DOCUMENTS: Array<{ id: string; name: string; size: string; date: string }> = [];
-
-function SiteMedia({ media, onAdd, onLightbox }: {
-  media: CapturedMedia[]; onAdd: () => void; onLightbox: (i: number) => void;
-}) {
-  const [showDocs, setShowDocs] = useState(false);
-
-  return (
-    <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3.5 border-b border-slate-100">
-        <div className="flex items-center gap-2">
-          <Camera size={14} className="text-slate-500" />
-          <h4 className="text-slate-700">Site Media</h4>
-          {media.length > 0 && (
-            <span className="text-xs bg-slate-100 text-slate-500 rounded-full px-2 py-0.5">{media.length}</span>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowDocs(v => !v)}
-            className={`flex items-center gap-1 text-xs transition-colors ${showDocs ? 'text-blue-600' : 'text-slate-400 hover:text-slate-600'}`}
-          >
-            <FileText size={12} /> Docs ({MOCK_DOCUMENTS.length})
-          </button>
-          <button onClick={onAdd} className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors">
-            <Camera size={12} /> Add
-          </button>
-        </div>
-      </div>
-
-      {media.length > 0 ? (
-        <div className="p-3 grid grid-cols-3 md:grid-cols-4 gap-2">
-          {media.map((item, i) => (
-            <button
-              key={item.id}
-              onClick={() => onLightbox(i)}
-              className="relative aspect-square rounded-xl overflow-hidden bg-slate-100 hover:opacity-90 active:scale-95 transition-all"
-            >
-              {item.type === 'photo'
-                ? <img src={item.url} className="w-full h-full object-cover" alt="" />
-                : <>
-                    {item.thumb
-                      ? <img src={item.thumb} className="w-full h-full object-cover" alt="" />
-                      : <div className="w-full h-full bg-slate-800 flex items-center justify-center"><Video size={18} className="text-white/60" /></div>
-                    }
-                    <div className="absolute inset-0 flex items-center justify-center bg-black/25">
-                      <span className="flex size-8 items-center justify-center rounded-full bg-black/50">
-                        <Play size={13} className="text-white ml-0.5" />
-                      </span>
-                    </div>
-                  </>
-              }
-            </button>
-          ))}
-          <button
-            onClick={onAdd}
-            className="aspect-square rounded-xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center gap-1 hover:border-blue-300 hover:bg-blue-50/50 transition-colors"
-          >
-            <Plus size={16} className="text-slate-300" />
-            <span className="text-xs text-slate-300">Add</span>
-          </button>
-        </div>
-      ) : (
-        <button
-          onClick={onAdd}
-          className="flex flex-col items-center gap-3 py-10 px-4 w-full hover:bg-slate-50 transition-colors"
-        >
-          <div className="flex size-14 items-center justify-center rounded-full bg-slate-100">
-            <Camera size={20} className="text-slate-400" />
-          </div>
-          <div className="text-center">
-            <p className="text-sm text-slate-600">Add site photos</p>
-            <p className="text-xs text-slate-400 mt-0.5">Capture before/after and site conditions</p>
-          </div>
-        </button>
-      )}
-
-      {showDocs && (
-        <div className="border-t border-slate-100">
-          {MOCK_DOCUMENTS.map(doc => (
-            <div key={doc.id} className="flex items-center gap-3 px-4 py-2.5 hover:bg-slate-50 border-b border-slate-50 last:border-0 transition-colors">
-              <div className="flex size-8 items-center justify-center rounded-lg bg-red-50 shrink-0">
-                <FileText size={14} className="text-red-500" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm text-slate-700 truncate">{doc.name}</p>
-                <p className="text-xs text-slate-400">{doc.size} · {doc.date}</p>
-              </div>
-              <button className="text-xs text-blue-600 hover:text-blue-700 shrink-0">View</button>
-            </div>
-          ))}
-          <button className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-600 px-4 py-2.5 transition-colors">
-            <Plus size={11} /> Attach document
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ─── AI Hints ─────────────────────────────────────────────────────────────
 interface AIHint {
   id: string;
@@ -867,75 +765,6 @@ function IssueBanner({ job, onText }: { job: Job; onText: () => void }) {
   );
 }
 
-// ─── Media Lightbox ───────────────────────────────────────────────────────
-function MediaLightbox({ media, index, onIndexChange, onDelete, onClose }: {
-  media: CapturedMedia[]; index: number;
-  onIndexChange: (i: number) => void; onDelete: (id: string) => void; onClose: () => void;
-}) {
-  const current = media[index];
-  return (
-    <div className="fixed inset-0 z-50 bg-black flex flex-col" onClick={onClose}>
-      <div
-        className="absolute top-0 left-0 right-0 z-10 flex items-center justify-between px-4 pt-5 pb-8"
-        style={{ background: 'linear-gradient(to bottom, rgba(0,0,0,0.7) 0%, transparent 100%)' }}
-        onClick={e => e.stopPropagation()}
-      >
-        <button onClick={onClose} className="flex size-9 items-center justify-center rounded-full bg-black/40">
-          <X size={18} className="text-white" />
-        </button>
-        <span className="text-sm text-white/70">{index + 1} / {media.length}</span>
-        <button onClick={() => onDelete(current.id)} className="flex size-9 items-center justify-center rounded-full bg-red-500/80">
-          <Trash2 size={15} className="text-white" />
-        </button>
-      </div>
-
-      <div className="flex-1 flex items-center justify-center relative" onClick={e => e.stopPropagation()}>
-        {current.type === 'photo'
-          ? <img key={current.id} src={current.url} className="max-w-full object-contain" style={{ maxHeight: 'calc(100vh - 160px)' }} alt="" />
-          : <video key={current.id} src={current.url} className="max-w-full" style={{ maxHeight: 'calc(100vh - 160px)' }} controls autoPlay />
-        }
-        {media.length > 1 && (
-          <>
-            <button onClick={() => onIndexChange((index - 1 + media.length) % media.length)} className="absolute left-3 flex size-10 items-center justify-center rounded-full bg-black/40">
-              <ChevronLeft size={20} className="text-white" />
-            </button>
-            <button onClick={() => onIndexChange((index + 1) % media.length)} className="absolute right-3 flex size-10 items-center justify-center rounded-full bg-black/40">
-              <ChevronRight size={20} className="text-white" />
-            </button>
-          </>
-        )}
-      </div>
-
-      <div
-        className="shrink-0 px-4 pb-8 pt-4"
-        style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 100%)' }}
-        onClick={e => e.stopPropagation()}
-      >
-        <p className="text-center text-xs text-white/50 mb-3">
-          {current.type === 'video' ? '🎬 Video' : '📷 Photo'} · {new Date(current.capturedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
-        </p>
-        {media.length > 1 && (
-          <div className="flex gap-1.5 justify-center overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
-            {media.map((item, i) => (
-              <button
-                key={item.id}
-                onClick={() => onIndexChange(i)}
-                className={`shrink-0 rounded-lg overflow-hidden transition-all ${i === index ? 'ring-2 ring-white scale-105' : 'opacity-50 hover:opacity-80'}`}
-                style={{ width: 48, height: 48 }}
-              >
-                {item.type === 'photo'
-                  ? <img src={item.url} className="w-full h-full object-cover" alt="" />
-                  : <div className="w-full h-full bg-slate-700 flex items-center justify-center"><Play size={12} className="text-white" /></div>
-                }
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ─── Main Component ───────────────────────────────────────────────────────
 export function JobDetailView({ id }: { id: string }) {
   const navigate = useNavigate();
@@ -957,9 +786,6 @@ export function JobDetailView({ id }: { id: string }) {
   } : undefined;
 
   const [modal,         setModal]         = useState<Modal>(null);
-  const [cameraOpen,    setCameraOpen]    = useState(false);
-  const [jobMedia,      setJobMedia]      = useState<CapturedMedia[]>([]);
-  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [activities,    setActivities]    = useState<JobActivity[]>([]);
   const [materials,     setMaterials]     = useState<MaterialItem[]>([]);
   const [showDuplicate, setShowDuplicate] = useState(false);
@@ -1100,7 +926,7 @@ export function JobDetailView({ id }: { id: string }) {
   }
 
   const secondaryActions = [
-    { key: 'camera',   icon: Camera,        label: 'Photos',   badge: jobMedia.length, disabled: false },
+    { key: 'camera',   icon: Camera,        label: 'Photos',   badge: 0, disabled: false },
     { key: 'estimate', icon: Eye,           label: 'Estimate', badge: 0,               disabled: !job.estimateId },
     { key: 'invoice',  icon: Receipt,       label: 'Invoice',  badge: 0,               disabled: false },
     { key: 'addEntry', icon: FileText,      label: 'Note',     badge: 0,               disabled: false },
@@ -1109,7 +935,7 @@ export function JobDetailView({ id }: { id: string }) {
   ];
 
   function onSecondaryAction(key: string) {
-    if      (key === 'camera')                    setCameraOpen(true);
+    if      (key === 'camera')                    document.getElementById('job-photos-section')?.scrollIntoView({ behavior: 'smooth' });
     else if (key === 'estimate' && job?.estimateId) setModal('estimate');
     else if (key === 'invoice')                    setModal('invoice');
     else if (key === 'addEntry')                   setModal('addEntry');
@@ -1219,11 +1045,9 @@ export function JobDetailView({ id }: { id: string }) {
         </div>
       </div>
 
-      <SiteMedia
-        media={jobMedia}
-        onAdd={() => setCameraOpen(true)}
-        onLightbox={i => setLightboxIndex(i)}
-      />
+      <div id="job-photos-section">
+        <JobPhotosSection jobId={id} compact />
+      </div>
     </div>
   );
 
@@ -1479,24 +1303,6 @@ export function JobDetailView({ id }: { id: string }) {
         <SuppliersSheet serviceType={job.serviceType} onClose={() => setModal(null)} />
       )}
 
-      {cameraOpen && (
-        <CameraCapture
-          onClose={newMedia => {
-            if (newMedia.length) setJobMedia(prev => [...prev, ...newMedia]);
-            setCameraOpen(false);
-          }}
-        />
-      )}
-
-      {lightboxIndex !== null && jobMedia.length > 0 && (
-        <MediaLightbox
-          media={jobMedia}
-          index={lightboxIndex}
-          onIndexChange={setLightboxIndex}
-          onDelete={did => { setJobMedia(prev => prev.filter(m => m.id !== did)); setLightboxIndex(null); }}
-          onClose={() => setLightboxIndex(null)}
-        />
-      )}
     </>
   );
 }

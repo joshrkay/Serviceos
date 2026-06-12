@@ -3924,6 +3924,12 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_integrations
       ADD COLUMN IF NOT EXISTS credentials JSONB NOT NULL DEFAULT '{}';
   `,
+
+  // Estimate entity resolution — trigram index for PgEntityResolver (estimate kind).
+  '156_estimate_entity_trgm_index': `
+    CREATE INDEX IF NOT EXISTS idx_estimates_number_trgm
+      ON estimates USING GIN (estimate_number gin_trgm_ops);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
