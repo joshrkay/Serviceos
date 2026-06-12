@@ -195,6 +195,7 @@ import {
   InMemoryTriageEventRepository,
 } from './ai/agents/customer-calling/pg-triage-events';
 import { patchOwnerThrough } from './ai/skills/patch-owner-through';
+import { buildMarkCustomerVulnerablePayload } from './ai/agents/customer-calling/vulnerable-customer';
 import { createHvacPack } from './verticals/packs/hvac';
 import { createPlumbingPack } from './verticals/packs/plumbing';
 import { createElectricalPack } from './verticals/packs/electrical';
@@ -371,7 +372,7 @@ import { whisperRouter } from './telephony/whisper-route';
 import { WhisperCache } from './telephony/whisper-cache';
 import { requireTwilioSignature } from './telephony/twilio-signature';
 import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation';
-import { InMemoryProposalRepository } from './proposals/proposal';
+import { InMemoryProposalRepository, createProposal as buildProposalRow } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { IdempotencyGuard } from './proposals/execution/idempotency';
@@ -2544,6 +2545,33 @@ export function createApp(): express.Express {
                 twilioAdapter.setPendingTransferTwiml(session.id, result.voicemailTwiml);
               }
               return `patch_owner:fallback${result.smsSent ? '+sms' : ''}${result.callMeBackTaskId ? '+callback' : ''}`;
+            },
+            // RV-123 — queue a human-approved update_customer proposal that
+            // stamps the vulnerability marker into communication notes (the
+            // EXISTING payload's `notes` field; see vulnerable-customer.ts).
+            markCustomerVulnerable: async ({ tenantId, customerId, decision, sessionId }) => {
+              const existing = await customerRepo.findById(tenantId, customerId);
+              const payload = buildMarkCustomerVulnerablePayload(
+                customerId,
+                decision,
+                existing?.communicationNotes,
+              );
+              if (!payload) return; // already marked
+              await proposalRepo.create(
+                buildProposalRow({
+                  tenantId,
+                  proposalType: 'update_customer',
+                  payload,
+                  summary: 'Flag customer as potentially vulnerable (voice triage)',
+                  sourceContext: {
+                    source: 'calling-agent',
+                    channel: 'telephony',
+                    sessionId,
+                    reason: 'vulnerability_triage',
+                  },
+                  createdBy: 'system:vulnerability-triage',
+                }),
+              );
             },
           })
         : undefined;
