@@ -15,6 +15,7 @@ import type {
   SideEffect,
 } from './types';
 import { selectRepairTemplate } from './repair-templates';
+import { EMERGENCY_SAFETY_LINE } from './emergency-detector';
 
 // ─── Thresholds ───────────────────────────────────────────────────────────────
 
@@ -241,6 +242,59 @@ function checkGlobalGuards(
     };
   }
 
+  // RV-140/RV-142 — deterministic emergency keyword hit. Fast-paths to
+  // escalating from any non-terminal state, BEFORE any LLM call. The 911
+  // safety line is the FIRST side effect (RV-142) so it is always spoken
+  // before any transfer copy/bridge; the create_proposal closes the
+  // emergency_dispatch execution gap (RV-141) and notify_oncall drives the
+  // immediate dispatcher transfer. Idempotent in escalating/terminated so a
+  // repeated keyword during the transfer can't double-page.
+  if (event.type === 'emergency_detected') {
+    if (state === 'escalating' || state === 'terminated') {
+      return { nextState: state, sideEffects: [], updatedContext: context };
+    }
+    const updatedContext: CallingAgentContext = {
+      ...context,
+      currentIntent: 'emergency_dispatch',
+      escalationReason: 'emergency_dispatch',
+    };
+    return {
+      nextState: 'escalating',
+      sideEffects: [
+        auditLog(updatedContext, state, 'escalating', 'emergency_detected', {
+          keyword: event.keyword,
+        }),
+        ttsPlay(EMERGENCY_SAFETY_LINE, { priority: 'safety' }),
+        ttsPlay("This sounds like an emergency. I'm connecting you with our on-call dispatcher immediately."),
+        {
+          type: 'create_proposal',
+          payload: {
+            tenantId: updatedContext.tenantId,
+            intent: 'emergency_dispatch',
+            entities: {
+              ...updatedContext.extractedEntities,
+              emergencyDescription: event.utterance,
+              detectedKeywords: [event.keyword],
+              // Duplicated into entities because the voice-turn processor's
+              // handleCreateProposal persists only {intent, entities,
+              // sessionId, callSid} — the execution handler (RV-141) reads
+              // the customer from here.
+              ...(updatedContext.customerId
+                ? { customerId: updatedContext.customerId }
+                : {}),
+            },
+            sessionId: updatedContext.sessionId,
+            callSid: updatedContext.callSid,
+            conversationId: updatedContext.conversationId,
+            customerId: updatedContext.customerId,
+          },
+        },
+        notifyOncall(updatedContext, 'emergency_dispatch'),
+      ],
+      updatedContext,
+    };
+  }
+
   // frustration_detected fires from keyword detector or LLM sentiment classifier.
   // Idempotent: skip if already in a terminal/escalating state.
   if (event.type === 'frustration_detected') {
@@ -454,6 +508,8 @@ function transitionIntentCapture(
         nextState: 'escalating',
         sideEffects: [
           auditLog(updatedContext, 'intent_capture', 'escalating', 'emergency_dispatch'),
+          // RV-142 — safety script first, before any transfer copy/bridge.
+          ttsPlay(EMERGENCY_SAFETY_LINE, { priority: 'safety' }),
           ttsPlay("This sounds like an emergency. I'm connecting you with our on-call dispatcher immediately."),
           notifyOncall(updatedContext, 'emergency_dispatch'),
         ],

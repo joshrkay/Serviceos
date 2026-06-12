@@ -17,6 +17,7 @@ import {
 import { Queue } from '../queues/queue';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { Logger } from '../logging/logger';
+import type { FileRepository, StorageProvider } from '../files/file-service';
 
 interface CreateVoiceRecordingBody {
   fileId: string;
@@ -44,6 +45,15 @@ function isAllowedMimeType(contentType: string): boolean {
 
 export interface VoiceRouterOpts {
   pool?: Pool;
+  /**
+   * RV-132 — deps for the audio-download endpoint. The retention worker
+   * deletes the S3 object but keeps the voice_recordings row (tombstoned
+   * via purged_at) and its files FK target intact, so the download path
+   * must consult purged_at instead of letting callers chase a dangling
+   * S3 404. Optional: absent → the audio endpoint answers 501.
+   */
+  fileRepo?: FileRepository;
+  storage?: StorageProvider;
 }
 
 export function createVoiceRouter(
@@ -270,6 +280,53 @@ export function createVoiceRouter(
     })
   );
 
+  /**
+   * RV-132 — recording audio download. Resolves the joined files row to a
+   * presigned download URL. A retention-purged recording (purged_at set;
+   * audio object deleted, metadata/transcript kept) answers a clear
+   * 410 GONE instead of handing out a URL that 404s at S3.
+   */
+  router.get(
+    '/recordings/:id/audio',
+    requireAuth,
+    requireTenant,
+    requirePermission('files:view'),
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const recording = await voiceRepo.findById(req.auth!.tenantId, req.params.id);
+      if (!recording) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Voice recording not found' });
+        return;
+      }
+      if (recording.purgedAt) {
+        res.status(410).json({
+          error: 'RECORDING_PURGED',
+          message:
+            'This recording\'s audio was purged under the tenant retention policy. The transcript and metadata are still available.',
+          purgedAt: recording.purgedAt.toISOString(),
+        });
+        return;
+      }
+      if (!opts?.fileRepo || !opts?.storage) {
+        res.status(501).json({ error: 'NOT_CONFIGURED', message: 'Audio download is not configured' });
+        return;
+      }
+      if (!recording.fileId) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Recording has no stored audio file' });
+        return;
+      }
+      const file = await opts.fileRepo.findById(req.auth!.tenantId, recording.fileId);
+      if (!file) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Recording audio file not found' });
+        return;
+      }
+      const downloadUrl = await opts.storage.generateDownloadUrl(
+        file.storageBucket,
+        file.storageKey,
+      );
+      res.json({ downloadUrl });
+    })
+  );
+
   router.post(
     '/go-live',
     requireAuth,
@@ -329,6 +386,18 @@ export function createVoiceRouter(
       const existing = await voiceRepo.findById(req.auth!.tenantId, req.params.id);
       if (!existing) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Voice recording not found' });
+        return;
+      }
+
+      // RV-132 — a purged recording has no audio object left to transcribe;
+      // re-enqueueing would just send the worker to a dangling S3 404.
+      if (existing.purgedAt) {
+        res.status(410).json({
+          error: 'RECORDING_PURGED',
+          message:
+            'This recording\'s audio was purged under the tenant retention policy and cannot be re-transcribed.',
+          purgedAt: existing.purgedAt.toISOString(),
+        });
         return;
       }
 

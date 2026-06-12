@@ -219,11 +219,40 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['154_call_me_back_session_idempotency', 'a08d1ad3f4a42adb17e2fd5ea464b52fb87721d3dd5fe534c662dd787228c65e'],
   // QA-2026-06-10: credentials column + google_business provider missing from tenant_integrations
   ['155_tenant_integrations_google_business', 'd626700ea571d2691927cf6adf43704b3bc44aecde7071f3895c1cf801cf2a7f'],
-  ['156_estimate_entity_trgm_index', '5c35bf46e89c5bd9659d8e4dc1c51c8735e5e8c5d956d838ba5f055e64412d39'],
-  ['157_proposal_sms_events', '3855ad353820b6b2c1014d7b3f97b913303247436817023f453e773f15917b95'],
-  ['158_digest_entries', '5e3960d01d38b0b5a078f128c0a64d0fea10b66ab83032aa52a442c8caecf581'],
-  ['159_invoice_photos_and_client_visible', 'b26ce21cdbf46812a6d961693c0e21f45048c46c61ebf51db20a914533bb579b'],
-  ['160_job_checklists', '85e7ebb0f66d2b8356b72241acdc586acb0f3e1dabb1cf5f6a62c6d1888ef8b0'],
+  // P2-034: SMS approval transport — proposal_sms_events
+  ['156_proposal_sms_events', '57fcfceeddded524d51d9d941e139b094dc684e818ea6c5772d561710a72d469'],
+  // P2-034 review: sender-scoped edit sessions
+  ['157_proposal_sms_events_from_phone', 'ba440770da6030cbbeb747578d33763768ef56191219f082b3b5233a6d204561'],
+  // P2-034 review: monotonic tiebreaker for latest-render ordering
+  ['158_proposal_sms_events_seq', '69e5325add052650a0355aeddab03b016018bf3d3272f63601b468ba32a67b9d'],
+  // RV-001: per-tenant feature flag overrides table
+  ['159_create_tenant_feature_flags', 'd30f579a89e543e42fec2f499dfd30b170994696d5f08b43b838a1cff483a319'],
+  // RV-005: generalized attachments foundation (photos & documents on any entity)
+  ['160_create_attachments', '25894a97ec6e05ddf8be60c0c90616e0b20355b9425008c334e188e5c21b1d9b'],
+  // RV-006: image post-process pipeline columns on files (dims, thumbnail, exif flag, content hash)
+  ['161_files_image_pipeline_columns', '237e44d6cf831a1fa52d972ccbe1de5180b2578f696857c642cc43f50c592464'],
+  // RV-060: end-of-day digest snapshots (CHECK widening moved to 164)
+  ['162_create_daily_digests', '2a55425f1609477624a0de73d215b33cff416a1aab7ad2e053619f41c76a702d'],
+  // RV-063: per-tenant digest delivery settings (enabled/time/channel)
+  ['163_tenant_settings_digest', '3fb34512c152ba262d2e21e4aa84608374156f89c07d5f71e3cd43d38b718836'],
+  ['164_dispatch_entity_daily_digest', '4d3ad093b4319cf786bfd047df3d5898720a4d6712e5037704c5a06fffc492e9'],
+  // RV-074: widen proposal_sms_events kind CHECK for 'review_required_rendered'
+  ['165_proposal_sms_events_review_required_kind', '0a1ccd582e840a57ec622344a0a41a690229bfd30b7b9e87b0265c255b1dff56'],
+  // RV-120: per-call vulnerability triage outcomes (turn-batch grader log)
+  // tier CHECK added (none/low/elevated/critical = UrgencyTier enum) — branch-local, pre-deploy
+  ['166_create_triage_events', 'a6e1f2eeefc1aba830d600aa36b1635535938bd9a83abc16c371c590f7568147'],
+  // tenant_budget_counters (fixed-window budget counters), both RLS'd.
+  ['167_create_supervisor_policies', '6bf3ba1a21e1bc1a829fe4addd9a71cd8e9c64587c23338909df15c0f6988d48'],
+  // RV-130: append-only consent ledger (recording/sms/marketing events)
+  ['168_create_consent_events', '6c9ba983361d9dec2a5a28e97ff13b210628cd194d22b6b5bd5b880a4af11970'],
+  // RV-132: per-tenant retention horizon + legal hold + purge tombstone
+  // CHECK (recording_retention_days > 0) added — branch-local, pre-deploy
+  ['169_recording_retention', 'aac50e6e535fc4347f0c9f3dc45f27ac8016902bc0fbbceb2b9ba9cd0d033afa'],
+  // RV-115: FSM context snapshot on dropped-call recovery rows
+  ['170_dropped_call_recovery_context', 'f05149c2f4fb0fabaa390b35054ba3bd9c8caeb75298cf729992e5a3955d91f6'],
+  // block, never a reply anchor)
+  ['171_proposal_sms_events_voice_reapproval_kind', '84e29ec755102c0b5f00bddc21544610d2c6d6e05ad9e20fafad6f0e700b99fe'],
+  ['172_create_accounting_integrations', '70acc51d76a63c01b9047b15198502d8ae013bcf0985f457d67a03a405097d33'],
 ];
 
 function hashMigration(value: string): string {

@@ -148,6 +148,49 @@ describe('wave-2 task handlers', () => {
     expect(res.proposal.payload.entryType).toBe('job');
   });
 
+  // RV-051 — voice clock-in confirmation. The proposal IS the confirm
+  // turn (capture-class, no trust tier → draft → human approves before
+  // execution); these pin the readback + resolved-job content of it.
+  it('log_time_entry carries the router-resolved jobId and a readback summary', async () => {
+    const res = await new LogTimeEntryTaskHandler().handle(
+      ctx({
+        existingEntities: {
+          jobReference: 'the Patel job',
+          jobId: '33333333-3333-4333-8333-333333333333',
+        },
+      }),
+    );
+    expect(res.proposal.payload.jobId).toBe('33333333-3333-4333-8333-333333333333');
+    expect(res.proposal.payload.jobReference).toBe('the Patel job');
+    expect(res.proposal.summary).toBe('Clocking you in on the Patel job — right?');
+    expect(missingFieldsFor(res.proposal)).not.toContain('jobId');
+    // Confirm gate: never auto-approved — a human taps before the clock starts.
+    expect(res.proposal.status).toBe('draft');
+  });
+
+  it('log_time_entry flags jobId missing when a job-type entry has no resolved job', async () => {
+    const res = await new LogTimeEntryTaskHandler().handle(
+      ctx({ existingEntities: { jobReference: 'the Patel job' } }),
+    );
+    expect(res.proposal.payload.jobId).toBeUndefined();
+    expect(missingFieldsFor(res.proposal)).toContain('jobId');
+    expect(res.proposal.status).toBe('draft');
+    expect(res.proposal.summary).toBe('Clocking you in on the Patel job — right?');
+  });
+
+  it('log_time_entry break/drive entries need no job and read back their own confirmation', async () => {
+    const breakRes = await new LogTimeEntryTaskHandler().handle(
+      ctx({ existingEntities: { timeEntryType: 'break' } }),
+    );
+    expect(missingFieldsFor(breakRes.proposal)).toEqual([]);
+    expect(breakRes.proposal.summary).toBe('Starting your break — right?');
+
+    const driveRes = await new LogTimeEntryTaskHandler().handle(
+      ctx({ existingEntities: { timeEntryType: 'drive' } }),
+    );
+    expect(driveRes.proposal.summary).toBe('Starting your drive time — right?');
+  });
+
   it('notify_delay carries delay minutes and flags appointmentId when unresolved', async () => {
     const res = await new NotifyDelayTaskHandler().handle(
       ctx({ existingEntities: { appointmentReference: 'the 10am', delayMinutes: 30 } }),

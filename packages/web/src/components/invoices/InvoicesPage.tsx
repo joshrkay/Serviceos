@@ -12,12 +12,18 @@ import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { normalizeInvoiceStatus, centsToDisplay } from '../../utils/statusNormalize';
+import { formatCurrencyAmount } from '../../utils/currency';
+
+/** Format dollar amounts (not cents) with fixed two decimal places. */
+const formatDollars = (dollars: number): string =>
+  formatCurrencyAmount(Math.round(dollars * 100));
 import { StatusBadge } from '../shared/StatusBadge';
 import { Spinner, EmptyState } from '../ui';
 import { ErrorState } from '../ErrorState';
 import { apiFetch } from '../../utils/api-fetch';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
+import { AttachmentSection } from '../attachments/AttachmentSection';
 
 type InvoiceStatus = 'Draft' | 'Sent' | 'Unpaid' | 'Paid' | 'Overdue' | 'Canceled';
 
@@ -253,8 +259,8 @@ function InvoiceLineItems({ items, editable, onChange }: {
               <>
                 <p className="text-sm text-slate-800 truncate">{item.description}</p>
                 <p className="text-sm text-slate-500 text-right">{item.qty}</p>
-                <p className="text-sm text-slate-500 text-right">${item.rate.toLocaleString()}</p>
-                <p className="text-sm text-slate-800 text-right">${(item.qty * item.rate).toLocaleString()}</p>
+                <p className="text-sm text-slate-500 text-right">${formatDollars(item.rate)}</p>
+                <p className="text-sm text-slate-800 text-right">${formatDollars(item.qty * item.rate)}</p>
               </>
             )}
           </div>
@@ -272,7 +278,7 @@ function InvoiceLineItems({ items, editable, onChange }: {
 
       <div className="px-4 py-3.5 border-t border-slate-100 bg-slate-50 flex items-center justify-between">
         <p className="text-sm text-slate-600">Total due</p>
-        <p className="text-sm text-slate-900">${(editing ? draftTotal : total).toLocaleString()}</p>
+        <p className="text-sm text-slate-900">${formatDollars(editing ? draftTotal : total)}</p>
       </div>
 
       {editing && (
@@ -373,7 +379,7 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent, apiId }: {
                 </p>
               </div>
               <div className="text-right">
-                <p className={`text-lg ${isOverdue ? 'text-red-900' : 'text-slate-900'}`}>${total.toLocaleString()}</p>
+                <p className={`text-lg ${isOverdue ? 'text-red-900' : 'text-slate-900'}`}>${formatDollars(total)}</p>
                 {isOverdue && <p className="text-xs text-red-600">Overdue</p>}
               </div>
             </div>
@@ -549,7 +555,7 @@ function MarkPaidSheet({
               <p className="text-sm text-green-800">{inv.description}</p>
               <p className="text-xs text-green-600 mt-0.5">{inv.invoiceNumber}</p>
             </div>
-            <p className="text-lg text-green-900">${total.toLocaleString()}</p>
+            <p className="text-lg text-green-900">${formatDollars(total)}</p>
           </div>
 
           <div>
@@ -720,7 +726,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
             </div>
             <div className="flex items-center gap-2 shrink-0">
               <StatusBadge status={status} />
-              <p className="text-sm text-slate-900">${total.toLocaleString()}</p>
+              <p className="text-sm text-slate-900">${formatDollars(total)}</p>
             </div>
           </div>
 
@@ -732,7 +738,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
               </div>
               <div>
                 <p className="text-sm text-green-800">Payment received</p>
-                <p className="text-xs text-green-600 mt-0.5">{paid ? 'Just now' : ''} · ${total.toLocaleString()}</p>
+                <p className="text-xs text-green-600 mt-0.5">{paid ? 'Just now' : ''} · ${formatDollars(total)}</p>
               </div>
             </div>
           )}
@@ -741,7 +747,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
               <AlertCircle size={18} className="text-red-500 shrink-0 mt-0.5" />
               <div className="flex-1">
                 <p className="text-sm text-red-800">Payment overdue</p>
-                <p className="text-xs text-red-600 mt-0.5">Due {inv.dueDate} · {total.toLocaleString()} outstanding</p>
+                <p className="text-xs text-red-600 mt-0.5">Due {inv.dueDate} · ${formatDollars(total)} outstanding</p>
               </div>
               <button
                 onClick={() => setSendOpen(true)}
@@ -770,6 +776,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
               {status !== 'Paid' && (
                 <PaymentMethodsCard paymentLink={paymentLink} />
               )}
+              <AttachmentSection entityType="invoice" entityId={invoiceId} />
 
               {/* Notes section */}
               <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
@@ -865,7 +872,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
                 <p className="text-sm text-white/60 mb-1">
                   {status === 'Paid' ? 'Amount paid' : 'Amount due'}
                 </p>
-                <p className="text-3xl text-white mb-1">${total.toLocaleString()}</p>
+                <p className="text-3xl text-white mb-1">${formatDollars(total)}</p>
                 {inv.dueDate && status !== 'Paid' && (
                   <p className={`text-xs ${status === 'Overdue' ? 'text-red-200' : 'text-white/40'}`}>
                     {status === 'Overdue' ? 'Overdue since' : 'Due'} {inv.dueDate}

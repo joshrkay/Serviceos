@@ -58,6 +58,7 @@ import { LLMGateway } from '../gateway/gateway';
 import {
   classifyIntent,
   isLookupIntent,
+  OWNER_LOOKUP_INTENT_TYPES,
   type IntentType,
 } from '../orchestration/intent-classifier';
 import {
@@ -96,6 +97,9 @@ import { lookupLeads } from '../skills/lookup-leads';
 import { lookupRevenue } from '../skills/lookup-revenue';
 import { lookupCatalog } from '../skills/lookup-catalog';
 import { lookupAvailability } from '../skills/lookup-availability';
+import { lookupDayOverview } from '../skills/lookup-day-overview';
+import { lookupDigest } from '../skills/lookup-digest';
+import { lookupPendingItems } from '../skills/lookup-pending-items';
 import type { AvailabilityFinder } from '../tasks/availability-finder';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
 
@@ -103,6 +107,7 @@ import type { LookupEventService } from '../../lookup-events/lookup-event-servic
 import type { CustomerRepository } from '../../customers/customer';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { InvoiceRepository } from '../../invoices/invoice';
+import type { DunningConfigRepository } from '../../invoices/dunning-config';
 import type { EstimateRepository } from '../../estimates/estimate';
 import type { JobRepository } from '../../jobs/job';
 import type { LeadRepository } from '../../leads/lead';
@@ -110,7 +115,9 @@ import type { AuditRepository } from '../../audit/audit';
 import type { AgreementRepository } from '../../agreements/agreement';
 import type { MoneyDashboardRepository } from '../../reports/money-dashboard';
 import type { CatalogItemRepository } from '../../catalog/catalog-item';
+import type { DailyDigestRepository } from '../../digest/digest-service';
 import { createProposal, type ProposalRepository } from '../../proposals/proposal';
+import type { DroppedCallRecoveryRepository } from '../../sms/recovery/scheduler';
 
 // Mutation worker (production code path for proposal creation).
 import {
@@ -185,6 +192,9 @@ export interface TextModeDriverDeps {
   agreementRepo?: AgreementRepository;
   moneyDashboardRepo?: MoneyDashboardRepository;
   catalogRepo?: CatalogItemRepository;
+  dailyDigestRepo?: DailyDigestRepository;
+  dunningConfigRepo?: DunningConfigRepository;
+  droppedCallRecoveryRepo?: Pick<DroppedCallRecoveryRepository, 'listUnansweredRecoveries'>;
   availabilityFinder?: AvailabilityFinder;
   /** Optional audit-trail of every lookup. */
   lookupEvents?: LookupEventService;
@@ -1018,7 +1028,16 @@ export class TextModeDriver implements AgentDriver {
   ): Promise<string> {
     const tenantId = session.tenantId;
     const customerId = session.customerId;
+    const ownerSession = session.machine.currentContext.ownerSession === true;
+    const extendedIntents = session.machine.currentContext.extendedIntents === true;
+    const ownerLookup = OWNER_LOOKUP_INTENT_TYPES.has(intentType);
 
+    if (ownerLookup) {
+      if (!ownerSession || !extendedIntents) {
+        return LOOKUP_NOT_WIRED_FALLBACK;
+      }
+      return this.runOwnerLookupSkill(session, intentType);
+    }
     // Lookups are customer-scoped. An anonymous caller doesn't have
     // an account to read from; degrade gracefully.
     if (!customerId) {
@@ -1233,6 +1252,102 @@ export class TextModeDriver implements AgentDriver {
           return result.status === 'unavailable'
             ? LOOKUP_NOT_WIRED_FALLBACK
             : result.message;
+        }
+        default:
+          return LOOKUP_NOT_WIRED_FALLBACK;
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      session.events.emit(
+        'voice-event',
+        lookupExecutedEvent(intentType, performance.now() - startMs, false, message),
+      );
+      return LOOKUP_NOT_WIRED_FALLBACK;
+    }
+  }
+
+  private async runOwnerLookupSkill(
+    session: VoiceSession,
+    intentType: IntentType,
+  ): Promise<string> {
+    const tenantId = session.tenantId;
+    const startMs = performance.now();
+    try {
+      switch (intentType) {
+        case 'lookup_day_overview': {
+          if (!this.deps.appointmentRepo || !this.deps.jobRepo || !this.deps.proposalRepo) {
+            return LOOKUP_NOT_WIRED_FALLBACK;
+          }
+          const result = await lookupDayOverview(
+            {
+              tenantId,
+              sessionId: session.id,
+              ...(this.deps.now ? { now: this.deps.now() } : {}),
+            },
+            {
+              appointmentRepo: this.deps.appointmentRepo,
+              jobRepo: this.deps.jobRepo,
+              proposalRepo: this.deps.proposalRepo,
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_digest': {
+          if (!this.deps.dailyDigestRepo) {
+            return LOOKUP_NOT_WIRED_FALLBACK;
+          }
+          const result = await lookupDigest(
+            {
+              tenantId,
+              sessionId: session.id,
+              ...(this.deps.now ? { now: this.deps.now() } : {}),
+            },
+            {
+              digestRepo: this.deps.dailyDigestRepo,
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_pending_items': {
+          if (!this.deps.estimateRepo || !this.deps.invoiceRepo) {
+            return LOOKUP_NOT_WIRED_FALLBACK;
+          }
+          const result = await lookupPendingItems(
+            {
+              tenantId,
+              sessionId: session.id,
+              ...(this.deps.now ? { now: this.deps.now() } : {}),
+            },
+            {
+              estimateRepo: this.deps.estimateRepo,
+              invoiceRepo: this.deps.invoiceRepo,
+              ...(this.deps.dunningConfigRepo
+                ? { dunningConfigRepo: this.deps.dunningConfigRepo }
+                : {}),
+              ...(this.deps.droppedCallRecoveryRepo
+                ? {
+                    listUnansweredRecoveries: (tenant: string) =>
+                      this.deps.droppedCallRecoveryRepo!.listUnansweredRecoveries(tenant),
+                  }
+                : {}),
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
+          );
+          return result.summary;
         }
         default:
           return LOOKUP_NOT_WIRED_FALLBACK;

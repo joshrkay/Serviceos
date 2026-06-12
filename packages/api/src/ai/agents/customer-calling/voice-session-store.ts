@@ -184,6 +184,24 @@ export interface VoiceSession {
    * use the default.
    */
   ttsVoice?: string;
+  /**
+   * RV-071 — in-flight owner voice-approval dialogue (readback awaiting
+   * the explicit affirmative, clarification list, or challenge prompt).
+   * Adapter-side state like `leadId`: the FSM never reads it. Carries no
+   * secrets (the challenge value is re-read from settings at verify
+   * time). Cleared whenever a turn resolves the dialogue.
+   */
+  pendingVoiceApproval?: import('../../tasks/proposal-approval-task').PendingVoiceApproval;
+  /**
+   * RV-071 — session-scoped voice-approval state (challenge fail counter
+   * + lockout flag). Adapter-side like `pendingVoiceApproval` and lives
+   * exactly as long as the session, but is NEVER cleared when a dialogue
+   * resolves: three wrong challenge codes anywhere in the call must lock
+   * money/irreversible approvals for the rest of the session, even across
+   * cancelled-and-restarted dialogues. Merged (not replaced) from each
+   * turn's `VoiceApprovalTurnResult.sessionState`.
+   */
+  voiceApprovalState?: import('../../tasks/proposal-approval-task').VoiceApprovalSessionState;
   /** Set after `endSession()` to short-circuit further input. */
   ended: boolean;
   /**
@@ -283,6 +301,10 @@ export class VoiceSessionStore {
       conversationId?: string;
       repairTemplates?: ReadonlyArray<RepairTemplate>;
       escalationTriggers?: CallingAgentContext['escalationTriggers'];
+      /** RV-070 — caller-ID matched an approver phone (owner / backup). */
+      ownerSession?: boolean;
+      /** Phase-2 Track A — tenant opted into extended owner intents. */
+      extendedIntents?: boolean;
     } = {}
   ): VoiceSession {
     const id = uuidv4();
@@ -296,6 +318,8 @@ export class VoiceSessionStore {
       ...(opts.escalationTriggers
         ? { escalationTriggers: opts.escalationTriggers }
         : {}),
+      ...(opts.ownerSession ? { ownerSession: true } : {}),
+      ...(opts.extendedIntents ? { extendedIntents: true } : {}),
     });
     const costTracker = new SessionCostTracker(
       channel === 'inapp' ? DEFAULT_INAPP_CAPS : DEFAULT_TELEPHONY_CAPS

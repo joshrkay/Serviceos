@@ -48,6 +48,14 @@ function routerMsg<T>(payload: T): QueueMessage<T> {
   };
 }
 
+/** Deposit-lock wiring for the executor: zero-deposit job-1 lets edits proceed. */
+function zeroDepositJobRepo(): Pick<import('../../src/jobs/job').JobRepository, 'findById'> {
+  return {
+    findById: async () =>
+      ({ id: 'job-1', tenantId: 't-1', depositPaidCents: 0 }) as import('../../src/jobs/job').Job,
+  };
+}
+
 function seedEstimate(): Estimate {
   const lineItems: LineItem[] = [
     buildLineItem('li-1', 'Site visit', 1, 15000, 0, true, 'labor'),
@@ -124,7 +132,13 @@ describe('integration — voice "add item to estimate" → proposal → executed
       estimateId: 'est-1',
       editActions: classifierPayload.editActions,
     };
-    const executor = new UpdateEstimateExecutionHandler(estimateRepo);
+    const executor = new UpdateEstimateExecutionHandler(
+      estimateRepo,
+      undefined,
+      undefined,
+      undefined,
+      zeroDepositJobRepo(),
+    );
     const result = await executor.execute(
       { ...proposal, payload: executablePayload },
       { tenantId: 't-1', executedBy: 'u-1' }
@@ -177,7 +191,13 @@ describe('integration — voice "add item to estimate" → proposal → executed
     );
 
     const proposal = (await proposalRepo.findByTenant('t-1'))[0];
-    const executor = new UpdateEstimateExecutionHandler(estimateRepo);
+    const executor = new UpdateEstimateExecutionHandler(
+      estimateRepo,
+      undefined,
+      undefined,
+      undefined,
+      zeroDepositJobRepo(),
+    );
     const result = await executor.execute(
       {
         ...proposal,

@@ -215,7 +215,7 @@ describe('P12-004 — one-tap approve token (HMAC, single-use, TTL)', () => {
       expectedTenantId: 'tenant-1',
       consumeNonce: createInMemoryNonceStore(),
     });
-    expect(result).toEqual({ ok: true, proposalId: 'prop-1', tenantId: 'tenant-1' });
+    expect(result).toEqual({ ok: true, action: 'approve', proposalId: 'prop-1', tenantId: 'tenant-1' });
   });
 
   it('rejects a tampered payload (bad signature)', async () => {
@@ -409,5 +409,626 @@ describe('P12-004 — routeUnsupervisedProposal', () => {
     expect(d.sms).toHaveLength(0);
     const events = await d.audit.findByEntity('tenant-1', 'proposal', 'prop-1');
     expect(events).toHaveLength(1);
+  });
+});
+
+describe('P2-034 — routeUnsupervisedProposal SMS transport seams', () => {
+  const base = {
+    tenantId: 'tenant-1',
+    proposalId: 'prop-1',
+    channel: 'other' as const,
+    ownerPhone: '+15555550100',
+  };
+
+  it('renderSmsBody builds the body around the one-tap URL and onSmsSent records it', async () => {
+    const audit = new InMemoryAuditRepository();
+    const sms: { to: string; body: string }[] = [];
+    const recorded: {
+      body: string;
+      kind: 'proposal_rendered' | 'review_required_rendered';
+      expiresAt?: Date;
+    }[] = [];
+
+    const result = await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        sendSms: async (to, body) => {
+          sms.push({ to, body });
+        },
+        buildApproveUrl: (token) => `https://app.test/p/approve?token=${token}`,
+        onSmsSent: async (sent) => {
+          recorded.push(sent);
+        },
+      },
+      {
+        ...base,
+        renderSmsBody: (url) => `Custom body. Reply Y/N/EDIT. ${url}`,
+      },
+    );
+
+    expect(result.smsSent).toBe(true);
+    expect(sms[0].body).toMatch(/^Custom body\. Reply Y\/N\/EDIT\. https:\/\/app\.test/);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].body).toBe(sms[0].body);
+    expect(recorded[0].kind).toBe('proposal_rendered');
+    expect(recorded[0].expiresAt).toEqual(result.approveLinkExpiresAt);
+  });
+
+  it('keeps the legacy link-only body when renderSmsBody is absent', async () => {
+    const audit = new InMemoryAuditRepository();
+    const sms: { to: string; body: string }[] = [];
+
+    await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        sendSms: async (to, body) => {
+          sms.push({ to, body });
+        },
+        buildApproveUrl: (token) => `https://app.test/p/approve?token=${token}`,
+      },
+      { ...base, summaryText: 'New booking for Jane D.' },
+    );
+
+    expect(sms[0].body).toBe(
+      `New booking for Jane D.. Tap to approve (link expires in 30 min): ${sms[0].body.split(': ')[1]}`,
+    );
+  });
+
+  it('does not invoke onSmsSent when no SMS goes out', async () => {
+    const audit = new InMemoryAuditRepository();
+    let called = 0;
+
+    await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        onSmsSent: async () => {
+          called += 1;
+        },
+      },
+      { ...base, ownerPhone: null },
+    );
+
+    expect(called).toBe(0);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// RV-007 (F-4) — Confidence Marker auto-approve guard
+//
+// `payload._meta.overallConfidence` of 'low' / 'very_low' must NEVER
+// auto-approve, regardless of the numeric score vs threshold. 'medium'
+// does NOT block (it renders as a marker downstream). Payloads without
+// `_meta` keep today's numeric-threshold behavior exactly.
+// ───────────────────────────────────────────────────────────────────────────
+
+import { confidenceMetaBlocksAutoApprove } from '../../src/proposals/auto-approve';
+
+describe('RV-007 — confidenceMetaBlocksAutoApprove', () => {
+  it('blocks on low and very_low', () => {
+    expect(confidenceMetaBlocksAutoApprove({ _meta: { overallConfidence: 'low' } })).toBe(true);
+    expect(confidenceMetaBlocksAutoApprove({ _meta: { overallConfidence: 'very_low' } })).toBe(
+      true,
+    );
+  });
+
+  it('does not block on high or medium', () => {
+    expect(confidenceMetaBlocksAutoApprove({ _meta: { overallConfidence: 'high' } })).toBe(false);
+    expect(confidenceMetaBlocksAutoApprove({ _meta: { overallConfidence: 'medium' } })).toBe(
+      false,
+    );
+  });
+
+  it('never blocks (and never throws) on absent or malformed _meta', () => {
+    expect(confidenceMetaBlocksAutoApprove(undefined)).toBe(false);
+    expect(confidenceMetaBlocksAutoApprove(null)).toBe(false);
+    expect(confidenceMetaBlocksAutoApprove('low')).toBe(false);
+    expect(confidenceMetaBlocksAutoApprove({})).toBe(false);
+    expect(confidenceMetaBlocksAutoApprove({ _meta: null })).toBe(false);
+    expect(confidenceMetaBlocksAutoApprove({ _meta: 'low' })).toBe(false);
+    expect(confidenceMetaBlocksAutoApprove({ _meta: {} })).toBe(false);
+    expect(confidenceMetaBlocksAutoApprove({ _meta: { overallConfidence: 42 } })).toBe(false);
+  });
+});
+
+describe('RV-007 — decideInitialStatus confidence-marker guard', () => {
+  // create_customer is capture-class; autonomous tier is the only path
+  // that can reach 'approved'.
+  const base = {
+    proposalType: 'create_customer' as const,
+    sourceTrustTier: 'autonomous' as const,
+  };
+
+  it.each(['low', 'very_low'] as const)(
+    '%s blocks auto-approve at ANY score, in every supervisor mode path',
+    (level) => {
+      const payload = { name: 'X', _meta: { overallConfidence: level } };
+
+      // Legacy path (no mode threaded) — 0.99 clears 0.9 numerically.
+      expect(decideInitialStatus({ ...base, confidenceScore: 0.99, payload })).toBe('draft');
+
+      // Mode-aware paths — 1.0 clears every threshold numerically.
+      for (const mode of ['supervisor', 'both', 'tech'] as const) {
+        expect(
+          decideInitialStatus({
+            ...base,
+            confidenceScore: 1.0,
+            supervisorMode: mode,
+            supervisorPresent: true,
+            payload,
+          }),
+        ).toBe('draft');
+      }
+
+      // Tenant override path — even a permissive 0.5 override is beaten.
+      expect(
+        decideInitialStatus({
+          ...base,
+          confidenceScore: 0.99,
+          supervisorMode: 'supervisor',
+          supervisorPresent: true,
+          tenantThresholdOverride: { supervisor: 0.5 },
+          payload,
+        }),
+      ).toBe('draft');
+
+      // Unsupervised path: a blocked proposal is NOT a "would have
+      // auto-approved" — it lands in 'draft', not 'ready_for_review'.
+      expect(
+        decideInitialStatus({
+          ...base,
+          confidenceScore: 0.99,
+          supervisorMode: 'supervisor',
+          supervisorPresent: false,
+          payload,
+        }),
+      ).toBe('draft');
+    },
+  );
+
+  it('medium does NOT block (F-4: only low/very_low block)', () => {
+    expect(
+      decideInitialStatus({
+        ...base,
+        confidenceScore: 0.96,
+        supervisorMode: 'supervisor',
+        supervisorPresent: true,
+        payload: { name: 'X', _meta: { overallConfidence: 'medium' } },
+      }),
+    ).toBe('approved');
+  });
+
+  it('high does not block either', () => {
+    expect(
+      decideInitialStatus({
+        ...base,
+        confidenceScore: 0.96,
+        supervisorMode: 'tech',
+        supervisorPresent: true,
+        payload: { name: 'X', _meta: { overallConfidence: 'high' } },
+      }),
+    ).toBe('approved');
+  });
+
+  it('regression pin — absent _meta keeps today\'s behavior per supervisor mode path', () => {
+    const payload = { name: 'X' }; // no _meta
+
+    // Legacy (no mode): 0.91 approves, 0.89 drafts.
+    expect(decideInitialStatus({ ...base, confidenceScore: 0.91, payload })).toBe('approved');
+    expect(decideInitialStatus({ ...base, confidenceScore: 0.89, payload })).toBe('draft');
+
+    // supervisor (0.90): boundary inclusive.
+    expect(
+      decideInitialStatus({
+        ...base,
+        confidenceScore: 0.9,
+        supervisorMode: 'supervisor',
+        supervisorPresent: true,
+        payload,
+      }),
+    ).toBe('approved');
+
+    // both (0.92).
+    expect(
+      decideInitialStatus({
+        ...base,
+        confidenceScore: 0.92,
+        supervisorMode: 'both',
+        supervisorPresent: true,
+        payload,
+      }),
+    ).toBe('approved');
+    expect(
+      decideInitialStatus({
+        ...base,
+        confidenceScore: 0.91,
+        supervisorMode: 'both',
+        supervisorPresent: true,
+        payload,
+      }),
+    ).toBe('draft');
+
+    // tech (0.95).
+    expect(
+      decideInitialStatus({
+        ...base,
+        confidenceScore: 0.95,
+        supervisorMode: 'tech',
+        supervisorPresent: true,
+        payload,
+      }),
+    ).toBe('approved');
+    expect(
+      decideInitialStatus({
+        ...base,
+        confidenceScore: 0.94,
+        supervisorMode: 'tech',
+        supervisorPresent: true,
+        payload,
+      }),
+    ).toBe('draft');
+
+    // Unsupervised: still routes to ready_for_review (unchanged).
+    expect(
+      decideInitialStatus({
+        ...base,
+        confidenceScore: 0.96,
+        supervisorMode: 'supervisor',
+        supervisorPresent: false,
+        payload,
+      }),
+    ).toBe('ready_for_review');
+
+    // No payload threaded at all (legacy callers): unchanged.
+    expect(decideInitialStatus({ ...base, confidenceScore: 0.91 })).toBe('approved');
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// RV-074 (F-4) — routing-site one-tap guard
+//
+// Low/very_low proposals must never get a Y-able one-tap link in the
+// routeUnsupervisedProposal path.  The predicate reuse is tested here: the
+// same `confidenceMetaBlocksAutoApprove` gate used by decideInitialStatus
+// also governs whether the one-tap token is minted.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('RV-074 — routeUnsupervisedProposal: low/very_low confidence suppresses one-tap link', () => {
+  const baseInput = {
+    tenantId: 'tenant-1',
+    proposalId: 'prop-1',
+    channel: 'other' as const,
+    ownerPhone: '+15555550100',
+  };
+
+  for (const level of ['low', 'very_low'] as const) {
+    it(`${level}: sends SMS without approve URL, anchors as review_required_rendered, audits the suppression`, async () => {
+      const audit = new InMemoryAuditRepository();
+      const sms: { to: string; body: string }[] = [];
+      const smsSentCalls: {
+        body: string;
+        kind: 'proposal_rendered' | 'review_required_rendered';
+        expiresAt?: Date;
+      }[] = [];
+
+      const result = await routeUnsupervisedProposal(
+        {
+          auditRepo: audit,
+          secret: SECRET,
+          sendSms: async (to, body) => sms.push({ to, body }),
+          buildApproveUrl: (token) => `https://app.test/p/approve?token=${token}`,
+          onSmsSent: async (sent) => smsSentCalls.push(sent),
+        },
+        {
+          ...baseInput,
+          payload: { _meta: { overallConfidence: level } },
+          renderSmsBody: (approveUrl: string) =>
+            approveUrl
+              ? `Review and approve. ${approveUrl}`
+              : `Low-confidence proposal. Needs review in app. Reply N to reject.`,
+        },
+      );
+
+      expect(result.smsSent).toBe(true);
+      // Body must NOT contain an approve URL
+      expect(sms[0].body).not.toContain('https://app.test/p/approve');
+      // Body contains the no-approve form
+      expect(sms[0].body).toContain('Needs review in app');
+      // No one-tap link expiry (no token was minted)
+      expect(result.approveLinkExpiresAt).toBeUndefined();
+      // RV-074 review fix: the low-confidence send IS anchored — it solicits
+      // "reply N to reject", so it must become the latest reply target.
+      expect(smsSentCalls).toHaveLength(1);
+      expect(smsSentCalls[0].kind).toBe('review_required_rendered');
+      expect(smsSentCalls[0].body).toBe(sms[0].body);
+      expect(smsSentCalls[0].expiresAt).toBeUndefined();
+      // The suppressed approve affordance is auditable.
+      const events = await audit.findByEntity('tenant-1', 'proposal', 'prop-1');
+      expect(events).toHaveLength(1);
+      expect(events[0].metadata).toMatchObject({
+        smsSent: true,
+        approveLinkSuppressed: true,
+        suppressReason: 'low_confidence',
+      });
+    });
+  }
+
+  it('high confidence (control): sends SMS with approve URL and calls onSmsSent', async () => {
+    const audit = new InMemoryAuditRepository();
+    const sms: { to: string; body: string }[] = [];
+    const smsSentCalls: {
+      body: string;
+      kind: 'proposal_rendered' | 'review_required_rendered';
+      expiresAt?: Date;
+    }[] = [];
+
+    const result = await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        sendSms: async (to, body) => sms.push({ to, body }),
+        buildApproveUrl: (token) => `https://app.test/p/approve?token=${token}`,
+        onSmsSent: async (sent) => smsSentCalls.push(sent),
+      },
+      {
+        ...baseInput,
+        payload: { _meta: { overallConfidence: 'high' } },
+        renderSmsBody: (approveUrl: string) => `Approve here: ${approveUrl}`,
+      },
+    );
+
+    expect(result.smsSent).toBe(true);
+    expect(sms[0].body).toContain('https://app.test/p/approve');
+    expect(result.approveLinkExpiresAt).toBeInstanceOf(Date);
+    expect(smsSentCalls).toHaveLength(1);
+    expect(smsSentCalls[0].kind).toBe('proposal_rendered');
+    expect(smsSentCalls[0].expiresAt).toBeInstanceOf(Date);
+    // No suppression metadata on the normal path.
+    const events = await audit.findByEntity('tenant-1', 'proposal', 'prop-1');
+    expect(events[0].metadata).not.toHaveProperty('approveLinkSuppressed');
+  });
+
+  it('absent _meta: preserves original behavior (one-tap link sent)', async () => {
+    const audit = new InMemoryAuditRepository();
+    const sms: { to: string; body: string }[] = [];
+
+    const result = await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        sendSms: async (to, body) => sms.push({ to, body }),
+        buildApproveUrl: (token) => `https://app.test/p/approve?token=${token}`,
+      },
+      {
+        ...baseInput,
+        // No payload field threaded — legacy path
+        summaryText: 'A proposal needs your approval',
+      },
+    );
+
+    expect(result.smsSent).toBe(true);
+    expect(sms[0].body).toContain('https://app.test/p/approve');
+    expect(result.approveLinkExpiresAt).toBeInstanceOf(Date);
+  });
+
+  // Item 2 pin: when BOTH low-confidence AND suppressApproveLink fire,
+  // the audit metadata records 'low_confidence+action_class'.
+  it('both low_confidence AND suppressApproveLink: suppressReason is "low_confidence+action_class"', async () => {
+    const audit = new InMemoryAuditRepository();
+    const sms: { to: string; body: string }[] = [];
+
+    await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        sendSms: async (to, body) => sms.push({ to, body }),
+        buildApproveUrl: (token) => `https://app.test/p/approve?token=${token}`,
+      },
+      {
+        ...baseInput,
+        // Low-confidence payload AND caller-asserted suppression.
+        payload: { _meta: { overallConfidence: 'low' } },
+        suppressApproveLink: true,
+        renderSmsBody: (approveUrl: string) =>
+          approveUrl ? `Approve: ${approveUrl}` : 'Needs review in app.',
+      },
+    );
+
+    const events = await audit.findByEntity('tenant-1', 'proposal', 'prop-1');
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata).toMatchObject({
+      approveLinkSuppressed: true,
+      suppressReason: 'low_confidence+action_class',
+    });
+    // No one-tap link in the body.
+    expect(sms[0].body).not.toContain('https://app.test/p/approve');
+  });
+
+  it('only suppressApproveLink (no low confidence): suppressReason is "action_class"', async () => {
+    const audit = new InMemoryAuditRepository();
+    const sms: { to: string; body: string }[] = [];
+
+    await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        sendSms: async (to, body) => sms.push({ to, body }),
+        buildApproveUrl: (token) => `https://app.test/p/approve?token=${token}`,
+      },
+      {
+        ...baseInput,
+        // No low-confidence payload; only caller-asserted suppression.
+        suppressApproveLink: true,
+        renderSmsBody: (_approveUrl: string) => 'Needs review in app.',
+      },
+    );
+
+    const events = await audit.findByEntity('tenant-1', 'proposal', 'prop-1');
+    expect(events[0].metadata).toMatchObject({
+      approveLinkSuppressed: true,
+      suppressReason: 'action_class',
+    });
+  });
+});
+
+// Wiring proof: createProposal threads its payload into decideInitialStatus,
+// so the guard holds on the real proposal-creation path (the single entry
+// every AI task handler uses).
+import { createProposal } from '../../src/proposals/proposal';
+
+describe('RV-007 — createProposal wiring', () => {
+  const baseInput = {
+    tenantId: 't1',
+    proposalType: 'create_customer' as const,
+    summary: 's',
+    createdBy: 'u1',
+    sourceTrustTier: 'autonomous' as const,
+    confidenceScore: 0.99,
+    supervisorMode: 'supervisor' as const,
+    supervisorPresent: true,
+  };
+
+  it('low _meta forces draft even at 0.99 confidence', () => {
+    const p = createProposal({
+      ...baseInput,
+      payload: { name: 'X', _meta: { overallConfidence: 'low' } },
+    });
+    expect(p.status).toBe('draft');
+    expect(p.approvedAt).toBeUndefined();
+  });
+
+  it('same proposal without _meta still auto-approves (regression pin)', () => {
+    const p = createProposal({ ...baseInput, payload: { name: 'X' } });
+    expect(p.status).toBe('approved');
+    expect(p.approvedAt).toBeInstanceOf(Date);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// RV-065 — one-tap token action variants ('approve' | 'mint_draft_invoice')
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('RV-065 — one-tap token action variants', () => {
+  it("round-trips a 'mint_draft_invoice' token bound to tenant + jobId", async () => {
+    const { token } = createOneTapApproveToken({
+      action: 'mint_draft_invoice',
+      jobId: 'job-77',
+      tenantId: 'tenant-1',
+      secret: SECRET,
+    });
+    const result = await verifyOneTapApproveToken({
+      token,
+      secret: SECRET,
+      expectedTenantId: 'tenant-1',
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(result).toEqual({
+      ok: true,
+      action: 'mint_draft_invoice',
+      jobId: 'job-77',
+      tenantId: 'tenant-1',
+    });
+  });
+
+  it('back-compat: approve token payload bytes are unchanged (pin: keys exactly p,t,n,e)', () => {
+    const now = 1_000_000;
+    const { token } = createOneTapApproveToken({
+      proposalId: 'prop-1',
+      tenantId: 'tenant-1',
+      secret: SECRET,
+      nowMs: now,
+    });
+    const rawJson = Buffer.from(token.split('.')[0], 'base64url').toString('utf8');
+    const parsed = JSON.parse(rawJson) as { p: string; t: string; n: string; e: number };
+    // Byte-identical pin: the serialized payload is exactly the legacy
+    // four-key shape in the legacy key order — no `a` discriminator, no
+    // extra keys, for ANY default-action token.
+    expect(rawJson).toBe(
+      `{"p":"prop-1","t":"tenant-1","n":"${parsed.n}","e":${parsed.e}}`,
+    );
+    expect(parsed.e).toBe(now + ONE_TAP_APPROVE_MAX_TTL_MS);
+  });
+
+  it("an explicit action: 'approve' also produces the legacy byte shape", () => {
+    const { token } = createOneTapApproveToken({
+      action: 'approve',
+      proposalId: 'prop-9',
+      tenantId: 't',
+      secret: SECRET,
+    });
+    const rawJson = Buffer.from(token.split('.')[0], 'base64url').toString('utf8');
+    expect(Object.keys(JSON.parse(rawJson))).toEqual(['p', 't', 'n', 'e']);
+  });
+
+  it('mint tokens expire and are single-use, same machinery as approve', async () => {
+    const now = 5_000_000;
+    const { token } = createOneTapApproveToken({
+      action: 'mint_draft_invoice',
+      jobId: 'job-1',
+      tenantId: 't',
+      secret: SECRET,
+      nowMs: now,
+    });
+    const expired = await verifyOneTapApproveToken({
+      token,
+      secret: SECRET,
+      nowMs: now + ONE_TAP_APPROVE_MAX_TTL_MS,
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(expired).toEqual({ ok: false, reason: 'expired' });
+
+    const consumeNonce = createInMemoryNonceStore();
+    const first = await verifyOneTapApproveToken({ token, secret: SECRET, nowMs: now, consumeNonce });
+    expect(first.ok).toBe(true);
+    const replayed = await verifyOneTapApproveToken({ token, secret: SECRET, nowMs: now, consumeNonce });
+    expect(replayed).toEqual({ ok: false, reason: 'already_used' });
+  });
+
+  it('mint tokens enforce the tenant binding', async () => {
+    const { token } = createOneTapApproveToken({
+      action: 'mint_draft_invoice',
+      jobId: 'job-1',
+      tenantId: 'tenant-A',
+      secret: SECRET,
+    });
+    const result = await verifyOneTapApproveToken({
+      token,
+      secret: SECRET,
+      expectedTenantId: 'tenant-B',
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(result).toEqual({ ok: false, reason: 'tenant_mismatch' });
+  });
+
+  it('rejects an unknown action discriminator as malformed (signed but bogus)', async () => {
+    // Forge a payload with a bad `a` and sign it with the real secret to
+    // prove the structural guard (not just the signature) rejects it.
+    const { createHmac } = await import('node:crypto');
+    const payloadB64 = Buffer.from(
+      JSON.stringify({ p: 'x', t: 't', n: 'n1', e: Date.now() + 60000, a: 'delete_everything' }),
+    ).toString('base64url');
+    const sig = createHmac('sha256', SECRET).update(payloadB64).digest('base64url');
+    const result = await verifyOneTapApproveToken({
+      token: `${payloadB64}.${sig}`,
+      secret: SECRET,
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(result).toEqual({ ok: false, reason: 'malformed' });
+  });
+
+  it('refuses to mint without the subject id for the action', () => {
+    expect(() =>
+      createOneTapApproveToken({ tenantId: 't', secret: SECRET }),
+    ).toThrow(/proposalId/);
+    expect(() =>
+      createOneTapApproveToken({
+        action: 'mint_draft_invoice',
+        proposalId: 'p',
+        tenantId: 't',
+        secret: SECRET,
+      }),
+    ).toThrow(/jobId/);
   });
 });

@@ -4,6 +4,7 @@ import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import {
   DroppedCallScheduler,
   InMemoryDroppedCallRecoveryRepository,
+  PgDroppedCallRecoveryRepository,
   RECOVERY_DELAY_MS,
   type DroppedCallRecoveryRow,
 } from '../../../src/sms/recovery/scheduler';
@@ -85,6 +86,54 @@ describe('P8-015 dropped-call recovery scheduler', () => {
     await scheduler.schedule({ tenantId: TENANT, voiceSessionId: SESSION, callerE164: E164, outcome: 'dropped', channel: 'voice_inbound' });
     await scheduler.schedule({ tenantId: TENANT, voiceSessionId: SESSION, callerE164: E164, outcome: 'dropped', channel: 'voice_inbound' });
     expect(repo.rows).toHaveLength(1);
+  });
+});
+
+describe('PgDroppedCallRecoveryRepository.listUnansweredRecoveries', () => {
+  it('reads sent unsuppressed rows for one tenant, newest first, limit 10', async () => {
+    const tenantId = '11111111-1111-4111-8111-111111111111';
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql.includes('SELECT id, tenant_id, voice_session_id')) {
+        return {
+          rows: [
+            {
+              id: '22222222-2222-4222-8222-222222222222',
+              tenant_id: tenantId,
+              voice_session_id: '33333333-3333-4333-8333-333333333333',
+              caller_e164: '+15125550100',
+              scheduled_for: '2026-06-11T10:00:00.000Z',
+              sent_at: '2026-06-11T10:01:00.000Z',
+              suppressed_reason: null,
+              sms_message_sid: 'SM1',
+              context: null,
+              created_at: '2026-06-11T10:00:00.000Z',
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+    const release = vi.fn();
+    const pool = {
+      connect: vi.fn(async () => ({ query, release })),
+    };
+    const repo = new PgDroppedCallRecoveryRepository(pool as never);
+
+    const rows = await repo.listUnansweredRecoveries(tenantId);
+
+    expect(rows).toHaveLength(1);
+    const selectCall = query.mock.calls.find(([sql]) =>
+      String(sql).includes('FROM dropped_call_recoveries'),
+    );
+    expect(selectCall).toBeTruthy();
+    expect(String(selectCall?.[0])).toContain(
+      "tenant_id = current_setting('app.current_tenant_id')::uuid",
+    );
+    expect(String(selectCall?.[0])).toContain('sent_at IS NOT NULL');
+    expect(String(selectCall?.[0])).toContain('suppressed_reason IS NULL');
+    expect(String(selectCall?.[0])).toContain('ORDER BY sent_at DESC, created_at DESC');
+    expect(selectCall?.[1]).toEqual([10]);
+    expect(release).toHaveBeenCalledOnce();
   });
 });
 

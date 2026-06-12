@@ -314,7 +314,11 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
       }
       if (updates.acceptedSelection !== undefined) {
         setClauses.push(`accepted_selection = $${paramIndex++}`);
-        values.push(JSON.stringify(updates.acceptedSelection));
+        // RV-042: acceptance invalidation clears the selection with an
+        // explicit null — write SQL NULL, not the JSON string "null".
+        values.push(
+          updates.acceptedSelection ? JSON.stringify(updates.acceptedSelection) : null,
+        );
       }
       if (updates.deletedAt !== undefined) {
         setClauses.push(`deleted_at = $${paramIndex++}`);

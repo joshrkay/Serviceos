@@ -1,5 +1,4 @@
-import { Proposal, ProposalRepository } from './proposal';
-import { validateProposalPayload } from './contracts';
+import { Proposal } from './proposal';
 import { ValidationError } from '../shared/errors';
 
 export const ALLOWED_WORDING_FIELDS = [
@@ -102,6 +101,45 @@ export function editEstimateProposal(
   }
 
   payload.lineItems = lineItems;
+
+  // Strip stale lineItems-scoped _meta entries produced during AI drafting.
+  // Human line-item edits (splice / push) shift indices, so any
+  // fieldConfidence keys or markers whose path starts with "lineItems" or
+  // "lineItems[" are no longer meaningful. overallConfidence is payload-level
+  // and is kept. Non-lineItems markers (e.g. "customerName") are also kept.
+  //
+  // On in-place update_line_item edits the edited entry could in principle
+  // keep its AI marker, but we strip all lineItems-prefixed markers
+  // deliberately: human-reviewed line items do not carry AI confidence
+  // signals, and the over-strip is simpler and safer than fine-grained
+  // per-index tracking.
+  const touchedLineItems = editedFields.some(
+    (f) => f === 'lineItems' || f.startsWith('lineItems['),
+  );
+  if (touchedLineItems) {
+    const meta = payload._meta;
+    if (meta !== null && typeof meta === 'object') {
+      // Shallow-copy _meta before mutating so the original proposal's payload
+      // reference is not written through (payload itself is already a shallow
+      // copy of proposal.payload, but _meta is still the same object reference).
+      const m = { ...(meta as Record<string, unknown>) };
+      payload._meta = m;
+      if (m.fieldConfidence !== null && typeof m.fieldConfidence === 'object') {
+        const fc = { ...(m.fieldConfidence as Record<string, unknown>) };
+        for (const key of Object.keys(fc)) {
+          if (key === 'lineItems' || key.startsWith('lineItems[')) {
+            delete fc[key];
+          }
+        }
+        m.fieldConfidence = fc;
+      }
+      if (Array.isArray(m.markers)) {
+        m.markers = (m.markers as Array<{ path: string; reason: string }>).filter(
+          (marker) => marker.path !== 'lineItems' && !marker.path.startsWith('lineItems['),
+        );
+      }
+    }
+  }
 
   const updatedProposal: Proposal = {
     ...proposal,

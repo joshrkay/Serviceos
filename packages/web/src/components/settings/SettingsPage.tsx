@@ -8,8 +8,8 @@ import {
   Calendar,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { QuickBooksModal } from './QuickBooksModal';
-import { BrandVoiceSection } from './BrandVoiceSection';
+import { QuickBooksIntegrationSheet } from './QuickBooksIntegrationSheet';
+import { fetchIntegrations, type AccountingIntegrationSummary } from '../../api/integrations';
 import { SuppliersSheet } from '../jobs/SuppliersSheet';
 import { apiFetch } from '../../utils/api-fetch';
 import { useMe } from '../../hooks/useMe';
@@ -93,10 +93,28 @@ export function SettingsPage() {
         /* language settings missing — default to English */
       }
     })();
+    (async () => {
+      try {
+        const rows = await fetchIntegrations();
+        if (cancelled) return;
+        setQbIntegration(rows.find((r) => r.provider === 'quickbooks') ?? null);
+      } catch {
+        /* integrations unavailable — QuickBooks row stays disconnected */
+      }
+    })();
     return () => {
       cancelled = true;
     };
   }, []);
+
+  async function refreshQuickBooksIntegration() {
+    try {
+      const rows = await fetchIntegrations();
+      setQbIntegration(rows.find((r) => r.provider === 'quickbooks') ?? null);
+    } catch {
+      setQbIntegration(null);
+    }
+  }
 
   async function persistToggle(field: 'aiAuto' | 'reminders' | 'spanishMode', value: boolean) {
     if (field === 'spanishMode') {
@@ -139,8 +157,9 @@ export function SettingsPage() {
     setSpanishMode(value);
     void persistToggle('spanishMode', value);
   }
-  const [qbOpen, setQbOpen]         = useState(false);
-  const [qbConnected, setQbConnected] = useState(false);
+  const [qbOpen, setQbOpen] = useState(false);
+  const [qbIntegration, setQbIntegration] = useState<AccountingIntegrationSummary | null>(null);
+  const qbConnected = qbIntegration?.status === 'active';
   const [suppliersOpen, setSuppliersOpen] = useState(false);
   const [businessProfileOpen, setBusinessProfileOpen] = useState(false);
   const [terminologyOpen, setTerminologyOpen] = useState(false);
@@ -167,6 +186,8 @@ export function SettingsPage() {
     // Connect onboarding to /settings?stripe_connect=1. Auto-open
     // the sheet so they see the freshly-mirrored status.
     const stripeReturned = params.get('stripe_connect') === '1';
+    const quickbooksConnected = params.get('quickbooks_connected') === '1';
+    const quickbooksError = params.get('quickbooks_error');
 
     let needsUrlUpdate = false;
     if (isConnected || connectionError) {
@@ -180,11 +201,23 @@ export function SettingsPage() {
       setPaymentMethodsOpen(true);
       needsUrlUpdate = true;
     }
+    if (quickbooksConnected || quickbooksError) {
+      setQbOpen(true);
+      if (quickbooksConnected) {
+        toast.success('QuickBooks connected');
+        void refreshQuickBooksIntegration();
+      } else if (quickbooksError) {
+        toast.error(`QuickBooks connection failed: ${quickbooksError}`);
+      }
+      needsUrlUpdate = true;
+    }
     if (needsUrlUpdate) {
       // Strip the params so a refresh doesn't re-open / re-toast.
       params.delete('calendar_connected');
       params.delete('calendar_error');
       params.delete('stripe_connect');
+      params.delete('quickbooks_connected');
+      params.delete('quickbooks_error');
       const next = `${window.location.pathname}${params.toString() ? `?${params}` : ''}`;
       window.history.replaceState(null, '', next);
     }
@@ -381,7 +414,9 @@ export function SettingsPage() {
         {
           icon: Link,
           label: 'QuickBooks',
-          description: qbConnected ? 'Connected · Ortega HVAC & Services' : 'Not connected · sync invoices & payments',
+          description: qbConnected
+            ? `Connected · QBO company ${qbIntegration?.realmId ?? ''}`
+            : 'Not connected · sync invoices & payments',
           badge: qbConnected
             ? { label: 'Connected', color: 'bg-green-100 text-green-700' }
             : { label: 'Connect', color: 'bg-blue-100 text-blue-700' },
@@ -751,14 +786,10 @@ export function SettingsPage() {
         </div>
       </div>
 
-      {/* QuickBooks modal */}
       {qbOpen && (
-        <QuickBooksModal
-          onClose={() => {
-            setQbOpen(false);
-            // In demo: treat dismiss as "connected" if they got past the connect step
-            setQbConnected(true);
-          }}
+        <QuickBooksIntegrationSheet
+          onClose={() => setQbOpen(false)}
+          onConnectionChange={() => void refreshQuickBooksIntegration()}
         />
       )}
 

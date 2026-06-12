@@ -1,11 +1,16 @@
 import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
 import {
+  confidenceMetaBlocksAutoApprove,
   resolveAutoApproveThreshold,
   shouldAutoApprove,
   type Mode,
   type ResolveThresholdInput,
 } from './auto-approve';
+import { payloadHeadlineCents } from './payload-money';
+import { getSupervisorCreationHook } from './supervisor/hook';
+import { payloadWithSupervisorMarker } from './supervisor/marker';
+import { capInitialStatus, type InitialProposalStatus } from './supervisor/policy';
 
 export type ProposalStatus =
   | 'draft'
@@ -48,6 +53,7 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'attach_invoice_photo',
   'send_invoice',
   'send_estimate',
+  'send_estimate_nudge',
   'record_payment',
   'log_expense',
   'convert_lead',
@@ -310,6 +316,10 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     // same 'comms' gate as send_invoice. Never auto-approves regardless
     // of trust tier; an operator (or supervisor) must approve the send.
     case 'send_estimate':
+    // RV-086: a nudge re-sends the estimate link to the customer — an
+    // outbound customer-facing message, so it carries the same 'comms'
+    // gate: never auto-approves regardless of trust tier.
+    case 'send_estimate_nudge':
       return 'comms';
     // Review responses: public + private + service-credit are always
     // owner-approved (per-component). The auto-approve path is
@@ -372,6 +382,14 @@ export function decideInitialStatus(input: {
    * keyed by mode). Pass-through to `resolveAutoApproveThreshold`.
    */
   tenantThresholdOverride?: ResolveThresholdInput['tenantOverride'];
+  /**
+   * RV-007: the proposal payload, inspected for the optional
+   * `_meta.overallConfidence` confidence marker. A 'low' / 'very_low'
+   * level hard-blocks auto-approval regardless of the numeric
+   * confidence score. Optional — payloads without `_meta` (and callers
+   * that don't thread the payload) keep pre-RV-007 behavior exactly.
+   */
+  payload?: unknown;
 }): ProposalStatus {
   // Missing required fields always land in 'draft' — a partial payload
   // can't be auto-approved even by an autonomous agent with high
@@ -386,6 +404,19 @@ export function decideInitialStatus(input: {
   // and capture-class. Money / comms / irreversible classes never auto-approve
   // regardless of trust tier or mode (see `actionClassForProposalType` doc).
   if (input.sourceTrustTier === 'autonomous' && cls === 'capture') {
+    // RV-007 — Confidence Marker hard-block. When the AI handler stamped
+    // `payload._meta.overallConfidence` as 'low' / 'very_low', the
+    // proposal can never auto-approve, whatever the numeric score says.
+    // Checked before threshold resolution so the unsupervised
+    // 'ready_for_review' branch (semantics: "would have auto-approved if
+    // a supervisor were present") is also skipped — a low-confidence
+    // proposal would NOT have auto-approved, so it lands in 'draft' for
+    // a full human review rather than a one-tap SMS approve. Absent or
+    // malformed `_meta` never blocks (pre-RV-007 behavior preserved).
+    if (confidenceMetaBlocksAutoApprove(input.payload)) {
+      return 'draft';
+    }
+
     // Phase 12 — resolve the mode-aware threshold. `null` means the
     // tenant is unsupervised and auto-approval is categorically blocked.
     const threshold = resolveAutoApproveThreshold({
@@ -513,10 +544,28 @@ export function validateProposalInput(input: CreateProposalInput): string[] {
 
 export function createProposal(input: CreateProposalInput): Proposal {
   const now = new Date();
+  // Rivet P2 F-1 — Supervisor Agent v1 hook point. Evaluated BEFORE the
+  // trust-tier decision so the deterministic tenant policy (budget caps,
+  // blocked types) sees every proposal at creation. The hook is a
+  // module-level optional dep (see supervisor/hook.ts for the injection
+  // rationale): when unconfigured — every caller that hasn't opted in —
+  // `supervisorHook` is null and this function behaves exactly as
+  // before. The verdict can only DOWNGRADE the initial status
+  // (capInitialStatus is monotone non-increasing), so money/irreversible
+  // proposals can never be upgraded by policy, structurally.
+  const supervisorHook = getSupervisorCreationHook();
+  const supervisorDecision = supervisorHook
+    ? supervisorHook.evaluate({
+        tenantId: input.tenantId,
+        proposalType: input.proposalType,
+        actionClass: actionClassForProposalType(input.proposalType),
+        amountCents: payloadHeadlineCents(input.payload),
+      })
+    : null;
   // D3 wiring: status is decided by the trust-tier rules below, not
   // hardcoded. Callers that don't pass `sourceTrustTier` get 'draft'
   // exactly as before — every existing test and AI task is unchanged.
-  const status = decideInitialStatus({
+  const baselineStatus = decideInitialStatus({
     proposalType: input.proposalType,
     sourceTrustTier: input.sourceTrustTier,
     confidenceScore: input.confidenceScore,
@@ -529,7 +578,38 @@ export function createProposal(input: CreateProposalInput): Proposal {
     supervisorMode: input.supervisorMode,
     supervisorPresent: input.supervisorPresent,
     tenantThresholdOverride: input.tenantThresholdOverride,
+    // RV-007: thread the payload so the `_meta.overallConfidence`
+    // confidence-marker guard sees it. Every auto-approve path goes
+    // through createProposal → decideInitialStatus, so this is the
+    // single wiring point.
+    payload: input.payload,
   });
+  // Supervisor verdict application:
+  //   'block'        → 'draft' (decideInitialStatus result discarded);
+  //   'force_review' → capped at 'ready_for_review' (never 'approved');
+  //   'allow' / null → baseline untouched.
+  // Non-'allow' verdicts stamp an explanatory `_meta` marker so the
+  // review UI / SMS / voice readback can say WHY the proposal is gated.
+  // Safe narrowing: decideInitialStatus only ever returns one of the
+  // three initial statuses (draft | ready_for_review | approved); its
+  // declared type is the full ProposalStatus union for historical
+  // reasons.
+  const status = supervisorDecision
+    ? capInitialStatus(supervisorDecision.verdict, baselineStatus as InitialProposalStatus)
+    : baselineStatus;
+  const payload =
+    supervisorDecision && supervisorDecision.verdict !== 'allow'
+      ? payloadWithSupervisorMarker(
+          input.payload,
+          supervisorDecision.reasons,
+        )
+      : input.payload;
+  // Budget accounting: machine approvals count against the hourly
+  // auto-approval budget at decide time. Only fires while the supervisor
+  // is active for the tenant (the hook's evaluate returned a verdict).
+  if (supervisorHook && supervisorDecision && status === 'approved') {
+    supervisorHook.onAutoApproved(input.tenantId);
+  }
   // D9 undo window: auto-approved proposals stamp `approvedAt` at
   // creation so the 5-second undo window starts ticking immediately.
   // Without this stamp, the executor would run without any hold — the
@@ -542,12 +622,12 @@ export function createProposal(input: CreateProposalInput): Proposal {
     input.missingFields && input.missingFields.length > 0
       ? { ...(input.sourceContext ?? {}), missingFields: input.missingFields }
       : input.sourceContext;
-  return {
+  const proposal: Proposal = {
     id: uuidv4(),
     tenantId: input.tenantId,
     proposalType: input.proposalType,
     status,
-    payload: input.payload,
+    payload,
     summary: input.summary,
     explanation: input.explanation,
     confidenceScore: input.confidenceScore,
@@ -565,6 +645,13 @@ export function createProposal(input: CreateProposalInput): Proposal {
     createdAt: now,
     updatedAt: now,
   };
+  // Audit trail for applied (non-'allow') verdicts — fire-and-forget
+  // inside the hook implementation, so the pure builder stays sync and
+  // a down audit store can't break proposal creation.
+  if (supervisorHook && supervisorDecision && supervisorDecision.verdict !== 'allow') {
+    supervisorHook.onDecision(proposal, supervisorDecision);
+  }
+  return proposal;
 }
 
 export class InMemoryProposalRepository implements ProposalRepository {

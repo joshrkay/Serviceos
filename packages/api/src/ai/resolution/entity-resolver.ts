@@ -20,7 +20,23 @@
  * pipelines without a resolver simply skip resolution.
  */
 
-export type EntityKind = 'customer' | 'job' | 'appointment' | 'invoice' | 'estimate';
+export type EntityKind =
+  | 'customer'
+  | 'job'
+  | 'appointment'
+  | 'invoice'
+  | 'estimate'
+  // RV-072 — a proposal awaiting review (status draft / ready_for_review),
+  // resolved by the voice approval channel ("approve the Henderson estimate").
+  | 'pending_proposal';
+
+/**
+ * Confidence threshold above which a match is considered "resolved"
+ * (τ_ent). Shared by every candidate source: one score above → resolved;
+ * several above → ambiguous (ONE clarification, never a silent guess);
+ * none above → not_found.
+ */
+export const TAU_ENT = 0.8;
 
 export interface EntityCandidate {
   id: string;

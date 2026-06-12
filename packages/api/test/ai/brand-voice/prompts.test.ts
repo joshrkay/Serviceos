@@ -12,13 +12,15 @@ import {
 } from '../../../src/ai/prompt-registry';
 
 describe('P4-015 — brand-voice prompt templates', () => {
-  it('P4-015 — exposes exactly the four V1 intents', () => {
+  it('P4-015/RV-061 — exposes exactly the registered intents (four V1 + digest narrative)', () => {
     expect([...BRAND_VOICE_INTENTS].sort()).toEqual(
       [
         'dropped_call_recovery_sms',
         'review_private_followup',
         'review_public_response',
         'tech_reschedule_customer_sms',
+        // RV-061 — owner-facing end-of-day digest narrative.
+        'digest_narrative',
       ].sort(),
     );
   });

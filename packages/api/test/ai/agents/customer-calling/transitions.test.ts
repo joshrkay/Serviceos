@@ -155,3 +155,65 @@ describe('frustration_detected handler', () => {
     expect(result.sideEffects).toEqual([]);
   });
 });
+
+describe('RV-140/RV-142 — emergency_detected handler', () => {
+  const event = {
+    type: 'emergency_detected' as const,
+    keyword: 'gas leak',
+    utterance: 'I think we have a gas leak',
+  };
+
+  it('escalates from any non-terminal state with the 911 safety line FIRST', () => {
+    for (const state of ['greeting', 'identifying', 'intent_capture', 'intent_confirm', 'closing'] as const) {
+      const result = transition(state, event, baseContext);
+      expect(result.nextState).toBe('escalating');
+      expect(result.updatedContext.escalationReason).toBe('emergency_dispatch');
+      expect(result.updatedContext.currentIntent).toBe('emergency_dispatch');
+      const tts = result.sideEffects.filter((fx) => fx.type === 'tts_play');
+      // RV-142 — safety script before any transfer copy.
+      expect((tts[0]!.payload as { text: string }).text).toContain('911');
+      expect(tts[0]!.payload.priority).toBe('safety');
+      expect((tts[1]!.payload as { text: string }).text).toContain('emergency');
+    }
+  });
+
+  it('queues an emergency_dispatch proposal with the utterance + keyword (RV-141 payload)', () => {
+    const result = transition('intent_capture', event, baseContext);
+    const proposal = result.sideEffects.find((fx) => fx.type === 'create_proposal');
+    expect(proposal).toBeDefined();
+    expect(proposal!.payload.intent).toBe('emergency_dispatch');
+    const entities = proposal!.payload.entities as Record<string, unknown>;
+    expect(entities.emergencyDescription).toBe(event.utterance);
+    expect(entities.detectedKeywords).toEqual(['gas leak']);
+  });
+
+  it('fires notify_oncall with reason emergency_dispatch', () => {
+    const result = transition('intent_capture', event, baseContext);
+    const oncall = result.sideEffects.find((fx) => fx.type === 'notify_oncall');
+    expect(oncall).toBeDefined();
+    expect(oncall!.payload.reason).toBe('emergency_dispatch');
+  });
+
+  it('is idempotent in escalating (no double-page)', () => {
+    const result = transition('escalating', event, baseContext);
+    expect(result.nextState).toBe('escalating');
+    expect(result.sideEffects).toEqual([]);
+  });
+
+  it('is inert in terminated (event ignored, audit only)', () => {
+    const result = transition('terminated', event, baseContext);
+    expect(result.nextState).toBe('terminated');
+    expect(result.sideEffects.filter((fx) => fx.type !== 'audit_log')).toEqual([]);
+  });
+
+  it('classified emergency_dispatch intent fast-path also speaks the 911 line first (RV-142)', () => {
+    const result = transition(
+      'intent_capture',
+      { type: 'intent_classified', intentType: 'emergency_dispatch', entities: {}, confidence: 0.95 },
+      baseContext,
+    );
+    expect(result.nextState).toBe('escalating');
+    const tts = result.sideEffects.filter((fx) => fx.type === 'tts_play');
+    expect((tts[0]!.payload as { text: string }).text).toContain('911');
+  });
+});

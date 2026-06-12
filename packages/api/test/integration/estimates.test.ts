@@ -88,6 +88,7 @@ describe('Postgres integration — estimates', () => {
         status: 'draft',
         lineItems: lineItems,
         totals: totals,
+        version: 1,
         createdBy: tenant.userId,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -114,6 +115,7 @@ describe('Postgres integration — estimates', () => {
         status: 'draft',
         lineItems: lineItems,
         totals: totals,
+        version: 1,
         createdBy: tenant.userId,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -144,6 +146,7 @@ describe('Postgres integration — estimates', () => {
         status: 'draft',
         lineItems: lineItems,
         totals: totals,
+        version: 1,
         createdBy: tenant.userId,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -170,6 +173,7 @@ describe('Postgres integration — estimates', () => {
         status: 'draft',
         lineItems: lineItems,
         totals: totals,
+        version: 1,
         createdBy: tenant.userId,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -177,6 +181,97 @@ describe('Postgres integration — estimates', () => {
 
       const found = await estimateRepo.findById(otherTenant.tenantId, estimate.id);
       expect(found).toBeNull();
+    });
+  });
+
+  // RV-042 — acceptance invalidation through the REAL Pg repo. Pins that
+  // clearing `acceptedSelection` writes SQL NULL into the JSONB column —
+  // not the JSON string 'null' (`to_jsonb(null)`-style bugs survive mocked
+  // repos; only a real round-trip catches them) — and that every acceptance
+  // field is cleared while the estimate returns to a re-sendable 'sent'.
+  describe('RV-042 — acceptance invalidation clears accepted_selection to SQL NULL', () => {
+    it('updateEstimate(invalidateAcceptance) → accepted_selection IS NULL, acceptance fields cleared', async () => {
+      const lineItemId = crypto.randomUUID();
+      const lineItems = [
+        buildLineItem(lineItemId, 'Replace heater', 1, 120000, 1, true, 'labor'),
+      ];
+      const totals = calculateDocumentTotals(lineItems, 0, 0);
+      const estimateId = crypto.randomUUID();
+
+      await estimateRepo.create({
+        id: estimateId,
+        tenantId: tenant.tenantId,
+        jobId: jobId,
+        estimateNumber: 'EST-RV042',
+        status: 'draft',
+        lineItems,
+        totals,
+        version: 1,
+        createdBy: tenant.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      // Persist a REAL acceptance, including a non-empty accepted_selection.
+      const accepted = await estimateRepo.update(tenant.tenantId, estimateId, {
+        status: 'accepted',
+        acceptedAt: new Date('2026-06-10T15:00:00Z'),
+        acceptedByName: 'Jane Henderson',
+        acceptedByIp: '203.0.113.9',
+        acceptedUserAgent: 'Safari',
+        acceptedSignatureData: 'data:image/png;base64,abc',
+        acceptedSelection: [lineItemId],
+      });
+      expect(accepted!.status).toBe('accepted');
+      expect(accepted!.acceptedSelection).toEqual([lineItemId]);
+
+      // Pre-condition at the SQL level: a real JSONB array is stored.
+      const before = await pool.query(
+        `SELECT accepted_selection IS NULL AS is_sql_null,
+                accepted_selection::text AS raw_text
+           FROM estimates WHERE id = $1 AND tenant_id = $2`,
+        [estimateId, tenant.tenantId],
+      );
+      expect(before.rows[0].is_sql_null).toBe(false);
+      expect(before.rows[0].raw_text).toContain(lineItemId);
+
+      // Invalidate through the domain invalidation path against the Pg repo.
+      const { updateEstimate } = await import('../../src/estimates/estimate');
+      const invalidated = await updateEstimate(
+        tenant.tenantId,
+        estimateId,
+        { customerMessage: 'Revised scope' },
+        estimateRepo,
+        { invalidateAcceptance: true, actorId: tenant.userId, actorRole: 'owner' },
+      );
+      expect(invalidated!.status).toBe('sent');
+
+      // THE pin: SQL NULL, not the JSONB string 'null'. `IS NULL` is false
+      // for a stored JSON null, and ::text would render it as 'null'.
+      const after = await pool.query(
+        `SELECT accepted_selection IS NULL AS is_sql_null,
+                accepted_selection::text AS raw_text,
+                status, accepted_at, accepted_by_name, accepted_by_ip,
+                accepted_user_agent, accepted_signature_data
+           FROM estimates WHERE id = $1 AND tenant_id = $2`,
+        [estimateId, tenant.tenantId],
+      );
+      const row = after.rows[0];
+      expect(row.is_sql_null).toBe(true);
+      expect(row.raw_text).toBeNull(); // a JSON-null column would yield 'null'
+      expect(row.status).toBe('sent');
+      expect(row.accepted_at).toBeNull();
+      expect(row.accepted_by_name).toBeNull();
+      expect(row.accepted_by_ip).toBeNull();
+      expect(row.accepted_user_agent).toBeNull();
+      expect(row.accepted_signature_data).toBeNull();
+
+      // Round-trip through the repo mapping: cleared selection reads back
+      // as undefined (not [] / not a phantom value).
+      const reread = await estimateRepo.findById(tenant.tenantId, estimateId);
+      expect(reread!.acceptedSelection).toBeUndefined();
+      expect(reread!.acceptedAt).toBeUndefined();
+      expect(reread!.status).toBe('sent');
     });
   });
 });

@@ -24,6 +24,7 @@
  * a pure function is trivially unit-testable with no migration).
  */
 import type { CatalogItem } from '../../catalog/catalog-item';
+import type { ConfidenceLevel } from '../guardrails/confidence';
 
 export type CatalogMatchTier = 'exact' | 'high' | 'ambiguous' | 'none';
 export type CatalogMatchType = 'exact' | 'prefix' | 'token_overlap' | 'fuzzy';
@@ -422,4 +423,44 @@ export function applyCatalogPricing(
     anyUncatalogued,
     anyCatalogPriced,
   };
+}
+
+/**
+ * RV-007 (F-4) — translate per-line `pricingSource` outcomes into the
+ * payload `_meta` per-field confidence signals. NOT a new confidence
+ * computation: it only re-expresses what `applyCatalogPricing` already
+ * decided ('uncatalogued' / 'ambiguous' lines are the low-certainty
+ * ones). Call with the FINAL payload line items (after any drop/filter
+ * pass) so the `lineItems[i]` paths index the stored payload, not an
+ * intermediate array. Returns empty maps when no line carries a
+ * low-certainty pricing source (e.g. catalog grounding not wired).
+ */
+export function lineItemConfidenceSignals(
+  lineItems: Array<Record<string, unknown>>,
+  priceField: 'unitPriceCents' | 'unitPrice',
+): {
+  fieldConfidence: Record<string, ConfidenceLevel>;
+  markers: Array<{ path: string; reason: string }>;
+} {
+  const fieldConfidence: Record<string, ConfidenceLevel> = {};
+  const markers: Array<{ path: string; reason: string }> = [];
+
+  lineItems.forEach((li, idx) => {
+    const path = `lineItems[${idx}].${priceField}`;
+    if (li.pricingSource === 'uncatalogued') {
+      fieldConfidence[path] = 'low';
+      markers.push({
+        path,
+        reason: `"${String(li.description ?? '')}" is not in the tenant catalog — the price is AI-estimated and needs review`,
+      });
+    } else if (li.pricingSource === 'ambiguous') {
+      fieldConfidence[path] = 'low';
+      markers.push({
+        path,
+        reason: `"${String(li.description ?? '')}" matched multiple catalog items — pick the right one to set the price`,
+      });
+    }
+  });
+
+  return { fieldConfidence, markers };
 }

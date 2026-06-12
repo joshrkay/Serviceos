@@ -19,6 +19,7 @@ import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNorma
 import { StatusBadge } from '../shared/StatusBadge';
 import { NewEstimateFlow } from './NewEstimateFlow';
 import { ConvertToInvoiceSheet } from './ConvertToInvoiceSheet';
+import { AttachmentSection } from '../attachments/AttachmentSection';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 
@@ -964,6 +965,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                   refetch();
                 }}
               />
+              <AttachmentSection entityType="estimate" entityId={estimateId} />
 
               {/* Notes section */}
               <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">

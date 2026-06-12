@@ -14,6 +14,9 @@ import {
   setSupervisorPresenceLoader,
   _resetSupervisorPresenceCache,
 } from '../../src/ai/supervisor-presence';
+import { complaintSeverity } from '../../src/workers/voice-action-router';
+import { assertValidProposalPayload } from '../../src/proposals/contracts';
+import { missingFieldsFor } from '../../src/proposals/proposal';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { IntentClassification } from '../../src/ai/orchestration/intent-classifier';
@@ -1256,5 +1259,524 @@ describe('voice-action-router entity resolution', () => {
     expect(proposals[0].proposalType).toBe('draft_invoice');
     expect((proposals[0].sourceContext as Record<string, unknown> | undefined)?.pendingReference)
       .toBeUndefined();
+  });
+});
+
+// ─── RV-071 / RV-225 — owner approval & edit intents are NOT routable here ───
+//
+// approve_proposal / reject_proposal / edit_proposal are only actionable
+// on a live, verified owner call (telephony FSM, RV-070 ownerSession).
+// This worker processes recorded memos with no caller-ID identity and no
+// confirm turn — even a classifier that returns the intent at 0.99 must
+// produce NO proposal and NO mutation here (Track E: edit_proposal joins
+// the same loud-warn refusal).
+
+describe('RV-071 / RV-225 — voice-action-router refuses owner approval/edit intents', () => {
+  it.each(['approve_proposal', 'reject_proposal', 'edit_proposal'])(
+    'a high-confidence %s classification produces no proposal and no mutation',
+    async (intentType) => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const seeded = await proposalRepo.create(
+        // A pending proposal that a mis-route could have approved.
+        (await import('../../src/proposals/proposal')).createProposal({
+          tenantId: 'tenant-1',
+          proposalType: 'draft_estimate',
+          payload: { customerName: 'Henderson', lineItems: [], totalCents: 45000 },
+          summary: 'Estimate for Henderson',
+          createdBy: 'voice',
+        }),
+      );
+
+      const gateway = gatewayReturning([
+        JSON.stringify({
+          intentType,
+          confidence: 0.99,
+          reasoning: 'owner-style command',
+          extractedEntities: { proposalReference: 'the Henderson estimate' },
+        }),
+      ]);
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+      await worker.handle(
+        msg({
+          tenantId: 'tenant-1',
+          userId: 'user-1',
+          transcript: 'approve the Henderson estimate',
+        }),
+        silentLogger(),
+      );
+
+      const all = await proposalRepo.findByTenant('tenant-1');
+      // No new proposal was created (no clarification either — skipped).
+      expect(all).toHaveLength(1);
+      // And the seeded proposal was not touched.
+      const stored = await proposalRepo.findById('tenant-1', seeded.id);
+      expect(stored?.status).toBe(seeded.status);
+    },
+  );
+});
+
+describe('Phase-2 Track A — extended intents routing', () => {
+  it.each(['lookup_day_overview', 'lookup_digest', 'lookup_pending_items'])(
+    '%s without opt-in: belt-and-braces gate emits a clarification (auditable refused extended intent)',
+    async (intentType) => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType,
+        confidence: 0.95,
+        reasoning: 'owner asked for a read-only overview',
+      }),
+    ]);
+    // No extendedIntentsEnabled dep → gate refuses the extended intent.
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+        transcript: 'morning rundown please',
+      }),
+      silentLogger(),
+    );
+
+    // Belt-and-braces gate: hallucinated extended intent on a non-opted surface
+    // produces a voice_clarification (auditable) rather than a silent skip.
+    const all = await proposalRepo.findByTenant('tenant-1');
+    expect(all.filter((p) => p.proposalType === 'voice_clarification')).toHaveLength(1);
+    // Only the classifier ran — no drafting LLM call.
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['lookup_day_overview', 'lookup_digest', 'lookup_pending_items'])(
+    '%s with opt-in: read-only, skipped (no proposal, no clarification)',
+    async (intentType) => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType,
+        confidence: 0.95,
+        reasoning: 'owner asked for a read-only overview',
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      extendedIntentsEnabled: async () => true,
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+        transcript: 'morning rundown please',
+      }),
+      silentLogger(),
+    );
+
+    // With opt-in, the extended lookup intent passes the gate and is
+    // then silently skipped (read-only — this worker has no voice back-channel).
+    expect(await proposalRepo.findByTenant('tenant-1')).toHaveLength(0);
+    // Only the classifier ran — no drafting LLM call.
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('sibling lookup intents get the same skip treatment (regression pin)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      JSON.stringify({ intentType: 'lookup_appointments', confidence: 0.95 }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({ tenantId: 'tenant-1', userId: 'user-1', transcript: 'when is my next appointment' }),
+      silentLogger(),
+    );
+
+    expect(await proposalRepo.findByTenant('tenant-1')).toHaveLength(0);
+  });
+
+  it('extendedIntentsEnabled: deterministic phrase routes with NO LLM call at all', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning(['{"intentType":"unknown","confidence":0.1}']);
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      extendedIntentsEnabled: async () => true,
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+        transcript: "What's my day look like?",
+      }),
+      silentLogger(),
+    );
+
+    // Deterministic short-circuit: classified as lookup_day_overview
+    // without touching the gateway, then skipped (read-only).
+    expect(gateway.complete).not.toHaveBeenCalled();
+    expect(await proposalRepo.findByTenant('tenant-1')).toHaveLength(0);
+  });
+
+  it('without the opt-in dep, classifier prompt messages keep the legacy single-system-message shape', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning(['{"intentType":"unknown","confidence":0.9}']);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({ tenantId: 'tenant-1', userId: 'user-1', transcript: "What's my day look like?" }),
+      silentLogger(),
+    );
+
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+    expect(systemMessages).toHaveLength(1);
+    expect(systemMessages[0].content).not.toContain('lookup_day_overview');
+  });
+
+  it('extendedIntentsEnabled resolver failure is non-fatal (falls back to legacy prompt)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'create_invoice',
+        confidence: 0.9,
+        extractedEntities: { customerName: 'Acme' },
+      }),
+      JSON.stringify({
+        customerId: '11111111-1111-4111-8111-111111111111',
+        jobId: '22222222-2222-4222-8222-222222222222',
+        lineItems: [{ description: 'Service call', quantity: 1, unitPriceCents: 45000 }],
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      extendedIntentsEnabled: async () => {
+        throw new Error('flag store down');
+      },
+    });
+
+    await worker.handle(
+      msg({ tenantId: 'tenant-1', userId: 'user-1', transcript: 'create an invoice for Acme' }),
+      silentLogger(),
+    );
+
+    const all = await proposalRepo.findByTenant('tenant-1');
+    expect(all).toHaveLength(1);
+    expect(all[0].proposalType).toBe('draft_invoice');
+  });
+});
+
+describe('RV-051 — voice clock-in confirmation through the router', () => {
+  const PATEL_JOB_ID = '44444444-4444-4444-8444-444444444444';
+
+  it('resolves the spoken job name to a verified jobId and reads back the confirmation', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'log_time_entry',
+        confidence: 0.92,
+        extractedEntities: { jobReference: 'the Patel job', timeEntryType: 'job' },
+      }),
+    ]);
+    const resolver: EntityResolver = {
+      resolve: vi.fn(async () => ({
+        kind: 'resolved' as const,
+        candidate: { id: PATEL_JOB_ID, kind: 'job' as const, label: 'JOB-0042 Patel', score: 0.95 },
+      })),
+    };
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, entityResolver: resolver });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'tech-1', transcript: 'Clock me in on the Patel job' }),
+      silentLogger(),
+    );
+
+    const all = await proposalRepo.findByTenant('t-1');
+    expect(all).toHaveLength(1);
+    const proposal = all[0];
+    expect(proposal.proposalType).toBe('log_time_entry');
+    // The execution handler clocks in by payload.jobId — the resolved id
+    // must land there, not just the free-text reference.
+    expect(proposal.payload.jobId).toBe(PATEL_JOB_ID);
+    expect(proposal.payload.jobReference).toBe('the Patel job');
+    expect(proposal.summary).toBe('Clocking you in on the Patel job — right?');
+    // The confirm gate: draft until a human says yes.
+    expect(proposal.status).toBe('draft');
+  });
+
+  it('an ambiguous job name becomes a voice_clarification, never a guessed clock-in', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'log_time_entry',
+        confidence: 0.92,
+        extractedEntities: { jobReference: 'the Patel job', timeEntryType: 'job' },
+      }),
+    ]);
+    const resolver: EntityResolver = {
+      resolve: vi.fn(async () => ({
+        kind: 'ambiguous' as const,
+        candidates: [
+          { id: PATEL_JOB_ID, kind: 'job' as const, label: 'JOB-0042 Patel (kitchen)', score: 0.9 },
+          { id: '55555555-5555-4555-8555-555555555555', kind: 'job' as const, label: 'JOB-0050 Patel (bath)', score: 0.88 },
+        ],
+      })),
+    };
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, entityResolver: resolver });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'tech-1', transcript: 'Clock me in on the Patel job' }),
+      silentLogger(),
+    );
+
+    const all = await proposalRepo.findByTenant('t-1');
+    expect(all).toHaveLength(1);
+    expect(all[0].proposalType).toBe('voice_clarification');
+    expect(all[0].payload.reason).toBe('ambiguous_entity');
+  });
+});
+
+describe('RV-080 — complaint intent routing', () => {
+  function complaintClassification(entities: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      intentType: 'complaint',
+      confidence: 0.9,
+      reasoning: 'caller is reporting dissatisfaction',
+      extractedEntities: entities,
+    });
+  }
+
+  it('creates a [COMPLAINT]-prefixed add_note AND a callback proposal — no new proposal types', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      complaintClassification({
+        customerName: 'Mrs. Patel',
+        noteBody: 'the leak came back two days after the repair',
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, extendedIntentsEnabled: async () => true });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'op-1',
+        transcript: 'Mrs. Patel called, really unhappy — the leak came back two days after the repair',
+        conversationId: 'conv-1',
+      }),
+      silentLogger(),
+    );
+
+    const all = await proposalRepo.findByTenant('t-1');
+    expect(all.map((p) => p.proposalType).sort()).toEqual(['add_note', 'callback']);
+
+    const note = all.find((p) => p.proposalType === 'add_note')!;
+    expect(note.payload.body).toBe('[COMPLAINT] the leak came back two days after the repair');
+    expect(note.payload.targetKind).toBe('customer');
+    expect(note.payload.targetReference).toBe('Mrs. Patel');
+    expect(note.summary).toBe('Complaint from Mrs. Patel');
+    // Capture-class, no trust tier → always human-confirmed.
+    expect(note.status).toBe('draft');
+    // Contract-valid against the EXISTING add_note schema.
+    expect(() => assertValidProposalPayload('add_note', note.payload)).not.toThrow();
+
+    const callback = all.find((p) => p.proposalType === 'callback')!;
+    expect(callback.payload.reason).toBe('customer_complaint_followup');
+    expect(callback.payload.transcript).toContain('the leak came back');
+    expect(callback.summary).toBe('Complaint follow-up — call Mrs. Patel back');
+    expect(callback.status).toBe('draft');
+    expect(() => assertValidProposalPayload('callback', callback.payload)).not.toThrow();
+    // Normal severity: no _meta markers on either payload.
+    expect(note.payload._meta).toBeUndefined();
+    expect(callback.payload._meta).toBeUndefined();
+  });
+
+  it('high-severity wording flags _meta.markers with reason complaint_high_severity on BOTH proposals', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      complaintClassification({ customerName: 'Mr. Jones' }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, extendedIntentsEnabled: async () => true });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'op-1',
+        transcript: 'Mr. Jones says the job was botched and he wants a refund or he is calling his lawyer',
+      }),
+      silentLogger(),
+    );
+
+    const all = await proposalRepo.findByTenant('t-1');
+    const note = all.find((p) => p.proposalType === 'add_note')!;
+    const callback = all.find((p) => p.proposalType === 'callback')!;
+    for (const proposal of [note, callback]) {
+      const meta = proposal.payload._meta as { markers?: Array<{ reason: string }> };
+      expect(meta?.markers?.[0]?.reason).toBe('complaint_high_severity');
+      // The marker must survive the contract gate.
+      expect(() => assertValidProposalPayload(proposal.proposalType, proposal.payload)).not.toThrow();
+      // Still draft — severity never auto-executes anything.
+      expect(proposal.status).toBe('draft');
+    }
+    expect(note.summary).toBe('HIGH-SEVERITY complaint from Mr. Jones');
+    expect(callback.summary).toBe('HIGH-SEVERITY complaint — call Mr. Jones back');
+  });
+
+  it('verified caller-ID identity pins the note to the caller (targetId, customer)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([complaintClassification({})]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, extendedIntentsEnabled: async () => true });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'op-1',
+        transcript: 'I want to file a complaint about the install',
+        customerId: 'cust-verified-1',
+      }),
+      silentLogger(),
+    );
+
+    const note = (await proposalRepo.findByTenant('t-1')).find((p) => p.proposalType === 'add_note')!;
+    expect(note.payload.targetKind).toBe('customer');
+    expect(note.payload.targetId).toBe('cust-verified-1');
+    // Note body falls back to the transcript when the classifier extracted no noteBody.
+    expect(note.payload.body).toBe('[COMPLAINT] I want to file a complaint about the install');
+  });
+
+  it('no resolvable target → note holds in draft with targetId flagged missing', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([complaintClassification({})]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, extendedIntentsEnabled: async () => true });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'op-1', transcript: 'someone called to complain about a job' }),
+      silentLogger(),
+    );
+
+    const note = (await proposalRepo.findByTenant('t-1')).find((p) => p.proposalType === 'add_note')!;
+    expect(note.status).toBe('draft');
+    expect(missingFieldsFor(note)).toContain('targetId');
+  });
+
+  it('complaintSeverity: deterministic keyword branch', () => {
+    expect(complaintSeverity('I want my money back, this is going to my attorney')).toBe('high');
+    expect(complaintSeverity('I will report you to the Better Business Bureau')).toBe('high');
+    expect(complaintSeverity('he threatened legal action')).toBe('high');
+    expect(complaintSeverity('the tech left mud on the carpet, please send someone')).toBe('normal');
+    expect(complaintSeverity('')).toBe('normal');
+  });
+
+  it('complaintSeverity: BBB regex matches title-case "Better Business Bureau"', () => {
+    // Fix #1: the phrase part must be case-insensitive so title-case matches.
+    expect(complaintSeverity('I will report you to the Better Business Bureau')).toBe('high');
+    // All-caps variant must still match (bare BBB pattern has no i flag, intentionally).
+    expect(complaintSeverity('filing a report with the BBB tomorrow')).toBe('high');
+    // All-lowercase must also match now that the phrase regex carries /i.
+    expect(complaintSeverity('reporting to better business bureau today')).toBe('high');
+  });
+
+  it('callback dedup: companion callback carries idempotency key voice-complaint-callback:<recordingId>', async () => {
+    // Fix #5: the callback proposal carries a stable idempotency key derived
+    // from recordingId so concurrent-style redelivery is idempotent — if the
+    // callback create races, the unique-key constraint lets exactly one win.
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'complaint',
+        confidence: 0.9,
+        extractedEntities: { customerName: 'Mrs. Chan' },
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, extendedIntentsEnabled: async () => true });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'op-1', transcript: 'Mrs. Chan complained', recordingId: 'rec-123' }),
+      silentLogger(),
+    );
+    const all = await proposalRepo.findByTenant('t-1');
+    const callback = all.find((p) => p.proposalType === 'callback')!;
+    expect(callback).toBeDefined();
+    expect(callback.idempotencyKey).toBe('voice-complaint-callback:rec-123');
+
+    // Concurrent-style redelivery: a second create with the same key must be
+    // rejected by the idempotency gate (simulating what the DB constraint does
+    // in production when two deliveries race past the sequential pre-check).
+    await expect(proposalRepo.create(callback)).rejects.toThrow(/idempotency/i);
+  });
+
+  it('callback dedup: no recordingId — callback is created without an idempotency key', async () => {
+    // Fix #5: keyless only when recordingId is genuinely absent (synthetic / test-mode).
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'complaint',
+        confidence: 0.9,
+        extractedEntities: {},
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, extendedIntentsEnabled: async () => true });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'op-1', transcript: 'someone complained' }),
+      silentLogger(),
+    );
+
+    const all = await proposalRepo.findByTenant('t-1');
+    const callback = all.find((p) => p.proposalType === 'callback')!;
+    expect(callback).toBeDefined();
+    expect(callback.idempotencyKey).toBeUndefined();
+  });
+});
+
+describe('RV-080 — belt-and-braces extended intent dispatch gate', () => {
+  function extendedIntentClassification(intentType: string): string {
+    return JSON.stringify({ intentType, confidence: 0.9 });
+  }
+
+  const EXTENDED_INTENTS = ['complaint', 'lookup_day_overview', 'lookup_digest', 'lookup_pending_items'] as const;
+
+  for (const intentType of EXTENDED_INTENTS) {
+    it(`${intentType}: routes to clarification when extendedIntentsEnabled is absent`, async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const gateway = gatewayReturning([extendedIntentClassification(intentType)]);
+      // No extendedIntentsEnabled dep → flag is false.
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+      await worker.handle(
+        msg({ tenantId: 't-1', userId: 'op-1', transcript: 'what is my day looking like today' }),
+        silentLogger(),
+      );
+
+      // No proposals created — the LLM-hallucinated extended intent was refused.
+      const all = await proposalRepo.findByTenant('t-1');
+      expect(all.filter((p) => p.proposalType === 'callback' || p.proposalType === 'add_note')).toHaveLength(0);
+      // A voice_clarification is emitted instead.
+      const clarifications = all.filter((p) => p.proposalType === 'voice_clarification');
+      expect(clarifications).toHaveLength(1);
+    });
+  }
+
+  it('complaint: dispatches normally when extendedIntentsEnabled returns true', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([extendedIntentClassification('complaint')]);
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      extendedIntentsEnabled: async () => true,
+    });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'op-1', transcript: 'I want to file a complaint' }),
+      silentLogger(),
+    );
+
+    const all = await proposalRepo.findByTenant('t-1');
+    expect(all.some((p) => p.proposalType === 'add_note')).toBe(true);
+    expect(all.some((p) => p.proposalType === 'callback')).toBe(true);
   });
 });

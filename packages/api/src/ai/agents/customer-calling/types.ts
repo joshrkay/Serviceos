@@ -70,7 +70,15 @@ export type CallingAgentEvent =
       source: 'keyword' | 'llm_sentiment';
       detail?: string;
       reasonHint?: string;
-    };
+    }
+  /**
+   * RV-140 — deterministic emergency keyword hit on a transcript chunk
+   * (emergency-detector.ts), dispatched BEFORE any LLM call. Global guard:
+   * fast-paths to `escalating` from any non-terminal state with the 911
+   * safety script (RV-142) spoken first, an emergency_dispatch proposal
+   * queued, and the on-call transfer initiated.
+   */
+  | { type: 'emergency_detected'; keyword: string; utterance: string };
 
 // ─── Context ─────────────────────────────────────────────────────────────────
 
@@ -118,6 +126,25 @@ export interface CallingAgentContext {
     trigger_explicit_request: boolean;
     trigger_keyword_frustration: boolean;
   };
+  /**
+   * RV-070 — true when the inbound caller-ID matched an approver phone
+   * (`tenant_settings.owner_phone` or the backup supervisor's mobile,
+   * normalized — same identity logic as the SMS reply transport; see
+   * `proposals/approver-identity.ts`). Set ONCE where the session is
+   * established (telephony adapter) and never from utterance content.
+   *
+   * Inert for every existing FSM flow — the transition table does not
+   * read it. It gates the voice approval channel (RV-071): the
+   * `approve_proposal` / `reject_proposal` intents are only routed when
+   * this is true.
+   */
+  ownerSession?: boolean;
+  /**
+   * Phase-2 Track A — resolved once at session establishment from the
+   * tenant `voice_extended_intents` flag. When true the live-call
+   * classifier appends the extended owner-lookup/complaint prompt section.
+   */
+  extendedIntents?: boolean;
 }
 
 // ─── Side effects ─────────────────────────────────────────────────────────────
