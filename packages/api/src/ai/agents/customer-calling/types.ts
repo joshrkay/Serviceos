@@ -70,7 +70,15 @@ export type CallingAgentEvent =
       source: 'keyword' | 'llm_sentiment';
       detail?: string;
       reasonHint?: string;
-    };
+    }
+  /**
+   * RV-140 — deterministic emergency keyword hit on a transcript chunk
+   * (emergency-detector.ts), dispatched BEFORE any LLM call. Global guard:
+   * fast-paths to `escalating` from any non-terminal state with the 911
+   * safety script (RV-142) spoken first, an emergency_dispatch proposal
+   * queued, and the on-call transfer initiated.
+   */
+  | { type: 'emergency_detected'; keyword: string; utterance: string };
 
 // ─── Context ─────────────────────────────────────────────────────────────────
 

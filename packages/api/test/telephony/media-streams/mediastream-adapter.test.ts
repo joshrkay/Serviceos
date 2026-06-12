@@ -1256,3 +1256,209 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     });
   });
 });
+
+// ─── Production-shaped wiring — disclosure/consent + interim emergency ───────
+//
+// These tests wire the mediastream adapter EXACTLY the way app.ts does:
+// `initializeSession` → TwilioGatherAdapter#initializeStreamSession,
+// `speechTurn` → #processCallerUtterance, `interimEmergencyScan` →
+// #scanInterimForEmergency — so a regression in the app.ts hook shape is
+// caught here instead of in production.
+
+import { TwilioGatherAdapter } from '../../../src/telephony/twilio-adapter';
+import { InMemoryConsentEventRepository } from '../../../src/compliance/consent-events';
+import type { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
+
+function makeGateway(): LLMGateway {
+  const response: LLMResponse = {
+    content: '{"intentType":"unknown","confidence":0,"reasoning":"x"}',
+    model: 'mock-model',
+    provider: 'mock',
+    tokenUsage: { input: 1, output: 1, total: 2 },
+    latencyMs: 1,
+  };
+  return { complete: vi.fn().mockResolvedValue(response) } as unknown as LLMGateway;
+}
+
+describe('production-shaped wiring (app.ts hooks)', () => {
+  function makeProductionShapedSetup(opts: { consentEvents?: InMemoryConsentEventRepository } = {}) {
+    const gateway = makeGateway();
+    const gatherAdapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      ...(opts.consentEvents ? { consentEvents: opts.consentEvents } : {}),
+    });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const tts = makeTtsProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        ttsProvider: tts,
+        speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
+          gatherAdapter.processCallerUtterance({
+            sessionId: session.id,
+            callSid,
+            speechResult,
+            tenantId,
+          }),
+        initializeSession: ({ callSid, tenantId }) =>
+          gatherAdapter.initializeStreamSession({ callSid, tenantId }),
+        interimEmergencyScan: ({ session, speechResult, tenantId }) =>
+          gatherAdapter.scanInterimForEmergency({
+            sessionId: session.id,
+            speechResult,
+            tenantId,
+          }),
+      },
+      ws,
+    );
+    return { gatherAdapter, adapter, ws, tts, handle, gateway };
+  }
+
+  it('RV-130 — session init speaks greeting+disclosure over stream TTS and ledgers implicit consent', async () => {
+    const consentEvents = new InMemoryConsentEventRepository();
+    const { gatherAdapter, adapter, ws, tts } = makeProductionShapedSetup({ consentEvents });
+
+    // Production /voice route: create the session + record caller-ID.
+    await gatherAdapter.handleInboundForStream({
+      callSid: 'CA-prod-init',
+      from: '+15125550111',
+      tenantId: 't',
+    });
+
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-prod-init',
+      start: { callSid: 'CA-prod-init', accountSid: 'AC', streamSid: 'MZ-prod-init', tracks: ['inbound'] },
+    });
+
+    const synth = tts.synthesize as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => {
+      expect(synth).toHaveBeenCalled();
+    });
+
+    // The spoken greeting carries the business name AND the recording
+    // disclosure text — synthesized via the stream TTS path.
+    const spoken = synth.mock.calls
+      .map((c) => (c[0] as { text: string }).text)
+      .join(' ');
+    expect(spoken).toContain('Acme Plumbing');
+    expect(spoken.toLowerCase()).toContain('record');
+
+    // Disclosure audio reaches the caller as outbound media frames.
+    await vi.waitFor(() => {
+      expect(ws.sent.some((m) => (m as Record<string, unknown>).event === 'media')).toBe(true);
+    });
+
+    // RV-130 — the implicit recording-consent event landed in the ledger.
+    expect(consentEvents.rows).toHaveLength(1);
+    expect(consentEvents.rows[0]).toMatchObject({
+      kind: 'recording',
+      state: 'implicit',
+      source: 'voice',
+    });
+    const session = store.findByCallSid('CA-prod-init');
+    expect(consentEvents.rows[0].voiceSessionId).toBe(session!.id);
+  });
+
+  it('RV-140 — an interim "gas leak" escalates (911 line spoken) before any final transcript', async () => {
+    const { gatherAdapter, adapter, ws, tts, handle, gateway } = makeProductionShapedSetup();
+    await gatherAdapter.handleInboundForStream({
+      callSid: 'CA-prod-int',
+      from: '+15125550111',
+      tenantId: 't',
+    });
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-prod-int',
+      start: { callSid: 'CA-prod-int', accountSid: 'AC', streamSid: 'MZ-prod-int', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // INTERIM ONLY — no final has arrived.
+    handle.emit({ type: 'partial', isFinal: false, transcript: 'there is a gas leak', confidence: 0.6 });
+
+    const session = store.findByCallSid('CA-prod-int');
+    await vi.waitFor(() => {
+      expect(session!.machine.currentState).toBe('escalating');
+    });
+
+    const synth = tts.synthesize as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => {
+      const safetyCalls = synth.mock.calls.filter((c) =>
+        (c[0] as { text: string }).text.includes('911'),
+      );
+      expect(safetyCalls).toHaveLength(1);
+    });
+    // No LLM call happened — the keyword scan escalated deterministically.
+    expect(gateway.complete as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+
+    // The FINAL for the same utterance now arrives: the FSM guard is
+    // idempotent and the debounce flag is set — the 911 line is not spoken
+    // a second time.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'there is a gas leak in the basement', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    const safetyCallsAfterFinal = synth.mock.calls.filter((c) =>
+      (c[0] as { text: string }).text.includes('911'),
+    );
+    expect(safetyCallsAfterFinal).toHaveLength(1);
+  });
+
+  it('DISCLOSURE_INIT_FAILED — emits logger.error with stable greppable code when initializeSession throws', async () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    const { adapter, ws } = makeProductionShapedSetup();
+
+    // Override initializeSession to throw after the session is stored.
+    const throwingAdapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: makeStreamingProvider().provider,
+        speechTurn: async () => [],
+        initializeSession: async () => {
+          throw new Error('disclosure rpc timeout');
+        },
+      },
+      ws,
+    );
+
+    await store.create('t', 'telephony', { callSid: 'CA-disclose-fail' });
+    throwingAdapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-disclose-fail',
+      start: {
+        callSid: 'CA-disclose-fail',
+        accountSid: 'AC',
+        streamSid: 'MZ-disclose-fail',
+        tracks: ['inbound'],
+      },
+    });
+
+    // Wait for the async handleStart to complete.
+    await vi.waitFor(() => {
+      const written = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+      expect(written).toContain('DISCLOSURE_INIT_FAILED');
+    });
+
+    // The error log must carry callSid and tenantId so ops can correlate.
+    const errorOutput = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(errorOutput).toContain('CA-disclose-fail');
+
+    // The adapter must NOT have closed the WS — call continues undisclosed
+    // rather than dropping the caller.
+    expect(ws.closed).toBe(false);
+
+    // Adapter variable is used above; reference it to satisfy unused-var lint.
+    void adapter;
+
+    stderrSpy.mockRestore();
+  });
+});

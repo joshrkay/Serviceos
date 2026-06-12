@@ -4122,6 +4122,35 @@ export const MIGRATIONS = {
           'review_required_rendered'
         ));
   `,
+
+  // RV-120 — per-call vulnerability triage outcomes. One row per
+  // `evaluateTriage` evaluation (turn-batch grader, RV-122) so post-incident
+  // review can audit the triage matrix per session without replaying audio.
+  // `signals` carries the NON-PII evidence strings (same discipline as
+  // migration 115's vulnerability_signals); `action_taken` records what the
+  // call actually did with the decision (patched owner, urgent booking,
+  // normal flow). voice_session_id is TEXT — in-memory session ids are not
+  // UUIDs on every channel. Idempotent (IF NOT EXISTS + DROP/CREATE POLICY).
+  '166_create_triage_events': `
+    CREATE TABLE IF NOT EXISTS triage_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      voice_session_id TEXT NOT NULL,
+      customer_id UUID,
+      score NUMERIC NOT NULL,
+      tier TEXT NOT NULL CHECK (tier IN ('none', 'low', 'elevated', 'critical')),
+      signals JSONB NOT NULL DEFAULT '[]'::jsonb,
+      action_taken TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_triage_events_tenant_created
+      ON triage_events (tenant_id, created_at);
+    ALTER TABLE triage_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE triage_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_triage_events ON triage_events;
+    CREATE POLICY tenant_isolation_triage_events ON triage_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
   // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy engine).
   // Note: migrations 165 and 166 are reserved by parallel sibling tracks.
   //
@@ -4167,6 +4196,70 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_budget_counters FORCE ROW LEVEL SECURITY;
     CREATE POLICY tenant_isolation_tenant_budget_counters ON tenant_budget_counters
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // RV-130 — append-only consent ledger. Every consent-relevant moment
+  // (implicit recording consent at disclosure, an explicit "stop recording"
+  // objection, an SMS opt-in/out, portal/manual grants) appends one event;
+  // rows are NEVER updated or deleted (the derived customers.consent_status
+  // from migration 132 is the mutable rollup). phone_normalized is the
+  // digits-only E.164 so lookups survive formatting drift. Idempotent.
+  '168_create_consent_events': `
+    CREATE TABLE IF NOT EXISTS consent_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID,
+      phone_normalized TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('recording', 'sms', 'marketing')),
+      state TEXT NOT NULL CHECK (state IN ('granted', 'revoked', 'implicit')),
+      source TEXT NOT NULL CHECK (source IN ('voice', 'sms', 'portal', 'manual')),
+      voice_session_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_consent_events_tenant_phone
+      ON consent_events (tenant_id, phone_normalized);
+    ALTER TABLE consent_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE consent_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_consent_events ON consent_events;
+    CREATE POLICY tenant_isolation_consent_events ON consent_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // RV-132 — per-tenant recording retention. recording_retention_days drives
+  // the retention worker's purge horizon; legal_hold exempts a recording from
+  // any purge regardless of age; purged_at is the tombstone the worker stamps
+  // after deleting the S3 object (the row is kept for audit — the 007 status
+  // CHECK has no 'deleted' value, so a dedicated nullable marker is the
+  // non-destructive tombstone). Idempotent.
+  '169_recording_retention': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS recording_retention_days INT NOT NULL DEFAULT 365;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS chk_recording_retention_days_positive;
+    ALTER TABLE tenant_settings
+      ADD CONSTRAINT chk_recording_retention_days_positive
+        CHECK (recording_retention_days > 0);
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS legal_hold BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS purged_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_retention
+      ON voice_recordings (created_at)
+      WHERE purged_at IS NULL AND legal_hold = false;
+  `,
+  // NOTE: recording_retention_days is not currently exposed at any settings
+  // write surface (no API endpoint, no settings contract field). If a write
+  // route is added in the future, validate retention_days > 0 there too.
+
+  // RV-115 — state-aware dropped-call recovery. The scheduler snapshots
+  // {state, intent, entitiesResolved, proposalIds} from the FSM at the moment
+  // the call terminated without reaching 'closing'; the recovery SMS handler
+  // composes a state-aware cue from it and the inbound resume handler
+  // (RV-116) uses it to confirm a pending booking / schedule a callback.
+  // JSONB NULL — rows scheduled before this migration simply have no context.
+  '170_dropped_call_recovery_context': `
+    ALTER TABLE dropped_call_recoveries
+      ADD COLUMN IF NOT EXISTS context JSONB;
   `,
   // Track E (RV-225 audit fix): widen the proposal_sms_events kind CHECK
   // from 165 to allow 'voice_reapproval' — recorded when a VOICE edit is

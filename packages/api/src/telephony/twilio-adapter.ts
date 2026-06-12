@@ -94,6 +94,21 @@ import {
 } from '../ai/voice-turn';
 import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
+import { detectEmergency } from '../ai/agents/customer-calling/emergency-detector';
+import { renderTtsText, type SessionLanguage } from '../ai/agents/customer-calling/tts-copy';
+import {
+  detectRecordingObjection,
+  RECORDING_OBJECTION_ACK,
+} from '../compliance/recording-objection';
+import {
+  updateDerivedConsentStatus,
+  type ConsentEventRepository,
+} from '../compliance/consent-events';
+import type { RecordingControl } from './recording-control';
+import { armEmergencyPageLadder } from './emergency-page-retry';
+import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
+import type { DroppedCallScheduler } from '../sms/recovery/scheduler';
+import { buildRecoveryContext } from '../sms/recovery/scheduler';
 import type { SettingsRepository } from '../settings/settings';
 import type { UserRepository } from '../users/user';
 import { isApproverPhone } from '../proposals/approver-identity';
@@ -281,6 +296,30 @@ export interface TwilioAdapterDeps {
    * unsupervised routing). Threaded through to the voice-turn processor.
    */
   voiceApprovalOneTap?: OneTapFallbackDeps;
+  /**
+   * RV-143 — durable exhaustion fallback for the emergency page-retry
+   * ladder (the same repo the call-me-back worker sweeps). Optional;
+   * without it the ladder still pages but has no durable tail.
+   */
+  callMeBackRepo?: CallMeBackRepository;
+  /**
+   * RV-115 — durable dropped-call recovery scheduler. When wired, every
+   * telephony termination runs through it with the FSM context snapshot;
+   * the scheduler's own detection rejects non-recovery outcomes.
+   */
+  droppedCallScheduler?: DroppedCallScheduler;
+  /**
+   * RV-130 — append-only consent ledger. Implicit recording consent is
+   * appended at disclosure time; a "stop recording" objection appends a
+   * revocation. Optional: absent in fixtures that don't exercise consent.
+   */
+  consentEvents?: ConsentEventRepository;
+  /**
+   * RV-130 — pauses the active call recording on an objection. Optional:
+   * when absent the objection is still ledgered + acknowledged (the
+   * recording itself can't be paused — logged loudly).
+   */
+  recordingControl?: RecordingControl;
 }
 
 /**
@@ -505,6 +544,45 @@ export function buildTwiML(
   return `<?xml version="1.0" encoding="UTF-8"?><Response>${parts.join('')}</Response>`;
 }
 
+/**
+ * RV-142 — prepend safety-marked TTS lines (payload.priority === 'safety',
+ * e.g. the emergency 911 line) as `<Say>` verbs at the top of an existing
+ * `<Response>` document (typically the pending `<Dial>` transfer TwiML), so
+ * the safety script is spoken BEFORE the bridge. Non-safety lines are left
+ * out, preserving the long-standing behavior where transfer TwiML replaces
+ * ordinary turn copy. Returns the document unchanged when no safety lines
+ * are present.
+ */
+export function injectSafetySayLines(
+  twiml: string,
+  sideEffects: ReadonlyArray<SideEffect>,
+  opts: { language?: 'en' | 'es'; voiceOverride?: string } = {},
+): string {
+  const lang: SessionLanguage = opts.language === 'es' ? 'es' : 'en';
+  const sayParts = sideEffects
+    .filter(
+      (fx) =>
+        fx.type === 'tts_play' &&
+        fx.payload.priority === 'safety' &&
+        typeof fx.payload.text === 'string' &&
+        fx.payload.text.length > 0,
+    )
+    .map((fx) => {
+      const voice =
+        opts.voiceOverride ?? (lang === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
+      // Localize the safety script by session language — same selector the
+      // Polly voice switch above uses. renderTtsText resolves the FSM's
+      // fixed English sentences against SENTENCE_CATALOG_ES (exact match;
+      // the 911 + transfer lines are catalogued), and passes unknown text
+      // through unchanged, so an 'en' session is a no-op.
+      const text = renderTtsText(String(fx.payload.text), fx.payload, lang);
+      return `<Say voice="${xmlEscape(voice)}">${xmlEscape(text)}</Say>`;
+    })
+    .join('');
+  if (!sayParts) return twiml;
+  return twiml.replace('<Response>', `<Response>${sayParts}`);
+}
+
 // ─── Adapter ─────────────────────────────────────────────────────────────────
 
 export class TwilioGatherAdapter {
@@ -559,6 +637,10 @@ export class TwilioGatherAdapter {
       // latency stays bounded by the speechTurn body — the summary
       // (which can take seconds) continues in the background.
       onSessionTerminated: async (session) => {
+        // RV-115 — the processor finalized the session internally (its
+        // speechTurn path bypasses the adapter wrapper), so stamp the
+        // durable recovery context here.
+        this.scheduleDurableRecoveryContext(session);
         void this.processor.runSummary(session).catch(() => {
           /* swallow — summary is best-effort */
         });
@@ -745,6 +827,10 @@ export class TwilioGatherAdapter {
       channel: 'telephony',
       businessName: this.deps.businessName,
       language,
+      // RV-130 — ledger the implicit recording consent against the session.
+      ...(this.deps.consentEvents ? { consentLedger: this.deps.consentEvents } : {}),
+      ...(from ? { callerPhone: from } : {}),
+      voiceSessionId: session.id,
     });
 
     // 2. Identify caller by phone number.
@@ -885,6 +971,240 @@ export class TwilioGatherAdapter {
    * end_session emitted by the FSM. The caller decides how to render
    * those (TTS synthesis for the WS path; <Say> for Gather).
    */
+  /**
+   * RV-121/RV-122 — caller-ID accessor for the vulnerability triage wiring
+   * (the map itself stays private; same value the processor's
+   * callerPhoneResolver reads). Empty string (blocked caller-id) → undefined.
+   */
+  getCallerPhone(sessionId: string): string | undefined {
+    return this.callerIdBySession.get(sessionId) || undefined;
+  }
+
+  /**
+   * RV-140 — the ONE shared deterministic safety scan. Runs on every caller
+   * transcript chunk from BOTH entry points (Gather finals via
+   * `_handleGatherLocked`, media-streams finals via `processCallerUtterance`)
+   * BEFORE any LLM call. Two checks, both keyword-deterministic:
+   *
+   *   1. Emergency keywords (emergency-detector.ts) → dispatch
+   *      `emergency_detected` into the FSM. The FSM's global guard speaks
+   *      the 911 safety line FIRST (RV-142), queues the emergency_dispatch
+   *      proposal (RV-141), and fires notify_oncall — all of which are
+   *      executed through the shared voice-turn processor here so the
+   *      transfer TwiML / SMS fan-out actually happen.
+   *   2. RV-130 — recording-objection keywords ("stop recording") →
+   *      pause the active recording + append a revoked consent event.
+   *      Objection handling never consumes the turn — the caller's words
+   *      still flow to the classifier so the call continues normally.
+   *
+   * Returns the dispatched side effects when the scan consumed the turn
+   * (emergency), or null to continue with the normal turn pipeline.
+   */
+  private async runDeterministicSafetyScan(
+    session: VoiceSession,
+    speechResult: string,
+    tenantId: string,
+  ): Promise<SideEffect[] | null> {
+    const emergency = await this.runEmergencyScan(session, speechResult, tenantId);
+    if (emergency.effects) return emergency.effects;
+    if (!emergency.matched) {
+      // RV-130 — recording objection (checked only when no emergency: the
+      // life-safety path always wins the turn).
+      const objection = detectRecordingObjection(speechResult);
+      if (objection.matched) {
+        await this.handleRecordingObjection(session, tenantId, objection.keyword ?? 'unknown');
+        // Consume the turn with a deterministic acknowledgment — the FSM
+        // state is untouched, so the call continues exactly where it was.
+        return [
+          { type: 'tts_play', payload: { text: RECORDING_OBJECTION_ACK } },
+        ];
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The EMERGENCY half of the deterministic safety scan (keywords →
+   * `emergency_detected` → executed effects + page ladder). Shared by the
+   * full per-final scan above and the streaming INTERIM scan
+   * (`scanInterimForEmergency`) so both paths page identically.
+   *
+   * `matched: true, effects: null` means the keyword hit but the dispatch
+   * was idempotent-skipped (already escalating → empty effects) or inert
+   * (terminated → event_ignored audit only) — callers fall through to their
+   * normal pipeline so in-transfer / post-call utterances keep their
+   * existing behavior (no double-page).
+   */
+  private async runEmergencyScan(
+    session: VoiceSession,
+    speechResult: string,
+    tenantId: string,
+  ): Promise<{ matched: boolean; effects: SideEffect[] | null }> {
+    const emergency = detectEmergency(speechResult);
+    if (!emergency.matched) return { matched: false, effects: null };
+    const effects = session.machine.dispatch({
+      type: 'emergency_detected',
+      keyword: emergency.keyword ?? 'unknown',
+      utterance: speechResult,
+    });
+    if (effects.length === 0 || session.machine.currentState !== 'escalating') {
+      return { matched: true, effects: null };
+    }
+    await this.processor.executeSideEffects(session, effects, tenantId);
+    this.armEmergencyPageLadder(session, speechResult, tenantId);
+    return { matched: true, effects };
+  }
+
+  /**
+   * RV-140 (interim) — emergency-keyword scan over a streaming INTERIM
+   * transcript. Keywords-only by design: the recording-objection scan stays
+   * finals-only so a half-formed interim ("...stop record...") can never
+   * pause a recording on a false positive. The FSM's `emergency_detected`
+   * guard is idempotent (already-escalating → empty effects → null here),
+   * so the FINAL transcript that follows an interim-detected emergency
+   * cannot double-page.
+   *
+   * Called by the mediastream adapter under `withSessionLock`. Returns the
+   * executed side effects (911 safety line, notify_oncall, proposal) when
+   * the scan escalated, or null when nothing matched / already escalating.
+   */
+  async scanInterimForEmergency(opts: {
+    sessionId: string;
+    speechResult: string;
+    tenantId: string;
+  }): Promise<SideEffect[] | null> {
+    const session = this.deps.store.get(opts.sessionId);
+    if (!session) return null;
+    const { effects } = await this.runEmergencyScan(session, opts.speechResult, opts.tenantId);
+    return effects;
+  }
+
+  /**
+   * RV-130 — objection side effects: pause the active recording, append a
+   * revoked consent event, roll the derived customers.consent_status, and
+   * audit. Every step is best-effort — the acknowledgment is spoken even
+   * when the provider/pg are degraded (the objection is at least ledgered
+   * or logged).
+   */
+  private async handleRecordingObjection(
+    session: VoiceSession,
+    tenantId: string,
+    keyword: string,
+  ): Promise<void> {
+    const callSid = session.callSid;
+    if (this.deps.recordingControl && callSid) {
+      try {
+        await this.deps.recordingControl.pauseRecording(callSid);
+      } catch (err) {
+        logger.error('recording objection: pauseRecording failed', {
+          tenantId,
+          callSid,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } else {
+      logger.error('recording objection: no recording control wired — recording NOT paused', {
+        tenantId,
+        sessionId: session.id,
+      });
+    }
+
+    const callerPhone = this.callerIdBySession.get(session.id) || undefined;
+    if (this.deps.consentEvents && callerPhone) {
+      try {
+        const event = {
+          tenantId,
+          customerId: session.customerId ?? null,
+          phone: callerPhone,
+          kind: 'recording' as const,
+          state: 'revoked' as const,
+          source: 'voice' as const,
+          voiceSessionId: session.id,
+        };
+        await this.deps.consentEvents.append(event);
+        if (this.deps.pool && session.customerId) {
+          await updateDerivedConsentStatus(this.deps.pool, event).catch(() => undefined);
+        }
+      } catch (err) {
+        logger.warn('recording objection: consent ledger append failed', {
+          tenantId,
+          sessionId: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    if (this.deps.auditRepo) {
+      try {
+        await this.deps.auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: this.deps.systemActorId ?? 'calling-agent',
+            actorRole: 'system',
+            eventType: 'recording_consent.revoked',
+            entityType: 'voice_session',
+            entityId: session.id,
+            correlationId: session.id,
+            metadata: { keyword, paused: Boolean(this.deps.recordingControl && callSid) },
+          }),
+        );
+      } catch {
+        /* audit is best-effort */
+      }
+    }
+  }
+
+  /**
+   * RV-143 — arm the owner page-retry ladder the moment an emergency
+   * escalation starts. Each tick (2-minute intervals, ×3) re-checks whether
+   * the transfer was answered (the /dial-result success branch stamps
+   * `terminalReason === 'transferred'`); unanswered ticks page the owner
+   * and the exhausted ladder lands a durable URGENT call_me_back task.
+   * No-op without an SMS provider.
+   */
+  private armEmergencyPageLadder(
+    session: VoiceSession,
+    utterance: string,
+    tenantId: string,
+  ): void {
+    const deliveryProvider = this.deps.deliveryProvider;
+    if (!deliveryProvider) return;
+    const callerPhone = this.callerIdBySession.get(session.id) || undefined;
+    const sessionId = session.id;
+    armEmergencyPageLadder(
+      {
+        tenantId,
+        sessionId,
+        ...(session.callSid ? { callSid: session.callSid } : {}),
+        ...(callerPhone ? { callerPhone } : {}),
+        emergencyDescription: utterance.slice(0, 160),
+        businessName: this.deps.businessName,
+      },
+      {
+        sendSms: (args) => deliveryProvider.sendSms(args),
+        resolvePagePhone: async () => {
+          if (!this.deps.settingsRepo) return null;
+          try {
+            const settings = await this.deps.settingsRepo.findByTenant(tenantId);
+            return settings?.ownerPhone ?? settings?.transferNumber ?? null;
+          } catch {
+            return null;
+          }
+        },
+        // Resolved when the dispatcher transfer was ANSWERED. A reaped /
+        // missing session is treated as unresolved — bias toward paging on
+        // an emergency.
+        isResolved: () => {
+          const live = this.deps.store.peek(sessionId);
+          if (!live) return false;
+          return live.terminalReason === 'transferred';
+        },
+        ...(this.deps.callMeBackRepo ? { callMeBackRepo: this.deps.callMeBackRepo } : {}),
+        ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+      },
+    );
+  }
+
   async processCallerUtterance(opts: {
     sessionId: string;
     callSid: string;
@@ -907,6 +1227,19 @@ export class TwilioGatherAdapter {
       text: opts.speechResult,
       ts: Date.now(),
     });
+
+    // RV-140 — ONE shared deterministic safety scan (emergency keywords),
+    // BEFORE the frustration check and BEFORE any LLM call. Shared with the
+    // Gather path (_handleGatherLocked) so both transcript entry points run
+    // the identical scan.
+    const safetyEffects = await this.runDeterministicSafetyScan(
+      session,
+      opts.speechResult,
+      opts.tenantId,
+    );
+    if (safetyEffects) {
+      return safetyEffects;
+    }
 
     // B3.2 — keyword frustration check BEFORE intent classification.
     // Route through the processor so notify_oncall (and any escalation
@@ -1016,6 +1349,10 @@ export class TwilioGatherAdapter {
       channel: 'telephony',
       businessName: this.deps.businessName,
       language,
+      // RV-130 — ledger the implicit recording consent against the session.
+      ...(this.deps.consentEvents ? { consentLedger: this.deps.consentEvents } : {}),
+      ...(opts.from ? { callerPhone: opts.from } : {}),
+      voiceSessionId: session.id,
     });
 
     // 2. Identify caller. Skill requires a Pool; if we don't have one (dev),
@@ -1157,7 +1494,7 @@ export class TwilioGatherAdapter {
     //    captures even calls that never reached intent_capture.
     if (session.machine.currentState === 'terminated' && !session.ended) {
       session.ended = true;
-      this.processor.finalizeTerminatedSession(session, expanded, 'caller_hangup');
+      this.finalizeTerminatedSession(session, expanded, 'caller_hangup');
       void this.processor.runSummary(session).catch(() => {
         /* swallow — summary is best-effort */
       });
@@ -1209,6 +1546,18 @@ export class TwilioGatherAdapter {
       text: opts.speechResult,
       ts: Date.now(),
     });
+
+    // RV-140 — shared deterministic safety scan (see
+    // runDeterministicSafetyScan). Runs after the transcript append so the
+    // triggering utterance is always captured, BEFORE any LLM call.
+    const gatherSafetyEffects = await this.runDeterministicSafetyScan(
+      session,
+      opts.speechResult,
+      opts.tenantId,
+    );
+    if (gatherSafetyEffects) {
+      return this.finalizeTwiml(session, gatherSafetyEffects, opts.sessionId);
+    }
 
     // B3.2 — keyword frustration check on the PSTN/Gather path, mirroring
     // the same guard in processCallerUtterance (WS path). Runs after the
@@ -1509,7 +1858,15 @@ export class TwilioGatherAdapter {
       // Still capture any agent TTS line for the transcript so
       // summarizeSession can see "the agent said: connecting you...".
       appendAgentTts(this.deps.store, sessionId, sideEffects);
-      return transferTwiml;
+      // RV-142 — safety-script lines (tts_play with priority 'safety',
+      // i.e. the 911 line on an emergency) MUST be spoken BEFORE the
+      // bridge. Prepend them as <Say> verbs inside the transfer response.
+      // Only safety-marked lines are injected: ordinary transfer copy keeps
+      // its long-standing replaced-by-<Dial> behavior.
+      return injectSafetySayLines(transferTwiml, sideEffects, {
+        language: session.language,
+        voiceOverride: session.ttsVoice,
+      });
     }
 
     const twiml = buildTwiML(sideEffects, {
@@ -1522,7 +1879,7 @@ export class TwilioGatherAdapter {
     appendAgentTts(this.deps.store, sessionId, sideEffects);
     if (session.machine.currentState === 'terminated' && !session.ended) {
       session.ended = true;
-      this.processor.finalizeTerminatedSession(session, sideEffects, 'caller_hangup');
+      this.finalizeTerminatedSession(session, sideEffects, 'caller_hangup');
       void this.processor.runSummary(session).catch(() => {
         /* swallow — summary is best-effort */
       });
@@ -2111,6 +2468,11 @@ export class TwilioGatherAdapter {
     // was the source of the dropped transcript+customerId bug (the
     // adapter copy included those fields; the processor copy did not).
     this.processor.finalizeTerminatedSession(session, sideEffects, fallbackReason);
+    // RV-115 — persist the FSM snapshot into the durable recovery row for
+    // calls that terminated without reaching `closing`. Idempotent (the repo
+    // dedupes on (tenant, voice_session_id)) and swallow-on-error inside the
+    // scheduler, so this never disturbs the terminal path.
+    this.scheduleDurableRecoveryContext(session);
     if (session.terminalOutcome) return;
     const endSessionEffect = [...sideEffects].reverse().find((e) => e.type === 'end_session');
     const reason =
@@ -2127,6 +2489,39 @@ export class TwilioGatherAdapter {
     session.terminalOutcome = outcome;
     session.terminalReason = reason;
     void this.persistSessionEnded(session, reason, outcome);
+  }
+
+  /**
+   * RV-115 — fire the durable dropped-call scheduler with the FSM snapshot.
+   * The scheduler's own detection (outcome ∈ {dropped, failed}, voice
+   * channel, usable caller id) decides whether a row is written; calls that
+   * reached `closing` derive a non-recovery outcome and are rejected there.
+   */
+  private scheduleDurableRecoveryContext(session: VoiceSession): void {
+    const scheduler = this.deps.droppedCallScheduler;
+    if (!scheduler || !session.terminalOutcome) return;
+    const callerE164 = this.callerIdBySession.get(session.id);
+    if (!callerE164) return;
+    const fsmContext = session.machine.currentContext;
+    void scheduler
+      .schedule({
+        tenantId: session.tenantId,
+        voiceSessionId: session.id,
+        callerE164,
+        outcome: session.terminalOutcome,
+        channel: session.channel,
+        context: buildRecoveryContext({
+          state: session.machine.currentState,
+          ...(fsmContext.currentIntent ? { currentIntent: fsmContext.currentIntent } : {}),
+          ...(fsmContext.extractedEntities
+            ? { extractedEntities: fsmContext.extractedEntities }
+            : {}),
+          proposalIds: session.proposalIds,
+        }),
+      })
+      .catch(() => {
+        /* scheduler logs; recovery is best-effort */
+      });
   }
 
   /**

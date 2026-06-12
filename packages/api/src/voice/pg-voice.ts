@@ -16,6 +16,7 @@ function mapRow(row: Record<string, unknown>): VoiceRecording {
     errorMessage: row.error_message as string | undefined,
     outcome: (row.outcome as CallOutcome | null) ?? undefined,
     detectedLanguage: (row.detected_language as string | null) ?? undefined,
+    purgedAt: row.purged_at ? new Date(row.purged_at as string) : undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),

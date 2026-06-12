@@ -49,6 +49,13 @@ export interface VoiceRecording {
    * NULL/'und' as the "unknown" bucket.
    */
   detectedLanguage?: string;
+  /**
+   * RV-132 — retention-purge tombstone. Set by the recording-retention
+   * worker after the stored audio object is deleted; the row (and its
+   * files FK target) is KEPT. Any audio download path must check this and
+   * answer 410 instead of handing out a URL to a deleted S3 object.
+   */
+  purgedAt?: Date;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;

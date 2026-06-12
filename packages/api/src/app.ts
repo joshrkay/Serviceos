@@ -139,7 +139,11 @@ import { InMemoryPaymentRepository } from './invoices/payment';
 import { createPaymentLinkProvider } from './payments/payment-link-provider';
 import { InMemoryNoteRepository } from './notes/note';
 import { InMemoryConversationRepository } from './conversations/conversation-service';
-import { InMemorySettingsRepository, resolveEscalationSettings } from './settings/settings';
+import {
+  InMemorySettingsRepository,
+  resolveEscalationSettings,
+  createSettingsOwnerPhoneResolver,
+} from './settings/settings';
 import { InMemoryAuditRepository } from './audit/audit';
 import { InMemoryLookupEventRepository } from './lookup-events/lookup-event';
 import { PgLookupEventRepository } from './lookup-events/pg-lookup-event';
@@ -164,6 +168,7 @@ import {
   FeatureFlagRepository,
 } from './flags/feature-flags';
 import { PgFeatureFlagRepository } from './flags/pg-feature-flags';
+import { PgTenantFeatureFlagRepository } from './flags/pg-tenant-feature-flags';
 import { createFeatureFlagsRouter } from './routes/feature-flags';
 import { createAdminTenantsRouter } from './routes/admin-tenants';
 import { InMemoryTechnicianLocationPingRepository } from './telemetry/technician-location-ping';
@@ -183,6 +188,14 @@ import { VerticalTerminologyProvider } from './voice/vertical-terminology-provid
 import { FillerEngine } from './ai/agents/customer-calling/filler-engine';
 import { FillerAudioCache } from './ai/agents/customer-calling/filler-audio-cache';
 import { classifyTurnSentiment } from './ai/agents/customer-calling/sentiment-classifier';
+import { gradeVulnerability } from './ai/agents/customer-calling/vulnerability-grader';
+import { createVulnerabilityTriageHook } from './ai/agents/customer-calling/vulnerability-triage-hook';
+import {
+  PgTriageEventRepository,
+  InMemoryTriageEventRepository,
+} from './ai/agents/customer-calling/pg-triage-events';
+import { patchOwnerThrough } from './ai/skills/patch-owner-through';
+import { buildMarkCustomerVulnerablePayload } from './ai/agents/customer-calling/vulnerable-customer';
 import { createHvacPack } from './verticals/packs/hvac';
 import { createPlumbingPack } from './verticals/packs/plumbing';
 import { createElectricalPack } from './verticals/packs/electrical';
@@ -313,6 +326,10 @@ import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
 import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
+import {
+  runRecordingRetentionSweep,
+  PgRecordingRetentionRepository,
+} from './workers/recording-retention-worker';
 import { createRetrieveAdapter } from './ai/orchestration/retrieve-adapter';
 import { FrancLanguageDetector } from './voice/language-detector';
 import type { RetrieveAdapter } from './ai/orchestration/context-builder';
@@ -359,7 +376,7 @@ import { whisperRouter } from './telephony/whisper-route';
 import { WhisperCache } from './telephony/whisper-cache';
 import { requireTwilioSignature } from './telephony/twilio-signature';
 import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation';
-import { InMemoryProposalRepository } from './proposals/proposal';
+import { InMemoryProposalRepository, createProposal as buildProposalRow } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy hook + advisory annotator).
 import { configureSupervisorCreationHook } from './proposals/supervisor/hook';
@@ -379,7 +396,6 @@ import {
   runSupervisorAnnotationSweep,
   SUPERVISOR_ANNOTATE_SWEEP_INTERVAL_MS,
 } from './workers/supervisor-review-worker';
-import { PgTenantFeatureFlagRepository } from './flags/pg-tenant-feature-flags';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { IdempotencyGuard } from './proposals/execution/idempotency';
 import {
@@ -417,7 +433,21 @@ import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
 import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
-import { registerKeywordHandler } from './sms/inbound-dispatch';
+import {
+  registerKeywordHandler,
+  registerRecoveryResumeHandler,
+} from './sms/inbound-dispatch';
+import {
+  DroppedCallScheduler,
+  PgDroppedCallRecoveryRepository,
+  InMemoryDroppedCallRecoveryRepository,
+} from './sms/recovery/scheduler';
+import { createDroppedCallResumeHandler } from './sms/recovery/resume-handler';
+import {
+  PgConsentEventRepository,
+  InMemoryConsentEventRepository,
+} from './compliance/consent-events';
+import { TwilioRecordingControl } from './telephony/recording-control';
 // RV-050 — inbound MMS photo ingestion from registered tech phones.
 // P0-009: the webhook seam enqueues; the worker runs the pipeline.
 import {
@@ -1354,6 +1384,9 @@ export function createApp(): express.Express {
     timeEntryService: new TimeEntryService(timeEntryRepo, auditRepo),
     feedbackRepo: feedbackRequestRepo,
     delayNotificationService,
+    // RV-141 — emergency_dispatch owner page goes through the same
+    // delivery provider as every other dispatch SMS.
+    ...(messageDelivery ? { emergencySmsSender: messageDelivery } : {}),
     // RV-086 — send_estimate_nudge: re-send via the unified SendService
     // path; message_dispatches backs the 48h cooldown.
     ...(sendService ? { sendService } : {}),
@@ -1508,7 +1541,9 @@ export function createApp(): express.Express {
     batchInvoice: 590007,
     callMeBack: 590008,
     dailyDigest: 590009,
-    // 590010/590011 reserved by parallel Rivet P2 tracks.
+    // RV-132 — recording retention purge. 590010 is reserved by a parallel
+    // track; this sweep owns 590011.
+    recordingRetention: 590011,
     supervisorAnnotate: 590012,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
@@ -2043,6 +2078,89 @@ export function createApp(): express.Express {
   const dailyDigestRepo = pool
     ? new PgDailyDigestRepository(pool)
     : new InMemoryDailyDigestRepository();
+  // RV-115/RV-116 — durable dropped-call recovery: the scheduler persists
+  // the FSM context snapshot at termination; the resume handler picks the
+  // thread back up when the caller replies to the recovery SMS.
+  const droppedCallRecoveryRepo = pool
+    ? new PgDroppedCallRecoveryRepository(pool)
+    : new InMemoryDroppedCallRecoveryRepository();
+  const droppedCallScheduler = new DroppedCallScheduler(
+    droppedCallRecoveryRepo,
+    createLogger({
+      service: 'sms.dropped-call-recovery',
+      environment: process.env.NODE_ENV || 'development',
+    }),
+  );
+  if (messageDelivery) {
+    registerRecoveryResumeHandler(
+      createDroppedCallResumeHandler({
+        recoveryRepo: droppedCallRecoveryRepo,
+        proposalRepo,
+        callMeBackRepo,
+        sendSms: (args: { to: string; body: string }) =>
+          messageDelivery.sendSms({ to: args.to, body: args.body }),
+        auditRepo,
+        businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
+      }),
+      { overwrite: true },
+    );
+  }
+
+  // RV-130 — consent ledger + recording control. The ledger appends
+  // implicit recording consent at disclosure and revocations on a
+  // "stop recording" objection; the control pauses the live recording.
+  const consentEventRepo = pool
+    ? new PgConsentEventRepository(pool)
+    : new InMemoryConsentEventRepository();
+  const twilioRecordingControl =
+    process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
+      ? new TwilioRecordingControl(
+          process.env.TWILIO_ACCOUNT_SID,
+          process.env.TWILIO_AUTH_TOKEN,
+        )
+      : undefined;
+
+  // Platform feature flags. Hoisted above the voice wiring so the
+  // per-tenant flag repo (RV-001 / RV-122) can gate voice features.
+  const featureFlagRepo: FeatureFlagRepository = pool
+    ? new PgFeatureFlagRepository(pool)
+    : new InMemoryFeatureFlagRepository();
+  const featureFlagStore = new InMemoryFeatureFlagStore();
+  // Hydration is fire-and-forget on boot — the store starts empty and is
+  // refilled from the repo asynchronously. isFeatureEnabled returns false
+  // for missing flags, so the worst case during the hydration window is
+  // that a flag reads as disabled for a few ms.
+  void (async () => {
+    const { seedResilienceFlags } = await import('./flags/resilience-flags');
+    try {
+      await seedResilienceFlags(featureFlagRepo);
+    } catch {
+      /* fire-and-forget — admin flags surface via the admin API */
+    }
+    await hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
+  })();
+  // RV-001 follow-up #8 / RV-122 — per-tenant feature-flag resolution
+  // (tenant_feature_flags override → platform flag → false). This is the
+  // first production wiring of PgTenantFeatureFlagRepository.
+  const tenantFeatureFlags = pool
+    ? new PgTenantFeatureFlagRepository(pool, featureFlagRepo)
+    : null;
+  const isFlagEnabledForTenant = async (
+    tenantId: string,
+    flagKey: string,
+  ): Promise<boolean> => {
+    if (tenantFeatureFlags) {
+      return tenantFeatureFlags.isEnabledForTenant(tenantId, flagKey);
+    }
+    // In-memory dev: no tenant override table — evaluate the platform flag.
+    const flag = await featureFlagRepo.get(flagKey);
+    if (!flag) return false;
+    return isFeatureEnabled(new InMemoryFeatureFlagStore([flag]), flagKey, {
+      environment: process.env.NODE_ENV ?? 'development',
+      tenantId,
+    });
+  };
+
   const twilioAdapter = new TwilioGatherAdapter({
     store: voiceSessionStore,
     gateway: llmGateway,
@@ -2077,6 +2195,13 @@ export function createApp(): express.Express {
           },
         }
       : {}),
+    // RV-143 — durable tail for the emergency page-retry ladder.
+    callMeBackRepo,
+    // RV-115 — FSM context snapshot into dropped_call_recoveries.context.
+    droppedCallScheduler,
+    // RV-130 — consent ledger + live recording pause on objection.
+    consentEvents: consentEventRepo,
+    ...(twilioRecordingControl ? { recordingControl: twilioRecordingControl } : {}),
     leadRepo,
     // P11-001: lookup-skill family wiring. Without these the adapter
     // falls back to a "let me get a person to help" line on lookup_*
@@ -2483,6 +2608,100 @@ export function createApp(): express.Express {
             })
         : undefined;
 
+      // RV-120/RV-121/RV-122 — per-turn vulnerability triage. The hook gates
+      // itself on the per-tenant `voice_vulnerability_triage` flag, grades
+      // the turn via the `grade_vulnerability` gateway task, persists every
+      // evaluateTriage outcome to triage_events, and patches vulnerable +
+      // urgent callers straight through to the owner (fallback ladder:
+      // owner → on-call → voicemail + urgent SMS + call_me_back).
+      const triageEventsRepo = pool
+        ? new PgTriageEventRepository(pool)
+        : new InMemoryTriageEventRepository();
+      const mediaStreamPublicBase = (process.env.PUBLIC_API_URL ?? '').replace(/\/+$/, '');
+      const vulnerabilityTriageHookDep = llmGateway
+        ? createVulnerabilityTriageHook({
+            isEnabledForTenant: isFlagEnabledForTenant,
+            grade: (input, budget) =>
+              gradeVulnerability(input, {
+                llm: {
+                  complete: async ({ prompt }: { prompt: string }) => {
+                    const res = await llmGateway.complete({
+                      taskType: 'grade_vulnerability',
+                      messages: [{ role: 'user' as const, content: prompt }],
+                    });
+                    return { text: res.content };
+                  },
+                },
+                ...budget,
+              }),
+            triageEvents: triageEventsRepo,
+            onPatchOwner: async ({ session, tenantId, decision }) => {
+              const patchCallerPhone = twilioAdapter.getCallerPhone(session.id);
+              const result = await patchOwnerThrough(
+                {
+                  tenantId,
+                  sessionId: session.id,
+                  ...(session.callSid ? { callSid: session.callSid } : {}),
+                  dialActionUrl: `${mediaStreamPublicBase}/api/telephony/dial-result?sid=${encodeURIComponent(session.id)}`,
+                  reason: decision.reason,
+                  ...(patchCallerPhone ? { callerPhone: patchCallerPhone } : {}),
+                  shopName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
+                  voicemailRecordingCallbackUrl: `${mediaStreamPublicBase}/api/telephony/recording`,
+                },
+                {
+                  callControl: telephonyCallControl,
+                  ownerPhoneResolver: createSettingsOwnerPhoneResolver(settingsRepo),
+                  onCallRepo: sharedOnCallRepo,
+                  dispatcherPhoneResolver: createBusinessPhoneDispatcherResolver(settingsRepo),
+                  ...(messageDelivery
+                    ? {
+                        sendSms: (args: { to: string; body: string }) =>
+                          messageDelivery.sendSms({ to: args.to, body: args.body }),
+                      }
+                    : {}),
+                  callMeBackRepo,
+                  auditRepo,
+                },
+              );
+              if (result.kind === 'bridged') {
+                twilioAdapter.setPendingTransferTwiml(session.id, result.twiml);
+                return `patch_owner:bridged_${result.target}`;
+              }
+              if (result.voicemailTwiml) {
+                twilioAdapter.setPendingTransferTwiml(session.id, result.voicemailTwiml);
+              }
+              return `patch_owner:fallback${result.smsSent ? '+sms' : ''}${result.callMeBackTaskId ? '+callback' : ''}`;
+            },
+            // RV-123 — queue a human-approved update_customer proposal that
+            // stamps the vulnerability marker into communication notes (the
+            // EXISTING payload's `notes` field; see vulnerable-customer.ts).
+            markCustomerVulnerable: async ({ tenantId, customerId, decision, sessionId }) => {
+              const existing = await customerRepo.findById(tenantId, customerId);
+              const payload = buildMarkCustomerVulnerablePayload(
+                customerId,
+                decision,
+                existing?.communicationNotes,
+              );
+              if (!payload) return; // already marked
+              await proposalRepo.create(
+                buildProposalRow({
+                  tenantId,
+                  proposalType: 'update_customer',
+                  payload,
+                  summary: 'Flag customer as potentially vulnerable (voice triage)',
+                  sourceContext: {
+                    source: 'calling-agent',
+                    channel: 'telephony',
+                    sessionId,
+                    reason: 'vulnerability_triage',
+                  },
+                  createdBy: 'system:vulnerability-triage',
+                }),
+              );
+            },
+          })
+        : undefined;
+
       const origListen = app.listen.bind(app);
       // Wrap listen() so the WS upgrade handler is attached the moment
       // the http.Server exists. Fire-and-forget; errors during attach
@@ -2503,6 +2722,22 @@ export function createApp(): express.Express {
               twilioAdapter.processCallerUtterance({
                 sessionId: session.id,
                 callSid,
+                speechResult,
+                tenantId,
+              }),
+            // RV-130 (CRITICAL) — greeting + recording-disclosure bootstrap
+            // once Deepgram opens. initializeStreamSession speaks the
+            // greeting/disclosure via the stream TTS path AND appends the
+            // implicit recording-consent event to the ledger (the gather
+            // adapter carries consentEvents). Without this hook wired,
+            // flag-enabled streaming calls start silent and ledger nothing.
+            initializeSession: ({ callSid, tenantId }) =>
+              twilioAdapter.initializeStreamSession({ callSid, tenantId }),
+            // RV-140 (interim) — emergency keywords escalate on interim
+            // transcripts (keywords only; objection scan stays finals-only).
+            interimEmergencyScan: ({ session, speechResult, tenantId }) =>
+              twilioAdapter.scanInterimForEmergency({
+                sessionId: session.id,
                 speechResult,
                 tenantId,
               }),
@@ -2532,6 +2767,15 @@ export function createApp(): express.Express {
             // F6c: LLM-backed sentiment classifier. Only fires when
             // escalationSettings.trigger_llm_sentiment is true.
             ...(sentimentClassifierDep ? { sentimentClassifier: sentimentClassifierDep } : {}),
+            // RV-122 — per-turn vulnerability triage (flag-gated inside the
+            // hook). DELIBERATE scope (v1): streaming-only — the hook is
+            // wired into the media-streams adapter exclusively, so Gather
+            // turns don't grade. The Gather path is the legacy/fallback
+            // transport; triage targets the launch transport first, and
+            // extending the hook to _handleGatherLocked is a follow-up.
+            ...(vulnerabilityTriageHookDep
+              ? { vulnerabilityTriageHook: vulnerabilityTriageHookDep }
+              : {}),
             // F6c (per-tenant): resolve escalation settings at WS session start
             // so CallRoutingSheet toggle changes take effect on the next call.
             resolveEscalationSettings: async (tenantId: string) => {
@@ -3072,7 +3316,13 @@ export function createApp(): express.Express {
   });
   app.use(
     '/api/voice',
-    createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger, pool ? { pool } : undefined),
+    createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger, {
+      ...(pool ? { pool } : {}),
+      // RV-132 — purged-recording download guard (410 instead of a
+      // dangling S3 404 after the retention worker deletes the object).
+      fileRepo,
+      storage: storageProvider,
+    }),
   );
   app.use(
     '/api/onboarding',
@@ -3230,6 +3480,31 @@ export function createApp(): express.Express {
       });
     });
   }, 60_000));
+
+  // RV-132 — recording retention purge. Hourly; pool-gated (the Pg repo is
+  // the only implementation that can see the cross-tenant horizon query).
+  if (pool) {
+    const retentionPool = pool;
+    const recordingRetentionLogger = createLogger({
+      service: 'recording-retention-worker',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const recordingRetentionRepo = new PgRecordingRetentionRepository(retentionPool);
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.recordingRetention, async () => {
+        await runRecordingRetentionSweep({
+          repo: recordingRetentionRepo,
+          storage: storageProvider,
+          auditRepo,
+          logger: recordingRetentionLogger,
+        });
+      }).catch((err) => {
+        recordingRetentionLogger.error('Recording-retention sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 60 * 60_000));
+  }
 
   // Voice-parity (Feature 7) — call_me_back sweep. Notifies the CSR
   // (transfer_number) of callbacks captured when a warm transfer failed. Runs
@@ -3588,6 +3863,10 @@ export function createApp(): express.Express {
     repairTemplatesResolver,
     voiceSessionRepo,
     voicePersonaResolver,
+    // RV-115 — durable dropped-call recovery with the FSM context snapshot.
+    // (In-app sessions rarely have a caller phone; the scheduler's own
+    // detection rejects rows without a usable E.164.)
+    droppedCallScheduler,
     // Voice-parity (Feature 6) — gate Spanish auto-detection on the tenant's
     // opt-in stack (supported_languages). Without this the in-app path would
     // treat any Spanish utterance as allowed and ignore the Settings toggle.
@@ -3622,24 +3901,9 @@ export function createApp(): express.Express {
     }),
   );
 
-  const featureFlagRepo: FeatureFlagRepository = pool
-    ? new PgFeatureFlagRepository(pool)
-    : new InMemoryFeatureFlagRepository();
-  const featureFlagStore = new InMemoryFeatureFlagStore();
-  // Hydration is fire-and-forget on boot — the store starts empty and is
-  // refilled from the repo asynchronously. isFeatureEnabled returns false
-  // for missing flags, so the worst case during the hydration window is
-  // that a flag reads as disabled for a few ms.
-  void (async () => {
-    const { seedResilienceFlags } = await import('./flags/resilience-flags');
-    try {
-      await seedResilienceFlags(featureFlagRepo);
-    } catch {
-      /* fire-and-forget — admin flags surface via the admin API */
-    }
-    await hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
-  })();
   // D2-1c — audit-log platform-admin feature-flag upsert / delete.
+  // (featureFlagRepo / featureFlagStore are constructed earlier, alongside
+  // the per-tenant flag repo — see the RV-122 wiring block.)
   app.use(
     '/api/admin/feature-flags',
     createFeatureFlagsRouter(featureFlagRepo, featureFlagStore, {}, auditRepo),
@@ -3664,15 +3928,12 @@ export function createApp(): express.Express {
   // flag is turned on. Routes/settings exposure for policy versions is
   // deferred to a follow-up track.
   //
-  // NOTE for merges: a parallel track may also construct a
-  // PgTenantFeatureFlagRepository — the instance below is scoped to the
-  // supervisor wiring on purpose (its 30s cache is per-instance only),
-  // so a duplicate construction is harmless.
-  const supervisorTenantFlags = pool
-    ? new PgTenantFeatureFlagRepository(pool, featureFlagRepo)
-    : null;
-  const supervisorFlagGate = supervisorTenantFlags
-    ? (tenantId: string) => supervisorTenantFlags.isEnabledForTenant(tenantId, 'supervisor_agent')
+  // Merge note: this reuses the single shared PgTenantFeatureFlagRepository
+  // constructed in the RV-122 wiring block above (`tenantFeatureFlags`) —
+  // one instance serves both the per-tenant triage/voice flag resolution
+  // and the supervisor gate (its 30s cache is per-instance only).
+  const supervisorFlagGate = tenantFeatureFlags
+    ? (tenantId: string) => tenantFeatureFlags.isEnabledForTenant(tenantId, 'supervisor_agent')
     : undefined;
   const supervisorLogger = createLogger({
     service: 'supervisor-agent',
