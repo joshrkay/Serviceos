@@ -617,7 +617,7 @@ async function applyEditInstruction(
           await reply(
             deps,
             ctx.fromE164,
-            'That one’s waiting on an earlier step — edit it after that step runs.',
+            'That one’s waiting on an earlier step — approval by text is paused until then. Edit it after that step runs.',
           );
           return { handled: true, handler: HANDLER_NAME, reason: 'edit_blocked_chain_ref' };
         }

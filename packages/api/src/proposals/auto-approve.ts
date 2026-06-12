@@ -392,8 +392,13 @@ export interface RouteUnsupervisedProposalInput {
    * capture-class (money / comms / irreversible): those classes are never
    * Y-approvable over SMS, so the one-tap token must not be minted and the
    * SMS anchors as `review_required_rendered` — exactly the same path the
-   * low/very_low-confidence flip uses. The two conditions are OR'd; the
-   * audit metadata records which one fired.
+   * low/very_low-confidence flip uses.
+   *
+   * The two conditions are OR'd; the audit metadata records which one(s)
+   * fired via `suppressReason`:
+   *   'low_confidence'            — payload _meta guard only
+   *   'action_class'              — caller-asserted suppressApproveLink only
+   *   'low_confidence+action_class' — both fired simultaneously
    */
   suppressApproveLink?: boolean;
   nowMs?: number;
@@ -421,7 +426,10 @@ export async function routeUnsupervisedProposal(
   // an SMS that still went out (low/very_low payload, or a caller-asserted
   // non-Y-approvable target like a money/comms chain head).
   let approveLinkSuppressed = false;
-  let suppressReason: 'low_confidence' | 'action_class' | undefined;
+  // Both conditions can fire simultaneously (e.g. a money/comms chain head
+  // that also carries low/very_low confidence). When both apply, record the
+  // combined reason so audit readers see the full picture.
+  let suppressReason: 'low_confidence' | 'action_class' | 'low_confidence+action_class' | undefined;
 
   if (requested === 'escalate_to_oncall' && (input.channel !== 'voice_inbound' || !deps.escalateToOnCall)) {
     // Non-call channels (or no escalation seam wired) fall back to queue_only.
@@ -477,7 +485,12 @@ export async function routeUnsupervisedProposal(
           ? input.renderSmsBody('')
           : `${summary}. Review in app.`;
         approveLinkSuppressed = true;
-        suppressReason = isLowConfidence ? 'low_confidence' : 'action_class';
+        suppressReason =
+          isLowConfidence && input.suppressApproveLink === true
+            ? 'low_confidence+action_class'
+            : isLowConfidence
+            ? 'low_confidence'
+            : 'action_class';
       } else {
         // No secret and not low confidence: preserve original behavior —
         // no token to mint, so no SMS goes out.

@@ -158,6 +158,48 @@ describe('renderProposalSms', () => {
       );
     }
   });
+
+  // ── Item 1 pin: non-capture WITHOUT approveUrl (reapproval path) gets the
+  // in-app variant, not the tap-the-link copy that would reference a missing URL.
+  it('non-capture WITHOUT approveUrl (reapproval / chain-head review) gets app-variant instructions', () => {
+    for (const proposalType of ['record_payment', 'send_estimate', 'cancel_appointment'] as const) {
+      const body = renderProposalSms(
+        { proposalType, summary: `Pending ${proposalType}`, payload: {} },
+        // No approveUrl — reapproval render or chain-head review form.
+      );
+      expect(body, `${proposalType} no-link: must NOT say "Tap the link"`).not.toContain('Tap the link');
+      expect(body, `${proposalType} no-link: must say "Review and approve in the app"`).toContain(
+        'Review and approve in the app',
+      );
+      expect(body, `${proposalType} no-link: must still offer N and EDIT`).toContain('reply N to reject');
+      expect(body, `${proposalType} no-link: must NOT contain Reply Y`).not.toContain('Reply Y');
+    }
+  });
+
+  it('non-capture WITH approveUrl keeps the tap-the-link instructions (existing behavior unchanged)', () => {
+    for (const proposalType of ['record_payment', 'send_estimate', 'cancel_appointment'] as const) {
+      const body = renderProposalSms(
+        { proposalType, summary: `Pending ${proposalType}`, payload: {} },
+        { approveUrl: URL },
+      );
+      expect(body, `${proposalType} with-link: must say "Tap the link"`).toContain(
+        'Tap the link to approve, reply N to reject, or EDIT to change.',
+      );
+      expect(body, `${proposalType} with-link: must contain URL`).toContain(URL);
+    }
+  });
+
+  it('capture WITHOUT approveUrl still gets the standard Reply-Y instructions (unchanged)', () => {
+    for (const proposalType of ['draft_estimate', 'create_appointment'] as const) {
+      const body = renderProposalSms(
+        { proposalType, summary: `Pending ${proposalType}`, payload: {} },
+        // No approveUrl.
+      );
+      expect(body, `${proposalType} capture no-link: still has Reply Y`).toContain(
+        'Reply Y to approve, N to reject, EDIT to change.',
+      );
+    }
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -783,5 +825,12 @@ describe('renderChainSms — RV-221 chain summaries', () => {
       }),
     ]);
     expect(body.match(/\$123\.45/g)).toHaveLength(1);
+  });
+
+  // Item 4 pin: an empty members list must throw rather than emit
+  // a nonsensical "0 linked actions:" message.
+  it('throws on an empty members list (guard: callers must supply at least one member)', () => {
+    expect(() => renderChainSms([])).toThrow();
+    expect(() => renderChainSms([], { approveUrl: URL })).toThrow();
   });
 });

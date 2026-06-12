@@ -1045,7 +1045,7 @@ describe('Track E — SMS Y blocked for non-capture action classes', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('Track E — SMS edit refused when the delta touches an unresolved chain ref', () => {
-  it('refuses with "waiting on an earlier step" copy, audits, and leaves the token in place', async () => {
+  it('refuses with "waiting on an earlier step — approval by text is paused until then" copy, audits, and leaves the token in place', async () => {
     const h = makeHarness({
       interpretEdit: async () => ({ invoiceId: 'INV-1024' }),
     });
@@ -1069,8 +1069,9 @@ describe('Track E — SMS edit refused when the delta touches an unresolved chai
     // The chain wiring is intact.
     const stored = await h.proposalRepo.findById(TENANT, proposal.id);
     expect(stored?.payload.invoiceId).toBe('$ref:chain[0].invoiceId');
-    // Clear, truthful copy.
+    // Clear, truthful copy — includes the "paused until then" phrasing.
     expect(h.sent.some((s) => s.body.includes('waiting on an earlier step'))).toBe(true);
+    expect(h.sent.some((s) => s.body.includes('approval by text is paused until then'))).toBe(true);
     // Audited with the touched fields.
     const blocked = h.auditRepo
       .getAll()

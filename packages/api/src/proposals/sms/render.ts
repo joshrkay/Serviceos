@@ -38,6 +38,12 @@ const REPLY_INSTRUCTIONS = 'Reply Y to approve, N to reject, EDIT to change.';
 // owner knows how to approve; N and EDIT remain accurate over SMS.
 const NON_CAPTURE_REPLY_INSTRUCTIONS =
   'Tap the link to approve, reply N to reject, or EDIT to change.';
+// Truthful no-link variant for non-capture proposals that are re-sent
+// WITHOUT an approveUrl (reapproval renders and chain-head review forms).
+// The link-based form would reference a nonexistent URL; "Review and approve
+// in the app" is accurate — the owner must act from the review queue.
+const NON_CAPTURE_NO_LINK_INSTRUCTIONS =
+  'Review and approve in the app — reply N to reject, EDIT to change.';
 // RV-074 review fix: the low-confidence send anchors the reply transport
 // (review_required_rendered), so "reply N to reject" is correctly targeted
 // at THIS proposal. Approval stays in-app only.
@@ -245,9 +251,18 @@ export function renderProposalSms(
   // RV-071: the one-tap fallback is the ONLY approve affordance for these
   // classes. The reply-handler's class guard refuses a texted Y, so we drop
   // the "Reply Y" prompt and lead with the link instead.
+  //
+  // Truthfulness guard: the link-based copy ("Tap the link to approve…")
+  // is only correct when an approveUrl was actually provided. Reapproval
+  // renders (renderReapprovalSms) and chain-head review forms carry NO
+  // approveUrl — those paths call renderProposalSms without one, so the
+  // link instruction would point at a nonexistent link. When approveUrl
+  // is absent for a non-capture proposal, use the in-app variant instead.
   const replyInstructions =
     actionClassForProposalType(input.proposalType) !== 'capture'
-      ? NON_CAPTURE_REPLY_INSTRUCTIONS
+      ? options.approveUrl
+        ? NON_CAPTURE_REPLY_INSTRUCTIONS
+        : NON_CAPTURE_NO_LINK_INSTRUCTIONS
       : REPLY_INSTRUCTIONS;
 
   const facts: string[] = [];
@@ -411,6 +426,13 @@ export function renderChainSms(
   members: readonly ChainSmsMember[],
   options: RenderChainSmsOptions = {},
 ): string {
+  // Guard: an empty member list has no head and no content to render.
+  // Callers must provide at least one member; throw rather than emit a
+  // nonsensical "0 linked actions:" message.
+  if (members.length === 0) {
+    throw new Error('renderChainSms: members must not be empty');
+  }
+
   const anyBlocking = chainHasBlockingMember(members);
   // Track E — Y acts on the HEAD member only, and money/comms/irreversible
   // proposals are never Y-approvable over SMS, so a non-capture head flips
@@ -452,6 +474,11 @@ export function renderChainSms(
     legend.length +
     1 + // space before instructions
     instructions.length;
+  // The CHAIN_MIN_MEMBER_CHARS floor (12) is an intentional exception to the
+  // 320-char contract: with many long-named members the per-member budget can
+  // fall below 12, at which point the total may exceed 320. Readability wins
+  // over byte budget when every slot is already at the minimum — the owner
+  // still sees all items, just over the two-segment target.
   const perMemberBudget = Math.max(
     Math.floor((PROPOSAL_SMS_MAX_CHARS - fixedOverhead) / items.length),
     CHAIN_MIN_MEMBER_CHARS,

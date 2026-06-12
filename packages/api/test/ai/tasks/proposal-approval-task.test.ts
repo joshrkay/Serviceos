@@ -1569,7 +1569,7 @@ describe('Track E — confirm-stage pending-edit race', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('Track E — voice edit chain-ref guard', () => {
-  it('a delta touching a $ref:chain[…] field is refused with the "earlier step" line', async () => {
+  it('a delta touching a $ref:chain[…] field is refused with the "earlier step — paused until then" line', async () => {
     const h = makeEditHarness({ delta: { invoiceId: 'INV-1024' } });
     // A chained dependent: invoiceId still holds the unresolved token
     // (plain-string contract field — Zod alone would let the overwrite by).
@@ -1588,6 +1588,8 @@ describe('Track E — voice edit chain-ref guard', () => {
 
     expect(result.outcome).toBe('edit_blocked_chain_ref');
     expect(result.speak).toContain('waiting on an earlier step');
+    // Item 3 pin: the spoken line includes the "paused until then" phrase.
+    expect(result.speak).toContain('approval by text is paused until then');
     // The chain wiring is intact.
     const stored = await h.proposalRepo.findById(TENANT, proposal.id);
     expect(stored?.payload.invoiceId).toBe('$ref:chain[0].invoiceId');
@@ -1598,5 +1600,11 @@ describe('Track E — voice edit chain-ref guard', () => {
     expect(blocked?.metadata).toMatchObject({ fields: ['invoiceId'] });
     // The recorded edit_request stays unapplied → approval remains blocked.
     expect(await h.smsEvents.hasUnappliedEditRequest(TENANT, proposal.id)).toBe(true);
+    // Item 3 pin: the blocked path stamps pendingVoiceEditRequest on
+    // sourceContext — same as the edit_recorded path — so the review queue
+    // shows WHAT the owner asked to change.
+    expect(stored?.sourceContext?.pendingVoiceEditRequest).toMatchObject({
+      instruction: 'issue invoice 1024 instead',
+    });
   });
 });

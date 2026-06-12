@@ -992,9 +992,22 @@ export async function startVoiceEdit(
           await audit(deps, input, 'proposal.voice_edit_blocked_chain_ref', proposal.id, {
             fields: refFields,
           });
+          // Stamp sourceContext so the review queue shows WHAT the owner asked
+          // to change — parity with the edit_recorded path and the SMS handler.
+          // The edit_request was already recorded above (record-first parity),
+          // so approval is blocked on every channel until the queue resolves it.
+          await deps.proposalRepo.update(input.tenantId, proposal.id, {
+            sourceContext: {
+              ...(proposal.sourceContext ?? {}),
+              pendingVoiceEditRequest: {
+                instruction: input.instruction,
+                receivedAt: new Date().toISOString(),
+              },
+            },
+          });
           return {
             speak:
-              'That one’s waiting on an earlier step — edit it after that step runs.',
+              'That one’s waiting on an earlier step — approval by text is paused until then. Edit it after that step runs.',
             pending: null,
             outcome: 'edit_blocked_chain_ref',
             proposalId: proposal.id,
