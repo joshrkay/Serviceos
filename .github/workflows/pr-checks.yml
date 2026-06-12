@@ -33,13 +33,8 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Install infra dependencies
-        run: npm ci
-        working-directory: infra
-
-      - name: Infra CDK tests
-        run: npm test
-        working-directory: infra
+      # infra/ moved to experiments/infra (B9): not deployed, removed
+      # from CI builds. See experiments/README.md.
 
       - name: AI gateway guard
         run: npm run check:ai-gateway-guard --workspace=packages/api
@@ -59,7 +54,6 @@ jobs:
       - name: Per-module coverage thresholds (PRD §13)
         run: npx ts-node scripts/check-coverage.ts
         working-directory: packages/api
-        continue-on-error: true
 
   # VQ-024 — Voice Quality v1 Layer 1 corpus suite.
   #

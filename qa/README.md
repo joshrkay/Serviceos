@@ -1,124 +1,131 @@
 # QA Matrix — 4-agent swarm harness
 
-Cross-layer QA for **Estimates**, **Invoices**, and **Assistant** (see the matrix
-in `/root/.claude/plans/detailed-qa-matrix-whimsical-scroll.md`).
-
-Each matrix row is executed by a 4-agent swarm inside a single Playwright test:
+Cross-layer QA for the full product surface: provisioning, customers, estimates,
+billing journeys, scheduling, SMS, payments, voice, proposals, isolation, and
+public portal. Each matrix row is executed by a 4-agent swarm inside a single
+Playwright test:
 
 - **Agent A — API Verifier** (`e2e/qa-matrix/helpers/api-verifier.ts`)
-  Issues the API call, captures request + response to `artifacts/<row>/api/`.
-- **Agent B — UI Verifier** (the Playwright `page` fixture in each spec)
-  Takes before/after screenshots into `artifacts/<row>/ui/`.
+- **Agent B — UI Verifier** (Playwright `page` fixture)
 - **Agent C — DB Verifier** (`e2e/qa-matrix/helpers/db-verifier.ts`)
-  Runs SQL (with optional `SET LOCAL app.current_tenant_id` for RLS) and
-  writes row dumps + the literal SQL to `artifacts/<row>/db/`.
 - **Agent D — Evidence Assembler** (`e2e/qa-matrix/helpers/report-builder.ts`)
-  Runs from Playwright `globalTeardown`. Walks artifacts and emits
-  `qa/reports/<date>/QA-REPORT.md` with a summary table, per-row detail, and
-  a backlog section for every fail.
+
+## Production gates
+
+Two enforced gate lists live in [`e2e/qa-matrix/gates.ts`](../e2e/qa-matrix/gates.ts):
+
+| Gate | Rule |
+|------|------|
+| **Voice-Critical (20 rows)** | 20/20 must be `pass`; `partial`/`fail`/`na`/missing = fail |
+| **Business-Critical (30 rows)** | ≥27/30 must pass; up to 3 documented waivers in [`qa/gate-exceptions.json`](gate-exceptions.json) |
+
+After a matrix run, enforce gates with:
+
+```bash
+npm run qa:matrix:gate
+# or voice-only:
+npm run qa:matrix:gate -- --voice-only
+```
+
+Set `QA_GATE_STRICT=1` to make Playwright fail when a row's harness verdict is not `pass`.
 
 ## Run order
 
-`precheck.spec.ts` → `estimates.spec.ts` → `invoices.spec.ts` → `assistant.spec.ts` (FINAL).
+`precheck.spec.ts` runs first (fail-fast env/API/DB/voice/worker checks). Voice and
+assistant specs run late in the Playwright project list so domain fixtures exist.
 
-The assistant module is always last because it must be able to drive the
-domain objects the prior two suites exercise.
+Recommended full pipeline:
+
+```bash
+npm run qa:matrix:run   # doctor → seed → matrix → report → gate
+```
 
 ## Quick start
 
 ```bash
-# 1) Seed the two fixtures into Railway dev. Re-runnable (idempotent).
+# 1) Seed Tenant A + B (idempotent). Requires read-write DB URL.
 E2E_DB_URL_READWRITE=postgres://service-role@... \
   npx tsx e2e/qa-matrix/fixtures/seed.ts
 
-# Copy the printed `export ...` lines into your shell.
+# Copy the printed export lines into your shell (or source .env.qa).
 
-# 2) Export the rest of the env (see below), then run the matrix:
-npm run e2e:qa-matrix
+# 2) Export remaining env (see below), then run:
+npm run qa:matrix:run
 
 # 3) Open the report:
-ls qa/reports/         # latest run dir
-open qa/reports/*/QA-REPORT.md
+ls qa/reports/
+cat qa/reports/*/QA-REPORT.md
 ```
 
 ## Required env
 
 | Var | Purpose |
 |-----|---------|
-| `E2E_BASE_URL` | Railway dev web URL (e.g. `https://serviceos-dev.up.railway.app`) |
-| `E2E_API_URL` | Railway dev API URL (e.g. `https://serviceos-api-dev.up.railway.app`) |
+| `E2E_BASE_URL` | Railway dev web URL |
+| `E2E_API_URL` | Railway dev API URL |
 | `E2E_DB_URL_READONLY` | Direct PG read connection for Agent C |
-| `E2E_DB_URL_READWRITE` | Service-role PG connection (for `fixtures/seed.ts` only) |
-| `E2E_CLERK_HMAC_SECRET` | Same value the deployed API reads as `CLERK_SECRET_KEY`. Tokens for Tenant A and B are minted at runtime (see `fixtures/tokens.ts`). |
-| `E2E_TENANT_A_ID` | UUID of QA Tenant A (from seeder output) |
-| `E2E_TENANT_A_CUSTOMER_ID` | Tenant A's seeded customer |
-| `E2E_TENANT_A_JOB_ID` | Tenant A's seeded job |
-| `E2E_TENANT_B_ID` / `E2E_TENANT_B_CUSTOMER_ID` / `E2E_TENANT_B_JOB_ID` | Same for Tenant B |
+| `E2E_DB_URL_READWRITE` | Service-role PG (seeder + DNC/deposit edge rows) |
+| `E2E_CLERK_HMAC_SECRET` | Same value deployed API reads as `CLERK_SECRET_KEY` |
+| `E2E_TENANT_A_ID` / `E2E_TENANT_A_CUSTOMER_ID` / `E2E_TENANT_A_JOB_ID` | Tenant A fixtures (from seeder) |
+| `E2E_TENANT_B_ID` / `E2E_TENANT_B_CUSTOMER_ID` / `E2E_TENANT_B_JOB_ID` | Tenant B fixtures |
 
-The API's auth layer is a custom HMAC JWT verifier, not the Clerk SDK
-proper. `fixtures/tokens.ts` mints short-lived tokens on demand signed
-with `E2E_CLERK_HMAC_SECRET`, so no Clerk backend account / signin flow
-is needed for the matrix. Make sure the secret you export here is the
-exact same value the deployed Railway dev API reads as `CLERK_SECRET_KEY`.
+**Deploy-side (Railway API):**
 
-Stripe for INV-05/06: use `stripe listen --forward-to $E2E_API_URL/webhooks/stripe`
-during the run. The harness constructs a synthetic payload with an
-`evt_qa_*` id so idempotency is exercised across two identical POSTs.
+- `CLERK_DEV_HMAC_TOKENS=true`
+- `AI_PROVIDER_API_KEY` set (voice rows are Real-LLM-only)
+- Execution worker running (proposals must reach `executed` after approve)
 
-## Run a single row
+**Optional:**
+
+- Stripe CLI for `INV-05`/`INV-06` webhook rows
+- `QA_RUN_ID` — custom report directory name
+- `QA_GATE_STRICT=1` — fail Playwright when harness verdict ≠ pass
+
+See [`.env.qa.example`](../.env.qa.example) for a fill-in template.
+
+## Voice-Critical subset (fast iteration)
 
 ```bash
-npm run e2e:qa-matrix -- --grep EST-01
-npm run e2e:qa-matrix -- --grep "INV-0[357]"
+npm run e2e:qa-matrix -- --grep "CUST-02|SCH-02|SCH-03|VOX-01|VOX-02|VOX-03|VOX-05|VOX-11"
+npm run qa:matrix:gate -- --voice-only
 ```
 
-The report builder still runs in teardown and writes a partial report.
+Single row:
 
-## What "pass / partial / fail" mean in this harness
+```bash
+npm run e2e:qa-matrix -- --grep VOX-01
+```
 
-- **pass** — API + UI + DB evidence aligned and meets the row's Pass Criteria.
-- **partial** — Pass Criteria substantially met but with a documented deviation
-  (e.g., PUT instead of PATCH; status `open` instead of `sent`). Note is
-  embedded in the report row.
-- **fail** — Pass Criteria not met. Evidence captures the missing-route /
-  wrong-status / absent-row that blocked the row. Fails become the backlog.
-- **n/a** — Harness couldn't execute (e.g., dependency row failed to seed).
+## What pass / partial / fail / na mean
+
+- **pass** — API + UI + DB evidence meets the row's Pass Criteria
+- **partial** — Substantially met with documented deviation (counts as **fail** on Voice-Critical gate)
+- **fail** — Pass Criteria not met; captured in report backlog
+- **na** — Could not execute (counts as **fail** on Voice-Critical gate)
 
 ## Output layout
 
 ```
 qa/
-├── README.md                     # this file
-├── artifacts/                    # transient — wiped between runs
+├── README.md
+├── gate-exceptions.json          # soft-gate waivers (owner, ticket, expiry)
 └── reports/
-    └── 2026-04-22/
+    └── 2026-05-27/
         ├── QA-REPORT.md
         └── artifacts/
-            ├── EST-01/
-            │   ├── api/01-create.json
-            │   ├── ui/01-list-before.png
-            │   ├── ui/01-list-after.png
-            │   ├── db/01-row.json
-            │   ├── db/01-row.sql
+            ├── CUST-02/
+            │   ├── api/
+            │   ├── ui/
+            │   ├── db/
             │   └── manifest.json
-            ├── EST-02/...
             └── ...
 ```
 
-## Expected verdicts against current main (as of 2026-04-22)
+## npm scripts
 
-Based on Phase-1 exploration — verdicts at run time may differ if gaps have
-been closed since:
-
-- **7 pass** — EST-01, EST-02, EST-04, EST-06, INV-01, AST-02, AST-03
-- **7 partial** — EST-03, EST-05, INV-03, INV-06, AST-01, AST-04, AST-06
-- **5 fail** — INV-02, INV-04, INV-05, INV-07, AST-05, AST-07
-  *(6 if AST-07 is not interpreted leniently)*
-
-Fail count is the production backlog until closed.
-
-## Re-running after fixing a gap
-
-Close the gap on main, redeploy to Railway dev, re-run the matrix. The
-report writes to a new dated directory, so you can diff two reports to see
-only the rows that changed.
+| Script | Purpose |
+|--------|---------|
+| `npm run qa:doctor` | Preflight env + reachability |
+| `npm run qa:matrix:run` | Full pipeline including gate |
+| `npm run e2e:qa-matrix` | Matrix only |
+| `npm run qa:matrix:gate` | Post-run gate enforcement |

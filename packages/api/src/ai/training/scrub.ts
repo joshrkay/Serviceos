@@ -117,7 +117,9 @@ const EMAIL_REGEX = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 
 // Street addresses: <number> <street name> <suffix>. Suffixes drawn
 // from USPS Publication 28 (common ones; the long tail is captured by
-// the residual-signal heuristic).
+// the residual-signal heuristic). Case-insensitive ('i'): real user text
+// frequently lowercases addresses ("123 main st"); a case-sensitive pattern
+// would let them slip past both the sweep and the residual gate.
 const STREET_SUFFIXES = [
   'St', 'Street', 'Ave', 'Avenue', 'Blvd', 'Boulevard', 'Rd', 'Road',
   'Ln', 'Lane', 'Dr', 'Drive', 'Ct', 'Court', 'Pl', 'Place',
@@ -125,8 +127,8 @@ const STREET_SUFFIXES = [
   'Cir', 'Circle', 'Trl', 'Trail',
 ];
 const ADDRESS_REGEX = new RegExp(
-  `\\b\\d+\\s+([A-Z][a-z]+(?:\\s+[A-Z][a-z]+){0,3})\\s+(?:${STREET_SUFFIXES.join('|')})\\b\\.?`,
-  'g',
+  `\\b\\d+\\s+([A-Za-z]+(?:\\s+[A-Za-z]+){0,3})\\s+(?:${STREET_SUFFIXES.join('|')})\\b\\.?`,
+  'gi',
 );
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

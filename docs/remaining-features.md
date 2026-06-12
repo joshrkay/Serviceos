@@ -29,7 +29,7 @@ Before dispatching Phase 8, wire two provider additions into the existing plugga
 | File | Change |
 |---|---|
 | `packages/api/src/voice/transcription-providers.ts` | Add `DeepgramStreamingProvider` alongside existing `OpenAiWhisperProvider` |
-| `infra/src/stacks/secrets-stack.ts` | `DEEPGRAM_API_KEY` secret already present — no new secrets needed |
+| `experiments/infra/src/stacks/secrets-stack.ts` | `DEEPGRAM_API_KEY` secret already present — no new secrets needed |
 
 **Behavior:** WebSocket to `wss://api.deepgram.com/v1/listen`. Emits `partial` events (for interruption detection) and `final` event (for intent classification). Uses Deepgram's Node SDK — no raw socket management.
 
@@ -45,7 +45,7 @@ Before dispatching Phase 8, wire two provider additions into the existing plugga
 |---|---|
 | `packages/api/src/ai/tts/tts-provider.ts` | Add `ElevenLabsTtsProvider` alongside existing `OpenAiTtsProvider` |
 | `packages/api/src/config/` | Add `ELEVENLABS_API_KEY`, `TTS_PROVIDER` env vars |
-| `infra/src/stacks/secrets-stack.ts` | Add `ELEVENLABS_API_KEY` secret |
+| `experiments/infra/src/stacks/secrets-stack.ts` | Add `ELEVENLABS_API_KEY` secret |
 
 **Behavior:** Streams audio chunks directly to Twilio Media Streams WebSocket rather than buffering full file. Selectable via `TTS_PROVIDER=elevenlabs` env var; falls back to OpenAI TTS if unset.
 

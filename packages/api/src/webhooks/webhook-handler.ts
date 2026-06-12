@@ -87,6 +87,28 @@ export function createWebhookSignature(payload: string, secret: string, timestam
  */
 const INFLIGHT_STALENESS_MS = 30_000;
 
+/**
+ * Status-based dedup decision for an existing webhook row, shared by the
+ * up-front findByIdempotencyKey path and the create-conflict (lost-race)
+ * path so the two cannot diverge:
+ *
+ *   processed              → duplicate (handler ran cleanly).
+ *   failed                 → not duplicate (retry to reconcile).
+ *   processing | received  → duplicate iff still in-flight
+ *                            (age < INFLIGHT_STALENESS_MS); a stale row is
+ *                            a crashed handler, so allow the retry.
+ */
+function classifyExisting(existing: WebhookEvent): { event: WebhookEvent; duplicate: boolean } {
+  if (existing.status === 'processed') {
+    return { event: existing, duplicate: true };
+  }
+  if (existing.status === 'failed') {
+    return { event: existing, duplicate: false };
+  }
+  const ageMs = Date.now() - existing.createdAt.getTime();
+  return { event: existing, duplicate: ageMs < INFLIGHT_STALENESS_MS };
+}
+
 export async function handleWebhookEvent(
   source: string,
   eventType: string,
@@ -116,16 +138,7 @@ export async function handleWebhookEvent(
   // retries.
   const existing = await repository.findByIdempotencyKey(source, idempotencyKey);
   if (existing) {
-    if (existing.status === 'processed') {
-      return { event: existing, duplicate: true };
-    }
-    if (existing.status === 'failed') {
-      return { event: existing, duplicate: false };
-    }
-    // 'processing' or 'received' → block concurrent in-flight retries,
-    // permit stale-handler recovery.
-    const ageMs = Date.now() - existing.createdAt.getTime();
-    return { event: existing, duplicate: ageMs < INFLIGHT_STALENESS_MS };
+    return classifyExisting(existing);
   }
 
   const event: WebhookEvent = {
@@ -150,14 +163,7 @@ export async function handleWebhookEvent(
   // (The in-memory repo always returns the row we passed, so id matches
   // and this branch is a no-op there.)
   if (created.id !== event.id) {
-    if (created.status === 'processed') {
-      return { event: created, duplicate: true };
-    }
-    if (created.status === 'failed') {
-      return { event: created, duplicate: false };
-    }
-    const ageMs = Date.now() - created.createdAt.getTime();
-    return { event: created, duplicate: ageMs < INFLIGHT_STALENESS_MS };
+    return classifyExisting(created);
   }
 
   return { event: created, duplicate: false };

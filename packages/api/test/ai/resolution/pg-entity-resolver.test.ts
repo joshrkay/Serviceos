@@ -21,23 +21,30 @@ type CapturedCall = { sql: string; params: unknown[] };
 
 interface MockRow {
   id?: string;
-  name?: string;
-  phone?: string | null;
-  title?: string;
+  display_name?: string;
+  primary_phone?: string | null;
+  summary?: string;
   status?: string | null;
   invoice_number?: string;
-  scheduled_for?: string;
+  scheduled_start?: string;
   score?: number;
 }
 
-function makeMockPool(rowsByCallIndex: Array<MockRow[] | undefined>) {
+function makeMockPool(rowsBySlot: Array<MockRow[] | undefined>) {
   const calls: CapturedCall[] = [];
   let releaseCount = 0;
+
+  // Each resolve() runs in a transaction: BEGIN → set_config(tenant) →
+  // business SELECT → COMMIT (ROLLBACK on error). Slot 0 is the canned result
+  // for the RLS-context statements (always empty); slot 1 holds the business
+  // rows returned by the single data query.
+  const isContextStatement = (sql: string) =>
+    /^\s*(BEGIN|COMMIT|ROLLBACK|SET\b)/i.test(sql) || /set_config/i.test(sql);
 
   const client: Partial<PoolClient> = {
     query: vi.fn(async (sql: string, params?: unknown[]) => {
       calls.push({ sql, params: params ?? [] });
-      const rows = rowsByCallIndex[calls.length - 1] ?? [];
+      const rows = (isContextStatement(sql) ? rowsBySlot[0] : rowsBySlot[1]) ?? [];
       return {
         rows,
         rowCount: rows.length,
@@ -73,7 +80,7 @@ describe('PgEntityResolver — customer', () => {
   it('exact name match returns resolved with score 1.0', async () => {
     const { pool } = makeMockPool([
       undefined, // SET tenant context
-      [{ id: 'cust-1', name: 'Rodriguez HVAC', phone: '555-1234', score: 1.0 }],
+      [{ id: 'cust-1', display_name: 'Rodriguez HVAC', primary_phone: '555-1234', score: 1.0 }],
     ]);
 
     const resolver = new PgEntityResolver(pool);
@@ -95,7 +102,7 @@ describe('PgEntityResolver — customer', () => {
   it('fuzzy match ("Rodrigez" → "Rodriguez") returns resolved with score < 1', async () => {
     const { pool } = makeMockPool([
       undefined,
-      [{ id: 'cust-1', name: 'Rodriguez HVAC', phone: null, score: 0.85 }],
+      [{ id: 'cust-1', display_name: 'Rodriguez HVAC', primary_phone: null, score: 0.85 }],
     ]);
 
     const resolver = new PgEntityResolver(pool);
@@ -116,8 +123,8 @@ describe('PgEntityResolver — customer', () => {
     const { pool } = makeMockPool([
       undefined,
       [
-        { id: 'cust-1', name: 'Rodriguez Plumbing', phone: null, score: 0.92 },
-        { id: 'cust-2', name: 'Rodriguez HVAC', phone: null, score: 0.88 },
+        { id: 'cust-1', display_name: 'Rodriguez Plumbing', primary_phone: null, score: 0.92 },
+        { id: 'cust-2', display_name: 'Rodriguez HVAC', primary_phone: null, score: 0.88 },
       ],
     ]);
 
@@ -139,7 +146,7 @@ describe('PgEntityResolver — customer', () => {
   it('no candidate above τ_ent returns not_found', async () => {
     const { pool } = makeMockPool([
       undefined,
-      [{ id: 'cust-9', name: 'Unrelated Company', phone: null, score: 0.35 }],
+      [{ id: 'cust-9', display_name: 'Unrelated Company', primary_phone: null, score: 0.35 }],
     ]);
 
     const resolver = new PgEntityResolver(pool);
@@ -171,7 +178,7 @@ describe('PgEntityResolver — customer', () => {
   it('tenant isolation — SQL always includes tenant_id = $1', async () => {
     const { pool, calls } = makeMockPool([
       undefined,
-      [{ id: 'cust-1', name: 'ACME', phone: null, score: 0.95 }],
+      [{ id: 'cust-1', display_name: 'ACME', primary_phone: null, score: 0.95 }],
     ]);
 
     const resolver = new PgEntityResolver(pool);
@@ -193,7 +200,7 @@ describe('PgEntityResolver — customer', () => {
   it('only one candidate exactly at τ_ent boundary (0.80) → resolved', async () => {
     const { pool } = makeMockPool([
       undefined,
-      [{ id: 'cust-1', name: 'Boundary Corp', phone: null, score: 0.80 }],
+      [{ id: 'cust-1', display_name: 'Boundary Corp', primary_phone: null, score: 0.80 }],
     ]);
 
     const resolver = new PgEntityResolver(pool);
@@ -247,7 +254,7 @@ describe('PgEntityResolver — job', () => {
   it('single fuzzy job match above τ_ent returns resolved', async () => {
     const { pool, calls } = makeMockPool([
       undefined,
-      [{ id: 'job-1', title: 'HVAC Repair - Smith', status: 'open', score: 0.82 }],
+      [{ id: 'job-1', summary: 'HVAC Repair - Smith', status: 'open', score: 0.82 }],
     ]);
 
     const resolver = new PgEntityResolver(pool);
@@ -272,7 +279,7 @@ describe('PgEntityResolver — job', () => {
   it('no job match above τ_ent returns not_found', async () => {
     const { pool } = makeMockPool([
       undefined,
-      [{ id: 'job-9', title: 'Plumbing Fix', status: 'open', score: 0.45 }],
+      [{ id: 'job-9', summary: 'Plumbing Fix', status: 'open', score: 0.45 }],
     ]);
 
     const resolver = new PgEntityResolver(pool);
@@ -377,8 +384,8 @@ describe('PgEntityResolver — appointment', () => {
       [
         {
           id: 'appt-1',
-          scheduled_for: futureDate.toISOString(),
-          title: 'AC Service',
+          scheduled_start: futureDate.toISOString(),
+          status: 'scheduled',
         },
       ],
     ]);
@@ -408,8 +415,8 @@ describe('PgEntityResolver — appointment', () => {
     const { pool } = makeMockPool([
       undefined,
       [
-        { id: 'appt-1', scheduled_for: futureDate.toISOString(), title: 'AC Service' },
-        { id: 'appt-2', scheduled_for: futureDate.toISOString(), title: 'Heater Install' },
+        { id: 'appt-1', scheduled_start: futureDate.toISOString(), status: 'scheduled' },
+        { id: 'appt-2', scheduled_start: futureDate.toISOString(), status: 'scheduled' },
       ],
     ]);
 
@@ -455,8 +462,9 @@ describe('PgEntityResolver — connection management', () => {
     const errorClient: Partial<PoolClient> = {
       query: vi
         .fn()
-        .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // SET tenant context
-        .mockRejectedValueOnce(new Error('pg connection lost')),
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // BEGIN
+        .mockRejectedValueOnce(new Error('pg connection lost')) // set_config → throws
+        .mockResolvedValue({ rows: [], rowCount: 0 }), // ROLLBACK (cleanup)
       release: vi.fn(),
     };
     const pool: Partial<Pool> = {

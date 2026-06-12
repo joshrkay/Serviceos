@@ -10,6 +10,8 @@ import { sendInvoicePayloadSchema } from './contracts/send-invoice';
 import { sendEstimatePayloadSchema } from './contracts/send-estimate';
 import { recordPaymentPayloadSchema } from './contracts/record-payment';
 import { logExpensePayloadSchema } from './contracts/log-expense';
+import { createInvoiceSchedulePayloadSchema } from './contracts/create-invoice-schedule';
+import { batchInvoicePayloadSchema } from './contracts/batch-invoice';
 import {
   onboardingTenantSettingsPayloadSchema,
   onboardingServiceCategoryPayloadSchema,
@@ -21,6 +23,56 @@ import {
 // package (per the spec — single source of truth, re-exported via the
 // shared barrel). Do NOT redefine it locally.
 import { reviewResponseProposalPayloadSchema } from '@ai-service-os/shared';
+// RV-007 (F-4) — the confidence vocabulary is owned by the guardrails
+// module (score→level mapping lives there too). Re-exported here so
+// proposal-layer consumers don't reach into src/ai for the type.
+import { CONFIDENCE_LEVELS } from '../ai/guardrails/confidence';
+export type { ConfidenceLevel } from '../ai/guardrails/confidence';
+
+// ───────────────────────────────────────────────────────────────────────────
+// RV-007 (F-4) — Confidence Marker `_meta` on proposal payloads.
+//
+// A reusable, OPTIONAL fragment carried inside the payload itself:
+//
+//   _meta: {
+//     overallConfidence: 'high' | 'medium' | 'low' | 'very_low',
+//     fieldConfidence?:  Record<payload path, ConfidenceLevel>,
+//     markers?:          Array<{ path, reason }>,
+//   }
+//
+// Attachment choice: every schema in PROPOSAL_TYPE_SCHEMAS is a Zod
+// strip-mode object (several wrapped in `.refine()` → ZodEffects, which
+// cannot be `.extend()`ed), so an unknown `_meta` key already passes
+// each per-type schema untouched. Rather than rewriting ~40 schemas,
+// `_meta` is validated once at the shared choke point —
+// `validateProposalPayload` / `assertValidProposalPayload` — via the
+// envelope below. Old payloads without `_meta` keep validating; a
+// present-but-malformed `_meta` is rejected for every proposal type.
+// ───────────────────────────────────────────────────────────────────────────
+
+export const confidenceLevelSchema = z.enum(CONFIDENCE_LEVELS);
+
+export const proposalConfidenceMetaSchema = z.object({
+  overallConfidence: confidenceLevelSchema,
+  /** Per-field certainty keyed by payload path, e.g. "lineItems[0].unitPrice". */
+  fieldConfidence: z.record(confidenceLevelSchema).optional(),
+  /** Human-readable callouts the review UI / SMS / voice readback render. */
+  markers: z
+    .array(
+      z.object({
+        path: z.string().min(1),
+        reason: z.string().min(1),
+      }),
+    )
+    .optional(),
+});
+
+export type ProposalConfidenceMeta = z.infer<typeof proposalConfidenceMetaSchema>;
+
+/** `_meta` is optional on EVERY payload; other keys pass through untouched. */
+const confidenceMetaEnvelopeSchema = z
+  .object({ _meta: proposalConfidenceMetaSchema.optional() })
+  .passthrough();
 
 export const createCustomerPayloadSchema = z.object({
   name: z.string().min(1),
@@ -47,24 +99,69 @@ export const createJobPayloadSchema = z.object({
   priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
 });
 
-export const createAppointmentPayloadSchema = z.object({
-  jobId: z.string().uuid(),
-  scheduledStart: z.string().min(1),
-  scheduledEnd: z.string().min(1),
-  technicianId: z.string().uuid().optional(),
-  notes: z.string().optional(),
-});
+export const createAppointmentPayloadSchema = z
+  .object({
+    jobId: z.string().uuid(),
+    scheduledStart: z.string().min(1),
+    scheduledEnd: z.string().min(1),
+    technicianId: z.string().uuid().optional(),
+    notes: z.string().optional(),
+    // IANA tenant timezone the times should render in (UTC instants are
+    // stored; this is display/context only). Set by the AI booking path.
+    timezone: z.string().optional(),
+    // Optional customer-facing arrival window (home-services standard).
+    arrivalWindowStart: z.string().optional(),
+    arrivalWindowEnd: z.string().optional(),
+    // Carried from the voice path for the dispatcher review card; not all
+    // are persisted directly on the appointment.
+    customerId: z.string().optional(),
+    customerName: z.string().optional(),
+    summary: z.string().optional(),
+  })
+  .refine(
+    (v) => {
+      const s = Date.parse(v.scheduledStart);
+      const e = Date.parse(v.scheduledEnd);
+      return !Number.isNaN(s) && !Number.isNaN(e) && e > s;
+    },
+    { message: 'scheduledEnd must be a valid datetime after scheduledStart' },
+  )
+  .refine(
+    (v) => {
+      // Arrival window is optional, but if both ends are present (e.g. a
+      // dispatcher edit) they must be valid and ordered — never "12pm–8am".
+      if (v.arrivalWindowStart == null && v.arrivalWindowEnd == null) return true;
+      if (v.arrivalWindowStart == null || v.arrivalWindowEnd == null) return false;
+      const s = Date.parse(v.arrivalWindowStart);
+      const e = Date.parse(v.arrivalWindowEnd);
+      return !Number.isNaN(s) && !Number.isNaN(e) && e > s;
+    },
+    { message: 'arrivalWindowEnd must be a valid datetime after arrivalWindowStart' },
+  );
 
 export const createBookingPayloadSchema = z.object({
   appointmentId: z.string().uuid(),
 });
 
-const lineItemSchema = z.object({
-  description: z.string().min(1),
-  quantity: z.number(),
-  unitPrice: z.number(),
-  category: z.string().optional(),
-});
+// One price field is required, but which one depends on the producer:
+// the estimate path emits `unitPrice` (integer cents) while the invoice
+// path normalizes to the executor's `unitPriceCents`. P22 adds
+// `catalogItemId` + `pricingSource` so the review UI and audit trail
+// can show WHERE a price came from (catalog-resolved vs LLM-invented).
+const lineItemSchema = z
+  .object({
+    description: z.string().min(1),
+    quantity: z.number(),
+    unitPrice: z.number().optional(),
+    unitPriceCents: z.number().int().min(0).nullable().optional(),
+    category: z.string().optional(),
+    catalogItemId: z.string().uuid().optional(),
+    pricingSource: z.enum(['catalog', 'ambiguous', 'uncatalogued', 'manual']).optional(),
+    needsPricing: z.boolean().optional(),
+  })
+  .refine((li) => li.unitPrice !== undefined || li.unitPriceCents != null, {
+    message: 'line item requires unitPrice or unitPriceCents',
+  });
 
 export const draftEstimatePayloadSchema = z.object({
   customerId: z.string().uuid(),
@@ -257,12 +354,28 @@ export const voiceClarificationPayloadSchema = z.object({
     'low_confidence',
     'parse_failed',
     'missing_entities',
+    // P8 — intent understood, but an entity reference matched several
+    // tenant records ("three Bobs"); candidates carry the picker list.
+    'ambiguous_entity',
   ]),
   suggestedIntents: z.array(z.string()).optional(),
   classifierReasoning: z.string().optional(),
   classifierConfidence: z.number().min(0).max(1).optional(),
   recordingId: z.string().optional(),
   conversationId: z.string().optional(),
+  /** P8 — the free-text reference that was ambiguous ("Bob"). */
+  entityReference: z.string().optional(),
+  /** P8 — disambiguation candidates for the review UI's one-tap picker. */
+  entityCandidates: z
+    .array(
+      z.object({
+        id: z.string(),
+        label: z.string(),
+        hint: z.string().optional(),
+        score: z.number().min(0).max(1),
+      }),
+    )
+    .optional(),
 });
 
 export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
@@ -287,6 +400,8 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   draft_invoice: draftInvoicePayloadSchema,
   update_invoice: updateInvoicePayloadSchema,
   issue_invoice: issueInvoicePayloadSchema,
+  create_invoice_schedule: createInvoiceSchedulePayloadSchema,
+  batch_invoice: batchInvoicePayloadSchema,
   reassign_appointment: reassignAppointmentPayloadSchema,
   reschedule_appointment: rescheduleAppointmentPayloadSchema,
   add_crew_member: addCrewMemberPayloadSchema,
@@ -327,11 +442,30 @@ export function validateProposalPayload(
     return { valid: false, errors: [`Unknown proposal type: ${proposalType}`] };
   }
 
+  const errors: string[] = [];
+
   const result = schema.safeParse(payload);
   if (!result.success) {
-    const errors = result.error.issues.map(
-      (i) => `${i.path.join('.')}: ${i.message}`
+    errors.push(
+      ...result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`)
     );
+  }
+
+  // RV-007 — validate the optional `_meta` confidence-marker fragment for
+  // every proposal type. The per-type schemas are strip-mode, so they
+  // ignore `_meta`; this envelope is the single gate that rejects a
+  // malformed one. Skipped for non-object payloads (the per-type schema
+  // already rejects those).
+  if (typeof payload === 'object' && payload !== null) {
+    const metaResult = confidenceMetaEnvelopeSchema.safeParse(payload);
+    if (!metaResult.success) {
+      errors.push(
+        ...metaResult.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`)
+      );
+    }
+  }
+
+  if (errors.length > 0) {
     return { valid: false, errors };
   }
 

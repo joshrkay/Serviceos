@@ -285,6 +285,10 @@ export const updateSettingsSchema = z.object({
   // so an explicit null is the only path to "clear this field".
   businessPhone: z.string().nullable().optional(),
   businessEmail: z.union([z.string().email(), z.null()]).optional(),
+  // P8-016 — owner's personal cell for emergency triage. Accepts any
+  // human format; normalized to E.164 server-side. Empty string or
+  // explicit null clears the value; omit to leave untouched.
+  ownerPhone: z.string().max(40).nullable().optional(),
   timezone: z.string().nullable().optional(),
   estimatePrefix: z.string().min(1).optional(),
   invoicePrefix: z.string().min(1).optional(),
@@ -299,6 +303,15 @@ export const updateSettingsSchema = z.object({
   // Tier 4 — Quick-settings toggles persistence.
   autoApplyInternalUpdates: z.boolean().optional(),
   autoSendAppointmentReminders: z.boolean().optional(),
+  // P20-001 — opt into auto-drafting an invoice (as a proposal) on job completion.
+  autoInvoiceOnCompletion: z.boolean().optional(),
+  // Feature (launch) — opt into recomputing auto-invoice labor from actual time entries.
+  billLaborFromTimeEntries: z.boolean().optional(),
+  // P21-003 — opt into the daily batch-invoice proposal sweep.
+  batchInvoiceEnabled: z.boolean().optional(),
+  // P21 — opt into minting on_completion milestone invoices. Without this in
+  // the schema Zod strips it, so the toggle could never be set via the API.
+  milestoneBillingEnabled: z.boolean().optional(),
   // Tier 4 — AI approval rules: per-mode auto-approve threshold override.
   // Each entry is a confidence in [0, 1]. Missing keys fall back to
   // DEFAULT_AUTO_APPROVE_THRESHOLDS in proposals/auto-approve.ts.
@@ -345,6 +358,13 @@ export const updateSettingsSchema = z.object({
       trigger_llm_sentiment: z.boolean(),
       llm_sentiment_threshold: z.number().min(0).max(1),
       after_hours_voice_mode: z.enum(['voicemail', 'ai_answering']),
+      // RV-071 — spoken challenge (PIN/passphrase) gating money/
+      // irreversible VOICE approvals on the recognized owner line
+      // (caller-ID match; see approver-identity.ts).
+      // Interim home in this JSONB (no new migration); min length keeps
+      // out trivially guessable one-digit codes. Unset → those voice
+      // approvals are refused with a one-tap SMS fallback (fail-safe).
+      voice_approval_challenge: z.string().min(4).max(64),
     })
     .partial()
     .optional(),
@@ -359,6 +379,17 @@ export const updateSettingsSchema = z.object({
   ttsVoiceEn: ttsVoiceField,
   ttsVoiceEs: ttsVoiceField,
   spanishDispatcherUserIds: z.array(z.string().uuid()).optional(),
+  // Voice-parity (migration 152) — E.164 warm-transfer line. Normalized to
+  // E.164 (or null to clear) at the route boundary, mirroring ownerPhone.
+  transferNumber: z.string().max(40).nullable().optional(),
+  // RV-063 — end-of-day digest delivery. digestTime is tenant-local
+  // 'HH:MM' (24h); channel 'none' stores the digest without owner SMS.
+  digestEnabled: z.boolean().optional(),
+  digestTime: z
+    .string()
+    .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "digestTime must be 'HH:MM' (24-hour)")
+    .optional(),
+  digestChannel: z.enum(['sms', 'none']).optional(),
 }).superRefine((val, ctx) => {
   if (val.depositStrategy === 'percentage') {
     if (val.depositPercentageBps == null) {

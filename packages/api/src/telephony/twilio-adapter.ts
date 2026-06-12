@@ -20,7 +20,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
-import { classifyIntent, isLookupIntent } from '../ai/orchestration/intent-classifier';
+import { classifyIntent, isLookupIntent, isVoiceApprovalIntent } from '../ai/orchestration/intent-classifier';
 import {
   CreateCustomerVoiceTaskHandler,
   CREATE_CUSTOMER_CONFIRMATION_TTS,
@@ -94,6 +94,10 @@ import {
 import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
 import type { SettingsRepository } from '../settings/settings';
+import type { UserRepository } from '../users/user';
+import { isApproverPhone } from '../proposals/approver-identity';
+import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
+import type { OneTapFallbackDeps } from '../ai/tasks/proposal-approval-task';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -254,6 +258,24 @@ export interface TwilioAdapterDeps {
   settingsRepo?: SettingsRepository;
   whisperCache?: WhisperCache;
   deliveryProvider?: { sendSms(args: { to: string; body: string }): Promise<unknown> };
+  /**
+   * RV-070 — resolves the backup supervisor's mobile for owner-line
+   * recognition (`tenant_settings.backup_supervisor_user_id` →
+   * users.mobile_number). Optional: without it, only owner_phone is
+   * checked — exactly mirroring the SMS reply handler's identity logic.
+   */
+  userRepo?: UserRepository;
+  /**
+   * RV-071 — pending-edit parity guard for voice approvals (same repo
+   * method the SMS reply transport and one-tap route use).
+   */
+  smsEventRepo?: Pick<ProposalSmsEventRepository, 'hasUnappliedEditRequest'>;
+  /**
+   * RV-071 — one-tap SMS fallback for refused money/irreversible voice
+   * approvals (same secret/sender/URL/owner-phone wiring as P12-004
+   * unsupervised routing). Threaded through to the voice-turn processor.
+   */
+  voiceApprovalOneTap?: OneTapFallbackDeps;
 }
 
 /**
@@ -539,6 +561,37 @@ export class TwilioGatherAdapter {
     });
   }
 
+  /**
+   * RV-070 — owner-line recognition. True when the inbound caller-ID
+   * matches `tenant_settings.owner_phone` or the backup supervisor's
+   * mobile (normalized E.164 comparison — the SAME identity logic as the
+   * SMS reply transport, via `proposals/approver-identity.ts`). Best
+   * effort and fail-closed: a settings/user lookup failure returns false
+   * so a degraded dependency can never mint an owner session.
+   */
+  private async resolveOwnerSession(
+    tenantId: string,
+    from: string | undefined,
+  ): Promise<boolean> {
+    if (!this.deps.settingsRepo || !from) return false;
+    try {
+      return await isApproverPhone(
+        {
+          settingsRepo: this.deps.settingsRepo,
+          ...(this.deps.userRepo ? { userRepo: this.deps.userRepo } : {}),
+        },
+        tenantId,
+        from,
+      );
+    } catch (err) {
+      logger.warn('resolveOwnerSession failed — treating caller as non-owner', {
+        tenantId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
   private async resolveEscalationTriggers(
     tenantId: string,
   ): Promise<CallingAgentContext['escalationTriggers'] | undefined> {
@@ -564,14 +617,24 @@ export class TwilioGatherAdapter {
    */
   private async resolveTenantLanguage(
     tenantId: string,
-  ): Promise<{ language: Language; ttsVoice?: string }> {
+  ): Promise<{ language: Language; ttsVoice?: string; supportedLanguages?: Language[] }> {
     if (!this.deps.settingsRepo) return { language: 'en' };
     try {
       const settings = await this.deps.settingsRepo.findByTenant(tenantId);
+      // The tenant's explicit default_language is always honored — it IS the
+      // tenant's opt-in. The supported_languages stack gates CALLER auto-
+      // detection (a Spanish-speaking caller on an English-only tenant), not
+      // the tenant's own configured greeting language.
       const language: Language = settings?.defaultLanguage === 'es' ? 'es' : 'en';
       const ttsVoice =
         (language === 'es' ? settings?.ttsVoiceEs : settings?.ttsVoiceEn) ?? undefined;
-      return { language, ttsVoice };
+      // Thread the opt-in stack for the auto-detect gate, always including the
+      // pinned language so the gate can never contradict the greeting.
+      const baseStack: Language[] = settings?.supportedLanguages ?? ['en'];
+      const supportedLanguages = baseStack.includes(language)
+        ? baseStack
+        : [...baseStack, language];
+      return { language, ttsVoice, supportedLanguages };
     } catch {
       return { language: 'en' };
     }
@@ -607,10 +670,14 @@ export class TwilioGatherAdapter {
       ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
       : [];
     const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
+    // RV-070 — owner-line recognition happens at session establishment:
+    // recognized owner line (caller-ID match; see approver-identity.ts).
+    const ownerSession = await this.resolveOwnerSession(opts.tenantId, opts.from);
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
       ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
       ...(escalationTriggers ? { escalationTriggers } : {}),
+      ...(ownerSession ? { ownerSession: true } : {}),
     });
     // initializeStreamSession reads callerIdBySession to drive
     // identifyCaller/lead creation; without this, every media-stream
@@ -662,9 +729,10 @@ export class TwilioGatherAdapter {
     const from = this.callerIdBySession.get(session.id) ?? '';
 
     // P11-002: resolve + pin the spoken language + TTS voice (tenant default).
-    const { language, ttsVoice } = await this.resolveTenantLanguage(opts.tenantId);
+    const { language, ttsVoice, supportedLanguages } = await this.resolveTenantLanguage(opts.tenantId);
     session.language = language;
     session.ttsVoice = ttsVoice;
+    if (supportedLanguages) session.supportedLanguages = supportedLanguages;
 
     // 1. Recording disclosure (text only — TTS synthesizes the audio).
     const disclosure = await discloseRecording({
@@ -913,10 +981,14 @@ export class TwilioGatherAdapter {
       ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
       : [];
     const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
+    // RV-070 — owner-line recognition happens at session establishment:
+    // recognized owner line (caller-ID match; see approver-identity.ts).
+    const ownerSession = await this.resolveOwnerSession(opts.tenantId, opts.from);
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
       ...(repairTemplatesForInbound.length > 0 ? { repairTemplates: repairTemplatesForInbound } : {}),
       ...(escalationTriggers ? { escalationTriggers } : {}),
+      ...(ownerSession ? { ownerSession: true } : {}),
     });
     this.persistVoiceSessionRow(session, opts.callSid);
 
@@ -928,9 +1000,10 @@ export class TwilioGatherAdapter {
     // P11-002: resolve spoken language + TTS voice (tenant default) and pin
     // them on the session so the greeting, disclosure, and every TwiML build
     // speak it in the right language/voice.
-    const { language, ttsVoice } = await this.resolveTenantLanguage(opts.tenantId);
+    const { language, ttsVoice, supportedLanguages } = await this.resolveTenantLanguage(opts.tenantId);
     session.language = language;
     session.ttsVoice = ttsVoice;
+    if (supportedLanguages) session.supportedLanguages = supportedLanguages;
 
     // 1. Disclose recording (text generation; no TTS — Twilio <Say> handles audio).
     const disclosure = await discloseRecording({
@@ -1146,6 +1219,20 @@ export class TwilioGatherAdapter {
       return this.finalizeTwiml(session, frustrationEffects, opts.sessionId);
     }
 
+    // RV-071 — an in-flight owner approval dialogue (readback awaiting the
+    // explicit yes, clarification list, or challenge) consumes this turn.
+    // Runs before the empty-speech check: silence while a readback is
+    // pending means "no action — keep it for later", not a reprompt.
+    const approvalTurn = await this.processor.handlePendingVoiceApproval(
+      session,
+      opts.speechResult,
+      opts.tenantId,
+    );
+    if (approvalTurn) {
+      await this.processor.executeSideEffects(session, approvalTurn, opts.tenantId);
+      return this.finalizeTwiml(session, approvalTurn, opts.sessionId);
+    }
+
     const sideEffectsAll: SideEffect[] = [];
     const currentState = session.machine.currentState;
 
@@ -1217,7 +1304,16 @@ export class TwilioGatherAdapter {
       try {
         const classification = await classifyIntent(
           opts.speechResult,
-          { tenantId: opts.tenantId, verticalPromptSection, planPromptSection },
+          {
+            tenantId: opts.tenantId,
+            verticalPromptSection,
+            planPromptSection,
+            // RV-071 — appended ONLY on verified owner sessions so every
+            // other call's prompt stays byte-identical (cassette hashes).
+            ...(session.machine.currentContext.ownerSession === true
+              ? { ownerSession: true }
+              : {}),
+          },
           this.deps.gateway,
         );
         // VQ-003: surface the classifier outcome for the harness.
@@ -1277,6 +1373,26 @@ export class TwilioGatherAdapter {
           type: 'tts_play',
           payload: { text: 'Anything else I can help you with?' },
         });
+        await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+        return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+      }
+
+      // RV-071 — owner voice approval. Routed OUTSIDE the FSM (the same
+      // pattern as the lookup skills above: state stays in
+      // intent_capture/closing; the dialogue rides the session). The
+      // processor hard-gates on the RV-070 ownerSession flag — a
+      // non-owner "approve" falls into the normal reprompt path.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        isVoiceApprovalIntent(classifierEvent.intentType)
+      ) {
+        const approvalFx = await this.processor.handleVoiceApprovalIntent(session, {
+          intentType: classifierEvent.intentType,
+          entities: classifierEvent.entities,
+          utterance: opts.speechResult,
+          tenantId: opts.tenantId,
+        });
+        sideEffectsAll.push(...approvalFx);
         await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
         return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
       }

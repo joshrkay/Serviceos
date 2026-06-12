@@ -87,7 +87,7 @@ running this sprint.
 
 ### Explicitly deferred past this week
 
-- 5 remaining settings stubs that need OAuth (Calendar sync, Zapier, Fieldly subscription, Payment methods/Deposit rules backend extension)
+- 5 remaining settings stubs that need OAuth (Calendar sync, Zapier, Rivet subscription, Payment methods/Deposit rules backend extension)
 - Original P7 integrations (QuickBooks sync, Zapier, full feature-flag UI, degraded mode, backup/recovery)
 - 8 `as any` escapes (cosmetic — P7-024)
 - 9 EC-* edge cases in `remaining-features.md` §5
@@ -144,7 +144,7 @@ running this sprint.
 
 **Tier 4 — UI polish (settings stubs)**
 - 5/13 closed end-to-end; **8 remain** in `packages/web/src/components/settings/SettingsPage.tsx`:
-  Reminders & follow-ups, Team members, Roles & permissions, Payment methods, Deposit rules, Fieldly subscription, Calendar sync, Zapier
+  Reminders & follow-ups, Team members, Roles & permissions, Payment methods, Deposit rules, Rivet subscription, Calendar sync, Zapier
 
 **Tier 5 — Operational / hardening**
 - P7-020 dependency audit (old `glob`, deprecated `async`, `superagent`)

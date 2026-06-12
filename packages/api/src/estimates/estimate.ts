@@ -150,6 +150,12 @@ export interface EstimateRepository {
   create(estimate: Estimate): Promise<Estimate>;
   findById(tenantId: string, id: string): Promise<Estimate | null>;
   findByJob(tenantId: string, jobId: string): Promise<Estimate[]>;
+  /**
+   * Batched findByJob — all estimates for many jobs in ONE query instead of N.
+   * Used by the invoicing queue / batch sweep to avoid an N+1 over completed
+   * jobs. Excludes soft-deleted rows; callers group by jobId.
+   */
+  findByJobs(tenantId: string, jobIds: string[]): Promise<Estimate[]>;
   findByTenant(tenantId: string, options?: EstimateListOptions): Promise<Estimate[]>;
   /** P1-018: paginated `{ data, total }` form for list UIs. */
   listWithMeta?(tenantId: string, options?: EstimateListOptions): Promise<EstimateListResult>;
@@ -522,7 +528,36 @@ export async function transitionEstimateStatus(
     throw new ValidationError(`Invalid transition from ${estimate.status} to ${newStatus}`);
   }
 
-  const updated = await repository.update(tenantId, id, { status: newStatus, updatedAt: new Date() });
+  // QA-2026-06-04 (JRN-02): one accepted estimate per job is a DB rule
+  // (partial unique index uq_estimates_accepted_per_job). Surface it as a
+  // 409 with a actionable message instead of letting the unique violation
+  // escape as 500 INTERNAL_ERROR.
+  if (newStatus === 'accepted' && estimate.status !== 'accepted') {
+    const siblings = await repository.findByJob(tenantId, estimate.jobId);
+    const conflicting = siblings.find((s) => s.id !== id && s.status === 'accepted');
+    if (conflicting) {
+      throw new ConflictError(
+        `Job ${estimate.jobId} already has an accepted estimate (${conflicting.id}). ` +
+          'Only one estimate per job can be accepted — revise the existing one or use a separate job.'
+      );
+    }
+  }
+
+  let updated: Estimate | null;
+  try {
+    updated = await repository.update(tenantId, id, { status: newStatus, updatedAt: new Date() });
+  } catch (err) {
+    // Race-safety: two concurrent accepts can both pass the pre-check; the
+    // index still wins. Map that exact violation to the same 409.
+    const pgErr = err as { code?: string; constraint?: string };
+    if (pgErr.code === '23505' && pgErr.constraint === 'uq_estimates_accepted_per_job') {
+      throw new ConflictError(
+        `Job ${estimate.jobId} already has an accepted estimate. ` +
+          'Only one estimate per job can be accepted — revise the existing one or use a separate job.'
+      );
+    }
+    throw err;
+  }
 
   // §6 Time-to-Cash. Best-effort job money-state rollup.
   if (updated && moneyStateDeps) {
@@ -669,6 +704,13 @@ export class InMemoryEstimateRepository implements EstimateRepository {
   async findByJob(tenantId: string, jobId: string): Promise<Estimate[]> {
     return Array.from(this.estimates.values())
       .filter((e) => e.tenantId === tenantId && e.jobId === jobId && !e.deletedAt)
+      .map((e) => ({ ...e, lineItems: [...e.lineItems] }));
+  }
+
+  async findByJobs(tenantId: string, jobIds: string[]): Promise<Estimate[]> {
+    const wanted = new Set(jobIds);
+    return Array.from(this.estimates.values())
+      .filter((e) => e.tenantId === tenantId && wanted.has(e.jobId) && !e.deletedAt)
       .map((e) => ({ ...e, lineItems: [...e.lineItems] }));
   }
 

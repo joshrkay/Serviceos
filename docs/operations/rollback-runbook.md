@@ -18,7 +18,7 @@
 Migrations are **forward-only** in [schema.ts](../../packages/api/src/db/schema.ts). Rolling back application code does not revert SQL.
 
 - If a migration partially applied, inspect `schema_migrations` and fix manually in a maintenance window.
-- Never run [supabase_migration.sql](../../supabase_migration.sql) on the canonical database.
+- Never run [supabase_migration.sql](../../experiments/supabase_migration.sql) on the canonical database.
 
 ## Web (Vite static)
 

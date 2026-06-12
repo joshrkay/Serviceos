@@ -20,10 +20,8 @@ import {
   EntityKind,
   EntityResolver,
   EntityResolverResult,
+  TAU_ENT,
 } from './entity-resolver';
-
-/** Confidence threshold above which a match is considered "resolved". */
-const TAU_ENT = 0.80;
 
 /** Minimum similarity score to even consider a candidate (pre-filter). */
 const SIMILARITY_PREFILTER = 0.3;
@@ -70,33 +68,40 @@ export class PgEntityResolver implements EntityResolver {
   ): Promise<EntityResolverResult> {
     const client = await this.pool.connect();
     try {
-      await client.query(
-        `SET app.current_tenant_id = '${tenantId}'`,
-      );
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+      // Schema columns are display_name / primary_phone (the trigram
+      // index from migration 051 is on display_name). Archived customers
+      // are excluded — they must not become invoice/estimate targets.
       const { rows } = await client.query<{
         id: string;
-        name: string;
-        phone: string | null;
+        display_name: string;
+        primary_phone: string | null;
         score: number;
       }>(
-        `SELECT id, name, phone, similarity(name, $2) AS score
+        `SELECT id, display_name, primary_phone, similarity(display_name, $2) AS score
            FROM customers
           WHERE tenant_id = $1
-            AND similarity(name, $2) > $3
+            AND is_archived = false
+            AND similarity(display_name, $2) > $3
           ORDER BY score DESC
           LIMIT 5`,
         [tenantId, reference, SIMILARITY_PREFILTER],
       );
+      await client.query('COMMIT');
 
       const candidates: EntityCandidate[] = rows.map((row) => ({
         id: row.id,
         kind: 'customer' as EntityKind,
-        label: row.name,
-        hint: row.phone ?? undefined,
+        label: row.display_name,
+        hint: row.primary_phone ?? undefined,
         score: Number(row.score),
       }));
 
       return this.toResult(candidates, reference);
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
     } finally {
       client.release();
     }
@@ -108,33 +113,38 @@ export class PgEntityResolver implements EntityResolver {
   ): Promise<EntityResolverResult> {
     const client = await this.pool.connect();
     try {
-      await client.query(
-        `SET app.current_tenant_id = '${tenantId}'`,
-      );
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+      // Schema column is `summary` (the trigram index from migration 051
+      // is on jobs.summary — there is no `title` column).
       const { rows } = await client.query<{
         id: string;
-        title: string;
+        summary: string;
         status: string | null;
         score: number;
       }>(
-        `SELECT id, title, status, similarity(title, $2) AS score
+        `SELECT id, summary, status, similarity(summary, $2) AS score
            FROM jobs
           WHERE tenant_id = $1
-            AND similarity(title, $2) > $3
+            AND similarity(summary, $2) > $3
           ORDER BY score DESC
           LIMIT 5`,
         [tenantId, reference, SIMILARITY_PREFILTER],
       );
+      await client.query('COMMIT');
 
       const candidates: EntityCandidate[] = rows.map((row) => ({
         id: row.id,
         kind: 'job' as EntityKind,
-        label: row.title,
+        label: row.summary,
         hint: row.status ?? undefined,
         score: Number(row.score),
       }));
 
       return this.toResult(candidates, reference);
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
     } finally {
       client.release();
     }
@@ -146,9 +156,8 @@ export class PgEntityResolver implements EntityResolver {
   ): Promise<EntityResolverResult> {
     const client = await this.pool.connect();
     try {
-      await client.query(
-        `SET app.current_tenant_id = '${tenantId}'`,
-      );
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
       const { rows } = await client.query<{
         id: string;
         invoice_number: string;
@@ -163,6 +172,7 @@ export class PgEntityResolver implements EntityResolver {
           LIMIT 5`,
         [tenantId, reference, SIMILARITY_PREFILTER],
       );
+      await client.query('COMMIT');
 
       const candidates: EntityCandidate[] = rows.map((row) => ({
         id: row.id,
@@ -173,6 +183,9 @@ export class PgEntityResolver implements EntityResolver {
       }));
 
       return this.toResult(candidates, reference);
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
     } finally {
       client.release();
     }
@@ -189,23 +202,27 @@ export class PgEntityResolver implements EntityResolver {
 
     const client = await this.pool.connect();
     try {
-      await client.query(
-        `SET app.current_tenant_id = '${tenantId}'`,
-      );
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+      // Schema column is `scheduled_start`; appointments have no title —
+      // label is the start time, hint is the status. Canceled
+      // appointments are excluded (they are not reschedule targets).
       const { rows } = await client.query<{
         id: string;
-        scheduled_for: string;
-        title: string | null;
+        scheduled_start: string;
+        status: string | null;
       }>(
-        `SELECT id, scheduled_for, title
+        `SELECT id, scheduled_start, status
            FROM appointments
           WHERE tenant_id = $1
-            AND scheduled_for >= $2
-            AND scheduled_for < $3
-          ORDER BY scheduled_for ASC
+            AND scheduled_start >= $2
+            AND scheduled_start < $3
+            AND status <> 'canceled'
+          ORDER BY scheduled_start ASC
           LIMIT 5`,
         [tenantId, parsed.start.toISOString(), parsed.end.toISOString()],
       );
+      await client.query('COMMIT');
 
       if (rows.length === 0) {
         return { kind: 'not_found', reference };
@@ -214,8 +231,8 @@ export class PgEntityResolver implements EntityResolver {
       const candidates: EntityCandidate[] = rows.map((row) => ({
         id: row.id,
         kind: 'appointment' as EntityKind,
-        label: row.title ?? new Date(row.scheduled_for).toISOString(),
-        hint: new Date(row.scheduled_for).toISOString(),
+        label: new Date(row.scheduled_start).toISOString(),
+        hint: row.status ?? undefined,
         score: 1.0,
       }));
 
@@ -223,6 +240,9 @@ export class PgEntityResolver implements EntityResolver {
         return { kind: 'resolved', candidate: candidates[0] };
       }
       return { kind: 'ambiguous', candidates };
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
     } finally {
       client.release();
     }

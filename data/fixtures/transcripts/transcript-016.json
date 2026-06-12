@@ -1,0 +1,15 @@
+{
+  "id": "transcript-016",
+  "type": "inbound_call",
+  "duration_seconds": 240,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is Jennifer Wu. I'm calling because my thermostat is leaking water. Dispatcher: Hi Jennifer, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Goodman, about 5 years old. Dispatcher: Okay, and what's the service address? Customer: 456 Oak Avenue. Dispatcher: Got it. We can send a technician out Thursday morning. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Jennifer Wu",
+    "issue": "thermostat is leaking water",
+    "equipment": "Goodman thermostat, about 5 years old",
+    "address": "456 Oak Avenue",
+    "appointment_window": "Thursday morning"
+  },
+  "source": "synthetic"
+}

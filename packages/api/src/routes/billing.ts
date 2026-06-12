@@ -8,7 +8,7 @@ import { StripeConnectService } from '../billing/stripe-connect';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 /**
- * Tier 4 (Subscription — Fieldly billing). Endpoints for the SaaS
+ * Tier 4 (Subscription — Rivet billing). Endpoints for the SaaS
  * subscription Settings sheet:
  *
  *   POST /api/billing/portal-session — mints a Stripe Customer Portal

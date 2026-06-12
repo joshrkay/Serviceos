@@ -86,6 +86,46 @@ describe('PgTenantTransactionRunner', () => {
     expect(texts).not.toContain('COMMIT');
     expect(released()).toBe(1);
   });
+
+  it('wraps savepoint work in SAVEPOINT / RELEASE without ending the outer tx', async () => {
+    const { pool, calls } = fakePool();
+    const runner = new PgTenantTransactionRunner(pool);
+
+    await runner.run(tenantId, async ({ savepoint }) => {
+      await savepoint(async () => undefined);
+    });
+
+    const texts = calls.map((c) => c.text);
+    expect(texts).toContain('SAVEPOINT sp_1');
+    expect(texts).toContain('RELEASE SAVEPOINT sp_1');
+    expect(texts).not.toContain('ROLLBACK TO SAVEPOINT sp_1');
+    expect(texts[texts.length - 1]).toBe('COMMIT');
+  });
+
+  it('rolls a failed savepoint back to itself, rethrows, and leaves the tx usable', async () => {
+    const { pool, calls } = fakePool();
+    const runner = new PgTenantTransactionRunner(pool);
+
+    const result = await runner.run(tenantId, async ({ savepoint }) => {
+      // First unit fails (e.g. a 23505) — only its savepoint rolls back.
+      const code = await savepoint(async () => {
+        throw Object.assign(new Error('dup'), { code: '23505' });
+      }).catch((e) => (e as { code?: string }).code);
+      expect(code).toBe('23505');
+      // The transaction is still usable: a second unit commits normally.
+      await savepoint(async () => undefined);
+      return 'ok';
+    });
+
+    expect(result).toBe('ok');
+    const texts = calls.map((c) => c.text);
+    expect(texts).toContain('SAVEPOINT sp_1');
+    expect(texts).toContain('ROLLBACK TO SAVEPOINT sp_1');
+    expect(texts).toContain('SAVEPOINT sp_2'); // second unit got a fresh savepoint
+    expect(texts).toContain('RELEASE SAVEPOINT sp_2');
+    expect(texts[texts.length - 1]).toBe('COMMIT'); // whole tx still commits
+    expect(texts).not.toContain('ROLLBACK'); // the OUTER tx never rolled back
+  });
 });
 
 describe('InMemoryTransactionRunner', () => {
@@ -99,5 +139,20 @@ describe('InMemoryTransactionRunner', () => {
     });
     expect(result).toBe(42);
     expect(locked).toBe(true);
+  });
+
+  it('runs savepoint work directly and propagates its errors', async () => {
+    const runner = new InMemoryTransactionRunner();
+
+    const ok = await runner.run(tenantId, async ({ savepoint }) => savepoint(async () => 7));
+    expect(ok).toBe(7);
+
+    await expect(
+      runner.run(tenantId, async ({ savepoint }) =>
+        savepoint(async () => {
+          throw new Error('boom');
+        }),
+      ),
+    ).rejects.toThrow('boom');
   });
 });

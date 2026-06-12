@@ -1,0 +1,77 @@
+name: QA Matrix Gate
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Nightly against Railway dev (02:00 UTC)
+    - cron: '0 2 * * *'
+
+jobs:
+  qa-matrix-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Preflight (doctor)
+        env:
+          E2E_BASE_URL: ${{ secrets.E2E_BASE_URL }}
+          E2E_API_URL: ${{ secrets.E2E_API_URL }}
+          E2E_DB_URL_READONLY: ${{ secrets.E2E_DB_URL_READONLY }}
+          E2E_DB_URL_READWRITE: ${{ secrets.E2E_DB_URL_READWRITE }}
+          E2E_CLERK_HMAC_SECRET: ${{ secrets.E2E_CLERK_HMAC_SECRET }}
+          E2E_TENANT_A_ID: ${{ secrets.E2E_TENANT_A_ID }}
+          E2E_TENANT_A_CUSTOMER_ID: ${{ secrets.E2E_TENANT_A_CUSTOMER_ID }}
+          E2E_TENANT_A_JOB_ID: ${{ secrets.E2E_TENANT_A_JOB_ID }}
+          E2E_TENANT_B_ID: ${{ secrets.E2E_TENANT_B_ID }}
+          E2E_TENANT_B_CUSTOMER_ID: ${{ secrets.E2E_TENANT_B_CUSTOMER_ID }}
+          E2E_TENANT_B_JOB_ID: ${{ secrets.E2E_TENANT_B_JOB_ID }}
+        run: npm run qa:doctor
+
+      - name: Seed QA tenants
+        env:
+          E2E_DB_URL_READWRITE: ${{ secrets.E2E_DB_URL_READWRITE }}
+          E2E_TENANT_A_ID: ${{ secrets.E2E_TENANT_A_ID }}
+          E2E_TENANT_B_ID: ${{ secrets.E2E_TENANT_B_ID }}
+        run: npx tsx e2e/qa-matrix/fixtures/seed.ts
+
+      - name: Run QA matrix
+        env:
+          QA_MATRIX: '1'
+          QA_RUN_ID: ${{ github.run_id }}
+          E2E_BASE_URL: ${{ secrets.E2E_BASE_URL }}
+          E2E_API_URL: ${{ secrets.E2E_API_URL }}
+          E2E_DB_URL_READONLY: ${{ secrets.E2E_DB_URL_READONLY }}
+          E2E_DB_URL_READWRITE: ${{ secrets.E2E_DB_URL_READWRITE }}
+          E2E_CLERK_HMAC_SECRET: ${{ secrets.E2E_CLERK_HMAC_SECRET }}
+          E2E_TENANT_A_ID: ${{ secrets.E2E_TENANT_A_ID }}
+          E2E_TENANT_A_CUSTOMER_ID: ${{ secrets.E2E_TENANT_A_CUSTOMER_ID }}
+          E2E_TENANT_A_JOB_ID: ${{ secrets.E2E_TENANT_A_JOB_ID }}
+          E2E_TENANT_B_ID: ${{ secrets.E2E_TENANT_B_ID }}
+          E2E_TENANT_B_CUSTOMER_ID: ${{ secrets.E2E_TENANT_B_CUSTOMER_ID }}
+          E2E_TENANT_B_JOB_ID: ${{ secrets.E2E_TENANT_B_JOB_ID }}
+        run: npm run e2e:qa-matrix
+
+      - name: Enforce gates
+        env:
+          QA_RUN_ID: ${{ github.run_id }}
+        run: npm run qa:matrix:gate
+
+      - name: Upload QA report artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-matrix-report-${{ github.run_id }}
+          path: qa/reports/
+          retention-days: 30

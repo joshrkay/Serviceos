@@ -30,13 +30,28 @@ export interface OnboardingStep {
   metadata?: Record<string, unknown>;
 }
 
+export type SubscriptionStatusValue =
+  | 'trialing'
+  | 'active'
+  | 'past_due'
+  | 'canceled'
+  | 'incomplete'
+  | null;
+
 export interface OnboardingStatusResponse {
   steps: OnboardingStep[];
   currentStep: OnboardingStepId | null;
   isComplete: boolean;
   voiceAgentLive: boolean;
+  /** The tenant id — lets the client stamp tenant_id onto funnel events. */
+  tenantId: string;
+  /** Mirror of tenants.subscription_status. Drives the past-due payment banner. */
+  subscriptionStatus: SubscriptionStatusValue;
   /** ISO-8601 timestamp of the 30-minute upgrade nudge fire-event. Drives the in-app banner. */
   upgradePromptShownAt?: string;
+  /** ISO-8601 timestamp of the activation milestone (first real inbound call).
+   * Drives the one-time celebration banner. Absent until activation fires. */
+  activatedAt?: string;
 }
 
 export interface DayHours {
@@ -53,6 +68,14 @@ export interface BusinessIdentityInput {
   businessHours: BusinessHours;
   jobBufferMinutes: number;
   hourlyRateCents: number;
+  /** IANA timezone name (e.g. "America/Phoenix"). Browser-detected on submit. */
+  timezone?: string;
+  /**
+   * Owner's personal cell, normalized server-side to E.164. Used for
+   * emergency vulnerability-triage patch-through. Empty string clears
+   * the value; omit to leave unchanged.
+   */
+  ownerPhone?: string;
 }
 
 export type PackId = 'hvac' | 'plumbing';

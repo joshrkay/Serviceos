@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { InvoicesPage } from './InvoicesPage';
@@ -7,6 +7,9 @@ import { InvoicesPage } from './InvoicesPage';
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
 vi.mock('../../hooks/useDetailQuery', () => ({ useDetailQuery: vi.fn() }));
 vi.mock('../../hooks/useMutation', () => ({ useMutation: vi.fn() }));
+vi.mock('../shared/CameraCapture', () => ({
+  CameraCapture: () => <div data-testid="mock-capture-sheet">Capture open</div>,
+}));
 vi.mock('sonner', () => ({
   toast: {
     success: vi.fn(),
@@ -15,16 +18,28 @@ vi.mock('sonner', () => ({
 }));
 
 import { useListQuery } from '../../hooks/useListQuery';
+import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { toast } from 'sonner';
+
+// Money lives under nested `totals` to match the API's serialized Invoice entity
+// (the authenticated GET /api/invoices returns invoice.totals.totalCents, not a
+// flat top-level totalCents — the prior flat fixtures masked a real rendering bug).
+const totalsOf = (totalCents: number) => ({
+  subtotalCents: totalCents,
+  discountCents: 0,
+  taxRateBps: 0,
+  taxableSubtotalCents: totalCents,
+  taxCents: 0,
+  totalCents,
+});
 
 const mockInvoices = [
   {
     id: 'i1',
     invoiceNumber: 'INV-001',
     status: 'open',
-    totalCents: 120000,
-    subtotalCents: 120000,
+    totals: totalsOf(120000),
     dueDate: '2026-03-20',
     issuedAt: '2026-03-01T00:00:00Z',
     customer: { id: 'c1', displayName: 'Alice Smith' },
@@ -33,16 +48,14 @@ const mockInvoices = [
     id: 'i2',
     invoiceNumber: 'INV-002',
     status: 'paid',
-    totalCents: 85000,
-    subtotalCents: 85000,
+    totals: totalsOf(85000),
     customer: { id: 'c2', displayName: 'Bob Jones' },
   },
   {
     id: 'i3',
     invoiceNumber: 'INV-003',
     status: 'draft',
-    totalCents: 45000,
-    subtotalCents: 45000,
+    totals: totalsOf(45000),
     customer: { id: 'c3', displayName: 'Carol White' },
   },
 ];
@@ -61,7 +74,9 @@ const defaultListResult = {
 };
 
 beforeEach(() => {
+  vi.restoreAllMocks();
   vi.mocked(useListQuery).mockReturnValue(defaultListResult);
+  vi.mocked(useDetailQuery).mockReturnValue({ data: null, isLoading: false, error: null, refetch: vi.fn() });
   vi.mocked(useMutation).mockReturnValue({ mutate: vi.fn(), isLoading: false, error: null });
 });
 
@@ -89,7 +104,7 @@ describe('InvoicesPage', () => {
 
   it('formats totalCents as dollars', () => {
     renderPage();
-    expect(screen.getAllByText('$1200.00').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('$1,200.00').length).toBeGreaterThan(0);
     expect(screen.getAllByText('$850.00').length).toBeGreaterThan(0);
   });
 
@@ -103,8 +118,8 @@ describe('InvoicesPage', () => {
 
   it('shows outstanding total', () => {
     renderPage();
-    // only open invoice: $1200.00 outstanding (may appear multiple times)
-    expect(screen.getAllByText('$1200.00').length).toBeGreaterThan(0);
+    // only open invoice: $1,200.00 outstanding (may appear multiple times)
+    expect(screen.getAllByText('$1,200.00').length).toBeGreaterThan(0);
   });
 
   it('shows total invoice count', () => {
@@ -147,6 +162,51 @@ describe('InvoicesPage', () => {
   it('uses /api/invoices endpoint', () => {
     renderPage();
     expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/invoices');
+  });
+
+  it('renders invoice attachments and opens capture from Add photo', async () => {
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: {
+        id: 'i1',
+        invoiceNumber: 'INV-001',
+        status: 'draft',
+        lineItems: [],
+        totals: totalsOf(0),
+        amountDueCents: 0,
+        customer: { id: 'c1', displayName: 'Alice Smith' },
+      },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith('/api/attachments')) {
+        return new Response(JSON.stringify([{
+          id: 'a1',
+          fileId: 'f1',
+          entityType: 'invoice',
+          entityId: 'i1',
+          kind: 'photo',
+          caption: 'Receipt photo',
+          portalVisible: true,
+          downloadUrl: 'https://cdn.test/receipt.jpg',
+        }]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }));
+
+    render(
+      <MemoryRouter>
+        <InvoicesPage defaultSelectedId="i1" />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('invoice-attachments-section')).toBeInTheDocument();
+    expect(screen.getByText('Receipt photo')).toBeInTheDocument();
+    expect(screen.getByText('Visible to customer')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /add photo/i }));
+    await waitFor(() => expect(screen.getByTestId('mock-capture-sheet')).toBeInTheDocument());
   });
 });
 

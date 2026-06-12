@@ -1,5 +1,6 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
+import { isValidTenantId } from '../db/schema';
 import {
   ActiveEntryConflictError,
   TimeEntry,
@@ -104,6 +105,22 @@ export class PgTimeEntryRepository extends PgBaseRepository implements TimeEntry
         [tenantId, userId]
       );
       return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
+  async findByJob(tenantId: string, jobId: string): Promise<TimeEntry[]> {
+    // Validate UUIDs up front so a malformed id can't reach setTenantContext /
+    // acquire a pooled connection before failing.
+    if (!isValidTenantId(tenantId)) throw new Error('Invalid tenant ID format');
+    if (!isValidTenantId(jobId)) throw new Error('Invalid job ID format');
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM time_entries
+         WHERE tenant_id = $1 AND job_id = $2
+         ORDER BY clocked_in_at ASC`,
+        [tenantId, jobId]
+      );
+      return result.rows.map(mapRow);
     });
   }
 

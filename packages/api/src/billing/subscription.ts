@@ -2,7 +2,7 @@ import type { Pool } from 'pg';
 import { ValidationError, NotFoundError } from '../shared/errors';
 
 /**
- * Tier 4 (Subscription — Fieldly billing). Service that mints Stripe
+ * Tier 4 (Subscription — Rivet billing). Service that mints Stripe
  * Customer Portal sessions for the tenant's SaaS subscription. Distinct
  * from `public-invoice-service.getOrCreateCheckoutUrl` (which is
  * billing the TENANT's customers via Stripe Connect — different
@@ -97,45 +97,11 @@ export class BillingService {
     const fetchFn = this.deps.fetchFn ?? fetch;
     const apiKey = this.deps.config.apiKey;
 
-    // Step 1 — look up or create the Stripe customer.
-    const { rows } = await this.deps.pool.query(
-      `SELECT stripe_customer_id FROM tenants WHERE id = $1`,
-      [tenantId],
-    );
-    if (rows.length === 0) throw new NotFoundError('Tenant', tenantId);
-    let customerId = (rows[0] as Record<string, unknown>).stripe_customer_id as
-      | string
-      | null;
+    // Reuse the tenant's single canonical Stripe customer so the portal
+    // and trial-checkout paths both bind to the same id.
+    const customerId = await this.getOrCreateStripeCustomer(tenantId, ownerEmail);
 
-    if (!customerId) {
-      const customerRes = await fetchFn('https://api.stripe.com/v1/customers', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({
-          email: ownerEmail,
-          'metadata[tenant_id]': tenantId,
-        }),
-      });
-      if (!customerRes.ok) {
-        const body = await customerRes.text();
-        throw new Error(`Stripe customer creation failed (${customerRes.status}): ${body}`);
-      }
-      const customer = (await customerRes.json()) as { id?: string };
-      if (!customer.id) {
-        throw new Error('Stripe customer creation returned no id');
-      }
-      customerId = customer.id;
-
-      await this.deps.pool.query(
-        `UPDATE tenants SET stripe_customer_id = $1, updated_at = NOW() WHERE id = $2`,
-        [customerId, tenantId],
-      );
-    }
-
-    // Step 2 — mint the portal session.
+    // Mint the portal session.
     const params = new URLSearchParams({
       customer: customerId,
       return_url: returnUrl,
@@ -183,34 +149,156 @@ export class BillingService {
       throw new ValidationError('STRIPE_PRICE_ID is not set');
     }
     const fetchFn = this.deps.fetchFn ?? fetch;
-    const body = new URLSearchParams();
-    body.set('mode', 'subscription');
-    body.set('line_items[0][price]', priceId);
-    body.set('line_items[0][quantity]', '1');
-    body.set('subscription_data[trial_period_days]', '14');
-    body.set('subscription_data[metadata][tenant_id]', input.tenantId);
-    body.set('payment_method_collection', 'always');
-    body.set('customer_email', input.ownerEmail);
-    body.set('success_url', input.successUrl);
-    body.set('cancel_url', input.cancelUrl);
-    body.set('client_reference_id', input.tenantId);
-    const res = await fetchFn('https://api.stripe.com/v1/checkout/sessions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.deps.config.apiKey}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body,
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Stripe checkout session failed (${res.status}): ${text}`);
+
+    // Serialize trial checkout per tenant via a Postgres advisory
+    // transaction lock. Without this, two callers that ran the
+    // subscription_status check at the same time (two tabs, retry
+    // while a webhook is delayed) could both pass the gate, both reach
+    // Stripe, and both mint a subscription on the SAME customer —
+    // billing the operator twice on day 15. With the lock, only one
+    // checkout per tenant is in flight at a time; the second caller
+    // gets a clear "in progress" error and can retry once the first
+    // finishes.
+    //
+    // Lock is held until the Stripe checkout session is minted, then
+    // released at COMMIT. Residual race window remains for callers
+    // arriving after the COMMIT but before the
+    // customer.subscription.created webhook lands; that's typically
+    // sub-second. A follow-up will add belt-and-suspenders
+    // compensating cancellation in the subscription webhook handler.
+    const client = await this.deps.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const lockRes = await client.query<{ locked: boolean }>(
+        `SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0)) AS locked`,
+        [input.tenantId],
+      );
+      if (!lockRes.rows[0]?.locked) {
+        throw new ValidationError(
+          'A checkout is already in progress for this tenant. Wait a moment and try again.',
+        );
+      }
+
+      // Re-check status INSIDE the lock. Two signals refuse a new
+      // checkout:
+      //   (1) subscription_status reflects a live subscription — a
+      //       prior checkout completed and its webhook landed;
+      //   (2) pending_checkout_at is recent (<30 min) — a prior
+      //       checkout minted a Stripe session that is still
+      //       outstanding. This closes the residual race the lock
+      //       alone left open: the previous caller already released
+      //       the lock at COMMIT, but its subscription.created
+      //       webhook hasn't fired yet so subscription_status is
+      //       still null. The pending timestamp survives lock
+      //       release until either the webhook clears it or the
+      //       30-min timeout expires for an abandoned checkout.
+      const statusRows = await client.query<{
+        subscription_status: string | null;
+        pending_checkout_at: Date | null;
+      }>(
+        `SELECT subscription_status, pending_checkout_at
+           FROM tenants WHERE id = $1`,
+        [input.tenantId],
+      );
+      const existingStatus = statusRows.rows[0]?.subscription_status ?? null;
+      if (existingStatus === 'trialing' || existingStatus === 'active' || existingStatus === 'past_due') {
+        throw new ValidationError(
+          'A subscription is already active for this tenant. Manage it from Settings → Billing.',
+        );
+      }
+      const pendingAt = statusRows.rows[0]?.pending_checkout_at ?? null;
+      if (pendingAt) {
+        const ageMs = Date.now() - new Date(pendingAt).getTime();
+        // Match the Stripe expires_at headroom (32 min) so the gate
+        // never reopens while the previous session could still be
+        // completed from browser history.
+        if (ageMs < 32 * 60 * 1000) {
+          throw new ValidationError(
+            'A checkout was just started for this tenant. Complete it or wait a moment before trying again.',
+          );
+        }
+      }
+
+      // Reuse the tenant's single canonical Stripe customer so two
+      // concurrent / retried checkouts never produce two different
+      // customers (one of which would have a subscription invisible
+      // to the in-app billing portal). getOrCreateStripeCustomer
+      // queries through the pool, not this client — that's
+      // intentional: customer creation persists independently of the
+      // checkout transaction, so a rollback here doesn't unbind a
+      // customer that Stripe already minted.
+      const customerId = await this.getOrCreateStripeCustomer(
+        input.tenantId,
+        input.ownerEmail,
+      );
+
+      const body = new URLSearchParams();
+      body.set('mode', 'subscription');
+      body.set('line_items[0][price]', priceId);
+      body.set('line_items[0][quantity]', '1');
+      body.set('subscription_data[trial_period_days]', '14');
+      body.set('subscription_data[metadata][tenant_id]', input.tenantId);
+      body.set('payment_method_collection', 'always');
+      body.set('customer', customerId);
+      body.set('success_url', input.successUrl);
+      body.set('cancel_url', input.cancelUrl);
+      body.set('client_reference_id', input.tenantId);
+      // Bind the Stripe session lifetime to the gate's staleness
+      // ceiling so a session can't outlive pending_checkout_at.
+      // Stripe's minimum expires_at is 30 minutes from now — we send
+      // 32 min so positive clock skew or a slow Stripe-side parse
+      // can't push our value below the minimum and reject the
+      // request. PENDING_CHECKOUT_STALE_MS matches.
+      const expiresAt = Math.floor(Date.now() / 1000) + 32 * 60;
+      body.set('expires_at', String(expiresAt));
+      const res = await fetchFn('https://api.stripe.com/v1/checkout/sessions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.deps.config.apiKey}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body,
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Stripe checkout session failed (${res.status}): ${text}`);
+      }
+      const session = (await res.json()) as { id?: string; url?: string };
+      if (!session.url) {
+        throw new Error('Stripe checkout session returned no url');
+      }
+
+      // Stamp the pending-checkout timestamp AND the Stripe session id
+      // INSIDE the lock so a racing follower sees both the moment they
+      // acquire the lock. The session id is what /billing/cancel hands
+      // to Stripe's expire endpoint — cancel_url can't carry it back to
+      // us because Stripe only interpolates {CHECKOUT_SESSION_ID} into
+      // success_url, not cancel_url. Cleared by the
+      // subscription.created webhook (success path) or by /billing/cancel
+      // (cancel path); the 32-min staleness check handles abandoned
+      // sessions.
+      await client.query(
+        `UPDATE tenants
+            SET pending_checkout_at = NOW(),
+                pending_checkout_session_id = $2,
+                updated_at = NOW()
+          WHERE id = $1`,
+        [input.tenantId, session.id ?? null],
+      );
+
+      await client.query('COMMIT');
+      return { url: session.url };
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        /* best-effort — connection may already be in an unknown state */
+      }
+      throw err;
+    } finally {
+      client.release();
     }
-    const session = (await res.json()) as { url?: string };
-    if (!session.url) {
-      throw new Error('Stripe checkout session returned no url');
-    }
-    return { url: session.url };
   }
 
   /**
@@ -272,5 +360,148 @@ export class BillingService {
        WHERE stripe_customer_id = $3`,
       [input.subscriptionId, input.status, input.customerId],
     );
+  }
+
+  /**
+   * Clears tenants.pending_checkout_at so the trial-checkout gate
+   * reopens. Called when the operator returns via Stripe's cancel_url.
+   *
+   * The session id is read from tenants.pending_checkout_session_id
+   * (persisted at create time) rather than trusting the client — Stripe
+   * only interpolates {CHECKOUT_SESSION_ID} into success_url, so we
+   * can't get the id back via the cancel redirect. When the persisted
+   * id is non-null, the server POSTs Stripe's expire endpoint BEFORE
+   * clearing the marker — without that, the operator could re-open the
+   * original Stripe URL from browser history and complete the old
+   * session AFTER opening a new one, creating two subscriptions.
+   *
+   * 404 from Stripe (session already expired/canceled) is treated as
+   * success — the goal state is reached. Any other non-OK leaves the
+   * marker stamped so the gate continues to refuse new checkouts until
+   * the staleness ceiling drops it naturally.
+   *
+   * KNOWN LIMITATION (deferred post-soft-launch): this always acts on
+   * the tenant's CURRENT pending session. If checkout A goes stale,
+   * the operator opens checkout B, and a stale tab / history entry
+   * from A then follows its cancel_url, B's session is expired and
+   * its marker cleared. The proper fix is a per-checkout cancellation
+   * token persisted alongside session id and verified here before
+   * acting. Soft-launch consequence: operator clicks Start Trial
+   * again and gets a fresh session — annoying but recoverable. Track
+   * in a follow-up issue.
+   */
+  async clearPendingCheckout(tenantId: string): Promise<void> {
+    const { rows } = await this.deps.pool.query<{
+      pending_checkout_session_id: string | null;
+    }>(
+      `SELECT pending_checkout_session_id FROM tenants WHERE id = $1`,
+      [tenantId],
+    );
+    const sessionId = rows[0]?.pending_checkout_session_id ?? null;
+
+    if (sessionId && this.deps.config?.apiKey) {
+      const fetchFn = this.deps.fetchFn ?? fetch;
+      const res = await fetchFn(
+        `https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}/expire`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${this.deps.config.apiKey}`,
+          },
+        },
+      );
+      if (!res.ok && res.status !== 404) {
+        const body = await res.text();
+        throw new Error(`Stripe session expire failed (${res.status}): ${body}`);
+      }
+    }
+
+    await this.deps.pool.query(
+      `UPDATE tenants
+          SET pending_checkout_at = NULL,
+              pending_checkout_session_id = NULL,
+              updated_at = NOW()
+        WHERE id = $1
+          AND (pending_checkout_at IS NOT NULL OR pending_checkout_session_id IS NOT NULL)`,
+      [tenantId],
+    );
+  }
+
+  /**
+   * Single canonical Stripe customer per tenant. Used by both the trial
+   * checkout and billing-portal paths so concurrent or retried
+   * checkouts never produce two different Stripe customers (one of
+   * which would carry a subscription invisible to the in-app portal).
+   *
+   * Race-tolerant: when two callers see stripe_customer_id IS NULL at
+   * the same time, each POSTs a new Stripe customer, but only the
+   * first UPDATE wins. The losing caller re-reads the winner's id and
+   * uses it. The losing call's Stripe customer becomes a no-op orphan
+   * — it has no subscription, no payment method, and Stripe doesn't
+   * bill empty customers.
+   */
+  private async getOrCreateStripeCustomer(
+    tenantId: string,
+    ownerEmail: string,
+  ): Promise<string> {
+    if (!this.deps.config?.apiKey) {
+      throw new ValidationError('Subscription billing is not configured');
+    }
+    const apiKey = this.deps.config.apiKey;
+    const fetchFn = this.deps.fetchFn ?? fetch;
+
+    const { rows } = await this.deps.pool.query(
+      `SELECT stripe_customer_id FROM tenants WHERE id = $1`,
+      [tenantId],
+    );
+    if (rows.length === 0) throw new NotFoundError('Tenant', tenantId);
+    const existing = (rows[0] as Record<string, unknown>).stripe_customer_id as
+      | string
+      | null;
+    if (existing) return existing;
+
+    const customerRes = await fetchFn('https://api.stripe.com/v1/customers', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        email: ownerEmail,
+        'metadata[tenant_id]': tenantId,
+      }),
+    });
+    if (!customerRes.ok) {
+      const body = await customerRes.text();
+      throw new Error(`Stripe customer creation failed (${customerRes.status}): ${body}`);
+    }
+    const customer = (await customerRes.json()) as { id?: string };
+    if (!customer.id) {
+      throw new Error('Stripe customer creation returned no id');
+    }
+
+    // Conditional UPDATE: only claim the column when still NULL so a
+    // concurrent get-or-create never overwrites a winning customer id.
+    const updateRes = await this.deps.pool.query<{ stripe_customer_id: string }>(
+      `UPDATE tenants
+          SET stripe_customer_id = $1, updated_at = NOW()
+        WHERE id = $2 AND stripe_customer_id IS NULL
+        RETURNING stripe_customer_id`,
+      [customer.id, tenantId],
+    );
+    if (updateRes.rows.length > 0) {
+      return updateRes.rows[0].stripe_customer_id;
+    }
+
+    // Lost the race — re-read what the winner persisted.
+    const reread = await this.deps.pool.query<{ stripe_customer_id: string }>(
+      `SELECT stripe_customer_id FROM tenants WHERE id = $1`,
+      [tenantId],
+    );
+    const winner = reread.rows[0]?.stripe_customer_id;
+    if (!winner) {
+      throw new Error('getOrCreateStripeCustomer: lost race but no winner persisted');
+    }
+    return winner;
   }
 }

@@ -1,0 +1,21 @@
+{
+  "name": "@rivet/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ts-rest/core": "~3.52.1",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "fast-check": "^4.1.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.0"
+  }
+}

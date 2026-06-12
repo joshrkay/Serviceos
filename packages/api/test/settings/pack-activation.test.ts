@@ -62,10 +62,14 @@ describe('P4-001B — Tenant-to-pack activation linkage', () => {
     expect(errors).toContain('packId is required');
   });
 
-  it('edge case — throws if pack already active', async () => {
-    await activatePack({ tenantId: 't1', packId: 'hvac-v1' }, repo);
-    await expect(activatePack({ tenantId: 't1', packId: 'hvac-v1' }, repo))
-      .rejects.toThrow('Pack already activated for this tenant');
+  it('edge case — re-activating an active pack is an idempotent no-op (QA 2026-06-04)', async () => {
+    const first = await activatePack({ tenantId: 't1', packId: 'hvac-v1' }, repo);
+    const again = await activatePack({ tenantId: 't1', packId: 'hvac-v1' }, repo);
+    // Same activation returned, no duplicate row, no 500-from-throw.
+    expect(again.id).toBe(first.id);
+    expect(again.status).toBe('active');
+    const active = await getActivePacks('t1', repo);
+    expect(active.filter((p) => p.packId === 'hvac-v1')).toHaveLength(1);
   });
 
   it('edge case — deactivate unknown pack returns null', async () => {

@@ -160,7 +160,8 @@ export function createTranscribeAudioFn(apiKey?: string): TranscribeAudioFn {
         : contentType.includes('mpeg') ? 'mp3'
         : 'webm';
       const fd = new FormData();
-      fd.append('file', new Blob([audioBuffer], { type: contentType }), `audio.${ext}`);
+      const audioBytes = new Uint8Array(audioBuffer.buffer, audioBuffer.byteOffset, audioBuffer.byteLength);
+      fd.append('file', new Blob([audioBytes], { type: contentType }), 'audio.' + ext);
       fd.append('model', 'whisper-1');
       if (options?.language) {
         fd.append('language', options.language);
@@ -381,11 +382,14 @@ export async function recordInboundCall(
     await client.query('COMMIT');
     return { voiceRecordingId, inserted: true };
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {
-      /* swallow — connection may already be in error state */
-    });
+    try { await client.query('ROLLBACK'); } catch { /* connection may already be in error state */ }
     throw err;
   } finally {
+    // GUC leak fix: plain `SET app.current_tenant_id` persists past
+    // COMMIT/ROLLBACK on the underlying connection. Clear it before
+    // release so the next pool checkout doesn't inherit this tenant's
+    // context.
+    try { await client.query('RESET app.current_tenant_id'); } catch { /* ignore */ }
     client.release();
   }
 }

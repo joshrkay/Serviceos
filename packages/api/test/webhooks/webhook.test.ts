@@ -237,9 +237,17 @@ describe('P0-014 — Webhook security and idempotency foundation', () => {
 
 describe('Blocker 1 — createWebhookRouter durable-idempotency guard', () => {
   it('throws in production when no durable webhookRepo is supplied', () => {
-    const config = { NODE_ENV: 'prod' } as AppConfig;
-    expect(() => createWebhookRouter(config, {})).toThrow(
-      /durable webhookRepo is required in production/,
-    );
+    // Guard reads the raw process.env.NODE_ENV (defense-in-depth against an
+    // unnormalized 'production'), so drive it via the env, not config.
+    const prev = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      const config = { NODE_ENV: 'prod' } as AppConfig;
+      expect(() => createWebhookRouter(config, {})).toThrow(
+        /durable webhookRepo is required in production/,
+      );
+    } finally {
+      process.env.NODE_ENV = prev;
+    }
   });
 });

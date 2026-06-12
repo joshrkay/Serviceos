@@ -11,9 +11,11 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
  * - `appointmentRepo`: when supplied, enforces a double-booking guard —
  *   the technician cannot be assigned to an appointment whose time range
  *   overlaps another of their active appointments (throws `ConflictError`,
- *   409). This is an application-layer backstop; the authoritative
- *   protection against the cross-request TOCTOU race is a database
- *   exclusion constraint (tracked as a follow-up).
+ *   409). The authoritative protection against the cross-request TOCTOU
+ *   race is the DB-level EXCLUDE constraint `no_double_booking` on
+ *   `appointment_assignments` (migration 131); this application-layer
+ *   check stays as a fast/friendly pre-flight that avoids a DB round-trip
+ *   on the obvious case and produces a context-rich error message.
  * - `auditRepo` / `actorRole`: when `auditRepo` is supplied, emits an
  *   `appointment.technician_assigned` audit event (CLAUDE.md: all
  *   mutations emit audit events).
@@ -42,6 +44,9 @@ export interface AppointmentAssignment {
   isPrimary: boolean;
   assignedBy: string;
   assignedAt: Date;
+  /** Denormalised from the parent appointment for the double-booking trigger. */
+  scheduledStart?: Date;
+  scheduledEnd?: Date;
 }
 
 export interface CreateAssignmentInput {
@@ -86,11 +91,10 @@ export async function assignTechnician(
   // Double-booking backstop. When an appointment repo is supplied, refuse
   // to assign a technician who already has an active appointment whose time
   // range overlaps the target. Callers that run a richer feasibility gate
-  // upstream still benefit from this as defense-in-depth (e.g. when their
-  // feasibility deps are unwired). NOTE: this is application-layer only and
-  // remains subject to a cross-request TOCTOU race; the authoritative fix
-  // is a DB exclusion constraint on (technician, time-range) — tracked
-  // follow-up.
+  // upstream still benefit from this as defense-in-depth. The authoritative
+  // race-safe check is the DB EXCLUDE constraint `no_double_booking`
+  // (migration 131); this layer fires earlier with a friendlier message
+  // and saves a DB round-trip on the obvious case.
   if (deps.appointmentRepo) {
     const target = await deps.appointmentRepo.findById(input.tenantId, input.appointmentId);
     if (target) {
@@ -137,11 +141,11 @@ export async function assignTechnician(
   }
 
   // Demote any existing primary assignments before assigning new primary.
-  // NOTE: demote + create are not atomic across concurrent requests — two
-  // simultaneous primary assignments can momentarily both be primary
-  // (reconciled by syncJobAssignment, which picks the last). A partial
-  // unique index `(appointment_id) WHERE is_primary` is the durable fix,
-  // tracked with the exclusion-constraint follow-up.
+  // Race protection: the partial unique index
+  // `uq_assignment_primary_per_appointment` (migration 131) is the durable
+  // backstop — two simultaneous primary assigns can't both INSERT
+  // is_primary=true; whichever loses the race surfaces as a 23505 which
+  // PgAssignmentRepository.create maps to ConflictError (409).
   if (isPrimary) {
     const existing = await repository.findByAppointment(input.tenantId, input.appointmentId);
     const currentPrimaries = existing.filter((a) => a.isPrimary);
@@ -156,6 +160,15 @@ export async function assignTechnician(
     isPrimary,
     assignedBy: input.assignedBy,
     assignedAt: new Date(),
+    // Denormalise the appointment's time window into the assignment row so
+    // the DB-level double-booking trigger (migration 129) can enforce the
+    // no-overlap constraint without a cross-table join in the trigger body.
+    scheduledStart: deps.appointmentRepo
+      ? (await deps.appointmentRepo.findById(input.tenantId, input.appointmentId))?.scheduledStart
+      : undefined,
+    scheduledEnd: deps.appointmentRepo
+      ? (await deps.appointmentRepo.findById(input.tenantId, input.appointmentId))?.scheduledEnd
+      : undefined,
   };
 
   const created = await repository.create(assignment);

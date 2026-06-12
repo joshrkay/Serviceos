@@ -69,6 +69,12 @@ export type IntentType =
   // Caller confirms/agrees to a pending action the agent proposed
   // ("yes", "that's right", "go ahead"). Conversational, non-proposal.
   | 'confirm'
+  // RV-071 — owner voice approval channel. Routable ONLY on verified
+  // owner sessions (ClassifyContext.ownerSession): the prompt section
+  // documenting them is appended only then, and the voice routing layers
+  // additionally hard-gate on the session flag (never prompt-only).
+  | 'approve_proposal'
+  | 'reject_proposal'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
@@ -112,6 +118,8 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'language_switch',
   'operator_request',
   'confirm',
+  'approve_proposal',
+  'reject_proposal',
   'unknown',
 ] as const;
 
@@ -194,6 +202,11 @@ export interface ExtractedEntities {
   timeEntryType?: 'job' | 'drive' | 'break' | 'admin';
   // notify_delay: how many minutes late the crew is running.
   delayMinutes?: number;
+  // RV-071 — approve_proposal / reject_proposal (owner sessions only):
+  // the owner's words identifying WHICH pending proposal ("the Henderson
+  // estimate", "the second one", "the $450 invoice"). Resolved downstream
+  // by the pendingProposals entity-resolver source — never trusted as an id.
+  proposalReference?: string;
 }
 
 /**
@@ -280,6 +293,16 @@ export interface ClassifyContext {
    * short-circuit (P18-001).
    */
   callerIsExistingCustomer?: boolean;
+  /**
+   * RV-071 — true ONLY when the session was established as a verified
+   * owner line (RV-070's `CallingAgentContext.ownerSession`). Appends the
+   * owner-approval prompt section (approve_proposal / reject_proposal) as
+   * a SEPARATE system message — non-owner calls keep byte-identical
+   * prompt messages, so voice-quality cassette hashes (and gateway cache
+   * keys) are unaffected. The prompt is a hint, not the gate: routing
+   * layers enforce the ownerSession check independently.
+   */
+  ownerSession?: boolean;
 }
 
 /**
@@ -318,12 +341,19 @@ Supported intents (return exactly ONE):
                            (number or customer name).
                            Examples: "Add a site visit to estimate EST-0001"
                                      "Remove the old heater from the Johnson estimate"
-- "issue_invoice"       — user wants to SEND/ISSUE an existing DRAFT invoice to
-                           the customer. May reference the invoice explicitly by
+- "issue_invoice"       — user wants to ISSUE/FINALIZE an existing DRAFT
+                           invoice: make it official and payable (draft → open,
+                           issued and due dates stamped). Issue = make official;
+                           send = deliver (see send_invoice). First-time
+                           "send/get the bill out" phrasings imply issuing.
+                           May reference the invoice explicitly by
                            number or customer name, or implicitly ("the one we
                            just drafted", "that invoice", "the Acme invoice").
-                           Examples: "Send invoice 1024 to the customer"
+                           Examples: "Issue invoice 1024"
                                      "Issue the Acme invoice"
+                                     "Finalize the Smith invoice"
+                                     "Make the Jones invoice official"
+                                     "Send out the bill for the Acme job"
                                      "Send the invoice we just drafted"
 - "unknown"             — anything else: genuinely ambiguous transcripts,
                            or commands without a clear target. Note that
@@ -393,14 +423,19 @@ Supported intents (return exactly ONE):
                            Examples: "Note on the Rodriguez job: customer
                                       wants a call before we arrive"
                                      "Add a note to Smith's file: prefers SMS"
-- "send_invoice"        — user wants to SEND an existing invoice to a
-                           customer (email or SMS). This is a customer
-                           comms action — never auto-execute, always
+- "send_invoice"        — user wants to SEND/DELIVER an existing invoice to a
+                           customer (email or SMS). Send = deliver to the
+                           customer; issue = make official/payable (see
+                           issue_invoice). Prefer send_invoice when a delivery
+                           channel or recipient is named, or the invoice is
+                           already issued ("resend", "email it again"). This is
+                           a customer comms action — never auto-execute, always
                            require a screen-tap approval. Extract the
                            invoice reference and sendChannel.
                            Examples: "Send invoice INV-0042 to Sarah"
                                      "Email the Jones invoice"
                                      "Text the Miller invoice to them"
+                                     "Resend the Acme invoice by email"
 - "send_estimate"       — user wants to SEND an existing estimate to a
                            customer (email or SMS). This is a customer
                            comms action — never auto-execute, always
@@ -622,7 +657,12 @@ Distinctions that matter:
   "add/remove/update" plus a reference to an EXISTING invoice or estimate
   = update_invoice or update_estimate. Any phrasing starting a NEW one
   = create_invoice or draft_estimate.
-- "send/issue/deliver an invoice" = issue_invoice, NOT create_invoice.
+- "send/issue/deliver an invoice" is never create_invoice. Within the pair:
+  issue_invoice = make a DRAFT invoice official and payable ("issue",
+  "finalize", "make official", "send out the bill" for the first time);
+  send_invoice = deliver/redeliver to the customer over a channel ("email
+  the invoice", "text it to them", "resend"). When a channel or recipient
+  is named, prefer send_invoice; bare "issue/finalize" = issue_invoice.
 - Invoice vs estimate — the operator usually says which. When they say
   "invoice" or use an "INV-" prefix, use the invoice intent; when they say
   "estimate/quote" or "EST-", use the estimate intent. When genuinely
@@ -682,6 +722,37 @@ Confidence calibration:
 - below 0.5 : ambiguous — prefer "unknown"
 
 Never invent entities. Extract only what the transcript actually says.`;
+
+/**
+ * RV-071 — owner-approval prompt section. Delivered as a SEPARATE system
+ * message, appended ONLY when `ClassifyContext.ownerSession` is true, so
+ * every non-owner call's prompt stays byte-identical to the pre-RV-071
+ * prompt (voice-quality cassettes replay unchanged).
+ */
+export const OWNER_APPROVAL_PROMPT_SECTION = `Owner-session intents (this caller is the VERIFIED business owner — these two intents exist only on this call):
+- "approve_proposal" — the owner wants to APPROVE a pending proposal/draft awaiting review.
+                        Put the owner's words identifying WHICH proposal in
+                        extractedEntities.proposalReference (verbatim phrase).
+                        Examples: "Approve the Henderson estimate"
+                                  "Approve the second one"
+                                  "Go ahead and approve the 450 dollar invoice"
+- "reject_proposal"  — the owner wants to REJECT / decline a pending proposal.
+                        Extract proposalReference the same way.
+                        Examples: "Reject the Acme invoice"
+                                  "Decline the Henderson estimate"
+                                  "Don't send that estimate — reject it"
+Notes:
+- "approve"/"reject" must target a proposal or draft ("the estimate", "the invoice",
+  "the second one"). A bare "yes"/"go ahead" answering YOUR question is still "confirm".
+- Do not change the JSON output schema; proposalReference is just an extra
+  optional key inside extractedEntities.`;
+
+/** RV-071 — predicate the voice routing layers use to gate owner approval intents. */
+export function isVoiceApprovalIntent(
+  intent: IntentType | string | undefined | null,
+): intent is 'approve_proposal' | 'reject_proposal' {
+  return intent === 'approve_proposal' || intent === 'reject_proposal';
+}
 
 function isSupportedIntent(value: unknown): value is IntentType {
   return typeof value === 'string' && (SUPPORTED_INTENTS as readonly string[]).includes(value);
@@ -830,6 +901,8 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (timeEntryType) extracted.timeEntryType = timeEntryType;
     // notify_delay fields
     if (typeof ee.delayMinutes === 'number') extracted.delayMinutes = ee.delayMinutes;
+    // approve_proposal / reject_proposal fields (RV-071)
+    if (typeof ee.proposalReference === 'string') extracted.proposalReference = ee.proposalReference;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }
@@ -929,6 +1002,13 @@ export async function classifyIntent(
       role: 'system',
       content: `Caller plan context (use to personalize the response; do not change the JSON output schema):\n${context.planPromptSection}`,
     });
+  }
+  // RV-071 — owner-approval intents are documented to the model ONLY on a
+  // recognized owner line (caller-ID match; see approver-identity.ts).
+  // Appended last so non-owner calls keep
+  // byte-identical messages (cassette hashes / gateway cache keys).
+  if (context.ownerSession === true) {
+    systemMessages.push({ role: 'system', content: OWNER_APPROVAL_PROMPT_SECTION });
   }
 
   const response = await gateway.complete({

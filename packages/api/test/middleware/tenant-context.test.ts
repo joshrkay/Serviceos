@@ -20,6 +20,7 @@ import {
   withTenantTransaction,
   tenantContextStore,
   currentTenantContext,
+  withRequestSavepoint,
 } from '../../src/middleware/tenant-context';
 import { PgBaseRepository } from '../../src/db/pg-base';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -476,6 +477,37 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     expect(sqls).not.toContain('COMMIT');
   });
 
+  it('no double-release — client released exactly once when both finish and close fire', async () => {
+    const { pool, calls, clients, getReleaseCount } = makeMockPool();
+
+    const res = new EventEmitter() as unknown as express.Response & EventEmitter;
+    (res as any).statusCode = 200;
+    (res as any).locals = {};
+    (res as any).status = vi.fn(() => res);
+    (res as any).json = vi.fn(() => res);
+
+    const req = {
+      auth: { userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner' },
+    } as unknown as AuthenticatedRequest;
+
+    const next = vi.fn();
+    await withTenantTransaction(pool)(req, res as unknown as express.Response, next);
+    expect(next).toHaveBeenCalledOnce();
+
+    // Normal lifecycle on modern Node: `finish` then `close`.
+    (res as unknown as EventEmitter).emit('finish');
+    (res as unknown as EventEmitter).emit('close');
+    await new Promise((r) => setImmediate(r));
+
+    // Exactly one release of the pooled client, COMMIT (status 200) and
+    // no ROLLBACK-after-COMMIT from the trailing `close`.
+    expect(getReleaseCount()).toBe(1);
+    expect((clients[0].release as unknown as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+    const sqls = calls.map((c) => c.sql);
+    expect(sqls).toContain('COMMIT');
+    expect(sqls).not.toContain('ROLLBACK');
+  });
+
   it('forceCommit escape hatch — commits despite a >=400 status', async () => {
     const { pool, calls } = makeMockPool();
     const app = buildApp(pool, async (_req, res) => {
@@ -510,5 +542,54 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     );
 
     expect(currentTenantContext()).toBeUndefined();
+  });
+});
+
+describe('withRequestSavepoint', () => {
+  function fakeClient(): { client: PoolClient; calls: string[] } {
+    const calls: string[] = [];
+    const client = {
+      query: async (text: string) => {
+        calls.push(text);
+        return { rows: [] } as unknown as QueryResult;
+      },
+    } as unknown as PoolClient;
+    return { client, calls };
+  }
+
+  it('runs fn directly when there is no request transaction (no savepoint)', async () => {
+    let ran = false;
+    const out = await withRequestSavepoint(async () => {
+      ran = true;
+      return 7;
+    });
+    expect(ran).toBe(true);
+    expect(out).toBe(7);
+  });
+
+  it('wraps fn in SAVEPOINT / RELEASE inside a request transaction', async () => {
+    const { client, calls } = fakeClient();
+    const out = await tenantContextStore.run({ client, tenantId: TENANT_A }, () =>
+      withRequestSavepoint(async () => 'ok'),
+    );
+    expect(out).toBe('ok');
+    expect(calls.some((q) => q.startsWith('SAVEPOINT'))).toBe(true);
+    expect(calls.some((q) => q.startsWith('RELEASE SAVEPOINT'))).toBe(true);
+    expect(calls.some((q) => q.startsWith('ROLLBACK TO SAVEPOINT'))).toBe(false);
+  });
+
+  it('rolls back to the savepoint and rethrows on error, leaving the tx usable', async () => {
+    const { client, calls } = fakeClient();
+    await expect(
+      tenantContextStore.run({ client, tenantId: TENANT_A }, () =>
+        withRequestSavepoint(async () => {
+          throw Object.assign(new Error('dup'), { code: '23505' });
+        }),
+      ),
+    ).rejects.toThrow('dup');
+    expect(calls.some((q) => q.startsWith('SAVEPOINT'))).toBe(true);
+    expect(calls.some((q) => q.startsWith('ROLLBACK TO SAVEPOINT'))).toBe(true);
+    // The outer transaction is NOT rolled back — only the savepoint is.
+    expect(calls).not.toContain('ROLLBACK');
   });
 });

@@ -127,23 +127,29 @@ cd packages/api && npx tsc --project tsconfig.build.json --noEmit
 cd packages/api && npm test -- --grep "P2-034"
 ```
 
-**Required tests:**
-- [ ] Happy path — every proposal type renders to SMS without exceeding
+**Required tests:** (shipped 2026-06-11 —
+`test/proposals/sms/`, `test/sms/inbound-dispatch.test.ts`,
+`test/integration/proposal-sms-events.test.ts`)
+- [x] Happy path — every proposal type renders to SMS without exceeding
       Twilio segment limits when input is realistic
-- [ ] Approve flow — `APPROVE`, `Y`, `yes` all transition state correctly
-- [ ] Reject flow — `REJECT`, `N` with body capture reason
-- [ ] Edit flow — voice memo MMS produces structured delta; re-rendered
-      for re-approval
-- [ ] Idempotency — duplicate `MessageSid` is no-op
-- [ ] Tenant isolation — inbound SMS from owner A cannot touch tenant B
+- [x] Approve flow — `APPROVE`, `Y`, `yes` all transition state correctly
+- [x] Reject flow — `REJECT`, `N` with body capture reason
+- [x] Edit flow — free-text SMS produces structured delta (LLM, fails
+      closed to manual review); re-rendered for re-approval. MMS
+      voice-memo input deferred (see non-goals note below)
+- [x] Idempotency — duplicate `MessageSid` is no-op
+- [x] Tenant isolation — inbound SMS from owner A cannot touch tenant B
       proposals
-- [ ] Edge: invalid token replies — system asks for clarification once
+- [x] Edge: invalid token replies — system asks for clarification once
       then escalates as a clarification-needed event
-- [ ] Audit — every state transition emits an audit event with
+- [x] Audit — every state transition emits an audit event with
       correlation id
 
 **Non-goals:** Rich-media interactive cards; group SMS approval; SMS to
-non-owner approvers (V2).
+non-owner approvers (V2). Deferred from the 2026-06-11 slice: MMS
+voice-memo edit input and Twilio delivery-status sync onto
+`proposal_sms_events` (delivery state currently lives in the generic
+status-callback receipts).
 
 ---
 

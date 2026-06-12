@@ -25,8 +25,9 @@ import {
 } from '../../proposals/proposal';
 import { ExtractedEntities } from '../orchestration/intent-classifier';
 import type { AppointmentRepository } from '../../appointments/appointment';
+import type { JobRepository } from '../../jobs/job';
 import type { LLMGateway } from '../gateway/gateway';
-import { isIsoDatetime } from './create-appointment-task';
+import { resolveDateTime, DEFAULT_TENANT_TIMEZONE } from '../scheduling/resolve-datetime';
 
 function entitiesFrom(context: TaskContext): ExtractedEntities {
   return (context.existingEntities ?? {}) as ExtractedEntities;
@@ -37,58 +38,97 @@ function isCancelled(status: unknown): boolean {
   return status === 'canceled' || status === 'cancelled';
 }
 
+/** Coerce a Date | ISO-string | unknown scheduledStart into a Date. */
+function toDate(v: unknown): Date {
+  return v instanceof Date ? v : new Date(v as string);
+}
+
+/** Options for scoping appointment resolution to the verified caller. */
+interface ResolveActiveOpts {
+  /** Verified caller identity (caller-ID match). When present, resolution is scoped to this customer. */
+  customerId?: string;
+  /** Job repo used to map appointment → job → customerId for caller scoping. */
+  jobRepo?: JobRepository;
+  /** Test seam for "now"; defaults to the wall clock. */
+  now?: Date;
+}
+
 /**
  * Resolve the caller's active (non-cancelled) appointment id.
  *
  * The classifier only ever returns a natural-language reference
- * ("my Tuesday appointment"), never a UUID. Production resolves that
- * against the identified caller's upcoming appointments. We mirror
- * that here: scan the tenant's scheduled appointments and return the
- * single active one. Returns undefined when zero or more than one
- * candidate exists (ambiguous → leave for the review UI / escalation).
+ * ("my Tuesday appointment"), never a UUID. We resolve it against the
+ * caller's own upcoming appointments and return the single match.
+ * Returns undefined when zero or more than one candidate exists
+ * (ambiguous → leave for the review UI / escalation, never guess).
+ *
+ * Caller scoping (robustness fix): when a verified `customerId` AND a
+ * `jobRepo` are supplied, candidates are filtered to appointments whose
+ * job belongs to that customer (appointment → job → customerId, the same
+ * join the slot-conflict-checker uses). This prevents a live caller's
+ * "reschedule/cancel my appointment" from ever resolving to a *different*
+ * customer's appointment in a small tenant. When the caller identity or
+ * jobRepo is absent we cannot verify ownership, so we preserve the legacy
+ * tenant-wide single-active behavior (the operator in-app path, and tests
+ * that omit the wiring).
+ *
+ * Upcoming scoping: past appointments are preferred-out, but only when
+ * doing so still leaves at least one candidate — so fixtures with
+ * past-but-active appointments (and repos that don't store scheduledStart)
+ * keep resolving.
  */
 async function resolveActiveAppointmentId(
   repo: AppointmentRepository | undefined,
   tenantId: string,
+  opts?: ResolveActiveOpts,
 ): Promise<string | undefined> {
   if (!repo) return undefined;
   // Use listWithMeta (tenant-scoped, no date filter) rather than
   // findByDateRange: corpus fixtures store scheduledStart as ISO
   // strings, which breaks the repo's Date-based range comparison.
-  let all: Array<{ id: string; status: unknown }> = [];
+  let all: Array<{ id: string; status: unknown; jobId?: string; scheduledStart?: unknown }> = [];
   if (repo.listWithMeta) {
     const r = await repo.listWithMeta(tenantId);
     all = r.data;
   } else {
     all = await repo.findByDateRange(tenantId, new Date(0), new Date('9999-12-31T00:00:00.000Z'));
   }
-  const active = all.filter((a) => !isCancelled(a.status));
-  return active.length === 1 ? active[0].id : undefined;
-}
+  let active = all.filter((a) => !isCancelled(a.status));
 
-const RESCHEDULE_SYSTEM_PROMPT = `You are an appointment scheduling assistant for a field service operating system.
-Given a voice transcript where a caller asks to reschedule an existing appointment, extract the NEW appointment time.
+  // Scope to the verified caller's own appointments FIRST (when we can
+  // verify ownership), THEN prefer upcoming within that owned set. Order
+  // matters: scoping before the upcoming filter ensures a caller whose
+  // only appointment is in the past still resolves even if a *different*
+  // customer has an upcoming one, and never widens resolution on the
+  // unscoped operator path (which keeps the legacy single-active-tenant
+  // behavior untouched — no auto-pick when >1 active exists).
+  if (opts?.customerId && opts?.jobRepo) {
+    const jobRepo = opts.jobRepo;
+    const owned: typeof active = [];
+    for (const a of active) {
+      if (!a.jobId) continue;
+      try {
+        const job = await jobRepo.findById(tenantId, a.jobId);
+        if (job && job.customerId === opts.customerId) owned.push(a);
+      } catch {
+        // Ignore per-candidate lookup failures — a flaky job read should
+        // exclude that candidate, not crash the whole resolution.
+      }
+    }
+    active = owned;
 
-Return valid JSON with this shape (no prose, no markdown fences):
-{
-  "newScheduledStart": "<ISO 8601 UTC datetime, e.g. 2026-04-22T21:00:00.000Z>",
-  "newScheduledEnd": "<ISO 8601 UTC datetime>",
-  "confidence_score": <number between 0 and 1>
-}
-
-Rules:
-- Always return ISO 8601 UTC datetimes.
-- Assume the tenant's local timezone is America/Los_Angeles unless told otherwise, then convert to UTC.
-- Preserve the original appointment's duration unless the caller states a new one.
-- If the new date/time is ambiguous, set confidence_score below 0.7.`;
-
-function tryParseJson(content: string): Record<string, unknown> | null {
-  try {
-    const p = JSON.parse(content);
-    return typeof p === 'object' && p !== null ? (p as Record<string, unknown>) : null;
-  } catch {
-    return null;
+    // Prefer the caller's upcoming appointments, but only when that leaves
+    // candidates (keeps past-but-active appointments + repos without
+    // scheduledStart resolvable).
+    const now = opts.now ?? new Date();
+    const upcoming = active.filter((a) => {
+      const t = toDate(a.scheduledStart).getTime();
+      return !Number.isNaN(t) && t >= now.getTime();
+    });
+    if (upcoming.length > 0) active = upcoming;
   }
+
+  return active.length === 1 ? active[0].id : undefined;
 }
 
 function baseSourceContext(context: TaskContext): Record<string, unknown> | undefined {
@@ -124,16 +164,20 @@ function inputFor(
 // ───────────── reschedule_appointment ─────────────
 //
 // Reschedule needs ISO datetimes. The classifier returns a natural-
-// language `newDateTimeDescription` ("next Tuesday at 2pm"). We keep
-// the description on the payload and list the ISO fields as missing —
-// the review UI (or a follow-up enrichment step) resolves them before
-// approval is allowed.
+// language `newDateTimeDescription` ("next Tuesday at 2pm"), which we
+// resolve deterministically (tenant timezone + now) via `resolveDateTime`.
+// When the phrase is ambiguous/unparseable the ISO fields stay missing so
+// the proposal holds in draft for the dispatcher to complete — it can
+// never silently mis-book.
 export class RescheduleAppointmentTaskHandler implements TaskHandler {
   readonly taskType = 'reschedule_appointment' as const;
 
   constructor(
+    // Retained for construction-site compatibility; date resolution is now
+    // deterministic, so no LLM round-trip is made here.
     private readonly gateway?: LLMGateway,
     private readonly appointmentRepo?: AppointmentRepository,
+    private readonly jobRepo?: JobRepository,
   ) {}
 
   async handle(context: TaskContext): Promise<TaskResult> {
@@ -146,6 +190,7 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
     const resolvedId = await resolveActiveAppointmentId(
       this.appointmentRepo,
       context.tenantId,
+      { customerId: context.customerId, jobRepo: this.jobRepo },
     );
     if (resolvedId) {
       payload.appointmentId = resolvedId;
@@ -160,49 +205,50 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
       payload.newDateTimeDescription = ee.newDateTimeDescription;
     }
 
-    // Parse the natural-language new time into ISO datetimes via the
-    // LLM — mirrors CreateAppointmentAITaskHandler. When no gateway is
-    // wired (or parsing fails) the ISO fields stay missing so the
-    // review UI fills them from the description.
-    let parsedStart: string | undefined;
-    let parsedEnd: string | undefined;
-    if (this.gateway) {
+    // Preserve the ORIGINAL appointment's duration on reschedule: load the
+    // resolved appointment and carry its length so "move it to Tuesday at
+    // 2pm" keeps a 2-hour job 2 hours instead of collapsing to the 60-min
+    // default. Best-effort — a lookup miss falls back to the default.
+    let originalDurationMin: number | undefined;
+    if (typeof payload.appointmentId === 'string' && this.appointmentRepo) {
       try {
-        const res = await this.gateway.complete({
-          taskType: 'reschedule_appointment',
-          messages: [
-            { role: 'system', content: RESCHEDULE_SYSTEM_PROMPT },
-            { role: 'user', content: this.buildUserMessage(context) },
-          ],
-          responseFormat: 'json',
-        });
-        const parsed = tryParseJson(res.content);
-        if (parsed) {
-          if (isIsoDatetime(parsed.newScheduledStart)) parsedStart = parsed.newScheduledStart;
-          if (isIsoDatetime(parsed.newScheduledEnd)) parsedEnd = parsed.newScheduledEnd;
+        const appt = await this.appointmentRepo.findById(context.tenantId, payload.appointmentId);
+        if (appt) {
+          const ms = toDate(appt.scheduledEnd).getTime() - toDate(appt.scheduledStart).getTime();
+          if (ms > 0) originalDurationMin = ms / 60000;
         }
       } catch {
-        // Degrade to missing-fields — never fail the call on a parse hiccup.
+        // ignore — resolver default duration applies
       }
     }
 
-    if (parsedStart) payload.newScheduledStart = parsedStart;
-    else missing.push('newScheduledStart');
-    if (parsedEnd) payload.newScheduledEnd = parsedEnd;
-    else missing.push('newScheduledEnd');
+    // HYBRID resolution (P0 fix): resolve the verbatim phrase
+    // deterministically against the TENANT timezone + now — no LLM
+    // timezone math, no hardcoded America/Los_Angeles. Ambiguous or
+    // invalid phrases leave the ISO fields missing so the proposal stays
+    // in draft for the dispatcher to complete.
+    const phrase =
+      typeof ee.newDateTimeDescription === 'string' ? ee.newDateTimeDescription.trim() : '';
+    const resolved = phrase
+      ? resolveDateTime(phrase, {
+          timezone: context.timezone ?? DEFAULT_TENANT_TIMEZONE,
+          now: context.now ?? new Date(),
+          ...(originalDurationMin ? { defaultDurationMin: originalDurationMin } : {}),
+        })
+      : undefined;
+
+    if (resolved && resolved.ok) {
+      payload.newScheduledStart = resolved.startUtc;
+      payload.newScheduledEnd = resolved.endUtc;
+    } else {
+      missing.push('newScheduledStart');
+      missing.push('newScheduledEnd');
+    }
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
       taskType: this.taskType,
     };
-  }
-
-  private buildUserMessage(context: TaskContext): string {
-    const parts: string[] = [`Transcript: ${context.message}`];
-    if (context.existingEntities && Object.keys(context.existingEntities).length > 0) {
-      parts.push(`Known entities: ${JSON.stringify(context.existingEntities)}`);
-    }
-    return parts.join('\n');
   }
 }
 
@@ -214,7 +260,10 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
 export class CancelAppointmentTaskHandler implements TaskHandler {
   readonly taskType = 'cancel_appointment' as const;
 
-  constructor(private readonly appointmentRepo?: AppointmentRepository) {}
+  constructor(
+    private readonly appointmentRepo?: AppointmentRepository,
+    private readonly jobRepo?: JobRepository,
+  ) {}
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
@@ -228,6 +277,7 @@ export class CancelAppointmentTaskHandler implements TaskHandler {
     const resolvedId = await resolveActiveAppointmentId(
       this.appointmentRepo,
       context.tenantId,
+      { customerId: context.customerId, jobRepo: this.jobRepo },
     );
     if (resolvedId) {
       payload.appointmentId = resolvedId;
@@ -518,14 +568,20 @@ export class ConvertLeadTaskHandler implements TaskHandler {
 export class ConfirmAppointmentTaskHandler implements TaskHandler {
   readonly taskType = 'confirm_appointment' as const;
 
-  constructor(private readonly appointmentRepo?: AppointmentRepository) {}
+  constructor(
+    private readonly appointmentRepo?: AppointmentRepository,
+    private readonly jobRepo?: JobRepository,
+  ) {}
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
-    const resolvedId = await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId);
+    const resolvedId = await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId, {
+      customerId: context.customerId,
+      jobRepo: this.jobRepo,
+    });
     if (resolvedId) {
       payload.appointmentId = resolvedId;
     } else if (ee.appointmentReference) {
@@ -627,14 +683,23 @@ export class LogTimeEntryTaskHandler implements TaskHandler {
 export class NotifyDelayTaskHandler implements TaskHandler {
   readonly taskType = 'notify_delay' as const;
 
-  constructor(private readonly appointmentRepo?: AppointmentRepository) {}
+  constructor(
+    private readonly appointmentRepo?: AppointmentRepository,
+    private readonly jobRepo?: JobRepository,
+  ) {}
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
-    const resolvedId = await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId);
+    // Scope to the caller's own appointment — notify_delay emits a comms
+    // proposal that texts the customer, so resolving to a *different*
+    // customer's appointment would message the wrong person.
+    const resolvedId = await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId, {
+      customerId: context.customerId,
+      jobRepo: this.jobRepo,
+    });
     if (resolvedId) {
       payload.appointmentId = resolvedId;
     } else if (ee.appointmentReference) {

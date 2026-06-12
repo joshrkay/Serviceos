@@ -1,4 +1,4 @@
-import { Proposal, ProposalRepository } from './proposal';
+import { Proposal, ProposalRepository, missingFieldsFor } from './proposal';
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from './lifecycle';
 import { validateProposalPayload } from './contracts';
 import { Role, hasPermission } from '../auth/rbac';
@@ -11,6 +11,24 @@ export interface BatchApproveResult {
   approved: string[];
   failed: { id: string; reason: string }[];
 }
+
+/**
+ * RV-073 — the transport an approval/rejection decision arrived on.
+ * Recorded in the `proposal.approved` / `proposal.rejected` audit-event
+ * metadata so the timeline can answer "HOW was this approved?".
+ *
+ *   'ui'      — dashboard / inbox screen-tap (routes/proposals.ts)
+ *   'sms'     — inbound SMS reply Y/N (proposals/sms/reply-handler.ts)
+ *   'one_tap' — HMAC one-tap link (routes/one-tap-approve.ts)
+ *   'voice'   — spoken approval on a recognized owner line
+ *               (caller-ID match; see approver-identity.ts) (RV-071)
+ *
+ * When absent, the channel key is OMITTED from the audit metadata
+ * (rather than defaulting to 'ui') — least invasive for existing audit
+ * consumers and truthful for legacy call sites that have not been
+ * updated to declare their transport.
+ */
+export type ApprovalChannel = 'ui' | 'sms' | 'one_tap' | 'voice';
 
 /**
  * P2-035 — Batch proposal approval (APPROVE ALL).
@@ -39,13 +57,14 @@ export async function approveProposalsBatch(
   actorId: string,
   actorRole: Role,
   auditRepo?: AuditRepository,
+  channel?: ApprovalChannel,
 ): Promise<BatchApproveResult> {
   const approved: string[] = [];
   const failed: { id: string; reason: string }[] = [];
 
   for (const id of proposalIds) {
     try {
-      await approveProposal(proposalRepo, tenantId, id, actorId, actorRole, auditRepo);
+      await approveProposal(proposalRepo, tenantId, id, actorId, actorRole, auditRepo, channel);
       approved.push(id);
     } catch (err) {
       // Surface the error code when available (e.g. NOT_FOUND, FORBIDDEN,
@@ -71,6 +90,7 @@ export async function approveProposal(
   actorId: string,
   actorRole: Role,
   auditRepo?: AuditRepository,
+  channel?: ApprovalChannel,
 ): Promise<Proposal> {
   if (!hasPermission(actorRole, 'proposals:approve')) {
     throw new ForbiddenError();
@@ -79,6 +99,21 @@ export async function approveProposal(
   const proposal = await proposalRepo.findById(tenantId, proposalId);
   if (!proposal) {
     throw new NotFoundError('Proposal', proposalId);
+  }
+
+  // A proposal with unfilled required fields can't be approved — the
+  // operator must resolve the gaps (via editProposal) first. This guard
+  // matters now that drafts are directly approvable from the inbox:
+  // without it a half-extracted voice payload could be approved straight
+  // from 'draft'. Chain-ref fields are intentionally NOT in missingFields
+  // (they resolve at execution time), so a chained dependent stays
+  // approvable.
+  const missing = missingFieldsFor(proposal);
+  if (missing.length > 0) {
+    throw new ValidationError(
+      `Cannot approve proposal with unfilled required fields: ${missing.join(', ')}`,
+      { missingFields: missing },
+    );
   }
 
   const transitioned = transitionProposal(proposal, 'approved', actorId);
@@ -97,10 +132,18 @@ export async function approveProposal(
   // care about audit rows) compile unchanged; the router-factory always
   // passes a real repo in production.
   if (auditRepo) {
-    await logProposalEvent(auditRepo, updated, 'proposal.approved', {
-      id: actorId,
-      role: actorRole,
-    });
+    await logProposalEvent(
+      auditRepo,
+      updated,
+      'proposal.approved',
+      {
+        id: actorId,
+        role: actorRole,
+      },
+      // RV-073 — record HOW the approval arrived. Omitted entirely when
+      // the call site has not declared a channel (legacy behavior).
+      channel ? { channel } : undefined,
+    );
   }
 
   return updated;
@@ -178,6 +221,7 @@ export async function rejectProposal(
   details?: string,
   appointmentRepo?: AppointmentRepository,
   auditRepo?: AuditRepository,
+  channel?: ApprovalChannel,
 ): Promise<Proposal> {
   if (!hasPermission(actorRole, 'proposals:approve')) {
     throw new ForbiddenError();
@@ -215,6 +259,9 @@ export async function rejectProposal(
           status: updated.status,
           rejectionReason: reason,
           rejectionDetails: details,
+          // RV-073 — transport the rejection arrived on. Omitted when the
+          // call site has not declared one (legacy behavior).
+          ...(channel ? { channel } : {}),
         },
       }),
     );

@@ -1,0 +1,431 @@
+{
+  "corpus_counts": {
+    "edge_cases": 157,
+    "negatives": 62,
+    "slots": {
+      "address": 9,
+      "phone": 8,
+      "service": 10,
+      "time": 8
+    },
+    "utterances_en": 1820,
+    "utterances_es": 1400
+  },
+  "edges": {
+    "all_categories_pass": true,
+    "handling_accuracy": 1.0,
+    "n": 157,
+    "per_category": {
+      "accent_boston": {
+        "pass": 12,
+        "rate": 1.0,
+        "total": 12
+      },
+      "accent_ny": {
+        "pass": 12,
+        "rate": 1.0,
+        "total": 12
+      },
+      "accent_southern": {
+        "pass": 12,
+        "rate": 1.0,
+        "total": 12
+      },
+      "accent_spanish_en": {
+        "pass": 13,
+        "rate": 1.0,
+        "total": 13
+      },
+      "accent_vietnamese_en": {
+        "pass": 12,
+        "rate": 1.0,
+        "total": 12
+      },
+      "background_noise": {
+        "pass": 12,
+        "rate": 1.0,
+        "total": 12
+      },
+      "butt_dial": {
+        "pass": 12,
+        "rate": 1.0,
+        "total": 12
+      },
+      "code_switch": {
+        "pass": 12,
+        "rate": 1.0,
+        "total": 12
+      },
+      "emergency_panic": {
+        "pass": 12,
+        "rate": 1.0,
+        "total": 12
+      },
+      "escalation_demand": {
+        "pass": 12,
+        "rate": 1.0,
+        "total": 12
+      },
+      "hesitation_repair": {
+        "pass": 12,
+        "rate": 1.0,
+        "total": 12
+      },
+      "multi_speaker": {
+        "pass": 12,
+        "rate": 1.0,
+        "total": 12
+      },
+      "wrong_number": {
+        "pass": 12,
+        "rate": 1.0,
+        "total": 12
+      }
+    }
+  },
+  "generated_at": "2026-06-08T06:22:40.062756+00:00",
+  "intent": {
+    "accuracy": 1.0,
+    "n": 645,
+    "per_intent": {
+      "add_note": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 22
+      },
+      "add_service_location": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 17
+      },
+      "agent_handoff_request": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 21
+      },
+      "callback": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 20
+      },
+      "cancel_appointment": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 16
+      },
+      "complaint": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 16
+      },
+      "confirm_appointment": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 19
+      },
+      "convert_lead": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 19
+      },
+      "create_appointment": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 24
+      },
+      "create_customer": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 13
+      },
+      "create_job": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 21
+      },
+      "dnc_optout": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 17
+      },
+      "draft_estimate": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 17
+      },
+      "draft_invoice": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 21
+      },
+      "emergency_dispatch": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 22
+      },
+      "greeting": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 18
+      },
+      "hours_location": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 19
+      },
+      "log_expense": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 19
+      },
+      "log_time_entry": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 17
+      },
+      "lookup_account_summary": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 17
+      },
+      "lookup_appointments": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 19
+      },
+      "lookup_customer": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 15
+      },
+      "lookup_estimates": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 19
+      },
+      "lookup_invoices": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 16
+      },
+      "lookup_jobs": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 22
+      },
+      "mark_lead_lost": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 18
+      },
+      "notify_delay": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 14
+      },
+      "payment_dispute": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 19
+      },
+      "pricing_question": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 16
+      },
+      "record_payment": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 19
+      },
+      "request_feedback": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 19
+      },
+      "reschedule_appointment": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 22
+      },
+      "send_estimate": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 20
+      },
+      "service_availability": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 14
+      },
+      "update_customer": {
+        "f1": 1.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tp": 18
+      }
+    },
+    "unknown_rate": 0.0
+  },
+  "language": {
+    "en_accuracy": 1.0,
+    "es_accuracy": 1.0,
+    "spanish_gap": 0.0
+  },
+  "negatives": {
+    "booking_leaks": 0,
+    "n": 62,
+    "routing_accuracy": 1.0,
+    "zero_booking": true
+  },
+  "scope": "full",
+  "slots": {
+    "address": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "n": 9,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 9
+    },
+    "phone": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "n": 8,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 8
+    },
+    "service": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "n": 10,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 10
+    },
+    "time": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "n": 8,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 8
+    }
+  },
+  "targets": {
+    "intent_accuracy": 0.92,
+    "slot_f1": 0.88,
+    "spanish_gap_max": 0.05,
+    "unknown_rate_max": 0.1
+  },
+  "top_failure_modes": []
+}

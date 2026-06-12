@@ -1,0 +1,45 @@
+{"id":"slot_svc_0001","text":"my water heater","slot_type":"service","expected":{"kind":"exact","value":"water_heater"},"lang":"en"}
+{"id":"slot_svc_0002","text":"the hot water tank","slot_type":"service","expected":{"kind":"fuzzy","value":"water_heater"},"lang":"en"}
+{"id":"slot_svc_0003","text":"hot water heater","slot_type":"service","expected":{"kind":"fuzzy","value":"water_heater"},"lang":"en"}
+{"id":"slot_svc_0004","text":"no hot water","slot_type":"service","expected":{"kind":"semantic","value":"water_heater"},"lang":"en"}
+{"id":"slot_svc_0005","text":"tankless water heater","slot_type":"service","expected":{"kind":"exact","value":"tankless_water_heater"},"lang":"en"}
+{"id":"slot_svc_0006","text":"the toilet","slot_type":"service","expected":{"kind":"exact","value":"toilet"},"lang":"en"}
+{"id":"slot_svc_0007","text":"the commode","slot_type":"service","expected":{"kind":"fuzzy","value":"toilet"},"lang":"en"}
+{"id":"slot_svc_0008","text":"my toilet keeps running","slot_type":"service","expected":{"kind":"semantic","value":"toilet"},"lang":"en"}
+{"id":"slot_svc_0009","text":"the throne won't flush","slot_type":"service","expected":{"kind":"semantic","value":"toilet"},"lang":"en"}
+{"id":"slot_svc_0010","text":"garbage disposal","slot_type":"service","expected":{"kind":"exact","value":"garbage_disposal"},"lang":"en"}
+{"id":"slot_svc_0011","text":"the disposal is jammed","slot_type":"service","expected":{"kind":"fuzzy","value":"garbage_disposal"},"lang":"en"}
+{"id":"slot_svc_0012","text":"the thing that grinds food in the sink","slot_type":"service","expected":{"kind":"semantic","value":"garbage_disposal"},"lang":"en"}
+{"id":"slot_svc_0013","text":"kitchen sink","slot_type":"service","expected":{"kind":"exact","value":"sink"},"lang":"en"}
+{"id":"slot_svc_0014","text":"bathroom sink","slot_type":"service","expected":{"kind":"exact","value":"sink"},"lang":"en"}
+{"id":"slot_svc_0015","text":"the faucet is dripping","slot_type":"service","expected":{"kind":"fuzzy","value":"faucet"},"lang":"en"}
+{"id":"slot_svc_0016","text":"leaky faucet","slot_type":"service","expected":{"kind":"exact","value":"faucet"},"lang":"en"}
+{"id":"slot_svc_0017","text":"the spicket out back","slot_type":"service","expected":{"kind":"semantic","value":"outdoor_spigot"},"lang":"en"}
+{"id":"slot_svc_0018","text":"outdoor spigot","slot_type":"service","expected":{"kind":"exact","value":"outdoor_spigot"},"lang":"en"}
+{"id":"slot_svc_0019","text":"hose bib","slot_type":"service","expected":{"kind":"fuzzy","value":"outdoor_spigot"},"lang":"en"}
+{"id":"slot_svc_0020","text":"the shower","slot_type":"service","expected":{"kind":"exact","value":"shower"},"lang":"en"}
+{"id":"slot_svc_0021","text":"shower valve","slot_type":"service","expected":{"kind":"exact","value":"shower_valve"},"lang":"en"}
+{"id":"slot_svc_0022","text":"the bathtub","slot_type":"service","expected":{"kind":"exact","value":"bathtub"},"lang":"en"}
+{"id":"slot_svc_0023","text":"the tub won't drain","slot_type":"service","expected":{"kind":"semantic","value":"bathtub"},"lang":"en"}
+{"id":"slot_svc_0024","text":"main line","slot_type":"service","expected":{"kind":"exact","value":"main_line"},"lang":"en"}
+{"id":"slot_svc_0025","text":"the main sewer line","slot_type":"service","expected":{"kind":"fuzzy","value":"sewer_line"},"lang":"en"}
+{"id":"slot_svc_0026","text":"sewer line","slot_type":"service","expected":{"kind":"exact","value":"sewer_line"},"lang":"en"}
+{"id":"slot_svc_0027","text":"my drain is clogged","slot_type":"service","expected":{"kind":"fuzzy","value":"drain"},"lang":"en"}
+{"id":"slot_svc_0028","text":"clogged drain","slot_type":"service","expected":{"kind":"exact","value":"drain"},"lang":"en"}
+{"id":"slot_svc_0029","text":"the sump pump","slot_type":"service","expected":{"kind":"exact","value":"sump_pump"},"lang":"en"}
+{"id":"slot_svc_0030","text":"well pump","slot_type":"service","expected":{"kind":"exact","value":"well_pump"},"lang":"en"}
+{"id":"slot_svc_0031","text":"the furnace","slot_type":"service","expected":{"kind":"exact","value":"furnace"},"lang":"en"}
+{"id":"slot_svc_0032","text":"no heat from the furnace","slot_type":"service","expected":{"kind":"semantic","value":"furnace"},"lang":"en"}
+{"id":"slot_svc_0033","text":"the AC","slot_type":"service","expected":{"kind":"exact","value":"air_conditioner"},"lang":"en"}
+{"id":"slot_svc_0034","text":"air conditioner","slot_type":"service","expected":{"kind":"exact","value":"air_conditioner"},"lang":"en"}
+{"id":"slot_svc_0035","text":"the air isn't cold","slot_type":"service","expected":{"kind":"semantic","value":"air_conditioner"},"lang":"en"}
+{"id":"slot_svc_0036","text":"heat pump","slot_type":"service","expected":{"kind":"exact","value":"heat_pump"},"lang":"en"}
+{"id":"slot_svc_0037","text":"the thermostat","slot_type":"service","expected":{"kind":"exact","value":"thermostat"},"lang":"en"}
+{"id":"slot_svc_0038","text":"the boiler","slot_type":"service","expected":{"kind":"exact","value":"boiler"},"lang":"en"}
+{"id":"slot_svc_0039","text":"ductwork","slot_type":"service","expected":{"kind":"exact","value":"ductwork"},"lang":"en"}
+{"id":"slot_svc_0040","text":"the condenser unit","slot_type":"service","expected":{"kind":"fuzzy","value":"condenser"},"lang":"en"}
+{"id":"slot_svc_0041","text":"gas line","slot_type":"service","expected":{"kind":"exact","value":"gas_line"},"lang":"en"}
+{"id":"slot_svc_0042","text":"water softener","slot_type":"service","expected":{"kind":"exact","value":"water_softener"},"lang":"en"}
+{"id":"slot_svc_0043","text":"the pressure regulator","slot_type":"service","expected":{"kind":"exact","value":"pressure_regulator"},"lang":"en"}
+{"id":"slot_svc_0044","text":"the P trap under the sink","slot_type":"service","expected":{"kind":"fuzzy","value":"p_trap"},"lang":"en"}
+{"id":"slot_svc_0045","text":"that curved pipe under the drain","slot_type":"service","expected":{"kind":"semantic","value":"p_trap"},"lang":"en"}

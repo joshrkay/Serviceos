@@ -1,0 +1,15 @@
+{
+  "id": "transcript-114",
+  "type": "inbound_call",
+  "duration_seconds": 225,
+  "service_type": "electrical",
+  "transcript": "Customer: Hi, this is Helen Park. I'm calling because my GFCI outlet has no power. Dispatcher: Hi Helen, I'm sorry to hear that. Can you tell me what brand it is? Customer: It's a Square D, pretty new, 2 years. Dispatcher: Okay, and what's the service address? Customer: 1500 Sunset Blvd. Dispatcher: Got it. We can send a technician out tomorrow between 8 and 10 AM. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Helen Park",
+    "issue": "GFCI outlet has no power",
+    "equipment": "Square D GFCI outlet, pretty new, 2 years",
+    "address": "1500 Sunset Blvd",
+    "appointment_window": "tomorrow between 8 and 10 AM"
+  },
+  "source": "synthetic"
+}

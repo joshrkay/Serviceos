@@ -15,6 +15,22 @@ import { printEstimateDocument } from '../../lib/estimatePdf';
 const fmtUsd = (n: number): string =>
   n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+/** Whole days from now until `iso` (negative once past). null when unparseable. */
+function daysUntil(iso?: string): number | null {
+  if (!iso) return null;
+  const then = new Date(iso).getTime();
+  if (isNaN(then)) return null;
+  return Math.ceil((then - Date.now()) / (24 * 60 * 60 * 1000));
+}
+
+/** Human "May 14, 2026" from an ISO string; '' when unparseable. */
+function fmtFriendlyDate(iso?: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 interface PublicEstimateView {
   id: string;
   estimateNumber: string;
@@ -30,6 +46,7 @@ interface PublicEstimateView {
     quantity: number;
     unitPriceCents: number;
     totalCents: number;
+    taxable?: boolean;
     groupKey?: string;
     groupLabel?: string;
     isOptional?: boolean;
@@ -37,6 +54,8 @@ interface PublicEstimateView {
   }>;
   /** True when the estimate has tier options or optional add-ons to choose. */
   hasSelectableItems?: boolean;
+  /** Tax rate (basis points) so the preview mirrors server tax math exactly. */
+  taxRateBps?: number;
   totalCents: number;
   subtotalCents: number;
   taxCents: number;
@@ -77,6 +96,12 @@ interface PublicEstimateView {
    * absent or expired.
    */
   depositCheckoutUrl?: string;
+  /**
+   * Hennessy — payment-link UX. ISO deadline for the deposit checkout
+   * link. Surfaced as a "pay by" hint; the server re-mints the link once
+   * this passes so the customer never lands on a dead URL.
+   */
+  depositCheckoutExpiresAt?: string;
 }
 
 // ─── Signature canvas ─────────────────────────────────────────────────────
@@ -509,8 +534,8 @@ export function EstimateApprovalPage() {
   const [accepted,     setAccept] = useState(false);
   const [showAllItems, setAll]    = useState(false);
 
-  // Try the real public API first. Falls back to mock data for the demo
-  // /e/<estimate-number-slug> URLs that don't correspond to real tokens.
+  // Load the estimate from the real public API. There is deliberately NO
+  // mock/fixture fallback on this public URL — see the error branch below.
   const [apiView, setApiView] = useState<PublicEstimateView | null>(null);
   const [apiLoading, setApiLoading] = useState(true);
   const [apiNotFound, setApiNotFound] = useState(false);
@@ -525,12 +550,17 @@ export function EstimateApprovalPage() {
   // Good-better-best: the line-item ids the customer has chosen. Null
   // until the estimate loads, then seeded from the server's defaults.
   const [selectedIds, setSelectedIds] = useState<string[] | null>(null);
+  // Bumped by the error screen's "Try again" button to re-run the fetch.
+  const [retryCount, setRetryCount] = useState(0);
 
   useEffect(() => {
     if (!id) {
       setApiLoading(false);
       return;
     }
+    setApiLoading(true);
+    setApiError(false);
+    setApiNotFound(false);
     let cancelled = false;
     (async () => {
       try {
@@ -564,7 +594,7 @@ export function EstimateApprovalPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [id]);
+  }, [id, retryCount]);
 
   // Re-sync poll: while the page is open on a live (sent) estimate, poll
   // for a revision so the customer can't accept stale numbers. When the
@@ -637,12 +667,20 @@ export function EstimateApprovalPage() {
     const heading = apiNotFound ? 'Link not found' : 'Couldn’t load this estimate';
     const detail = apiNotFound
       ? 'This estimate link is invalid or has been revoked. Please contact the business that sent it.'
-      : 'We couldn’t load this estimate right now. Please refresh the page, or contact the business that sent it.';
+      : 'We couldn’t load this estimate — check the link or contact the business that sent it.';
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center px-6">
         <div className="max-w-md text-center">
           <h1 className="text-slate-900 mb-2" style={{ fontSize: '1.4rem' }}>{heading}</h1>
           <p className="text-sm text-slate-500">{detail}</p>
+          {apiError && (
+            <button
+              onClick={() => setRetryCount(c => c + 1)}
+              className="mt-5 inline-flex items-center justify-center rounded-2xl bg-slate-900 text-white px-6 py-3 text-sm hover:bg-slate-700 active:scale-[0.98] transition-all"
+            >
+              Try again
+            </button>
+          )}
         </div>
       </div>
     );
@@ -682,14 +720,17 @@ export function EstimateApprovalPage() {
     }
   }
 
-  // Client-side preview total. The server recomputes authoritatively on
-  // approve; this just keeps the displayed figure in sync with the choice.
+  // Client-side preview total. Mirrors billing-engine.calculateDocumentTotals
+  // exactly — tax is applied only to the SELECTED taxable items (after
+  // discount), so changing the taxable composition (e.g. picking a
+  // non-taxable tier) tracks the server's accepted total. The server still
+  // recomputes authoritatively on approve.
   const selectedSubtotalCents = billedApiItems.reduce((s, li) => s + li.totalCents, 0);
-  const effRateBps = apiView.subtotalCents > apiView.discountCents
-    ? Math.round((apiView.taxCents * 10000) / (apiView.subtotalCents - apiView.discountCents))
-    : 0;
-  const previewTaxCents = Math.round((Math.max(0, selectedSubtotalCents - apiView.discountCents) * effRateBps) / 10000);
-  const previewTotalCents = Math.max(0, selectedSubtotalCents - apiView.discountCents + previewTaxCents);
+  const selectedTaxableCents = billedApiItems.filter(li => li.taxable).reduce((s, li) => s + li.totalCents, 0);
+  const discountCents = apiView?.discountCents ?? 0;
+  const taxRateBps = apiView?.taxRateBps ?? 0;
+  const previewTaxCents = Math.round((Math.max(0, selectedTaxableCents - discountCents) * taxRateBps) / 10000);
+  const previewTotalCents = Math.max(0, selectedSubtotalCents - discountCents + previewTaxCents);
 
   function selectTier(groupKey: string, itemId: string) {
     setSelectedIds(prev => {
@@ -718,6 +759,10 @@ export function EstimateApprovalPage() {
   const total           = (hasSelectable ? previewTotalCents : apiView.totalCents) / 100;
   const isExpired       = apiView.isExpired;
   const isAlreadyDeclined = apiView.status === 'rejected';
+  // Days until the quote's price is no longer guaranteed. Drives the
+  // validity urgency banner (Hennessy). Null when the quote carries no
+  // validUntil — we say nothing rather than imply a deadline.
+  const validUntilDays  = daysUntil(apiView.validUntil);
 
   if (accepted) return (
     <SuccessScreen
@@ -784,6 +829,33 @@ export function EstimateApprovalPage() {
               <p className="text-xs text-amber-700 mt-0.5">Please contact the business for an updated quote.</p>
             </div>
           )}
+
+          {/* Hennessy — payment-link UX. Tell the customer, up front, how
+              long this price is held so the deadline drives action instead
+              of surprising them at accept-time. Only while the quote is
+              still live and actionable; escalates from neutral to amber as
+              the window closes. */}
+          {!isExpired && !isAlreadyDeclined && apiView.isActionable !== false && validUntilDays !== null && (
+            <div
+              data-testid="estimate-validity-banner"
+              className={`mb-5 flex items-center gap-2.5 rounded-xl border px-4 py-3 ${
+                validUntilDays <= 3
+                  ? 'bg-amber-50 border-amber-200 text-amber-900'
+                  : 'bg-slate-50 border-slate-200 text-slate-700'
+              }`}
+            >
+              <Clock size={15} className={validUntilDays <= 3 ? 'text-amber-500 shrink-0' : 'text-slate-400 shrink-0'} />
+              <p className="text-sm">
+                {validUntilDays <= 0
+                  ? 'This price expires today.'
+                  : validUntilDays === 1
+                  ? 'This price is held until tomorrow — 1 day left.'
+                  : validUntilDays <= 14
+                  ? `This price is held until ${fmtFriendlyDate(apiView.validUntil)} — ${validUntilDays} days left.`
+                  : `This price is held until ${fmtFriendlyDate(apiView.validUntil)}.`}
+              </p>
+            </div>
+          )}
           {isAlreadyDeclined && (
             <div className="mb-5 rounded-xl bg-slate-100 border border-slate-200 px-4 py-3">
               <p className="text-sm text-slate-800">You declined this estimate.</p>
@@ -821,7 +893,7 @@ export function EstimateApprovalPage() {
                           key={item.id}
                           type="button"
                           onClick={() => selectTier(groupKey, item.id)}
-                          className={`flex w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
+                          className={`flex min-h-11 w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
                         >
                           <span className="flex items-center gap-3 min-w-0">
                             <span className={`flex size-4 shrink-0 items-center justify-center rounded-full border ${isSel ? 'border-blue-600 bg-blue-600' : 'border-slate-300'}`}>
@@ -850,7 +922,7 @@ export function EstimateApprovalPage() {
                           key={item.id}
                           type="button"
                           onClick={() => toggleAddOn(item.id)}
-                          className={`flex w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
+                          className={`flex min-h-11 w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
                         >
                           <span className="flex items-center gap-3 min-w-0">
                             <span className={`flex size-4 shrink-0 items-center justify-center rounded border ${isSel ? 'border-blue-600 bg-blue-600' : 'border-slate-300'}`}>
@@ -870,7 +942,12 @@ export function EstimateApprovalPage() {
 
           {/* Line items */}
           <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden mb-4">
-            <div className="grid grid-cols-[1fr_40px_72px_72px] gap-x-2 px-5 py-2.5 bg-slate-50 border-b border-slate-100">
+            {/* minmax(0,1fr) lets the description track shrink below its
+                content width (grid items default to min-width:auto, which
+                forced horizontal overflow on ≤390px phones). Narrower fixed
+                columns below the sm breakpoint; tabular-nums keeps money
+                digits stable and right-aligned. */}
+            <div className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_40px_72px_72px] gap-x-2 px-5 py-2.5 bg-slate-50 border-b border-slate-100">
               <p className="text-xs text-slate-400">Item</p>
               <p className="text-xs text-slate-400 text-right">Qty</p>
               <p className="text-xs text-slate-400 text-right">Rate</p>
@@ -878,18 +955,18 @@ export function EstimateApprovalPage() {
             </div>
             <div className="divide-y divide-slate-50">
               {visItems.map((item, i) => (
-                <div key={i} className="grid grid-cols-[1fr_40px_72px_72px] gap-x-2 px-5 py-3 items-start">
-                  <p className="text-sm text-slate-800">{item.description}</p>
-                  <p className="text-sm text-slate-500 text-right">{item.qty}</p>
-                  <p className="text-sm text-slate-500 text-right">${fmtUsd(item.rate)}</p>
-                  <p className="text-sm text-slate-800 text-right">${fmtUsd(item.qty * item.rate)}</p>
+                <div key={i} className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_40px_72px_72px] gap-x-2 px-5 py-3 items-start">
+                  <p className="text-sm text-slate-800 min-w-0 break-words">{item.description}</p>
+                  <p className="text-sm text-slate-500 text-right tabular-nums">{item.qty}</p>
+                  <p className="text-sm text-slate-500 text-right tabular-nums">${fmtUsd(item.rate)}</p>
+                  <p className="text-sm text-slate-800 text-right tabular-nums">${fmtUsd(item.qty * item.rate)}</p>
                 </div>
               ))}
             </div>
             {lineItems.length > 3 && (
               <button
                 onClick={() => setAll(v => !v)}
-                className="flex items-center justify-center gap-1 w-full py-2.5 text-xs text-slate-400 hover:text-slate-600 border-t border-slate-100 transition-colors"
+                className="flex min-h-11 items-center justify-center gap-1 w-full py-2.5 text-xs text-slate-400 hover:text-slate-600 border-t border-slate-100 transition-colors"
               >
                 {showAllItems ? <><ChevronUp size={12} /> Show less</> : <><ChevronDown size={12} /> {lineItems.length - 3} more items</>}
               </button>
@@ -911,7 +988,7 @@ export function EstimateApprovalPage() {
               lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate })),
               totalDollars: total,
             })}
-            className="mb-4 flex items-center justify-center gap-1.5 w-full rounded-xl border border-slate-200 bg-white py-2.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors"
+            className="mb-4 flex min-h-11 items-center justify-center gap-1.5 w-full rounded-xl border border-slate-200 bg-white py-2.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors"
           >
             <Download size={12} /> Download PDF
           </button>
@@ -977,7 +1054,11 @@ export function EstimateApprovalPage() {
             return (
               <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-5 pb-safe pt-3">
                 <div className="max-w-lg mx-auto">
-                  <PayDepositButton token={id} initialUrl={apiView?.depositCheckoutUrl} />
+                  <PayDepositButton
+                    token={id}
+                    initialUrl={apiView?.depositCheckoutUrl}
+                    expiresAt={apiView?.depositCheckoutExpiresAt}
+                  />
                   {id && (
                     <DeclineButton
                       token={id}
@@ -1046,12 +1127,15 @@ export function EstimateApprovalPage() {
 // and redirects the customer there. After payment Stripe redirects
 // back to the page and the webhook will have credited the deposit so
 // the page swaps in the regular Accept CTA on next load.
-function PayDepositButton({ token, initialUrl }: {
+function PayDepositButton({ token, initialUrl, expiresAt }: {
   token: string;
   initialUrl?: string;
+  /** ISO deadline after which this checkout link is re-minted server-side. */
+  expiresAt?: string;
 }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const depositDays = daysUntil(expiresAt);
 
   async function go() {
     setSubmitting(true);
@@ -1092,6 +1176,13 @@ function PayDepositButton({ token, initialUrl }: {
       {error && (
         <p className="text-center text-xs text-red-600 mt-2" role="alert">
           {error}
+        </p>
+      )}
+      {!error && expiresAt && depositDays !== null && depositDays > 0 && (
+        <p className="text-center text-xs text-slate-400 mt-2">
+          {depositDays === 1
+            ? 'Pay by tomorrow to hold your spot'
+            : `Pay by ${fmtFriendlyDate(expiresAt)} to hold your spot`}
         </p>
       )}
     </>

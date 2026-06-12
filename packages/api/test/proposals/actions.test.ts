@@ -52,6 +52,27 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     expect(result.status).toBe('approved');
   });
 
+  it('approves a draft directly (inbox surfaces drafts)', async () => {
+    const repo = makeRepo();
+    const proposal = createProposal(baseInput); // lands in 'draft'
+    await repo.create(proposal);
+
+    const result = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+    expect(result.status).toBe('approved');
+  });
+
+  it('refuses to approve a proposal with unfilled missingFields', async () => {
+    const repo = makeRepo();
+    const proposal = createProposal({ ...baseInput, missingFields: ['phone'] });
+    await repo.create(proposal);
+
+    await expect(
+      approveProposal(repo, tenantId, proposal.id, actorId, 'owner')
+    ).rejects.toThrow(ValidationError);
+    // Untouched — still draft.
+    expect((await repo.findById(tenantId, proposal.id))!.status).toBe('draft');
+  });
+
   it('validation — technician cannot approve', async () => {
     const repo = makeRepo();
     const proposal = await createReadyProposal(repo);
@@ -203,5 +224,137 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
         undoProposal(repo, tenantId, 'nonexistent-id', actorId, 'owner')
       ).rejects.toThrow(NotFoundError);
     });
+  });
+});
+
+// ─── RV-073 — approval-channel audit tagging ────────────────────────────────
+//
+// approveProposal/rejectProposal accept an optional `channel`
+// ('ui' | 'sms' | 'one_tap' | 'voice') recorded on the audit-event
+// metadata. When the call site does not declare one, the key is OMITTED
+// (legacy behavior) rather than defaulted.
+
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { approveProposalsBatch } from '../../src/proposals/actions';
+
+describe('RV-073 — approval channel audit tagging', () => {
+  const tenantId = 'tenant-1';
+  const actorId = 'user-1';
+
+  const baseInput: CreateProposalInput = {
+    tenantId,
+    proposalType: 'create_customer',
+    payload: { name: 'John Doe' },
+    summary: 'Create customer from voice call',
+    createdBy: actorId,
+  };
+
+  async function createReady(repo: InMemoryProposalRepository): Promise<Proposal> {
+    const proposal = createProposal(baseInput);
+    await repo.create(proposal);
+    await repo.updateStatus(tenantId, proposal.id, 'ready_for_review');
+    return (await repo.findById(tenantId, proposal.id))!;
+  }
+
+  it('approveProposal records channel on the proposal.approved audit metadata', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const proposal = await createReady(repo);
+
+    await approveProposal(repo, tenantId, proposal.id, actorId, 'owner', auditRepo, 'voice');
+
+    const event = auditRepo.getAll().find((e) => e.eventType === 'proposal.approved');
+    expect(event).toBeDefined();
+    expect(event!.metadata).toMatchObject({
+      proposalType: 'create_customer',
+      status: 'approved',
+      channel: 'voice',
+    });
+  });
+
+  it('approveProposal omits the channel key entirely when no channel is passed (legacy)', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const proposal = await createReady(repo);
+
+    await approveProposal(repo, tenantId, proposal.id, actorId, 'owner', auditRepo);
+
+    const event = auditRepo.getAll().find((e) => e.eventType === 'proposal.approved');
+    expect(event).toBeDefined();
+    expect(event!.metadata).not.toHaveProperty('channel');
+  });
+
+  it('rejectProposal records channel on the proposal.rejected audit metadata', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const proposal = await createReady(repo);
+
+    await rejectProposal(
+      repo,
+      tenantId,
+      proposal.id,
+      actorId,
+      'owner',
+      'not needed',
+      undefined,
+      undefined,
+      auditRepo,
+      'sms',
+    );
+
+    const event = auditRepo.getAll().find((e) => e.eventType === 'proposal.rejected');
+    expect(event).toBeDefined();
+    expect(event!.metadata).toMatchObject({
+      rejectionReason: 'not needed',
+      channel: 'sms',
+    });
+  });
+
+  it('rejectProposal omits the channel key when no channel is passed (legacy)', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const proposal = await createReady(repo);
+
+    await rejectProposal(
+      repo,
+      tenantId,
+      proposal.id,
+      actorId,
+      'owner',
+      'not needed',
+      undefined,
+      undefined,
+      auditRepo,
+    );
+
+    const event = auditRepo.getAll().find((e) => e.eventType === 'proposal.rejected');
+    expect(event).toBeDefined();
+    expect(event!.metadata).not.toHaveProperty('channel');
+  });
+
+  it('approveProposalsBatch threads the channel onto each member approval', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const a = await createReady(repo);
+    const b = await createReady(repo);
+
+    const result = await approveProposalsBatch(
+      repo,
+      tenantId,
+      [a.id, b.id],
+      actorId,
+      'owner',
+      auditRepo,
+      'ui',
+    );
+
+    expect(result.approved).toEqual([a.id, b.id]);
+    const approvedEvents = auditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'proposal.approved');
+    expect(approvedEvents).toHaveLength(2);
+    for (const event of approvedEvents) {
+      expect(event.metadata).toMatchObject({ channel: 'ui' });
+    }
   });
 });

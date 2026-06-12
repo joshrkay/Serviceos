@@ -1,9 +1,16 @@
+import { useEffect } from 'react';
 import { SignUp, useAuth } from '@clerk/clerk-react';
 import { Navigate } from 'react-router';
 import { Zap } from 'lucide-react';
+import { trackFunnel } from '../../lib/analytics';
 
 export function SignupPage() {
   const { isLoaded, isSignedIn } = useAuth();
+  // Funnel step between view_landing and signup_completed. Fires once when
+  // the signup form mounts. No tenant/user yet — null context.
+  useEffect(() => {
+    trackFunnel('signup_started');
+  }, []);
   if (isLoaded && isSignedIn) return <Navigate to="/" replace />;
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
@@ -12,7 +19,7 @@ export function SignupPage() {
         <span className="flex size-8 items-center justify-center rounded-xl bg-slate-900">
           <Zap size={15} className="text-white" />
         </span>
-        <span className="text-slate-900 tracking-tight">Fieldly</span>
+        <span className="text-slate-900 tracking-tight">Rivet</span>
       </div>
 
       {/* Clerk Sign-Up */}
@@ -32,7 +39,7 @@ export function SignupPage() {
       {/* Footer */}
       <div className="px-6 pb-6 text-center">
         <p className="text-xs text-slate-300">
-          &copy; 2026 Fieldly &middot; Privacy &middot; Terms
+          &copy; 2026 Rivet &middot; Privacy &middot; Terms
         </p>
       </div>
     </div>

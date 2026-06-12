@@ -214,6 +214,104 @@ describe('P18-001 create-customer-task — proposal building', () => {
   });
 });
 
+describe('P18-001 create-customer-task — malicious input (path 9)', () => {
+  const handler = new CreateCustomerVoiceTaskHandler();
+
+  it('stores SQL-injection-looking name as an inert string (Zod accepts, no interpolation)', async () => {
+    const malicious = "Robert'); DROP TABLE customers;--";
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: `My name is ${malicious}`,
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: malicious,
+        callerIdPhone: '+15550000009',
+      },
+    });
+    // Zod validates shape; injection safety comes from prepared
+    // statements downstream. The raw string must survive untouched
+    // so the audit trail captures exactly what the caller said.
+    expect(out.status).toBe('proposal_drafted');
+    expect(out.proposal!.payload.name).toBe(malicious);
+  });
+
+  it('rejects a malformed/malicious email at the Zod gate', async () => {
+    await expect(
+      handler.run({
+        tenantId: TENANT,
+        message: 'sign me up',
+        conversationId: SESSION,
+        userId: SYSTEM_USER,
+        existingEntities: {
+          displayName: 'Eve Mallory',
+          email: '<script>alert(1)</script>',
+          callerIdPhone: '+15550000010',
+        },
+      })
+    ).rejects.toThrow(/Invalid payload/);
+  });
+});
+
+describe('P18-001 create-customer-task — tenant isolation (path 13)', () => {
+  const handler = new CreateCustomerVoiceTaskHandler();
+
+  it('scopes the proposal to the resolved tenant from context — never cross-tenant', async () => {
+    const entsFor = (phone: string) => ({
+      displayName: 'Same Caller',
+      callerIdPhone: phone,
+    });
+    const a = await handler.run({
+      tenantId: 'tenant-A',
+      message: 'sign me up',
+      conversationId: 'session-A',
+      userId: SYSTEM_USER,
+      existingEntities: entsFor('+15550000020'),
+    });
+    const b = await handler.run({
+      tenantId: 'tenant-B',
+      message: 'sign me up',
+      conversationId: 'session-B',
+      userId: SYSTEM_USER,
+      existingEntities: entsFor('+15550000020'),
+    });
+    expect(a.proposal!.tenantId).toBe('tenant-A');
+    expect(b.proposal!.tenantId).toBe('tenant-B');
+    // No leakage of the other tenant's session into either proposal.
+    expect(a.proposal!.sourceContext).toMatchObject({ correlationId: 'session-A' });
+    expect(b.proposal!.sourceContext).toMatchObject({ correlationId: 'session-B' });
+  });
+});
+
+describe('P18-001 classifier — low-confidence band (path 11)', () => {
+  it('signup phrasing in the [0.6, 0.75) band is bumped past TAU_INT (no reprompt loop)', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'create_customer', confidence: 0.65 })
+    );
+    const result = await classifyIntent(
+      "I'd like to sign up as a new customer",
+      { tenantId: TENANT },
+      gateway
+    );
+    expect(result.intentType).toBe('create_customer');
+    expect(result.confidence).toBeGreaterThanOrEqual(0.75);
+  });
+
+  it('non-signup phrasing below 0.6 → unknown with lowConfidenceIntent for clarification reprompt', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'create_customer', confidence: 0.55 })
+    );
+    const result = await classifyIntent(
+      'um maybe put me down or something',
+      { tenantId: TENANT },
+      gateway
+    );
+    expect(result.intentType).toBe('unknown');
+    expect(result.unknownReason).toBe('low_confidence');
+    expect(result.lowConfidenceIntent).toBe('create_customer');
+  });
+});
+
 describe('P18-001 create-customer-task — phone resolution', () => {
   it('prefers spoken callback over caller-id', () => {
     const r = resolvePhone({ phone: '+15551230999', callerIdPhone: '+15550000001' });
@@ -306,5 +404,62 @@ describe('P18-001 create_customer regression — AST-01 classifier signup phrasi
       gateway
     );
     expect(result.intentType).toBe('create_customer');
+  });
+});
+
+// ─── RV-007 (F-4): Confidence Marker `_meta` ─────────────────────────────
+describe('RV-007 — create-customer task populates payload._meta', () => {
+  const handler = new CreateCustomerVoiceTaskHandler();
+
+  it('sets overallConfidence mapped from the classifier confidence (overall-only — no per-field signal)', async () => {
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up as a new customer",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Alex Smith',
+        callerIdPhone: '+15551230100',
+        classifierConfidence: 0.92,
+      },
+    });
+
+    const meta = out.proposal!.payload._meta as Record<string, unknown>;
+    expect(meta).toBeDefined();
+    expect(meta.overallConfidence).toBe('high'); // 0.92 ≥ 0.8
+    expect(meta.fieldConfidence).toBeUndefined();
+    expect(meta.markers).toBeUndefined();
+  });
+
+  it('maps a low classifier confidence to low', async () => {
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: 'maybe sign me up I guess',
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Mumbly Caller',
+        callerIdPhone: '+15551230101',
+        classifierConfidence: 0.35,
+      },
+    });
+
+    const meta = out.proposal!.payload._meta as Record<string, unknown>;
+    expect(meta.overallConfidence).toBe('low');
+  });
+
+  it('omits _meta when no classifier confidence was threaded (non-voice callers unchanged)', async () => {
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: 'Add customer Acme',
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Acme Corp',
+        callerIdPhone: '+15550000001',
+      },
+    });
+
+    expect(out.proposal!.payload._meta).toBeUndefined();
   });
 });

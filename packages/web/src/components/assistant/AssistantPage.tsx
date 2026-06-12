@@ -264,6 +264,17 @@ function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
                   throw new Error(`Approve failed: ${response.status} ${response.statusText}`);
                 }
               }}
+              onReject={async () => {
+                // Same authenticated client + throw-on-failure contract as
+                // approve: AIProposalCard reverts its "Rejected" state and
+                // shows an error toast when this rejects.
+                const response = await apiFetch(`/api/proposals/${msg.proposal!.id}/reject`, {
+                  method: 'POST',
+                });
+                if (!response.ok) {
+                  throw new Error(`Reject failed: ${response.status} ${response.statusText}`);
+                }
+              }}
             />
           </div>
         )}
@@ -587,7 +598,7 @@ function VoiceRecordingBar({ onCancel, onSend }: {
     <div className="flex flex-col gap-3 px-4 py-3 bg-white border-t border-slate-200">
       {showIOSBanner && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-          Keep this screen on and keep Fieldly in the foreground while recording (iOS Safari limitation).
+          Keep this screen on and keep Rivet in the foreground while recording (iOS Safari limitation).
         </div>
       )}
 
@@ -706,7 +717,7 @@ export function AssistantPage() {
   const [attachPickerOpen, setAttachPickerOpen] = useState(false);
   const [pendingAttachment, setPendingAttachment] = useState<Message['attachments']>([]);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
-  const [ttsEnabled, setTtsEnabled]   = useState(() => localStorage.getItem('fieldly:tts-enabled') === 'true');
+  const [ttsEnabled, setTtsEnabled]   = useState(() => localStorage.getItem('rivet:tts-enabled') === 'true');
   const { speak, stop: stopTTS, isSpeaking } = useTTS({ rate: 1.0 });
   const lastInputWasVoiceRef = useRef(false);
 
@@ -863,7 +874,7 @@ export function AssistantPage() {
               <span className="absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full bg-green-400 border-2 border-white" />
             </div>
             <div>
-              <h2 className="text-slate-900" style={{ fontSize: '0.95rem' }}>Fieldly AI</h2>
+              <h2 className="text-slate-900" style={{ fontSize: '0.95rem' }}>Rivet AI</h2>
               <div className="flex items-center gap-1.5">
                 <span className="text-xs text-green-600">Online</span>
                 <span className="text-slate-300">·</span>
@@ -877,7 +888,7 @@ export function AssistantPage() {
               onClick={() => {
                 const next = !ttsEnabled;
                 setTtsEnabled(next);
-                localStorage.setItem('fieldly:tts-enabled', String(next));
+                localStorage.setItem('rivet:tts-enabled', String(next));
                 if (!next) stopTTS();
               }}
               className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${

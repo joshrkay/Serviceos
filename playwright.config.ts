@@ -72,7 +72,16 @@ export default defineConfig({
       // coverage-sweep spec (opt-in via the dedicated project below) so
       // the default `npm run e2e` does not run them.
       testIgnore: ['**/qa-matrix/**', '**/coverage-sweep.spec.ts'],
-      use: { ...devices['Desktop Chrome'] },
+      use: {
+        ...devices['Desktop Chrome'],
+        // Same escape hatch the qa-matrix project has: runners whose
+        // pre-baked chromium build differs from the installed Playwright's
+        // expected build (and can't download) point QA_CHROMIUM_PATH at the
+        // existing binary. No-op when unset.
+        ...(process.env.QA_CHROMIUM_PATH
+          ? { launchOptions: { executablePath: process.env.QA_CHROMIUM_PATH } }
+          : {}),
+      },
     },
     ...(includeQaMatrix
       ? [
@@ -121,6 +130,7 @@ export default defineConfig({
               'scheduling.spec.ts',
               'sms.spec.ts',
               'voice-extras.spec.ts',
+              'voice-billing.spec.ts',
               'isolation.spec.ts',
               'assistant.spec.ts',
             ],

@@ -111,3 +111,344 @@ export function shouldAutoApprove(
   if (typeof confidenceScore !== 'number') return false;
   return confidenceScore >= threshold;
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// RV-007 (F-4) — Confidence Marker auto-approve guard.
+//
+// AI task handlers stamp `payload._meta.overallConfidence` with the level
+// from the single confidence vocabulary (src/ai/guardrails/confidence.ts:
+// high | medium | low | very_low). A proposal carrying a 'low' or
+// 'very_low' overall level must NEVER auto-approve, regardless of how the
+// numeric confidence score compares to the resolved threshold.
+//
+// This guard is ADDITIVE only:
+//   - payloads without `_meta` (all pre-RV-007 proposals) are untouched —
+//     the numeric-threshold rules apply exactly as before;
+//   - 'medium' does NOT block (per F-4 it renders as a marker downstream);
+//   - a malformed `_meta` never blocks and never throws — the payload
+//     contract gate (assertValidProposalPayload) rejects it upstream.
+//
+// `decideInitialStatus` (proposals/proposal.ts) is the single place that
+// can return 'approved', so the check is applied there — every
+// auto-approve path flows through it.
+// ───────────────────────────────────────────────────────────────────────────
+
+import type { ConfidenceLevel } from '../ai/guardrails/confidence';
+
+/** Levels that hard-block auto-approval (F-4: only low / very_low block). */
+export const AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS: readonly ConfidenceLevel[] = [
+  'low',
+  'very_low',
+];
+
+/**
+ * True when `payload._meta.overallConfidence` is a blocking level.
+ * Pure observer — tolerates any payload shape (absent/malformed `_meta`
+ * returns false, preserving pre-RV-007 behavior exactly).
+ */
+export function confidenceMetaBlocksAutoApprove(payload: unknown): boolean {
+  if (payload === null || typeof payload !== 'object') return false;
+  const meta = (payload as Record<string, unknown>)._meta;
+  if (meta === null || typeof meta !== 'object') return false;
+  const overall = (meta as Record<string, unknown>).overallConfidence;
+  return (
+    typeof overall === 'string' &&
+    (AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS as readonly string[]).includes(overall)
+  );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Phase 12 — one-tap re-approve token (SMS deep link)
+//
+// When a proposal is routed via `queue_and_sms`, the owner gets an SMS with
+// a link that pre-authenticates a single-use approve action for exactly one
+// proposal. Same conceptual shape as the estimate `view_token` pattern
+// (opaque token + expiry checked server-side), hardened per the P12-004
+// risk note: HMAC-SHA256 signed, bound to proposal_id + tenant_id + nonce,
+// single-use (nonce consumed on first successful verify), TTL ≤ 30 min.
+// ───────────────────────────────────────────────────────────────────────────
+
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import type { AuditRepository } from '../audit/audit';
+import { createAuditEvent } from '../audit/audit';
+import type { UnsupervisedProposalRouting } from '../settings/settings';
+
+/** Hard ceiling on one-tap link lifetime (risk note: TTL ≤ 30 minutes). */
+export const ONE_TAP_APPROVE_MAX_TTL_MS = 30 * 60 * 1000;
+
+interface OneTapPayload {
+  /** proposal_id */
+  p: string;
+  /** tenant_id */
+  t: string;
+  /** nonce (single-use) */
+  n: string;
+  /** expiry, epoch ms */
+  e: number;
+}
+
+function sign(payloadB64: string, secret: string): string {
+  return createHmac('sha256', secret).update(payloadB64).digest('base64url');
+}
+
+export interface CreateOneTapApproveTokenInput {
+  proposalId: string;
+  tenantId: string;
+  /** HMAC secret (server-side, e.g. config.appSecret). */
+  secret: string;
+  /** Requested TTL in ms. Clamped to ONE_TAP_APPROVE_MAX_TTL_MS. */
+  ttlMs?: number;
+  /** Injectable clock for tests. */
+  nowMs?: number;
+}
+
+export interface OneTapApproveToken {
+  token: string;
+  nonce: string;
+  expiresAt: Date;
+}
+
+/**
+ * Mint an HMAC-signed, single-use approve token bound to
+ * proposal_id + tenant_id + nonce. TTL is clamped to 30 minutes.
+ */
+export function createOneTapApproveToken(
+  input: CreateOneTapApproveTokenInput,
+): OneTapApproveToken {
+  if (!input.secret) throw new Error('one-tap token requires a secret');
+  const now = input.nowMs ?? Date.now();
+  const ttl = Math.min(input.ttlMs ?? ONE_TAP_APPROVE_MAX_TTL_MS, ONE_TAP_APPROVE_MAX_TTL_MS);
+  const payload: OneTapPayload = {
+    p: input.proposalId,
+    t: input.tenantId,
+    n: randomBytes(16).toString('base64url'),
+    e: now + ttl,
+  };
+  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const token = `${payloadB64}.${sign(payloadB64, input.secret)}`;
+  return { token, nonce: payload.n, expiresAt: new Date(payload.e) };
+}
+
+export type OneTapVerifyFailure =
+  | 'malformed'
+  | 'bad_signature'
+  | 'expired'
+  | 'tenant_mismatch'
+  | 'already_used';
+
+export interface VerifyOneTapApproveTokenInput {
+  token: string;
+  secret: string;
+  /** When supplied, the token's tenant binding must match. */
+  expectedTenantId?: string;
+  nowMs?: number;
+  /**
+   * Single-use enforcement seam: returns true iff this nonce has not
+   * been consumed before (and atomically marks it consumed). Backed by
+   * an in-memory store in tests / single-dyno; a DB row in production.
+   */
+  consumeNonce: (nonce: string) => boolean | Promise<boolean>;
+}
+
+export type OneTapVerifyResult =
+  | { ok: true; proposalId: string; tenantId: string }
+  | { ok: false; reason: OneTapVerifyFailure };
+
+/** Verify an HMAC one-tap approve token. Consumes the nonce on success. */
+export async function verifyOneTapApproveToken(
+  input: VerifyOneTapApproveTokenInput,
+): Promise<OneTapVerifyResult> {
+  const parts = input.token.split('.');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return { ok: false, reason: 'malformed' };
+  const [payloadB64, sig] = parts;
+
+  const expected = sign(payloadB64, input.secret);
+  const sigBuf = Buffer.from(sig, 'base64url');
+  const expBuf = Buffer.from(expected, 'base64url');
+  if (sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) {
+    return { ok: false, reason: 'bad_signature' };
+  }
+
+  let payload: OneTapPayload;
+  try {
+    payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+  } catch {
+    return { ok: false, reason: 'malformed' };
+  }
+  if (
+    typeof payload.p !== 'string' ||
+    typeof payload.t !== 'string' ||
+    typeof payload.n !== 'string' ||
+    typeof payload.e !== 'number'
+  ) {
+    return { ok: false, reason: 'malformed' };
+  }
+
+  const now = input.nowMs ?? Date.now();
+  if (now >= payload.e) return { ok: false, reason: 'expired' };
+  if (input.expectedTenantId && input.expectedTenantId !== payload.t) {
+    return { ok: false, reason: 'tenant_mismatch' };
+  }
+
+  const fresh = await input.consumeNonce(payload.n);
+  if (!fresh) return { ok: false, reason: 'already_used' };
+
+  return { ok: true, proposalId: payload.p, tenantId: payload.t };
+}
+
+/**
+ * In-process single-use nonce store. Sufficient for the week-one single
+ * dyno; multi-instance deployments swap in a DB-backed consumeNonce.
+ * Entries are pruned lazily once `maxEntries` is exceeded.
+ */
+export function createInMemoryNonceStore(maxEntries = 10_000): (nonce: string) => boolean {
+  const used = new Set<string>();
+  return (nonce: string): boolean => {
+    if (used.has(nonce)) return false;
+    used.add(nonce);
+    if (used.size > maxEntries) {
+      const oldest = used.values().next().value;
+      if (oldest !== undefined) used.delete(oldest);
+    }
+    return true;
+  };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Phase 12 — unsupervised proposal routing
+//
+// Applied when `resolveAutoApproveThreshold` returned `null` (no supervisor
+// present). The proposal has already been left in 'ready_for_review' by the
+// status decision; this function performs the tenant-configured side effect
+// and ALWAYS emits an `unsupervised_proposal_routed` audit event.
+// ───────────────────────────────────────────────────────────────────────────
+
+export interface RouteUnsupervisedProposalDeps {
+  auditRepo: AuditRepository;
+  /**
+   * Outbound SMS sender (existing message_dispatches + Twilio delivery).
+   * Optional — when absent, queue_and_sms degrades to queue_only.
+   */
+  sendSms?: (to: string, body: string) => Promise<void>;
+  /**
+   * Emits an `escalate_to_human` skill call so the active call routes to
+   * on-call. Only invoked for the `escalate_to_oncall` routing on a voice
+   * channel; non-call channels fall back to queue_only per the story.
+   */
+  escalateToOnCall?: () => Promise<void>;
+  /** Builds the public one-tap approve URL from the signed token. */
+  buildApproveUrl?: (token: string) => string;
+  /** HMAC secret for the one-tap token. Required for queue_and_sms SMS. */
+  secret?: string;
+  /**
+   * P2-034 — invoked after the owner SMS goes out so the caller can record
+   * the outbound `proposal_sms_events` row that anchors the reply transport
+   * (the inbound Y/N/EDIT handler resolves "which proposal?" from it).
+   */
+  onSmsSent?: (sent: { body: string; expiresAt: Date }) => Promise<void>;
+}
+
+export interface RouteUnsupervisedProposalInput {
+  tenantId: string;
+  proposalId: string;
+  /** From tenant_settings.unsupervised_proposal_routing. Defaults to queue_and_sms. */
+  routing?: UnsupervisedProposalRouting;
+  /** Originating channel — escalate_to_oncall only applies to live voice calls. */
+  channel: 'voice_inbound' | 'inapp' | 'sms' | 'other';
+  /** Owner's E.164 mobile for the one-tap SMS. Null/undefined skips the SMS. */
+  ownerPhone?: string | null;
+  /** Short human label for the SMS body, e.g. "New booking for Jane D." */
+  summaryText?: string;
+  /**
+   * P2-034 — full SMS body builder (proposal summary + key facts + reply
+   * tokens + the one-tap link). When absent the legacy link-only body is
+   * sent, so existing callers keep their exact behavior.
+   */
+  renderSmsBody?: (approveUrl: string) => string;
+  nowMs?: number;
+}
+
+export interface RouteUnsupervisedProposalResult {
+  /** Routing actually applied after fallbacks. */
+  effectiveRouting: UnsupervisedProposalRouting;
+  smsSent: boolean;
+  escalated: boolean;
+  /** Expiry of the one-tap link when an SMS was sent. */
+  approveLinkExpiresAt?: Date;
+}
+
+export async function routeUnsupervisedProposal(
+  deps: RouteUnsupervisedProposalDeps,
+  input: RouteUnsupervisedProposalInput,
+): Promise<RouteUnsupervisedProposalResult> {
+  const requested: UnsupervisedProposalRouting = input.routing ?? 'queue_and_sms';
+  let effective: UnsupervisedProposalRouting = requested;
+  let smsSent = false;
+  let escalated = false;
+  let approveLinkExpiresAt: Date | undefined;
+
+  if (requested === 'escalate_to_oncall' && (input.channel !== 'voice_inbound' || !deps.escalateToOnCall)) {
+    // Non-call channels (or no escalation seam wired) fall back to queue_only.
+    effective = 'queue_only';
+  }
+
+  if (effective === 'escalate_to_oncall' && deps.escalateToOnCall) {
+    await deps.escalateToOnCall();
+    escalated = true;
+  }
+
+  if (effective === 'queue_and_sms') {
+    if (deps.sendSms && deps.secret && input.ownerPhone) {
+      const { token, expiresAt } = createOneTapApproveToken({
+        proposalId: input.proposalId,
+        tenantId: input.tenantId,
+        secret: deps.secret,
+        ...(input.nowMs !== undefined ? { nowMs: input.nowMs } : {}),
+      });
+      const url = deps.buildApproveUrl
+        ? deps.buildApproveUrl(token)
+        : `/p/approve?token=${encodeURIComponent(token)}`;
+      const summary = input.summaryText ?? 'A proposal needs your approval';
+      const body = input.renderSmsBody
+        ? input.renderSmsBody(url)
+        : `${summary}. Tap to approve (link expires in 30 min): ${url}`;
+      await deps.sendSms(input.ownerPhone, body);
+      smsSent = true;
+      approveLinkExpiresAt = expiresAt;
+      // P2-034 — anchor the reply transport. Recorded only after a
+      // successful send; a failure here surfaces to the caller's
+      // best-effort wrapper rather than silently losing the anchor.
+      if (deps.onSmsSent) {
+        await deps.onSmsSent({ body, expiresAt });
+      }
+    }
+    // No phone / no SMS seam: the proposal still sits in ready_for_review —
+    // behaviorally queue_only, but we record the requested routing in audit.
+  }
+
+  // Audit — every unsupervised-route decision emits an event (story item 6).
+  await deps.auditRepo.create(
+    createAuditEvent({
+      tenantId: input.tenantId,
+      actorId: 'system',
+      actorRole: 'system',
+      eventType: 'unsupervised_proposal_routed',
+      entityType: 'proposal',
+      entityId: input.proposalId,
+      metadata: {
+        requestedRouting: requested,
+        effectiveRouting: effective,
+        channel: input.channel,
+        smsSent,
+        escalated,
+      },
+    }),
+  );
+
+  return {
+    effectiveRouting: effective,
+    smsSent,
+    escalated,
+    ...(approveLinkExpiresAt ? { approveLinkExpiresAt } : {}),
+  };
+}

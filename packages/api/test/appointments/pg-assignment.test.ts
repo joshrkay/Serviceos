@@ -2,6 +2,7 @@ import { vi } from 'vitest';
 import type { Pool, PoolClient, QueryResult } from 'pg';
 import { PgAssignmentRepository } from '../../src/appointments/pg-assignment';
 import { AppointmentAssignment } from '../../src/appointments/assignment';
+import { ConflictError } from '../../src/shared/errors';
 
 /**
  * Lightweight mock for the `pg` Pool/PoolClient pair.
@@ -274,6 +275,88 @@ describe('P0-019 — PgAssignmentRepository', () => {
       for (const c of businessQueries) {
         expect(c.sql).not.toContain(TENANT_A);
       }
+    });
+  });
+
+  describe('Blocker 7 — DB conflict mapping', () => {
+    function buildErrorPool(err: unknown) {
+      const releases: number[] = [];
+      const client: Partial<PoolClient> = {
+        query: vi
+          .fn()
+          // SET app.current_tenant_id — succeeds
+          .mockResolvedValueOnce({ rows: [], rowCount: 0 } as unknown as QueryResult)
+          // INSERT — rejects with the supplied pg error
+          .mockRejectedValueOnce(err)
+          // RESET app.current_tenant_id (finally) — succeeds
+          .mockResolvedValueOnce({ rows: [], rowCount: 0 } as unknown as QueryResult),
+        release: vi.fn(() => {
+          releases.push(1);
+        }) as unknown as PoolClient['release'],
+      };
+      const pool: Partial<Pool> = {
+        connect: vi.fn(async () => client as PoolClient) as unknown as Pool['connect'],
+      };
+      return { pool: pool as Pool, releases, client: client as PoolClient };
+    }
+
+    it('maps EXCLUDE-constraint violation (23P01 / no_double_booking) to ConflictError', async () => {
+      const pgErr = Object.assign(new Error('conflicting key value violates exclusion constraint "no_double_booking"'), {
+        code: '23P01',
+        constraint: 'no_double_booking',
+      });
+      const { pool, releases } = buildErrorPool(pgErr);
+      const repo = new PgAssignmentRepository(pool);
+
+      let caught: unknown;
+      try {
+        await repo.create(makeAssignment());
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(ConflictError);
+      expect((caught as ConflictError).statusCode).toBe(409);
+      expect((caught as Error).message).toMatch(/already booked/i);
+      // Client still released exactly once even though INSERT threw.
+      expect(releases).toHaveLength(1);
+    });
+
+    it('maps partial-unique violation (23505 / uq_assignment_primary_per_appointment) to ConflictError', async () => {
+      const pgErr = Object.assign(new Error('duplicate key value violates unique constraint "uq_assignment_primary_per_appointment"'), {
+        code: '23505',
+        constraint: 'uq_assignment_primary_per_appointment',
+      });
+      const { pool } = buildErrorPool(pgErr);
+      const repo = new PgAssignmentRepository(pool);
+
+      await expect(repo.create(makeAssignment({ isPrimary: true }))).rejects.toBeInstanceOf(ConflictError);
+    });
+
+    it('does not mask unrelated DB errors as ConflictError', async () => {
+      const pgErr = Object.assign(new Error('connection terminated'), { code: '08006' });
+      const { pool } = buildErrorPool(pgErr);
+      const repo = new PgAssignmentRepository(pool);
+
+      let caught: unknown;
+      try {
+        await repo.create(makeAssignment());
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      expect(caught).not.toBeInstanceOf(ConflictError);
+      expect((caught as Error).message).toMatch(/connection terminated/);
+    });
+
+    it('also maps the conflict on UPDATE path (rescheduling into a busy slot)', async () => {
+      const pgErr = Object.assign(new Error('exclusion'), {
+        code: '23P01',
+        constraint: 'no_double_booking',
+      });
+      const { pool } = buildErrorPool(pgErr);
+      const repo = new PgAssignmentRepository(pool);
+
+      await expect(repo.update(makeAssignment())).rejects.toBeInstanceOf(ConflictError);
     });
   });
 });

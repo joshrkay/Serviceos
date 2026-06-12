@@ -1,0 +1,15 @@
+{
+  "id": "transcript-094",
+  "type": "inbound_call",
+  "duration_seconds": 100,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is Maria Lopez. I need to reschedule my appointment for the air handler. Dispatcher: No problem Maria. When works better for you? Customer: Could we do Thursday morning? Dispatcher: That works. I've moved your appointment to Thursday morning. Customer: Perfect, thanks.",
+  "expected_entities": {
+    "customer_name": "Maria Lopez",
+    "issue": "reschedule air handler appointment",
+    "equipment": "air handler",
+    "address": "",
+    "appointment_window": "Thursday morning"
+  },
+  "source": "synthetic"
+}
