@@ -648,9 +648,84 @@ describe('RV-071 — approve_proposal / reject_proposal intents', () => {
 // eslint-disable-next-line import/first
 import {
   EXTENDED_INTENTS_PROMPT_SECTION,
+  EXTENDED_INTENT_TYPES,
   isLookupIntent,
   matchExtendedIntentPhrase,
 } from '../../../src/ai/orchestration/intent-classifier';
+
+// ─── Consistency pin: EXTENDED_INTENT_TYPES ↔ EXTENDED_INTENTS_PROMPT_SECTION ──
+//
+// Encodes three invariants established by the Architect:
+//   1. The set of intent names quoted in EXTENDED_INTENTS_PROMPT_SECTION equals
+//      the set of members in EXTENDED_INTENT_TYPES.
+//   2. Every EXTENDED_INTENT_TYPES member appears in SUPPORTED_INTENTS.
+//   3. Every EXTENDED_INTENT_PHRASES entry is in the read-only-entity-free
+//      allowlist {lookup_day_overview, lookup_digest, lookup_pending_items} —
+//      i.e. `complaint` (proposal-driving) is excluded.
+//
+// These tests will fail red if a new extended intent is added to one place
+// but not the other, or if a proposal-driving intent is accidentally added
+// to the phrase short-circuit list.
+
+describe('consistency pin — EXTENDED_INTENT_TYPES', () => {
+  const PHRASE_MATCH_ALLOWLIST = new Set([
+    'lookup_day_overview',
+    'lookup_digest',
+    'lookup_pending_items',
+  ]);
+
+  // Extract quoted intent names from EXTENDED_INTENTS_PROMPT_SECTION.
+  // The prompt uses `- "intent_name"` syntax; this regex collects every
+  // quoted token on a line that starts with `- "`.
+  function intentNamesFromPrompt(section: string): Set<string> {
+    const names = new Set<string>();
+    for (const line of section.split('\n')) {
+      const m = /^-\s+"([a-z_]+)"/.exec(line.trim());
+      if (m) names.add(m[1]);
+    }
+    return names;
+  }
+
+  it('quoted intents in EXTENDED_INTENTS_PROMPT_SECTION match EXTENDED_INTENT_TYPES', () => {
+    const fromPrompt = intentNamesFromPrompt(EXTENDED_INTENTS_PROMPT_SECTION);
+    const fromSet = new Set(EXTENDED_INTENT_TYPES);
+    for (const name of fromPrompt) {
+      expect(fromSet.has(name as never), `"${name}" in prompt but not in EXTENDED_INTENT_TYPES`).toBe(true);
+    }
+    for (const name of fromSet) {
+      expect(fromPrompt.has(name), `"${name}" in EXTENDED_INTENT_TYPES but not quoted in prompt`).toBe(true);
+    }
+  });
+
+  it('every EXTENDED_INTENT_TYPES member is in SUPPORTED_INTENTS', () => {
+    // SUPPORTED_INTENTS is not exported; test via parseClassifierJson (imported
+    // at the top of this file): it returns non-null only for supported intents.
+    for (const intent of EXTENDED_INTENT_TYPES) {
+      const result = parseClassifierJson(JSON.stringify({ intentType: intent, confidence: 0.9 }));
+      expect(result, `"${intent}" in EXTENDED_INTENT_TYPES but not accepted by parseClassifierJson`).not.toBeNull();
+    }
+  });
+
+  it('every EXTENDED_INTENT_PHRASES key is in the entity-free read-only allowlist', () => {
+    // matchExtendedIntentPhrase tests reveal which intents are phrase-matched.
+    // We verify indirectly: all phrase-triggered intents must be in PHRASE_MATCH_ALLOWLIST.
+    // Use a set of unambiguous stereotype transcripts for each allowlist member.
+    const triggersByIntent: Record<string, string[]> = {
+      lookup_day_overview: ["What's my day look like?", 'Give me my morning overview'],
+      lookup_digest: ['Read me my day', 'give me the daily digest'],
+      lookup_pending_items: ['What am I waiting on?', 'what are we still waiting on'],
+    };
+    for (const [intent, transcripts] of Object.entries(triggersByIntent)) {
+      expect(PHRASE_MATCH_ALLOWLIST.has(intent), `"${intent}" must be in the phrase-match allowlist`).toBe(true);
+      for (const tx of transcripts) {
+        expect(matchExtendedIntentPhrase(tx), `"${tx}" should match "${intent}"`).toBe(intent);
+      }
+    }
+    // complaint must NOT be phrase-matchable (it's proposal-driving).
+    expect(matchExtendedIntentPhrase('I want to file a complaint about the install')).toBeNull();
+    expect(matchExtendedIntentPhrase('I have a complaint')).toBeNull();
+  });
+});
 
 describe('Phase-2 Track A — extended operator intents', () => {
   it('parseClassifierJson accepts the new intents', () => {
@@ -672,15 +747,19 @@ describe('Phase-2 Track A — extended operator intents', () => {
     expect(matchExtendedIntentPhrase('I am waiting on a delivery tomorrow')).toBeNull();
   });
 
-  it('matchExtendedIntentPhrase matches only explicit complaint phrasings', () => {
-    expect(matchExtendedIntentPhrase('I want to file a complaint about the install')).toBe('complaint');
-    expect(matchExtendedIntentPhrase('I would like to complain')).toBe('complaint');
-    // Fix #2: "I'd like to complain" must match (contraction with no whitespace after "I").
-    expect(matchExtendedIntentPhrase("I'd like to complain about the service")).toBe('complaint');
-    expect(matchExtendedIntentPhrase('I have a complaint')).toBe('complaint');
-    // Vague unhappiness is NOT deterministically a complaint — the LLM /
-    // escalation paths own it (e.g. the vague-complaint-escalated corpus
-    // script must keep escalating, not minting records).
+  it('matchExtendedIntentPhrase does NOT match complaint phrasings (complaint is LLM-path only)', () => {
+    // complaint was removed from EXTENDED_INTENT_PHRASES because it is
+    // a proposal-driving intent that extracts entities (noteBody /
+    // customerName / jobReference). The deterministic path returns no
+    // entities, creating a quality cliff. The LLM prompt section
+    // (EXTENDED_INTENTS_PROMPT_SECTION) owns complaint classification
+    // and entity extraction entirely.
+    expect(matchExtendedIntentPhrase('I want to file a complaint about the install')).toBeNull();
+    expect(matchExtendedIntentPhrase('I would like to complain')).toBeNull();
+    expect(matchExtendedIntentPhrase("I'd like to complain about the service")).toBeNull();
+    expect(matchExtendedIntentPhrase('I have a complaint')).toBeNull();
+    // Corpus safety: vague unhappiness also not matched (trivially true
+    // now that the whole complaint block is absent).
     expect(matchExtendedIntentPhrase("I'm not happy with my last service.")).toBeNull();
   });
 
