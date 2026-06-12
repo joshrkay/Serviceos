@@ -557,9 +557,13 @@ export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
     }
 
     if (!this.estimateRepo || !this.sendService) {
-      // Dev/test wiring without the send path — synthetic passthrough,
-      // matching the degraded-dep convention of the other comms handlers.
-      return { success: true, resultEntityId: estimateId };
+      // Fail-closed: customer-facing sends must never silently no-op with a
+      // clean audit trail. Owner-approved comms that reach this handler
+      // without the required deps wired are a misconfiguration — surface it.
+      return {
+        success: false,
+        error: 'send service not configured',
+      };
     }
 
     const estimate = await this.estimateRepo.findById(context.tenantId, estimateId);
@@ -599,12 +603,15 @@ export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
             `at ${recent.sentAt.toISOString()} — wait 48h between reminders`,
         };
       }
-    } else if (
+    }
+
+    // Belt-and-braces: ALSO check estimate.lastReminderAt regardless of
+    // whether the dispatch repo is wired. Whichever source is more recent
+    // governs; both checks must pass for the nudge to proceed.
+    if (
       estimate.lastReminderAt !== undefined &&
       estimate.lastReminderAt.getTime() >= cooldownFloor
     ) {
-      // Fallback when no dispatch repo is wired: the estimate's own
-      // reminder bookkeeping still enforces the 48h spacing.
       return {
         success: false,
         error:

@@ -93,6 +93,7 @@ function queueMessage(
 
 function fullPayload(): MmsIngestQueuePayload {
   return {
+    v: 1,
     tenantId: TENANT,
     fromPhone: TECH_PHONE,
     messageSid: 'SM-mms-1',
@@ -211,5 +212,33 @@ describe('mms-ingest-worker (RV-050 / P0-009)', () => {
     );
     const attachments = await attachmentRepo.listByEntity(TENANT, 'job', JOB_ID);
     expect(attachments).toHaveLength(1);
+  });
+
+  it('accepts a legacy payload without v field (in-flight compat)', async () => {
+    const worker = createMmsIngestWorker(deps);
+    const legacyPayload = { ...fullPayload() } as Partial<MmsIngestQueuePayload>;
+    // Simulate a pre-versioning message by deleting v.
+    delete (legacyPayload as Record<string, unknown>)['v'];
+    const logger = silentLogger();
+    await expect(
+      worker.handle(queueMessage(legacyPayload), logger),
+    ).resolves.toBeUndefined();
+    // Should have processed normally — no error log, attachments stored.
+    expect(logger.error).not.toHaveBeenCalled();
+    const attachments = await attachmentRepo.listByEntity(TENANT, 'job', JOB_ID);
+    expect(attachments).toHaveLength(1);
+  });
+
+  it('drops a payload with an unknown version without throwing (permanent, no retry)', async () => {
+    const worker = createMmsIngestWorker(deps);
+    const logger = silentLogger();
+    await expect(
+      worker.handle(
+        queueMessage({ ...fullPayload(), v: 99 as unknown as 1 }),
+        logger,
+      ),
+    ).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalled();
+    expect(fetchMedia).not.toHaveBeenCalled();
   });
 });

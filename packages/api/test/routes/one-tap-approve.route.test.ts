@@ -200,6 +200,48 @@ describe('GET /public/proposals/one-tap-approve', () => {
   });
 });
 
+describe('approve-success HTML escaping', () => {
+  it('escapes a <script> tag in proposal summary — no raw HTML in the success page', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const smsEventRepo = new InMemoryProposalSmsEventRepository();
+
+    const base = createProposal({
+      tenantId: TENANT,
+      proposalType: 'create_appointment',
+      payload: {},
+      summary: '<script>alert(1)</script>',
+      confidenceScore: 0.97,
+      createdBy: 'voice',
+    });
+    const proposal = await proposalRepo.create({ ...base, status: 'ready_for_review' });
+
+    const app = express();
+    app.use(express.json());
+    app.use(
+      '/public/proposals',
+      createOneTapApproveRouter({
+        proposalRepo,
+        auditRepo,
+        secret: SECRET,
+        consumeNonce: createInMemoryNonceStore(),
+        smsEventRepo,
+      }),
+    );
+
+    const { token } = mint(proposal.id);
+    const res = await request(app)
+      .get('/public/proposals/one-tap-approve')
+      .query({ token });
+
+    expect(res.status).toBe(200);
+    // Raw script tag must not appear in the response body.
+    expect(res.text).not.toContain('<script>');
+    // Escaped form must be present.
+    expect(res.text).toContain('&lt;script&gt;');
+  });
+});
+
 describe('RV-073 — one-tap approvals tag channel one_tap', () => {
   it('proposal.approved audit metadata carries channel one_tap', async () => {
     const { app, auditRepo, proposal } = await makeApp();

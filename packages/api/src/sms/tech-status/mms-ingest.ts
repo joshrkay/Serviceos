@@ -259,8 +259,16 @@ export function createTwilioMediaFetcher(
 /** Queue message type consumed by src/workers/mms-ingest-worker.ts. */
 export const MMS_INGEST_QUEUE_TYPE = 'mms_ingest';
 
-/** Payload of one enqueued inbound-MMS ingestion job. */
+/**
+ * Payload of one enqueued inbound-MMS ingestion job.
+ *
+ * Forward-compat convention: `v` is the schema version. New fields added in
+ * future versions MUST be optional so the worker can handle both v:1 and
+ * absent (legacy in-flight messages that pre-date this field).
+ */
 export interface MmsIngestQueuePayload {
+  /** Schema version — always 1 for messages produced by this codebase. */
+  v: 1;
   tenantId: string;
   /** Sender in E.164 — identity-gated by the worker, not the webhook. */
   fromPhone: string;
@@ -300,6 +308,7 @@ export function registerMmsIngestHandler(
       const media = ctx.media ?? [];
       if (media.length === 0) return { outcome: 'ignored_no_media' };
       const payload: MmsIngestQueuePayload = {
+        v: 1,
         tenantId: ctx.tenantId,
         fromPhone: ctx.fromE164,
         messageSid: ctx.messageSid,

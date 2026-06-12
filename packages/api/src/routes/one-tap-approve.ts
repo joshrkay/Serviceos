@@ -348,7 +348,7 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
         .send(
           page(
             'Approved',
-            `“${approved.summary}” has been approved and will execute shortly.`,
+            `”${escapeHtml(approved.summary)}” has been approved and will execute shortly.`,
           ),
         );
     } catch (err) {

@@ -40,7 +40,16 @@ export function createMmsIngestWorker(
   return {
     type: MMS_INGEST_QUEUE_TYPE,
     async handle(message: QueueMessage<MmsIngestQueuePayload>, logger: Logger): Promise<void> {
-      const { tenantId, fromPhone, messageSid, mediaItems } = message.payload ?? {};
+      const { v, tenantId, fromPhone, messageSid, mediaItems } = message.payload ?? {};
+      // Accept v:1 or absent (legacy in-flight messages that pre-date the
+      // version field); any other explicit version is rejected as unknown.
+      if (v !== undefined && v !== 1) {
+        logger.error('mms_ingest: unknown payload version — dropping', {
+          messageId: message.id,
+          v,
+        });
+        return;
+      }
       if (
         typeof tenantId !== 'string' ||
         typeof fromPhone !== 'string' ||

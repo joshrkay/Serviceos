@@ -258,6 +258,37 @@ describe('SendEstimateNudgeExecutionHandler', () => {
     expect(sendService.sendEstimate).toHaveBeenCalledTimes(1);
   });
 
+  it('fails-closed when estimateRepo/sendService are absent — returns FAILURE, never a synthetic success', async () => {
+    const bare = new SendEstimateNudgeExecutionHandler(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => NOW,
+    );
+    const result = await bare.execute(makeProposal({ estimateId: ESTIMATE_ID }), {
+      tenantId: TENANT,
+      executedBy: 'owner-1',
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/send service not configured/);
+  });
+
+  it('belt-and-braces: lastReminderAt also blocks the nudge even when dispatch repo clears (both sources consulted)', async () => {
+    // dispatchRepo has no recent rows, but lastReminderAt is recent — must still block.
+    await estimateRepo.update(TENANT, ESTIMATE_ID, {
+      reminderCount: 1,
+      lastReminderAt: new Date(NOW.getTime() - 60 * 60 * 1000), // 1h ago — within 48h
+    });
+    const result = await handler.execute(makeProposal({ estimateId: ESTIMATE_ID }), {
+      tenantId: TENANT,
+      executedBy: 'owner-1',
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Nudge refused/);
+    expect(sendService.sendEstimate).not.toHaveBeenCalled();
+  });
+
   it('falls back to lastReminderAt for the cooldown when no dispatch repo is wired', async () => {
     await estimateRepo.update(TENANT, ESTIMATE_ID, {
       reminderCount: 1,

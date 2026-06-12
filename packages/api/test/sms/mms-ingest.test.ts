@@ -265,6 +265,7 @@ describe('dispatcher media integration (RV-050)', () => {
     ];
     expect(type).toBe(MMS_INGEST_QUEUE_TYPE);
     expect(payload).toEqual({
+      v: 1,
       tenantId: TENANT,
       fromPhone: TECH_PHONE,
       messageSid: 'SM-mms-1',
