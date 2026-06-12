@@ -162,6 +162,65 @@ describe('RV-225 — owner edit over Gather (end to end)', () => {
     expect(await h.smsEventRepo.hasUnappliedEditRequest(TENANT, proposal.id)).toBe(false);
   });
 
+  it('RV-226 — edit then approve in the same call: confirm readback + executed payload are the EDITED values', async () => {
+    const gateway = makeGateway(
+      [EDIT_CLASSIFICATION, APPROVE_CLASSIFICATION],
+      JSON.stringify({ totalCents: 20000 }),
+    );
+    const h = makeHarness(gateway);
+    const proposal = await seedPending(h.proposalRepo);
+    const sessionId = await startCall(h, OWNER_PHONE, 'CA-edit-2');
+    const turn = (speechResult: string) =>
+      h.adapter.handleGather({
+        sessionId,
+        callSid: 'CA-edit-2',
+        speechResult,
+        confidence: 0.9,
+        tenantId: TENANT,
+      });
+
+    expect(await turn('change the Henderson estimate to 200 dollars')).toContain('$200.00');
+
+    // Approve: the readback MUST speak the edited amount…
+    const readback = await turn('approve the Henderson estimate');
+    expect(readback).toContain('$200.00');
+    expect(readback).not.toContain('$450.00');
+
+    // …and the explicit yes executes against the EDITED payload.
+    const confirmed = await turn('yes');
+    expect(confirmed).toContain('Approved');
+    const stored = await h.proposalRepo.findById(TENANT, proposal.id);
+    expect(stored?.status).toBe('approved');
+    expect(stored?.payload.totalCents).toBe(20000);
+  });
+
+  it('RV-226 — an UNAPPLIED voice edit blocks a voice approve later in the call', async () => {
+    // Interpreter returns {} → no delta → the request is recorded, not applied.
+    const gateway = makeGateway([EDIT_CLASSIFICATION, APPROVE_CLASSIFICATION], '{}');
+    const h = makeHarness(gateway);
+    const proposal = await seedPending(h.proposalRepo);
+    const sessionId = await startCall(h, OWNER_PHONE, 'CA-edit-3');
+    const turn = (speechResult: string) =>
+      h.adapter.handleGather({
+        sessionId,
+        callSid: 'CA-edit-3',
+        speechResult,
+        confidence: 0.9,
+        tenantId: TENANT,
+      });
+
+    const recorded = await turn('change the Henderson estimate to 200 dollars');
+    expect(recorded.toLowerCase()).toContain('review queue');
+    expect(await h.smsEventRepo.hasUnappliedEditRequest(TENANT, proposal.id)).toBe(true);
+
+    // Approval over the SAME voice channel is blocked until the edit is applied.
+    const blocked = await turn('approve the Henderson estimate');
+    expect(blocked.toLowerCase()).toContain('your note is attached');
+    const stored = await h.proposalRepo.findById(TENANT, proposal.id);
+    expect(stored?.status).toBe('ready_for_review');
+    expect(stored?.payload.totalCents).toBe(45000);
+  });
+
   it('NON-owner caller classified as edit_proposal is hard-gated — nothing changes', async () => {
     const gateway = makeGateway([EDIT_CLASSIFICATION], JSON.stringify({ totalCents: 20000 }));
     const h = makeHarness(gateway);

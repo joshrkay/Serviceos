@@ -1304,3 +1304,67 @@ describe('RV-225 — voice edit dialogue', () => {
     expect(h.interpreterCalls).toHaveLength(0);
   });
 });
+
+describe('RV-226 — edit-then-approve sequencing', () => {
+  it('an unapplied voice edit blocks a voice approve in the same session', async () => {
+    const h = makeEditHarness({ delta: null });
+    const proposal = await seedEditablePending(h.proposalRepo);
+
+    const edit = await startVoiceEdit(h.deps, {
+      ...ref,
+      reference: 'the Henderson estimate',
+      instruction: 'make it nicer somehow',
+    });
+    expect(edit.outcome).toBe('edit_recorded');
+
+    // Approve in the same session — blocked until the edit is resolved.
+    const approve = await startVoiceApproval(h.deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Henderson estimate',
+    });
+    expect(approve.outcome).toBe('blocked_pending_edit');
+    expect(approve.proposalId).toBe(proposal.id);
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+    expect(
+      h.auditRepo
+        .getAll()
+        .some((e) => e.eventType === 'proposal.voice_approve_blocked_pending_edit'),
+    ).toBe(true);
+  });
+
+  it('edit → approve end-to-end: the confirm readback and the executed payload are the EDITED values', async () => {
+    const h = makeEditHarness({ delta: { totalCents: 20000 } });
+    const proposal = await seedEditablePending(h.proposalRepo);
+
+    const edit = await startVoiceEdit(h.deps, {
+      ...ref,
+      reference: 'the Henderson estimate',
+      instruction: 'change the total to 200 dollars',
+    });
+    expect(edit.outcome).toBe('edited');
+
+    // Approve in the same session. The readback MUST speak the edited
+    // amount — never the pre-edit $450.00.
+    const start = await startVoiceApproval(h.deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Henderson estimate',
+    });
+    expect(start.outcome).toBe('readback');
+    expect(start.speak).toContain('$200.00');
+    expect(start.speak).not.toContain('$450.00');
+
+    const confirm = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: 'yes',
+      pending: start.pending!,
+    });
+    expect(confirm.outcome).toBe('approved');
+
+    // Payload-at-execution equals the edited payload.
+    const stored = await h.proposalRepo.findById(TENANT, proposal.id);
+    expect(stored?.status).toBe('approved');
+    expect(stored?.payload.totalCents).toBe(20000);
+  });
+});
