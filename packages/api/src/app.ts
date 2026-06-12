@@ -235,6 +235,8 @@ import { PgJobFileRepository } from './files/pg-job-file';
 import { InMemoryCatalogItemRepository } from './catalog/catalog-item';
 import { PgCatalogItemRepository } from './catalog/pg-catalog-item';
 import { createStorageProvider } from './files/storage-provider';
+import { createSharpImageProcessor } from './files/image-processor';
+import { createImagePostProcessWorker } from './workers/image-post-process-worker';
 import { PgWebhookRepository } from './webhooks/pg-webhook';
 import { PgWebhookEventRepository } from './webhooks/pg-webhook-event';
 import { PgAssignmentRepository } from './appointments/pg-assignment';
@@ -271,6 +273,10 @@ import { createPublicPaymentsRouter } from './routes/public-payments';
 import { createOneTapApproveRouter } from './routes/one-tap-approve';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
+import { runDailyDigestSweep, DIGEST_SWEEP_INTERVAL_MS } from './workers/daily-digest-worker';
+import { PgDailyDigestRepository } from './digest/pg-daily-digest';
+import { InMemoryDailyDigestRepository, type DailyDigestPayload } from './digest/digest-service';
+import { composeBrandVoiceMessage } from './ai/brand-voice/composer';
 import { runOverdueInvoiceSweep } from './workers/overdue-invoice-worker';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
 import { PgReviewRepository } from './reputation/pg-review';
@@ -1133,6 +1139,21 @@ export function createApp(): express.Express {
     diffAnalysisWorker as import('./queues/queue').WorkerHandler<unknown>
   );
 
+  // ── Image post-process worker (RV-006): strips EXIF, converts
+  // HEIC/WEBP→JPEG, generates thumbnails and stamps content hashes for
+  // files enqueued after a successful attach. Uses the same storage
+  // provider/bucket as the upload path; on the dev provider (which
+  // discards bytes) the worker no-ops gracefully.
+  const imagePostProcessWorker = createImagePostProcessWorker({
+    fileRepo,
+    storage: storageProvider,
+    processor: createSharpImageProcessor(),
+  });
+  workerRegistry.set(
+    imagePostProcessWorker.type,
+    imagePostProcessWorker as import('./queues/queue').WorkerHandler<unknown>
+  );
+
   // ── Auto-delivery worker: sweeps approved proposals past the 5-second
   // undo window and hands them to the executor. Closes the operational
   // question from the D9 undo-window slice: "who kicks execution after
@@ -1434,6 +1455,7 @@ export function createApp(): express.Express {
     googleReviews: 590006,
     batchInvoice: 590007,
     callMeBack: 590008,
+    dailyDigest: 590009,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -1589,7 +1611,16 @@ export function createApp(): express.Express {
   // matching worker by message.type. This is the single consumer for the
   // queue — multiple setInterval poll loops would race for the same row
   // under PgQueue's FOR UPDATE SKIP LOCKED semantics and waste cycles.
+  //
+  // In-flight guard: setInterval fires every 250ms regardless of whether the
+  // previous async callback has resolved. Without the guard, slow workers
+  // (e.g. the image pipeline holding large in-memory buffers) can stack up
+  // unbounded concurrent ticks → OOM. The boolean flag ensures at most one
+  // tick body runs at a time; overlapping ticks are silently skipped.
+  let pollInFlight = false;
   registerInterval(setInterval(async () => {
+    if (pollInFlight) return;
+    pollInFlight = true;
     try {
       const message = await queue.receive();
       if (!message) return;
@@ -1614,6 +1645,8 @@ export function createApp(): express.Express {
       workerLogger.error('Queue poll failed', {
         error: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      pollInFlight = false;
     }
   }, 250));
 
@@ -1953,6 +1986,21 @@ export function createApp(): express.Express {
     callControl: telephonyCallControl,
     dispatcherPhoneResolver: createBusinessPhoneDispatcherResolver(settingsRepo),
     settingsRepo,
+    // RV-070 — owner-line recognition: backup supervisor mobile lookup
+    // (mirrors the SMS reply transport's approver identity).
+    userRepo,
+    // RV-071 — voice approval channel: pending-edit parity guard + the
+    // one-tap SMS fallback for refused money/irreversible approvals
+    // (same secret/sender/URL/owner-phone wiring as P12-004).
+    smsEventRepo: proposalSmsEventRepo,
+    voiceApprovalOneTap: {
+      ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
+      ...(oneTapSecret ? { secret: oneTapSecret } : {}),
+      buildApproveUrl: (token: string) =>
+        `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
+      resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
+      recordSmsEvent: recordProposalSmsRender,
+    },
     whisperCache: sharedWhisperCache,
     ...(messageDelivery
       ? {
@@ -2590,7 +2638,8 @@ export function createApp(): express.Express {
     createJobPhotosRouter({
       // RV-005: attachmentRepo enables the dual-write shadow — every job
       // photo created through this flow also lands in `attachments`.
-      service: new JobPhotoService(jobPhotoRepo, fileRepo, storageProvider, attachmentRepo),
+      // RV-006: queue kicks the image post-process pipeline per photo.
+      service: new JobPhotoService(jobPhotoRepo, fileRepo, storageProvider, attachmentRepo, queue),
       fileRepo,
       storage: storageProvider,
       bucket: storageBucket,
@@ -2607,7 +2656,8 @@ export function createApp(): express.Express {
         job: async (tenantId, id) => (await jobRepo.findById(tenantId, id)) !== null,
         invoice: async (tenantId, id) => (await invoiceRepo.findById(tenantId, id)) !== null,
         estimate: async (tenantId, id) => (await estimateRepo.findById(tenantId, id)) !== null,
-      }),
+        // RV-006: queue kicks the image post-process pipeline per attach.
+      }, queue),
       fileRepo,
       storage: storageProvider,
       bucket: storageBucket,
@@ -3120,6 +3170,87 @@ export function createApp(): express.Express {
       });
     });
   }, 3_600_000));
+
+  // RV-061 (F-9) — end-of-day digest sweep. Every 15 minutes, tenants whose
+  // tenant-local digest_time fell in the just-passed bucket get their digest
+  // computed (same query functions as the money dashboard), narrated via the
+  // brand-voice composer (deterministic fallback when the LLM fails), stored
+  // idempotently on (tenant, date), and sent to the owner's phone with
+  // one-tap approve links. Same setInterval + leader-lock driver as the
+  // other sweeps; in-memory dev returns no tenants so it no-ops locally.
+  const dailyDigestLogger = createLogger({
+    service: 'daily-digest-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  const dailyDigestRepo = pool
+    ? new PgDailyDigestRepository(pool)
+    : new InMemoryDailyDigestRepository();
+  // Capture as const so the closure narrows (messageDelivery is a let).
+  const digestDelivery = messageDelivery;
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.dailyDigest, async () => {
+      await runDailyDigestSweep({
+        settingsRepo,
+        digestRepo: dailyDigestRepo,
+        computeDeps: {
+          paymentRepo,
+          invoiceRepo,
+          estimateRepo,
+          jobRepo,
+          appointmentRepo,
+          proposalRepo,
+          customerRepo,
+          settingsRepo,
+        },
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        // Narrative through the brand-voice composer ONLY when a real LLM
+        // provider is configured — the mock gateway's canned JSON must not
+        // become an owner-facing narrative. Composer failures fall back to
+        // the deterministic template inside the worker.
+        ...(config.AI_PROVIDER_API_KEY
+          ? {
+              composeNarrative: async (tenantId: string, payload: DailyDigestPayload) => {
+                const result = await composeBrandVoiceMessage(
+                  {
+                    tenantId,
+                    intent: 'digest_narrative',
+                    // PII opt-in: counts only — no customer names or amounts
+                    // beyond the aggregate figures the owner already sees.
+                    context: {
+                      moneyInCents: payload.revenueCents,
+                      jobsCompleted: payload.jobsCompletedCount,
+                      tomorrowVisits: payload.tomorrow.appointmentCount,
+                      tomorrowFirstStart: payload.tomorrow.firstStartIso ?? 'none scheduled',
+                      approvalsWaiting: payload.pendingApprovals.totalCount,
+                      overdueInvoices: payload.overdueInvoicesCount,
+                      unbilledCompletedJobs: payload.unbilledJobs.length,
+                    },
+                    maxChars: 420,
+                  },
+                  { gateway: llmGateway, settingsRepo },
+                );
+                return result.text;
+              },
+            }
+          : {}),
+        ...(digestDelivery ? { delivery: digestDelivery } : {}),
+        dispatchRepo,
+        ...(oneTapSecret ? { oneTapSecret } : {}),
+        buildApproveUrl: (token: string) =>
+          `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
+        publicBaseUrl,
+        logger: dailyDigestLogger,
+      });
+    }).catch((err) => {
+      dailyDigestLogger.error('Daily-digest sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, DIGEST_SWEEP_INTERVAL_MS));
 
   // §6 Time-to-Cash: overdue-invoice sweep. Hourly — invoice due dates
   // have day granularity, so an hourly check surfaces newly-overdue

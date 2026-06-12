@@ -18,6 +18,7 @@ import { ErrorState } from '../ErrorState';
 import { apiFetch } from '../../utils/api-fetch';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
+import { AttachmentSection } from '../attachments/AttachmentSection';
 
 type InvoiceStatus = 'Draft' | 'Sent' | 'Unpaid' | 'Paid' | 'Overdue' | 'Canceled';
 
@@ -770,6 +771,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
               {status !== 'Paid' && (
                 <PaymentMethodsCard paymentLink={paymentLink} />
               )}
+              <AttachmentSection entityType="invoice" entityId={invoiceId} />
 
               {/* Notes section */}
               <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
