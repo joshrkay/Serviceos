@@ -1313,7 +1313,7 @@ describe('RV-071 — voice-action-router refuses owner approval intents', () => 
 });
 
 describe('Phase-2 Track A — extended intents routing', () => {
-  it.each(['lookup_day_overview', 'lookup_digest'])(
+  it.each(['lookup_day_overview', 'lookup_digest', 'lookup_pending_items'])(
     '%s is read-only: no proposal, exactly like sibling lookup_* intents',
     async (intentType) => {
     const proposalRepo = new InMemoryProposalRepository();

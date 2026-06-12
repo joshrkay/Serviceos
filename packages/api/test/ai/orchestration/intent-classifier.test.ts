@@ -654,7 +654,7 @@ import {
 
 describe('Phase-2 Track A — extended operator intents', () => {
   it('parseClassifierJson accepts the new intents', () => {
-    for (const intentType of ['lookup_day_overview', 'lookup_digest'] as const) {
+    for (const intentType of ['lookup_day_overview', 'lookup_digest', 'lookup_pending_items'] as const) {
       const out = parseClassifierJson(JSON.stringify({ intentType, confidence: 0.9 }));
       expect(out?.intentType).toBe(intentType);
     }
@@ -663,6 +663,13 @@ describe('Phase-2 Track A — extended operator intents', () => {
   it('isLookupIntent covers the new lookup intents', () => {
     expect(isLookupIntent('lookup_day_overview')).toBe(true);
     expect(isLookupIntent('lookup_digest')).toBe(true);
+    expect(isLookupIntent('lookup_pending_items')).toBe(true);
+  });
+
+  it('matchExtendedIntentPhrase matches the canonical pending-items phrasings only', () => {
+    expect(matchExtendedIntentPhrase('What am I waiting on?')).toBe('lookup_pending_items');
+    expect(matchExtendedIntentPhrase('what are we still waiting on')).toBe('lookup_pending_items');
+    expect(matchExtendedIntentPhrase('I am waiting on a delivery tomorrow')).toBeNull();
   });
 
   it('matchExtendedIntentPhrase matches the canonical digest phrasings only', () => {

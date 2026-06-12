@@ -71,6 +71,10 @@ export type IntentType =
   // digest narrative ("read me my day"). Read-only; same extendedIntents
   // gating as lookup_day_overview.
   | 'lookup_digest'
+  // Phase-2 Track A (RV-085) — owner asks what they're waiting on
+  // (aging estimates, unpaid invoices, unanswered recovery threads).
+  // Read-only; same extendedIntents gating.
+  | 'lookup_pending_items'
   // P11-002: caller asks to switch the call language ("english please" /
   // "hablo español"). The adapter consumes this as a signal to flip the
   // session language — it is NOT a proposal-driving intent.
@@ -130,6 +134,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'lookup_catalog',
   'lookup_day_overview',
   'lookup_digest',
+  'lookup_pending_items',
   'language_switch',
   'operator_request',
   'confirm',
@@ -796,6 +801,13 @@ export const EXTENDED_INTENTS_PROMPT_SECTION = `Extended operator intents (this 
                            Examples: "Read me my day"
                                      "Read me my daily digest"
                                      "What did the digest say?"
+- "lookup_pending_items" — the owner asks what they're WAITING ON from
+                           customers: estimates sent but not accepted,
+                           unpaid/overdue invoices, unanswered follow-up
+                           texts. Read-only.
+                           Examples: "What am I waiting on?"
+                                     "What's still out there?"
+                                     "Which estimates haven't been accepted?"
 Notes:
 - These are READ-ONLY intents — never classify a command that creates or
   changes a record as one of them.
@@ -824,6 +836,13 @@ const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: Rea
       /\bread\s+(?:me\s+)?my\s+day\b/i,
       /\b(?:read|give)\s+me\s+(?:my|the)\s+(?:daily\s+)?digest\b/i,
       /\bwhat\s+did\s+the\s+digest\s+say\b/i,
+    ],
+  },
+  {
+    intent: 'lookup_pending_items',
+    patterns: [
+      /\bwhat\s+(?:am\s+i|are\s+we)\s+(?:still\s+)?waiting\s+on\b/i,
+      /\bwhat(?:'s| is)\s+(?:still\s+)?(?:out\s+there|outstanding)\s+waiting\b/i,
     ],
   },
 ];
