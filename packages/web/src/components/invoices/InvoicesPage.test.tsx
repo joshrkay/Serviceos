@@ -108,6 +108,79 @@ describe('InvoicesPage', () => {
     expect(screen.getAllByText('$850.00').length).toBeGreaterThan(0);
   });
 
+  it('formats detail line items with fixed cents (123450 cents → $1,234.50)', () => {
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: {
+        id: 'i-detail',
+        invoiceNumber: 'INV-999',
+        status: 'open',
+        dueDate: '2026-04-01',
+        lineItems: [
+          {
+            id: 'li-1',
+            description: 'Labor',
+            quantity: 1,
+            unitPriceCents: 123450,
+            totalCents: 123450,
+            category: 'labor',
+            sortOrder: 0,
+            taxable: true,
+          },
+        ],
+        totals: totalsOf(123450),
+        amountDueCents: 123450,
+        customer: { id: 'c1', displayName: 'Detail Customer' },
+      },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    render(
+      <MemoryRouter>
+        <InvoicesPage defaultSelectedId="i-detail" />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getAllByText('$1,234.50').length).toBeGreaterThan(0);
+  });
+
+  it('keeps trailing .00 on round dollar detail totals', () => {
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: {
+        id: 'i-round',
+        invoiceNumber: 'INV-1000',
+        status: 'open',
+        lineItems: [
+          {
+            id: 'li-1',
+            description: 'Flat rate',
+            quantity: 1,
+            unitPriceCents: 120000,
+            totalCents: 120000,
+            category: 'labor',
+            sortOrder: 0,
+            taxable: true,
+          },
+        ],
+        totals: totalsOf(120000),
+        amountDueCents: 120000,
+        customer: { id: 'c1', displayName: 'Round Total Customer' },
+      },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    render(
+      <MemoryRouter>
+        <InvoicesPage defaultSelectedId="i-round" />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getAllByText('$1,200.00').length).toBeGreaterThan(0);
+  });
+
   it('normalizes API statuses to UI labels', () => {
     renderPage();
     // 'open' → 'Unpaid', 'paid' → 'Paid', 'draft' → 'Draft'

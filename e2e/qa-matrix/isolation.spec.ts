@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { Client } from 'pg';
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
 
 /**
@@ -51,6 +53,64 @@ matrixTest('ISO-01', 'Cross-tenant isolation across core entities + RLS', async 
       expectStatus: [403, 404],
     });
     expect([403, 404], `${r.path} must be hidden from Tenant B`).toContain(res.response.status);
+  }
+
+  // Conversation isolation — thread created under Tenant A.
+  const conv = await h.api.call({
+    method: 'POST',
+    path: '/api/conversations',
+    body: { title: `ISO probe ${Date.now()}`, entityType: 'job', entityId: a.jobId },
+    token: a.token,
+    label: '01-a-conversation',
+    expectStatus: 201,
+  });
+  const conversationId = (conv.response.body as { id: string }).id;
+  for (const r of [
+    { label: '01-b-conversation', path: `/api/conversations/${conversationId}` },
+    { label: '01-b-conversation-messages', path: `/api/conversations/${conversationId}/messages` },
+  ]) {
+    const res = await h.api.call({
+      method: 'GET',
+      path: r.path,
+      token: b.token,
+      label: r.label,
+      expectStatus: [403, 404],
+    });
+    expect([403, 404], `${r.path} must be hidden from Tenant B`).toContain(res.response.status);
+  }
+
+  // Attachments list on Tenant A's job must not be readable as Tenant B.
+  const attachList = await h.api.call({
+    method: 'GET',
+    path: `/api/attachments?entityType=job&entityId=${a.jobId}`,
+    token: b.token,
+    label: '01-b-attachments-list',
+    expectStatus: [403, 404],
+  });
+  expect([403, 404]).toContain(attachList.response.status);
+
+  // Audit events — Tenant B GUC must not see rows for Tenant A's estimate.
+  const auditAsB = await h.db.query({
+    label: '01-audit-as-b',
+    tenantId: b.tenantId,
+    sql: `SELECT count(*)::int AS c FROM audit_events WHERE entity_id = $1`,
+    params: [estimateId],
+  });
+  expect((auditAsB.rows[0] as { c: number }).c, 'tenant B must not see tenant A audit events').toBe(0);
+
+  // Voice recording — seed under A, Tenant B must not read via API.
+  const recordingId = await seedTenantAVoiceRecording(a.tenantId);
+  if (recordingId) {
+    const recRead = await h.api.call({
+      method: 'GET',
+      path: `/api/voice/recordings/${recordingId}`,
+      token: b.token,
+      label: '01-b-recording',
+      expectStatus: [403, 404],
+    });
+    expect([403, 404]).toContain(recRead.response.status);
+  } else {
+    h.evidence.note('Skipped voice recording API probe — E2E_DB_URL_READWRITE unavailable or seed failed.');
   }
 
   // Cross-tenant WRITE attempt: Tenant B writing a note onto Tenant A's customer.
@@ -137,6 +197,37 @@ matrixTest('ISO-01', 'Cross-tenant isolation across core entities + RLS', async 
 });
 
 // ---------------- helpers ----------------
+
+async function seedTenantAVoiceRecording(tenantId: string): Promise<string | null> {
+  const rw = process.env.E2E_DB_URL_READWRITE;
+  if (!rw) return null;
+
+  const fileId = randomUUID();
+  const recordingId = randomUUID();
+  const client = new Client({ connectionString: rw });
+  await client.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL app.current_tenant_id = '${tenantId.replace(/'/g, "''")}'`);
+    await client.query(
+      `INSERT INTO files (id, tenant_id, filename, content_type, size_bytes, s3_bucket, s3_key, uploaded_by)
+       VALUES ($1, $2, 'iso-probe.wav', 'audio/wav', 1, 'qa', 'qa/iso-probe', 'qa-matrix')`,
+      [fileId, tenantId],
+    );
+    await client.query(
+      `INSERT INTO voice_recordings (id, tenant_id, file_id, status, created_by)
+       VALUES ($1, $2, $3, 'pending', 'qa-matrix')`,
+      [recordingId, tenantId, fileId],
+    );
+    await client.query('COMMIT');
+    return recordingId;
+  } catch {
+    await client.query('ROLLBACK').catch(() => void 0);
+    return null;
+  } finally {
+    await client.end();
+  }
+}
 
 function minimalEstimate(jobId: string) {
   return {

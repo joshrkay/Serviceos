@@ -626,7 +626,9 @@ export function createApp(): express.Express {
           await pool.query('SELECT 1');
           return { status: 'ok' };
         } catch {
-          return { status: 'degraded', message: 'Database connection failed' };
+          // Report `down` so /ready returns 503 and stops taking traffic during
+          // a genuine DB outage. /health stays 200 (liveness) per railway.toml.
+          return { status: 'down', message: 'Database connection failed' };
         }
       },
     });
