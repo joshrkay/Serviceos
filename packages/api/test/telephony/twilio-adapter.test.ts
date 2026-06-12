@@ -4,6 +4,7 @@ import {
   buildTwiML,
   xmlEscape,
   buildTelephonyGreeting,
+  injectSafetySayLines,
 } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -1143,5 +1144,100 @@ describe('TwilioGatherAdapter.processCallerUtterance — frustration detector', 
       expect.objectContaining({ type: 'frustration_detected', source: 'keyword' }),
     );
     expect(sideEffects.length).toBeGreaterThan(0);
+  });
+});
+
+// ─── RV-140/RV-142 — emergency keyword interrupt (shared safety scan) ────────
+
+describe('RV-140 — deterministic emergency scan (both transcript entry points)', () => {
+  it('processCallerUtterance (media-streams path): escalates on emergency keyword without any LLM call, 911 line first', async () => {
+    const { adapter, store, gateway } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-1' });
+
+    const sideEffects = await adapter.processCallerUtterance({
+      sessionId: session.id,
+      callSid: 'CA-em-1',
+      speechResult: 'I think we have a gas leak in the basement',
+      tenantId: 'tenant-t1',
+    });
+
+    // No LLM call of any kind happened (scan runs BEFORE the classifier).
+    expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(session.machine.currentState).toBe('escalating');
+    const tts = sideEffects.filter((fx) => fx.type === 'tts_play');
+    expect((tts[0]?.payload as { text: string }).text).toContain('911');
+  });
+
+  it('handleGather (PSTN path): the same shared scan fires and the TwiML speaks the 911 line', async () => {
+    const { adapter, store, gateway } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-2' });
+
+    const twiml = await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-em-2',
+      speechResult: 'the outlet is sparking and I smell electrical burning',
+      confidence: 0.9,
+      tenantId: 'tenant-t1',
+    });
+
+    expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(session.machine.currentState).toBe('escalating');
+    expect(twiml).toContain('call 911');
+  });
+
+  it('emergency utterance while already escalating falls through (no double-page)', async () => {
+    const { adapter, store } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-3' });
+    // First hit moves the FSM to escalating.
+    await adapter.processCallerUtterance({
+      sessionId: session.id,
+      callSid: 'CA-em-3',
+      speechResult: 'gas leak',
+      tenantId: 'tenant-t1',
+    });
+    const dispatchSpy = vi.spyOn(session.machine, 'dispatch');
+    await adapter.processCallerUtterance({
+      sessionId: session.id,
+      callSid: 'CA-em-3',
+      speechResult: 'I said there is a gas leak',
+      tenantId: 'tenant-t1',
+    });
+    // The second emergency dispatch is idempotent (empty effects) and the
+    // turn falls through to the normal pipeline — no second notify_oncall.
+    const emergencyCalls = dispatchSpy.mock.calls.filter(
+      ([ev]) => (ev as { type: string }).type === 'emergency_detected',
+    );
+    expect(emergencyCalls.length).toBe(1);
+    const results = dispatchSpy.mock.results.filter((_, i) =>
+      (dispatchSpy.mock.calls[i][0] as { type: string }).type === 'emergency_detected');
+    expect(results[0].value).toEqual([]);
+  });
+});
+
+describe('RV-142 — injectSafetySayLines', () => {
+  it('prepends safety-marked tts lines as <Say> before the <Dial> verb', () => {
+    const dial =
+      '<?xml version="1.0" encoding="UTF-8"?><Response><Dial timeout="20" action="/api/telephony/dial-result?sid=s1" method="POST"><Number>+15125550100</Number></Dial></Response>';
+    const out = injectSafetySayLines(
+      dial,
+      [
+        { type: 'tts_play', payload: { text: 'If anyone is in immediate danger, hang up and call 911.', priority: 'safety' } },
+        { type: 'tts_play', payload: { text: 'Connecting you now.' } },
+      ],
+      {},
+    );
+    const sayIdx = out.indexOf('call 911');
+    const dialIdx = out.indexOf('<Dial');
+    expect(sayIdx).toBeGreaterThan(-1);
+    expect(sayIdx).toBeLessThan(dialIdx);
+    // Non-safety copy is NOT injected (preserves existing transfer behavior).
+    expect(out).not.toContain('Connecting you now.');
+  });
+
+  it('returns the document unchanged when no safety lines are present', () => {
+    const dial = '<?xml version="1.0" encoding="UTF-8"?><Response><Dial>x</Dial></Response>';
+    expect(
+      injectSafetySayLines(dial, [{ type: 'tts_play', payload: { text: 'hi' } }], {}),
+    ).toBe(dial);
   });
 });

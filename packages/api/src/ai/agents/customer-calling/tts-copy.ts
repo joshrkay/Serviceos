@@ -107,6 +107,11 @@ const SENTENCE_CATALOG_ES: Record<string, string> = {
     'Tengo dificultades para completar eso. Le comunico con un miembro del equipo.',
   "I'm having trouble pulling up your account. Let me connect you with a team member.":
     'Tengo dificultades para acceder a su cuenta. Le comunico con un miembro del equipo.',
+  // RV-142 — emergency safety script + transfer line.
+  'If anyone is in immediate danger, hang up and call 911.':
+    'Si alguien está en peligro inmediato, cuelgue y llame al 911.',
+  "This sounds like an emergency. I'm connecting you with our on-call dispatcher immediately.":
+    'Esto parece una emergencia. Le comunico de inmediato con nuestro despachador de guardia.',
 };
 
 export function renderTtsText(

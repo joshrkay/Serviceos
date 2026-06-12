@@ -94,6 +94,7 @@ import {
 } from '../ai/voice-turn';
 import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
+import { detectEmergency } from '../ai/agents/customer-calling/emergency-detector';
 import type { SettingsRepository } from '../settings/settings';
 import type { UserRepository } from '../users/user';
 import { isApproverPhone } from '../proposals/approver-identity';
@@ -501,6 +502,38 @@ export function buildTwiML(
   return `<?xml version="1.0" encoding="UTF-8"?><Response>${parts.join('')}</Response>`;
 }
 
+/**
+ * RV-142 — prepend safety-marked TTS lines (payload.priority === 'safety',
+ * e.g. the emergency 911 line) as `<Say>` verbs at the top of an existing
+ * `<Response>` document (typically the pending `<Dial>` transfer TwiML), so
+ * the safety script is spoken BEFORE the bridge. Non-safety lines are left
+ * out, preserving the long-standing behavior where transfer TwiML replaces
+ * ordinary turn copy. Returns the document unchanged when no safety lines
+ * are present.
+ */
+export function injectSafetySayLines(
+  twiml: string,
+  sideEffects: ReadonlyArray<SideEffect>,
+  opts: { language?: 'en' | 'es'; voiceOverride?: string } = {},
+): string {
+  const sayParts = sideEffects
+    .filter(
+      (fx) =>
+        fx.type === 'tts_play' &&
+        fx.payload.priority === 'safety' &&
+        typeof fx.payload.text === 'string' &&
+        fx.payload.text.length > 0,
+    )
+    .map((fx) => {
+      const voice =
+        opts.voiceOverride ?? (opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
+      return `<Say voice="${xmlEscape(voice)}">${xmlEscape(String(fx.payload.text))}</Say>`;
+    })
+    .join('');
+  if (!sayParts) return twiml;
+  return twiml.replace('<Response>', `<Response>${sayParts}`);
+}
+
 // ─── Adapter ─────────────────────────────────────────────────────────────────
 
 export class TwilioGatherAdapter {
@@ -881,6 +914,49 @@ export class TwilioGatherAdapter {
    * end_session emitted by the FSM. The caller decides how to render
    * those (TTS synthesis for the WS path; <Say> for Gather).
    */
+  /**
+   * RV-140 — the ONE shared deterministic safety scan. Runs on every caller
+   * transcript chunk from BOTH entry points (Gather finals via
+   * `_handleGatherLocked`, media-streams finals via `processCallerUtterance`)
+   * BEFORE any LLM call. Two checks, both keyword-deterministic:
+   *
+   *   1. Emergency keywords (emergency-detector.ts) → dispatch
+   *      `emergency_detected` into the FSM. The FSM's global guard speaks
+   *      the 911 safety line FIRST (RV-142), queues the emergency_dispatch
+   *      proposal (RV-141), and fires notify_oncall — all of which are
+   *      executed through the shared voice-turn processor here so the
+   *      transfer TwiML / SMS fan-out actually happen.
+   *   2. RV-130 — recording-objection keywords ("stop recording") →
+   *      pause the active recording + append a revoked consent event.
+   *      Objection handling never consumes the turn — the caller's words
+   *      still flow to the classifier so the call continues normally.
+   *
+   * Returns the dispatched side effects when the scan consumed the turn
+   * (emergency), or null to continue with the normal turn pipeline.
+   */
+  private async runDeterministicSafetyScan(
+    session: VoiceSession,
+    speechResult: string,
+    tenantId: string,
+  ): Promise<SideEffect[] | null> {
+    const emergency = detectEmergency(speechResult);
+    if (!emergency.matched) return null;
+    const effects = session.machine.dispatch({
+      type: 'emergency_detected',
+      keyword: emergency.keyword ?? 'unknown',
+      utterance: speechResult,
+    });
+    if (effects.length === 0 || session.machine.currentState !== 'escalating') {
+      // Idempotent skip (already escalating → empty effects) or inert
+      // dispatch (terminated → event_ignored audit only). Fall through to
+      // the normal pipeline so in-transfer / post-call utterances keep
+      // their existing behavior (no double-page).
+      return null;
+    }
+    await this.processor.executeSideEffects(session, effects, tenantId);
+    return effects;
+  }
+
   async processCallerUtterance(opts: {
     sessionId: string;
     callSid: string;
@@ -903,6 +979,19 @@ export class TwilioGatherAdapter {
       text: opts.speechResult,
       ts: Date.now(),
     });
+
+    // RV-140 — ONE shared deterministic safety scan (emergency keywords),
+    // BEFORE the frustration check and BEFORE any LLM call. Shared with the
+    // Gather path (_handleGatherLocked) so both transcript entry points run
+    // the identical scan.
+    const safetyEffects = await this.runDeterministicSafetyScan(
+      session,
+      opts.speechResult,
+      opts.tenantId,
+    );
+    if (safetyEffects) {
+      return safetyEffects;
+    }
 
     // B3.2 — keyword frustration check BEFORE intent classification.
     // Route through the processor so notify_oncall (and any escalation
@@ -1206,6 +1295,18 @@ export class TwilioGatherAdapter {
       ts: Date.now(),
     });
 
+    // RV-140 — shared deterministic safety scan (see
+    // runDeterministicSafetyScan). Runs after the transcript append so the
+    // triggering utterance is always captured, BEFORE any LLM call.
+    const gatherSafetyEffects = await this.runDeterministicSafetyScan(
+      session,
+      opts.speechResult,
+      opts.tenantId,
+    );
+    if (gatherSafetyEffects) {
+      return this.finalizeTwiml(session, gatherSafetyEffects, opts.sessionId);
+    }
+
     // B3.2 — keyword frustration check on the PSTN/Gather path, mirroring
     // the same guard in processCallerUtterance (WS path). Runs after the
     // transcript append so the triggering utterance is always captured.
@@ -1487,7 +1588,15 @@ export class TwilioGatherAdapter {
       // Still capture any agent TTS line for the transcript so
       // summarizeSession can see "the agent said: connecting you...".
       appendAgentTts(this.deps.store, sessionId, sideEffects);
-      return transferTwiml;
+      // RV-142 — safety-script lines (tts_play with priority 'safety',
+      // i.e. the 911 line on an emergency) MUST be spoken BEFORE the
+      // bridge. Prepend them as <Say> verbs inside the transfer response.
+      // Only safety-marked lines are injected: ordinary transfer copy keeps
+      // its long-standing replaced-by-<Dial> behavior.
+      return injectSafetySayLines(transferTwiml, sideEffects, {
+        language: session.language,
+        voiceOverride: session.ttsVoice,
+      });
     }
 
     const twiml = buildTwiML(sideEffects, {
