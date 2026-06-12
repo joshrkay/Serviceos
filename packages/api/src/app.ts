@@ -326,6 +326,10 @@ import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
 import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
+import {
+  runRecordingRetentionSweep,
+  PgRecordingRetentionRepository,
+} from './workers/recording-retention-worker';
 import { createRetrieveAdapter } from './ai/orchestration/retrieve-adapter';
 import { FrancLanguageDetector } from './voice/language-detector';
 import type { RetrieveAdapter } from './ai/orchestration/context-builder';
@@ -1487,6 +1491,9 @@ export function createApp(): express.Express {
     batchInvoice: 590007,
     callMeBack: 590008,
     dailyDigest: 590009,
+    // RV-132 — recording retention purge. 590010 is reserved by a parallel
+    // track; this sweep owns 590011.
+    recordingRetention: 590011,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -3330,6 +3337,31 @@ export function createApp(): express.Express {
       });
     });
   }, 60_000));
+
+  // RV-132 — recording retention purge. Hourly; pool-gated (the Pg repo is
+  // the only implementation that can see the cross-tenant horizon query).
+  if (pool) {
+    const retentionPool = pool;
+    const recordingRetentionLogger = createLogger({
+      service: 'recording-retention-worker',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const recordingRetentionRepo = new PgRecordingRetentionRepository(retentionPool);
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.recordingRetention, async () => {
+        await runRecordingRetentionSweep({
+          repo: recordingRetentionRepo,
+          storage: storageProvider,
+          auditRepo,
+          logger: recordingRetentionLogger,
+        });
+      }).catch((err) => {
+        recordingRetentionLogger.error('Recording-retention sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 60 * 60_000));
+  }
 
   // Voice-parity (Feature 7) — call_me_back sweep. Notifies the CSR
   // (transfer_number) of callbacks captured when a warm transfer failed. Runs
