@@ -336,7 +336,7 @@ const CHAIN_SEPARATE_APPROVAL_LEGEND = '*Approval follows separately.';
 const CHAIN_MIN_MEMBER_CHARS = 12;
 
 /** True when any member's `_meta.overallConfidence` is low / very_low. */
-export function chainHasBlockingMember(members: readonly ChainSmsMember[]): boolean {
+function chainHasBlockingMember(members: readonly ChainSmsMember[]): boolean {
   return members.some((m) => isBlocking(extractMeta(m.payload).overallConfidence));
 }
 
