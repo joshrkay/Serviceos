@@ -1,8 +1,12 @@
 /**
- * RV-065 — digest "invoice it" one-tap: a mint_draft_invoice token tapped on
+ * RV-065 — digest "invoice it" one-tap: a mint_draft_invoice token POSTed to
  * the public one-tap route mints a draft_invoice proposal for the bound job
  * (via the batch-invoice eligibility/payload machinery) and 302-redirects to
  * the standard approve page with a fresh single-use approve token.
+ *
+ * GET on a mint token renders a CONFIRM page instead (the button POSTs the
+ * same token): link scanners' automatic GETs neither mint anything nor burn
+ * the single-use nonce. The approve-variant GET behavior is unchanged.
  */
 import { describe, it, expect } from 'vitest';
 import express from 'express';
@@ -104,13 +108,48 @@ function mintToken(jobId: string, ttlMs?: number) {
 }
 
 describe('one-tap mint_draft_invoice (RV-065)', () => {
-  it('tap → draft_invoice proposal created → 302 to the standard approve page', async () => {
-    const { app, proposalRepo, auditRepo } = await makeApp();
+  it('GET → 200 confirm page: nothing minted, nonce NOT consumed', async () => {
+    const { app, proposalRepo } = await makeApp();
     const { token } = mintToken(JOB_ID);
 
     const res = await request(app)
       .get('/public/proposals/one-tap-approve')
       .query({ token });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('Create the invoice for Heater replacement?');
+    expect(res.text).toContain('Create invoice');
+    expect(res.text).toMatch(/<form method="post"/);
+    expect(res.text).toContain(`value="${token}"`);
+    // Nothing minted by the GET.
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+
+    // Nonce NOT consumed: the same token still mints via POST.
+    const posted = await request(app)
+      .post('/public/proposals/one-tap-approve')
+      .type('form')
+      .send({ token });
+    expect(posted.status).toBe(302);
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(1);
+  });
+
+  it('repeated GETs keep rendering the confirm page (still nothing minted)', async () => {
+    const { app, proposalRepo } = await makeApp();
+    const { token } = mintToken(JOB_ID);
+
+    await request(app).get('/public/proposals/one-tap-approve').query({ token }).expect(200);
+    await request(app).get('/public/proposals/one-tap-approve').query({ token }).expect(200);
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+  });
+
+  it('POST → draft_invoice proposal created → 302 to the standard approve page', async () => {
+    const { app, proposalRepo, auditRepo } = await makeApp();
+    const { token } = mintToken(JOB_ID);
+
+    const res = await request(app)
+      .post('/public/proposals/one-tap-approve')
+      .type('form')
+      .send({ token });
 
     expect(res.status).toBe(302);
     const location: string = res.headers.location;
@@ -156,10 +195,13 @@ describe('one-tap mint_draft_invoice (RV-065)', () => {
     const { token } = mintToken(JOB_ID);
 
     const first = await request(app)
-      .get('/public/proposals/one-tap-approve')
-      .query({ token });
+      .post('/public/proposals/one-tap-approve')
+      .type('form')
+      .send({ token });
     expect(first.status).toBe(302);
 
+    // Approve-variant GET behavior is unchanged (precedent): the redirect
+    // is followed with a plain GET and approves immediately.
     const followed = await request(app).get(first.headers.location);
     expect(followed.status).toBe(200);
     expect(followed.text).toContain('Approved');
@@ -174,57 +216,88 @@ describe('one-tap mint_draft_invoice (RV-065)', () => {
     const { token } = mintToken(JOB_ID);
 
     const res = await request(app)
-      .get('/public/proposals/one-tap-approve')
-      .query({ token });
+      .post('/public/proposals/one-tap-approve')
+      .type('form')
+      .send({ token });
     expect(res.status).toBe(404);
     expect(res.text).toContain('Nothing to invoice');
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
   });
 
+  it('GET confirm page falls back to a generic label when the job is unknown', async () => {
+    const { app } = await makeApp({ eligibleJob: false });
+    const { token } = mintToken(JOB_ID);
+
+    const res = await request(app)
+      .get('/public/proposals/one-tap-approve')
+      .query({ token });
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('Create the invoice for this job?');
+  });
+
   it('a second tap with a DIFFERENT token the same day answers 409 already drafted', async () => {
     const { app, proposalRepo } = await makeApp();
     const first = await request(app)
-      .get('/public/proposals/one-tap-approve')
-      .query({ token: mintToken(JOB_ID).token });
+      .post('/public/proposals/one-tap-approve')
+      .type('form')
+      .send({ token: mintToken(JOB_ID).token });
     expect(first.status).toBe(302);
 
     const second = await request(app)
-      .get('/public/proposals/one-tap-approve')
-      .query({ token: mintToken(JOB_ID).token });
+      .post('/public/proposals/one-tap-approve')
+      .type('form')
+      .send({ token: mintToken(JOB_ID).token });
     expect(second.status).toBe(409);
     expect(second.text).toContain('Already drafted');
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(1);
   });
 
-  it('replayed mint token → 410, nothing minted twice', async () => {
+  it('replayed POST → 410, nothing minted twice', async () => {
     const { app, proposalRepo } = await makeApp();
     const { token } = mintToken(JOB_ID);
 
-    await request(app).get('/public/proposals/one-tap-approve').query({ token }).expect(302);
+    await request(app)
+      .post('/public/proposals/one-tap-approve')
+      .type('form')
+      .send({ token })
+      .expect(302);
     const replay = await request(app)
-      .get('/public/proposals/one-tap-approve')
-      .query({ token });
+      .post('/public/proposals/one-tap-approve')
+      .type('form')
+      .send({ token });
     expect(replay.status).toBe(410);
     expect(replay.text).toContain('already used');
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(1);
   });
 
-  it('expired mint token → 410, nothing minted', async () => {
+  it('expired mint token → 410 on both GET and POST, nothing minted', async () => {
     const { app, proposalRepo } = await makeApp();
     const { token } = mintToken(JOB_ID, 0);
 
-    const res = await request(app)
+    const got = await request(app)
       .get('/public/proposals/one-tap-approve')
       .query({ token });
-    expect(res.status).toBe(410);
+    expect(got.status).toBe(410);
+
+    const posted = await request(app)
+      .post('/public/proposals/one-tap-approve')
+      .type('form')
+      .send({ token });
+    expect(posted.status).toBe(410);
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
   });
 
-  it('returns 503 when mint deps are not wired', async () => {
+  it('returns 503 when mint deps are not wired (GET and POST)', async () => {
     const { app } = await makeApp({ mintDeps: false });
-    const res = await request(app)
+    const got = await request(app)
       .get('/public/proposals/one-tap-approve')
       .query({ token: mintToken(JOB_ID).token });
-    expect(res.status).toBe(503);
+    expect(got.status).toBe(503);
+
+    const posted = await request(app)
+      .post('/public/proposals/one-tap-approve')
+      .type('form')
+      .send({ token: mintToken(JOB_ID).token });
+    expect(posted.status).toBe(503);
   });
 });

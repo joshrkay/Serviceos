@@ -18,7 +18,7 @@
  *   409 — a manual edit request is pending (approve from the queue)
  *   410 — expired or already used (single-use nonce consumed)
  */
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, urlencoded } from 'express';
 import {
   createOneTapApproveToken,
   verifyOneTapApproveToken,
@@ -81,6 +81,39 @@ h1{font-size:1.4rem}p{color:#555}</style></head>
 <body><h1>${title}</h1><p>${body}</p></body></html>`;
 }
 
+/** Minimal HTML-attribute/text escaping for values echoed into pages. */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * GET-mint interstitial: link scanners (SMS preview bots, mail security
+ * proxies) issue GETs — a confirm page makes those harmless and keeps the
+ * single-use nonce intact. The button POSTs the SAME token; the nonce is
+ * only consumed (and the draft only minted) on the POST. ≥44px tap target
+ * per the mobile/public UI rule.
+ */
+function mintConfirmPage(jobLabel: string, token: string, action: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Create invoice?</title>
+<style>body{font-family:system-ui,sans-serif;margin:0;padding:48px 24px;text-align:center;color:#111}
+h1{font-size:1.4rem}p{color:#555}
+button{min-height:44px;padding:12px 32px;font-size:1rem;border:0;border-radius:8px;
+background:#111;color:#fff;cursor:pointer}</style></head>
+<body><h1>Create invoice?</h1>
+<p>Create the invoice for ${escapeHtml(jobLabel)}?</p>
+<form method="post" action="${escapeHtml(action)}">
+<input type="hidden" name="token" value="${escapeHtml(token)}">
+<button type="submit">Create invoice</button>
+</form></body></html>`;
+}
+
 export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router {
   const router = Router();
 
@@ -104,11 +137,50 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
       return;
     }
 
-    const verified = await verifyOneTapApproveToken({
+    // Non-consuming peek: validates signature/TTL/shape WITHOUT burning the
+    // single-use nonce, so we can learn the token's action first. A GET on a
+    // MINT token renders a confirm page (link scanners' GETs stay harmless);
+    // everything else falls through to the real, nonce-consuming verify.
+    const peeked = await verifyOneTapApproveToken({
       token,
       secret: deps.secret,
-      consumeNonce: deps.consumeNonce,
+      consumeNonce: () => true,
     });
+
+    if (peeked.ok && peeked.action === 'mint_draft_invoice' && req.method === 'GET') {
+      if (!deps.invoiceMintDeps) {
+        res
+          .status(503)
+          .type('html')
+          .send(page('Unavailable', 'Invoice drafting from this link is not configured.'));
+        return;
+      }
+      // Best-effort job label for the confirm copy; the POST re-verifies
+      // everything, so a missing job here only degrades the wording.
+      let jobLabel = 'this job';
+      try {
+        const job = await deps.invoiceMintDeps.jobRepo.findById(
+          peeked.tenantId,
+          peeked.jobId,
+        );
+        if (job?.summary) jobLabel = job.summary;
+      } catch {
+        // Keep the generic label.
+      }
+      res
+        .status(200)
+        .type('html')
+        .send(mintConfirmPage(jobLabel, token, `${req.baseUrl}${req.path}`));
+      return;
+    }
+
+    const verified = peeked.ok
+      ? await verifyOneTapApproveToken({
+          token,
+          secret: deps.secret,
+          consumeNonce: deps.consumeNonce,
+        })
+      : peeked;
 
     if (!verified.ok) {
       const gone = verified.reason === 'expired' || verified.reason === 'already_used';
@@ -300,7 +372,10 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
   };
 
   router.get('/one-tap-approve', handler);
-  router.post('/one-tap-approve', handler);
+  // The mint confirm page submits a standard HTML form — parse
+  // application/x-www-form-urlencoded bodies so the token reaches the
+  // handler regardless of the host app's body-parser configuration.
+  router.post('/one-tap-approve', urlencoded({ extended: false }), handler);
 
   return router;
 }
