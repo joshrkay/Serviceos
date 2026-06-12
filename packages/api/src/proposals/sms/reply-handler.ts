@@ -47,6 +47,7 @@ import type { UserRepository } from '../../users/user';
 import { type AuditRepository, createAuditEvent } from '../../audit/audit';
 import { ValidationError } from '../../shared/errors';
 import { normalizePhone } from '../../shared/phone';
+import { resolveApproverPhones, isApprover } from '../approver-identity';
 import { STOP_KEYWORDS, START_KEYWORDS } from '../../compliance/stop-reply';
 import {
   type ProposalSmsEventRepository,
@@ -90,24 +91,19 @@ export interface ProposalSmsReplyDeps {
   now?: () => Date;
 }
 
-async function resolveApproverPhones(
+/**
+ * RV-070 — approver identity (owner_phone + backup supervisor mobile,
+ * normalized comparison) is shared with the voice owner-line recognition.
+ * See `proposals/approver-identity.ts` for the canonical logic.
+ */
+async function resolveApproverPhonesForDeps(
   deps: ProposalSmsReplyDeps,
   tenantId: string,
 ): Promise<string[]> {
-  const settings = await deps.settingsRepo.findByTenant(tenantId);
-  const phones: string[] = [];
-  if (settings?.ownerPhone) phones.push(settings.ownerPhone);
-  if (settings?.backupSupervisorUserId && deps.userRepo) {
-    const backup = await deps.userRepo.findById(tenantId, settings.backupSupervisorUserId);
-    if (backup?.mobileNumber) phones.push(backup.mobileNumber);
-  }
-  return phones;
-}
-
-function isApprover(phones: string[], fromE164: string): boolean {
-  const from = normalizePhone(fromE164);
-  if (!from) return false;
-  return phones.some((p) => normalizePhone(p) === from);
+  return resolveApproverPhones(
+    { settingsRepo: deps.settingsRepo, ...(deps.userRepo ? { userRepo: deps.userRepo } : {}) },
+    tenantId,
+  );
 }
 
 async function audit(
@@ -265,6 +261,7 @@ async function handleApprove(
       SMS_REPLY_ACTOR_ID,
       'owner',
       deps.auditRepo,
+      'sms', // RV-073 — inbound SMS reply approval
     );
   } catch (err) {
     if (err instanceof ValidationError) {
@@ -344,6 +341,7 @@ async function handleReject(
       undefined,
       deps.appointmentRepo,
       deps.auditRepo,
+      'sms', // RV-073 — inbound SMS reply rejection
     );
   } catch (err) {
     await audit(deps, ctx, 'proposal.sms_reject_failed', proposal.id, {
@@ -404,7 +402,7 @@ export async function handleProposalSmsReply(
 ): Promise<HandlerResult> {
   const parsed = parseProposalSmsReply(ctx.body);
 
-  const phones = await resolveApproverPhones(deps, ctx.tenantId);
+  const phones = await resolveApproverPhonesForDeps(deps, ctx.tenantId);
   if (!isApprover(phones, ctx.fromE164)) {
     if (parsed.intent !== 'unrecognized') {
       await audit(deps, ctx, 'proposal.sms_reply_unverified_mobile', '', {
@@ -655,7 +653,7 @@ export async function handleProposalSmsFallback(
   ctx: InboundSmsContext,
   deps: ProposalSmsReplyDeps,
 ): Promise<HandlerResult> {
-  const phones = await resolveApproverPhones(deps, ctx.tenantId);
+  const phones = await resolveApproverPhonesForDeps(deps, ctx.tenantId);
   if (!isApprover(phones, ctx.fromE164)) {
     // Not the owner — silently decline so other features (and the
     // unhandled audit upstream) keep their behavior.

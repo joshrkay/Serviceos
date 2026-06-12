@@ -159,6 +159,7 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
         ONE_TAP_ACTOR_ID,
         ONE_TAP_ACTOR_ROLE,
         deps.auditRepo,
+        'one_tap', // RV-073 — HMAC one-tap link approval
       );
 
       // P12-004 — record that this approval came through the one-tap SMS

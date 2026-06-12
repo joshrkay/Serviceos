@@ -18,7 +18,13 @@ export async function logProposalEvent(
   auditRepo: AuditRepository,
   proposal: Proposal,
   eventType: string,
-  actor: { id: string; role: string }
+  actor: { id: string; role: string },
+  /**
+   * RV-073 — optional extra metadata merged onto the standard
+   * proposalType/status pair (e.g. the approval `channel`). Spread LAST
+   * so callers can extend but the base keys stay authoritative-shaped.
+   */
+  extraMetadata?: Record<string, unknown>
 ): Promise<AuditEvent> {
   const event = createAuditEvent({
     tenantId: proposal.tenantId,
@@ -30,6 +36,7 @@ export async function logProposalEvent(
     metadata: {
       proposalType: proposal.proposalType,
       status: proposal.status,
+      ...(extraMetadata ?? {}),
     },
   });
   return auditRepo.create(event);

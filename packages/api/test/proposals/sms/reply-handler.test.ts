@@ -801,3 +801,31 @@ describe('clarification flow (fallback)', () => {
     expect(result).toMatchObject({ handled: false, reason: 'no_context' });
   });
 });
+
+describe('RV-073 — SMS reply approvals/rejections tag channel sms', () => {
+  it('proposal.approved audit metadata carries channel sms', async () => {
+    const h = makeHarness();
+    const proposal = await seedPendingProposal(h);
+
+    await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    const approvedEvent = h.auditRepo
+      .getAll()
+      .find((e) => e.eventType === 'proposal.approved' && e.entityId === proposal.id);
+    expect(approvedEvent).toBeDefined();
+    expect(approvedEvent!.metadata).toMatchObject({ channel: 'sms' });
+  });
+
+  it('proposal.rejected audit metadata carries channel sms', async () => {
+    const h = makeHarness();
+    const proposal = await seedPendingProposal(h);
+
+    await handleProposalSmsReply(ctx('N customer canceled'), h.deps);
+
+    const rejectedEvent = h.auditRepo
+      .getAll()
+      .find((e) => e.eventType === 'proposal.rejected' && e.entityId === proposal.id);
+    expect(rejectedEvent).toBeDefined();
+    expect(rejectedEvent!.metadata).toMatchObject({ channel: 'sms' });
+  });
+});

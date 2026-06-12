@@ -1986,6 +1986,21 @@ export function createApp(): express.Express {
     callControl: telephonyCallControl,
     dispatcherPhoneResolver: createBusinessPhoneDispatcherResolver(settingsRepo),
     settingsRepo,
+    // RV-070 — owner-line recognition: backup supervisor mobile lookup
+    // (mirrors the SMS reply transport's approver identity).
+    userRepo,
+    // RV-071 — voice approval channel: pending-edit parity guard + the
+    // one-tap SMS fallback for refused money/irreversible approvals
+    // (same secret/sender/URL/owner-phone wiring as P12-004).
+    smsEventRepo: proposalSmsEventRepo,
+    voiceApprovalOneTap: {
+      ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
+      ...(oneTapSecret ? { secret: oneTapSecret } : {}),
+      buildApproveUrl: (token: string) =>
+        `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
+      resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
+      recordSmsEvent: recordProposalSmsRender,
+    },
     whisperCache: sharedWhisperCache,
     ...(messageDelivery
       ? {

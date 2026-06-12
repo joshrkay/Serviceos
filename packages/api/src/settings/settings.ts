@@ -28,6 +28,19 @@ export interface EscalationSettings {
   llm_sentiment_threshold: number;
   /** B6 — inbound behavior when outside business hours. */
   after_hours_voice_mode?: 'voicemail' | 'ai_answering';
+  /**
+   * RV-071 — spoken challenge (e.g. a PIN like "4271") required before a
+   * money-class or irreversible-class proposal can be APPROVED BY VOICE on
+   * a recognized owner line (caller-ID match; see approver-identity.ts).
+   * When unset, money/irreversible voice approvals
+   * are politely refused and the owner gets a one-tap approve SMS instead.
+   *
+   * INTERIM HOME: rides the existing `tenant_settings.escalation_settings`
+   * JSONB so no new migration is needed (161-163 are owned by parallel
+   * tracks). A dedicated column is the planned permanent home; when it
+   * lands, read it first and fall back to this key.
+   */
+  voice_approval_challenge?: string;
 }
 
 export const DEFAULT_ESCALATION_SETTINGS: EscalationSettings = {

@@ -20,10 +20,8 @@ import {
   EntityKind,
   EntityResolver,
   EntityResolverResult,
+  TAU_ENT,
 } from './entity-resolver';
-
-/** Confidence threshold above which a match is considered "resolved". */
-const TAU_ENT = 0.80;
 
 /** Minimum similarity score to even consider a candidate (pre-filter). */
 const SIMILARITY_PREFILTER = 0.3;
