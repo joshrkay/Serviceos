@@ -1373,7 +1373,7 @@ describe('RV-130 — "stop recording" objection in the shared safety scan', () =
     expect((effects[0].payload as { text: string }).text).toContain('paused the recording');
     expect(session.machine.currentState).toBe(stateBefore);
     expect(
-      auditRepo.events.some((e) => e.eventType === 'recording_consent.revoked'),
+      auditRepo.getAll().some((e) => e.eventType === 'recording_consent.revoked'),
     ).toBe(true);
   });
 

@@ -85,7 +85,7 @@ describe('RV-116 — dropped-call resume handler', () => {
       body: composeBookingStatusReply('Acme'),
     });
     expect(
-      auditRepo.events.some(
+      auditRepo.getAll().some(
         (e) =>
           e.eventType === 'dropped_call_recovery.resumed' &&
           (e.metadata as { outcome?: string }).outcome === 'booking_status_sent',

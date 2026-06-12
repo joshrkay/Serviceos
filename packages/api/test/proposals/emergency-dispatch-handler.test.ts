@@ -81,7 +81,7 @@ describe('RV-141 — EmergencyDispatchExecutionHandler', () => {
     const locationRepo = new InMemoryLocationRepository();
     await seedCustomerLocation(locationRepo);
     const auditRepo = new InMemoryAuditRepository();
-    const sendSms = vi.fn(async () => ({}));
+    const sendSms = vi.fn(async (_args: { to: string; body: string }) => ({}));
     const handler = new EmergencyDispatchExecutionHandler(
       jobRepo,
       locationRepo,
@@ -112,12 +112,12 @@ describe('RV-141 — EmergencyDispatchExecutionHandler', () => {
     expect(result.resultEntityId).toBe(jobs[0].id);
 
     expect(sendSms).toHaveBeenCalledTimes(1);
-    const sms = sendSms.mock.calls[0][0] as { to: string; body: string };
+    const sms = sendSms.mock.calls[0][0];
     expect(sms.to).toBe('+15125550999');
     expect(sms.body).toContain('EMERGENCY');
     expect(sms.body).toContain('+15125550111');
 
-    const audits = auditRepo.events.filter(
+    const audits = auditRepo.getAll().filter(
       (e) => e.eventType === 'emergency_dispatch.executed',
     );
     expect(audits).toHaveLength(1);
@@ -137,7 +137,7 @@ describe('RV-141 — EmergencyDispatchExecutionHandler', () => {
   it('anonymous caller: no job, but the page still goes out (success)', async () => {
     const jobRepo = new InMemoryJobRepository();
     const locationRepo = new InMemoryLocationRepository();
-    const sendSms = vi.fn(async () => ({}));
+    const sendSms = vi.fn(async (_args: { to: string; body: string }) => ({}));
     const handler = new EmergencyDispatchExecutionHandler(
       jobRepo,
       locationRepo,
@@ -156,13 +156,13 @@ describe('RV-141 — EmergencyDispatchExecutionHandler', () => {
     expect(result.success).toBe(true);
     expect(await jobRepo.findByTenant(TENANT)).toHaveLength(0);
     expect(sendSms).toHaveBeenCalledTimes(1);
-    expect((sendSms.mock.calls[0][0] as { body: string }).body).toContain(
+    expect(sendSms.mock.calls[0][0].body).toContain(
       'No customer match',
     );
   });
 
   it('falls back to transfer_number when no owner phone is configured', async () => {
-    const sendSms = vi.fn(async () => ({}));
+    const sendSms = vi.fn(async (_args: { to: string; body: string }) => ({}));
     const handler = new EmergencyDispatchExecutionHandler(
       undefined,
       undefined,
@@ -174,7 +174,7 @@ describe('RV-141 — EmergencyDispatchExecutionHandler', () => {
       ctx,
     );
     expect(result.success).toBe(true);
-    expect((sendSms.mock.calls[0][0] as { to: string }).to).toBe('+15125550777');
+    expect(sendSms.mock.calls[0][0].to).toBe('+15125550777');
   });
 
   it('fails (retryable) when neither a job nor a page could land', async () => {
@@ -196,7 +196,7 @@ describe('RV-141 — EmergencyDispatchExecutionHandler', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('provider down');
     expect(
-      auditRepo.events.some((e) => e.eventType === 'emergency_dispatch.failed'),
+      auditRepo.getAll().some((e) => e.eventType === 'emergency_dispatch.failed'),
     ).toBe(true);
   });
 

@@ -123,7 +123,7 @@ describe('RV-143 — emergency page-retry ladder', () => {
     expect(pending[0].callerPhone).toBe('+15125550111');
     expect(pending[0].callbackMessage).toContain('EMERGENCY');
     expect(
-      auditRepo.events.filter((e) => e.eventType === 'emergency_page.sent'),
+      auditRepo.getAll().filter((e) => e.eventType === 'emergency_page.sent'),
     ).toHaveLength(3);
   });
 

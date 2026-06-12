@@ -43,7 +43,7 @@ describe('RV-121 — patchOwnerThrough', () => {
     expect(result.twiml).toContain(`timeout="${PATCH_DIAL_TIMEOUT_SECONDS}"`);
     expect(result.twiml).toContain('+15125550999');
     expect(
-      auditRepo.events.some(
+      auditRepo.getAll().some(
         (e) =>
           e.eventType === 'vulnerability_patch.attempted' &&
           (e.metadata as { outcome?: string }).outcome === 'bridged_owner',
@@ -106,7 +106,7 @@ describe('RV-121 — patchOwnerThrough', () => {
     const onCallRepo = new InMemoryOnCallRepository(
       new Map([['t1', [{ id: 'e1', userId: 'csr-1', orderIndex: 0 }]]]),
     );
-    const sendSms = vi.fn(async () => ({}));
+    const sendSms = vi.fn(async (_args: { to: string; body: string }) => ({}));
     // Owner unresolvable; dispatcher resolver throws on the BRIDGE attempt
     // but succeeds for the page (simulate via call counting).
     let calls = 0;
@@ -125,7 +125,7 @@ describe('RV-121 — patchOwnerThrough', () => {
     expect(result.kind).toBe('fallback');
     if (result.kind !== 'fallback') throw new Error('unreachable');
     expect(result.smsSent).toBe(true);
-    const sms = sendSms.mock.calls[0][0] as { to: string; body: string };
+    const sms = sendSms.mock.calls[0][0];
     expect(sms.to).toBe('+15125550555');
     expect(sms.body).toContain('URGENT');
     expect(sms.body).toContain('+15125550111');

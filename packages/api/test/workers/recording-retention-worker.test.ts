@@ -67,7 +67,7 @@ describe('RV-132 — recording retention sweep', () => {
     expect(deleteObject).toHaveBeenCalledWith('bkt', 't1/old-1.mp3');
     expect(repo.rows.find((r) => r.id === 'old-1')?.purgedAt).toEqual(NOW);
     expect(repo.rows.find((r) => r.id === 'fresh-1')?.purgedAt).toBeNull();
-    const audit = auditRepo.events.find((e) => e.eventType === 'voice_recording.purged');
+    const audit = auditRepo.getAll().find((e) => e.eventType === 'voice_recording.purged');
     expect(audit?.entityId).toBe('old-1');
     expect((audit?.metadata as { hadStoredObject?: boolean }).hadStoredObject).toBe(true);
   });
@@ -120,7 +120,7 @@ describe('RV-132 — recording retention sweep', () => {
     expect(result.purged).toBe(1);
     expect(deleteObject).not.toHaveBeenCalled();
     expect(
-      (auditRepo.events[0].metadata as { hadStoredObject?: boolean }).hadStoredObject,
+      (auditRepo.getAll()[0].metadata as { hadStoredObject?: boolean }).hadStoredObject,
     ).toBe(false);
   });
 
