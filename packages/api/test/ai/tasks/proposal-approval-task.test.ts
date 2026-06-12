@@ -249,6 +249,65 @@ describe('RV-071 — explicit affirmative required on the next turn', () => {
     expect((await h.proposalRepo.findById(TENANT, head.id))?.status).toBe('approved');
     expect((await h.proposalRepo.findById(TENANT, job.id))?.status).toBe('approved');
     expect((await h.proposalRepo.findById(TENANT, sendEstimate.id))?.status).toBe('draft');
+    expect(h.auditRepo.getAll()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventType: 'proposal.voice_approved',
+          metadata: expect.objectContaining({
+            skipped: [{ id: sendEstimate.id, reason: 'non_capture' }],
+          }),
+        }),
+      ]),
+    );
+  });
+
+  it('approving a non-head chain member speaks the normal single-approval confirmation', async () => {
+    const h = makeHarness();
+    const chainId = 'voice-chain-member';
+    const head = createProposal({
+      tenantId: TENANT,
+      proposalType: 'create_customer',
+      payload: { name: 'Jane Chain' },
+      summary: 'Create Jane Chain',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(head, {
+      chainId,
+      chainIndex: 0,
+      chainLength: 2,
+      dependsOnChainIndices: [],
+      chainRefs: [],
+    });
+    const job = createProposal({
+      tenantId: TENANT,
+      proposalType: 'create_job',
+      payload: { customerId: 'placeholder', title: 'Install' },
+      summary: 'Create install job',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(job, {
+      chainId,
+      chainIndex: 1,
+      chainLength: 2,
+      dependsOnChainIndices: [0],
+      chainRefs: [{ payloadPath: 'customerId', parentChainIndex: 0, entityKind: 'customerId' }],
+    });
+    await h.proposalRepo.createMany([
+      { ...head, status: 'ready_for_review' },
+      { ...job, status: 'draft' },
+    ]);
+
+    const result = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: 'yes',
+      pending: { action: 'approve', stage: 'confirm', proposalId: job.id },
+    });
+
+    expect(result.outcome).toBe('approved');
+    expect(result.speak).toContain('Approved — "Create install job" will run shortly.');
+    expect(result.speak).not.toContain('follows separately');
+    expect((await h.proposalRepo.findById(TENANT, head.id))?.status).toBe('ready_for_review');
+    expect((await h.proposalRepo.findById(TENANT, job.id))?.status).toBe('approved');
   });
 
   it.each(['approve', 'yes, approve it', 'go ahead'])(

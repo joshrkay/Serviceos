@@ -346,7 +346,7 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
       );
       const approved = result.approved[0];
       const approvedCount = result.approved.length;
-      const skippedCount = result.skipped.length;
+      const skippedCount = result.skipped.filter((skip) => skip.reason !== 'not_reviewable').length;
 
       // P12-004 — record that this approval came through the one-tap SMS
       // link specifically (in addition to the standard proposal.approved
@@ -359,7 +359,7 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
           eventType: 'proposal.one_tap_approved',
           entityType: 'proposal',
           entityId: verified.proposalId,
-          metadata: { channel: 'sms_one_tap' },
+          metadata: { channel: 'sms_one_tap', skipped: result.skipped },
         }),
       );
 

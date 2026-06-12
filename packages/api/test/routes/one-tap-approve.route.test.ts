@@ -276,6 +276,79 @@ describe('GET /public/proposals/one-tap-approve', () => {
     expect((await proposalRepo.findById(TENANT, head.id))?.status).toBe('approved');
     expect((await proposalRepo.findById(TENANT, job.id))?.status).toBe('approved');
     expect((await proposalRepo.findById(TENANT, sendEstimate.id))?.status).toBe('draft');
+    expect(auditRepo.getAll()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventType: 'proposal.one_tap_approved',
+          metadata: expect.objectContaining({
+            skipped: [{ id: sendEstimate.id, reason: 'non_capture' }],
+          }),
+        }),
+      ]),
+    );
+  });
+
+  it('approving a non-head chain member shows the normal single-approval success page', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const smsEventRepo = new InMemoryProposalSmsEventRepository();
+    const chainId = 'one-tap-chain-member';
+    const head = createProposal({
+      tenantId: TENANT,
+      proposalType: 'create_customer',
+      payload: { name: 'Jane Chain' },
+      summary: 'Create Jane Chain',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(head, {
+      chainId,
+      chainIndex: 0,
+      chainLength: 2,
+      dependsOnChainIndices: [],
+      chainRefs: [],
+    });
+    const job = createProposal({
+      tenantId: TENANT,
+      proposalType: 'create_job',
+      payload: { customerId: 'placeholder', title: 'Install' },
+      summary: 'Create install job',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(job, {
+      chainId,
+      chainIndex: 1,
+      chainLength: 2,
+      dependsOnChainIndices: [0],
+      chainRefs: [{ payloadPath: 'customerId', parentChainIndex: 0, entityKind: 'customerId' }],
+    });
+    await proposalRepo.createMany([
+      { ...head, status: 'ready_for_review' },
+      { ...job, status: 'draft' },
+    ]);
+    const app = express();
+    app.use(express.json());
+    app.use(
+      '/public/proposals',
+      createOneTapApproveRouter({
+        proposalRepo,
+        auditRepo,
+        secret: SECRET,
+        consumeNonce: createInMemoryNonceStore(),
+        smsEventRepo,
+      }),
+    );
+    const { token } = mint(job.id);
+
+    const res = await request(app)
+      .get('/public/proposals/one-tap-approve')
+      .query({ token });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('Create install job');
+    expect(res.text).not.toContain('linked');
+    expect(res.text).not.toContain('follows separately');
+    expect((await proposalRepo.findById(TENANT, head.id))?.status).toBe('ready_for_review');
+    expect((await proposalRepo.findById(TENANT, job.id))?.status).toBe('approved');
   });
 });
 

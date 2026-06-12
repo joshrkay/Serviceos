@@ -358,7 +358,7 @@ export function renderReapprovalSms(
 //
 //   "3 linked actions: 1) create customer Jane 2) book Tue 9am
 //    3) send estimate ($450.00)* *Approval follows separately.
-//    Reply Y to approve 1); the rest follow in your queue. Or tap (30 min): …"
+//    Reply Y to approve the setup steps; starred items follow separately. Or tap (30 min): …"
 //
 // Budget note (P2-034 module contract, see the header up top): the chain SMS
 // follows the same contract as the single-proposal render — the
@@ -370,16 +370,11 @@ export function renderReapprovalSms(
 // Reply mapping (documented here because the copy must stay truthful):
 //   - The send site anchors the outbound render (`proposal_rendered` /
 //     `review_required_rendered`) on the chain HEAD member, so Y / N /
-//     EDIT and the one-tap link act on the HEAD proposal only. The
-//     approvable-form copy says exactly that: "Reply Y to approve 1); the
-//     rest follow in your queue."
+//     EDIT and the one-tap link act on the chain set rooted at the head.
 //   - Chained dependents are forced to 'draft' at creation
 //     (applyChainMetadata) and follow the existing chain-resolution
-//     execution ordering once approved from the queue. Money/comms
-//     members never ride the Y: they are listed but marked
-//     "*Approval follows separately."  (Capture-class set-approval on a
-//     single Y is a follow-up that needs the reply handler to approve a
-//     chain SET — see the send site in workers/voice-action-router.ts.)
+//     execution ordering once approved. Money/comms members never ride
+//     the Y: they are listed but marked "*Approval follows separately."
 //   - Track E (HIGH fix): a chain whose HEAD member is not capture-class
 //     (money / comms / irreversible) must not be Y-approvable at all — Y
 //     acts on the head, and those classes never ride an SMS Y. The WHOLE
@@ -406,13 +401,11 @@ export interface RenderChainSmsOptions {
 
 const CHAIN_SEPARATE_APPROVAL_LEGEND = '*Approval follows separately.';
 
-// Truthful chain reply prompt: Y approves the HEAD (item 1) only — the
-// dependents are drafts that the owner approves from the review queue
-// (chain-resolution execution ordering). The single-proposal
-// REPLY_INSTRUCTIONS would overpromise ("Y to approve" reads as approving
-// the whole list).
+// Truthful chain reply prompt: Y approves the capture-class setup steps as a
+// set; starred money/comms/irreversible items keep their separate approval
+// affordances.
 const CHAIN_REPLY_INSTRUCTIONS =
-  'Reply Y to approve 1); the rest follow in your queue.';
+  'Reply Y to approve the setup steps; starred items follow separately.';
 
 /** Minimum readable per-member summary length once the budget is split. */
 const CHAIN_MIN_MEMBER_CHARS = 12;

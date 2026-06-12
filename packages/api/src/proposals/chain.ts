@@ -187,6 +187,7 @@ export const ENTITY_KIND_TO_PAYLOAD_PATH: Partial<
   draft_estimate: { customerId: 'customerId', jobId: 'jobId' },
   draft_invoice: { customerId: 'customerId', jobId: 'jobId', estimateId: 'estimateId' },
   add_service_location: { customerId: 'customerId' },
+  // Two refs into one add_note would overwrite targetId/targetKind; the decomposer does not wire that shape today.
   add_note: {
     customerId: 'targetId',
     jobId: 'targetId',

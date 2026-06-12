@@ -583,6 +583,7 @@ async function executeApprove(
   let approved: Proposal;
   let approvedCount = 0;
   let skippedCount = 0;
+  let skipped: { id: string; reason: string }[] = [];
   try {
     const result = await approveChainSet(
       deps.proposalRepo,
@@ -598,7 +599,8 @@ async function executeApprove(
     );
     approved = result.approved[0];
     approvedCount = result.approved.length;
-    skippedCount = result.skipped.length;
+    skippedCount = result.skipped.filter((skip) => skip.reason !== 'not_reviewable').length;
+    skipped = result.skipped;
   } catch (err) {
     if (err instanceof ValidationError) {
       await audit(deps, ref, 'proposal.voice_approve_blocked', proposalId, {
@@ -626,6 +628,7 @@ async function executeApprove(
     proposalType: approved.proposalType,
     approvedCount,
     skippedCount,
+    skipped,
   });
   return {
     speak:

@@ -19,12 +19,12 @@ export interface ApproveChainSetResult {
   skipped: {
     id: string;
     reason:
-      | 'head_not_chain'
-      | 'not_head'
       | 'non_capture'
       | 'not_reviewable'
       | 'low_confidence'
-      | 'pending_edit';
+      | 'pending_edit'
+      | 'missing_fields'
+      | 'error';
   }[];
 }
 
@@ -216,49 +216,106 @@ export async function approveChainSet(
       auditRepo,
       channel,
     );
-    return { approved: [approved], skipped: [{ id: headId, reason: 'not_head' }] };
+    return { approved: [approved], skipped: [] };
   }
 
+  const approvedHead = await approveProposal(
+    proposalRepo,
+    tenantId,
+    headId,
+    actorId,
+    actorRole,
+    auditRepo,
+    channel,
+  );
+  const approved: Proposal[] = [approvedHead];
+  if (!approved.some((p) => p.id === headId)) {
+    throw new AppError('CHAIN_HEAD_APPROVAL_INVARIANT', 'Approved chain set is missing its head', 500);
+  }
+  const skipped: ApproveChainSetResult['skipped'] = [];
+
   const siblings = await proposalRepo.findByChain(tenantId, headMeta.chainId);
+  if (!siblings.some((p) => p.id === headId)) {
+    if (auditRepo) {
+      await auditRepo.create(
+        createAuditEvent({
+          tenantId,
+          actorId,
+          actorRole,
+          eventType: 'proposal.chain_set_warning',
+          entityType: 'proposal',
+          entityId: headId,
+          metadata: {
+            reason: 'head_missing_from_chain_lookup',
+            chainId: headMeta.chainId,
+          },
+        }),
+      );
+    }
+    return { approved, skipped };
+  }
+
   const ordered = siblings.sort((a, b) => {
     const ai = chainMetaFor(a)?.chainIndex ?? Number.MAX_SAFE_INTEGER;
     const bi = chainMetaFor(b)?.chainIndex ?? Number.MAX_SAFE_INTEGER;
     return ai - bi;
   });
 
-  const approved: Proposal[] = [];
-  const skipped: ApproveChainSetResult['skipped'] = [];
-
   for (const proposal of ordered) {
-    if (proposal.id !== headId) {
-      if (actionClassForProposalType(proposal.proposalType) !== 'capture') {
-        skipped.push({ id: proposal.id, reason: 'non_capture' });
-        continue;
-      }
-      if (!isReviewableForChainSet(proposal)) {
-        skipped.push({ id: proposal.id, reason: 'not_reviewable' });
-        continue;
-      }
-      if (confidenceMetaBlocksAutoApprove(proposal.payload)) {
-        skipped.push({ id: proposal.id, reason: 'low_confidence' });
-        continue;
-      }
-      if (hasPendingEdit && (await hasPendingEdit(tenantId, proposal.id))) {
-        skipped.push({ id: proposal.id, reason: 'pending_edit' });
-        continue;
-      }
+    if (proposal.id === headId) continue;
+
+    if (actionClassForProposalType(proposal.proposalType) !== 'capture') {
+      skipped.push({ id: proposal.id, reason: 'non_capture' });
+      continue;
+    }
+    if (!isReviewableForChainSet(proposal)) {
+      skipped.push({ id: proposal.id, reason: 'not_reviewable' });
+      continue;
+    }
+    if (confidenceMetaBlocksAutoApprove(proposal.payload)) {
+      skipped.push({ id: proposal.id, reason: 'low_confidence' });
+      continue;
+    }
+    if (hasPendingEdit && (await hasPendingEdit(tenantId, proposal.id))) {
+      skipped.push({ id: proposal.id, reason: 'pending_edit' });
+      continue;
+    }
+    if (missingFieldsFor(proposal).length > 0) {
+      skipped.push({ id: proposal.id, reason: 'missing_fields' });
+      continue;
     }
 
-    const updated = await approveProposal(
-      proposalRepo,
-      tenantId,
-      proposal.id,
-      actorId,
-      actorRole,
-      auditRepo,
-      channel,
-    );
-    approved.push(updated);
+    try {
+      const updated = await approveProposal(
+        proposalRepo,
+        tenantId,
+        proposal.id,
+        actorId,
+        actorRole,
+        auditRepo,
+        channel,
+      );
+      approved.push(updated);
+    } catch (err) {
+      skipped.push({ id: proposal.id, reason: 'error' });
+      if (auditRepo) {
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId,
+            actorRole,
+            eventType: 'proposal.chain_set_member_skipped',
+            entityType: 'proposal',
+            entityId: proposal.id,
+            metadata: {
+              reason: 'error',
+              headId,
+              error: err instanceof Error ? err.message : String(err),
+            },
+          }),
+        );
+      }
+    }
   }
 
   return { approved, skipped };

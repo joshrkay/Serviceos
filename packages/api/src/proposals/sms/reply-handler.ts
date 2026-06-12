@@ -314,8 +314,14 @@ async function handleApprove(
       (tenantId, proposalId) => deps.smsEventRepo.hasUnappliedEditRequest(tenantId, proposalId),
     );
     approvedCount = result.approved.length;
-    skippedCount = result.skipped.length;
+    skippedCount = result.skipped.filter((skip) => skip.reason !== 'not_reviewable').length;
     approvedSummary = result.approved[0]?.summary ?? proposal.summary;
+    await notifyBestEffort(deps, ctx, proposal.id, 'proposal.sms_approved', {
+      proposalType: proposal.proposalType,
+      approvedCount,
+      skippedCount,
+      skipped: result.skipped,
+    }, approvalConfirmation(approvedCount, skippedCount, approvedSummary));
   } catch (err) {
     if (err instanceof ValidationError) {
       // Missing required fields — truthful, with the next step.
@@ -340,11 +346,6 @@ async function handleApprove(
     return { handled: true, handler: HANDLER_NAME, reason: 'approve_failed' };
   }
 
-  await notifyBestEffort(deps, ctx, proposal.id, 'proposal.sms_approved', {
-    proposalType: proposal.proposalType,
-    approvedCount,
-    skippedCount,
-  }, approvalConfirmation(approvedCount, skippedCount, approvedSummary));
   return { handled: true, handler: HANDLER_NAME, reason: 'approved' };
 }
 
