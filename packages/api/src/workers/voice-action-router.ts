@@ -248,6 +248,16 @@ export interface VoiceActionRouterDeps {
    * records the unsupervised routing audit event. Optional for tests.
    */
   unsupervisedRouting?: UnsupervisedRoutingDeps;
+  /**
+   * RV-042 — review-time visibility of acceptance voiding: lets the
+   * update_estimate task handler read the targeted estimate and stamp the
+   * `_meta.markers` acceptance-void warning when it is currently accepted.
+   * Optional; absent -> marker skipped (execute-time audit still records it).
+   */
+  estimateRepo?: Pick<
+    import('../estimates/estimate').EstimateRepository,
+    'findById' | 'findByTenant'
+  >;
 }
 
 // P11-001: lookup_* intents are READ-ONLY and never produce a
@@ -370,7 +380,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
     ),
   );
   handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway));
-  handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway));
+  handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo));
   handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo, deps.thresholdResolver));
   handlers.set('create_customer', new CreateCustomerTaskHandler());
   handlers.set('create_job', new CreateJobVoiceTaskHandler());
