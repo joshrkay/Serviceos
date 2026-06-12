@@ -118,6 +118,19 @@ export interface CallingAgentContext {
     trigger_explicit_request: boolean;
     trigger_keyword_frustration: boolean;
   };
+  /**
+   * RV-070 — true when the inbound caller-ID matched an approver phone
+   * (`tenant_settings.owner_phone` or the backup supervisor's mobile,
+   * normalized — same identity logic as the SMS reply transport; see
+   * `proposals/approver-identity.ts`). Set ONCE where the session is
+   * established (telephony adapter) and never from utterance content.
+   *
+   * Inert for every existing FSM flow — the transition table does not
+   * read it. It gates the voice approval channel (RV-071): the
+   * `approve_proposal` / `reject_proposal` intents are only routed when
+   * this is true.
+   */
+  ownerSession?: boolean;
 }
 
 // ─── Side effects ─────────────────────────────────────────────────────────────

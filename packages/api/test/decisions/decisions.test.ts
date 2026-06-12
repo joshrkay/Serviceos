@@ -71,7 +71,7 @@ import { Role, Permission, hasPermission, getPermissionContract } from '../../sr
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
 const API_SRC = path.resolve(REPO_ROOT, 'packages/api/src');
-const AGENT_PY = path.resolve(REPO_ROOT, 'service-os-agent');
+const AGENT_PY = path.resolve(REPO_ROOT, 'experiments/service-os-agent');
 
 // ────────────────────────────────────────────────────────────────────────────
 // Helpers: file and content searches across the repo surface.

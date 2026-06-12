@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { InvoicesPage } from './InvoicesPage';
@@ -7,6 +7,9 @@ import { InvoicesPage } from './InvoicesPage';
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
 vi.mock('../../hooks/useDetailQuery', () => ({ useDetailQuery: vi.fn() }));
 vi.mock('../../hooks/useMutation', () => ({ useMutation: vi.fn() }));
+vi.mock('../shared/CameraCapture', () => ({
+  CameraCapture: () => <div data-testid="mock-capture-sheet">Capture open</div>,
+}));
 vi.mock('sonner', () => ({
   toast: {
     success: vi.fn(),
@@ -15,6 +18,7 @@ vi.mock('sonner', () => ({
 }));
 
 import { useListQuery } from '../../hooks/useListQuery';
+import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { toast } from 'sonner';
 
@@ -70,7 +74,9 @@ const defaultListResult = {
 };
 
 beforeEach(() => {
+  vi.restoreAllMocks();
   vi.mocked(useListQuery).mockReturnValue(defaultListResult);
+  vi.mocked(useDetailQuery).mockReturnValue({ data: null, isLoading: false, error: null, refetch: vi.fn() });
   vi.mocked(useMutation).mockReturnValue({ mutate: vi.fn(), isLoading: false, error: null });
 });
 
@@ -156,6 +162,51 @@ describe('InvoicesPage', () => {
   it('uses /api/invoices endpoint', () => {
     renderPage();
     expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/invoices');
+  });
+
+  it('renders invoice attachments and opens capture from Add photo', async () => {
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: {
+        id: 'i1',
+        invoiceNumber: 'INV-001',
+        status: 'draft',
+        lineItems: [],
+        totals: totalsOf(0),
+        amountDueCents: 0,
+        customer: { id: 'c1', displayName: 'Alice Smith' },
+      },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith('/api/attachments')) {
+        return new Response(JSON.stringify([{
+          id: 'a1',
+          fileId: 'f1',
+          entityType: 'invoice',
+          entityId: 'i1',
+          kind: 'photo',
+          caption: 'Receipt photo',
+          portalVisible: true,
+          downloadUrl: 'https://cdn.test/receipt.jpg',
+        }]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }));
+
+    render(
+      <MemoryRouter>
+        <InvoicesPage defaultSelectedId="i1" />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('invoice-attachments-section')).toBeInTheDocument();
+    expect(screen.getByText('Receipt photo')).toBeInTheDocument();
+    expect(screen.getByText('Visible to customer')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /add photo/i }));
+    await waitFor(() => expect(screen.getByTestId('mock-capture-sheet')).toBeInTheDocument());
   });
 });
 

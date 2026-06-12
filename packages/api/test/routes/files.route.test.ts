@@ -34,6 +34,12 @@ class FakeStorageProvider implements StorageProvider {
   async getObjectMetadata(): Promise<ObjectMetadata | null> {
     return this.headResult;
   }
+  async getObject(): Promise<Buffer | null> {
+    return null;
+  }
+  async putObject(): Promise<void> {
+    return;
+  }
 
   async deleteObject(bucket: string, key: string): Promise<void> {
     this.deleted.push({ bucket, key });

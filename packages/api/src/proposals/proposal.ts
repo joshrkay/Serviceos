@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
 import {
+  confidenceMetaBlocksAutoApprove,
   resolveAutoApproveThreshold,
   shouldAutoApprove,
   type Mode,
@@ -368,6 +369,14 @@ export function decideInitialStatus(input: {
    * keyed by mode). Pass-through to `resolveAutoApproveThreshold`.
    */
   tenantThresholdOverride?: ResolveThresholdInput['tenantOverride'];
+  /**
+   * RV-007: the proposal payload, inspected for the optional
+   * `_meta.overallConfidence` confidence marker. A 'low' / 'very_low'
+   * level hard-blocks auto-approval regardless of the numeric
+   * confidence score. Optional — payloads without `_meta` (and callers
+   * that don't thread the payload) keep pre-RV-007 behavior exactly.
+   */
+  payload?: unknown;
 }): ProposalStatus {
   // Missing required fields always land in 'draft' — a partial payload
   // can't be auto-approved even by an autonomous agent with high
@@ -382,6 +391,19 @@ export function decideInitialStatus(input: {
   // and capture-class. Money / comms / irreversible classes never auto-approve
   // regardless of trust tier or mode (see `actionClassForProposalType` doc).
   if (input.sourceTrustTier === 'autonomous' && cls === 'capture') {
+    // RV-007 — Confidence Marker hard-block. When the AI handler stamped
+    // `payload._meta.overallConfidence` as 'low' / 'very_low', the
+    // proposal can never auto-approve, whatever the numeric score says.
+    // Checked before threshold resolution so the unsupervised
+    // 'ready_for_review' branch (semantics: "would have auto-approved if
+    // a supervisor were present") is also skipped — a low-confidence
+    // proposal would NOT have auto-approved, so it lands in 'draft' for
+    // a full human review rather than a one-tap SMS approve. Absent or
+    // malformed `_meta` never blocks (pre-RV-007 behavior preserved).
+    if (confidenceMetaBlocksAutoApprove(input.payload)) {
+      return 'draft';
+    }
+
     // Phase 12 — resolve the mode-aware threshold. `null` means the
     // tenant is unsupervised and auto-approval is categorically blocked.
     const threshold = resolveAutoApproveThreshold({
@@ -525,6 +547,11 @@ export function createProposal(input: CreateProposalInput): Proposal {
     supervisorMode: input.supervisorMode,
     supervisorPresent: input.supervisorPresent,
     tenantThresholdOverride: input.tenantThresholdOverride,
+    // RV-007: thread the payload so the `_meta.overallConfidence`
+    // confidence-marker guard sees it. Every auto-approve path goes
+    // through createProposal → decideInitialStatus, so this is the
+    // single wiring point.
+    payload: input.payload,
   });
   // D9 undo window: auto-approved proposals stamp `approvedAt` at
   // creation so the 5-second undo window starts ticking immediately.

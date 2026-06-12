@@ -20,6 +20,10 @@ import type { IntentClassification } from '../../src/ai/orchestration/intent-cla
 import type { QueueMessage } from '../../src/queues/queue';
 import type { Logger } from '../../src/logging/logger';
 import type { SlotConflictCheckerInput } from '../../src/ai/tasks/slot-conflict-checker';
+import type {
+  EntityResolver,
+  EntityResolverResult,
+} from '../../src/ai/resolution/entity-resolver';
 
 function silentLogger(): Logger {
   const noop = (..._args: unknown[]) => {};
@@ -1055,4 +1059,255 @@ describe('voice-action-router worker', () => {
     // Exactly one proposal actually persisted despite two create attempts.
     expect(await real.findByTenant('t-1')).toHaveLength(1);
   });
+});
+
+// ─── P8: entity resolution ("three Bobs") ────────────────────────────────
+// The router resolves the classifier's free-text customer/job references
+// to verified tenant IDs before drafting. These tests use a fake resolver
+// to pin the contract for each EntityResolverResult kind plus failure
+// tolerance and the no-resolver regression pin.
+describe('voice-action-router entity resolution', () => {
+  let proposalRepo: InMemoryProposalRepository;
+
+  beforeEach(() => {
+    proposalRepo = new InMemoryProposalRepository();
+  });
+
+  afterEach(() => {
+    _resetSupervisorPresenceCache();
+    setSupervisorPresenceLoader(null);
+  });
+
+  const BOB_ID = '11111111-1111-1111-1111-111111111111';
+
+  function classifierJson(entities: Record<string, unknown>): string {
+    return JSON.stringify({
+      intentType: 'create_invoice',
+      confidence: 0.9,
+      extractedEntities: entities,
+    } satisfies IntentClassification);
+  }
+
+  const invoiceJson = JSON.stringify({
+    customerId: BOB_ID,
+    jobId: '22222222-2222-2222-2222-222222222222',
+    lineItems: [{ description: 'Pipe repair', quantity: 1, unitPrice: 45000 }],
+    confidence_score: 0.85,
+  });
+
+  function fakeResolver(
+    impl: (input: { tenantId: string; reference: string; kind: string }) => Promise<EntityResolverResult>,
+  ): EntityResolver {
+    return { resolve: vi.fn(impl) } as EntityResolver;
+  }
+
+  it('resolved reference → verified UUID rides the drafting context entities', async () => {
+    const gateway = gatewayReturning([classifierJson({ customerName: 'Bob' }), invoiceJson]);
+    const resolver = fakeResolver(async () => ({
+      kind: 'resolved',
+      candidate: { id: BOB_ID, kind: 'customer', label: 'Bob Smith (555-0100)', score: 0.95 },
+    }));
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, entityResolver: resolver });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Invoice Bob for the pipe repair' }),
+      silentLogger(),
+    );
+
+    expect(await proposalRepo.findByTenant('t-1')).toHaveLength(1);
+    // The drafting (second) LLM call must see the resolved UUID, not just free text.
+    const draftCall = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[1][0];
+    expect(draftCall.messages[1].content).toContain(BOB_ID);
+  });
+
+  it('ambiguous reference → voice_clarification with candidates, NO drafting LLM call', async () => {
+    const gateway = gatewayReturning([classifierJson({ customerName: 'Bob' }), invoiceJson]);
+    const resolver = fakeResolver(async () => ({
+      kind: 'ambiguous',
+      candidates: [
+        { id: 'c-1', kind: 'customer', label: 'Bob Smith (555-0100)', score: 0.9 },
+        { id: 'c-2', kind: 'customer', label: 'Bob Stone (555-0200)', hint: 'Last job: May', score: 0.88 },
+      ],
+    }));
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, entityResolver: resolver });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Invoice Bob for the pipe repair' }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant('t-1');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposalType).toBe('voice_clarification');
+    const payload = proposals[0].payload as Record<string, unknown>;
+    expect(payload.reason).toBe('ambiguous_entity');
+    expect(payload.entityReference).toBe('Bob');
+    expect(payload.entityCandidates).toEqual([
+      { id: 'c-1', label: 'Bob Smith (555-0100)', score: 0.9 },
+      { id: 'c-2', label: 'Bob Stone (555-0200)', hint: 'Last job: May', score: 0.88 },
+    ]);
+    // Classifier call only — the expensive drafting call was skipped.
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('not_found reference → proposal persists with sourceContext.pendingReference', async () => {
+    const gateway = gatewayReturning([classifierJson({ customerName: 'Zelda' }), invoiceJson]);
+    const resolver = fakeResolver(async () => ({ kind: 'not_found', reference: 'Zelda' }));
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, entityResolver: resolver });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Invoice Zelda for the pipe repair' }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant('t-1');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposalType).toBe('draft_invoice');
+    const ctx = proposals[0].sourceContext as Record<string, unknown>;
+    expect(ctx.pendingReference).toEqual([{ kind: 'customer', reference: 'Zelda' }]);
+  });
+
+  it('resolver throw is non-fatal — proposal still created, unannotated', async () => {
+    const gateway = gatewayReturning([classifierJson({ customerName: 'Bob' }), invoiceJson]);
+    const resolver = fakeResolver(async () => {
+      throw new Error('pg down');
+    });
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, entityResolver: resolver });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Invoice Bob for the pipe repair' }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant('t-1');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposalType).toBe('draft_invoice');
+    expect((proposals[0].sourceContext as Record<string, unknown> | undefined)?.pendingReference)
+      .toBeUndefined();
+  });
+
+  it('verified caller-ID customerId wins — spoken name is never resolved over it', async () => {
+    const gateway = gatewayReturning([classifierJson({ customerName: 'Bob' }), invoiceJson]);
+    const resolve = vi.fn(async () => ({
+      kind: 'resolved' as const,
+      candidate: { id: 'WRONG', kind: 'customer' as const, label: 'Bob Imposter', score: 0.99 },
+    }));
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      entityResolver: { resolve } as EntityResolver,
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'Invoice Bob for the pipe repair',
+        customerId: 'verified-caller-id',
+      }),
+      silentLogger(),
+    );
+
+    // No customer lookup attempted (no job reference either → zero calls).
+    expect(resolve).not.toHaveBeenCalled();
+    expect(await proposalRepo.findByTenant('t-1')).toHaveLength(1);
+  });
+
+  it('job references resolve independently of customer references', async () => {
+    const gateway = gatewayReturning([
+      classifierJson({ customerName: 'Bob', jobReference: 'the Rodriguez job' }),
+      invoiceJson,
+    ]);
+    const seen: string[] = [];
+    const resolver = fakeResolver(async ({ kind }) => {
+      seen.push(kind);
+      if (kind === 'customer') {
+        return {
+          kind: 'resolved',
+          candidate: { id: BOB_ID, kind: 'customer', label: 'Bob Smith', score: 0.95 },
+        };
+      }
+      return { kind: 'not_found', reference: 'the Rodriguez job' };
+    });
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, entityResolver: resolver });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Invoice Bob for the Rodriguez job' }),
+      silentLogger(),
+    );
+
+    expect(seen.sort()).toEqual(['customer', 'job']);
+    const proposals = await proposalRepo.findByTenant('t-1');
+    const ctx = proposals[0].sourceContext as Record<string, unknown>;
+    expect(ctx.pendingReference).toEqual([{ kind: 'job', reference: 'the Rodriguez job' }]);
+  });
+
+  it('without an entityResolver dep, behavior is unchanged (regression pin)', async () => {
+    const gateway = gatewayReturning([classifierJson({ customerName: 'Bob' }), invoiceJson]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Invoice Bob for the pipe repair' }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant('t-1');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposalType).toBe('draft_invoice');
+    expect((proposals[0].sourceContext as Record<string, unknown> | undefined)?.pendingReference)
+      .toBeUndefined();
+  });
+});
+
+// ─── RV-071 — owner approval intents are NOT routable from this worker ───────
+//
+// approve_proposal / reject_proposal are only actionable on a live,
+// verified owner call (telephony FSM, RV-070 ownerSession). This worker
+// processes recorded memos with no caller-ID identity and no confirm
+// turn — even a classifier that returns the intent at 0.99 must produce
+// NO proposal and NO mutation here.
+
+describe('RV-071 — voice-action-router refuses owner approval intents', () => {
+  it.each(['approve_proposal', 'reject_proposal'])(
+    'a high-confidence %s classification produces no proposal and no mutation',
+    async (intentType) => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const seeded = await proposalRepo.create(
+        // A pending proposal that a mis-route could have approved.
+        (await import('../../src/proposals/proposal')).createProposal({
+          tenantId: 'tenant-1',
+          proposalType: 'draft_estimate',
+          payload: { customerName: 'Henderson', lineItems: [], totalCents: 45000 },
+          summary: 'Estimate for Henderson',
+          createdBy: 'voice',
+        }),
+      );
+
+      const gateway = gatewayReturning([
+        JSON.stringify({
+          intentType,
+          confidence: 0.99,
+          reasoning: 'owner-style command',
+          extractedEntities: { proposalReference: 'the Henderson estimate' },
+        }),
+      ]);
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+      await worker.handle(
+        msg({
+          tenantId: 'tenant-1',
+          userId: 'user-1',
+          transcript: 'approve the Henderson estimate',
+        }),
+        silentLogger(),
+      );
+
+      const all = await proposalRepo.findByTenant('tenant-1');
+      // No new proposal was created (no clarification either — skipped).
+      expect(all).toHaveLength(1);
+      // And the seeded proposal was not touched.
+      const stored = await proposalRepo.findById('tenant-1', seeded.id);
+      expect(stored?.status).toBe(seeded.status);
+    },
+  );
 });

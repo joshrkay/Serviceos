@@ -136,14 +136,18 @@ export const BRAND_VOICE_TASK_TYPE = 'brand_voice_v1';
 export const BRAND_VOICE_PROMPT_VERSION_ID = 'brand_voice_v1';
 
 /**
- * The four customer-facing intents brand-voice ships with in V1. Adding an
- * intent is a single entry here (and one guidance block in brand-voice/prompts.ts).
+ * The intents registered against `brand_voice_v1`. Adding an intent is a
+ * single entry here (and one guidance block in brand-voice/prompts.ts).
+ * V1 shipped the four customer-facing intents; RV-061 added the
+ * owner-facing digest narrative.
  */
 export const BRAND_VOICE_INTENTS = [
   'tech_reschedule_customer_sms',
   'review_public_response',
   'review_private_followup',
   'dropped_call_recovery_sms',
+  // RV-061 (F-9) — owner-facing end-of-day digest narrative.
+  'digest_narrative',
 ] as const;
 
 export type BrandVoiceRegisteredIntent = (typeof BRAND_VOICE_INTENTS)[number];

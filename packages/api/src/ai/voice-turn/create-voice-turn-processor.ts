@@ -47,10 +47,22 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
-import { classifyIntent } from '../orchestration/intent-classifier';
+import { classifyIntent, isVoiceApprovalIntent } from '../orchestration/intent-classifier';
+import {
+  startVoiceApproval,
+  continueVoiceApproval,
+  type OneTapFallbackDeps,
+  type VoiceApprovalDeps,
+  type VoiceApprovalTurnResult,
+} from '../tasks/proposal-approval-task';
+import type { ProposalSmsEventRepository } from '../../proposals/sms/sms-event';
 import { confirmIntent } from '../skills/confirm-intent';
 import { summarizeSession } from '../skills/summarize-session';
-import { escalateToHuman } from '../skills/escalate-to-human';
+import {
+  escalateToHuman,
+  emergencyImmediateDial,
+  EMERGENCY_INTENTS,
+} from '../skills/escalate-to-human';
 import { estimateCostCents } from '../skills/session-cost-tracker';
 import {
   intentClassifiedEvent,
@@ -261,6 +273,19 @@ export interface VoiceTurnProcessorDeps {
    * summaries; otherwise a placeholder is used.
    */
   callerPhoneResolver?: (session: VoiceSession) => string | undefined;
+  /**
+   * RV-071 — pending-edit parity guard for voice approvals (same repo
+   * method the SMS reply transport and the one-tap route use). Optional:
+   * without it the guard is skipped, mirroring pre-P2-034 wiring.
+   */
+  smsEventRepo?: Pick<ProposalSmsEventRepository, 'hasUnappliedEditRequest'>;
+  /**
+   * RV-071 — one-tap SMS fallback wiring for refused money/irreversible
+   * voice approvals. Same values app.ts already wires for P12-004
+   * unsupervised routing (secret, sender, URL builder, owner phone,
+   * P2-034 render recording).
+   */
+  voiceApprovalOneTap?: OneTapFallbackDeps;
 }
 
 export interface VoiceTurnProcessor {
@@ -309,6 +334,34 @@ export interface VoiceTurnProcessor {
   >;
   /** Persist the end-of-call summary. Best-effort. */
   runSummary(session: VoiceSession): Promise<void>;
+  /**
+   * RV-071 — consume the turn when an owner voice-approval dialogue is
+   * pending on the session (confirm / disambiguate / challenge stage).
+   * Returns the side effects to render, or null when no dialogue is
+   * pending (caller proceeds with the normal turn). Shared by
+   * `speechTurn` (WS path) and the Gather adapter so both transports run
+   * the identical safety flow.
+   */
+  handlePendingVoiceApproval(
+    session: VoiceSession,
+    speechResult: string,
+    tenantId: string,
+  ): Promise<SideEffect[] | null>;
+  /**
+   * RV-071 — route a classified `approve_proposal` / `reject_proposal`
+   * intent. HARD-GATED on the session's RV-070 `ownerSession` flag (not
+   * just the classifier prompt): non-owner callers fall into the FSM's
+   * normal `confidence_low` reprompt path and no approval flow starts.
+   */
+  handleVoiceApprovalIntent(
+    session: VoiceSession,
+    args: {
+      intentType: string;
+      entities: Record<string, unknown>;
+      utterance: string;
+      tenantId: string;
+    },
+  ): Promise<SideEffect[]>;
 }
 
 export function createVoiceTurnProcessor(
@@ -933,6 +986,118 @@ export function createVoiceTurnProcessor(
     return 'no_intent';
   }
 
+  // ─── RV-071 — owner voice-approval dialogue ─────────────────────────
+
+  /** Assembled lazily — voice approval needs a proposalRepo to exist. */
+  function voiceApprovalDeps(): VoiceApprovalDeps | null {
+    if (!deps.proposalRepo) return null;
+    return {
+      proposalRepo: deps.proposalRepo,
+      ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+      ...(deps.settingsRepo ? { settingsRepo: deps.settingsRepo } : {}),
+      ...(deps.smsEventRepo ? { smsEventRepo: deps.smsEventRepo } : {}),
+      ...(deps.appointmentRepo ? { appointmentRepo: deps.appointmentRepo } : {}),
+      ...(deps.voiceApprovalOneTap ? { oneTapFallback: deps.voiceApprovalOneTap } : {}),
+    };
+  }
+
+  function applyVoiceApprovalResult(
+    session: VoiceSession,
+    result: VoiceApprovalTurnResult,
+  ): SideEffect[] {
+    session.pendingVoiceApproval = result.pending ?? undefined;
+    // Merge (never replace) session-level mutations: a turn that only
+    // bumps challengeFailCount must not drop an earlier challengeLockedOut.
+    if (result.sessionState) {
+      session.voiceApprovalState = {
+        ...session.voiceApprovalState,
+        ...result.sessionState,
+      };
+    }
+    return [{ type: 'tts_play', payload: { text: result.speak, source: 'voice_approval' } }];
+  }
+
+  async function handlePendingVoiceApproval(
+    session: VoiceSession,
+    speechResult: string,
+    tenantId: string,
+  ): Promise<SideEffect[] | null> {
+    const pending = session.pendingVoiceApproval;
+    if (!pending) return null;
+    const approvalDeps = voiceApprovalDeps();
+    if (!approvalDeps) {
+      session.pendingVoiceApproval = undefined;
+      return null;
+    }
+    const result = await continueVoiceApproval(approvalDeps, {
+      tenantId,
+      sessionId: session.id,
+      ownerSession: session.machine.currentContext.ownerSession === true,
+      // Session-level lockout / fail-counter state — without this the
+      // challenge lockout is dead code (the task can't see prior failures).
+      sessionState: session.voiceApprovalState,
+      utterance: speechResult,
+      pending,
+    });
+    return applyVoiceApprovalResult(session, result);
+  }
+
+  async function handleVoiceApprovalIntent(
+    session: VoiceSession,
+    args: {
+      intentType: string;
+      entities: Record<string, unknown>;
+      utterance: string;
+      tenantId: string;
+    },
+  ): Promise<SideEffect[]> {
+    const ownerSession = session.machine.currentContext.ownerSession === true;
+    const approvalDeps = ownerSession ? voiceApprovalDeps() : null;
+
+    // The HARD gate (never prompt-only): a non-owner caller uttering
+    // "approve ..." — or a deployment without a proposalRepo — never
+    // starts an approval flow. The FSM's bounded reprompt path answers.
+    if (!ownerSession || !approvalDeps) {
+      const sideEffects: SideEffect[] = [
+        {
+          type: 'audit_log',
+          payload: {
+            eventType: 'agent.calling.voice_approval_denied',
+            reason: ownerSession ? 'not_configured' : 'not_owner_session',
+            intentType: args.intentType,
+            sessionId: session.id,
+            tenantId: args.tenantId,
+            ts: Date.now(),
+          },
+        },
+      ];
+      sideEffects.push(
+        ...session.machine.dispatch({ type: 'confidence_low', threshold: TAU_INT, score: 0 }),
+      );
+      return sideEffects;
+    }
+
+    const reference =
+      typeof args.entities.proposalReference === 'string' &&
+      args.entities.proposalReference.trim().length > 0
+        ? args.entities.proposalReference
+        : args.utterance;
+    const result = await startVoiceApproval(approvalDeps, {
+      tenantId: args.tenantId,
+      sessionId: session.id,
+      ownerSession,
+      // Session-level lockout state: a locked session refuses fresh
+      // money/irreversible dialogues immediately (capture-class still works).
+      sessionState: session.voiceApprovalState,
+      action: args.intentType === 'reject_proposal' ? 'reject' : 'approve',
+      reference,
+    });
+    // The FSM deliberately stays in intent_capture / closing (the
+    // lookup-skill pattern): the dialogue is session-scoped adapter
+    // state, so existing FSM flows are untouched.
+    return applyVoiceApprovalResult(session, result);
+  }
+
   // ─── Speech turn (formerly processCallerUtterance) ──────────────────
 
   const speechTurn: SpeechTurnHandler = async ({
@@ -965,6 +1130,23 @@ export function createVoiceTurnProcessor(
       text: speechResult,
       ts: Date.now(),
     });
+
+    // RV-071 — an in-flight owner approval dialogue consumes the turn
+    // BEFORE the FSM-state branch (including silence: an empty utterance
+    // is "anything else" → no action, keep for later).
+    const approvalTurn = await handlePendingVoiceApproval(session, speechResult, tenantId);
+    if (approvalTurn) {
+      await executeSideEffects(session, approvalTurn, tenantId);
+      const lastTts = [...approvalTurn].reverse().find((e) => e.type === 'tts_play');
+      if (lastTts && typeof lastTts.payload.text === 'string') {
+        deps.store.appendTranscript(session.id, {
+          speaker: 'agent',
+          text: lastTts.payload.text,
+          ts: Date.now(),
+        });
+      }
+      return approvalTurn;
+    }
 
     const sideEffectsAll: SideEffect[] = [];
     const currentState = session.machine.currentState;
@@ -1030,7 +1212,18 @@ export function createVoiceTurnProcessor(
       try {
         const classification = await classifyIntent(
           speechResult,
-          { tenantId, verticalPromptSection, planPromptSection },
+          {
+            tenantId,
+            verticalPromptSection,
+            planPromptSection,
+            // RV-071 — the owner-approval prompt section is appended ONLY
+            // on a recognized owner line (caller-ID match; see
+            // approver-identity.ts), keeping every other call's
+            // prompt byte-identical (cassettes / gateway cache).
+            ...(session.machine.currentContext.ownerSession === true
+              ? { ownerSession: true }
+              : {}),
+          },
           deps.gateway,
         );
         session.events.emit(
@@ -1070,6 +1263,86 @@ export function createVoiceTurnProcessor(
           sessionId: session.id,
         });
         classifierEvent = { type: 'confidence_low', threshold: TAU_INT, score: 0 };
+      }
+
+      // RV-071 — owner voice approval. Routed OUTSIDE the FSM (the
+      // lookup-skill pattern: the FSM state is untouched and the dialogue
+      // lives on the session). handleVoiceApprovalIntent hard-gates on
+      // ownerSession — a non-owner "approve" gets the normal reprompt.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        isVoiceApprovalIntent(classifierEvent.intentType)
+      ) {
+        const approvalFx = await handleVoiceApprovalIntent(session, {
+          intentType: classifierEvent.intentType,
+          entities: classifierEvent.entities,
+          utterance: speechResult,
+          tenantId,
+        });
+        sideEffectsAll.push(...approvalFx);
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        const lastTts = [...sideEffectsAll].reverse().find((e) => e.type === 'tts_play');
+        if (lastTts && typeof lastTts.payload.text === 'string') {
+          deps.store.appendTranscript(session.id, {
+            speaker: 'agent',
+            text: lastTts.payload.text,
+            ts: Date.now(),
+          });
+        }
+        return sideEffectsAll;
+      }
+
+      // P12-004 — emergency-intent immediate Dial. When the classified
+      // intent is in the emergency set AND the tenant is unsupervised
+      // (checked inside the wrapper via isSupervisorPresent), bypass the
+      // FSM/booking path entirely and Dial the on-call rotation now.
+      // The wrapper emits the `emergency_immediate_dial` audit event.
+      // Supervised tenants and non-emergency intents fall through to the
+      // unchanged FSM dispatch below.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        EMERGENCY_INTENTS.has(classifierEvent.intentType) &&
+        deps.onCallRepo
+      ) {
+        try {
+          const immediate = await emergencyImmediateDial({
+            intent: classifierEvent.intentType,
+            tenantId,
+            sessionId: session.id,
+            channel: 'telephony',
+            onCallRepo: deps.onCallRepo,
+            ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+            session,
+            ...(deps.callControl ? { callControl: deps.callControl } : {}),
+            ...(deps.dispatcherPhoneResolver
+              ? { dispatcherPhoneResolver: deps.dispatcherPhoneResolver }
+              : {}),
+            ...(session.callSid ? { callSid: session.callSid } : {}),
+            dialActionUrl: dialResultUrl(session.id),
+          });
+          if (immediate.dialed && immediate.escalation) {
+            if (immediate.escalation.transfer?.fallbackTwiml !== undefined) {
+              pendingTransferTwiml.set(
+                session.id,
+                immediate.escalation.transfer.fallbackTwiml,
+              );
+            }
+            sideEffectsAll.push({
+              type: 'tts_play',
+              payload: { text: immediate.escalation.message },
+            });
+            await executeSideEffects(session, sideEffectsAll, tenantId);
+            return sideEffectsAll;
+          }
+        } catch (err) {
+          // Best-effort: an immediate-Dial failure must never strand the
+          // caller — fall through to the normal FSM path (whose own
+          // emergency fast-path still escalates via notify_oncall).
+          logger.warn('speechTurn: emergencyImmediateDial failed, falling through', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: session.id,
+          });
+        }
       }
 
       sideEffectsAll.push(...session.machine.dispatch(classifierEvent));
@@ -1153,5 +1426,7 @@ export function createVoiceTurnProcessor(
     resolvePlanPromptSection,
     resolveThresholdOverride,
     runSummary,
+    handlePendingVoiceApproval,
+    handleVoiceApprovalIntent,
   };
 }

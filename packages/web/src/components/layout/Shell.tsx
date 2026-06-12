@@ -160,10 +160,12 @@ interface ModeToggleProps {
  */
 function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
   const [pending, setPending] = useState<Mode | null>(null);
-  const options: ReadonlyArray<{ mode: Mode; label: string }> = [
-    { mode: 'supervisor', label: 'Supervisor' },
-    { mode: 'both',       label: 'Both' },
-    { mode: 'tech',       label: 'Tech' },
+  // The topbar (mobile) variant uses a short "Sup" label so all three
+  // options fit a 320px-wide header; full names stay on aria-label.
+  const options: ReadonlyArray<{ mode: Mode; label: string; fullLabel: string }> = [
+    { mode: 'supervisor', label: variant === 'topbar' ? 'Sup' : 'Supervisor', fullLabel: 'Supervisor' },
+    { mode: 'both',       label: 'Both', fullLabel: 'Both' },
+    { mode: 'tech',       label: 'Tech', fullLabel: 'Tech' },
   ];
 
   const handleClick = async (target: Mode) => {
@@ -179,9 +181,12 @@ function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
     }
   };
 
+  // Touch targets: the topbar (mobile) variant must be >= 40px tall;
+  // the sidebar variant matches the desktop nav density but keeps a
+  // 40px minimum hit area too.
   const sizeClass = variant === 'sidebar'
-    ? 'text-xs px-2 py-1'
-    : 'text-xs px-2 py-1';
+    ? 'text-xs px-2 py-1 min-h-[40px]'
+    : 'text-xs px-1.5 min-h-[40px]';
 
   return (
     <div
@@ -190,7 +195,7 @@ function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
       data-testid="mode-toggle"
       className="flex rounded-md border border-slate-200 bg-slate-50 overflow-hidden"
     >
-      {options.map(({ mode, label }) => {
+      {options.map(({ mode, label, fullLabel }) => {
         const active = current === mode;
         const isPending = pending === mode;
         return (
@@ -199,6 +204,7 @@ function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
             type="button"
             role="radio"
             aria-checked={active}
+            aria-label={fullLabel}
             data-mode-option={mode}
             disabled={pending !== null}
             onClick={() => handleClick(mode)}
@@ -489,7 +495,7 @@ function ShellInner() {
           </div>
           <div className="flex items-center gap-3">
             {showModeToggle && (
-              <div className="hidden sm:block w-44">
+              <div className="w-36 sm:w-44">
                 <ModeToggle
                   current={currentMode}
                   canFieldServe={canFieldServe}

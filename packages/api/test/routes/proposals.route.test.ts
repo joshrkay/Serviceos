@@ -18,6 +18,7 @@ import {
 } from '../../src/proposals/proposal';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { Role } from '../../src/auth/rbac';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 
 const baseInput: CreateProposalInput = {
   tenantId: TEST_TENANT_ID,
@@ -238,5 +239,82 @@ describe('PUT /api/proposals/:id', () => {
     const res = await request(app).put(`/api/proposals/${proposal.id}`).send({});
 
     expect(res.status).toBe(400);
+  });
+});
+
+describe('RV-073 — UI route approvals/rejections tag channel ui', () => {
+  function buildAppWithAudit() {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER_ID,
+        sessionId: 'session-audit',
+        tenantId: TEST_TENANT_ID,
+        role: 'owner' as Role,
+      };
+      next();
+    });
+    const proposalRepo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    app.use('/api/proposals', createProposalsRouter(proposalRepo, undefined, auditRepo));
+    return { app, proposalRepo, auditRepo };
+  }
+
+  it('POST /:id/approve audits channel ui', async () => {
+    const { app, proposalRepo, auditRepo } = buildAppWithAudit();
+    const proposal = createProposal(baseInput);
+    await proposalRepo.create(proposal);
+    await proposalRepo.updateStatus(TEST_TENANT_ID, proposal.id, 'ready_for_review');
+
+    const res = await request(app).post(`/api/proposals/${proposal.id}/approve`);
+    expect(res.status).toBe(200);
+
+    const approvedEvent = auditRepo
+      .getAll()
+      .find((e) => e.eventType === 'proposal.approved' && e.entityId === proposal.id);
+    expect(approvedEvent).toBeDefined();
+    expect(approvedEvent!.metadata).toMatchObject({ channel: 'ui' });
+  });
+
+  it('POST /:id/reject audits channel ui', async () => {
+    const { app, proposalRepo, auditRepo } = buildAppWithAudit();
+    const proposal = createProposal(baseInput);
+    await proposalRepo.create(proposal);
+    await proposalRepo.updateStatus(TEST_TENANT_ID, proposal.id, 'ready_for_review');
+
+    const res = await request(app)
+      .post(`/api/proposals/${proposal.id}/reject`)
+      .send({ reason: 'not needed' });
+    expect(res.status).toBe(200);
+
+    const rejectedEvent = auditRepo
+      .getAll()
+      .find((e) => e.eventType === 'proposal.rejected' && e.entityId === proposal.id);
+    expect(rejectedEvent).toBeDefined();
+    expect(rejectedEvent!.metadata).toMatchObject({ channel: 'ui' });
+  });
+
+  it('POST /approve-batch audits channel ui on every member', async () => {
+    const { app, proposalRepo, auditRepo } = buildAppWithAudit();
+    const a = createProposal(baseInput);
+    const b = createProposal({ ...baseInput, summary: 'Second' });
+    await proposalRepo.create(a);
+    await proposalRepo.create(b);
+    await proposalRepo.updateStatus(TEST_TENANT_ID, a.id, 'ready_for_review');
+    await proposalRepo.updateStatus(TEST_TENANT_ID, b.id, 'ready_for_review');
+
+    const res = await request(app)
+      .post('/api/proposals/approve-batch')
+      .send({ proposalIds: [a.id, b.id] });
+    expect(res.status).toBe(200);
+
+    const approvedEvents = auditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'proposal.approved');
+    expect(approvedEvents).toHaveLength(2);
+    for (const event of approvedEvents) {
+      expect(event.metadata).toMatchObject({ channel: 'ui' });
+    }
   });
 });

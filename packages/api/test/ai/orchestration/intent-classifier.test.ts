@@ -568,3 +568,79 @@ describe('intent-classifier — classifyIntent', () => {
     ).rejects.toThrow(/upstream 502/);
   });
 });
+
+// ─── RV-071 — owner approval intents ─────────────────────────────────────────
+
+import { OWNER_APPROVAL_PROMPT_SECTION, isVoiceApprovalIntent } from '../../../src/ai/orchestration/intent-classifier';
+
+describe('RV-071 — approve_proposal / reject_proposal intents', () => {
+  it('parseClassifierJson accepts approve_proposal with a proposalReference', () => {
+    const out = parseClassifierJson(JSON.stringify({
+      intentType: 'approve_proposal',
+      confidence: 0.93,
+      reasoning: 'owner asked to approve the Henderson estimate',
+      extractedEntities: { proposalReference: 'the Henderson estimate' },
+    }));
+    expect(out?.intentType).toBe('approve_proposal');
+    expect(out?.extractedEntities?.proposalReference).toBe('the Henderson estimate');
+  });
+
+  it('parseClassifierJson accepts reject_proposal', () => {
+    const out = parseClassifierJson(JSON.stringify({
+      intentType: 'reject_proposal',
+      confidence: 0.9,
+      extractedEntities: { proposalReference: 'the Acme invoice' },
+    }));
+    expect(out?.intentType).toBe('reject_proposal');
+  });
+
+  it('isVoiceApprovalIntent matches exactly the two owner intents', () => {
+    expect(isVoiceApprovalIntent('approve_proposal')).toBe(true);
+    expect(isVoiceApprovalIntent('reject_proposal')).toBe(true);
+    expect(isVoiceApprovalIntent('confirm')).toBe(false);
+    expect(isVoiceApprovalIntent('create_invoice')).toBe(false);
+    expect(isVoiceApprovalIntent(undefined)).toBe(false);
+  });
+
+  it('ownerSession: true appends the owner prompt section as a SEPARATE system message', async () => {
+    const gateway = mockGateway(JSON.stringify({
+      intentType: 'approve_proposal',
+      confidence: 0.92,
+      extractedEntities: { proposalReference: 'the Henderson estimate' },
+    }));
+
+    const result = await classifyIntent(
+      'approve the Henderson estimate',
+      { tenantId: 't1', ownerSession: true },
+      gateway,
+    );
+    expect(result.intentType).toBe('approve_proposal');
+
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+    expect(systemMessages.length).toBe(2);
+    expect(systemMessages[1].content).toBe(OWNER_APPROVAL_PROMPT_SECTION);
+    // The BASE prompt is untouched — it must not mention the owner intents.
+    expect(systemMessages[0].content).not.toContain('approve_proposal');
+  });
+
+  it('without ownerSession the prompt messages are byte-identical to the legacy shape (cassette stability)', async () => {
+    const gatewayA = mockGateway('{"intentType":"unknown","confidence":0.9}');
+    const gatewayB = mockGateway('{"intentType":"unknown","confidence":0.9}');
+
+    await classifyIntent('approve the Henderson estimate', { tenantId: 't1' }, gatewayA);
+    await classifyIntent(
+      'approve the Henderson estimate',
+      { tenantId: 't1', ownerSession: false },
+      gatewayB,
+    );
+
+    const messagesA = (gatewayA.complete as ReturnType<typeof vi.fn>).mock.calls[0][0].messages;
+    const messagesB = (gatewayB.complete as ReturnType<typeof vi.fn>).mock.calls[0][0].messages;
+    expect(messagesB).toEqual(messagesA);
+    expect(messagesA.filter((m: { role: string }) => m.role === 'system')).toHaveLength(1);
+    for (const m of messagesA) {
+      expect(m.content).not.toContain('approve_proposal');
+    }
+  });
+});
