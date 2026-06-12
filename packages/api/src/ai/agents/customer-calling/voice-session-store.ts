@@ -303,6 +303,8 @@ export class VoiceSessionStore {
       escalationTriggers?: CallingAgentContext['escalationTriggers'];
       /** RV-070 — caller-ID matched an approver phone (owner / backup). */
       ownerSession?: boolean;
+      /** Phase-2 Track A — tenant opted into extended owner intents. */
+      extendedIntents?: boolean;
     } = {}
   ): VoiceSession {
     const id = uuidv4();
@@ -317,6 +319,7 @@ export class VoiceSessionStore {
         ? { escalationTriggers: opts.escalationTriggers }
         : {}),
       ...(opts.ownerSession ? { ownerSession: true } : {}),
+      ...(opts.extendedIntents ? { extendedIntents: true } : {}),
     });
     const costTracker = new SessionCostTracker(
       channel === 'inapp' ? DEFAULT_INAPP_CAPS : DEFAULT_TELEPHONY_CAPS

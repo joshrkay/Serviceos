@@ -37,15 +37,20 @@ import { lookupLeads } from '../ai/skills/lookup-leads';
 import { lookupRevenue } from '../ai/skills/lookup-revenue';
 import { lookupCatalog } from '../ai/skills/lookup-catalog';
 import { lookupAvailability } from '../ai/skills/lookup-availability';
+import { lookupDayOverview } from '../ai/skills/lookup-day-overview';
+import { lookupDigest } from '../ai/skills/lookup-digest';
+import { lookupPendingItems } from '../ai/skills/lookup-pending-items';
 import type { AvailabilityFinder } from '../ai/tasks/availability-finder';
 import type { MoneyDashboardRepository } from '../reports/money-dashboard';
 import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { JobRepository } from '../jobs/job';
 import type { AppointmentRepository } from '../appointments/appointment';
 import type { InvoiceRepository } from '../invoices/invoice';
+import type { DunningConfigRepository } from '../invoices/dunning-config';
 import type { AgreementRepository } from '../agreements/agreement';
 import type { CustomerRepository } from '../customers/customer';
 import type { EstimateRepository } from '../estimates/estimate';
+import type { DailyDigestRepository } from '../digest/digest-service';
 import type { LookupEventService } from '../lookup-events/lookup-event-service';
 import type { LLMGateway } from '../ai/gateway/gateway';
 import { discloseRecording } from '../ai/skills/disclose-recording';
@@ -107,7 +112,10 @@ import {
 import type { RecordingControl } from './recording-control';
 import { armEmergencyPageLadder } from './emergency-page-retry';
 import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
-import type { DroppedCallScheduler } from '../sms/recovery/scheduler';
+import type {
+  DroppedCallRecoveryRepository,
+  DroppedCallScheduler,
+} from '../sms/recovery/scheduler';
 import { buildRecoveryContext } from '../sms/recovery/scheduler';
 import type { SettingsRepository } from '../settings/settings';
 import type { UserRepository } from '../users/user';
@@ -119,6 +127,16 @@ const logger = createLogger({
   service: 'telephony.twilio-adapter',
   environment: process.env.NODE_ENV || 'development',
 });
+
+const OWNER_LOOKUP_INTENTS = new Set([
+  'lookup_day_overview',
+  'lookup_digest',
+  'lookup_pending_items',
+]);
+
+function isOwnerLookupIntent(intentType: string): boolean {
+  return OWNER_LOOKUP_INTENTS.has(intentType);
+}
 
 // ─── Deps ────────────────────────────────────────────────────────────────────
 
@@ -192,6 +210,10 @@ export interface TwilioAdapterDeps {
   /** Full-app voice coverage: owner-scoped revenue + catalog lookups. */
   moneyDashboardRepo?: MoneyDashboardRepository;
   catalogRepo?: CatalogItemRepository;
+  /** Phase-2 Track A: owner-scoped day/digest/pending lookups. */
+  dailyDigestRepo?: DailyDigestRepository;
+  dunningConfigRepo?: DunningConfigRepository;
+  droppedCallRecoveryRepo?: Pick<DroppedCallRecoveryRepository, 'listUnansweredRecoveries'>;
   /** When wired, lookup_availability speaks the next open slots. */
   availabilityFinder?: AvailabilityFinder;
   /** P11-001: when wired, every lookup invocation writes a row. */
@@ -219,6 +241,12 @@ export interface TwilioAdapterDeps {
     tenantId: string,
     customerId: string,
   ) => Promise<string | undefined>;
+  /**
+   * Phase-2 Track A — per-tenant opt-in for extended owner intents.
+   * Resolved once at session establishment and stored on the session context;
+   * resolver failures degrade to false so live calls never fail over flags.
+   */
+  extendedIntentsEnabled?: (tenantId: string) => Promise<boolean>;
   /**
    * Tier 4 / PR B — per-tenant auto-approve threshold override
    * resolver. When wired, the adapter loads the override before
@@ -757,6 +785,7 @@ export class TwilioGatherAdapter {
       ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
       : [];
     const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
+    const extendedIntents = await this.resolveExtendedIntents(opts.tenantId);
     // RV-070 — owner-line recognition happens at session establishment:
     // recognized owner line (caller-ID match; see approver-identity.ts).
     const ownerSession = await this.resolveOwnerSession(opts.tenantId, opts.from);
@@ -765,6 +794,7 @@ export class TwilioGatherAdapter {
       ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
       ...(escalationTriggers ? { escalationTriggers } : {}),
       ...(ownerSession ? { ownerSession: true } : {}),
+      ...(extendedIntents ? { extendedIntents: true } : {}),
     });
     // initializeStreamSession reads callerIdBySession to drive
     // identifyCaller/lead creation; without this, every media-stream
@@ -1319,6 +1349,7 @@ export class TwilioGatherAdapter {
       ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
       : [];
     const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
+    const extendedIntents = await this.resolveExtendedIntents(opts.tenantId);
     // RV-070 — owner-line recognition happens at session establishment:
     // recognized owner line (caller-ID match; see approver-identity.ts).
     const ownerSession = await this.resolveOwnerSession(opts.tenantId, opts.from);
@@ -1327,6 +1358,7 @@ export class TwilioGatherAdapter {
       ...(repairTemplatesForInbound.length > 0 ? { repairTemplates: repairTemplatesForInbound } : {}),
       ...(escalationTriggers ? { escalationTriggers } : {}),
       ...(ownerSession ? { ownerSession: true } : {}),
+      ...(extendedIntents ? { extendedIntents: true } : {}),
     });
     this.persistVoiceSessionRow(session, opts.callSid);
 
@@ -1667,6 +1699,9 @@ export class TwilioGatherAdapter {
             ...(session.machine.currentContext.ownerSession === true
               ? { ownerSession: true }
               : {}),
+            ...(session.machine.currentContext.extendedIntents === true
+              ? { extendedIntents: true }
+              : {}),
           },
           this.deps.gateway,
         );
@@ -1923,16 +1958,22 @@ export class TwilioGatherAdapter {
     tenantId: string,
   ): Promise<string> {
     const customerId = session.customerId;
-    if (!customerId) {
+    const ownerSession = session.machine.currentContext.ownerSession === true;
+    const ownerLookup = isOwnerLookupIntent(intentType);
+    if (!customerId && !ownerLookup) {
       // Lookups are customer-scoped. An anonymous caller doesn't have
       // an account to read from; we never want to leak a different
       // tenant's summary. Degrade gracefully.
       return "I can't pull up your account without identifying you first. Let me get a person to help.";
     }
+    if (ownerLookup && !ownerSession) {
+      return this.lookupNotWiredFallback();
+    }
+    const customerScopedCustomerId = customerId as string;
 
     const sharedInput = {
       tenantId,
-      customerId,
+      customerId: customerScopedCustomerId,
       sessionId: session.id,
     };
 
@@ -2050,7 +2091,7 @@ export class TwilioGatherAdapter {
           const result = await lookupCustomer(
             {
               tenantId,
-              identifier: { type: 'id', value: customerId },
+              identifier: { type: 'id', value: customerScopedCustomerId },
               sessionId: session.id,
             },
             {
@@ -2152,6 +2193,70 @@ export class TwilioGatherAdapter {
             ? this.lookupNotWiredFallback()
             : result.message;
         }
+        case 'lookup_day_overview': {
+          if (!this.deps.appointmentRepo || !this.deps.jobRepo || !this.deps.proposalRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupDayOverview(
+            { tenantId, sessionId: session.id },
+            {
+              appointmentRepo: this.deps.appointmentRepo,
+              jobRepo: this.deps.jobRepo,
+              proposalRepo: this.deps.proposalRepo,
+              ...(this.deps.userRepo ? { userRepo: this.deps.userRepo } : {}),
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_digest': {
+          if (!this.deps.dailyDigestRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupDigest(
+            { tenantId, sessionId: session.id },
+            {
+              digestRepo: this.deps.dailyDigestRepo,
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_pending_items': {
+          if (!this.deps.estimateRepo || !this.deps.invoiceRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupPendingItems(
+            { tenantId, sessionId: session.id },
+            {
+              estimateRepo: this.deps.estimateRepo,
+              invoiceRepo: this.deps.invoiceRepo,
+              ...(this.deps.dunningConfigRepo
+                ? { dunningConfigRepo: this.deps.dunningConfigRepo }
+                : {}),
+              ...(this.deps.droppedCallRecoveryRepo
+                ? {
+                    listUnansweredRecoveries: (tenant: string) =>
+                      this.deps.droppedCallRecoveryRepo!.listUnansweredRecoveries(tenant),
+                  }
+                : {}),
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
+          return result.summary;
+        }
         default:
           return this.lookupNotWiredFallback();
       }
@@ -2172,6 +2277,19 @@ export class TwilioGatherAdapter {
 
   private lookupNotWiredFallback(): string {
     return "I'm having trouble pulling that up right now. Let me get a person to help.";
+  }
+
+  private async resolveExtendedIntents(tenantId: string): Promise<boolean> {
+    if (!this.deps.extendedIntentsEnabled) return false;
+    try {
+      return await this.deps.extendedIntentsEnabled(tenantId);
+    } catch (err) {
+      logger.warn('extendedIntentsEnabled resolver failed in TwilioGatherAdapter', {
+        tenantId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
   }
 
   /**

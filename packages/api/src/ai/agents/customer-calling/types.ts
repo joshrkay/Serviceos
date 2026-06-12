@@ -139,6 +139,12 @@ export interface CallingAgentContext {
    * this is true.
    */
   ownerSession?: boolean;
+  /**
+   * Phase-2 Track A — resolved once at session establishment from the
+   * tenant `voice_extended_intents` flag. When true the live-call
+   * classifier appends the extended owner-lookup/complaint prompt section.
+   */
+  extendedIntents?: boolean;
 }
 
 // ─── Side effects ─────────────────────────────────────────────────────────────
