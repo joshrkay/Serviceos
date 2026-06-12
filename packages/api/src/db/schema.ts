@@ -4319,6 +4319,7 @@ export const MIGRATIONS = {
       synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     ALTER TABLE accounting_sync_log ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE accounting_sync_log FORCE ROW LEVEL SECURITY;
     CREATE POLICY accounting_sync_log_tenant ON accounting_sync_log
       USING (
         tenant_id = current_setting('app.current_tenant_id', true)::uuid
