@@ -172,6 +172,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
 import type { UnsupervisedProposalRouting } from '../settings/settings';
+import type { OutboundAnchorKind } from './sms/sms-event';
 
 /** Hard ceiling on one-tap link lifetime (risk note: TTL ≤ 30 minutes). */
 export const ONE_TAP_APPROVE_MAX_TTL_MS = 30 * 60 * 1000;
@@ -355,7 +356,7 @@ export interface RouteUnsupervisedProposalDeps {
    */
   onSmsSent?: (sent: {
     body: string;
-    kind: 'proposal_rendered' | 'review_required_rendered';
+    kind: OutboundAnchorKind;
     expiresAt?: Date;
   }) => Promise<void>;
 }

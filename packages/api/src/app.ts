@@ -404,6 +404,7 @@ import {
   InMemoryProposalSmsEventRepository,
   createProposalSmsEvent,
   createLlmEditInterpreter,
+  type OutboundAnchorKind,
 } from './proposals/sms';
 
 // Auth middleware
@@ -1209,7 +1210,7 @@ export function createApp(): express.Express {
     // RV-074 — low/very_low-confidence sends anchor as
     // `review_required_rendered` so the "reply N to reject" they solicit
     // targets THIS proposal, not an older render.
-    kind: 'proposal_rendered' | 'review_required_rendered';
+    kind: OutboundAnchorKind;
   }): Promise<void> => {
     await proposalSmsEventRepo.create(
       createProposalSmsEvent({

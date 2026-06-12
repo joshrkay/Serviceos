@@ -6,6 +6,7 @@ import { assertValidProposalPayload } from '../proposals/contracts';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
 import { routeUnsupervisedProposal } from '../proposals/auto-approve';
 import { renderProposalSms } from '../proposals/sms/render';
+import type { OutboundAnchorKind } from '../proposals/sms/sms-event';
 import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
 import type { AuditRepository } from '../audit/audit';
 import type { UnsupervisedProposalRouting } from '../settings/settings';
@@ -131,7 +132,7 @@ export interface UnsupervisedRoutingDeps extends RouteUnsupervisedProposalDeps {
     tenantId: string;
     proposalId: string;
     body: string;
-    kind: 'proposal_rendered' | 'review_required_rendered';
+    kind: OutboundAnchorKind;
   }) => Promise<void>;
 }
 
@@ -1355,7 +1356,7 @@ export function createVoiceActionRouterWorker(
                         kind,
                       }: {
                         body: string;
-                        kind: 'proposal_rendered' | 'review_required_rendered';
+                        kind: OutboundAnchorKind;
                       }) =>
                         ur.recordSmsEvent!({
                           tenantId,

@@ -38,6 +38,17 @@ export type ProposalSmsEventKind =
   | 'edit_session_opened'
   | 'edit_request';
 
+/**
+ * The two outbound kinds that anchor the inbound reply transport — the ones
+ * `findRecentOutbound` returns and Y/N/EDIT replies resolve against. Named
+ * centrally to eliminate the five inline `'proposal_rendered' |
+ * 'review_required_rendered'` unions spread across callers.
+ */
+export type OutboundAnchorKind = Extract<
+  ProposalSmsEventKind,
+  'proposal_rendered' | 'review_required_rendered'
+>;
+
 export interface ProposalSmsEvent {
   id: string;
   tenantId: string;

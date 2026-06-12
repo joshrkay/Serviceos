@@ -236,6 +236,11 @@ async function handleApprove(
 ): Promise<HandlerResult> {
   await recordInbound(deps, ctx, proposal.id, 'reply_approve');
 
+  // Low-confidence guard runs BEFORE the pending-edit guard because it is the
+  // stronger invariant: an applied SMS edit can clear pending-edit state, but
+  // it cannot upgrade the payload's _meta confidence — a proposal that needed
+  // in-app review before the edit still needs it after.
+  //
   // RV-074 — a low/very_low-confidence proposal was sent as the
   // "needs review in app" form (no Y prompt, no one-tap link), but nothing
   // stops the owner texting Y anyway. The same predicate that suppressed

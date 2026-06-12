@@ -41,7 +41,7 @@ import { actionClassForProposalType } from '../../proposals/proposal';
 import { approveProposal, rejectProposal } from '../../proposals/actions';
 import { routeUnsupervisedProposal } from '../../proposals/auto-approve';
 import { renderProposalSms } from '../../proposals/sms/render';
-import type { ProposalSmsEventRepository } from '../../proposals/sms/sms-event';
+import type { ProposalSmsEventRepository, OutboundAnchorKind } from '../../proposals/sms/sms-event';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import { createAuditEvent, type AuditRepository } from '../../audit/audit';
 import type { SettingsRepository } from '../../settings/settings';
@@ -162,7 +162,7 @@ export interface OneTapFallbackDeps {
     tenantId: string;
     proposalId: string;
     body: string;
-    kind: 'proposal_rendered' | 'review_required_rendered';
+    kind: OutboundAnchorKind;
   }) => Promise<void>;
 }
 
@@ -405,7 +405,7 @@ async function sendOneTapFallback(
                 kind,
               }: {
                 body: string;
-                kind: 'proposal_rendered' | 'review_required_rendered';
+                kind: OutboundAnchorKind;
               }) =>
                 fallback.recordSmsEvent!({
                   tenantId: ref.tenantId,

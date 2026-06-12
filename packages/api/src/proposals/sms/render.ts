@@ -25,7 +25,7 @@
  *     prompt and approveUrl are OMITTED — no approve affordance.
  */
 import type { ProposalType } from '../proposal';
-import type { ConfidenceLevel } from '../../ai/guardrails/confidence';
+import { CONFIDENCE_LEVELS, type ConfidenceLevel } from '../../ai/guardrails/confidence';
 import { AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS } from '../auto-approve';
 
 export const PROPOSAL_SMS_MAX_CHARS = 320;
@@ -116,8 +116,7 @@ function extractMeta(payload: Record<string, unknown>): ExtractedMeta {
   const m = meta as Record<string, unknown>;
 
   // overallConfidence
-  const LEVELS: readonly string[] = ['high', 'medium', 'low', 'very_low'];
-  const overall = typeof m.overallConfidence === 'string' && LEVELS.includes(m.overallConfidence)
+  const overall = typeof m.overallConfidence === 'string' && (CONFIDENCE_LEVELS as readonly string[]).includes(m.overallConfidence)
     ? (m.overallConfidence as ConfidenceLevel)
     : undefined;
 
@@ -126,7 +125,7 @@ function extractMeta(payload: Record<string, unknown>): ExtractedMeta {
   if (m.fieldConfidence !== null && typeof m.fieldConfidence === 'object' && !Array.isArray(m.fieldConfidence)) {
     const fc: Record<string, ConfidenceLevel> = {};
     for (const [k, v] of Object.entries(m.fieldConfidence as Record<string, unknown>)) {
-      if (typeof v === 'string' && LEVELS.includes(v)) fc[k] = v as ConfidenceLevel;
+      if (typeof v === 'string' && (CONFIDENCE_LEVELS as readonly string[]).includes(v)) fc[k] = v as ConfidenceLevel;
     }
     if (Object.keys(fc).length > 0) fieldConfidence = fc;
   }
@@ -172,8 +171,8 @@ const LINE_ITEM_ANY_RE = /^lineItems\[/;
 
 /**
  * Given the fieldConfidence map and the rendered facts, return which fact
- * strings should carry a `(?)` suffix.  Returns a Set<string> of the fact
- * values that should be flagged.
+ * strings should carry a `(?)` suffix.  Returns `{ flaggedMoney, flaggedCustomer }`
+ * boolean flags — true when the corresponding fact should be suffixed.
  *
  * Rules:
  *  - Any key matching `lineItems[N].unitPrice|unitPriceCents` at medium-or-lower
