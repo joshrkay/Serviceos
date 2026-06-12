@@ -118,6 +118,38 @@ export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
       return { success: true, resultEntityId: proposal.resultEntityId };
     }
 
+    // Idempotency for the PAGE-ONLY path: a prior execution that paged the
+    // owner but landed no job (anonymous caller / job-row failure) has no
+    // resultEntityId, so the guard above can't see it. The
+    // `emergency_dispatch.executed` audit event this handler writes below is
+    // the durable marker — re-executing after a page-only success must not
+    // page the owner a second time. Best-effort: a degraded audit lookup
+    // never blocks a life-safety dispatch (the per-proposal SMS
+    // idempotencyKey still suppresses true duplicates at the provider).
+    if (this.auditRepo) {
+      try {
+        const priorEvents = await this.auditRepo.findByEntity(
+          context.tenantId,
+          'proposal',
+          proposal.id,
+        );
+        const executed = priorEvents.find(
+          (e) => e.eventType === 'emergency_dispatch.executed',
+        );
+        if (executed) {
+          const priorJobId = executed.metadata?.jobId;
+          return {
+            success: true,
+            ...(typeof priorJobId === 'string' && priorJobId
+              ? { resultEntityId: priorJobId }
+              : {}),
+          };
+        }
+      } catch {
+        /* fall through to a fresh dispatch — paging twice beats never paging */
+      }
+    }
+
     // Degraded passthrough when no deps are wired (in-memory tests that
     // don't exercise the mutation path) — same convention as the other
     // registry handlers.

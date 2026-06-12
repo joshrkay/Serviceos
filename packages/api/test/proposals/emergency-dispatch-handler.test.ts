@@ -215,6 +215,69 @@ describe('RV-141 — EmergencyDispatchExecutionHandler', () => {
     expect(sendSms).not.toHaveBeenCalled();
   });
 
+  it('page-only success (no job) is idempotent via the durable audit marker', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    const sendSms = vi.fn(async (_args: { to: string; body: string }) => ({}));
+    const handler = new EmergencyDispatchExecutionHandler(
+      undefined,
+      undefined,
+      settingsStub(),
+      { sendSms },
+      auditRepo,
+    );
+    // Anonymous caller -> no job lands -> no resultEntityId is ever stamped,
+    // so only the emergency_dispatch.executed audit event can guard re-runs.
+    const proposal = makeProposal({
+      intent: 'emergency_dispatch',
+      entities: { emergencyDescription: 'smell gas in the hallway', detectedKeywords: ['smell gas'] },
+    });
+
+    const first = await handler.execute(proposal, ctx);
+    expect(first.success).toBe(true);
+    expect(first.resultEntityId).toBeUndefined();
+    expect(sendSms).toHaveBeenCalledTimes(1);
+
+    // Re-execution (executor retry / double-approve race): NO second page.
+    const second = await handler.execute(proposal, ctx);
+    expect(second.success).toBe(true);
+    expect(sendSms).toHaveBeenCalledTimes(1);
+    expect(
+      auditRepo.getAll().filter((e) => e.eventType === 'emergency_dispatch.executed'),
+    ).toHaveLength(1);
+  });
+
+  it('audit re-run guard returns the prior jobId when the first run created one', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const locationRepo = new InMemoryLocationRepository();
+    await seedCustomerLocation(locationRepo);
+    const auditRepo = new InMemoryAuditRepository();
+    const sendSms = vi.fn(async (_args: { to: string; body: string }) => ({}));
+    const handler = new EmergencyDispatchExecutionHandler(
+      jobRepo,
+      locationRepo,
+      settingsStub(),
+      { sendSms },
+      auditRepo,
+    );
+    const proposal = makeProposal({
+      intent: 'emergency_dispatch',
+      entities: {
+        emergencyDescription: 'gas leak',
+        detectedKeywords: ['gas leak'],
+        customerId: CUSTOMER,
+      },
+    });
+    const first = await handler.execute(proposal, ctx);
+    expect(first.resultEntityId).toBeTruthy();
+    // Simulate the executor failing to stamp resultEntityId back onto the
+    // proposal row -- the audit marker still resolves the prior job.
+    const second = await handler.execute(proposal, ctx);
+    expect(second.success).toBe(true);
+    expect(second.resultEntityId).toBe(first.resultEntityId);
+    expect(sendSms).toHaveBeenCalledTimes(1);
+    expect(await jobRepo.findByTenant(TENANT)).toHaveLength(1);
+  });
+
   it('degrades to passthrough with no deps (in-memory test convention)', async () => {
     const handler = new EmergencyDispatchExecutionHandler();
     const result = await handler.execute(

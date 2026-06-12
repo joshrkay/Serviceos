@@ -2,7 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   patchOwnerThrough,
   composePatchMissSms,
-  PATCH_ANNOUNCE_LINE,
+  PATCH_ANNOUNCE_LINE_OWNER,
+  PATCH_ANNOUNCE_LINE_ONCALL,
   PATCH_DIAL_TIMEOUT_SECONDS,
 } from '../../../src/ai/skills/patch-owner-through';
 import { DefaultTwilioCallControl } from '../../../src/telephony/twilio-call-control';
@@ -35,11 +36,14 @@ describe('RV-121 — patchOwnerThrough', () => {
     expect(result.phone).toBe('+15125550999');
     // Announce <Say> precedes the <Dial> verb.
     // Apostrophes are XML-escaped in the <Say>; match an escape-free fragment.
-    expect(PATCH_ANNOUNCE_LINE).toContain('patch you straight through');
+    expect(PATCH_ANNOUNCE_LINE_OWNER).toContain('patch you straight through');
     const sayIdx = result.twiml.indexOf('patch you straight through');
     const dialIdx = result.twiml.indexOf('<Dial');
     expect(sayIdx).toBeGreaterThan(-1);
     expect(sayIdx).toBeLessThan(dialIdx);
+    // Per-rung copy accuracy: the owner rung promises the owner, not "our team".
+    expect(result.twiml).toContain('straight through to the owner');
+    expect(result.twiml).not.toContain('our team');
     expect(result.twiml).toContain(`timeout="${PATCH_DIAL_TIMEOUT_SECONDS}"`);
     expect(result.twiml).toContain('+15125550999');
     expect(
@@ -72,6 +76,11 @@ describe('RV-121 — patchOwnerThrough', () => {
     if (result.kind !== 'bridged') throw new Error('unreachable');
     expect(result.target).toBe('oncall');
     expect(result.phone).toBe('+15125550555');
+    // Per-rung copy accuracy: bridging on-call must say "our team" — it
+    // must NOT promise "the owner" (announce-line accuracy, audit item 6).
+    expect(PATCH_ANNOUNCE_LINE_ONCALL).toContain('our team');
+    expect(result.twiml).toContain('straight through to our team');
+    expect(result.twiml).not.toContain('to the owner');
   });
 
   it('rung 3: nothing reachable → voicemail TwiML + urgent SMS + call_me_back task', async () => {

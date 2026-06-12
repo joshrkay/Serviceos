@@ -60,9 +60,16 @@ export interface PatchOwnerThroughInput {
   voicemailRecordingCallbackUrl?: string;
 }
 
-/** Spoken to the caller before the bridge (prepended as <Say>). */
-export const PATCH_ANNOUNCE_LINE =
+/**
+ * Spoken to the caller before the bridge (prepended as <Say>). Per-rung
+ * copy: the on-call rung must not promise "the owner" — a vulnerable caller
+ * told they're being connected to the owner and answered by a dispatcher
+ * starts the human handoff with a broken promise.
+ */
+export const PATCH_ANNOUNCE_LINE_OWNER =
   "I'm going to patch you straight through to the owner — stay on the line with me.";
+export const PATCH_ANNOUNCE_LINE_ONCALL =
+  "I'm going to patch you straight through to our team — stay on the line with me.";
 
 export type PatchOwnerThroughResult =
   | {
@@ -138,7 +145,7 @@ export async function patchOwnerThrough(
         actionUrl: input.dialActionUrl,
         timeoutSeconds: PATCH_DIAL_TIMEOUT_SECONDS,
       }),
-      PATCH_ANNOUNCE_LINE,
+      PATCH_ANNOUNCE_LINE_OWNER,
     );
     await audit('bridged_owner', {});
     return { kind: 'bridged', target: 'owner', phone: ownerPhone, twiml };
@@ -161,7 +168,7 @@ export async function patchOwnerThrough(
               actionUrl: input.dialActionUrl,
               timeoutSeconds: PATCH_DIAL_TIMEOUT_SECONDS,
             }),
-            PATCH_ANNOUNCE_LINE,
+            PATCH_ANNOUNCE_LINE_ONCALL,
           );
           await audit('bridged_oncall', { dispatcherUserId: entry.userId });
           return { kind: 'bridged', target: 'oncall', phone, twiml };
