@@ -18,7 +18,7 @@ import { Link, useParams } from 'react-router';
 import { useApiClient } from '../../lib/apiClient';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatCurrency } from '../../utils/currency';
-import { formatTimeInTenantTz } from '../../utils/formatInTenantTz';
+import { formatTimeInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import { Spinner } from '../../components/ui';
 import { ErrorState } from '../../components/ErrorState';
 
@@ -366,7 +366,7 @@ function DigestBody({
       </SectionCard>
 
       <p className="pt-2 text-xs text-slate-400">
-        Generated {new Date(digest.generatedAt).toLocaleString()}
+        Generated {formatDateTimeInTenantTz(digest.generatedAt, timezone)}
       </p>
     </div>
   );

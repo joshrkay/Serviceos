@@ -144,7 +144,7 @@ describe('DigestPage', () => {
     expect(reviewLink).toHaveAttribute('href', '/inbox');
     // The page must never offer a one-tap approve affordance on this surface.
     expect(screen.queryByRole('button', { name: /approve/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: /^approve/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /approve/i })).not.toBeInTheDocument();
   });
 
   it('only the low-confidence approval gets the review link (high-confidence does not)', async () => {

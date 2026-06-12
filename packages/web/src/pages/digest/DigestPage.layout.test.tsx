@@ -39,7 +39,7 @@ const payload = {
   jobsCompletedCount: 2,
   tomorrow: { appointmentCount: 1, firstStartIso: '2026-06-12T13:00:00.000Z' },
   pendingApprovals: {
-    totalCount: 1,
+    totalCount: 5,
     top: [
       {
         proposalId: 'p-1',
@@ -93,6 +93,12 @@ describe('DigestPage — mobile layout contract', () => {
     renderPage();
     const review = await screen.findByRole('link', { name: /review in app/i });
     expect(review.className).toContain('min-h-11');
+  });
+
+  it('"View all N in the inbox" link meets the 44px glove target (min-h-11)', async () => {
+    renderPage();
+    const viewAll = await screen.findByRole('link', { name: /view all \d+ in the inbox/i });
+    expect(viewAll.className).toContain('min-h-11');
   });
 
   it('long customer/approval text can wrap (min-w-0 + break-words) so it cannot overflow', async () => {

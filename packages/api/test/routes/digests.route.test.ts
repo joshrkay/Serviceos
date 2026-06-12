@@ -92,6 +92,13 @@ describe('GET /api/digests/:date', () => {
     expect(res.body.error).toBe('VALIDATION_ERROR');
   });
 
+  it('400s on a calendar-invalid date (month 13, day 99)', async () => {
+    const { app } = buildApp();
+    const res = await request(app).get('/api/digests/2026-13-99');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
   it('does not leak another tenant’s digest', async () => {
     const { app, repo } = buildApp();
     await repo.upsert('tenant-OTHER', '2026-06-10', samplePayload('2026-06-10'), 'theirs');

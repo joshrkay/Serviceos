@@ -21,11 +21,16 @@ export interface DigestsRouterDeps {
   digestRepo: DailyDigestRepository;
 }
 
-/** YYYY-MM-DD (calendar-valid is enforced by the digest worker; here we
- * only guard the param shape so a malformed value can't reach the repo). */
+/** YYYY-MM-DD, calendar-valid (e.g. 2026-13-99 is rejected). */
 const dateParamSchema = z
   .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD or "latest"');
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD or "latest"')
+  .refine((s) => {
+    const [y, m, d] = s.split('-').map(Number);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return false;
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    return !isNaN(dt.getTime()) && dt.toISOString().slice(0, 10) === s;
+  }, 'date must be YYYY-MM-DD or "latest"');
 
 export function createDigestsRouter(deps: DigestsRouterDeps): Router {
   const router = Router();
