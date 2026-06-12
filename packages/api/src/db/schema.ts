@@ -4299,6 +4299,7 @@ export const MIGRATIONS = {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     ALTER TABLE accounting_integrations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE accounting_integrations FORCE ROW LEVEL SECURITY;
     CREATE POLICY accounting_integrations_tenant ON accounting_integrations
       USING (
         tenant_id = current_setting('app.current_tenant_id', true)::uuid
