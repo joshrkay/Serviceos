@@ -3930,6 +3930,43 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_estimates_number_trgm
       ON estimates USING GIN (estimate_number gin_trgm_ops);
   `,
+
+  // P2-034 — SMS proposal approval transport audit + edit sessions.
+  '157_proposal_sms_events': `
+    CREATE TABLE IF NOT EXISTS proposal_sms_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID REFERENCES proposals(id),
+      direction TEXT NOT NULL CHECK (direction IN ('outbound', 'inbound')),
+      message_sid TEXT NOT NULL,
+      owner_e164 TEXT NOT NULL,
+      body_preview TEXT NOT NULL,
+      inbound_action TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT uq_proposal_sms_message_sid UNIQUE (message_sid)
+    );
+    CREATE INDEX IF NOT EXISTS idx_proposal_sms_tenant_proposal
+      ON proposal_sms_events (tenant_id, proposal_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_proposal_sms_tenant_phone
+      ON proposal_sms_events (tenant_id, owner_e164, created_at DESC);
+    ALTER TABLE proposal_sms_events ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_proposal_sms_events ON proposal_sms_events;
+    CREATE POLICY tenant_isolation_proposal_sms_events ON proposal_sms_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS proposal_sms_edit_sessions (
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID NOT NULL REFERENCES proposals(id),
+      owner_user_id UUID NOT NULL REFERENCES users(id),
+      opened_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      expires_at TIMESTAMPTZ NOT NULL,
+      PRIMARY KEY (tenant_id, owner_user_id)
+    );
+    ALTER TABLE proposal_sms_edit_sessions ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_proposal_sms_edit_sessions ON proposal_sms_edit_sessions;
+    CREATE POLICY tenant_isolation_proposal_sms_edit_sessions ON proposal_sms_edit_sessions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

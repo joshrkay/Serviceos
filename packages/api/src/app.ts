@@ -388,6 +388,11 @@ import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import { registerKeywordHandler } from './sms/inbound-dispatch';
+import {
+  registerProposalApprovalKeywords,
+  InMemoryProposalSmsEventRepository,
+  PgProposalSmsEventRepository,
+} from './sms/proposal-approval';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -1445,6 +1450,20 @@ export function createApp(): express.Express {
     appointmentRepo,
     assignmentRepo,
   });
+  const proposalSmsEventRepo = pool
+    ? new PgProposalSmsEventRepository(pool)
+    : new InMemoryProposalSmsEventRepository();
+  registerProposalApprovalKeywords(
+    {
+      userRepo,
+      proposalRepo,
+      smsEventRepo: proposalSmsEventRepo,
+      auditRepo,
+      ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
+    },
+    { overwrite: true },
+  );
+
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
     gateway: llmGateway,
     proposalRepo,

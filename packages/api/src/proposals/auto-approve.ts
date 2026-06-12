@@ -308,6 +308,12 @@ export interface RouteUnsupervisedProposalInput {
   ownerPhone?: string | null;
   /** Short human label for the SMS body, e.g. "New booking for Jane D." */
   summaryText?: string;
+  /**
+   * P2-034 — when provided, outbound SMS uses the keyword transport renderer
+   * (summary + confidence markers + APPROVE/EDIT/REJECT) with the one-tap
+   * link appended as a fallback.
+   */
+  smsBody?: string;
   nowMs?: number;
 }
 
@@ -352,10 +358,11 @@ export async function routeUnsupervisedProposal(
         ? deps.buildApproveUrl(token)
         : `/p/approve?token=${encodeURIComponent(token)}`;
       const summary = input.summaryText ?? 'A proposal needs your approval';
-      await deps.sendSms(
-        input.ownerPhone,
-        `${summary}. Tap to approve (link expires in 30 min): ${url}`,
-      );
+      const linkTail = `Link (30 min): ${url}`;
+      const body = input.smsBody
+        ? `${input.smsBody}\n${linkTail}`
+        : `${summary}. Tap to approve (link expires in 30 min): ${url}`;
+      await deps.sendSms(input.ownerPhone, body);
       smsSent = true;
       approveLinkExpiresAt = expiresAt;
     }

@@ -4,6 +4,8 @@ export interface PrioritizedProposal {
   proposal: Proposal;
   urgency: 'critical' | 'high' | 'normal' | 'low';
   reason?: string;
+  /** P2-035 — human-readable uncertainty markers (no numeric %). */
+  confidenceMarkers?: string[];
 }
 
 const TYPE_PRIORITY: Record<ProposalType, number> = {

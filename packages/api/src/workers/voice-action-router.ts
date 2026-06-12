@@ -5,6 +5,7 @@ import { Proposal, ProposalRepository, createProposal, CreateProposalInput, Prop
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
 import { routeUnsupervisedProposal } from '../proposals/auto-approve';
+import { renderProposalSms } from '../proposals/sms/render';
 import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
 import type { AuditRepository } from '../audit/audit';
 import type { UnsupervisedProposalRouting } from '../settings/settings';
@@ -1309,6 +1310,7 @@ export function createVoiceActionRouterWorker(
           try {
             const routing = await ur.resolveRouting?.(tenantId);
             const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
+            const { body: smsBody } = renderProposalSms(outcome.proposal);
             await routeUnsupervisedProposal(
               {
                 auditRepo: ur.auditRepo,
@@ -1325,6 +1327,7 @@ export function createVoiceActionRouterWorker(
                 channel: 'other',
                 ...(ownerPhone ? { ownerPhone } : {}),
                 summaryText: outcome.proposal.summary,
+                smsBody,
               },
             );
           } catch (err) {

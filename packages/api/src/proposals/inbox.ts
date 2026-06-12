@@ -1,5 +1,9 @@
 import { Proposal } from './proposal';
 import { PrioritizedProposal, prioritizeProposals } from './prioritization';
+import {
+  deriveMarkersFromProposal,
+  formatMarkersForInbox,
+} from './markers/render';
 
 /**
  * Inbox response shape for `GET /api/proposals/inbox`. Wraps the
@@ -24,7 +28,10 @@ export interface InboxPayload {
 }
 
 export function buildInboxPayload(proposals: Proposal[], cap: number): InboxPayload {
-  const prioritized = prioritizeProposals(proposals);
+  const prioritized = prioritizeProposals(proposals).map((row) => {
+    const markers = formatMarkersForInbox(deriveMarkersFromProposal(row.proposal));
+    return markers.length > 0 ? { ...row, confidenceMarkers: markers } : row;
+  });
   const summary: InboxSummary = {
     totalCount: prioritized.length,
     criticalCount: 0,

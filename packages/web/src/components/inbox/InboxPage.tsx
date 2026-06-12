@@ -22,6 +22,7 @@ interface InboxProposalRow {
   };
   urgency: Urgency;
   reason?: string;
+  confidenceMarkers?: string[];
 }
 
 /**
@@ -289,6 +290,14 @@ export function InboxPage() {
                       <p className="text-xs text-amber-700 mt-0.5">{holdExpiryLine(row, tz)}</p>
                     )}
                     {row.reason && <p className="text-xs text-slate-500 mt-0.5">{row.reason}</p>}
+                    {row.confidenceMarkers && row.confidenceMarkers.length > 0 && (
+                      <p
+                        className="text-xs text-amber-700 mt-1"
+                        data-testid="confidence-markers"
+                      >
+                        Not sure: {row.confidenceMarkers.join('; ')}
+                      </p>
+                    )}
                     {clarification ? (
                       <ClarificationPicker
                         proposalId={row.proposal.id}
