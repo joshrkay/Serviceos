@@ -4122,6 +4122,52 @@ export const MIGRATIONS = {
           'review_required_rendered'
         ));
   `,
+  // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy engine).
+  // Note: migrations 165 and 166 are reserved by parallel sibling tracks.
+  //
+  // supervisor_policies: versioned per-tenant rule sets. `rules` is the
+  // SupervisorRules JSONB (src/proposals/supervisor/policy.ts) — all keys
+  // optional, unset = permissive. Exactly one version per tenant SHOULD be
+  // active at a time (enforced by the repo's activate(), which deactivates
+  // siblings in the same transaction); UNIQUE(tenant_id, version) pins the
+  // version ledger. Indexed on (tenant_id, active) for the hot
+  // getActive() read on every proposal creation.
+  //
+  // tenant_budget_counters: fixed-window counters backing the budget caps
+  // (daily executed spend per UTC day, auto-approvals per UTC hour —
+  // window_start is the UTC truncation; v1 deliberately does NOT use
+  // tenant-local windows). Incremented via INSERT .. ON CONFLICT value =
+  // value + delta so concurrent writers never lose updates.
+  '167_create_supervisor_policies': `
+    CREATE TABLE IF NOT EXISTS supervisor_policies (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      version INT NOT NULL,
+      active BOOLEAN NOT NULL DEFAULT false,
+      rules JSONB NOT NULL,
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE(tenant_id, version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_supervisor_policies_tenant_active
+      ON supervisor_policies (tenant_id, active);
+    ALTER TABLE supervisor_policies ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE supervisor_policies FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_supervisor_policies ON supervisor_policies
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS tenant_budget_counters (
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      counter_key TEXT NOT NULL,
+      window_start TIMESTAMPTZ NOT NULL,
+      value BIGINT NOT NULL DEFAULT 0,
+      PRIMARY KEY (tenant_id, counter_key, window_start)
+    );
+    ALTER TABLE tenant_budget_counters ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_budget_counters FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_tenant_budget_counters ON tenant_budget_counters
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

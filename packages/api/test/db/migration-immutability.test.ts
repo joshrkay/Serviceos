@@ -238,6 +238,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['164_dispatch_entity_daily_digest', '4d3ad093b4319cf786bfd047df3d5898720a4d6712e5037704c5a06fffc492e9'],
   // RV-074: widen proposal_sms_events kind CHECK for 'review_required_rendered'
   ['165_proposal_sms_events_review_required_kind', '0a1ccd582e840a57ec622344a0a41a690229bfd30b7b9e87b0265c255b1dff56'],
+  // tenant_budget_counters (fixed-window budget counters), both RLS'd.
+  ['167_create_supervisor_policies', '6bf3ba1a21e1bc1a829fe4addd9a71cd8e9c64587c23338909df15c0f6988d48'],
 ];
 
 function hashMigration(value: string): string {
