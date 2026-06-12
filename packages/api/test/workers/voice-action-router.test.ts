@@ -1313,13 +1313,15 @@ describe('RV-071 — voice-action-router refuses owner approval intents', () => 
 });
 
 describe('Phase-2 Track A — extended intents routing', () => {
-  it('lookup_day_overview is read-only: no proposal, exactly like sibling lookup_* intents', async () => {
+  it.each(['lookup_day_overview', 'lookup_digest'])(
+    '%s is read-only: no proposal, exactly like sibling lookup_* intents',
+    async (intentType) => {
     const proposalRepo = new InMemoryProposalRepository();
     const gateway = gatewayReturning([
       JSON.stringify({
-        intentType: 'lookup_day_overview',
+        intentType,
         confidence: 0.95,
-        reasoning: 'owner asked for the morning overview',
+        reasoning: 'owner asked for a read-only overview',
       }),
     ]);
     const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
@@ -1338,7 +1340,8 @@ describe('Phase-2 Track A — extended intents routing', () => {
     expect(await proposalRepo.findByTenant('tenant-1')).toHaveLength(0);
     // Only the classifier ran — no drafting LLM call.
     expect(gateway.complete).toHaveBeenCalledTimes(1);
-  });
+    },
+  );
 
   it('sibling lookup intents get the same skip treatment (regression pin)', async () => {
     const proposalRepo = new InMemoryProposalRepository();

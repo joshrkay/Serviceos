@@ -654,7 +654,7 @@ import {
 
 describe('Phase-2 Track A — extended operator intents', () => {
   it('parseClassifierJson accepts the new intents', () => {
-    for (const intentType of ['lookup_day_overview'] as const) {
+    for (const intentType of ['lookup_day_overview', 'lookup_digest'] as const) {
       const out = parseClassifierJson(JSON.stringify({ intentType, confidence: 0.9 }));
       expect(out?.intentType).toBe(intentType);
     }
@@ -662,6 +662,15 @@ describe('Phase-2 Track A — extended operator intents', () => {
 
   it('isLookupIntent covers the new lookup intents', () => {
     expect(isLookupIntent('lookup_day_overview')).toBe(true);
+    expect(isLookupIntent('lookup_digest')).toBe(true);
+  });
+
+  it('matchExtendedIntentPhrase matches the canonical digest phrasings only', () => {
+    expect(matchExtendedIntentPhrase('Read me my day')).toBe('lookup_digest');
+    expect(matchExtendedIntentPhrase('read my day')).toBe('lookup_digest');
+    expect(matchExtendedIntentPhrase('give me the daily digest')).toBe('lookup_digest');
+    expect(matchExtendedIntentPhrase('what did the digest say?')).toBe('lookup_digest');
+    expect(matchExtendedIntentPhrase('read me the Smith invoice')).toBeNull();
   });
 
   it('matchExtendedIntentPhrase matches the canonical day-overview phrasings only', () => {

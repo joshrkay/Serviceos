@@ -67,6 +67,10 @@ export type IntentType =
   // cassette hashes / gateway cache keys are unaffected — the RV-071
   // pattern).
   | 'lookup_day_overview'
+  // Phase-2 Track A (RV-064) — owner asks for the stored end-of-day
+  // digest narrative ("read me my day"). Read-only; same extendedIntents
+  // gating as lookup_day_overview.
+  | 'lookup_digest'
   // P11-002: caller asks to switch the call language ("english please" /
   // "hablo español"). The adapter consumes this as a signal to flip the
   // session language — it is NOT a proposal-driving intent.
@@ -125,6 +129,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'lookup_revenue',
   'lookup_catalog',
   'lookup_day_overview',
+  'lookup_digest',
   'language_switch',
   'operator_request',
   'confirm',
@@ -786,6 +791,11 @@ export const EXTENDED_INTENTS_PROMPT_SECTION = `Extended operator intents (this 
                            Examples: "What's my day look like?"
                                      "Give me my morning overview"
                                      "What's on deck today?"
+- "lookup_digest"       — the owner asks to hear their stored end-of-day
+                           digest narrative. Read-only.
+                           Examples: "Read me my day"
+                                     "Read me my daily digest"
+                                     "What did the digest say?"
 Notes:
 - These are READ-ONLY intents — never classify a command that creates or
   changes a record as one of them.
@@ -806,6 +816,14 @@ const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: Rea
       /\bwhat(?:'s| is| does)\s+my\s+day\s+look(?:ing)?\s+like\b/i,
       /\b(?:give me |what's )?my morning overview\b/i,
       /\bhow(?:'s| is)\s+my\s+day\s+looking\b/i,
+    ],
+  },
+  {
+    intent: 'lookup_digest',
+    patterns: [
+      /\bread\s+(?:me\s+)?my\s+day\b/i,
+      /\b(?:read|give)\s+me\s+(?:my|the)\s+(?:daily\s+)?digest\b/i,
+      /\bwhat\s+did\s+the\s+digest\s+say\b/i,
     ],
   },
 ];
