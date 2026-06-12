@@ -10,8 +10,20 @@
  * enough, confidence drops and the operator disambiguates.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { EstimateEditTaskHandler } from '../../../src/ai/tasks/estimate-edit-task';
+import {
+  EstimateEditTaskHandler,
+  ACCEPTANCE_VOID_MARKER,
+} from '../../../src/ai/tasks/estimate-edit-task';
 import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
+import {
+  Estimate,
+  InMemoryEstimateRepository,
+} from '../../../src/estimates/estimate';
+import {
+  buildLineItem,
+  calculateDocumentTotals,
+  LineItem,
+} from '../../../src/shared/billing-engine';
 
 function mockGateway(jsonContent: string): LLMGateway {
   return {
@@ -156,5 +168,148 @@ describe('EstimateEditTaskHandler', () => {
     const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(call.taskType).toBe('update_estimate');
     expect(call.responseFormat).toBe('json');
+  });
+
+  describe('RV-042 — acceptance-void marker at proposal creation', () => {
+    function makeEstimate(overrides: Partial<Estimate> = {}): Estimate {
+      const lineItems: LineItem[] = [
+        buildLineItem('li-1', 'Replace heater', 1, 120000, 0, true, 'labor'),
+      ];
+      return {
+        id: 'est-1',
+        tenantId,
+        jobId: 'job-1',
+        estimateNumber: 'EST-0001',
+        status: 'accepted',
+        lineItems,
+        totals: calculateDocumentTotals(lineItems, 0, 0),
+        acceptedAt: new Date('2026-06-05T12:00:00Z'),
+        version: 2,
+        createdBy: userId,
+        createdAt: new Date('2026-06-01T00:00:00Z'),
+        updatedAt: new Date('2026-06-05T12:00:00Z'),
+        ...overrides,
+      };
+    }
+
+    function editGateway(reference = 'EST-0001'): LLMGateway {
+      return mockGateway(
+        JSON.stringify({
+          estimateReference: reference,
+          editActions: [
+            {
+              type: 'add_line_item',
+              lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 },
+            },
+          ],
+          confidence_score: 0.9,
+        }),
+      );
+    }
+
+    it('stamps _meta.markers when the referenced estimate is currently ACCEPTED', async () => {
+      const estimateRepo = new InMemoryEstimateRepository();
+      await estimateRepo.create(makeEstimate());
+
+      const handler = new EstimateEditTaskHandler(editGateway(), estimateRepo);
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee to EST-0001',
+      });
+
+      const meta = (result.proposal.payload as Record<string, unknown>)._meta as {
+        markers?: Array<{ path: string; reason: string }>;
+      };
+      expect(meta).toBeDefined();
+      expect(meta.markers).toContainEqual(ACCEPTANCE_VOID_MARKER);
+      expect(meta.markers![0].path).toBe('_acceptance');
+      expect(meta.markers![0].reason).toMatch(/voids the customer's prior acceptance/);
+    });
+
+    it('omits the marker when the target estimate is NOT accepted', async () => {
+      const estimateRepo = new InMemoryEstimateRepository();
+      await estimateRepo.create(makeEstimate({ status: 'draft', acceptedAt: undefined }));
+
+      const handler = new EstimateEditTaskHandler(editGateway(), estimateRepo);
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee to EST-0001',
+      });
+
+      expect((result.proposal.payload as Record<string, unknown>)._meta).toBeUndefined();
+    });
+
+    it('omits the marker when no estimate repo is wired', async () => {
+      const handler = new EstimateEditTaskHandler(editGateway());
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee to EST-0001',
+      });
+      expect((result.proposal.payload as Record<string, unknown>)._meta).toBeUndefined();
+    });
+
+    it('omits the marker when the reference is ambiguous (two matches)', async () => {
+      const estimateRepo = new InMemoryEstimateRepository();
+      await estimateRepo.create(makeEstimate({ id: 'est-1', estimateNumber: 'EST-0001' }));
+      await estimateRepo.create(makeEstimate({ id: 'est-2', estimateNumber: 'EST-00012' }));
+
+      const handler = new EstimateEditTaskHandler(editGateway('EST-0001'), estimateRepo);
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee to EST-0001',
+      });
+      expect((result.proposal.payload as Record<string, unknown>)._meta).toBeUndefined();
+    });
+
+    it('resolves by estimateId when the payload carries one', async () => {
+      const estimateRepo = new InMemoryEstimateRepository();
+      await estimateRepo.create(makeEstimate());
+
+      const gateway = mockGateway(
+        JSON.stringify({
+          estimateId: 'est-1',
+          editActions: [
+            {
+              type: 'add_line_item',
+              lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 },
+            },
+          ],
+          confidence_score: 0.9,
+        }),
+      );
+      const handler = new EstimateEditTaskHandler(gateway, estimateRepo);
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee',
+      });
+      const meta = (result.proposal.payload as Record<string, unknown>)._meta as {
+        markers?: Array<{ path: string; reason: string }>;
+      };
+      expect(meta?.markers).toContainEqual(ACCEPTANCE_VOID_MARKER);
+    });
+
+    it('a repo failure never blocks proposal creation (marker skipped)', async () => {
+      const failingRepo = {
+        findById: async () => {
+          throw new Error('db down');
+        },
+        findByTenant: async () => {
+          throw new Error('db down');
+        },
+      };
+      const handler = new EstimateEditTaskHandler(editGateway(), failingRepo);
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee to EST-0001',
+      });
+      expect(result.proposal.proposalType).toBe('update_estimate');
+      expect((result.proposal.payload as Record<string, unknown>)._meta).toBeUndefined();
+    });
   });
 });

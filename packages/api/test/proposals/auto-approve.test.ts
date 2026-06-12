@@ -215,7 +215,7 @@ describe('P12-004 — one-tap approve token (HMAC, single-use, TTL)', () => {
       expectedTenantId: 'tenant-1',
       consumeNonce: createInMemoryNonceStore(),
     });
-    expect(result).toEqual({ ok: true, proposalId: 'prop-1', tenantId: 'tenant-1' });
+    expect(result).toEqual({ ok: true, action: 'approve', proposalId: 'prop-1', tenantId: 'tenant-1' });
   });
 
   it('rejects a tampered payload (bad signature)', async () => {
@@ -844,5 +844,132 @@ describe('RV-007 — createProposal wiring', () => {
     const p = createProposal({ ...baseInput, payload: { name: 'X' } });
     expect(p.status).toBe('approved');
     expect(p.approvedAt).toBeInstanceOf(Date);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// RV-065 — one-tap token action variants ('approve' | 'mint_draft_invoice')
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('RV-065 — one-tap token action variants', () => {
+  it("round-trips a 'mint_draft_invoice' token bound to tenant + jobId", async () => {
+    const { token } = createOneTapApproveToken({
+      action: 'mint_draft_invoice',
+      jobId: 'job-77',
+      tenantId: 'tenant-1',
+      secret: SECRET,
+    });
+    const result = await verifyOneTapApproveToken({
+      token,
+      secret: SECRET,
+      expectedTenantId: 'tenant-1',
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(result).toEqual({
+      ok: true,
+      action: 'mint_draft_invoice',
+      jobId: 'job-77',
+      tenantId: 'tenant-1',
+    });
+  });
+
+  it('back-compat: approve token payload bytes are unchanged (pin: keys exactly p,t,n,e)', () => {
+    const now = 1_000_000;
+    const { token } = createOneTapApproveToken({
+      proposalId: 'prop-1',
+      tenantId: 'tenant-1',
+      secret: SECRET,
+      nowMs: now,
+    });
+    const rawJson = Buffer.from(token.split('.')[0], 'base64url').toString('utf8');
+    const parsed = JSON.parse(rawJson) as { p: string; t: string; n: string; e: number };
+    // Byte-identical pin: the serialized payload is exactly the legacy
+    // four-key shape in the legacy key order — no `a` discriminator, no
+    // extra keys, for ANY default-action token.
+    expect(rawJson).toBe(
+      `{"p":"prop-1","t":"tenant-1","n":"${parsed.n}","e":${parsed.e}}`,
+    );
+    expect(parsed.e).toBe(now + ONE_TAP_APPROVE_MAX_TTL_MS);
+  });
+
+  it("an explicit action: 'approve' also produces the legacy byte shape", () => {
+    const { token } = createOneTapApproveToken({
+      action: 'approve',
+      proposalId: 'prop-9',
+      tenantId: 't',
+      secret: SECRET,
+    });
+    const rawJson = Buffer.from(token.split('.')[0], 'base64url').toString('utf8');
+    expect(Object.keys(JSON.parse(rawJson))).toEqual(['p', 't', 'n', 'e']);
+  });
+
+  it('mint tokens expire and are single-use, same machinery as approve', async () => {
+    const now = 5_000_000;
+    const { token } = createOneTapApproveToken({
+      action: 'mint_draft_invoice',
+      jobId: 'job-1',
+      tenantId: 't',
+      secret: SECRET,
+      nowMs: now,
+    });
+    const expired = await verifyOneTapApproveToken({
+      token,
+      secret: SECRET,
+      nowMs: now + ONE_TAP_APPROVE_MAX_TTL_MS,
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(expired).toEqual({ ok: false, reason: 'expired' });
+
+    const consumeNonce = createInMemoryNonceStore();
+    const first = await verifyOneTapApproveToken({ token, secret: SECRET, nowMs: now, consumeNonce });
+    expect(first.ok).toBe(true);
+    const replayed = await verifyOneTapApproveToken({ token, secret: SECRET, nowMs: now, consumeNonce });
+    expect(replayed).toEqual({ ok: false, reason: 'already_used' });
+  });
+
+  it('mint tokens enforce the tenant binding', async () => {
+    const { token } = createOneTapApproveToken({
+      action: 'mint_draft_invoice',
+      jobId: 'job-1',
+      tenantId: 'tenant-A',
+      secret: SECRET,
+    });
+    const result = await verifyOneTapApproveToken({
+      token,
+      secret: SECRET,
+      expectedTenantId: 'tenant-B',
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(result).toEqual({ ok: false, reason: 'tenant_mismatch' });
+  });
+
+  it('rejects an unknown action discriminator as malformed (signed but bogus)', async () => {
+    // Forge a payload with a bad `a` and sign it with the real secret to
+    // prove the structural guard (not just the signature) rejects it.
+    const { createHmac } = await import('node:crypto');
+    const payloadB64 = Buffer.from(
+      JSON.stringify({ p: 'x', t: 't', n: 'n1', e: Date.now() + 60000, a: 'delete_everything' }),
+    ).toString('base64url');
+    const sig = createHmac('sha256', SECRET).update(payloadB64).digest('base64url');
+    const result = await verifyOneTapApproveToken({
+      token: `${payloadB64}.${sig}`,
+      secret: SECRET,
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(result).toEqual({ ok: false, reason: 'malformed' });
+  });
+
+  it('refuses to mint without the subject id for the action', () => {
+    expect(() =>
+      createOneTapApproveToken({ tenantId: 't', secret: SECRET }),
+    ).toThrow(/proposalId/);
+    expect(() =>
+      createOneTapApproveToken({
+        action: 'mint_draft_invoice',
+        proposalId: 'p',
+        tenantId: 't',
+        secret: SECRET,
+      }),
+    ).toThrow(/jobId/);
   });
 });

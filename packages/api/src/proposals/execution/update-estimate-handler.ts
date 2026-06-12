@@ -8,6 +8,7 @@ import {
 import { AuditRepository } from '../../audit/audit';
 import { DocumentRevisionRepository } from '../../ai/document-revision';
 import { EditDeltaRepository } from '../../estimates/edit-delta';
+import { JobRepository } from '../../jobs/job';
 import { ValidationError, ConflictError } from '../../shared/errors';
 
 /**
@@ -32,6 +33,16 @@ export class UpdateEstimateExecutionHandler implements ExecutionHandler {
     private readonly auditRepo?: AuditRepository,
     private readonly docRevisionRepo?: DocumentRevisionRepository,
     private readonly editDeltaRepo?: EditDeltaRepository,
+    /**
+     * Deposit-lock resolution: the estimate's linked job carries
+     * `depositPaidCents`; once money has been collected the estimate is
+     * financially committed and this handler must refuse the edit — same
+     * rule the authenticated edit route enforces. FAIL-CLOSED: when the
+     * estimate has a jobId but no jobRepo is wired, the deposit state
+     * cannot be verified, so the edit is refused rather than risking a
+     * mutation of a deposit-backed agreement.
+     */
+    private readonly jobRepo?: Pick<JobRepository, 'findById'>,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -56,14 +67,40 @@ export class UpdateEstimateExecutionHandler implements ExecutionHandler {
       return { success: false, error: `Estimate ${estimateId} not found in this tenant` };
     }
 
+    // Deposit lock — resolve the linked job's depositPaidCents so
+    // assertEstimateEditable (inside updateEstimate) sees the real amount
+    // instead of defaulting to 0. A paid deposit refuses the edit even
+    // with acceptance invalidation (financial commitment already made).
+    let depositPaidCents = 0;
+    if (estimate.jobId) {
+      if (!this.jobRepo) {
+        // Fail closed: without the job repo the deposit state is unknowable.
+        return {
+          success: false,
+          error:
+            `Cannot verify the deposit state for estimate ${estimateId}: ` +
+            'no job repository is wired. Refusing the edit (a paid deposit locks the estimate).',
+        };
+      }
+      const job = await this.jobRepo.findById(proposal.tenantId, estimate.jobId);
+      depositPaidCents = job?.depositPaidCents ?? 0;
+    }
+
     try {
       // Compute the post-edit line items, then persist through
       // updateEstimate so version/revision/audit stay consistent with the
       // authenticated PUT/PATCH path (which is the source of truth for the
       // optimistic-lock + stale-accept guards).
+      //
+      // RV-042: an update_estimate against an ACCEPTED estimate invalidates
+      // the acceptance instead of refusing — updateEstimate clears the
+      // acceptance fields, returns the estimate to 'sent' (re-sendable),
+      // and records the prior acceptance in an
+      // `estimate.acceptance_invalidated` audit event.
       const { updatedEstimate } = applyEstimateEdits(
         estimate,
-        editActions as EstimateEditAction[]
+        editActions as EstimateEditAction[],
+        { allowAccepted: true },
       );
       const persisted = await updateEstimate(
         proposal.tenantId,
@@ -76,6 +113,8 @@ export class UpdateEstimateExecutionHandler implements ExecutionHandler {
           editDeltaRepo: this.editDeltaRepo,
           actorId: context.executedBy,
           actorRole: 'system',
+          invalidateAcceptance: true,
+          depositPaidCents,
         },
       );
       if (!persisted) {

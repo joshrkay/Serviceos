@@ -38,6 +38,9 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   record_payment: 1,
   send_invoice: 1,
   send_estimate: 1,
+  // RV-086 — estimate nudges are owner-approved comms, same tier as
+  // send_estimate (same-day relevance, screen-tap required).
+  send_estimate_nudge: 1,
   // Notes are low priority — they never gate other work.
   add_note: 5,
   // Expense logging is informational — captured after the fact, never

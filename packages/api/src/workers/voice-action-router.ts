@@ -262,6 +262,16 @@ export interface VoiceActionRouterDeps {
    */
   unsupervisedRouting?: UnsupervisedRoutingDeps;
   /**
+   * RV-042 — review-time visibility of acceptance voiding: lets the
+   * update_estimate task handler read the targeted estimate and stamp the
+   * `_meta.markers` acceptance-void warning when it is currently accepted.
+   * Optional; absent -> marker skipped (execute-time audit still records it).
+   */
+  estimateRepo?: Pick<
+    import('../estimates/estimate').EstimateRepository,
+    'findById' | 'findByTenant'
+  >;
+  /**
    * Phase-2 Track A — per-tenant opt-in for the extended operator intents
    * (lookup_day_overview / lookup_digest / lookup_pending_items /
    * complaint). Threaded as `ClassifyContext.extendedIntents` so the
@@ -395,7 +405,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
     ),
   );
   handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway));
-  handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway));
+  handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo));
   handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo, deps.thresholdResolver));
   handlers.set('create_customer', new CreateCustomerTaskHandler());
   handlers.set('create_job', new CreateJobVoiceTaskHandler());
