@@ -675,6 +675,8 @@ describe('Phase-2 Track A — extended operator intents', () => {
   it('matchExtendedIntentPhrase matches only explicit complaint phrasings', () => {
     expect(matchExtendedIntentPhrase('I want to file a complaint about the install')).toBe('complaint');
     expect(matchExtendedIntentPhrase('I would like to complain')).toBe('complaint');
+    // Fix #2: "I'd like to complain" must match (contraction with no whitespace after "I").
+    expect(matchExtendedIntentPhrase("I'd like to complain about the service")).toBe('complaint');
     expect(matchExtendedIntentPhrase('I have a complaint')).toBe('complaint');
     // Vague unhappiness is NOT deterministically a complaint — the LLM /
     // escalation paths own it (e.g. the vague-complaint-escalated corpus

@@ -14,6 +14,7 @@ import { voiceProposalIdempotencyKey } from '../voice/voice-audit';
 import {
   classifyIntent,
   isLookupIntent,
+  isExtendedIntent,
   isVoiceApprovalIntent,
   ExtractedEntities,
   IntentClassification,
@@ -385,7 +386,8 @@ const COMPLAINT_HIGH_SEVERITY_PATTERNS: ReadonlyArray<RegExp> = [
   /\blegal(?:\s+action)?\b/i,
   /\bsue\b|\bsuing\b|\blawsuits?\b/i,
   /\bsmall\s+claims\b/i,
-  /\bbetter\s+business\s+bureau\b|\bBBB\b/,
+  /\bbetter\s+business\s+bureau\b/i,
+  /\bBBB\b/,
   /\bthreat(?:s|en(?:s|ed|ing)?)?\b/i,
   /\breport(?:ing)?\s+you\b/i,
 ];
@@ -477,6 +479,13 @@ class ComplaintTaskHandler implements TaskHandler {
 
     // Companion: owner follow-up callback. Persisted directly (see class
     // doc); capture-class, no trust tier → 'draft'.
+    // RV-080 dedup: derive a stable idempotency key from recordingId so
+    // concurrent-style redelivery of the same recording never double-creates
+    // the callback. Key is absent (and dedup skipped) only when recordingId
+    // is genuinely unknown (e.g. synthetic / test-mode transcripts).
+    const callbackIdempotencyKey = context.recordingId
+      ? `voice-complaint-callback:${context.recordingId}`
+      : undefined;
     const callbackProposal = createProposal({
       tenantId: context.tenantId,
       proposalType: 'callback',
@@ -494,6 +503,7 @@ class ComplaintTaskHandler implements TaskHandler {
         'Logged from a complaint heard on a call. The pinned-prefix note carries the details; this callback is the owner follow-up.',
       sourceContext,
       createdBy: context.userId,
+      ...(callbackIdempotencyKey ? { idempotencyKey: callbackIdempotencyKey } : {}),
       ...(context.tenantThresholdOverride
         ? { tenantThresholdOverride: context.tenantThresholdOverride }
         : {}),
@@ -1048,6 +1058,40 @@ async function processSegment(
         conversationId,
         recordingId,
         // Single-action only: dedup a redelivered clarification atomically.
+        ...(params.applyDedup && recordingId
+          ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
+          : {}),
+      },
+      log,
+    );
+    return { kind: 'clarified', classification };
+  }
+
+  // Phase-2 Track A — belt-and-braces gate: extended intents (complaint,
+  // lookup_day_overview, lookup_digest, lookup_pending_items) are ONLY
+  // actionable when the calling surface opted in via extendedIntentsEnabled.
+  // The classifier prompt gate (appending EXTENDED_INTENTS_PROMPT_SECTION
+  // only when opted in) is the primary defence; this re-check is the
+  // backstop against LLM hallucination on a non-opted surface. Route to
+  // the clarification path (same as 'unknown') rather than silently
+  // skipping, so the caller gets an auditable response.
+  // Must run BEFORE the isLookupIntent check so that hallucinated
+  // lookup_day_overview / lookup_digest / lookup_pending_items on a
+  // non-opted surface produce an auditable clarification rather than a
+  // silent skip.
+  if (isExtendedIntent(classification.intentType) && !params.extendedIntents) {
+    log.warn('voice-action-router: extended intent refused — surface not opted in', {
+      intent: classification.intentType,
+    });
+    await emitClarification(
+      deps,
+      {
+        tenantId,
+        userId,
+        transcript: segmentText,
+        classification: { ...classification, intentType: 'unknown' as IntentType },
+        conversationId,
+        recordingId,
         ...(params.applyDedup && recordingId
           ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
           : {}),

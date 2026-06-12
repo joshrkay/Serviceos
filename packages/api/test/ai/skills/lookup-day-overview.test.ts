@@ -242,6 +242,32 @@ describe('lookupDayOverview (RV-010)', () => {
     expect(result.data.appointments[0].technicianName).toBeUndefined();
   });
 
+  it('THROWING-userRepo: findByTenant throws → skill still returns found, tech names absent', async () => {
+    // Fix #3: the userRepo error catch block in the skill must swallow the
+    // throw and continue; technician names are decorative and must never
+    // fail the overview.
+    const job = makeJob({ id: 'job-1', assignedTechnicianId: 'tech-mike', summary: 'Boiler check' });
+    const deps = await fixtures({
+      jobs: [job],
+      appointments: [makeAppointment({ jobId: 'job-1' })],
+      withUsers: true,
+    });
+    // Override findByTenant to throw unconditionally.
+    deps.userRepo.findByTenant = async () => {
+      throw new Error('user store unavailable');
+    };
+
+    const result = await lookupDayOverview({ tenantId: TENANT, timezone: TZ, now: NOW }, deps);
+
+    expect(result.status).toBe('found');
+    if (result.status === 'error') throw new Error('unexpected error result');
+    // Appointments still present — the repo error only suppressed names.
+    expect(result.data.appointments).toHaveLength(1);
+    expect(result.data.appointments[0].technicianName).toBeUndefined();
+    // Summary must not contain the tech's name (would only appear if names loaded).
+    expect(result.summary).not.toContain('Mike Diaz');
+  });
+
   it('records a lookup_events audit row when wired', async () => {
     const deps = await fixtures({ appointments: [makeAppointment({})], jobs: [makeJob({ id: 'job-1' })] });
     const recorded: unknown[] = [];

@@ -1317,7 +1317,7 @@ describe('RV-071 — voice-action-router refuses owner approval intents', () => 
 
 describe('Phase-2 Track A — extended intents routing', () => {
   it.each(['lookup_day_overview', 'lookup_digest', 'lookup_pending_items'])(
-    '%s is read-only: no proposal, exactly like sibling lookup_* intents',
+    '%s without opt-in: belt-and-braces gate emits a clarification (auditable refused extended intent)',
     async (intentType) => {
     const proposalRepo = new InMemoryProposalRepository();
     const gateway = gatewayReturning([
@@ -1327,6 +1327,7 @@ describe('Phase-2 Track A — extended intents routing', () => {
         reasoning: 'owner asked for a read-only overview',
       }),
     ]);
+    // No extendedIntentsEnabled dep → gate refuses the extended intent.
     const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
 
     await worker.handle(
@@ -1338,8 +1339,43 @@ describe('Phase-2 Track A — extended intents routing', () => {
       silentLogger(),
     );
 
-    // Read-only intent: no proposal AND no clarification — skipped, the
-    // same treatment the sibling lookup_* intents get (P11-001).
+    // Belt-and-braces gate: hallucinated extended intent on a non-opted surface
+    // produces a voice_clarification (auditable) rather than a silent skip.
+    const all = await proposalRepo.findByTenant('tenant-1');
+    expect(all.filter((p) => p.proposalType === 'voice_clarification')).toHaveLength(1);
+    // Only the classifier ran — no drafting LLM call.
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['lookup_day_overview', 'lookup_digest', 'lookup_pending_items'])(
+    '%s with opt-in: read-only, skipped (no proposal, no clarification)',
+    async (intentType) => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType,
+        confidence: 0.95,
+        reasoning: 'owner asked for a read-only overview',
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      extendedIntentsEnabled: async () => true,
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+        transcript: 'morning rundown please',
+      }),
+      silentLogger(),
+    );
+
+    // With opt-in, the extended lookup intent passes the gate and is
+    // then silently skipped (read-only — this worker has no voice back-channel).
     expect(await proposalRepo.findByTenant('tenant-1')).toHaveLength(0);
     // Only the classifier ran — no drafting LLM call.
     expect(gateway.complete).toHaveBeenCalledTimes(1);
@@ -1522,7 +1558,7 @@ describe('RV-080 — complaint intent routing', () => {
         noteBody: 'the leak came back two days after the repair',
       }),
     ]);
-    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, extendedIntentsEnabled: async () => true });
 
     await worker.handle(
       msg({
@@ -1563,7 +1599,7 @@ describe('RV-080 — complaint intent routing', () => {
     const gateway = gatewayReturning([
       complaintClassification({ customerName: 'Mr. Jones' }),
     ]);
-    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, extendedIntentsEnabled: async () => true });
 
     await worker.handle(
       msg({
@@ -1592,7 +1628,7 @@ describe('RV-080 — complaint intent routing', () => {
   it('verified caller-ID identity pins the note to the caller (targetId, customer)', async () => {
     const proposalRepo = new InMemoryProposalRepository();
     const gateway = gatewayReturning([complaintClassification({})]);
-    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, extendedIntentsEnabled: async () => true });
 
     await worker.handle(
       msg({
@@ -1614,7 +1650,7 @@ describe('RV-080 — complaint intent routing', () => {
   it('no resolvable target → note holds in draft with targetId flagged missing', async () => {
     const proposalRepo = new InMemoryProposalRepository();
     const gateway = gatewayReturning([complaintClassification({})]);
-    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, extendedIntentsEnabled: async () => true });
 
     await worker.handle(
       msg({ tenantId: 't-1', userId: 'op-1', transcript: 'someone called to complain about a job' }),
@@ -1632,5 +1668,114 @@ describe('RV-080 — complaint intent routing', () => {
     expect(complaintSeverity('he threatened legal action')).toBe('high');
     expect(complaintSeverity('the tech left mud on the carpet, please send someone')).toBe('normal');
     expect(complaintSeverity('')).toBe('normal');
+  });
+
+  it('complaintSeverity: BBB regex matches title-case "Better Business Bureau"', () => {
+    // Fix #1: the phrase part must be case-insensitive so title-case matches.
+    expect(complaintSeverity('I will report you to the Better Business Bureau')).toBe('high');
+    // All-caps variant must still match (bare BBB pattern has no i flag, intentionally).
+    expect(complaintSeverity('filing a report with the BBB tomorrow')).toBe('high');
+    // All-lowercase must also match now that the phrase regex carries /i.
+    expect(complaintSeverity('reporting to better business bureau today')).toBe('high');
+  });
+
+  it('callback dedup: companion callback carries idempotency key voice-complaint-callback:<recordingId>', async () => {
+    // Fix #5: the callback proposal carries a stable idempotency key derived
+    // from recordingId so concurrent-style redelivery is idempotent — if the
+    // callback create races, the unique-key constraint lets exactly one win.
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'complaint',
+        confidence: 0.9,
+        extractedEntities: { customerName: 'Mrs. Chan' },
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, extendedIntentsEnabled: async () => true });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'op-1', transcript: 'Mrs. Chan complained', recordingId: 'rec-123' }),
+      silentLogger(),
+    );
+    const all = await proposalRepo.findByTenant('t-1');
+    const callback = all.find((p) => p.proposalType === 'callback')!;
+    expect(callback).toBeDefined();
+    expect(callback.idempotencyKey).toBe('voice-complaint-callback:rec-123');
+
+    // Concurrent-style redelivery: a second create with the same key must be
+    // rejected by the idempotency gate (simulating what the DB constraint does
+    // in production when two deliveries race past the sequential pre-check).
+    await expect(proposalRepo.create(callback)).rejects.toThrow(/idempotency/i);
+  });
+
+  it('callback dedup: no recordingId — callback is created without an idempotency key', async () => {
+    // Fix #5: keyless only when recordingId is genuinely absent (synthetic / test-mode).
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'complaint',
+        confidence: 0.9,
+        extractedEntities: {},
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, extendedIntentsEnabled: async () => true });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'op-1', transcript: 'someone complained' }),
+      silentLogger(),
+    );
+
+    const all = await proposalRepo.findByTenant('t-1');
+    const callback = all.find((p) => p.proposalType === 'callback')!;
+    expect(callback).toBeDefined();
+    expect(callback.idempotencyKey).toBeUndefined();
+  });
+});
+
+describe('RV-080 — belt-and-braces extended intent dispatch gate', () => {
+  function extendedIntentClassification(intentType: string): string {
+    return JSON.stringify({ intentType, confidence: 0.9 });
+  }
+
+  const EXTENDED_INTENTS = ['complaint', 'lookup_day_overview', 'lookup_digest', 'lookup_pending_items'] as const;
+
+  for (const intentType of EXTENDED_INTENTS) {
+    it(`${intentType}: routes to clarification when extendedIntentsEnabled is absent`, async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const gateway = gatewayReturning([extendedIntentClassification(intentType)]);
+      // No extendedIntentsEnabled dep → flag is false.
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+      await worker.handle(
+        msg({ tenantId: 't-1', userId: 'op-1', transcript: 'what is my day looking like today' }),
+        silentLogger(),
+      );
+
+      // No proposals created — the LLM-hallucinated extended intent was refused.
+      const all = await proposalRepo.findByTenant('t-1');
+      expect(all.filter((p) => p.proposalType === 'callback' || p.proposalType === 'add_note')).toHaveLength(0);
+      // A voice_clarification is emitted instead.
+      const clarifications = all.filter((p) => p.proposalType === 'voice_clarification');
+      expect(clarifications).toHaveLength(1);
+    });
+  }
+
+  it('complaint: dispatches normally when extendedIntentsEnabled returns true', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([extendedIntentClassification('complaint')]);
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      extendedIntentsEnabled: async () => true,
+    });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'op-1', transcript: 'I want to file a complaint' }),
+      silentLogger(),
+    );
+
+    const all = await proposalRepo.findByTenant('t-1');
+    expect(all.some((p) => p.proposalType === 'add_note')).toBe(true);
+    expect(all.some((p) => p.proposalType === 'callback')).toBe(true);
   });
 });

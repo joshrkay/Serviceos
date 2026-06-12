@@ -159,6 +159,24 @@ export function isLookupIntent(intent: IntentType | undefined | null): boolean {
   return typeof intent === 'string' && intent.startsWith('lookup_');
 }
 
+/**
+ * Phase-2 Track A — the full set of intents that require
+ * `ClassifyContext.extendedIntents === true` to be actionable. Used
+ * as a belt-and-braces dispatch gate: even if the LLM hallucinates one
+ * of these without the opt-in flag, the router re-checks here and falls
+ * through to the unknown/clarification path instead of acting on it.
+ */
+export const EXTENDED_INTENT_TYPES = new Set<IntentType>([
+  'complaint',
+  'lookup_day_overview',
+  'lookup_digest',
+  'lookup_pending_items',
+]);
+
+export function isExtendedIntent(intent: IntentType | undefined | null): boolean {
+  return typeof intent === 'string' && EXTENDED_INTENT_TYPES.has(intent as IntentType);
+}
+
 export interface ExtractedEntities {
   customerName?: string;
   jobReference?: string;
@@ -870,7 +888,8 @@ const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: Rea
     intent: 'complaint',
     patterns: [
       /\b(?:file|make|register|lodge)\s+a\s+(?:formal\s+)?complaint\b/i,
-      /\bi\s+(?:want|need|would like|'d like)\s+to\s+complain\b/i,
+      /\bi\s+(?:want|need|would like)\s+to\s+complain\b/i,
+      /\bi'd\s+like\s+to\s+complain\b/i,
       /\bi\s+have\s+a\s+complaint\b/i,
     ],
   },
