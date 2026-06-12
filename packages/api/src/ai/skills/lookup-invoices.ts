@@ -16,6 +16,7 @@ import type {
   RecordLookupEventInput,
 } from '../../lookup-events/lookup-event-service';
 import { t, type Language } from '../i18n/i18n';
+import { formatCents } from './spoken-format';
 
 export interface LookupInvoicesInput {
   tenantId: string;
@@ -56,12 +57,6 @@ export interface LookupInvoicesDeps {
   jobRepo: JobRepository;
   invoiceRepo: InvoiceRepository;
   lookupEvents?: LookupEventService;
-}
-
-/** Minimal money formatter — `$120.50` reads correctly on both TTS engines. */
-function formatCents(cents: number): string {
-  const dollars = (cents / 100).toFixed(2);
-  return `$${dollars}`;
 }
 
 function formatDueDate(d: Date | undefined, timezone?: string): string | null {

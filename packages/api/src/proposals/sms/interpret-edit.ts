@@ -66,7 +66,16 @@ export function createLlmEditInterpreter(
       for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
         // Own-property check — `in` would also accept prototype keys like
         // `toString`/`constructor` coming back from the model.
-        if (Object.prototype.hasOwnProperty.call(proposal.payload, key)) {
+        //
+        // Additionally, keys prefixed with `_` (e.g. `_meta`, `_anything`) are
+        // system-owned metadata and are never edit-writable. A rogue delta such
+        // as `{_meta: {overallConfidence: "high"}}` would otherwise survive this
+        // filter (because `_meta` IS an own property on AI proposals) and silently
+        // flip a low-confidence proposal into auto-approvable form.
+        if (
+          !key.startsWith('_') &&
+          Object.prototype.hasOwnProperty.call(proposal.payload, key)
+        ) {
           delta[key] = value;
         }
       }

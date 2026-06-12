@@ -60,6 +60,35 @@ describe('createLlmEditInterpreter', () => {
     ).resolves.toBeNull();
   });
 
+  it('strips _meta from the delta even though it is an own property of the payload', async () => {
+    // A rogue LLM delta could try to flip confidence metadata to smuggle a
+    // low-confidence proposal past the auto-approve threshold.
+    const interpret = createLlmEditInterpreter(
+      gatewayReturning('{"_meta": {"overallConfidence": "high"}, "totalCents": 20000}'),
+    );
+    await expect(
+      interpret({ proposal: proposal(), instruction: 'make it $200' }),
+    ).resolves.toEqual({ totalCents: 20000 });
+  });
+
+  it('strips any _-prefixed key from the delta', async () => {
+    const interpret = createLlmEditInterpreter(
+      gatewayReturning('{"_anything": "value", "totalCents": 20000}'),
+    );
+    await expect(
+      interpret({ proposal: proposal(), instruction: 'make it $200' }),
+    ).resolves.toEqual({ totalCents: 20000 });
+  });
+
+  it('returns null when the only delta key is _-prefixed', async () => {
+    const interpret = createLlmEditInterpreter(
+      gatewayReturning('{"_meta": {"overallConfidence": "high"}}'),
+    );
+    await expect(
+      interpret({ proposal: proposal(), instruction: 'raise confidence' }),
+    ).resolves.toBeNull();
+  });
+
   it('returns null when the gateway throws', async () => {
     const interpret = createLlmEditInterpreter({
       complete: async () => {
