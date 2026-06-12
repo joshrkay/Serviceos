@@ -7,6 +7,8 @@ import {
   isChained,
   payloadPathFor,
   applyChainMetadata,
+  ENTITY_KIND_TO_PAYLOAD_PATH,
+  type ChainEntityKind,
 } from '../../src/proposals/chain';
 import { createProposal, Proposal } from '../../src/proposals/proposal';
 
@@ -55,6 +57,23 @@ describe('payloadPathFor', () => {
     // an appointment cannot consume a customerId directly (needs a job)
     expect(payloadPathFor('create_appointment', 'customerId')).toBeUndefined();
     expect(payloadPathFor('create_customer', 'customerId')).toBeUndefined();
+  });
+
+  // RV-220 — chain coverage for the comms/money follow-up types. These are
+  // the segments the decomposer emits for "…and send her the estimate" /
+  // "…then send the invoice" — without map entries the dependency edge was
+  // silently dropped and the send executed against a free-text reference.
+  it('maps the send/issue/record follow-up types to their id fields', () => {
+    expect(payloadPathFor('send_estimate', 'estimateId')).toBe('estimateId');
+    expect(payloadPathFor('send_invoice', 'invoiceId')).toBe('invoiceId');
+    expect(payloadPathFor('issue_invoice', 'invoiceId')).toBe('invoiceId');
+    expect(payloadPathFor('record_payment', 'invoiceId')).toBe('invoiceId');
+  });
+
+  it('follow-up types cannot consume unrelated entity kinds', () => {
+    expect(payloadPathFor('send_estimate', 'invoiceId')).toBeUndefined();
+    expect(payloadPathFor('send_invoice', 'estimateId')).toBeUndefined();
+    expect(payloadPathFor('record_payment', 'customerId')).toBeUndefined();
   });
 });
 
@@ -120,5 +139,40 @@ describe('applyChainMetadata', () => {
     // Dependent with unresolved refs can never race ahead of its parent.
     expect(p.status).toBe('draft');
     expect(p.approvedAt).toBeUndefined();
+  });
+
+  // RV-220 — the dependents-forced-draft invariant holds for every type in
+  // ENTITY_KIND_TO_PAYLOAD_PATH, including the newly covered follow-up
+  // types: a chained dependent with unresolved refs is ALWAYS forced to
+  // 'draft' (never auto-approve ahead of its parent), with the ref token
+  // written to the payload path the map declares.
+  it('forces draft for every (type, entityKind) pair in the coverage map', () => {
+    for (const [proposalType, kinds] of Object.entries(ENTITY_KIND_TO_PAYLOAD_PATH)) {
+      for (const [entityKind, payloadPath] of Object.entries(kinds ?? {})) {
+        const p = makeProposal({
+          proposalType: proposalType as Proposal['proposalType'],
+          status: 'approved',
+          approvedAt: new Date(),
+        });
+        applyChainMetadata(p, {
+          chainId: 'c',
+          chainIndex: 1,
+          chainLength: 2,
+          dependsOnChainIndices: [0],
+          chainRefs: [
+            {
+              payloadPath: payloadPath as string,
+              parentChainIndex: 0,
+              entityKind: entityKind as ChainEntityKind,
+            },
+          ],
+        });
+        expect(p.payload[payloadPath as string]).toBe(
+          `$ref:chain[0].${entityKind}`,
+        );
+        expect(p.status).toBe('draft');
+        expect(p.approvedAt).toBeUndefined();
+      }
+    }
   });
 });
