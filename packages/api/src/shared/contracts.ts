@@ -375,6 +375,14 @@ export const updateSettingsSchema = z.object({
   // Voice-parity (migration 152) — E.164 warm-transfer line. Normalized to
   // E.164 (or null to clear) at the route boundary, mirroring ownerPhone.
   transferNumber: z.string().max(40).nullable().optional(),
+  // RV-063 — end-of-day digest delivery. digestTime is tenant-local
+  // 'HH:MM' (24h); channel 'none' stores the digest without owner SMS.
+  digestEnabled: z.boolean().optional(),
+  digestTime: z
+    .string()
+    .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "digestTime must be 'HH:MM' (24-hour)")
+    .optional(),
+  digestChannel: z.enum(['sms', 'none']).optional(),
 }).superRefine((val, ctx) => {
   if (val.depositStrategy === 'percentage') {
     if (val.depositPercentageBps == null) {

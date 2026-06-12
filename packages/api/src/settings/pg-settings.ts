@@ -138,9 +138,21 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // match the InMemory repo shape; consumers (onboarding's
     // `aiConfigPresent`, verify_ai worker) treat undefined as "not seeded".
     aiModel: (row.ai_model as string | null) ?? undefined,
+    // RV-063 — migration 163. NOT NULL with column defaults, so a
+    // pre-migration row reads as the defaults (false / 18:00 / sms).
+    // Postgres TIME comes back as 'HH:MM:SS'; normalize to 'HH:MM' so
+    // consumers (worker bucket matching, settings UI) see one shape.
+    digestEnabled: (row.digest_enabled as boolean | null) ?? false,
+    digestTime: normalizeDigestTime(row.digest_time),
+    digestChannel: (row.digest_channel as 'sms' | 'none' | null) ?? 'sms',
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
+}
+
+function normalizeDigestTime(raw: unknown): string {
+  if (typeof raw !== 'string' || raw.length < 5) return '18:00';
+  return raw.slice(0, 5);
 }
 
 function buildTerminologyJson(
@@ -299,6 +311,12 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         transferNumber: 'transfer_number',
         // Migration 120 — per-tenant AI model override.
         aiModel: 'ai_model',
+        // RV-063 — migration 163. digest_time accepts 'HH:MM' (Postgres
+        // casts to TIME); digest_channel is CHECK-constrained in the DB
+        // and validated at the route boundary.
+        digestEnabled: 'digest_enabled',
+        digestTime: 'digest_time',
+        digestChannel: 'digest_channel',
         updatedAt: 'updated_at',
       };
 

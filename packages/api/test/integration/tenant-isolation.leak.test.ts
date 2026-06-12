@@ -52,6 +52,8 @@ import { PgInvoiceRepository } from '../../src/invoices/pg-invoice';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgFileRepository } from '../../src/files/pg-file';
 import { PgAttachmentRepository } from '../../src/attachments/pg-attachment';
+import { PgDailyDigestRepository } from '../../src/digest/pg-daily-digest';
+import type { DailyDigestPayload } from '../../src/digest/digest-service';
 import { PgTenantFeatureFlagRepository } from '../../src/flags/pg-tenant-feature-flags';
 import { InMemoryFeatureFlagRepository } from '../../src/flags/feature-flags';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
@@ -619,6 +621,72 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
     });
   });
 
+  // ── daily_digests (RV-060, migration 162) ──────────────────────────────────
+  describe('PgDailyDigestRepository', () => {
+    const DIGEST_DATE = '2026-06-10';
+
+    function digestPayload(revenueCents: number): DailyDigestPayload {
+      return {
+        date: DIGEST_DATE,
+        timezone: 'America/Chicago',
+        revenueCents,
+        grossRevenueCents: revenueCents,
+        refundsCents: 0,
+        paymentsCount: 1,
+        jobsCompletedCount: 0,
+        tomorrow: { appointmentCount: 0, firstStartIso: null },
+        pendingApprovals: { totalCount: 0, top: [] },
+        overdueInvoicesCount: 0,
+        unbilledJobs: [],
+      };
+    }
+
+    it('upsert + findByTenantAndDate round-trips per tenant and never crosses tenants (pins real column names)', async () => {
+      const repo = new PgDailyDigestRepository(pool);
+      const rowA = await repo.upsert(tenantA.tenantId, DIGEST_DATE, digestPayload(100), 'narrative A');
+      const rowB = await repo.upsert(tenantB.tenantId, DIGEST_DATE, digestPayload(200), 'narrative B');
+      expect(rowA.id).not.toBe(rowB.id);
+      expect(rowA.digestDate).toBe(DIGEST_DATE);
+
+      const seenByA = await repo.findByTenantAndDate(tenantA.tenantId, DIGEST_DATE);
+      const seenByB = await repo.findByTenantAndDate(tenantB.tenantId, DIGEST_DATE);
+      expect(seenByA?.id).toBe(rowA.id);
+      expect(seenByA?.narrative).toBe('narrative A');
+      expect(seenByB?.id).toBe(rowB.id);
+      expect(seenByB?.narrative).toBe('narrative B');
+    });
+
+    it('insertIfAbsent dedupes on (tenant, date) within a tenant but NOT across tenants', async () => {
+      const repo = new PgDailyDigestRepository(pool);
+      const again = await repo.insertIfAbsent(tenantA.tenantId, DIGEST_DATE, digestPayload(300));
+      expect(again.inserted).toBe(false); // tenant A already has this date
+      expect(again.digest.narrative).toBe('narrative A');
+    });
+
+    it('setSmsDispatchId scoped to A cannot claim B row (and claims only once)', async () => {
+      const repo = new PgDailyDigestRepository(pool);
+      const dispatchId = crypto.randomUUID();
+      const claimed = await repo.setSmsDispatchId(tenantA.tenantId, DIGEST_DATE, dispatchId);
+      expect(claimed?.smsDispatchId).toBe(dispatchId);
+      // Second claim is a no-op (status check).
+      expect(await repo.setSmsDispatchId(tenantA.tenantId, DIGEST_DATE, crypto.randomUUID())).toBeNull();
+      // B's row is untouched by A's claim.
+      const intactB = await repo.findByTenantAndDate(tenantB.tenantId, DIGEST_DATE);
+      expect(intactB?.smsDispatchId).toBeUndefined();
+    });
+
+    it('tenant A digest row is invisible to tenant B via RLS (raw query cross-check)', async () => {
+      const n = await asTenant(pool, tenantB.tenantId, async (client) => {
+        const res = await client.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM daily_digests WHERE tenant_id = $1`,
+          [tenantA.tenantId],
+        );
+        return res.rows[0].n;
+      });
+      expect(n).toBe(0);
+    });
+  });
+
   // ── GUC-unset (fail-closed) coverage ──────────────────────────────────────
   //
   // Nothing in the repo previously tested what happens when no tenant context
@@ -684,6 +752,24 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
         await client.query(`RESET app.current_tenant_id`);
         await expect(
           client.query('SELECT count(*) FROM attachments'),
+        ).rejects.toThrow(/unrecognized configuration parameter|invalid input syntax for type uuid/);
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined);
+        client.release();
+      }
+    });
+
+    it('SELECT on daily_digests throws when GUC is not set (fail-closed policy)', async () => {
+      // daily_digests policy (schema.ts migration 162):
+      //   USING (tenant_id = current_setting('app.current_tenant_id')::UUID)
+      // No missing_ok → same fail-closed error as customers above.
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+        await client.query(`RESET app.current_tenant_id`);
+        await expect(
+          client.query('SELECT count(*) FROM daily_digests'),
         ).rejects.toThrow(/unrecognized configuration parameter|invalid input syntax for type uuid/);
       } finally {
         await client.query('ROLLBACK').catch(() => undefined);

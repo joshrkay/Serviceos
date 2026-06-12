@@ -23,6 +23,8 @@ export const BRAND_VOICE_INTENTS = [
   'review_public_response',
   'review_private_followup',
   'dropped_call_recovery_sms',
+  // RV-061 (F-9) — owner-facing end-of-day digest narrative.
+  'digest_narrative',
 ] as const;
 
 export type BrandVoiceIntent = (typeof BRAND_VOICE_INTENTS)[number];
@@ -80,6 +82,13 @@ const INTENT_GUIDANCE: Record<BrandVoiceIntent, string> = {
     'dropped or missed. Apologize for the disconnection, confirm you want to ' +
     'help, and invite them to reply or expect a call back. One or two ' +
     'sentences.',
+  digest_narrative:
+    'Write a short end-of-day summary FOR THE BUSINESS OWNER (not a ' +
+    'customer) covering exactly the facts in the context: money collected ' +
+    'today, jobs completed, tomorrow’s schedule, approvals waiting, and ' +
+    'any flags (overdue invoices, unbilled jobs). Warm, plain language; no ' +
+    'greetings or sign-offs; two to four sentences. Never invent numbers ' +
+    'that are not in the context.',
 };
 
 function normalizeTone(tone: BrandVoiceTone | null | undefined): BrandVoiceTone {
