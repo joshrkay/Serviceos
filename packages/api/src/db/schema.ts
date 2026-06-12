@@ -4027,6 +4027,82 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_attachments ON attachments
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // RV-006: image post-process pipeline outputs. The async worker stamps
+  // dimensions (post EXIF-rotation), the 480px thumbnail key, whether EXIF
+  // was stripped (false = non-image or graceful-degraded unsupported
+  // format), and the SHA-256 of the final stored object. content_hash
+  // doubles as the worker's idempotency marker and powers the attach-time
+  // dedupe lookup, hence the (tenant_id, content_hash) index.
+  '161_files_image_pipeline_columns': `
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS width INT;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS height INT;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS thumbnail_s3_key TEXT;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS exif_stripped BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS content_hash TEXT;
+    CREATE INDEX IF NOT EXISTS idx_files_tenant_content_hash ON files(tenant_id, content_hash);
+  `,
+  // RV-060 (F-9): end-of-day digest snapshots. One row per tenant per
+  // tenant-local calendar day; `payload` is the computed snapshot (money in,
+  // jobs done, tomorrow's schedule, pending approvals, flags) so the web
+  // view and voice readback render exactly what was sent. `narrative` is the
+  // brand-voice text; `sms_dispatch_id` records the owner SMS send (NULL =
+  // stored but not yet sent — the worker's resend guard keys off it). The
+  // UNIQUE(tenant_id, digest_date) is the idempotency anchor: overlapping
+  // sweeps INSERT … ON CONFLICT DO NOTHING and only the winner sends.
+  // The message_dispatches CHECK is widened so the owner digest SMS can be
+  // recorded in the same dispatch audit trail as every other send.
+  '162_create_daily_digests': `
+    CREATE TABLE IF NOT EXISTS daily_digests (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      digest_date DATE NOT NULL,
+      payload JSONB NOT NULL,
+      narrative TEXT,
+      sms_dispatch_id UUID,
+      generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE(tenant_id, digest_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_daily_digests_tenant_date
+      ON daily_digests (tenant_id, digest_date);
+    ALTER TABLE daily_digests ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE daily_digests FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_daily_digests ON daily_digests
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // RV-063 (F-9): per-tenant digest delivery settings. Opt-in
+  // (digest_enabled defaults false); digest_time is a tenant-local
+  // wall-clock time (the worker buckets it in tenant tz); digest_channel
+  // 'none' keeps generating/storing the digest (web view) without SMS.
+  '163_tenant_settings_digest': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS digest_enabled BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS digest_time TIME NOT NULL DEFAULT '18:00';
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS digest_channel TEXT NOT NULL DEFAULT 'sms'
+        CHECK (digest_channel IN ('sms','none'));
+  `,
+
+  // RV-061 (F-9): widen message_dispatches entity_type CHECK to allow
+  // 'daily_digest' (owner end-of-day digest SMS, entity_id = daily_digests.id).
+  // Mirrors the prior widenings in 092_extend_dispatch_entity_types and
+  // 125_dispatch_entity_en_route — kept separate from 162_create_daily_digests
+  // so the table-creation and the constraint change are independently
+  // reviewable and reversible.
+  '164_dispatch_entity_daily_digest': `
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_entity_type_check
+        CHECK (entity_type IN (
+          'estimate', 'invoice', 'appointment_confirmation',
+          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
+          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
+          'daily_digest'
+        ));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
