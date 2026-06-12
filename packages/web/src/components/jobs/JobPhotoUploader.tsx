@@ -15,6 +15,10 @@ import {
   JOB_PHOTO_CATEGORIES,
   uploadJobPhoto,
 } from '../../api/job-photos';
+import {
+  enqueueOfflinePhoto,
+  fileToBase64,
+} from '../../lib/offline-photo-queue';
 
 export interface JobPhotoUploaderProps {
   jobId: string;
@@ -54,6 +58,22 @@ export function JobPhotoUploader({
     setBusy(true);
     setError(null);
     try {
+      if (!navigator.onLine) {
+        const base64 = await fileToBase64(file);
+        await enqueueOfflinePhoto({
+          id: crypto.randomUUID(),
+          jobId,
+          fileName: file.name,
+          contentType: file.type || 'image/jpeg',
+          base64,
+          category,
+          notes: notes.trim() || undefined,
+          createdAt: new Date().toISOString(),
+        });
+        setNotes('');
+        setError('Saved offline — will upload when back online.');
+        return;
+      }
       const photo = await uploader(
         jobId,
         file,

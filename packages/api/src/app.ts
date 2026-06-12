@@ -93,9 +93,17 @@ import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
 import { createJobFilesRouter } from './routes/job-files';
 import { createJobPhotosRouter } from './routes/job-photos';
+import { createInvoicePhotosRouter } from './routes/invoice-photos';
+import { createJobChecklistsRouter } from './routes/job-checklists';
 import { JobPhotoService } from './jobs/job-photo-service';
 import { InMemoryJobPhotoRepository } from './jobs/job-photo';
 import { PgJobPhotoRepository } from './jobs/pg-job-photo';
+import { InMemoryInvoicePhotoRepository } from './invoices/invoice-photo';
+import { PgInvoicePhotoRepository } from './invoices/pg-invoice-photo';
+import { InvoicePhotoService } from './invoices/invoice-photo-service';
+import { InMemoryJobChecklistRepository } from './jobs/checklist';
+import { PgJobChecklistRepository } from './jobs/pg-checklist';
+import { createDroppedCallHandlerDeps } from './sms/recovery/wiring';
 import { createDispatchRoutes } from './dispatch/routes';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
@@ -882,6 +890,18 @@ export function createApp(): express.Express {
   const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
     process.env as NodeJS.ProcessEnv
   );
+  const jobPhotoService = new JobPhotoService(jobPhotoRepo, fileRepo, storageProvider);
+  const invoicePhotoRepo = pool
+    ? new PgInvoicePhotoRepository(pool)
+    : new InMemoryInvoicePhotoRepository();
+  const invoicePhotoService = new InvoicePhotoService(
+    invoicePhotoRepo,
+    fileRepo,
+    storageProvider,
+  );
+  const jobChecklistRepo = pool
+    ? new PgJobChecklistRepository(pool)
+    : new InMemoryJobChecklistRepository();
 
   const canonicalPackRegistry = pool
     ? new PgVerticalPackRegistry(pool)
@@ -1003,6 +1023,29 @@ export function createApp(): express.Express {
         publicBaseUrl,
       })
     : undefined;
+
+  const droppedCallRecoveryLogger = createLogger({
+    service: 'dropped-call-recovery',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  const droppedCallRecoveryRepo = pool
+    ? new PgDroppedCallRecoveryRepository(pool)
+    : undefined;
+  const droppedCallScheduler = droppedCallRecoveryRepo
+    ? new DroppedCallScheduler(droppedCallRecoveryRepo, droppedCallRecoveryLogger)
+    : undefined;
+  const droppedCallHandlerDeps =
+    pool && messageDelivery && droppedCallRecoveryRepo
+      ? createDroppedCallHandlerDeps({
+          pool,
+          auditRepo,
+          settingsRepo,
+          voiceSessionRepo,
+          delivery: messageDelivery,
+          gateway: llmGateway,
+          logger: droppedCallRecoveryLogger,
+        })
+      : undefined;
 
   // ── P12-004 wiring — one-tap approve (unsupervised queue_and_sms) ────────
   // HMAC secret for the single-use approve token in the owner SMS. In prod /
@@ -1269,6 +1312,8 @@ export function createApp(): express.Express {
     timeEntryService: new TimeEntryService(timeEntryRepo, auditRepo),
     feedbackRepo: feedbackRequestRepo,
     delayNotificationService,
+    jobPhotoService,
+    invoicePhotoService,
   });
   // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
   // default to `proposal-run:{tenant}:{id}` when callers omit one.
@@ -1959,6 +2004,7 @@ export function createApp(): express.Express {
     store: voiceSessionStore,
     gateway: llmGateway,
     ...(pool ? { pool } : {}),
+    ...(droppedCallScheduler ? { droppedCallScheduler } : {}),
     proposalRepo,
     auditRepo,
     onCallRepo: sharedOnCallRepo,
@@ -2603,7 +2649,18 @@ export function createApp(): express.Express {
   app.use(
     '/api/jobs',
     createJobPhotosRouter({
-      service: new JobPhotoService(jobPhotoRepo, fileRepo, storageProvider),
+      service: jobPhotoService,
+      fileRepo,
+      storage: storageProvider,
+      bucket: storageBucket,
+      auditRepo,
+    })
+  );
+  app.use('/api/jobs', createJobChecklistsRouter(jobChecklistRepo));
+  app.use(
+    '/api/invoices',
+    createInvoicePhotosRouter({
+      service: invoicePhotoService,
       fileRepo,
       storage: storageProvider,
       bucket: storageBucket,
@@ -3212,6 +3269,22 @@ export function createApp(): express.Express {
     }, 60 * 60_000));
   }
 
+  if (droppedCallRecoveryRepo && droppedCallHandlerDeps) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.droppedCall, async () => {
+        await runDroppedCallRecoverySweep({
+          repo: droppedCallRecoveryRepo,
+          handlerDeps: droppedCallHandlerDeps,
+          logger: droppedCallRecoveryLogger,
+        });
+      }).catch((err) => {
+        droppedCallRecoveryLogger.error('Dropped-call sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 30_000));
+  }
+
   if (sendService) {
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.estimateReminder, async () => {
@@ -3345,17 +3418,6 @@ export function createApp(): express.Express {
     ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
     AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
   });
-  const droppedCallRecoveryLogger = createLogger({
-    service: 'dropped-call-recovery',
-    environment: process.env.NODE_ENV || 'development',
-  });
-  const droppedCallScheduler = pool
-    ? new DroppedCallScheduler(
-        new PgDroppedCallRecoveryRepository(pool),
-        droppedCallRecoveryLogger,
-      )
-    : undefined;
-
   const inAppVoiceAdapter = new InAppVoiceAdapter({
     store: voiceSessionStore,
     gateway: llmGateway,

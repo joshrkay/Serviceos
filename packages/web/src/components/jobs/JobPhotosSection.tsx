@@ -76,11 +76,15 @@ export function JobPhotosSection({
         </p>
       ) : null}
       <JobPhotoGallery
+        jobId={jobId}
         photos={photos}
         loading={loading}
         activeCategory={activeCategory}
         onCategoryChange={setActiveCategory}
         onDelete={handleDelete}
+        onClientVisibleChange={(photo) => {
+          setPhotos((prev) => prev.map((p) => (p.id === photo.id ? { ...p, ...photo } : p)));
+        }}
       />
     </div>
   );

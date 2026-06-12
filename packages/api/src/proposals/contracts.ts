@@ -6,6 +6,10 @@ import { rescheduleAppointmentPayloadSchema } from './contracts/reschedule';
 import { addCrewMemberPayloadSchema, removeCrewMemberPayloadSchema } from './contracts/crew';
 import { cancelAppointmentPayloadSchema } from './contracts/cancellation';
 import { addNotePayloadSchema } from './contracts/notes';
+import {
+  attachJobPhotoPayloadSchema,
+  attachInvoicePhotoPayloadSchema,
+} from './contracts/attach-photo';
 import { sendInvoicePayloadSchema } from './contracts/send-invoice';
 import { sendEstimatePayloadSchema } from './contracts/send-estimate';
 import { recordPaymentPayloadSchema } from './contracts/record-payment';
@@ -364,6 +368,8 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   cancel_appointment: cancelAppointmentPayloadSchema,
   voice_clarification: voiceClarificationPayloadSchema,
   add_note: addNotePayloadSchema,
+  attach_job_photo: attachJobPhotoPayloadSchema,
+  attach_invoice_photo: attachInvoicePhotoPayloadSchema,
   send_invoice: sendInvoicePayloadSchema,
   send_estimate: sendEstimatePayloadSchema,
   record_payment: recordPaymentPayloadSchema,

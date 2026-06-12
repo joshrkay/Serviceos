@@ -26,6 +26,7 @@ import type { Logger } from '../../logging/logger';
 import type { AuditRepository } from '../../audit/audit';
 import { createAuditEvent } from '../../audit/audit';
 import { extractContextCue } from '../../voice/recovery/extract-context-cue';
+import { registerDroppedCallSession } from '../../telephony/dropped-call-session-bridge';
 import type {
   DroppedCallRecoveryRepository,
   DroppedCallRecoveryRow,
@@ -178,6 +179,8 @@ export async function handleDroppedCallRecovery(
       error: err instanceof Error ? err.message : String(err),
     });
   }
+
+  registerDroppedCallSession(row.tenantId, row.callerE164, row.voiceSessionId);
 
   if (deps.thread) {
     try {

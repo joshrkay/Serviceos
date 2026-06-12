@@ -42,6 +42,8 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   send_estimate: 1,
   // Notes are low priority — they never gate other work.
   add_note: 5,
+  attach_job_photo: 5,
+  attach_invoice_photo: 5,
   // Expense logging is informational — captured after the fact, never
   // gates any other work.
   log_expense: 5,

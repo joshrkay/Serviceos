@@ -42,6 +42,7 @@ export interface JobPhotoRepository {
   findById(tenantId: string, id: string): Promise<JobPhoto | null>;
   listByJob(tenantId: string, jobId: string): Promise<JobPhoto[]>;
   delete(tenantId: string, id: string): Promise<boolean>;
+  updateClientVisible(tenantId: string, id: string, clientVisible: boolean): Promise<JobPhoto | null>;
 }
 
 export function isValidJobPhotoCategory(value: unknown): value is JobPhotoCategory {
@@ -89,5 +90,17 @@ export class InMemoryJobPhotoRepository implements JobPhotoRepository {
     if (!photo || photo.tenantId !== tenantId) return false;
     this.photos.delete(id);
     return true;
+  }
+
+  async updateClientVisible(
+    tenantId: string,
+    id: string,
+    clientVisible: boolean,
+  ): Promise<JobPhoto | null> {
+    const photo = this.photos.get(id);
+    if (!photo || photo.tenantId !== tenantId) return null;
+    const updated = { ...photo, clientVisible };
+    this.photos.set(id, updated);
+    return { ...updated };
   }
 }

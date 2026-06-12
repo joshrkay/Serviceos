@@ -254,6 +254,8 @@ export interface TwilioAdapterDeps {
   settingsRepo?: SettingsRepository;
   whisperCache?: WhisperCache;
   deliveryProvider?: { sendSms(args: { to: string; body: string }): Promise<unknown> };
+  /** P8-015 — durable dropped-call recovery scheduler. */
+  droppedCallScheduler?: import('../sms/recovery/scheduler').DroppedCallScheduler;
 }
 
 /**

@@ -108,7 +108,7 @@ import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
 import type { SpeechTurnHandler } from '../../telephony/media-streams/mediastream-adapter';
 import { createLogger } from '../../logging/logger';
-import { scheduleDroppedCallRecovery } from '../../telephony/dropped-call-recovery';
+import type { DroppedCallScheduler } from '../../sms/recovery/scheduler';
 
 const logger = createLogger({
   service: 'ai.voice-turn.processor',
@@ -265,6 +265,8 @@ export interface VoiceTurnProcessorDeps {
    * summaries; otherwise a placeholder is used.
    */
   callerPhoneResolver?: (session: VoiceSession) => string | undefined;
+  /** P8-015 — durable dropped-call recovery queue (replaces in-memory timer). */
+  droppedCallScheduler?: DroppedCallScheduler;
 }
 
 export interface VoiceTurnProcessor {
@@ -832,21 +834,21 @@ export function createVoiceTurnProcessor(
     session.terminalReason = reason;
     void persistSessionEnded(session, reason, outcome);
 
-    if (
-      outcome === 'dropped' &&
-      deps.deliveryProvider &&
-      deps.callerPhoneResolver &&
-      session.channel === 'telephony'
-    ) {
+    const scheduler = deps.droppedCallScheduler;
+    if (scheduler && deps.callerPhoneResolver) {
       const callerE164 = deps.callerPhoneResolver(session);
-      if (callerE164 && callerE164.length >= 7) {
-        scheduleDroppedCallRecovery({
-          tenantId: session.tenantId,
-          sessionId: session.id,
-          callerE164,
-          shopName: deps.businessName,
-          sendSms: (args) => deps.deliveryProvider!.sendSms(args),
-        });
+      if (callerE164) {
+        void scheduler
+          .schedule({
+            tenantId: session.tenantId,
+            voiceSessionId: session.id,
+            callerE164,
+            outcome,
+            channel: session.channel === 'telephony' ? 'voice_inbound' : session.channel,
+          })
+          .catch(() => {
+            /* swallow — scheduler already logs */
+          });
       }
     }
   }

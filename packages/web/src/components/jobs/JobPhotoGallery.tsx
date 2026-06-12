@@ -7,13 +7,15 @@
  * fires without coupling the gallery to a specific delete client.
  */
 import React from 'react';
-import { JobPhoto, JobPhotoCategory, JOB_PHOTO_CATEGORIES } from '../../api/job-photos';
+import { JobPhoto, JobPhotoCategory, JOB_PHOTO_CATEGORIES, setJobPhotoClientVisible } from '../../api/job-photos';
 
 export interface JobPhotoGalleryProps {
+  jobId: string;
   photos: JobPhoto[];
   activeCategory?: JobPhotoCategory | 'all';
   onCategoryChange?: (next: JobPhotoCategory | 'all') => void;
   onDelete?: (photo: JobPhoto) => void;
+  onClientVisibleChange?: (photo: JobPhoto) => void;
   loading?: boolean;
 }
 
@@ -27,10 +29,12 @@ const CATEGORY_LABELS: Record<JobPhotoCategory | 'all', string> = {
 };
 
 export function JobPhotoGallery({
+  jobId,
   photos,
   activeCategory = 'all',
   onCategoryChange,
   onDelete,
+  onClientVisibleChange,
   loading = false,
 }: JobPhotoGalleryProps) {
   const filtered =
@@ -87,6 +91,22 @@ export function JobPhotoGallery({
               <figcaption className="p-2 text-xs text-slate-700">
                 <div className="font-medium">{CATEGORY_LABELS[photo.category]}</div>
                 {photo.notes ? <div className="truncate">{photo.notes}</div> : null}
+                <label className="mt-1 flex items-center gap-1 min-h-11">
+                  <input
+                    type="checkbox"
+                    data-testid={`job-photo-client-visible-${photo.id}`}
+                    checked={photo.clientVisible === true}
+                    onChange={async (e) => {
+                      const updated = await setJobPhotoClientVisible(
+                        jobId,
+                        photo.id,
+                        e.target.checked,
+                      );
+                      onClientVisibleChange?.(updated);
+                    }}
+                  />
+                  <span>Client Hub</span>
+                </label>
                 {onDelete ? (
                   <button
                     type="button"

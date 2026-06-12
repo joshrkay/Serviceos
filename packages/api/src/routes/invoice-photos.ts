@@ -1,12 +1,5 @@
 /**
- * P12-001 — Job photos router.
- *
- * Mount at `/api/jobs` so the URL shape mirrors the existing
- * job-files router:
- *   POST   /api/jobs/:id/photos/presign-upload
- *   POST   /api/jobs/:id/photos
- *   GET    /api/jobs/:id/photos
- *   DELETE /api/jobs/:id/photos/:photoId
+ * Invoice photos router — mirrors job-photos.ts.
  */
 import { Response, Router } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
@@ -18,15 +11,11 @@ import {
   validateUpload,
   normalizeContentType,
 } from '../files/file-service';
-import { JobPhotoService } from '../jobs/job-photo-service';
-import { isValidJobPhotoCategory } from '../jobs/job-photo';
+import { InvoicePhotoService } from '../invoices/invoice-photo-service';
+import { isValidJobPhotoCategory } from '../invoices/invoice-photo';
 import { requireAuth, requirePermission, requireTenant } from '../middleware/auth';
 import { toErrorResponse } from '../shared/errors';
-
-// Photos are bounded tighter than the generic 100MB file limit:
-// mobile cameras commonly emit 4–8MB JPEGs; 10MB is a comfortable
-// ceiling that still rejects accidental video uploads.
-export const MAX_JOB_PHOTO_SIZE = 10 * 1024 * 1024;
+import { MAX_JOB_PHOTO_SIZE } from './job-photos';
 
 const ALLOWED_PHOTO_CONTENT_TYPES = new Set([
   'image/jpeg',
@@ -49,30 +38,27 @@ interface AttachBody {
   clientVisible?: boolean;
 }
 
-export interface JobPhotosRouterDeps {
-  service: JobPhotoService;
+export interface InvoicePhotosRouterDeps {
+  service: InvoicePhotoService;
   fileRepo: FileRepository;
   storage: StorageProvider;
   bucket: string;
   auditRepo: AuditRepository;
 }
 
-export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
+export function createInvoicePhotosRouter(deps: InvoicePhotosRouterDeps): Router {
   const { service, fileRepo, storage, bucket, auditRepo } = deps;
   const router = Router();
 
-  // Step 1 of upload: client requests a presigned URL. We create the
-  // `files` row eagerly so the subsequent attach call only needs the
-  // fileId. Mirrors the job-files router's upload-url shape.
   router.post(
     '/:id/photos/presign-upload',
     requireAuth,
     requireTenant,
-    requirePermission('jobs:update'),
+    requirePermission('invoices:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const body = (req.body ?? {}) as PresignBody;
-        const jobId = req.params.id;
+        const invoiceId = req.params.id;
         const tenantId = req.auth!.tenantId;
 
         const uploadRequest = {
@@ -81,8 +67,8 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
           filename: body.filename ?? '',
           contentType: body.contentType ?? '',
           sizeBytes: Number(body.sizeBytes ?? 0),
-          entityType: 'job' as const,
-          entityId: jobId,
+          entityType: 'invoice' as const,
+          entityId: invoiceId,
         };
 
         const errors = validateUpload(uploadRequest);
@@ -100,12 +86,17 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
           return;
         }
 
-        if (isNaN(uploadRequest.sizeBytes) || uploadRequest.sizeBytes <= 0 || uploadRequest.sizeBytes > MAX_JOB_PHOTO_SIZE) {
+        if (
+          isNaN(uploadRequest.sizeBytes) ||
+          uploadRequest.sizeBytes <= 0 ||
+          uploadRequest.sizeBytes > MAX_JOB_PHOTO_SIZE
+        ) {
           res.status(400).json({
             error: 'VALIDATION_ERROR',
-            message: uploadRequest.sizeBytes > MAX_JOB_PHOTO_SIZE
-              ? 'Photo exceeds maximum allowed size of ' + MAX_JOB_PHOTO_SIZE + ' bytes'
-              : 'Photo size must be a positive number',
+            message:
+              uploadRequest.sizeBytes > MAX_JOB_PHOTO_SIZE
+                ? `Photo exceeds maximum allowed size of ${MAX_JOB_PHOTO_SIZE} bytes`
+                : 'Photo size must be a positive number',
           });
           return;
         }
@@ -115,7 +106,7 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
         const uploadUrl = await storage.generateUploadUrl(
           created.storageBucket,
           created.storageKey,
-          created.contentType
+          created.contentType,
         );
 
         await auditRepo.create(
@@ -123,16 +114,16 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
             tenantId,
             actorId: req.auth!.userId,
             actorRole: req.auth!.role,
-            eventType: 'job.photo.upload_requested',
-            entityType: 'job',
-            entityId: jobId,
+            eventType: 'invoice.photo.upload_requested',
+            entityType: 'invoice',
+            entityId: invoiceId,
             metadata: {
               fileId: created.id,
               filename: created.filename,
               contentType: created.contentType,
               sizeBytes: created.sizeBytes,
             },
-          })
+          }),
         );
 
         res.status(201).json({
@@ -144,20 +135,18 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
       }
-    }
+    },
   );
 
-  // Step 2 of upload: client confirms the S3 PUT succeeded and asks
-  // us to attach the file row to the job with category + notes.
   router.post(
     '/:id/photos',
     requireAuth,
     requireTenant,
-    requirePermission('jobs:update'),
+    requirePermission('invoices:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const body = (req.body ?? {}) as AttachBody;
-        const jobId = req.params.id;
+        const invoiceId = req.params.id;
         const tenantId = req.auth!.tenantId;
 
         if (!body.fileId) {
@@ -178,34 +167,31 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
           return;
         }
 
-        let photo = await service.attachPhotoToJob(
+        const photo = await service.attachPhotoToInvoice(
           tenantId,
-          jobId,
+          invoiceId,
           body.fileId,
           body.category,
           body.notes,
           takenAt,
           req.auth!.userId,
+          body.clientVisible === true,
         );
-        if (body.clientVisible === true) {
-          photo = (await service.setClientVisible(tenantId, jobId, photo.id, true)) ?? photo;
-        }
 
         await auditRepo.create(
           createAuditEvent({
             tenantId,
             actorId: req.auth!.userId,
             actorRole: req.auth!.role,
-            eventType: 'job.photo.attached',
-            entityType: 'job',
-            entityId: jobId,
+            eventType: 'invoice.photo.attached',
+            entityType: 'invoice',
+            entityId: invoiceId,
             metadata: {
               photoId: photo.id,
               fileId: photo.fileId,
               category: photo.category,
-              clientVisible: photo.clientVisible === true,
             },
-          })
+          }),
         );
 
         res.status(201).json(photo);
@@ -213,35 +199,31 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
       }
-    }
+    },
   );
 
   router.get(
     '/:id/photos',
     requireAuth,
     requireTenant,
-    requirePermission('jobs:view'),
+    requirePermission('invoices:view'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const tenantId = req.auth!.tenantId;
-        const photos = await service.listJobPhotos(tenantId, req.params.id);
+        const photos = await service.listInvoicePhotos(tenantId, req.params.id);
         res.json(photos);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
       }
-    }
+    },
   );
 
-  // Removes only the join row: the underlying file + S3 object
-  // intentionally remain so download URLs already shared in
-  // (e.g.) audit metadata still resolve. A separate cleanup job
-  // can reap orphaned files later.
   router.patch(
     '/:id/photos/:photoId',
     requireAuth,
     requireTenant,
-    requirePermission('jobs:update'),
+    requirePermission('invoices:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const tenantId = req.auth!.tenantId;
@@ -257,7 +239,7 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
           clientVisible,
         );
         if (!photo) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Job photo not found' });
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice photo not found' });
           return;
         }
         res.json(photo);
@@ -272,13 +254,17 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
     '/:id/photos/:photoId',
     requireAuth,
     requireTenant,
-    requirePermission('jobs:update'),
+    requirePermission('invoices:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const tenantId = req.auth!.tenantId;
-        const removed = await service.deleteJobPhoto(tenantId, req.params.id, req.params.photoId);
+        const removed = await service.deleteInvoicePhoto(
+          tenantId,
+          req.params.id,
+          req.params.photoId,
+        );
         if (!removed) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Job photo not found' });
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice photo not found' });
           return;
         }
 
@@ -287,11 +273,11 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
             tenantId,
             actorId: req.auth!.userId,
             actorRole: req.auth!.role,
-            eventType: 'job.photo.deleted',
-            entityType: 'job',
+            eventType: 'invoice.photo.deleted',
+            entityType: 'invoice',
             entityId: req.params.id,
             metadata: { photoId: req.params.photoId },
-          })
+          }),
         );
 
         res.status(204).send();
@@ -299,7 +285,7 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
       }
-    }
+    },
   );
 
   return router;

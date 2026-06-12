@@ -73,6 +73,12 @@ import { TimeEntryService } from '../../time-tracking/time-entry-service';
 import { FeedbackRequestRepository } from '../../feedback/feedback-request';
 import { DelayNotificationService } from '../../notifications/delay-notifications';
 import { LineItem } from '../../shared/billing-engine';
+import { JobPhotoService } from '../../jobs/job-photo-service';
+import { InvoicePhotoService } from '../../invoices/invoice-photo-service';
+import {
+  AttachJobPhotoExecutionHandler,
+  AttachInvoicePhotoExecutionHandler,
+} from './attach-photo-handler';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -498,6 +504,8 @@ export function createExecutionHandlerRegistry(deps?: {
   timeEntryService?: TimeEntryService;
   feedbackRepo?: FeedbackRequestRepository;
   delayNotificationService?: DelayNotificationService;
+  jobPhotoService?: JobPhotoService;
+  invoicePhotoService?: InvoicePhotoService;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -548,6 +556,8 @@ export function createExecutionHandlerRegistry(deps?: {
     // absent (used by in-memory tests that don't exercise the
     // mutation path). Production wires the real deps in app.ts.
     new AddNoteExecutionHandler(deps?.noteRepo),
+    new AttachJobPhotoExecutionHandler(deps?.jobPhotoService),
+    new AttachInvoicePhotoExecutionHandler(deps?.invoicePhotoService),
     new SendInvoiceExecutionHandler(deps?.invoiceDeliveryProvider),
     new SendEstimateExecutionHandler(deps?.estimateDeliveryProvider),
     new RecordPaymentExecutionHandler(
