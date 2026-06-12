@@ -303,8 +303,6 @@ export interface TwilioAdapterDeps {
   settingsRepo?: SettingsRepository;
   whisperCache?: WhisperCache;
   deliveryProvider?: { sendSms(args: { to: string; body: string }): Promise<unknown> };
-  /** P8-015 — durable dropped-call recovery scheduler. */
-  droppedCallScheduler?: import('../sms/recovery/scheduler').DroppedCallScheduler;
   /**
    * RV-070 — resolves the backup supervisor's mobile for owner-line
    * recognition (`tenant_settings.backup_supervisor_user_id` →
