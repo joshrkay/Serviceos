@@ -639,8 +639,8 @@ Task conventions: IDs are `RV-###`, globally unique, referenced (not repeated) w
 **Required features:** existing `lookup_appointments`/`lookup_*` skills, F-4 markers, F-9 digest data functions, F-1 supervisor annotations, F-18 routes (P4).
 **Acceptance criteria:** voice answer covers today's appointments in order with tech assignment, urgent flags first, then pending-approval count; "approve the first one" works end-to-end (→ Flow 28 tasks); answer uses tenant tz; cassette-graded; nothing from other tenants.
 **Atomic tasks:**
-- [ ] **RV-010 (P2)** Add `lookup_day_overview` intent + skill `packages/api/src/ai/skills/lookup-day-overview.ts` composing appointments + urgent jobs + pending proposals + overnight voice sessions; register in `intent-classifier.ts` + `voice-action-router.ts`; cassette corpus script `morning-overview`.
-- [ ] **RV-011 (P2)** Overnight events query: extend `proposals/inbox.ts` with `listSince(tenantId, since)` returning created/executed/failed since timestamp; unit tests.
+- [x] **RV-010 (P2)** DONE, PR #548.  Add `lookup_day_overview` intent + skill `packages/api/src/ai/skills/lookup-day-overview.ts` composing appointments + urgent jobs + pending proposals + overnight voice sessions; register in `intent-classifier.ts` + `voice-action-router.ts`; cassette corpus script `morning-overview`.
+- [x] **RV-011 (P2)** DONE, PR #548.  Overnight events query: extend `proposals/inbox.ts` with `listSince(tenantId, since)` returning created/executed/failed since timestamp; unit tests.
 - [ ] **RV-012 (P4)** Include route-plan summary in day overview when `route_plans` row exists for today (depends RV-115).
 
 ### Flow 2 — On-site job intake & quoting + fast photo upload
@@ -671,7 +671,7 @@ Task conventions: IDs are `RV-###`, globally unique, referenced (not repeated) w
 **Atomic tasks:**
 - [ ] **RV-040 (P2)** Voice change-order path: ensure `update_estimate` task handler supports add-line via utterance with catalog resolution (extend `ai/tasks/estimate-task.ts` update path); cassette script `change-order`.
 - [ ] **RV-041 (P1)** Photos on `/e/:id`: extend `estimates/public-estimate-service.ts` to include portal-visible attachments (presigned thumbs); render gallery section in `web/src/components/customer/EstimateApprovalPage.tsx`; mobile e2e extension in `e2e/estimate-approval-mobile.spec.ts`.
-- [ ] **RV-042 (P2)** Re-approval invalidation test hardening: accepted estimate + update → status back to ready→sent, old acceptance recorded; integration test in `packages/api/test/estimates/` (verify existing behavior, add if missing).
+- [x] **RV-042 (P2)** DONE, PR #549 (behavior was missing; opt-in invalidation + deposit lock on handler path).  Re-approval invalidation test hardening: accepted estimate + update → status back to ready→sent, old acceptance recorded; integration test in `packages/api/test/estimates/` (verify existing behavior, add if missing).
 
 ### Flow 5 — Technician status updates + time tracking + photos
 
@@ -679,8 +679,8 @@ Task conventions: IDs are `RV-###`, globally unique, referenced (not repeated) w
 **Required features:** existing tech-status SMS keyword router + time entries + dispatch presence, F-16, F-20.
 **Acceptance criteria:** SMS "STARTED" from a registered tech phone updates job status + opens time entry (verify existing; add gaps); photo MMS attaches to the active job; dispatch board reflects within 5s (existing stream).
 **Atomic tasks:**
-- [ ] **RV-050 (P2)** MMS ingestion: extend `sms/inbound-dispatch.ts` to detect media URLs on tech messages → download via Twilio media API → attach to tech's active job (active time entry's job_id) through AttachmentService (source='sms'); tests with mocked Twilio media.
-- [ ] **RV-051 (P2)** Voice clock-in hardening: `log_time_entry` task handler resolves job by name (F-3) and confirms ("Clocking you in on Patel — right?"); cassette.
+- [x] **RV-050 (P2)** DONE, PR #549 (fully async via queue worker).  MMS ingestion: extend `sms/inbound-dispatch.ts` to detect media URLs on tech messages → download via Twilio media API → attach to tech's active job (active time entry's job_id) through AttachmentService (source='sms'); tests with mocked Twilio media.
+- [x] **RV-051 (P2)** DONE, PR #548 (real bug fixed: resolved jobId was dropped).  Voice clock-in hardening: `log_time_entry` task handler resolves job by name (F-3) and confirms ("Clocking you in on Patel — right?"); cassette.
 - [ ] **RV-052 (P4)** GPS-stamped punches: optional lat/lng on `POST /api/time-entries` (migration columns per F-20); web capture from geolocation with permission fallback; tests.
 
 ### Flow 6 — End-of-day reconciliation
@@ -691,10 +691,10 @@ Task conventions: IDs are `RV-###`, globally unique, referenced (not repeated) w
 **Atomic tasks:**
 - [x] **RV-060 (P2)** DONE, PR #535 (migrations 162/163/164; dashboard-parity pinned). `daily_digests` migration + `packages/api/src/digest/digest-service.ts` (pure compute functions reusing `reports/money-dashboard.ts` query fns — export them) + unit tests with fixture data.
 - [x] **RV-061 (P2)** DONE, PR #535 (DST fall-back + spring-forward verified; 3-layer send idempotency; low-confidence proposals get no one-tap links). `workers/daily-digest-worker.ts`: 15-min sweep, tenant-tz time matching, narrative via BrandVoiceComposer, SMS dispatch with one-tap links (`createOneTapApproveToken`), idempotent per (tenant, date); worker tests.
-- [ ] **RV-062 (P2)** Digest web view: route `/digest/:date?` in `web/src/routes.ts` + `web/src/pages/digest/DigestPage.tsx`; renders payload sections; component tests.
+- [x] **RV-062 (P2)** DONE, PR #544 (Opus implementer; calendar-roundtrip date validation; F-4 review-in-app-only affordances; tenant-tz throughout). Digest web view: route `/digest/:date?` in `web/src/routes.ts` + `web/src/pages/digest/DigestPage.tsx`; renders payload sections; component tests.
 - [x] **RV-063 (P2)** DONE, PR #535 (via existing PUT /api/settings; web settings UI section still open). Digest settings: `tenant_settings` migration (digest_enabled/time/channel) + settings UI section in `web/src/pages/settings/`; API in `routes/settings`-adjacent; tests.
-- [ ] **RV-064 (P2)** Voice `lookup_digest` skill ("read me my day") returning narrative; register intent; cassette.
-- [ ] **RV-065 (P2)** Unbilled-jobs digest section + one-tap "invoice it": digest payload includes completed-unbilled jobs; one-tap token variant that mints a `draft_invoice` proposal then redirects to its one-tap approve page; tests.
+- [x] **RV-064 (P2)** DONE, PR #548.  Voice `lookup_digest` skill ("read me my day") returning narrative; register intent; cassette.
+- [x] **RV-065 (P2)** DONE, PR #549 (GET-confirm interstitial / POST-mints).  Unbilled-jobs digest section + one-tap "invoice it": digest payload includes completed-unbilled jobs; one-tap token variant that mints a `draft_invoice` proposal then redirects to its one-tap approve page; tests.
 
 ### Flow 7 — Approval of pending estimates/quotes + photos
 
@@ -715,8 +715,8 @@ Task conventions: IDs are `RV-###`, globally unique, referenced (not repeated) w
 **Required features:** existing escalation + notes, F-6 triage signals, F-16, comms proposals.
 **Acceptance criteria:** complaint intent creates `add_note`(pinned) + owner-notification path; "send Joe back tomorrow" books revisit linked to original job; credit offer is money-class (always owner-approved); customer photos arrive via portal request flow.
 **Atomic tasks:**
-- [ ] **RV-080 (P2)** Complaint intent + handler: `complaint` intent → pinned note + `callback` proposal + owner SMS for high-severity (sentiment grade); cassette.
-- [ ] **RV-081 (P2)** Revisit linkage: `create_appointment` payload supports `linkedJobId` revisit semantics (no new job) — extend `contracts.ts createAppointmentPayloadSchema` + handler; tests.
+- [x] **RV-080 (P2)** DONE, PR #548.  Complaint intent + handler: `complaint` intent → pinned note + `callback` proposal + owner SMS for high-severity (sentiment grade); cassette.
+- [x] **RV-081 (P2)** DONE, PR #549.  Revisit linkage: `create_appointment` payload supports `linkedJobId` revisit semantics (no new job) — extend `contracts.ts createAppointmentPayloadSchema` + handler; tests.
 - [ ] **RV-082 (P1)** Customer photo upload on portal issue/service request (shared with Flow 12/21): token-scoped presign `POST /api/portal/:token/uploads` (rate-limited, image-only) in `routes/portal`-adjacent + attach to created lead/request; web portal form file input; tests.
 
 ### Flow 9 — Follow-up on pending items
@@ -725,8 +725,8 @@ Task conventions: IDs are `RV-###`, globally unique, referenced (not repeated) w
 **Required features:** existing reminder/dunning/expiry workers, F-9 data fns, comms proposals.
 **Acceptance criteria:** voice answer lists aging estimates/invoices with ages; "nudge Maria about the estimate" → comms proposal using existing estimate-reminder template; dunning state visible; no duplicate nudges inside provider cooldowns (existing reminder idempotency reused).
 **Atomic tasks:**
-- [ ] **RV-085 (P2)** `lookup_pending_items` skill composing estimate (sent, not accepted), invoice (open/overdue + dunning stage), recovery threads unanswered; intent registration; cassette.
-- [ ] **RV-086 (P2)** `send_estimate_nudge` proposal type (comms) reusing `workers/estimate-reminder-worker.ts` send path as handler dependency; 8-step recipe; cooldown check against `message_dispatches`; tests.
+- [x] **RV-085 (P2)** DONE, PR #548.  `lookup_pending_items` skill composing estimate (sent, not accepted), invoice (open/overdue + dunning stage), recovery threads unanswered; intent registration; cassette.
+- [x] **RV-086 (P2)** DONE, PR #549.  `send_estimate_nudge` proposal type (comms) reusing `workers/estimate-reminder-worker.ts` send path as handler dependency; 8-step recipe; cooldown check against `message_dispatches`; tests.
 
 ### Flow 10 — Customer receives & approves estimate + photos (Client Hub)
 
@@ -760,8 +760,8 @@ Task conventions: IDs are `RV-###`, globally unique, referenced (not repeated) w
 
 **Description:** Mid-call drop → context-aware SMS in ≤90s; reply resumes; mid-proposal drops reference proposal state (F-5).
 **Atomic tasks:**
-- [ ] **RV-115 (P2)** FSM drop-state capture: on call termination without `closing`, persist `{state, intent, entitiesResolved, proposalIds}` snapshot to `dropped_call_recoveries.context` (extend table via migration); handler composes state-aware cue; tests per FSM state.
-- [ ] **RV-116 (P2)** Recovery reply resume: inbound reply on recovery thread routes to a resume handler (continue via SMS: confirm pending booking / create call_me_back_task); extend `sms/inbound-dispatch.ts` thread matching; tests.
+- [x] **RV-115 (P2)** DONE, PR #551 (migration 170).  FSM drop-state capture: on call termination without `closing`, persist `{state, intent, entitiesResolved, proposalIds}` snapshot to `dropped_call_recoveries.context` (extend table via migration); handler composes state-aware cue; tests per FSM state.
+- [x] **RV-116 (P2)** DONE, PR #551.  Recovery reply resume: inbound reply on recovery thread routes to a resume handler (continue via SMS: confirm pending booking / create call_me_back_task); extend `sms/inbound-dispatch.ts` thread matching; tests.
 - [ ] **RV-117 (P5)** Streaming-mode drop detection: media-streams adapter emits same termination event into recovery scheduler; test with simulated WS close.
 **Acceptance criteria:** as F-5 spec; all suppression rules regression-tested.
 
@@ -769,30 +769,30 @@ Task conventions: IDs are `RV-###`, globally unique, referenced (not repeated) w
 
 **Description:** Distressed/at-risk caller → score → patch owner through / priority booking; evidence photos attachable to resulting job (F-6).
 **Atomic tasks:**
-- [ ] **RV-120 (P2)** `triage_events` migration + repo; persist every `evaluateTriage` outcome with signals; tests.
-- [ ] **RV-121 (P2)** Patch-through execution: `ai/skills/patch-owner-through.ts` using `twilio-call-control.ts` conference (announce → bridge); fallback ladder (on-call → voicemail+SMS+urgent callback task); integration-style tests with mocked call control.
-- [ ] **RV-122 (P2)** Turn-batch vulnerability classifier task (`grade_vulnerability` gateway task, cassettes incl. counter-examples); wire into FSM turn post-processing behind per-tenant flag.
-- [ ] **RV-123 (P2)** Mark-customer-vulnerable via `update_customer` proposal path (payload extension, m113 fields); handling changes (slower pace prompts, no upsells — flag read in task handlers); tests.
-- [ ] **RV-124 (P2)** Digest flags section includes triage events (extends RV-060 payload).
+- [x] **RV-120 (P2)** DONE, PR #551 (migration 166).  `triage_events` migration + repo; persist every `evaluateTriage` outcome with signals; tests.
+- [x] **RV-121 (P2)** DONE, PR #551.  Patch-through execution: `ai/skills/patch-owner-through.ts` using `twilio-call-control.ts` conference (announce → bridge); fallback ladder (on-call → voicemail+SMS+urgent callback task); integration-style tests with mocked call control.
+- [x] **RV-122 (P2)** DONE, PR #551 (streaming-only v1; wires per-tenant flags repo).  Turn-batch vulnerability classifier task (`grade_vulnerability` gateway task, cassettes incl. counter-examples); wire into FSM turn post-processing behind per-tenant flag.
+- [x] **RV-123 (P2)** DONE, PR #551.  Mark-customer-vulnerable via `update_customer` proposal path (payload extension, m113 fields); handling changes (slower pace prompts, no upsells — flag read in task handlers); tests.
+- [ ] **RV-124 (P2)** [deferred to follow-up: digest flags section reads triage_events]  Digest flags section includes triage events (extends RV-060 payload).
 **Acceptance criteria:** as F-6 spec.
 
 ### Flow 15 — Recording disclosure + custom forms + photos
 
 **Description:** Compliance end-to-end: disclosure/consent ledger on calls; on-site required checklist with photo evidence before completion (F-12 + F-21).
 **Atomic tasks:**
-- [ ] **RV-130 (P2)** `consent_events` migration + ledger writes from disclosure skill + objection intent (pause recording via call control); derived `customers.consent_status` updater; tests.
-- [ ] **RV-131 (P2)** Disclosure grader: add disclosure-timing check to layer-1 graders (`ai/voice-quality/graders/`) asserting disclosure ≤10s post-greeting across corpus.
-- [ ] **RV-132 (P2)** Retention purge worker (recordings past `recording_retention_days`, legal_hold exempt): migration + `workers/recording-retention-worker.ts`; dev-storage integration test.
+- [x] **RV-130 (P2)** DONE, PR #551 (migration 168; streaming disclosure dead-code found in audit and wired).  `consent_events` migration + ledger writes from disclosure skill + objection intent (pause recording via call control); derived `customers.consent_status` updater; tests.
+- [x] **RV-131 (P2)** DONE, PR #551 (report-only; promotion tracked).  Disclosure grader: add disclosure-timing check to layer-1 graders (`ai/voice-quality/graders/`) asserting disclosure ≤10s post-greeting across corpus.
+- [x] **RV-132 (P2)** DONE, PR #551 (migration 169; purged_at tombstone + 410 endpoint).  Retention purge worker (recordings past `recording_retention_days`, legal_hold exempt): migration + `workers/recording-retention-worker.ts`; dev-storage integration test.
 - [ ] **RV-133..137** → forms tasks live in Flow 26 (RV-180..186); this flow consumes them.
 **Acceptance criteria:** as F-12 spec + gated completion per F-21.
 ### Flow 16 — Emergency fast-path
 
 **Description:** "Gas is leaking everywhere" → safety script → immediate transfer + urgent job + owner page (F-13).
 **Atomic tasks:**
-- [ ] **RV-140 (P2)** Keyword interrupt: emergency keyword scan on every transcript chunk (incl. Deepgram interims in streaming mode) in FSM event pre-filter — no LLM round-trip; unit tests on keyword table merge (platform + `supervisor_policies.rules.emergencyKeywords`).
-- [ ] **RV-141 (P2)** `EmergencyDispatchExecutionHandler` (closes the missing-handler gap): atomically create urgent job + appointment hold + owner/on-call SMS page; register in `execution/handlers.ts`; tests.
-- [ ] **RV-142 (P2)** Safety script + jurisdiction-aware 911 line in FSM `escalating` entry for emergency cause; cassette `emergency-gas-leak` with timing assertion ≤15s to transfer attempt.
-- [ ] **RV-143 (P2)** Page-retry ladder (3× 2-min owner SMS if transfer unanswered) via `call_me_back_tasks` urgent priority; worker tests.
+- [x] **RV-140 (P2)** DONE, PR #551 (interim scanning on streaming).  Keyword interrupt: emergency keyword scan on every transcript chunk (incl. Deepgram interims in streaming mode) in FSM event pre-filter — no LLM round-trip; unit tests on keyword table merge (platform + `supervisor_policies.rules.emergencyKeywords`).
+- [x] **RV-141 (P2)** DONE, PR #551 (deviation: no auto appointment-hold, documented).  `EmergencyDispatchExecutionHandler` (closes the missing-handler gap): atomically create urgent job + appointment hold + owner/on-call SMS page; register in `execution/handlers.ts`; tests.
+- [x] **RV-142 (P2)** DONE, PR #551 (es on TwiML path; streaming localization tracked #28).  Safety script + jurisdiction-aware 911 line in FSM `escalating` entry for emergency cause; cassette `emergency-gas-leak` with timing assertion ≤15s to transfer attempt.
+- [x] **RV-143 (P2)** DONE, PR #551.  Page-retry ladder (3× 2-min owner SMS if transfer unanswered) via `call_me_back_tasks` urgent priority; worker tests.
 **Acceptance criteria:** as F-13 spec; e2e in qa-matrix voice-gates.
 
 ### Flow 17 — Maintenance plans / recurring services + photos
@@ -908,16 +908,16 @@ Task conventions: IDs are `RV-###`, globally unique, referenced (not repeated) w
 
 **Description:** "Create a job for Maria, book Joe Tuesday morning, and send her the spring-tune-up estimate" → one chain (EXISTS — P9-016); extend to new types.
 **Atomic tasks:**
-- [ ] **RV-220 (P2)** Chain coverage for new types: add `attach_photos`, `create_agreement`, `apply_route_plan` to `chain.ts ENTITY_KIND_TO_PAYLOAD_PATH` where consuming refs; decomposer prompt corpus additions; tests for forced-draft of dependents (existing invariant).
-- [ ] **RV-221 (P2)** Chain SMS render: multi-proposal chains render as one summarized SMS with single one-tap approving the chain head set (chain-aware token: approves all capture-class members whose refs resolve; money/comms members still individually gated); tests incl. partial-failure cascade messaging.
+- [x] **RV-220 (P2)** DONE, PR #550 (plan targets didn't exist — comms/money tails added instead).  Chain coverage for new types: add `attach_photos`, `create_agreement`, `apply_route_plan` to `chain.ts ENTITY_KIND_TO_PAYLOAD_PATH` where consuming refs; decomposer prompt corpus additions; tests for forced-draft of dependents (existing invariant).
+- [x] **RV-221 (P2)** DONE, PR #550 (capture-only Y; chains previously sent no SMS).  Chain SMS render: multi-proposal chains render as one summarized SMS with single one-tap approving the chain head set (chain-aware token: approves all capture-class members whose refs resolve; money/comms members still individually gated); tests incl. partial-failure cascade messaging.
 **Acceptance criteria:** 3-action utterance yields one chain, one SMS, correct execution order, cascade-fail messaging on parent failure (existing chain tests extended).
 
 ### Flow 28 — Voice-driven proposal revision and voice approval
 
 **Description:** Owner: "change the second line to $200, then approve it" — voice edit + voice approve in one session.
 **Atomic tasks:**
-- [ ] **RV-225 (P2)** Voice edit intent `edit_proposal` mapping utterance → `editActions` (reuse SMS edit interpreter `proposals/sms/interpret-edit.ts` LLM seam — extract shared module `proposals/edit-interpreter.ts`); applies via existing edit path (re-render/reapproval machinery m156-158 reused); cassettes for line edits, field corrections, ambiguous refs.
-- [ ] **RV-226 (P2)** Edit-then-approve sequencing: voice session holds pending-edit lock; approval allowed only after edit applied (parity with RV-004); readback of the EDITED values before confirm; cassette.
+- [x] **RV-225 (P2)** DONE, PR #550 (shared edit-interpreter; migration 171 voice_reapproval).  Voice edit intent `edit_proposal` mapping utterance → `editActions` (reuse SMS edit interpreter `proposals/sms/interpret-edit.ts` LLM seam — extract shared module `proposals/edit-interpreter.ts`); applies via existing edit path (re-render/reapproval machinery m156-158 reused); cassettes for line edits, field corrections, ambiguous refs.
+- [x] **RV-226 (P2)** DONE, PR #550 (confirm-race closed in executeApprove).  Edit-then-approve sequencing: voice session holds pending-edit lock; approval allowed only after edit applied (parity with RV-004); readback of the EDITED values before confirm; cassette.
 **Acceptance criteria:** edited value is what executes (assert payload at execution); pending-edit block enforced across all 4 channels; audit shows edited→approved sequence with channel=voice.
 
 ### Flow 29 — Correction loop
