@@ -4013,6 +4013,23 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_invoice_photos ON invoice_photos
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // P23 — job checklists + completion gating.
+  '160_job_checklists': `
+    CREATE TABLE IF NOT EXISTS job_checklists (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      items JSONB NOT NULL DEFAULT '[]',
+      completed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    ALTER TABLE job_checklists ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_checklists ON job_checklists;
+    CREATE POLICY tenant_isolation_job_checklists ON job_checklists
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

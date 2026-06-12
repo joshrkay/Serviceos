@@ -274,7 +274,9 @@ import { PgReviewPollStateRepository } from './reputation/poll-state';
 import { PgServiceCreditRepository } from './reputation/pg-service-credit';
 import { PgGoogleBusinessReplyResolver } from './reputation/pg-google-business-reply-resolver';
 import { MessageDeliveryReviewPrivateMessageSender } from './reputation/private-message-sender-adapter';
-import { NoopBrandVoiceLoader } from './reputation/brand-voice';
+import { SettingsBrandVoiceLoader } from './reputation/settings-brand-voice-loader';
+import { createQboRouter } from './integrations/accounting/qbo-router';
+import { createPayrollExportRouter } from './routes/payroll-export';
 import { PgCustomerLoader } from './reputation/match-customer';
 import { createCredentialResolver } from './integrations/credentials';
 import { InMemoryAgreementRepository } from './agreements/agreement';
@@ -2050,7 +2052,10 @@ export function createApp(): express.Express {
   // off — when off, the existing Gather adapter remains the only
   // telephony surface. When on, /voice returns a <Connect><Stream/>
   // TwiML and audio flows over the WebSocket attached below.
-  const mediaStreamsEnabled = process.env.TWILIO_MEDIA_STREAMS_ENABLED === 'true';
+  const mediaStreamsEnabled =
+    process.env.TWILIO_MEDIA_STREAMS_DISABLED !== 'true' &&
+    (process.env.TWILIO_MEDIA_STREAMS_ENABLED === 'true' ||
+      process.env.TWILIO_MEDIA_STREAMS_DEFAULT_ON === 'true');
 
   // Per-tenant Twilio token + tenant-id resolvers, keyed off
   // tenant_integrations. Falls back to the legacy single-account env
@@ -2872,6 +2877,8 @@ export function createApp(): express.Express {
     ),
   );
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry, auditRepo));
+  app.use('/api/integrations/qbo', createQboRouter());
+  app.use('/api/reports/payroll', createPayrollExportRouter());
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
   app.use('/api/vertical-training-assets', createVerticalTrainingAssetsRouter(trainingAssetService));
   app.use('/api/templates', createTemplateRouter(templateRepo, auditRepo));
@@ -3277,7 +3284,7 @@ export function createApp(): express.Express {
   // missing, we log a one-shot warning so ops can see "ingestion only,
   // no proposals being created" without grepping the per-tick logs.
   const googleReviewsCustomerLoader = pool ? new PgCustomerLoader(pool) : null;
-  const googleReviewsBrandVoiceLoader = new NoopBrandVoiceLoader();
+  const googleReviewsBrandVoiceLoader = new SettingsBrandVoiceLoader(settingsRepo);
   const googleReviewsProposalEmission =
     serviceCreditRepo && googleReviewsCustomerLoader
       ? {

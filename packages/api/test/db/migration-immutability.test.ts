@@ -223,6 +223,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['157_proposal_sms_events', '3855ad353820b6b2c1014d7b3f97b913303247436817023f453e773f15917b95'],
   ['158_digest_entries', '5e3960d01d38b0b5a078f128c0a64d0fea10b66ab83032aa52a442c8caecf581'],
   ['159_invoice_photos_and_client_visible', 'b26ce21cdbf46812a6d961693c0e21f45048c46c61ebf51db20a914533bb579b'],
+  ['160_job_checklists', '85e7ebb0f66d2b8356b72241acdc586acb0f3e1dabb1cf5f6a62c6d1888ef8b0'],
 ];
 
 function hashMigration(value: string): string {
