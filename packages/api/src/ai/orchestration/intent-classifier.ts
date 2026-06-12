@@ -856,6 +856,17 @@ Notes:
  * matched phrase routes with zero gateway cost and cannot regress with
  * model drift. Patterns are anchored tight so ordinary commands can
  * never collapse into a lookup.
+ *
+ * RULE: phrase short-circuits are for ENTITY-FREE READ-ONLY intents
+ * only. Any intent that produces entities or drives a proposal (e.g.
+ * `complaint`, which extracts noteBody / customerName / jobReference
+ * and creates an add_note + callback pair) MUST NOT appear here —
+ * the deterministic path returns no extractedEntities, which creates a
+ * quality cliff for proposal-driving intents. The LLM prompt section
+ * (EXTENDED_INTENTS_PROMPT_SECTION) owns classification + entity
+ * extraction for all non-read-only extended intents.
+ * Permitted phrase-match intents: lookup_day_overview, lookup_digest,
+ * lookup_pending_items.
  */
 const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: ReadonlyArray<RegExp> }> = [
   {
@@ -879,18 +890,6 @@ const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: Rea
     patterns: [
       /\bwhat\s+(?:am\s+i|are\s+we)\s+(?:still\s+)?waiting\s+on\b/i,
       /\bwhat(?:'s| is)\s+(?:still\s+)?(?:out\s+there|outstanding)\s+waiting\b/i,
-    ],
-  },
-  {
-    // Tight, explicit complaint phrasings only — general unhappiness is
-    // left to the LLM (with the prompt section) / escalation paths so a
-    // vague "I'm not happy" never silently becomes a complaint record.
-    intent: 'complaint',
-    patterns: [
-      /\b(?:file|make|register|lodge)\s+a\s+(?:formal\s+)?complaint\b/i,
-      /\bi\s+(?:want|need|would like)\s+to\s+complain\b/i,
-      /\bi'd\s+like\s+to\s+complain\b/i,
-      /\bi\s+have\s+a\s+complaint\b/i,
     ],
   },
 ];

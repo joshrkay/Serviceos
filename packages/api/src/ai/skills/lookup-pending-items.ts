@@ -23,6 +23,7 @@ import { daysPastDue } from '../../invoices/late-fee';
 import { isInvoiceOverdue, isInvoiceOwing } from '../../reports/money-dashboard';
 import type { DroppedCallRecoveryRow } from '../../sms/recovery/scheduler';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
+import { plural, formatUsd } from './spoken-format';
 
 export interface LookupPendingItemsInput {
   tenantId: string;
@@ -86,17 +87,9 @@ function wholeDaysSince(d: Date | undefined, now: Date): number {
   return diff <= 0 ? 0 : Math.floor(diff / MS_PER_DAY);
 }
 
-function formatUsd(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
-}
-
 function agePhrase(days: number): string {
   if (days === 0) return 'sent today';
   return `sent ${days} ${days === 1 ? 'day' : 'days'} ago`;
-}
-
-function plural(n: number, singular: string, pluralForm?: string): string {
-  return n === 1 ? singular : (pluralForm ?? `${singular}s`);
 }
 
 export async function lookupPendingItems(

@@ -27,6 +27,7 @@ import { buildInboxPayload, listSince } from '../../proposals/inbox';
 import { resolveDayWindow } from '../../reports/money-dashboard';
 import { localDateString } from '../../digest/digest-service';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
+import { plural } from './spoken-format';
 
 export interface LookupDayOverviewInput {
   tenantId: string;
@@ -99,10 +100,6 @@ function formatTime(d: Date, timezone: string): string {
     .replace(':00', '');
 }
 
-function plural(n: number, singular: string, pluralForm?: string): string {
-  return n === 1 ? singular : (pluralForm ?? `${singular}s`);
-}
-
 export async function lookupDayOverview(
   input: LookupDayOverviewInput,
   deps: LookupDayOverviewDeps,
@@ -142,6 +139,12 @@ export async function lookupDayOverview(
     const [rawAppointments, allJobs, draftProposals, readyProposals, overnight] =
       await Promise.all([
         deps.appointmentRepo.findByDateRange(input.tenantId, today.start, today.end),
+        // 200: covers a busy week of jobs on a typical SMB tenant without
+        // loading the entire job history. Urgent/high-priority jobs are
+        // filtered client-side below, so a priority-filtered DB query
+        // (findByPriority) would be cleaner but the repo interface
+        // doesn't expose one yet — this bounded scan is acceptable until
+        // a priority index + filtered query is added.
         deps.jobRepo.findByTenant(input.tenantId, { limit: 200 }),
         deps.proposalRepo.findByStatus(input.tenantId, 'draft'),
         deps.proposalRepo.findByStatus(input.tenantId, 'ready_for_review'),
