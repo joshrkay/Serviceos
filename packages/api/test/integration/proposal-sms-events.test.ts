@@ -216,4 +216,40 @@ describe('Postgres integration — proposal_sms_events (P2-034)', () => {
       }),
     ).rejects.toThrow();
   });
+
+  it('accepts review_required_rendered (migration 165 CHECK) and returns it as the latest findRecentOutbound target', async () => {
+    // Seed a proposal_rendered first (older) so ordering is verified.
+    const olderProposalId = await seedProposal(tenant.tenantId);
+    const t0 = new Date(Date.now() + 2 * 60 * 60 * 1000); // 2 h ahead — newer than any prior tests
+    await repo.create(
+      createProposalSmsEvent({
+        tenantId: tenant.tenantId,
+        proposalId: olderProposalId,
+        direction: 'outbound',
+        kind: 'proposal_rendered',
+        body: 'Approve this. Reply Y to approve, N to reject, EDIT to change.',
+        now: t0,
+      }),
+    );
+
+    // Now insert the review_required_rendered (newer) — must be accepted by the DB CHECK.
+    const reviewProposalId = await seedProposal(tenant.tenantId);
+    const t1 = new Date(t0.getTime() + 1000); // 1 s later — strictly newer
+    const reviewEvent = await repo.create(
+      createProposalSmsEvent({
+        tenantId: tenant.tenantId,
+        proposalId: reviewProposalId,
+        direction: 'outbound',
+        kind: 'review_required_rendered',
+        body: 'Needs review in app before approval — reply N to reject.',
+        now: t1,
+      }),
+    );
+
+    // findRecentOutbound must surface review_required_rendered as the latest target.
+    const [latest] = await repo.findRecentOutbound(tenant.tenantId, 1);
+    expect(latest.id).toBe(reviewEvent.id);
+    expect(latest.kind).toBe('review_required_rendered');
+    expect(latest.proposalId).toBe(reviewProposalId);
+  });
 });

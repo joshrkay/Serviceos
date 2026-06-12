@@ -173,6 +173,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
 import type { UnsupervisedProposalRouting } from '../settings/settings';
+import type { OutboundAnchorKind } from './sms/sms-event';
 
 /** Hard ceiling on one-tap link lifetime (risk note: TTL ≤ 30 minutes). */
 export const ONE_TAP_APPROVE_MAX_TTL_MS = 30 * 60 * 1000;
@@ -345,8 +346,20 @@ export interface RouteUnsupervisedProposalDeps {
    * P2-034 — invoked after the owner SMS goes out so the caller can record
    * the outbound `proposal_sms_events` row that anchors the reply transport
    * (the inbound Y/N/EDIT handler resolves "which proposal?" from it).
+   *
+   * RV-074 — `kind` distinguishes the normal approvable render
+   * (`proposal_rendered`, with the one-tap link's `expiresAt`) from the
+   * low/very_low-confidence "needs review in app" send
+   * (`review_required_rendered`, no token, no `expiresAt`). BOTH must be
+   * recorded: the low-confidence SMS says "reply N to reject", so it has
+   * to become the owner's latest reply target or that N would land on an
+   * older proposal.
    */
-  onSmsSent?: (sent: { body: string; expiresAt: Date }) => Promise<void>;
+  onSmsSent?: (sent: {
+    body: string;
+    kind: OutboundAnchorKind;
+    expiresAt?: Date;
+  }) => Promise<void>;
 }
 
 export interface RouteUnsupervisedProposalInput {
@@ -366,6 +379,13 @@ export interface RouteUnsupervisedProposalInput {
    * sent, so existing callers keep their exact behavior.
    */
   renderSmsBody?: (approveUrl: string) => string;
+  /**
+   * RV-074 (F-4) — proposal payload used to check _meta.overallConfidence.
+   * When present and confidence is low/very_low, the one-tap Y-able link is
+   * suppressed (body becomes the no-approve "needs review in app" form from
+   * renderSmsBody, called without an approveUrl).
+   */
+  payload?: unknown;
   nowMs?: number;
 }
 
@@ -387,6 +407,9 @@ export async function routeUnsupervisedProposal(
   let smsSent = false;
   let escalated = false;
   let approveLinkExpiresAt: Date | undefined;
+  // RV-074 — true when a low/very_low-confidence payload suppressed the
+  // one-tap approve link on an SMS that still went out.
+  let approveLinkSuppressed = false;
 
   if (requested === 'escalate_to_oncall' && (input.channel !== 'voice_inbound' || !deps.escalateToOnCall)) {
     // Non-call channels (or no escalation seam wired) fall back to queue_only.
@@ -399,28 +422,64 @@ export async function routeUnsupervisedProposal(
   }
 
   if (effective === 'queue_and_sms') {
-    if (deps.sendSms && deps.secret && input.ownerPhone) {
-      const { token, expiresAt } = createOneTapApproveToken({
-        proposalId: input.proposalId,
-        tenantId: input.tenantId,
-        secret: deps.secret,
-        ...(input.nowMs !== undefined ? { nowMs: input.nowMs } : {}),
-      });
-      const url = deps.buildApproveUrl
-        ? deps.buildApproveUrl(token)
-        : `/p/approve?token=${encodeURIComponent(token)}`;
-      const summary = input.summaryText ?? 'A proposal needs your approval';
-      const body = input.renderSmsBody
-        ? input.renderSmsBody(url)
-        : `${summary}. Tap to approve (link expires in 30 min): ${url}`;
-      await deps.sendSms(input.ownerPhone, body);
-      smsSent = true;
-      approveLinkExpiresAt = expiresAt;
-      // P2-034 — anchor the reply transport. Recorded only after a
-      // successful send; a failure here surfaces to the caller's
-      // best-effort wrapper rather than silently losing the anchor.
-      if (deps.onSmsSent) {
-        await deps.onSmsSent({ body, expiresAt });
+    if (deps.sendSms && input.ownerPhone) {
+      // RV-074 (F-4) — low/very_low proposals must never get a Y-able one-tap
+      // link. When the payload carries a blocking confidence level, mint no
+      // token and call renderSmsBody without an approveUrl so the renderer
+      // emits the "needs review in app" form.
+      const isLowConfidence = confidenceMetaBlocksAutoApprove(input.payload);
+
+      let body: string;
+      let expiresAt: Date | undefined;
+
+      if (!isLowConfidence && deps.secret) {
+        // Normal path: mint a one-tap token and include the approve URL.
+        const { token, expiresAt: exp } = createOneTapApproveToken({
+          proposalId: input.proposalId,
+          tenantId: input.tenantId,
+          secret: deps.secret,
+          ...(input.nowMs !== undefined ? { nowMs: input.nowMs } : {}),
+        });
+        expiresAt = exp;
+        const url = deps.buildApproveUrl
+          ? deps.buildApproveUrl(token)
+          : `/p/approve?token=${encodeURIComponent(token)}`;
+        const summary = input.summaryText ?? 'A proposal needs your approval';
+        body = input.renderSmsBody
+          ? input.renderSmsBody(url)
+          : `${summary}. Tap to approve (link expires in 30 min): ${url}`;
+        approveLinkExpiresAt = expiresAt;
+      } else if (isLowConfidence) {
+        // Low/very_low confidence: no token, no Y-able link. The renderer
+        // (renderProposalSms) emits the "needs review in app" form when it
+        // sees the blocking confidence level; pass an empty string so the
+        // renderSmsBody callback signature is satisfied.
+        const summary = input.summaryText ?? 'A proposal needs your approval';
+        body = input.renderSmsBody
+          ? input.renderSmsBody('')
+          : `${summary}. Review in app.`;
+        approveLinkSuppressed = true;
+      } else {
+        // No secret and not low confidence: preserve original behavior —
+        // no token to mint, so no SMS goes out.
+        body = '';
+      }
+
+      if (body) {
+        await deps.sendSms(input.ownerPhone, body);
+        smsSent = true;
+        // P2-034 / RV-074 — anchor the reply transport. Recorded only after
+        // a successful send. Low-confidence sends anchor too (kind
+        // `review_required_rendered`): they solicit "reply N to reject", so
+        // they MUST become the latest reply target — otherwise that N would
+        // be applied to whatever older proposal was rendered before.
+        if (deps.onSmsSent) {
+          await deps.onSmsSent({
+            body,
+            kind: isLowConfidence ? 'review_required_rendered' : 'proposal_rendered',
+            ...(expiresAt ? { expiresAt } : {}),
+          });
+        }
       }
     }
     // No phone / no SMS seam: the proposal still sits in ready_for_review —
@@ -442,6 +501,10 @@ export async function routeUnsupervisedProposal(
         channel: input.channel,
         smsSent,
         escalated,
+        // RV-074 — make the suppressed approve affordance auditable.
+        ...(approveLinkSuppressed
+          ? { approveLinkSuppressed: true, suppressReason: 'low_confidence' }
+          : {}),
       },
     }),
   );
