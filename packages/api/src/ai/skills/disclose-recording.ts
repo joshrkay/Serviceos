@@ -24,6 +24,7 @@
 
 import { TtsProvider } from '../tts/tts-provider';
 import { t, type Language } from '../i18n/i18n';
+import type { ConsentEventRepository } from '../../compliance/consent-events';
 
 // ---------------------------------------------------------------------------
 // Two-party consent state list
@@ -109,6 +110,20 @@ export interface DisclosureInput {
   businessName: string;
   /** P11-002: spoken-disclosure language. Defaults to 'en'. */
   language?: Language;
+  /**
+   * RV-130 — append-only consent ledger. When wired (with a caller phone),
+   * a telephony disclosure appends `{ kind: 'recording', state: 'implicit',
+   * source: 'voice' }` tied to the session — "disclosure played; the caller
+   * staying on the line is implicit consent". Best-effort: a ledger failure
+   * never blocks the disclosure (the call must proceed).
+   */
+  consentLedger?: ConsentEventRepository;
+  /** Caller E.164 for the ledger row. Without it, no event is written. */
+  callerPhone?: string;
+  /** Matched customer for the ledger row (null/undefined for unknown callers). */
+  customerId?: string | null;
+  /** Originating voice session id, for the ledger row. */
+  voiceSessionId?: string;
 }
 
 export interface DisclosureResult {
@@ -146,6 +161,25 @@ export async function discloseRecording(
   // ── Telephony: generate state-appropriate disclosure text ─────────────────
   const lang: Language = input.language ?? 'en';
   const disclosure = buildDisclosureText(callerState, businessName, lang);
+
+  // RV-130 — ledger the implicit recording consent. Best-effort and awaited
+  // (one fast insert) so tests are deterministic; failures are swallowed —
+  // the disclosure itself must never be blocked by a ledger write.
+  if (input.consentLedger && input.callerPhone) {
+    try {
+      await input.consentLedger.append({
+        tenantId: input.tenantId,
+        customerId: input.customerId ?? null,
+        phone: input.callerPhone,
+        kind: 'recording',
+        state: 'implicit',
+        source: 'voice',
+        voiceSessionId: input.voiceSessionId ?? null,
+      });
+    } catch {
+      // Swallow — see above.
+    }
+  }
 
   let audioBuffer: Buffer | undefined;
 

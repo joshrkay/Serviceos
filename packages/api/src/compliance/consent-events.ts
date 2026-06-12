@@ -129,11 +129,13 @@ export class InMemoryConsentEventRepository implements ConsentEventRepository {
 
   async listByPhone(tenantId: string, phone: string): Promise<ConsentEventRow[]> {
     const phoneNormalized = normalizeConsentPhone(phone);
+    // Rows are appended chronologically; reverse for newest-first. (A
+    // createdAt sort is unstable for same-millisecond appends.)
     return this.rows
       .filter(
         (r) => r.tenantId === tenantId && r.phoneNormalized === phoneNormalized,
       )
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .reverse()
       .map((r) => ({ ...r }));
   }
 }

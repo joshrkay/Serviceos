@@ -422,6 +422,11 @@ import {
 } from './sms/recovery/scheduler';
 import { createDroppedCallResumeHandler } from './sms/recovery/resume-handler';
 import {
+  PgConsentEventRepository,
+  InMemoryConsentEventRepository,
+} from './compliance/consent-events';
+import { TwilioRecordingControl } from './telephony/recording-control';
+import {
   registerProposalReplySms,
   PgProposalSmsEventRepository,
   InMemoryProposalSmsEventRepository,
@@ -2036,6 +2041,20 @@ export function createApp(): express.Express {
     );
   }
 
+  // RV-130 — consent ledger + recording control. The ledger appends
+  // implicit recording consent at disclosure and revocations on a
+  // "stop recording" objection; the control pauses the live recording.
+  const consentEventRepo = pool
+    ? new PgConsentEventRepository(pool)
+    : new InMemoryConsentEventRepository();
+  const twilioRecordingControl =
+    process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
+      ? new TwilioRecordingControl(
+          process.env.TWILIO_ACCOUNT_SID,
+          process.env.TWILIO_AUTH_TOKEN,
+        )
+      : undefined;
+
   // Platform feature flags. Hoisted above the voice wiring so the
   // per-tenant flag repo (RV-001 / RV-122) can gate voice features.
   const featureFlagRepo: FeatureFlagRepository = pool
@@ -2115,6 +2134,9 @@ export function createApp(): express.Express {
     callMeBackRepo,
     // RV-115 — FSM context snapshot into dropped_call_recoveries.context.
     droppedCallScheduler,
+    // RV-130 — consent ledger + live recording pause on objection.
+    consentEvents: consentEventRepo,
+    ...(twilioRecordingControl ? { recordingControl: twilioRecordingControl } : {}),
     leadRepo,
     // P11-001: lookup-skill family wiring. Without these the adapter
     // falls back to a "let me get a person to help" line on lookup_*

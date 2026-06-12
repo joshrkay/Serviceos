@@ -95,6 +95,15 @@ import {
 import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
 import { detectEmergency } from '../ai/agents/customer-calling/emergency-detector';
+import {
+  detectRecordingObjection,
+  RECORDING_OBJECTION_ACK,
+} from '../compliance/recording-objection';
+import {
+  updateDerivedConsentStatus,
+  type ConsentEventRepository,
+} from '../compliance/consent-events';
+import type { RecordingControl } from './recording-control';
 import { armEmergencyPageLadder } from './emergency-page-retry';
 import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
 import type { DroppedCallScheduler } from '../sms/recovery/scheduler';
@@ -294,6 +303,18 @@ export interface TwilioAdapterDeps {
    * the scheduler's own detection rejects non-recovery outcomes.
    */
   droppedCallScheduler?: DroppedCallScheduler;
+  /**
+   * RV-130 — append-only consent ledger. Implicit recording consent is
+   * appended at disclosure time; a "stop recording" objection appends a
+   * revocation. Optional: absent in fixtures that don't exercise consent.
+   */
+  consentEvents?: ConsentEventRepository;
+  /**
+   * RV-130 — pauses the active call recording on an objection. Optional:
+   * when absent the objection is still ledgered + acknowledged (the
+   * recording itself can't be paused — logged loudly).
+   */
+  recordingControl?: RecordingControl;
 }
 
 /**
@@ -794,6 +815,10 @@ export class TwilioGatherAdapter {
       channel: 'telephony',
       businessName: this.deps.businessName,
       language,
+      // RV-130 — ledger the implicit recording consent against the session.
+      ...(this.deps.consentEvents ? { consentLedger: this.deps.consentEvents } : {}),
+      ...(from ? { callerPhone: from } : {}),
+      voiceSessionId: session.id,
     });
 
     // 2. Identify caller by phone number.
@@ -969,7 +994,20 @@ export class TwilioGatherAdapter {
     tenantId: string,
   ): Promise<SideEffect[] | null> {
     const emergency = detectEmergency(speechResult);
-    if (!emergency.matched) return null;
+    if (!emergency.matched) {
+      // RV-130 — recording objection (checked only when no emergency: the
+      // life-safety path always wins the turn).
+      const objection = detectRecordingObjection(speechResult);
+      if (objection.matched) {
+        await this.handleRecordingObjection(session, tenantId, objection.keyword ?? 'unknown');
+        // Consume the turn with a deterministic acknowledgment — the FSM
+        // state is untouched, so the call continues exactly where it was.
+        return [
+          { type: 'tts_play', payload: { text: RECORDING_OBJECTION_ACK } },
+        ];
+      }
+      return null;
+    }
     const effects = session.machine.dispatch({
       type: 'emergency_detected',
       keyword: emergency.keyword ?? 'unknown',
@@ -985,6 +1023,81 @@ export class TwilioGatherAdapter {
     await this.processor.executeSideEffects(session, effects, tenantId);
     this.armEmergencyPageLadder(session, speechResult, tenantId);
     return effects;
+  }
+
+  /**
+   * RV-130 — objection side effects: pause the active recording, append a
+   * revoked consent event, roll the derived customers.consent_status, and
+   * audit. Every step is best-effort — the acknowledgment is spoken even
+   * when the provider/pg are degraded (the objection is at least ledgered
+   * or logged).
+   */
+  private async handleRecordingObjection(
+    session: VoiceSession,
+    tenantId: string,
+    keyword: string,
+  ): Promise<void> {
+    const callSid = session.callSid;
+    if (this.deps.recordingControl && callSid) {
+      try {
+        await this.deps.recordingControl.pauseRecording(callSid);
+      } catch (err) {
+        logger.error('recording objection: pauseRecording failed', {
+          tenantId,
+          callSid,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } else {
+      logger.error('recording objection: no recording control wired — recording NOT paused', {
+        tenantId,
+        sessionId: session.id,
+      });
+    }
+
+    const callerPhone = this.callerIdBySession.get(session.id) || undefined;
+    if (this.deps.consentEvents && callerPhone) {
+      try {
+        const event = {
+          tenantId,
+          customerId: session.customerId ?? null,
+          phone: callerPhone,
+          kind: 'recording' as const,
+          state: 'revoked' as const,
+          source: 'voice' as const,
+          voiceSessionId: session.id,
+        };
+        await this.deps.consentEvents.append(event);
+        if (this.deps.pool && session.customerId) {
+          await updateDerivedConsentStatus(this.deps.pool, event).catch(() => undefined);
+        }
+      } catch (err) {
+        logger.warn('recording objection: consent ledger append failed', {
+          tenantId,
+          sessionId: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    if (this.deps.auditRepo) {
+      try {
+        await this.deps.auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: this.deps.systemActorId ?? 'calling-agent',
+            actorRole: 'system',
+            eventType: 'recording_consent.revoked',
+            entityType: 'voice_session',
+            entityId: session.id,
+            correlationId: session.id,
+            metadata: { keyword, paused: Boolean(this.deps.recordingControl && callSid) },
+          }),
+        );
+      } catch {
+        /* audit is best-effort */
+      }
+    }
   }
 
   /**
@@ -1182,6 +1295,10 @@ export class TwilioGatherAdapter {
       channel: 'telephony',
       businessName: this.deps.businessName,
       language,
+      // RV-130 — ledger the implicit recording consent against the session.
+      ...(this.deps.consentEvents ? { consentLedger: this.deps.consentEvents } : {}),
+      ...(opts.from ? { callerPhone: opts.from } : {}),
+      voiceSessionId: session.id,
     });
 
     // 2. Identify caller. Skill requires a Pool; if we don't have one (dev),

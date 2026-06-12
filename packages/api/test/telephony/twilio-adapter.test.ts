@@ -1317,3 +1317,77 @@ describe('RV-115 — telephony termination persists the FSM snapshot', () => {
     expect(recoveryRepo.rows).toHaveLength(0);
   });
 });
+
+// ─── RV-130 — recording objection path (shared safety scan) ──────────────────
+
+describe('RV-130 — "stop recording" objection in the shared safety scan', () => {
+  async function makeObjectionFixture() {
+    const { InMemoryConsentEventRepository } = await import(
+      '../../src/compliance/consent-events'
+    );
+    const consentEvents = new InMemoryConsentEventRepository();
+    const pauseRecording = vi.fn(async () => undefined);
+    const auditRepo = new InMemoryAuditRepository();
+    const store = new VoiceSessionStore();
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme',
+      auditRepo,
+      consentEvents,
+      recordingControl: { pauseRecording },
+    } as never);
+    await adapter.handleInboundForStream({
+      callSid: 'CA-obj-1',
+      from: '+15125550133',
+      tenantId: 'tenant-t1',
+    });
+    const session = store.findByCallSid('CA-obj-1')!;
+    return { adapter, session, consentEvents, pauseRecording, auditRepo, gateway };
+  }
+
+  it('pauses the recording, ledgers the revocation, and acks — no LLM call', async () => {
+    const { adapter, session, consentEvents, pauseRecording, auditRepo, gateway } =
+      await makeObjectionFixture();
+    const stateBefore = session.machine.currentState;
+
+    const effects = await adapter.processCallerUtterance({
+      sessionId: session.id,
+      callSid: 'CA-obj-1',
+      speechResult: 'please stop recording this call',
+      tenantId: 'tenant-t1',
+    });
+
+    expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(pauseRecording).toHaveBeenCalledWith('CA-obj-1');
+    expect(consentEvents.rows).toHaveLength(1);
+    expect(consentEvents.rows[0]).toMatchObject({
+      kind: 'recording',
+      state: 'revoked',
+      source: 'voice',
+      voiceSessionId: session.id,
+    });
+    // The turn is consumed with the ack; FSM state is untouched.
+    expect(effects).toHaveLength(1);
+    expect((effects[0].payload as { text: string }).text).toContain('paused the recording');
+    expect(session.machine.currentState).toBe(stateBefore);
+    expect(
+      auditRepo.events.some((e) => e.eventType === 'recording_consent.revoked'),
+    ).toBe(true);
+  });
+
+  it('emergency keywords win the turn over an objection in the same chunk', async () => {
+    const { adapter, session, pauseRecording } = await makeObjectionFixture();
+    const effects = await adapter.processCallerUtterance({
+      sessionId: session.id,
+      callSid: 'CA-obj-1',
+      speechResult: 'stop recording — there is a gas leak in here',
+      tenantId: 'tenant-t1',
+    });
+    // Emergency consumed the turn (911 line first); objection deferred.
+    expect((effects.find((e) => e.type === 'tts_play')?.payload as { text: string }).text).toContain('911');
+    expect(pauseRecording).not.toHaveBeenCalled();
+    expect(session.machine.currentState).toBe('escalating');
+  });
+});
