@@ -73,6 +73,9 @@ import { TimeEntryService } from '../../time-tracking/time-entry-service';
 import { FeedbackRequestRepository } from '../../feedback/feedback-request';
 import { DelayNotificationService } from '../../notifications/delay-notifications';
 import { LineItem } from '../../shared/billing-engine';
+import { dispatchEstimateNudge } from '../../estimates/estimate-nudge';
+import type { SendService } from '../../notifications/send-service';
+import type { DispatchRepository } from '../../notifications/dispatch-repository';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -458,6 +461,127 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
   }
 }
 
+// ─── send_estimate_nudge (RV-086) ─────────────────────────────────────────
+//
+// Re-sends an aging, still-unanswered estimate to the customer through the
+// SAME send composition the estimate-reminder worker uses
+// (dispatchEstimateNudge → SendService.sendEstimate + reminder bookkeeping +
+// `estimate.reminder_sent` audit). Comms-class: only ever runs after an
+// explicit human approval.
+//
+// Cooldown: the handler REFUSES (execution_failed with a clear reason) when
+// any message for this estimate was already dispatched within the last 48
+// hours — checked against message_dispatches (entity_type='estimate', by
+// recency, ignoring failed rows) plus the estimate's own last_reminder_at as
+// a belt-and-braces fallback when the dispatch repo isn't wired.
+export const ESTIMATE_NUDGE_COOLDOWN_MS = 48 * 60 * 60 * 1000;
+
+export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
+  proposalType: ProposalType = 'send_estimate_nudge';
+
+  constructor(
+    private readonly estimateRepo?: EstimateRepository,
+    private readonly sendService?: Pick<SendService, 'sendEstimate'>,
+    private readonly dispatchRepo?: DispatchRepository,
+    private readonly auditRepo?: AuditRepository,
+    /** Injectable clock for deterministic cooldown tests. */
+    private readonly now: () => Date = () => new Date(),
+  ) {}
+
+  async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
+    const { payload } = proposal;
+
+    const estimateId = payload.estimateId;
+    if (
+      typeof estimateId !== 'string' ||
+      !/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(estimateId)
+    ) {
+      return {
+        success: false,
+        error: 'Payload must include a valid estimateId UUID (resolve estimateReference at review time first)',
+      };
+    }
+
+    if (!this.estimateRepo || !this.sendService) {
+      // Dev/test wiring without the send path — synthetic passthrough,
+      // matching the degraded-dep convention of the other comms handlers.
+      return { success: true, resultEntityId: estimateId };
+    }
+
+    const estimate = await this.estimateRepo.findById(context.tenantId, estimateId);
+    if (!estimate) {
+      return { success: false, error: `Estimate ${estimateId} not found in this tenant` };
+    }
+    if (estimate.status !== 'sent') {
+      return {
+        success: false,
+        error: `Estimate ${estimate.estimateNumber} is '${estimate.status}' — only a sent, still-unanswered estimate can be nudged`,
+      };
+    }
+
+    const asOf = this.now();
+    const cooldownFloor = asOf.getTime() - ESTIMATE_NUDGE_COOLDOWN_MS;
+
+    // Cooldown source of truth: message_dispatches for this estimate.
+    if (this.dispatchRepo) {
+      const dispatches = await this.dispatchRepo.findByEntity(
+        context.tenantId,
+        'estimate',
+        estimateId,
+      );
+      const recent = dispatches.find(
+        (d) => d.status !== 'failed' && d.sentAt.getTime() >= cooldownFloor,
+      );
+      if (recent) {
+        return {
+          success: false,
+          error:
+            `Nudge refused: a message for estimate ${estimate.estimateNumber} was already sent ` +
+            `at ${recent.sentAt.toISOString()} — wait 48h between reminders`,
+        };
+      }
+    } else if (
+      estimate.lastReminderAt !== undefined &&
+      estimate.lastReminderAt.getTime() >= cooldownFloor
+    ) {
+      // Fallback when no dispatch repo is wired: the estimate's own
+      // reminder bookkeeping still enforces the 48h spacing.
+      return {
+        success: false,
+        error:
+          `Nudge refused: estimate ${estimate.estimateNumber} was already reminded ` +
+          `at ${estimate.lastReminderAt.toISOString()} — wait 48h between reminders`,
+      };
+    }
+
+    try {
+      await dispatchEstimateNudge(
+        {
+          estimateRepo: this.estimateRepo,
+          sendService: this.sendService,
+          ...(this.auditRepo ? { auditRepo: this.auditRepo } : {}),
+        },
+        {
+          tenantId: context.tenantId,
+          estimate,
+          channel: 'sms',
+          asOf,
+          actorId: context.executedBy,
+          ...(typeof payload.note === 'string' && payload.note.trim().length > 0
+            ? { customMessage: payload.note }
+            : {}),
+        },
+      );
+      return { success: true, resultEntityId: estimate.id };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : 'Estimate nudge failed',
+      };
+    }
+  }
+}
+
 export function createExecutionHandlerRegistry(deps?: {
   customerRepo?: CustomerRepository;
   jobRepo?: JobRepository;
@@ -498,6 +622,11 @@ export function createExecutionHandlerRegistry(deps?: {
   timeEntryService?: TimeEntryService;
   feedbackRepo?: FeedbackRequestRepository;
   delayNotificationService?: DelayNotificationService;
+  // RV-086 — send_estimate_nudge. sendService drives the actual re-send;
+  // dispatchRepo backs the 48h cooldown check. Absent → degraded behavior
+  // documented on the handler.
+  sendService?: Pick<SendService, 'sendEstimate'>;
+  dispatchRepo?: DispatchRepository;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -550,6 +679,14 @@ export function createExecutionHandlerRegistry(deps?: {
     new AddNoteExecutionHandler(deps?.noteRepo),
     new SendInvoiceExecutionHandler(deps?.invoiceDeliveryProvider),
     new SendEstimateExecutionHandler(deps?.estimateDeliveryProvider),
+    // RV-086 — comms-class nudge for aging sent estimates; 48h cooldown
+    // enforced against message_dispatches inside the handler.
+    new SendEstimateNudgeExecutionHandler(
+      deps?.estimateRepo,
+      deps?.sendService,
+      deps?.dispatchRepo,
+      deps?.auditRepo,
+    ),
     new RecordPaymentExecutionHandler(
       deps?.paymentRepo,
       deps?.invoiceRepo,

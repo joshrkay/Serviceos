@@ -329,6 +329,22 @@ export const requestFeedbackPayloadSchema = z
     message: 'jobId, jobReference, or customerReference is required',
   });
 
+// send_estimate_nudge (RV-086): re-send a sent-but-unanswered estimate to
+// the customer ("nudge"). Comms-class — never auto-approves. The classifier
+// only has a free-text reference ("the Hendersons' estimate"), so the
+// contract accepts either a resolved estimateId (uuid) or an
+// estimateReference; the execution handler requires the resolved id.
+export const sendEstimateNudgePayloadSchema = z
+  .object({
+    estimateId: z.string().uuid().optional(),
+    estimateReference: z.string().min(1).optional(),
+    /** Optional note appended to the outbound message. */
+    note: z.string().optional(),
+  })
+  .refine((v) => Boolean(v.estimateId || v.estimateReference), {
+    message: 'estimateId or estimateReference is required',
+  });
+
 // voice_clarification: emitted when the voice classifier cannot route
 // a transcript (intent='unknown' OR confidence below threshold). It is
 // NOT a mutation — it surfaces in the operator's feed as "I heard X
@@ -411,6 +427,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   add_note: addNotePayloadSchema,
   send_invoice: sendInvoicePayloadSchema,
   send_estimate: sendEstimatePayloadSchema,
+  send_estimate_nudge: sendEstimateNudgePayloadSchema,
   record_payment: recordPaymentPayloadSchema,
   log_expense: logExpensePayloadSchema,
   convert_lead: convertLeadPayloadSchema,

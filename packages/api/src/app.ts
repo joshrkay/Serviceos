@@ -1323,6 +1323,10 @@ export function createApp(): express.Express {
     timeEntryService: new TimeEntryService(timeEntryRepo, auditRepo),
     feedbackRepo: feedbackRequestRepo,
     delayNotificationService,
+    // RV-086 — send_estimate_nudge: re-send via the unified SendService
+    // path; message_dispatches backs the 48h cooldown.
+    ...(sendService ? { sendService } : {}),
+    dispatchRepo,
   });
   // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
   // default to `proposal-run:{tenant}:{id}` when callers omit one.
