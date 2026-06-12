@@ -121,6 +121,12 @@ function renderPage() {
 }
 
 describe('HomePage', () => {
+  it('greets the signed-in user by first name (not a hardcoded demo name)', () => {
+    renderPage();
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(/Ada/);
+    expect(screen.queryByText(/Mike/)).toBeNull();
+  });
+
   it("renders today's jobs section", () => {
     renderPage();
     expect(screen.getByText("Today's jobs")).toBeInTheDocument();

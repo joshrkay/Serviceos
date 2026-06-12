@@ -1,4 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
+import { useUser } from '@clerk/clerk-react';
+import { useApiClient } from '../../lib/apiClient';
+import { firstNameFromUser } from '../../utils/greeting';
 import {
   X, Search, MapPin, Check, Plus, Trash2, Send,
   ArrowLeft, FileText, Phone, Mail, ChevronDown,
@@ -1009,8 +1012,33 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
   onCreated: () => void;
   preSelectedCustomerId?: string;
 }) {
+  const { user } = useUser();
+  const apiClient = useApiClient();
   const { data: apiCustomers } = useListQuery<ApiCustomer>('/api/customers');
   const customers = mapApiCustomers(apiCustomers);
+  const [businessName, setBusinessName] = useState('');
+
+  const ownerFirstName = firstNameFromUser(
+    user?.fullName,
+    user?.primaryEmailAddress?.emailAddress,
+  );
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await apiClient('/api/settings');
+        if (!res.ok || !alive) return;
+        const data = (await res.json()) as { businessName?: string };
+        if (typeof data.businessName === 'string' && data.businessName.trim()) {
+          setBusinessName(data.businessName.trim());
+        }
+      } catch {
+        /* non-fatal — preview falls back to owner first name only */
+      }
+    })();
+    return () => { alive = false; };
+  }, [apiClient]);
 
   const [step,       setStep]      = useState<FlowStep>('start');
   const [startMode,  setStartMode] = useState<StartMode>(null);
@@ -1069,8 +1097,11 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
   const stepOrder: FlowStep[] = ['describe', 'review'];
   const dotIndex = stepOrder.indexOf(step === 'send' ? 'review' : step);
 
-  const smsMsg   = `Hi ${firstName},\n\nEstimate for ${aiResult?.description ?? 'your job'} is ready.\n\nTotal: $${total.toLocaleString()}\n\nReview here:\nrivet.ai/e/${estNum.toLowerCase().replace('-','')}\n\n– Mike, Rivet Pro`;
-  const emailMsg = `Hi ${firstName},\n\n${estNum} is ready for your review.\n\nService: ${aiResult?.description}\nTotal: $${total.toLocaleString()}\n\nrivet.ai/e/${estNum.toLowerCase().replace('-','')}\n\nThank you,\nMike\nRivet Pro Services`;
+  const senderLine = businessName
+    ? `${ownerFirstName}, ${businessName}`
+    : ownerFirstName;
+  const smsMsg   = `Hi ${firstName},\n\nEstimate for ${aiResult?.description ?? 'your job'} is ready.\n\nTotal: $${total.toLocaleString()}\n\nReview here:\nrivet.ai/e/${estNum.toLowerCase().replace('-','')}\n\n– ${senderLine}`;
+  const emailMsg = `Hi ${firstName},\n\n${estNum} is ready for your review.\n\nService: ${aiResult?.description}\nTotal: $${total.toLocaleString()}\n\nrivet.ai/e/${estNum.toLowerCase().replace('-','')}\n\nThank you,\n${ownerFirstName}\n${businessName || 'Your team'}`;
 
   function handleSend() {
     setSending(true);
