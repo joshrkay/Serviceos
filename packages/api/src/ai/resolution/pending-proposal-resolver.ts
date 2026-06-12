@@ -32,6 +32,7 @@
  */
 import type { Proposal, ProposalRepository } from '../../proposals/proposal';
 import { TAU_ENT, type EntityCandidate, type EntityResolverResult } from './entity-resolver';
+import { payloadAmountsCents as sharedPayloadAmountsCents } from '../../proposals/payload-money';
 
 /** Reviewable statuses — mirrors `isReviewable` in the SMS reply handler. */
 const PENDING_STATUSES = ['draft', 'ready_for_review'] as const;
@@ -106,10 +107,15 @@ export function parseOrdinalReference(reference: string): number | 'last' | null
   for (const [word, index] of Object.entries(ORDINAL_WORDS)) {
     if (new RegExp(`\\b${word}\\b`).test(ref)) return index;
   }
-  const numbered = ref.match(/\b(?:number\s+)?(\d+)(?:st|nd|rd|th)?\b/);
-  if (numbered && /\b(number\s+\d+|\d+(st|nd|rd|th))\b/.test(ref)) {
-    const n = parseInt(numbered[1], 10);
-    if (n >= 1) return n - 1;
+  // Anchored regex: capture and validation are the same match — the number
+  // that validates IS the number captured. This prevents a split like
+  // "approve 2 of the 3rd" matching capture="2" but validate="3rd".
+  const numbered = ref.match(/\b(number\s+(\d+)|(\d+)(st|nd|rd|th))\b/);
+  if (numbered) {
+    // Group 2: "number N" form. Group 3: "Nth" ordinal form.
+    const raw = numbered[2] ?? numbered[3];
+    const n = raw !== undefined ? parseInt(raw, 10) : NaN;
+    if (!Number.isNaN(n) && n >= 1) return n - 1;
   }
   return null;
 }
@@ -128,29 +134,7 @@ export function parseAmountMention(reference: string): number | null {
 }
 
 /** All plausible integer-cent money values carried by a proposal payload. */
-function payloadAmountsCents(payload: Record<string, unknown>): number[] {
-  const out: number[] = [];
-  for (const key of ['total', 'totalCents', 'amount', 'amountCents', 'amountDueCents']) {
-    const v = payload[key];
-    if (typeof v === 'number' && Number.isFinite(v)) out.push(Math.round(v));
-  }
-  const lineItems = payload.lineItems;
-  if (Array.isArray(lineItems)) {
-    let sum = 0;
-    let sawTotal = false;
-    for (const item of lineItems) {
-      if (item && typeof item === 'object') {
-        const t = (item as Record<string, unknown>).total;
-        if (typeof t === 'number' && Number.isFinite(t)) {
-          sum += Math.round(t);
-          sawTotal = true;
-        }
-      }
-    }
-    if (sawTotal) out.push(sum);
-  }
-  return out;
-}
+const payloadAmountsCents = sharedPayloadAmountsCents;
 
 /** Customer-name-ish strings carried by a proposal (payload first, then summary). */
 function candidateNameHaystack(proposal: Proposal): string {
