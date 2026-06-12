@@ -221,6 +221,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['155_tenant_integrations_google_business', 'd626700ea571d2691927cf6adf43704b3bc44aecde7071f3895c1cf801cf2a7f'],
   ['156_estimate_entity_trgm_index', '5c35bf46e89c5bd9659d8e4dc1c51c8735e5e8c5d956d838ba5f055e64412d39'],
   ['157_proposal_sms_events', '3855ad353820b6b2c1014d7b3f97b913303247436817023f453e773f15917b95'],
+  ['158_digest_entries', '5e3960d01d38b0b5a078f128c0a64d0fea10b66ab83032aa52a442c8caecf581'],
+  ['159_invoice_photos_and_client_visible', 'b26ce21cdbf46812a6d961693c0e21f45048c46c61ebf51db20a914533bb579b'],
 ];
 
 function hashMigration(value: string): string {

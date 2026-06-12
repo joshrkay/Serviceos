@@ -393,6 +393,20 @@ import {
   InMemoryProposalSmsEventRepository,
   PgProposalSmsEventRepository,
 } from './sms/proposal-approval';
+import {
+  registerTechStatusKeywords,
+  PgTechStatusTodayRepository,
+  InMemoryTechStatusTodayRepository,
+} from './sms/tech-status';
+import { PgUnavailableBlockRepository } from './availability/pg-unavailable-block';
+import { InMemoryDigestEntryRepository, PgDigestEntryRepository } from './digest/repository';
+import { runDigestSweep } from './digest/worker';
+import { handleDigestAckSms } from './sms/digest/handler';
+import {
+  DroppedCallScheduler,
+  PgDroppedCallRecoveryRepository,
+} from './sms/recovery/scheduler';
+import { runDroppedCallRecoverySweep } from './workers/dropped-call-worker';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -731,7 +745,9 @@ export function createApp(): express.Express {
   // InMemory for now — wiring its Pg variant (table from migration 116) is a
   // separate, out-of-scope change. InMemory variants stay for tests / no-pool.
   const workingHoursRepo       = pool ? new PgWorkingHoursRepository(pool)     : new InMemoryWorkingHoursRepository();
-  const unavailableBlockRepo   = new InMemoryUnavailableBlockRepository();
+  const unavailableBlockRepo   = pool
+    ? new PgUnavailableBlockRepository(pool)
+    : new InMemoryUnavailableBlockRepository();
   const travelTimeProvider     = createTravelTimeProvider(process.env);
   const skillMatcher           = new StubSkillMatcher();
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
@@ -1384,6 +1400,8 @@ export function createApp(): express.Express {
     googleReviews: 590006,
     batchInvoice: 590007,
     callMeBack: 590008,
+    digest: 590009,
+    droppedCall: 590010,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -1460,6 +1478,39 @@ export function createApp(): express.Express {
       smsEventRepo: proposalSmsEventRepo,
       auditRepo,
       ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
+    },
+    { overwrite: true },
+  );
+
+  const digestRepo = pool
+    ? new PgDigestEntryRepository(pool)
+    : new InMemoryDigestEntryRepository();
+  registerKeywordHandler(
+    {
+      keywords: ['looks', 'good', 'looks good'],
+      handle: (ctx) => handleDigestAckSms(ctx, { userRepo, digestRepo }),
+    },
+    { overwrite: true },
+  );
+
+  const techStatusTodayRepo = pool
+    ? new PgTechStatusTodayRepository(pool)
+    : new InMemoryTechStatusTodayRepository();
+  registerTechStatusKeywords(
+    {
+      userRepo,
+      settingsRepo,
+      unavailableBlockRepo,
+      techStatusTodayRepo,
+      auditRepo,
+      rescheduleDeps: {
+        appointmentRepo,
+        assignmentRepo,
+        proposalRepo,
+        jobRepo,
+        customerRepo,
+        brandVoiceDeps: { gateway: llmGateway, settingsRepo },
+      },
     },
     { overwrite: true },
   );
@@ -1716,6 +1767,7 @@ export function createApp(): express.Express {
         ? new PgTenantTransactionRunner(pool)
         : new InMemoryTransactionRunner(),
       paymentLinkProvider,
+      jobPhotoService: new JobPhotoService(jobPhotoRepo, fileRepo, storageProvider),
     }),
   );
 
@@ -3125,6 +3177,34 @@ export function createApp(): express.Express {
     service: 'estimate-reminder-worker',
     environment: process.env.NODE_ENV || 'development',
   });
+  const digestLogger = createLogger({
+    service: 'digest-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  if (oneTapSmsSender) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.digest, async () => {
+        await runDigestSweep({
+          settingsRepo,
+          proposalRepo,
+          digestRepo,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          sendSms: oneTapSmsSender,
+          resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
+          logger: digestLogger,
+        });
+      }).catch((err) => {
+        digestLogger.error('Digest sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 60 * 60_000));
+  }
+
   if (sendService) {
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.estimateReminder, async () => {
@@ -3258,6 +3338,17 @@ export function createApp(): express.Express {
     ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
     AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
   });
+  const droppedCallRecoveryLogger = createLogger({
+    service: 'dropped-call-recovery',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  const droppedCallScheduler = pool
+    ? new DroppedCallScheduler(
+        new PgDroppedCallRecoveryRepository(pool),
+        droppedCallRecoveryLogger,
+      )
+    : undefined;
+
   const inAppVoiceAdapter = new InAppVoiceAdapter({
     store: voiceSessionStore,
     gateway: llmGateway,
@@ -3266,6 +3357,7 @@ export function createApp(): express.Express {
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     ...(pool ? { pool } : {}),
+    ...(droppedCallScheduler ? { droppedCallScheduler } : {}),
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,

@@ -18,6 +18,7 @@ function mapRow(row: Record<string, unknown>): JobPhoto {
     category: row.category as JobPhotoCategory,
     notes: (row.notes as string | null) ?? undefined,
     takenAt: row.taken_at ? new Date(row.taken_at as string) : undefined,
+    clientVisible: row.client_visible === true,
     createdAt: new Date(row.created_at as string),
   };
 }

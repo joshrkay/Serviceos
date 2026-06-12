@@ -6,6 +6,7 @@ import { assertValidProposalPayload } from '../proposals/contracts';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
 import { routeUnsupervisedProposal } from '../proposals/auto-approve';
 import { renderProposalSms } from '../proposals/sms/render';
+import { runSupervisorReview } from '../ai/supervisor/review';
 import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
 import type { AuditRepository } from '../audit/audit';
 import type { UnsupervisedProposalRouting } from '../settings/settings';
@@ -1100,7 +1101,8 @@ async function processChain(
   // failure must not leave orphaned members (e.g. a parent with no
   // dependents, or dependents whose parent never landed), so all writes
   // share one transaction.
-  await deps.proposalRepo.createMany(built.map((b) => b.proposal));
+  const reviewed = built.map((b) => runSupervisorReview(b.proposal).proposal);
+  await deps.proposalRepo.createMany(reviewed);
 
   for (const b of built) {
     log.info('voice-action-router: chain proposal created', {
@@ -1283,17 +1285,18 @@ export function createVoiceActionRouterWorker(
       );
 
       if (outcome.kind === 'proposal') {
+        const reviewed = runSupervisorReview(outcome.proposal).proposal;
         await createDeduped(
           deps.proposalRepo,
-          stampSingleActionDedup(outcome.proposal, recordingId),
+          stampSingleActionDedup(reviewed, recordingId),
           recordingId,
           log,
         );
         log.info('voice-action-router: proposal created from voice', {
-          proposalId: outcome.proposal.id,
-          proposalType: outcome.proposal.proposalType,
+          proposalId: reviewed.id,
+          proposalType: reviewed.proposalType,
           classifierConfidence: outcome.classification.confidence,
-          proposalConfidence: outcome.proposal.confidenceScore,
+          proposalConfidence: reviewed.confidenceScore,
         });
 
         // P12-004 — unsupervised routing. The proposal just queued with no
@@ -1304,13 +1307,13 @@ export function createVoiceActionRouterWorker(
         if (
           deps.unsupervisedRouting &&
           !outcome.supervisorPresent &&
-          outcome.proposal.status === 'ready_for_review'
+          reviewed.status === 'ready_for_review'
         ) {
           const ur = deps.unsupervisedRouting;
           try {
             const routing = await ur.resolveRouting?.(tenantId);
             const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
-            const { body: smsBody } = renderProposalSms(outcome.proposal);
+            const { body: smsBody } = renderProposalSms(reviewed);
             await routeUnsupervisedProposal(
               {
                 auditRepo: ur.auditRepo,
@@ -1320,13 +1323,13 @@ export function createVoiceActionRouterWorker(
               },
               {
                 tenantId,
-                proposalId: outcome.proposal.id,
+                proposalId: reviewed.id,
                 ...(routing ? { routing } : {}),
                 // Operator voice recordings are not a live inbound call, so
                 // `escalate_to_oncall` falls back to queue_only here by design.
                 channel: 'other',
                 ...(ownerPhone ? { ownerPhone } : {}),
-                summaryText: outcome.proposal.summary,
+                summaryText: reviewed.summary,
                 smsBody,
               },
             );

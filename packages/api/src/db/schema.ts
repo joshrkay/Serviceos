@@ -3967,6 +3967,52 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_proposal_sms_edit_sessions ON proposal_sms_edit_sessions
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // P5-020 — end-of-day digest entries (one per tenant per local date).
+  '158_digest_entries': `
+    CREATE TABLE IF NOT EXISTS digest_entries (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      local_date DATE NOT NULL,
+      rendered_text TEXT NOT NULL,
+      sections JSONB NOT NULL DEFAULT '{}',
+      delivery_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (delivery_status IN ('pending', 'sent', 'failed', 'acked')),
+      delivery_attempts INT NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (tenant_id, local_date)
+    );
+    ALTER TABLE digest_entries ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_digest_entries ON digest_entries;
+    CREATE POLICY tenant_isolation_digest_entries ON digest_entries
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // PHOTO-INVOICE + client_visible on job photos for Client Hub.
+  '159_invoice_photos_and_client_visible': `
+    ALTER TABLE job_photos
+      ADD COLUMN IF NOT EXISTS client_visible BOOLEAN NOT NULL DEFAULT false;
+
+    CREATE TABLE IF NOT EXISTS invoice_photos (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      invoice_id UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+      uploaded_by_user_id TEXT NOT NULL,
+      file_id UUID NOT NULL REFERENCES files(id),
+      category TEXT NOT NULL DEFAULT 'other'
+        CHECK (category IN ('before','after','problem','completion','other')),
+      notes TEXT,
+      taken_at TIMESTAMPTZ,
+      client_visible BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_invoice_photos_tenant_invoice
+      ON invoice_photos(tenant_id, invoice_id);
+    ALTER TABLE invoice_photos ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_invoice_photos ON invoice_photos;
+    CREATE POLICY tenant_isolation_invoice_photos ON invoice_photos
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

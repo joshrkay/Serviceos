@@ -22,6 +22,8 @@ export interface JobPhoto {
   category: JobPhotoCategory;
   notes?: string;
   takenAt?: Date;
+  /** When true, visible on the customer portal (Client Hub). */
+  clientVisible?: boolean;
   createdAt: Date;
 }
 
