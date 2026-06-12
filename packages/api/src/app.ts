@@ -411,7 +411,16 @@ import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
 import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
-import { registerKeywordHandler } from './sms/inbound-dispatch';
+import {
+  registerKeywordHandler,
+  registerRecoveryResumeHandler,
+} from './sms/inbound-dispatch';
+import {
+  DroppedCallScheduler,
+  PgDroppedCallRecoveryRepository,
+  InMemoryDroppedCallRecoveryRepository,
+} from './sms/recovery/scheduler';
+import { createDroppedCallResumeHandler } from './sms/recovery/resume-handler';
 import {
   registerProposalReplySms,
   PgProposalSmsEventRepository,
@@ -1999,6 +2008,34 @@ export function createApp(): express.Express {
   const dailyDigestRepo = pool
     ? new PgDailyDigestRepository(pool)
     : new InMemoryDailyDigestRepository();
+  // RV-115/RV-116 — durable dropped-call recovery: the scheduler persists
+  // the FSM context snapshot at termination; the resume handler picks the
+  // thread back up when the caller replies to the recovery SMS.
+  const droppedCallRecoveryRepo = pool
+    ? new PgDroppedCallRecoveryRepository(pool)
+    : new InMemoryDroppedCallRecoveryRepository();
+  const droppedCallScheduler = new DroppedCallScheduler(
+    droppedCallRecoveryRepo,
+    createLogger({
+      service: 'sms.dropped-call-recovery',
+      environment: process.env.NODE_ENV || 'development',
+    }),
+  );
+  if (messageDelivery) {
+    registerRecoveryResumeHandler(
+      createDroppedCallResumeHandler({
+        recoveryRepo: droppedCallRecoveryRepo,
+        proposalRepo,
+        callMeBackRepo,
+        sendSms: (args: { to: string; body: string }) =>
+          messageDelivery.sendSms({ to: args.to, body: args.body }),
+        auditRepo,
+        businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
+      }),
+      { overwrite: true },
+    );
+  }
+
   // Platform feature flags. Hoisted above the voice wiring so the
   // per-tenant flag repo (RV-001 / RV-122) can gate voice features.
   const featureFlagRepo: FeatureFlagRepository = pool
@@ -2076,6 +2113,8 @@ export function createApp(): express.Express {
       : {}),
     // RV-143 — durable tail for the emergency page-retry ladder.
     callMeBackRepo,
+    // RV-115 — FSM context snapshot into dropped_call_recoveries.context.
+    droppedCallScheduler,
     leadRepo,
     // P11-001: lookup-skill family wiring. Without these the adapter
     // falls back to a "let me get a person to help" line on lookup_*
@@ -3627,6 +3666,10 @@ export function createApp(): express.Express {
     repairTemplatesResolver,
     voiceSessionRepo,
     voicePersonaResolver,
+    // RV-115 — durable dropped-call recovery with the FSM context snapshot.
+    // (In-app sessions rarely have a caller phone; the scheduler's own
+    // detection rejects rows without a usable E.164.)
+    droppedCallScheduler,
     // Voice-parity (Feature 6) — gate Spanish auto-detection on the tenant's
     // opt-in stack (supported_languages). Without this the in-app path would
     // treat any Spanish utterance as allowed and ignore the Settings toggle.

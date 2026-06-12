@@ -97,6 +97,8 @@ import { detectFrustration } from '../ai/agents/customer-calling/frustration-det
 import { detectEmergency } from '../ai/agents/customer-calling/emergency-detector';
 import { armEmergencyPageLadder } from './emergency-page-retry';
 import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
+import type { DroppedCallScheduler } from '../sms/recovery/scheduler';
+import { buildRecoveryContext } from '../sms/recovery/scheduler';
 import type { SettingsRepository } from '../settings/settings';
 import type { UserRepository } from '../users/user';
 import { isApproverPhone } from '../proposals/approver-identity';
@@ -286,6 +288,12 @@ export interface TwilioAdapterDeps {
    * without it the ladder still pages but has no durable tail.
    */
   callMeBackRepo?: CallMeBackRepository;
+  /**
+   * RV-115 — durable dropped-call recovery scheduler. When wired, every
+   * telephony termination runs through it with the FSM context snapshot;
+   * the scheduler's own detection rejects non-recovery outcomes.
+   */
+  droppedCallScheduler?: DroppedCallScheduler;
 }
 
 /**
@@ -596,6 +604,10 @@ export class TwilioGatherAdapter {
       // latency stays bounded by the speechTurn body — the summary
       // (which can take seconds) continues in the background.
       onSessionTerminated: async (session) => {
+        // RV-115 — the processor finalized the session internally (its
+        // speechTurn path bypasses the adapter wrapper), so stamp the
+        // durable recovery context here.
+        this.scheduleDurableRecoveryContext(session);
         void this.processor.runSummary(session).catch(() => {
           /* swallow — summary is best-effort */
         });
@@ -1311,7 +1323,7 @@ export class TwilioGatherAdapter {
     //    captures even calls that never reached intent_capture.
     if (session.machine.currentState === 'terminated' && !session.ended) {
       session.ended = true;
-      this.processor.finalizeTerminatedSession(session, expanded, 'caller_hangup');
+      this.finalizeTerminatedSession(session, expanded, 'caller_hangup');
       void this.processor.runSummary(session).catch(() => {
         /* swallow — summary is best-effort */
       });
@@ -1678,7 +1690,7 @@ export class TwilioGatherAdapter {
     appendAgentTts(this.deps.store, sessionId, sideEffects);
     if (session.machine.currentState === 'terminated' && !session.ended) {
       session.ended = true;
-      this.processor.finalizeTerminatedSession(session, sideEffects, 'caller_hangup');
+      this.finalizeTerminatedSession(session, sideEffects, 'caller_hangup');
       void this.processor.runSummary(session).catch(() => {
         /* swallow — summary is best-effort */
       });
@@ -2267,6 +2279,11 @@ export class TwilioGatherAdapter {
     // was the source of the dropped transcript+customerId bug (the
     // adapter copy included those fields; the processor copy did not).
     this.processor.finalizeTerminatedSession(session, sideEffects, fallbackReason);
+    // RV-115 — persist the FSM snapshot into the durable recovery row for
+    // calls that terminated without reaching `closing`. Idempotent (the repo
+    // dedupes on (tenant, voice_session_id)) and swallow-on-error inside the
+    // scheduler, so this never disturbs the terminal path.
+    this.scheduleDurableRecoveryContext(session);
     if (session.terminalOutcome) return;
     const endSessionEffect = [...sideEffects].reverse().find((e) => e.type === 'end_session');
     const reason =
@@ -2283,6 +2300,39 @@ export class TwilioGatherAdapter {
     session.terminalOutcome = outcome;
     session.terminalReason = reason;
     void this.persistSessionEnded(session, reason, outcome);
+  }
+
+  /**
+   * RV-115 — fire the durable dropped-call scheduler with the FSM snapshot.
+   * The scheduler's own detection (outcome ∈ {dropped, failed}, voice
+   * channel, usable caller id) decides whether a row is written; calls that
+   * reached `closing` derive a non-recovery outcome and are rejected there.
+   */
+  private scheduleDurableRecoveryContext(session: VoiceSession): void {
+    const scheduler = this.deps.droppedCallScheduler;
+    if (!scheduler || !session.terminalOutcome) return;
+    const callerE164 = this.callerIdBySession.get(session.id);
+    if (!callerE164) return;
+    const fsmContext = session.machine.currentContext;
+    void scheduler
+      .schedule({
+        tenantId: session.tenantId,
+        voiceSessionId: session.id,
+        callerE164,
+        outcome: session.terminalOutcome,
+        channel: session.channel,
+        context: buildRecoveryContext({
+          state: session.machine.currentState,
+          ...(fsmContext.currentIntent ? { currentIntent: fsmContext.currentIntent } : {}),
+          ...(fsmContext.extractedEntities
+            ? { extractedEntities: fsmContext.extractedEntities }
+            : {}),
+          proposalIds: session.proposalIds,
+        }),
+      })
+      .catch(() => {
+        /* scheduler logs; recovery is best-effort */
+      });
   }
 
   /**

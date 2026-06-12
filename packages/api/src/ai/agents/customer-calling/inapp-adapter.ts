@@ -48,6 +48,7 @@ import { isLanguageSupported } from '../../orchestration/language-detector';
 import type { VoicePersona, VoicePersonaResolver } from '../../../settings/voice-persona-resolver';
 import type { RepairTemplate } from '../../../verticals/registry';
 import type { DroppedCallScheduler } from '../../../sms/recovery/scheduler';
+import { buildRecoveryContext } from '../../../sms/recovery/scheduler';
 
 export interface InAppAdapterDeps {
   store: VoiceSessionStore;
@@ -676,6 +677,9 @@ export class InAppVoiceAdapter {
     if (!scheduler) return;
     const callerE164 = this.deps.callerPhoneResolver?.(session);
     if (!callerE164) return;
+    // RV-115 — snapshot the FSM into the durable row so the recovery SMS
+    // and the inbound resume handler (RV-116) can compose state-aware cues.
+    const fsmContext = session.machine.currentContext;
     void scheduler
       .schedule({
         tenantId: session.tenantId,
@@ -683,6 +687,14 @@ export class InAppVoiceAdapter {
         callerE164,
         outcome,
         channel: session.channel,
+        context: buildRecoveryContext({
+          state: session.machine.currentState,
+          ...(fsmContext.currentIntent ? { currentIntent: fsmContext.currentIntent } : {}),
+          ...(fsmContext.extractedEntities
+            ? { extractedEntities: fsmContext.extractedEntities }
+            : {}),
+          proposalIds: session.proposalIds,
+        }),
       })
       .catch(() => {
         /* swallow — scheduler already logs; recovery is best-effort */

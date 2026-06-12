@@ -1241,3 +1241,79 @@ describe('RV-142 — injectSafetySayLines', () => {
     ).toBe(dial);
   });
 });
+
+// ─── RV-115 — durable recovery context on telephony termination ─────────────
+
+describe('RV-115 — telephony termination persists the FSM snapshot', () => {
+  it('a dropped call schedules a durable recovery row with context', async () => {
+    const { InMemoryDroppedCallRecoveryRepository, DroppedCallScheduler } =
+      await import('../../src/sms/recovery/scheduler');
+    const recoveryRepo = new InMemoryDroppedCallRecoveryRepository();
+    const noopLogger = {
+      info: () => undefined,
+      warn: () => undefined,
+      error: () => undefined,
+      debug: () => undefined,
+    } as never;
+    const store = new VoiceSessionStore();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}'),
+      businessName: 'Acme',
+      droppedCallScheduler: new DroppedCallScheduler(recoveryRepo, noopLogger),
+    } as never);
+
+    // Establish the session via the stream inbound path so the caller-id
+    // map is populated (the durable row needs an E.164).
+    await adapter.handleInboundForStream({
+      callSid: 'CA-rv115',
+      from: '+15125550144',
+      tenantId: 'tenant-t1',
+    });
+    const session = store.findByCallSid('CA-rv115')!;
+    // Caller hangs up before saying anything → outcome 'dropped'.
+    session.machine.dispatch({ type: 'caller_hangup' });
+
+    adapter.finalizeTerminatedSession(session, [], 'caller_hangup');
+    // Scheduling is fire-and-forget — let the microtask settle.
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(recoveryRepo.rows).toHaveLength(1);
+    const row = recoveryRepo.rows[0];
+    expect(row.voiceSessionId).toBe(session.id);
+    expect(row.callerE164).toBe('+15125550144');
+    expect(row.context?.bucket).toBe('early');
+    expect(row.context?.proposalIds).toEqual([]);
+  });
+
+  it('a transferred call does NOT schedule recovery (detection rejects it)', async () => {
+    const { InMemoryDroppedCallRecoveryRepository, DroppedCallScheduler } =
+      await import('../../src/sms/recovery/scheduler');
+    const recoveryRepo = new InMemoryDroppedCallRecoveryRepository();
+    const noopLogger = {
+      info: () => undefined,
+      warn: () => undefined,
+      error: () => undefined,
+      debug: () => undefined,
+    } as never;
+    const store = new VoiceSessionStore();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGatewayReturning('{}'),
+      businessName: 'Acme',
+      droppedCallScheduler: new DroppedCallScheduler(recoveryRepo, noopLogger),
+    } as never);
+    await adapter.handleInboundForStream({
+      callSid: 'CA-rv115b',
+      from: '+15125550145',
+      tenantId: 'tenant-t1',
+    });
+    const session = store.findByCallSid('CA-rv115b')!;
+    // Mirror the dial-result success branch: synthetic proposal_queued +
+    // explicit 'transferred' reason → outcome 'completed'.
+    session.machine.dispatch({ type: 'proposal_queued', proposalId: 'transfer:CA-rv115b' });
+    adapter.finalizeTerminatedSession(session, [], 'transferred');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(recoveryRepo.rows).toHaveLength(0);
+  });
+});

@@ -64,6 +64,16 @@ export interface FallbackHandler {
   handle(ctx: InboundSmsContext): Promise<HandlerResult>;
 }
 
+/**
+ * RV-116 — dropped-call recovery resume. A reply on a recovery thread is
+ * free text from a CUSTOMER phone (not the owner), so neither keyword
+ * routing nor the owner-edit fallback claims it. Exactly one resume handler
+ * may be registered; it runs LAST — only after keyword routing and the
+ * fallback have both declined — so every existing dispatch path is
+ * untouched. Same `FallbackHandler` shape (name + handle).
+ */
+export type RecoveryResumeHandler = FallbackHandler;
+
 interface RegistryEntry {
   keyword: string;
   handler: KeywordHandler;
@@ -71,6 +81,7 @@ interface RegistryEntry {
 
 const registry = new Map<string, RegistryEntry>();
 let fallback: FallbackHandler | undefined;
+let recoveryResume: RecoveryResumeHandler | undefined;
 
 function normalize(keyword: string): string {
   return keyword.trim().toLowerCase();
@@ -117,6 +128,35 @@ export function registerFallbackHandler(
   fallback = handler;
 }
 
+export function registerRecoveryResumeHandler(
+  handler: RecoveryResumeHandler,
+  options: RegisterKeywordHandlerOptions = {},
+): void {
+  if (recoveryResume && !options.overwrite) {
+    throw new Error(
+      `duplicate recovery-resume registration: '${recoveryResume.name}' is already registered`,
+    );
+  }
+  recoveryResume = handler;
+}
+
+async function runRecoveryResume(
+  ctx: InboundSmsContext,
+): Promise<HandlerResult | null> {
+  if (!recoveryResume) return null;
+  try {
+    return await recoveryResume.handle({ ...ctx });
+  } catch (err) {
+    logger.error('Inbound SMS recovery-resume handler threw', {
+      tenantId: ctx.tenantId,
+      messageSid: ctx.messageSid,
+      handler: recoveryResume.name,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { handled: false, handler: recoveryResume.name, reason: 'handler_error' };
+  }
+}
+
 async function runFallback(ctx: InboundSmsContext): Promise<HandlerResult | null> {
   if (!fallback) return null;
   try {
@@ -148,6 +188,9 @@ export async function dispatchInboundSms(
   if (!entry) {
     const viaFallback = await runFallback(ctx);
     if (viaFallback?.handled) return viaFallback;
+    // RV-116 — last chance: a reply on a dropped-call recovery thread.
+    const viaResume = await runRecoveryResume(ctx);
+    if (viaResume?.handled) return viaResume;
     return { handled: false, reason: 'no_matching_handler' };
   }
 
@@ -174,6 +217,11 @@ export async function dispatchInboundSms(
   // whole message is free-text and any first token is plausible.
   const viaFallback = await runFallback(ctx);
   if (viaFallback?.handled) return viaFallback;
+  // RV-116 — last chance: a reply on a dropped-call recovery thread (e.g.
+  // a customer replying "yes" — a keyword another feature owns but whose
+  // handler declined a non-matching phone).
+  const viaResume = await runRecoveryResume(ctx);
+  if (viaResume?.handled) return viaResume;
   return keywordResult;
 }
 
@@ -184,4 +232,5 @@ export async function dispatchInboundSms(
 export function __resetKeywordRegistryForTests(): void {
   registry.clear();
   fallback = undefined;
+  recoveryResume = undefined;
 }
