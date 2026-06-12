@@ -282,7 +282,12 @@ export class ProposalExecutor {
       }
     }
 
-    if (this.onExecuted) {
+    // Only fire onExecuted on FIRST execution. When the idempotency guard
+    // short-circuited (alreadyExecuted=true) the handler did not run — the
+    // spend recorder must NOT increment again, and the proposal-correction
+    // worker has nothing new to learn from a replay. Gating here is the
+    // single choke-point for all consumers; no per-consumer guard needed.
+    if (this.onExecuted && !alreadyExecuted) {
       try {
         await this.onExecuted({
           tenantId: updatedProposal.tenantId,

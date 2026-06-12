@@ -77,6 +77,9 @@ import {
   EmergencyDispatchExecutionHandler,
   EmergencySmsSender,
 } from './emergency-dispatch-handler';
+import { dispatchEstimateNudge } from '../../estimates/estimate-nudge';
+import type { SendService } from '../../notifications/send-service';
+import type { DispatchRepository } from '../../notifications/dispatch-repository';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -248,11 +251,23 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     private readonly assignmentRepo?: AssignmentRepository,
     private readonly confirmationNotifier: SchedulingConfirmationNotifier = new NoopSchedulingConfirmationNotifier(),
     private readonly auditRepo?: AuditRepository,
+    // RV-081 — revisit linkage: validates payload.linkedJobId exists
+    // (tenant-scoped) before attaching the appointment to it.
+    private readonly jobRepo?: JobRepository,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
-    if (!payload.jobId || typeof payload.jobId !== 'string') {
+    // RV-081 — a revisit books an appointment against an EXISTING job: when
+    // linkedJobId is present it is the job the appointment attaches to (no
+    // new job is created), overriding jobId.
+    const linkedJobId =
+      typeof payload.linkedJobId === 'string' && payload.linkedJobId.length > 0
+        ? payload.linkedJobId
+        : undefined;
+    const targetJobId =
+      linkedJobId ?? (typeof payload.jobId === 'string' && payload.jobId.length > 0 ? payload.jobId : undefined);
+    if (!targetJobId) {
       return { success: false, error: 'Payload must include a valid jobId' };
     }
     if (!payload.scheduledStart || typeof payload.scheduledStart !== 'string') {
@@ -264,6 +279,24 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
 
     if (!this.appointmentRepo) {
       return { success: true, resultEntityId: uuidv4() };
+    }
+
+    if (linkedJobId) {
+      // Tenant-scoped existence check — a cross-tenant (or deleted) job id
+      // must surface as not-found, never silently book against it.
+      if (!this.jobRepo) {
+        return {
+          success: false,
+          error: 'Revisit linkage requires the job repository to be wired',
+        };
+      }
+      const linkedJob = await this.jobRepo.findById(context.tenantId, linkedJobId);
+      if (!linkedJob) {
+        return {
+          success: false,
+          error: `Linked job ${linkedJobId} not found in this tenant — a revisit must reference an existing job`,
+        };
+      }
     }
 
     const scheduledStart = new Date(payload.scheduledStart);
@@ -308,7 +341,7 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
 
     const appointment = await createAppointment({
       tenantId: context.tenantId,
-      jobId: payload.jobId,
+      jobId: targetJobId,
       scheduledStart,
       scheduledEnd,
       ...(arrivalWindowStart && arrivalWindowEnd && !isNaN(arrivalWindowStart.getTime()) && !isNaN(arrivalWindowEnd.getTime())
@@ -373,6 +406,30 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
           return { success: false, error: err.message };
         }
         throw err;
+      }
+    }
+
+    // RV-081 — audit the revisit linkage so the trail shows this
+    // appointment was booked against an existing job rather than a new one.
+    if (linkedJobId && this.auditRepo) {
+      try {
+        await this.auditRepo.create(
+          createAuditEvent({
+            tenantId: context.tenantId,
+            actorId: context.executedBy,
+            actorRole: 'system',
+            eventType: 'appointment.revisit_linked',
+            entityType: 'appointment',
+            entityId: appointment.id,
+            metadata: {
+              revisit: true,
+              linkedJobId,
+              proposalId: proposal.id,
+            },
+          }),
+        );
+      } catch {
+        // Audit emission is best-effort — the appointment is already booked.
       }
     }
 
@@ -462,6 +519,139 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
   }
 }
 
+// ─── send_estimate_nudge (RV-086) ─────────────────────────────────────────
+//
+// Re-sends an aging, still-unanswered estimate to the customer through the
+// SAME send composition the estimate-reminder worker uses
+// (dispatchEstimateNudge → SendService.sendEstimate + reminder bookkeeping +
+// `estimate.reminder_sent` audit). Comms-class: only ever runs after an
+// explicit human approval.
+//
+// Cooldown: the handler REFUSES (execution_failed with a clear reason) when
+// any message for this estimate was already dispatched within the last 48
+// hours — checked against message_dispatches (entity_type='estimate', by
+// recency, ignoring failed rows) plus the estimate's own last_reminder_at as
+// a belt-and-braces fallback when the dispatch repo isn't wired.
+export const ESTIMATE_NUDGE_COOLDOWN_MS = 48 * 60 * 60 * 1000;
+
+export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
+  proposalType: ProposalType = 'send_estimate_nudge';
+
+  constructor(
+    private readonly estimateRepo?: EstimateRepository,
+    private readonly sendService?: Pick<SendService, 'sendEstimate'>,
+    private readonly dispatchRepo?: DispatchRepository,
+    private readonly auditRepo?: AuditRepository,
+    /** Injectable clock for deterministic cooldown tests. */
+    private readonly now: () => Date = () => new Date(),
+  ) {}
+
+  async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
+    const { payload } = proposal;
+
+    const estimateId = payload.estimateId;
+    if (
+      typeof estimateId !== 'string' ||
+      !/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(estimateId)
+    ) {
+      return {
+        success: false,
+        error: 'Payload must include a valid estimateId UUID (resolve estimateReference at review time first)',
+      };
+    }
+
+    if (!this.estimateRepo || !this.sendService) {
+      // Fail-closed: customer-facing sends must never silently no-op with a
+      // clean audit trail. Owner-approved comms that reach this handler
+      // without the required deps wired are a misconfiguration — surface it.
+      return {
+        success: false,
+        error: 'send service not configured',
+      };
+    }
+
+    const estimate = await this.estimateRepo.findById(context.tenantId, estimateId);
+    if (!estimate) {
+      return { success: false, error: `Estimate ${estimateId} not found in this tenant` };
+    }
+    if (estimate.status !== 'sent') {
+      return {
+        success: false,
+        error: `Estimate ${estimate.estimateNumber} is '${estimate.status}' — only a sent, still-unanswered estimate can be nudged`,
+      };
+    }
+
+    const asOf = this.now();
+    const cooldownFloor = asOf.getTime() - ESTIMATE_NUDGE_COOLDOWN_MS;
+
+    // Cooldown source of truth: message_dispatches for this estimate.
+    if (this.dispatchRepo) {
+      const dispatches = await this.dispatchRepo.findByEntity(
+        context.tenantId,
+        'estimate',
+        estimateId,
+      );
+      const recent = dispatches.find(
+        (d) =>
+          // 'failed' and 'bounced' dispatches never reached the customer —
+          // neither counts against the 48h spacing.
+          d.status !== 'failed' &&
+          d.status !== 'bounced' &&
+          d.sentAt.getTime() >= cooldownFloor,
+      );
+      if (recent) {
+        return {
+          success: false,
+          error:
+            `Nudge refused: a message for estimate ${estimate.estimateNumber} was already sent ` +
+            `at ${recent.sentAt.toISOString()} — wait 48h between reminders`,
+        };
+      }
+    }
+
+    // Belt-and-braces: ALSO check estimate.lastReminderAt regardless of
+    // whether the dispatch repo is wired. Whichever source is more recent
+    // governs; both checks must pass for the nudge to proceed.
+    if (
+      estimate.lastReminderAt !== undefined &&
+      estimate.lastReminderAt.getTime() >= cooldownFloor
+    ) {
+      return {
+        success: false,
+        error:
+          `Nudge refused: estimate ${estimate.estimateNumber} was already reminded ` +
+          `at ${estimate.lastReminderAt.toISOString()} — wait 48h between reminders`,
+      };
+    }
+
+    try {
+      await dispatchEstimateNudge(
+        {
+          estimateRepo: this.estimateRepo,
+          sendService: this.sendService,
+          ...(this.auditRepo ? { auditRepo: this.auditRepo } : {}),
+        },
+        {
+          tenantId: context.tenantId,
+          estimate,
+          channel: 'sms',
+          asOf,
+          actorId: context.executedBy,
+          ...(typeof payload.note === 'string' && payload.note.trim().length > 0
+            ? { customMessage: payload.note }
+            : {}),
+        },
+      );
+      return { success: true, resultEntityId: estimate.id };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : 'Estimate nudge failed',
+      };
+    }
+  }
+}
+
 export function createExecutionHandlerRegistry(deps?: {
   customerRepo?: CustomerRepository;
   jobRepo?: JobRepository;
@@ -505,6 +695,11 @@ export function createExecutionHandlerRegistry(deps?: {
   // RV-141 — emergency_dispatch owner page. Optional; absent → the handler
   // degrades per its own per-dep guards (job-only / passthrough).
   emergencySmsSender?: EmergencySmsSender;
+  // RV-086 — send_estimate_nudge. sendService drives the actual re-send;
+  // dispatchRepo backs the 48h cooldown check. Absent → degraded behavior
+  // documented on the handler.
+  sendService?: Pick<SendService, 'sendEstimate'>;
+  dispatchRepo?: DispatchRepository;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -527,7 +722,7 @@ export function createExecutionHandlerRegistry(deps?: {
     new CreateCustomerVoiceExecutionHandler(deps?.customerRepo, deps?.auditRepo),
     new UpdateCustomerExecutionHandler(deps?.customerRepo),
     new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo),
-    new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier, deps?.auditRepo),
+    new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier, deps?.auditRepo, deps?.jobRepo),
     new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
     new DraftEstimateExecutionHandler(deps?.estimateRepo, deps?.settingsRepo),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
@@ -557,6 +752,14 @@ export function createExecutionHandlerRegistry(deps?: {
     new AddNoteExecutionHandler(deps?.noteRepo),
     new SendInvoiceExecutionHandler(deps?.invoiceDeliveryProvider),
     new SendEstimateExecutionHandler(deps?.estimateDeliveryProvider),
+    // RV-086 — comms-class nudge for aging sent estimates; 48h cooldown
+    // enforced against message_dispatches inside the handler.
+    new SendEstimateNudgeExecutionHandler(
+      deps?.estimateRepo,
+      deps?.sendService,
+      deps?.dispatchRepo,
+      deps?.auditRepo,
+    ),
     new RecordPaymentExecutionHandler(
       deps?.paymentRepo,
       deps?.invoiceRepo,
@@ -619,6 +822,10 @@ export function createExecutionHandlerRegistry(deps?: {
       deps.auditRepo,
       deps.docRevisionRepo,
       deps.editDeltaRepo,
+      // Deposit lock: the handler resolves the linked job's
+      // depositPaidCents and refuses the edit once money was collected.
+      // Fail-closed inside the handler when the repo is absent.
+      deps.jobRepo,
     ));
   }
 

@@ -8,6 +8,7 @@
  */
 import type { MoneyDashboardRepository } from '../../reports/money-dashboard';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
+import { formatCents } from './spoken-format';
 
 export interface LookupRevenueInput {
   tenantId: string;
@@ -28,10 +29,6 @@ export type LookupRevenueResult =
       data: { revenueCents: number; outstandingCents: number; month: string };
     }
   | { status: 'error'; summary: string; data: { error: string } };
-
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
-}
 
 function currentMonth(now: Date): string {
   return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;

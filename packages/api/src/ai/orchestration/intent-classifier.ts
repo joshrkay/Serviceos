@@ -58,6 +58,29 @@ export type IntentType =
   | 'lookup_leads'
   | 'lookup_revenue'
   | 'lookup_catalog'
+  // Phase-2 Track A (RV-010) — owner/operator morning overview ("what's
+  // my day look like?"). Read-only, routed to the lookup-skill family.
+  // Routable ONLY when the calling surface opts in via
+  // `ClassifyContext.extendedIntents` — the prompt section documenting it
+  // is a SEPARATE system message appended only then, so every existing
+  // call path keeps byte-identical prompt messages (voice-quality
+  // cassette hashes / gateway cache keys are unaffected — the RV-071
+  // pattern).
+  | 'lookup_day_overview'
+  // Phase-2 Track A (RV-064) — owner asks for the stored end-of-day
+  // digest narrative ("read me my day"). Read-only; same extendedIntents
+  // gating as lookup_day_overview.
+  | 'lookup_digest'
+  // Phase-2 Track A (RV-085) — owner asks what they're waiting on
+  // (aging estimates, unpaid invoices, unanswered recovery threads).
+  // Read-only; same extendedIntents gating.
+  | 'lookup_pending_items'
+  // Phase-2 Track A (RV-080) — caller/operator reports dissatisfaction
+  // with completed work or service. PROPOSAL-DRIVING (pinned-prefix
+  // add_note + callback for owner follow-up — both existing proposal
+  // types, dispatched by a dedicated router handler). Same
+  // extendedIntents gating as the Track A lookups.
+  | 'complaint'
   // P11-002: caller asks to switch the call language ("english please" /
   // "hablo español"). The adapter consumes this as a signal to flip the
   // session language — it is NOT a proposal-driving intent.
@@ -75,6 +98,11 @@ export type IntentType =
   // additionally hard-gate on the session flag (never prompt-only).
   | 'approve_proposal'
   | 'reject_proposal'
+  // RV-225 — owner voice edit channel ("change the second line to $200").
+  // Same owner-session-only gating as approve/reject: documented to the
+  // model exclusively via the appended owner system message, hard-gated
+  // by the routing layers on the session flag.
+  | 'edit_proposal'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
@@ -115,11 +143,16 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'lookup_leads',
   'lookup_revenue',
   'lookup_catalog',
+  'lookup_day_overview',
+  'lookup_digest',
+  'lookup_pending_items',
+  'complaint',
   'language_switch',
   'operator_request',
   'confirm',
   'approve_proposal',
   'reject_proposal',
+  'edit_proposal',
   'unknown',
 ] as const;
 
@@ -130,6 +163,24 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
  */
 export function isLookupIntent(intent: IntentType | undefined | null): boolean {
   return typeof intent === 'string' && intent.startsWith('lookup_');
+}
+
+/**
+ * Phase-2 Track A — the full set of intents that require
+ * `ClassifyContext.extendedIntents === true` to be actionable. Used
+ * as a belt-and-braces dispatch gate: even if the LLM hallucinates one
+ * of these without the opt-in flag, the router re-checks here and falls
+ * through to the unknown/clarification path instead of acting on it.
+ */
+export const EXTENDED_INTENT_TYPES = new Set<IntentType>([
+  'complaint',
+  'lookup_day_overview',
+  'lookup_digest',
+  'lookup_pending_items',
+]);
+
+export function isExtendedIntent(intent: IntentType | undefined | null): boolean {
+  return typeof intent === 'string' && EXTENDED_INTENT_TYPES.has(intent as IntentType);
 }
 
 export interface ExtractedEntities {
@@ -207,6 +258,11 @@ export interface ExtractedEntities {
   // estimate", "the second one", "the $450 invoice"). Resolved downstream
   // by the pendingProposals entity-resolver source — never trusted as an id.
   proposalReference?: string;
+  // RV-225 — edit_proposal (owner sessions only): the owner's words
+  // describing WHAT to change ("change the second line to $200"). Fed to
+  // the shared edit interpreter (proposals/edit-interpreter.ts), whose
+  // delta is Zod-validated by editProposal — never trusted as a payload.
+  editInstruction?: string;
 }
 
 /**
@@ -303,6 +359,21 @@ export interface ClassifyContext {
    * layers enforce the ownerSession check independently.
    */
   ownerSession?: boolean;
+  /**
+   * Phase-2 Track A (RV-010/064/085/080) — opt-in for the extended
+   * operator intents (lookup_day_overview, lookup_digest,
+   * lookup_pending_items, complaint). When true:
+   *   - the EXTENDED_INTENTS_PROMPT_SECTION is appended as a SEPARATE
+   *     system message (non-opted calls keep byte-identical prompt
+   *     messages — voice-quality cassette hashes and gateway cache keys
+   *     are unaffected; same mechanism as RV-071's ownerSession), and
+   *   - the deterministic phrase matcher (matchExtendedIntentPhrase)
+   *     short-circuits stereotyped phrasings ("what's my day look
+   *     like?") without an LLM round-trip.
+   * When absent/false the new intents are never produced — existing
+   * call paths are bit-for-bit unchanged.
+   */
+  extendedIntents?: boolean;
 }
 
 /**
@@ -729,7 +800,7 @@ Never invent entities. Extract only what the transcript actually says.`;
  * every non-owner call's prompt stays byte-identical to the pre-RV-071
  * prompt (voice-quality cassettes replay unchanged).
  */
-export const OWNER_APPROVAL_PROMPT_SECTION = `Owner-session intents (this caller is the VERIFIED business owner — these two intents exist only on this call):
+export const OWNER_APPROVAL_PROMPT_SECTION = `Owner-session intents (this caller is the VERIFIED business owner — these intents exist only on this call):
 - "approve_proposal" — the owner wants to APPROVE a pending proposal/draft awaiting review.
                         Put the owner's words identifying WHICH proposal in
                         extractedEntities.proposalReference (verbatim phrase).
@@ -741,17 +812,126 @@ export const OWNER_APPROVAL_PROMPT_SECTION = `Owner-session intents (this caller
                         Examples: "Reject the Acme invoice"
                                   "Decline the Henderson estimate"
                                   "Don't send that estimate — reject it"
+- "edit_proposal"    — the owner wants to CHANGE a pending proposal before approving.
+                        Extract proposalReference the same way (when the owner
+                        names one) and put the owner's change instruction in
+                        extractedEntities.editInstruction (verbatim phrase).
+                        Examples: "Change the second line to 200 dollars"
+                                  "Make the Henderson estimate 450"
+                                  "On that invoice, change the labor to two hours"
 Notes:
-- "approve"/"reject" must target a proposal or draft ("the estimate", "the invoice",
-  "the second one"). A bare "yes"/"go ahead" answering YOUR question is still "confirm".
-- Do not change the JSON output schema; proposalReference is just an extra
-  optional key inside extractedEntities.`;
+- "approve"/"reject"/"edit" must target a proposal or draft ("the estimate", "the
+  invoice", "the second one"). A bare "yes"/"go ahead" answering YOUR question is still "confirm".
+- Do not change the JSON output schema; proposalReference and editInstruction are
+  just extra optional keys inside extractedEntities.`;
+
+/**
+ * Phase-2 Track A — extended operator intents prompt section. Delivered as
+ * a SEPARATE system message, appended ONLY when
+ * `ClassifyContext.extendedIntents` is true, so every non-opted call's
+ * prompt stays byte-identical to the existing prompt (voice-quality
+ * cassettes replay unchanged — the RV-071 mechanism).
+ */
+export const EXTENDED_INTENTS_PROMPT_SECTION = `Extended operator intents (this surface has opted in — these intents exist only on this call):
+- "lookup_day_overview" — the owner/operator asks for a morning overview of
+                           their day: schedule, priorities, overnight events,
+                           pending approvals. Read-only.
+                           Examples: "What's my day look like?"
+                                     "Give me my morning overview"
+                                     "What's on deck today?"
+- "lookup_digest"       — the owner asks to hear their stored end-of-day
+                           digest narrative. Read-only.
+                           Examples: "Read me my day"
+                                     "Read me my daily digest"
+                                     "What did the digest say?"
+- "lookup_pending_items" — the owner asks what they're WAITING ON from
+                           customers: estimates sent but not accepted,
+                           unpaid/overdue invoices, unanswered follow-up
+                           texts. Read-only.
+                           Examples: "What am I waiting on?"
+                                     "What's still out there?"
+                                     "Which estimates haven't been accepted?"
+- "complaint"            — the caller (or an operator relaying a call)
+                           reports DISSATISFACTION with work or service
+                           already delivered: poor workmanship, rude crew,
+                           wrong charge, wants to escalate. Extract the
+                           complaint text into noteBody, the customer into
+                           customerName, and any job into jobReference.
+                           Distinct from emergency_dispatch (active
+                           danger) and from update_* edits.
+                           Examples: "I want to file a complaint about the install"
+                                     "Mrs. Patel called furious about the leak coming back"
+                                     "I'm really unhappy with the work and I want a refund"
+Notes:
+- The lookup_* entries above are READ-ONLY intents — never classify a
+  command that creates or changes a record as one of them.
+- Do not change the JSON output schema.`;
+
+/**
+ * Deterministic short-circuit for the stereotyped extended-intent
+ * phrasings (the P18-001 signup-override pattern). Consulted ONLY when
+ * `ClassifyContext.extendedIntents` is true, BEFORE the LLM call — a
+ * matched phrase routes with zero gateway cost and cannot regress with
+ * model drift. Patterns are anchored tight so ordinary commands can
+ * never collapse into a lookup.
+ *
+ * RULE: phrase short-circuits are for ENTITY-FREE READ-ONLY intents
+ * only. Any intent that produces entities or drives a proposal (e.g.
+ * `complaint`, which extracts noteBody / customerName / jobReference
+ * and creates an add_note + callback pair) MUST NOT appear here —
+ * the deterministic path returns no extractedEntities, which creates a
+ * quality cliff for proposal-driving intents. The LLM prompt section
+ * (EXTENDED_INTENTS_PROMPT_SECTION) owns classification + entity
+ * extraction for all non-read-only extended intents.
+ * Permitted phrase-match intents: lookup_day_overview, lookup_digest,
+ * lookup_pending_items.
+ */
+const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: ReadonlyArray<RegExp> }> = [
+  {
+    intent: 'lookup_day_overview',
+    patterns: [
+      /\bwhat(?:'s| is| does)\s+my\s+day\s+look(?:ing)?\s+like\b/i,
+      /\b(?:give me |what's )?my morning overview\b/i,
+      /\bhow(?:'s| is)\s+my\s+day\s+looking\b/i,
+    ],
+  },
+  {
+    intent: 'lookup_digest',
+    patterns: [
+      /\bread\s+(?:me\s+)?my\s+day\b/i,
+      /\b(?:read|give)\s+me\s+(?:my|the)\s+(?:daily\s+)?digest\b/i,
+      /\bwhat\s+did\s+the\s+digest\s+say\b/i,
+    ],
+  },
+  {
+    intent: 'lookup_pending_items',
+    patterns: [
+      /\bwhat\s+(?:am\s+i|are\s+we)\s+(?:still\s+)?waiting\s+on\b/i,
+      /\bwhat(?:'s| is)\s+(?:still\s+)?(?:out\s+there|outstanding)\s+waiting\b/i,
+    ],
+  },
+];
+
+export function matchExtendedIntentPhrase(transcript: string): IntentType | null {
+  if (!transcript) return null;
+  for (const entry of EXTENDED_INTENT_PHRASES) {
+    if (entry.patterns.some((rx) => rx.test(transcript))) return entry.intent;
+  }
+  return null;
+}
 
 /** RV-071 — predicate the voice routing layers use to gate owner approval intents. */
 export function isVoiceApprovalIntent(
   intent: IntentType | string | undefined | null,
 ): intent is 'approve_proposal' | 'reject_proposal' {
   return intent === 'approve_proposal' || intent === 'reject_proposal';
+}
+
+/** RV-225 — predicate the voice routing layers use to gate the owner edit intent. */
+export function isVoiceEditIntent(
+  intent: IntentType | string | undefined | null,
+): intent is 'edit_proposal' {
+  return intent === 'edit_proposal';
 }
 
 function isSupportedIntent(value: unknown): value is IntentType {
@@ -903,6 +1083,8 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.delayMinutes === 'number') extracted.delayMinutes = ee.delayMinutes;
     // approve_proposal / reject_proposal fields (RV-071)
     if (typeof ee.proposalReference === 'string') extracted.proposalReference = ee.proposalReference;
+    // edit_proposal fields (RV-225)
+    if (typeof ee.editInstruction === 'string') extracted.editInstruction = ee.editInstruction;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }
@@ -982,6 +1164,20 @@ export async function classifyIntent(
     return unknownResult('empty transcript', 'empty_transcript');
   }
 
+  // Phase-2 Track A — deterministic extended-intent phrasings. Only on
+  // opted-in surfaces, BEFORE the LLM call: no gateway cost, no cassette
+  // interaction, no model-drift regression for the canonical phrasings.
+  if (context.extendedIntents === true) {
+    const matched = matchExtendedIntentPhrase(transcript);
+    if (matched) {
+      return {
+        intentType: matched,
+        confidence: 0.95,
+        reasoning: 'matched deterministic extended-intent phrasing',
+      };
+    }
+  }
+
   // Compose the system prompt: base classifier rules + (optional)
   // tenant vertical context + (optional) caller plan context. Each
   // optional block is delivered as a separate system message so it
@@ -1009,6 +1205,13 @@ export async function classifyIntent(
   // byte-identical messages (cassette hashes / gateway cache keys).
   if (context.ownerSession === true) {
     systemMessages.push({ role: 'system', content: OWNER_APPROVAL_PROMPT_SECTION });
+  }
+  // Phase-2 Track A — extended operator intents are documented to the model
+  // ONLY on opted-in surfaces. Appended last (after the owner section) so
+  // non-opted calls keep byte-identical messages (cassette hashes /
+  // gateway cache keys).
+  if (context.extendedIntents === true) {
+    systemMessages.push({ role: 'system', content: EXTENDED_INTENTS_PROMPT_SECTION });
   }
 
   const response = await gateway.complete({

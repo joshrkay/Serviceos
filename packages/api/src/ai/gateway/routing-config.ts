@@ -142,5 +142,21 @@ export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
         'Generate targeted follow-up questions for incomplete onboarding data. ' +
         'Questions should be specific, not generic. Return valid JSON.',
     },
+    // Rivet P2 F-1 — Supervisor Agent advisory annotator. Cheap model
+    // (same tier as classify_intent): the output is a short risk note
+    // attached to proposals already awaiting human review. It NEVER
+    // approves, blocks, or changes status — advisory only.
+    supervisor_annotate: {
+      model: defaultModel,
+      temperature: 0.0,
+      maxTokens: 512,
+      systemPrompt:
+        'You annotate pending proposals in a service-business review queue with ' +
+        'a short advisory risk note for the human reviewer. ' +
+        'Respond ONLY with valid JSON: {"riskSummary": string, "flags": string[]}. ' +
+        'riskSummary is one or two plain sentences; flags are short snake_case ' +
+        'labels (e.g. "high_amount", "irreversible"). You are advisory only — ' +
+        'never instruct approval or rejection.',
+    },
   },
 };

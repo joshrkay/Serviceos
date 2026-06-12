@@ -256,12 +256,25 @@ export interface DigestSmsApprovalLink {
   url: string;
 }
 
+/** RV-065 — "invoice it" one-tap link for a completed-unbilled job. */
+export interface DigestSmsInvoiceLink {
+  job: DigestUnbilledJob;
+  /** One-tap mint-draft-invoice URL (signed token minted by the worker). */
+  url: string;
+}
+
 export interface RenderDigestSmsInput {
   payload: DailyDigestPayload;
   /** Web deep link to the full digest (`<base>/digest/<date>`). */
   deepLinkUrl: string;
   /** One-tap links for the top approvals, in priority order. */
   approvalLinks: DigestSmsApprovalLink[];
+  /**
+   * RV-065 — one-tap "invoice it" links for unbilled jobs. LOWEST priority
+   * for the character budget: these are dropped first (an approval entry is
+   * never sacrificed for an invoice link).
+   */
+  invoiceLinks?: DigestSmsInvoiceLink[];
   maxChars?: number;
 }
 
@@ -277,6 +290,11 @@ function approvalLabel(a: DigestPendingApproval): string {
  * URLs are long, so approval entries are included greedily in priority
  * order and the remainder collapses into "+N more"; the counts line and
  * the deep link always survive. Never exceeds `maxChars`.
+ *
+ * RV-065 — "invoice it" links for unbilled jobs render after the approvals
+ * block but carry the LOWEST budget priority: they are only included while
+ * EVERY approval entry fits, and are dropped (last first) before any
+ * approval entry is sacrificed.
  */
 export function renderDigestSms(input: RenderDigestSmsInput): string {
   const { payload, deepLinkUrl, approvalLinks } = input;
@@ -297,35 +315,48 @@ export function renderDigestSms(input: RenderDigestSmsInput): string {
 
   const tail = ` Full day: ${deepLinkUrl}`;
 
-  const total = payload.pendingApprovals.totalCount;
-  if (total === 0) {
-    return truncateHard(`${head}${flags}${tail}`, maxChars);
-  }
-
-  // Greedily include approval entries while the assembled message (with
-  // the "+N more" marker for whatever doesn't fit) stays within budget.
   // No punctuation ever directly follows a one-tap URL — a trailing '.'
   // would be swallowed into the link by SMS clients and corrupt the token.
-  // When any one-tap link is present, append "(links expire in 30 min)"
-  // once after the approvals block so operators know the links are time-limited.
   const entries = approvalLinks.map(
     (l, i) => ` [${i + 1}] ${approvalLabel(l.approval)} ${l.url}`,
   );
-  const expiryNote = approvalLinks.length > 0 ? ' (links expire in 30 min)' : '';
-  let included = entries.length;
-  while (included >= 0) {
-    const rest = total - included;
+  const invoiceEntries = (input.invoiceLinks ?? []).map(
+    (l) =>
+      ` Bill${l.job.customerName ? ` ${l.job.customerName}` : ''} ${formatUsd(l.job.amountCents)} ${l.url}`,
+  );
+  const total = payload.pendingApprovals.totalCount;
+  // When any one-tap link is present, append "(links expire in 30 min)"
+  // once after the link blocks so operators know the links are time-limited.
+  const expiryNote = ' (links expire in 30 min)';
+
+  const assemble = (apprIncluded: number, invIncluded: number): string => {
+    const rest = total - apprIncluded;
     const moreMarker = rest > 0 ? ` +${rest} more` : '';
-    const linkNote = included > 0 ? expiryNote : '';
-    const body =
-      `${head} Approvals: ${total} waiting —` +
-      entries.slice(0, included).join('') +
-      `${moreMarker}${linkNote}${flags}${tail}`;
+    const approvalsBlock =
+      total === 0
+        ? ''
+        : ` Approvals: ${total} waiting —` + entries.slice(0, apprIncluded).join('') + moreMarker;
+    const invBlock = invoiceEntries.slice(0, invIncluded).join('');
+    const linkNote = apprIncluded > 0 || invIncluded > 0 ? expiryNote : '';
+    return `${head}${approvalsBlock}${invBlock}${linkNote}${flags}${tail}`;
+  };
+
+  // Phase 1 — all approval entries, invoice links dropped greedily (last
+  // first). invIncluded === 0 reproduces the pre-RV-065 body exactly.
+  for (let invIncluded = invoiceEntries.length; invIncluded >= 0; invIncluded--) {
+    const body = assemble(entries.length, invIncluded);
     if (body.length <= maxChars) return body;
-    included--;
+  }
+  // Phase 2 — degrade approval entries (no invoice links survive here).
+  for (let included = entries.length - 1; included >= 0; included--) {
+    const body = assemble(included, 0);
+    if (body.length <= maxChars) return body;
   }
   // Even the zero-entry form is over budget (pathological URLs): hard-cut.
-  return truncateHard(`${head} Approvals: ${total} waiting${flags}${tail}`, maxChars);
+  return truncateHard(
+    total === 0 ? `${head}${flags}${tail}` : `${head} Approvals: ${total} waiting${flags}${tail}`,
+    maxChars,
+  );
 }
 
 function truncateHard(text: string, maxChars: number): string {

@@ -173,12 +173,23 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
 import type { UnsupervisedProposalRouting } from '../settings/settings';
+import type { OutboundAnchorKind } from './sms/sms-event';
 
 /** Hard ceiling on one-tap link lifetime (risk note: TTL ≤ 30 minutes). */
 export const ONE_TAP_APPROVE_MAX_TTL_MS = 30 * 60 * 1000;
 
+/**
+ * RV-065 — one-tap action discriminator. 'approve' is the original P12-004
+ * behavior (approve an existing proposal); 'mint_draft_invoice' is the
+ * digest's "invoice it" tap: mint a draft_invoice proposal for a completed
+ * unbilled job, then continue into the standard approve flow. Defaults to
+ * 'approve' everywhere so pre-RV-065 tokens (no `a` key) keep verifying —
+ * and freshly minted approve tokens stay byte-identical to the old format.
+ */
+export type OneTapAction = 'approve' | 'mint_draft_invoice';
+
 interface OneTapPayload {
-  /** proposal_id */
+  /** Subject id: proposal_id for 'approve', job_id for 'mint_draft_invoice'. */
   p: string;
   /** tenant_id */
   t: string;
@@ -186,6 +197,11 @@ interface OneTapPayload {
   n: string;
   /** expiry, epoch ms */
   e: number;
+  /**
+   * Action discriminator (RV-065). OMITTED for 'approve' so legacy approve
+   * tokens are byte-identical; present only for 'mint_draft_invoice'.
+   */
+  a?: 'mint_draft_invoice';
 }
 
 function sign(payloadB64: string, secret: string): string {
@@ -193,7 +209,12 @@ function sign(payloadB64: string, secret: string): string {
 }
 
 export interface CreateOneTapApproveTokenInput {
-  proposalId: string;
+  /** Required for action 'approve' (the default). */
+  proposalId?: string;
+  /** RV-065 — required for action 'mint_draft_invoice'; binds tenant+jobId. */
+  jobId?: string;
+  /** RV-065 — defaults to 'approve' (back-compat: token bytes unchanged). */
+  action?: OneTapAction;
   tenantId: string;
   /** HMAC secret (server-side, e.g. config.appSecret). */
   secret: string;
@@ -210,20 +231,32 @@ export interface OneTapApproveToken {
 }
 
 /**
- * Mint an HMAC-signed, single-use approve token bound to
- * proposal_id + tenant_id + nonce. TTL is clamped to 30 minutes.
+ * Mint an HMAC-signed, single-use one-tap token bound to
+ * (proposal_id | job_id) + tenant_id + nonce. TTL is clamped to 30 minutes.
+ * Signature/nonce/TTL machinery is identical across both action variants;
+ * the default 'approve' variant produces byte-identical payloads to the
+ * pre-RV-065 format (no `a` key).
  */
 export function createOneTapApproveToken(
   input: CreateOneTapApproveTokenInput,
 ): OneTapApproveToken {
   if (!input.secret) throw new Error('one-tap token requires a secret');
+  const action: OneTapAction = input.action ?? 'approve';
+  if (action === 'approve' && !input.proposalId) {
+    throw new Error("one-tap 'approve' token requires a proposalId");
+  }
+  if (action === 'mint_draft_invoice' && !input.jobId) {
+    throw new Error("one-tap 'mint_draft_invoice' token requires a jobId");
+  }
   const now = input.nowMs ?? Date.now();
   const ttl = Math.min(input.ttlMs ?? ONE_TAP_APPROVE_MAX_TTL_MS, ONE_TAP_APPROVE_MAX_TTL_MS);
   const payload: OneTapPayload = {
-    p: input.proposalId,
+    p: action === 'approve' ? (input.proposalId as string) : (input.jobId as string),
     t: input.tenantId,
     n: randomBytes(16).toString('base64url'),
     e: now + ttl,
+    // Key omitted entirely for 'approve' — legacy byte-identity.
+    ...(action === 'mint_draft_invoice' ? { a: 'mint_draft_invoice' as const } : {}),
   };
   const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const token = `${payloadB64}.${sign(payloadB64, input.secret)}`;
@@ -252,7 +285,8 @@ export interface VerifyOneTapApproveTokenInput {
 }
 
 export type OneTapVerifyResult =
-  | { ok: true; proposalId: string; tenantId: string }
+  | { ok: true; action: 'approve'; proposalId: string; tenantId: string }
+  | { ok: true; action: 'mint_draft_invoice'; jobId: string; tenantId: string }
   | { ok: false; reason: OneTapVerifyFailure };
 
 /** Verify an HMAC one-tap approve token. Consumes the nonce on success. */
@@ -280,7 +314,9 @@ export async function verifyOneTapApproveToken(
     typeof payload.p !== 'string' ||
     typeof payload.t !== 'string' ||
     typeof payload.n !== 'string' ||
-    typeof payload.e !== 'number'
+    typeof payload.e !== 'number' ||
+    // RV-065: `a` is either absent (legacy approve) or the mint literal.
+    (payload.a !== undefined && payload.a !== 'mint_draft_invoice')
   ) {
     return { ok: false, reason: 'malformed' };
   }
@@ -294,7 +330,10 @@ export async function verifyOneTapApproveToken(
   const fresh = await input.consumeNonce(payload.n);
   if (!fresh) return { ok: false, reason: 'already_used' };
 
-  return { ok: true, proposalId: payload.p, tenantId: payload.t };
+  if (payload.a === 'mint_draft_invoice') {
+    return { ok: true, action: 'mint_draft_invoice', jobId: payload.p, tenantId: payload.t };
+  }
+  return { ok: true, action: 'approve', proposalId: payload.p, tenantId: payload.t };
 }
 
 /**
@@ -345,8 +384,20 @@ export interface RouteUnsupervisedProposalDeps {
    * P2-034 — invoked after the owner SMS goes out so the caller can record
    * the outbound `proposal_sms_events` row that anchors the reply transport
    * (the inbound Y/N/EDIT handler resolves "which proposal?" from it).
+   *
+   * RV-074 — `kind` distinguishes the normal approvable render
+   * (`proposal_rendered`, with the one-tap link's `expiresAt`) from the
+   * low/very_low-confidence "needs review in app" send
+   * (`review_required_rendered`, no token, no `expiresAt`). BOTH must be
+   * recorded: the low-confidence SMS says "reply N to reject", so it has
+   * to become the owner's latest reply target or that N would land on an
+   * older proposal.
    */
-  onSmsSent?: (sent: { body: string; expiresAt: Date }) => Promise<void>;
+  onSmsSent?: (sent: {
+    body: string;
+    kind: OutboundAnchorKind;
+    expiresAt?: Date;
+  }) => Promise<void>;
 }
 
 export interface RouteUnsupervisedProposalInput {
@@ -366,6 +417,28 @@ export interface RouteUnsupervisedProposalInput {
    * sent, so existing callers keep their exact behavior.
    */
   renderSmsBody?: (approveUrl: string) => string;
+  /**
+   * RV-074 (F-4) — proposal payload used to check _meta.overallConfidence.
+   * When present and confidence is low/very_low, the one-tap Y-able link is
+   * suppressed (body becomes the no-approve "needs review in app" form from
+   * renderSmsBody, called without an approveUrl).
+   */
+  payload?: unknown;
+  /**
+   * Track E (RV-221 audit fix) — caller-asserted "this send must be the
+   * review form". Set by the chain send site when the chain HEAD is not
+   * capture-class (money / comms / irreversible): those classes are never
+   * Y-approvable over SMS, so the one-tap token must not be minted and the
+   * SMS anchors as `review_required_rendered` — exactly the same path the
+   * low/very_low-confidence flip uses.
+   *
+   * The two conditions are OR'd; the audit metadata records which one(s)
+   * fired via `suppressReason`:
+   *   'low_confidence'            — payload _meta guard only
+   *   'action_class'              — caller-asserted suppressApproveLink only
+   *   'low_confidence+action_class' — both fired simultaneously
+   */
+  suppressApproveLink?: boolean;
   nowMs?: number;
 }
 
@@ -387,6 +460,14 @@ export async function routeUnsupervisedProposal(
   let smsSent = false;
   let escalated = false;
   let approveLinkExpiresAt: Date | undefined;
+  // RV-074 / Track E — true when the one-tap approve link was suppressed on
+  // an SMS that still went out (low/very_low payload, or a caller-asserted
+  // non-Y-approvable target like a money/comms chain head).
+  let approveLinkSuppressed = false;
+  // Both conditions can fire simultaneously (e.g. a money/comms chain head
+  // that also carries low/very_low confidence). When both apply, record the
+  // combined reason so audit readers see the full picture.
+  let suppressReason: 'low_confidence' | 'action_class' | 'low_confidence+action_class' | undefined;
 
   if (requested === 'escalate_to_oncall' && (input.channel !== 'voice_inbound' || !deps.escalateToOnCall)) {
     // Non-call channels (or no escalation seam wired) fall back to queue_only.
@@ -399,28 +480,76 @@ export async function routeUnsupervisedProposal(
   }
 
   if (effective === 'queue_and_sms') {
-    if (deps.sendSms && deps.secret && input.ownerPhone) {
-      const { token, expiresAt } = createOneTapApproveToken({
-        proposalId: input.proposalId,
-        tenantId: input.tenantId,
-        secret: deps.secret,
-        ...(input.nowMs !== undefined ? { nowMs: input.nowMs } : {}),
-      });
-      const url = deps.buildApproveUrl
-        ? deps.buildApproveUrl(token)
-        : `/p/approve?token=${encodeURIComponent(token)}`;
-      const summary = input.summaryText ?? 'A proposal needs your approval';
-      const body = input.renderSmsBody
-        ? input.renderSmsBody(url)
-        : `${summary}. Tap to approve (link expires in 30 min): ${url}`;
-      await deps.sendSms(input.ownerPhone, body);
-      smsSent = true;
-      approveLinkExpiresAt = expiresAt;
-      // P2-034 — anchor the reply transport. Recorded only after a
-      // successful send; a failure here surfaces to the caller's
-      // best-effort wrapper rather than silently losing the anchor.
-      if (deps.onSmsSent) {
-        await deps.onSmsSent({ body, expiresAt });
+    if (deps.sendSms && input.ownerPhone) {
+      // RV-074 (F-4) — low/very_low proposals must never get a Y-able one-tap
+      // link. When the payload carries a blocking confidence level, mint no
+      // token and call renderSmsBody without an approveUrl so the renderer
+      // emits the "needs review in app" form.
+      //
+      // Track E — the same suppression applies when the caller asserted the
+      // target is not Y-approvable (`suppressApproveLink`, e.g. a money/comms
+      // chain head). Both conditions share one code path: no token, review
+      // form, `review_required_rendered` anchor.
+      const isLowConfidence = confidenceMetaBlocksAutoApprove(input.payload);
+      const reviewRequired = isLowConfidence || input.suppressApproveLink === true;
+
+      let body: string;
+      let expiresAt: Date | undefined;
+
+      if (!reviewRequired && deps.secret) {
+        // Normal path: mint a one-tap token and include the approve URL.
+        const { token, expiresAt: exp } = createOneTapApproveToken({
+          proposalId: input.proposalId,
+          tenantId: input.tenantId,
+          secret: deps.secret,
+          ...(input.nowMs !== undefined ? { nowMs: input.nowMs } : {}),
+        });
+        expiresAt = exp;
+        const url = deps.buildApproveUrl
+          ? deps.buildApproveUrl(token)
+          : `/p/approve?token=${encodeURIComponent(token)}`;
+        const summary = input.summaryText ?? 'A proposal needs your approval';
+        body = input.renderSmsBody
+          ? input.renderSmsBody(url)
+          : `${summary}. Tap to approve (link expires in 30 min): ${url}`;
+        approveLinkExpiresAt = expiresAt;
+      } else if (reviewRequired) {
+        // Low/very_low confidence OR caller-asserted suppression: no token,
+        // no Y-able link. The renderer (renderProposalSms / renderChainSms)
+        // emits the review-in-app form; pass an empty string so the
+        // renderSmsBody callback signature is satisfied.
+        const summary = input.summaryText ?? 'A proposal needs your approval';
+        body = input.renderSmsBody
+          ? input.renderSmsBody('')
+          : `${summary}. Review in app.`;
+        approveLinkSuppressed = true;
+        suppressReason =
+          isLowConfidence && input.suppressApproveLink === true
+            ? 'low_confidence+action_class'
+            : isLowConfidence
+            ? 'low_confidence'
+            : 'action_class';
+      } else {
+        // No secret and not low confidence: preserve original behavior —
+        // no token to mint, so no SMS goes out.
+        body = '';
+      }
+
+      if (body) {
+        await deps.sendSms(input.ownerPhone, body);
+        smsSent = true;
+        // P2-034 / RV-074 — anchor the reply transport. Recorded only after
+        // a successful send. Low-confidence sends anchor too (kind
+        // `review_required_rendered`): they solicit "reply N to reject", so
+        // they MUST become the latest reply target — otherwise that N would
+        // be applied to whatever older proposal was rendered before.
+        if (deps.onSmsSent) {
+          await deps.onSmsSent({
+            body,
+            kind: reviewRequired ? 'review_required_rendered' : 'proposal_rendered',
+            ...(expiresAt ? { expiresAt } : {}),
+          });
+        }
       }
     }
     // No phone / no SMS seam: the proposal still sits in ready_for_review —
@@ -442,6 +571,11 @@ export async function routeUnsupervisedProposal(
         channel: input.channel,
         smsSent,
         escalated,
+        // RV-074 / Track E — make the suppressed approve affordance (and
+        // which guard fired) auditable.
+        ...(approveLinkSuppressed
+          ? { approveLinkSuppressed: true, suppressReason }
+          : {}),
       },
     }),
   );

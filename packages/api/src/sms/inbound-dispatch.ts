@@ -33,11 +33,19 @@ const logger = createLogger({
   environment: process.env.NODE_ENV || 'dev',
 });
 
+/** RV-050 — one inbound MMS media item (Twilio MediaUrlN / MediaContentTypeN). */
+export interface InboundSmsMedia {
+  url: string;
+  contentType?: string;
+}
+
 export interface InboundSmsContext {
   tenantId: string;
   fromE164: string;
   body: string;
   messageSid: string;
+  /** RV-050 — MMS media attached to the inbound message, when any. */
+  media?: InboundSmsMedia[];
 }
 
 export interface HandlerResult {
@@ -74,6 +82,19 @@ export interface FallbackHandler {
  */
 export type RecoveryResumeHandler = FallbackHandler;
 
+/**
+ * RV-050 — media side-channel. Exactly one media handler may register; it
+ * runs for every inbound message that carries media, INDEPENDENTLY of
+ * keyword/fallback routing (a photo with no body still ingests; a photo
+ * accompanying "OUT" ingests AND the keyword still routes). Its failures
+ * are swallowed and logged — media ingestion must never break normal SMS
+ * handling or turn an acknowledged Twilio delivery into a retry.
+ */
+export interface MediaHandler {
+  readonly name: string;
+  handle(ctx: InboundSmsContext): Promise<unknown>;
+}
+
 interface RegistryEntry {
   keyword: string;
   handler: KeywordHandler;
@@ -82,6 +103,7 @@ interface RegistryEntry {
 const registry = new Map<string, RegistryEntry>();
 let fallback: FallbackHandler | undefined;
 let recoveryResume: RecoveryResumeHandler | undefined;
+let mediaHandler: MediaHandler | undefined;
 
 function normalize(keyword: string): string {
   return keyword.trim().toLowerCase();
@@ -157,6 +179,39 @@ async function runRecoveryResume(
   }
 }
 
+/** RV-050 — register the (single) inbound-media handler. */
+export function registerMediaHandler(
+  handler: MediaHandler,
+  options: RegisterKeywordHandlerOptions = {},
+): void {
+  if (mediaHandler && !options.overwrite) {
+    throw new Error(
+      `duplicate media-handler registration: '${mediaHandler.name}' is already registered`,
+    );
+  }
+  mediaHandler = handler;
+}
+
+/**
+ * RV-050 — failure-isolated media ingestion. Awaited so the webhook's
+ * side-effects complete before the 200 is returned, but ANY error is logged
+ * and swallowed: media failures never break normal SMS handling.
+ */
+async function runMediaHandler(ctx: InboundSmsContext): Promise<void> {
+  if (!mediaHandler || !ctx.media || ctx.media.length === 0) return;
+  try {
+    await mediaHandler.handle({ ...ctx, media: ctx.media.map((m) => ({ ...m })) });
+  } catch (err) {
+    logger.error('Inbound SMS media handler threw', {
+      tenantId: ctx.tenantId,
+      messageSid: ctx.messageSid,
+      mediaHandler: mediaHandler.name,
+      mediaCount: ctx.media.length,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 async function runFallback(ctx: InboundSmsContext): Promise<HandlerResult | null> {
   if (!fallback) return null;
   try {
@@ -175,6 +230,11 @@ async function runFallback(ctx: InboundSmsContext): Promise<HandlerResult | null
 export async function dispatchInboundSms(
   ctx: InboundSmsContext,
 ): Promise<HandlerResult> {
+  // RV-050 — media ingestion runs FIRST and independently: a photo-only
+  // message (empty body) must still ingest even though keyword routing
+  // below has nothing to match. Failure-isolated inside runMediaHandler.
+  await runMediaHandler(ctx);
+
   const firstToken = ctx.body.trim().split(/\s+/, 1)[0] ?? '';
   if (!firstToken) {
     return { handled: false, reason: 'no_matching_handler' };
@@ -233,4 +293,5 @@ export function __resetKeywordRegistryForTests(): void {
   registry.clear();
   fallback = undefined;
   recoveryResume = undefined;
+  mediaHandler = undefined;
 }

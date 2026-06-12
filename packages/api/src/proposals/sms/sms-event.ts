@@ -5,6 +5,16 @@
  *
  *   outbound `proposal_rendered`     — the approval request we texted the owner
  *   outbound `reapproval_rendered`   — re-render after an SMS edit
+ *   outbound `review_required_rendered` — RV-074 low/very_low-confidence
+ *     send ("needs review in app — reply N to reject"). No approve
+ *     affordance, but it IS the owner's latest conversation turn, so it
+ *     must anchor reply targeting like any other render.
+ *   outbound `voice_reapproval`      — a voice edit was applied and the
+ *     updated values were read back BY VOICE only (no SMS re-render was
+ *     sent — the SMS deps weren't wired). It clears the pending-edit
+ *     block like `reapproval_rendered`, but it is NOT a reply anchor:
+ *     the owner never received a text for it, so a texted Y must keep
+ *     targeting the latest message we actually SENT (migration 171).
  *   outbound `clarification_sent`    — the one-time "Reply Y/N/EDIT" nudge
  *   inbound  `reply_approve` / `reply_reject` — the owner's decision
  *   inbound  `edit_session_opened`   — EDIT received; `expiresAt` = +10 min
@@ -27,11 +37,24 @@ export type ProposalSmsDirection = 'outbound' | 'inbound';
 export type ProposalSmsEventKind =
   | 'proposal_rendered'
   | 'reapproval_rendered'
+  | 'review_required_rendered'
+  | 'voice_reapproval'
   | 'clarification_sent'
   | 'reply_approve'
   | 'reply_reject'
   | 'edit_session_opened'
   | 'edit_request';
+
+/**
+ * The two outbound kinds that anchor the inbound reply transport — the ones
+ * `findRecentOutbound` returns and Y/N/EDIT replies resolve against. Named
+ * centrally to eliminate the five inline `'proposal_rendered' |
+ * 'review_required_rendered'` unions spread across callers.
+ */
+export type OutboundAnchorKind = Extract<
+  ProposalSmsEventKind,
+  'proposal_rendered' | 'review_required_rendered'
+>;
 
 export interface ProposalSmsEvent {
   id: string;
@@ -94,9 +117,12 @@ export function createProposalSmsEvent(
 export interface ProposalSmsEventRepository {
   create(event: ProposalSmsEvent): Promise<ProposalSmsEvent>;
   /**
-   * Most recent outbound `proposal_rendered` / `reapproval_rendered`
-   * events, newest first. The reply handler walks these and acts on the
-   * first one whose proposal is still actionable.
+   * Most recent outbound `proposal_rendered` / `reapproval_rendered` /
+   * `review_required_rendered` events, newest first. The reply handler
+   * walks these and acts on the first one whose proposal is still
+   * actionable. `voice_reapproval` is deliberately EXCLUDED: no text was
+   * sent for it, so it must never retarget the owner's next Y/N reply
+   * away from the latest message they actually received.
    */
   findRecentOutbound(tenantId: string, limit: number): Promise<ProposalSmsEvent[]>;
   /**
@@ -113,11 +139,12 @@ export interface ProposalSmsEventRepository {
   countClarifications(tenantId: string, proposalId: string): Promise<number>;
   /**
    * True when the proposal has an `edit_request` not yet followed by a
-   * `reapproval_rendered` — the owner asked for a change that could not
-   * be applied over SMS. While true, an SMS `Y` must NOT approve: the
-   * owner would be executing the stale payload they were told needs the
-   * review queue. Decided by insertion order (`seq`), so same-millisecond
-   * pairs resolve correctly: the reapproval is always inserted after.
+   * `reapproval_rendered` (SMS re-render) or `voice_reapproval` (spoken
+   * re-render) — the owner asked for a change that could not be applied.
+   * While true, an SMS `Y` must NOT approve: the owner would be
+   * executing the stale payload they were told needs the review queue.
+   * Decided by insertion order (`seq`), so same-millisecond pairs
+   * resolve correctly: the reapproval is always inserted after.
    */
   hasUnappliedEditRequest(tenantId: string, proposalId: string): Promise<boolean>;
   /** Close an edit session (idempotent). */
@@ -148,7 +175,9 @@ export class InMemoryProposalSmsEventRepository
         (e) =>
           e.tenantId === tenantId &&
           e.direction === 'outbound' &&
-          (e.kind === 'proposal_rendered' || e.kind === 'reapproval_rendered'),
+          (e.kind === 'proposal_rendered' ||
+            e.kind === 'reapproval_rendered' ||
+            e.kind === 'review_required_rendered'),
       )
       .sort(bySeqDesc)
       .slice(0, limit)
@@ -189,7 +218,12 @@ export class InMemoryProposalSmsEventRepository
         (e) =>
           e.tenantId === tenantId &&
           e.proposalId === proposalId &&
-          (e.kind === 'edit_request' || e.kind === 'reapproval_rendered'),
+          // voice_reapproval clears the block (the owner heard the updated
+          // values read back) without becoming a reply anchor — it is
+          // deliberately ABSENT from findRecentOutbound above.
+          (e.kind === 'edit_request' ||
+            e.kind === 'reapproval_rendered' ||
+            e.kind === 'voice_reapproval'),
       )
       .sort(bySeqDesc)[0];
     return latest?.kind === 'edit_request';
@@ -258,7 +292,7 @@ export class PgProposalSmsEventRepository
         `SELECT * FROM proposal_sms_events
           WHERE tenant_id = $1
             AND direction = 'outbound'
-            AND kind IN ('proposal_rendered', 'reapproval_rendered')
+            AND kind IN ('proposal_rendered', 'reapproval_rendered', 'review_required_rendered')
           ORDER BY created_at DESC, seq DESC
           LIMIT $2`,
         [tenantId, limit],
@@ -303,12 +337,15 @@ export class PgProposalSmsEventRepository
   async hasUnappliedEditRequest(tenantId: string, proposalId: string): Promise<boolean> {
     return this.withTenant(tenantId, async (client) => {
       // Insertion order decides: the reapproval row is always inserted
-      // after the edit_request it answers, so the most recent of the two
-      // kinds tells whether the latest request was applied.
+      // after the edit_request it answers, so the most recent of the
+      // kinds tells whether the latest request was applied. Both the SMS
+      // re-render (reapproval_rendered) and the spoken-only re-render
+      // (voice_reapproval, migration 171) clear the block; only the
+      // former is a reply anchor (see findRecentOutbound).
       const result = await client.query(
         `SELECT kind FROM proposal_sms_events
           WHERE tenant_id = $1 AND proposal_id = $2
-            AND kind IN ('edit_request', 'reapproval_rendered')
+            AND kind IN ('edit_request', 'reapproval_rendered', 'voice_reapproval')
           ORDER BY created_at DESC, seq DESC
           LIMIT 1`,
         [tenantId, proposalId],

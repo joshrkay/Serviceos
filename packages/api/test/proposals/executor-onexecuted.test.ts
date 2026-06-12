@@ -168,4 +168,47 @@ describe('ProposalExecutor — Phase 4a-1 onExecuted + proposal_executions row',
     const rows = await executionRepo.listByProposal(TENANT_A, proposal.id);
     expect(rows[0].idempotencyKey).toBe('idem-7');
   });
+
+  it('replay (alreadyExecuted=true): onExecuted is NOT fired — spend recorder cannot double-count', async () => {
+    // Simulate a replay: first run executes normally (onExecuted fires once).
+    // Second call on the SAME proposal — after the execution row exists, the
+    // guard short-circuits with alreadyExecuted=true; onExecuted must NOT fire.
+    //
+    // Note: we re-run the same proposal object (reset to 'approved') rather
+    // than creating a duplicate — the idempotency guard looks at the
+    // proposal_executions table, not the proposals table.
+    const repo = new InMemoryProposalRepository();
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    const onExecuted = vi.fn(async (_event: ProposalExecutionEvent) => undefined);
+
+    const proposal = approvedProposal();
+    proposal.idempotencyKey = 'idem-replay';
+    await repo.create(proposal);
+
+    const handlers = new Map<ProposalType, ExecutionHandler>([
+      ['create_customer', passingHandler('entity-replay')],
+    ]);
+    const executor = new ProposalExecutor(handlers, repo, makeGuard(executionRepo, repo), {
+      executionRepo,
+      onExecuted,
+    });
+
+    // First execution — handler runs, onExecuted fires once.
+    const first = await executor.execute(proposal, { tenantId: TENANT_A, executedBy: 'user-1' });
+    expect(first.alreadyExecuted).toBeFalsy();
+    expect(onExecuted).toHaveBeenCalledTimes(1);
+
+    // Second execution of the same proposal (re-approved to bypass status check,
+    // simulating re-delivery or retry after a crash). The idempotency guard will
+    // find the execution row written by the first run and short-circuit.
+    const reapproved = { ...proposal, status: 'approved' as const };
+    const second = await executor.execute(reapproved, { tenantId: TENANT_A, executedBy: 'user-1' });
+    expect(second.alreadyExecuted).toBe(true);
+    // onExecuted must NOT fire on replay — still exactly 1 call total.
+    expect(onExecuted).toHaveBeenCalledTimes(1);
+
+    // Sanity: the first execution's row is still there (one row only).
+    const rows = await executionRepo.listByProposal(TENANT_A, proposal.id);
+    expect(rows.length).toBe(1);
+  });
 });

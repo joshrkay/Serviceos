@@ -19,8 +19,9 @@
  */
 import { Logger } from '../logging/logger';
 import { EstimateRepository } from '../estimates/estimate';
-import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { AuditRepository } from '../audit/audit';
 import { SendChannel, SendService } from '../notifications/send-service';
+import { dispatchEstimateNudge } from '../estimates/estimate-nudge';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -104,34 +105,24 @@ export async function runEstimateReminderSweep(
       if (lastContactAt && lastContactAt.getTime() >= sentBefore.getTime()) continue;
 
       try {
-        await deps.sendService.sendEstimate({
-          tenantId,
-          estimateId: estimate.id,
-          channel,
-        });
-        await deps.estimateRepo.update(tenantId, estimate.id, {
-          reminderCount: (estimate.reminderCount ?? 0) + 1,
-          lastReminderAt: asOf,
-          updatedAt: asOf,
-        });
+        // RV-086: the send composition (SendService re-send + reminder
+        // bookkeeping + audit) is shared with the send_estimate_nudge
+        // proposal handler via dispatchEstimateNudge.
+        await dispatchEstimateNudge(
+          {
+            estimateRepo: deps.estimateRepo,
+            sendService: deps.sendService,
+            ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+          },
+          {
+            tenantId,
+            estimate,
+            channel,
+            asOf,
+            actorId: 'estimate-reminder-worker',
+          },
+        );
         reminders++;
-        if (deps.auditRepo) {
-          await deps.auditRepo.create(
-            createAuditEvent({
-              tenantId,
-              actorId: 'estimate-reminder-worker',
-              actorRole: 'system',
-              eventType: 'estimate.reminder_sent',
-              entityType: 'estimate',
-              entityId: estimate.id,
-              metadata: {
-                estimateNumber: estimate.estimateNumber,
-                reminderCount: (estimate.reminderCount ?? 0) + 1,
-                channel,
-              },
-            }),
-          );
-        }
       } catch (err) {
         // A single estimate's send failure (e.g. recipient has no phone,
         // delivery provider error) must not skip the rest of the tenant.

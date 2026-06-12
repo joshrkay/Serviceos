@@ -38,11 +38,19 @@
  */
 import type { Proposal, ProposalRepository } from '../../proposals/proposal';
 import { actionClassForProposalType } from '../../proposals/proposal';
-import { approveProposal, rejectProposal } from '../../proposals/actions';
+import { approveProposal, rejectProposal, editProposal } from '../../proposals/actions';
 import { routeUnsupervisedProposal } from '../../proposals/auto-approve';
-import { renderProposalSms } from '../../proposals/sms/render';
+import { renderProposalSms, renderReapprovalSms } from '../../proposals/sms/render';
 import { payloadHeadlineCents } from '../../proposals/payload-money';
-import type { ProposalSmsEventRepository } from '../../proposals/sms/sms-event';
+import {
+  chainRefFieldsTouchedByDelta,
+  type ProposalEditInterpreter,
+} from '../../proposals/edit-interpreter';
+import {
+  type ProposalSmsEventRepository,
+  type OutboundAnchorKind,
+  createProposalSmsEvent,
+} from '../../proposals/sms/sms-event';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import { createAuditEvent, type AuditRepository } from '../../audit/audit';
 import type { SettingsRepository } from '../../settings/settings';
@@ -139,7 +147,17 @@ export type VoiceApprovalOutcome =
   | 'rejected'
   | 'kept_for_later'
   | 'approve_failed'
-  | 'reject_failed';
+  | 'reject_failed'
+  // RV-225 — voice edit dialogue outcomes. 'edited' = the delta was
+  // applied (proposal stays pending); 'edit_recorded' = the instruction
+  // could not be applied automatically and was recorded (blocking later
+  // approval until it is resolved in the review queue).
+  | 'edited'
+  | 'edit_recorded'
+  // Track E — the edit targeted a chained dependent whose payload still
+  // holds an unresolved `$ref:chain[…]` token in a field the delta
+  // touches. Refused: the edit would overwrite the chain wiring.
+  | 'edit_blocked_chain_ref';
 
 export interface VoiceApprovalTurnResult {
   /** TTS-ready line for this turn. */
@@ -169,6 +187,7 @@ export interface OneTapFallbackDeps {
     tenantId: string;
     proposalId: string;
     body: string;
+    kind: OutboundAnchorKind;
   }) => Promise<void>;
 }
 
@@ -176,12 +195,25 @@ export interface VoiceApprovalDeps {
   proposalRepo: ProposalRepository;
   auditRepo?: AuditRepository;
   settingsRepo?: SettingsRepository;
-  /** Pending-edit parity guard — same repo method SMS reply and one-tap use. */
-  smsEventRepo?: Pick<ProposalSmsEventRepository, 'hasUnappliedEditRequest'>;
+  /**
+   * Pending-edit parity guard — same repo method SMS reply and one-tap use.
+   * RV-225: `create` is additionally used (when available) to record voice
+   * edit requests / re-approval renders in the SAME event store, so a
+   * voice-dictated edit that could not be applied blocks Y / one-tap /
+   * voice approval exactly like an SMS edit request would.
+   */
+  smsEventRepo?: Pick<ProposalSmsEventRepository, 'hasUnappliedEditRequest'> &
+    Partial<Pick<ProposalSmsEventRepository, 'create'>>;
   /** Lets a rejected create_booking release its held calendar slot. */
   appointmentRepo?: AppointmentRepository;
   /** One-tap SMS fallback for refused money/irreversible approvals. */
   oneTapFallback?: OneTapFallbackDeps;
+  /**
+   * RV-225 — shared edit-delta interpreter (proposals/edit-interpreter.ts,
+   * the exact seam the SMS EDIT reply uses). Absent or returning null: the
+   * instruction is recorded instead of applied — never a silent guess.
+   */
+  editInterpreter?: ProposalEditInterpreter;
 }
 
 export interface VoiceApprovalSessionRef {
@@ -373,11 +405,18 @@ async function sendOneTapFallback(
         ...(fallback.buildApproveUrl ? { buildApproveUrl: fallback.buildApproveUrl } : {}),
         ...(fallback.recordSmsEvent
           ? {
-              onSmsSent: async ({ body }: { body: string }) =>
+              onSmsSent: async ({
+                body,
+                kind,
+              }: {
+                body: string;
+                kind: OutboundAnchorKind;
+              }) =>
                 fallback.recordSmsEvent!({
                   tenantId: ref.tenantId,
                   proposalId: proposal.id,
                   body,
+                  kind,
                 }),
             }
           : {}),
@@ -398,8 +437,11 @@ async function sendOneTapFallback(
               summary: proposal.summary,
               payload: proposal.payload,
             },
-            { approveUrl },
+            { approveUrl: approveUrl || undefined },
           ),
+        // RV-074 (F-4) — pass payload so the routing site can guard
+        // low/very_low proposals against one-tap Y-able links.
+        payload: proposal.payload,
       },
     );
     return result.smsSent;
@@ -516,6 +558,28 @@ async function executeApprove(
   ref: VoiceApprovalSessionRef,
   proposalId: string,
 ): Promise<VoiceApprovalTurnResult> {
+  // Track E — confirm-stage race: `prepareResolvedTarget` checked the
+  // pending-edit guard at READBACK time, but between the readback and the
+  // owner's "yes" (and, for money targets, the challenge turn) an SMS
+  // edit_request may have landed. Re-run the guard at the moment the
+  // mutation would actually apply, so a strict affirmative can never
+  // execute a payload the owner just asked to change.
+  if (
+    deps.smsEventRepo &&
+    (await deps.smsEventRepo.hasUnappliedEditRequest(ref.tenantId, proposalId))
+  ) {
+    await audit(deps, ref, 'proposal.voice_approve_blocked_pending_edit', proposalId, {
+      stage: 'confirm',
+    });
+    return {
+      speak:
+        'You asked to change that one — your note is attached. Review and approve it in your queue.',
+      pending: null,
+      outcome: 'blocked_pending_edit',
+      proposalId,
+    };
+  }
+
   let approved: Proposal;
   try {
     approved = await approveProposal(
@@ -710,6 +774,295 @@ export async function startVoiceApproval(
       return { speak: NOT_FOUND_LINE, pending: null, outcome: 'not_found' };
     }
   }
+}
+
+// ─── RV-225 — voice edit dialogue ────────────────────────────────────────────
+
+/**
+ * Spoken confirmation of an APPLIED edit, composed from the UPDATED
+ * payload — the same payload-not-utterance provenance rule as
+ * `composeReadback`. The proposal stays pending: editing never approves.
+ */
+export function composeEditedReadback(proposal: Proposal): string {
+  const payload = (proposal.payload ?? {}) as Record<string, unknown>;
+  const parts: string[] = [];
+  const customer = payloadCustomerName(payload);
+  parts.push(customer ? `${typeLabel(proposal)} for ${customer}` : typeLabel(proposal));
+  const cents = payloadHeadlineCents(payload);
+  if (cents !== null) parts.push(`total ${formatCents(cents)}`);
+  const head = parts.join(', ');
+  return `Updated — ${head}. It stays pending; say "approve it" when you're ready.`;
+}
+
+const EDIT_RECORDED_LINE =
+  'I couldn’t apply that automatically, so I attached your note to the proposal. Finish it in your review queue.';
+
+/**
+ * Record a voice edit request in the SAME proposal_sms_events store the
+ * SMS EDIT flow uses, so `hasUnappliedEditRequest` blocks approval on
+ * EVERY channel (voice, SMS Y, one-tap) until the request is resolved.
+ * Best-effort when the deps only wire the read side.
+ */
+async function recordVoiceEditEvent(
+  deps: VoiceApprovalDeps,
+  tenantId: string,
+  proposalId: string,
+  kind: 'edit_request' | 'reapproval_rendered' | 'voice_reapproval',
+  body: string,
+): Promise<void> {
+  if (!deps.smsEventRepo?.create) return;
+  await deps.smsEventRepo.create(
+    createProposalSmsEvent({
+      tenantId,
+      proposalId,
+      direction: kind === 'edit_request' ? 'inbound' : 'outbound',
+      kind,
+      body,
+    }),
+  );
+}
+
+/**
+ * Track E (architect ruling) — deliver the re-approval render after an
+ * APPLIED voice edit.
+ *
+ * The pre-fix behavior recorded `reapproval_rendered` for a message that
+ * was never sent, making the voice-edited proposal the owner's latest
+ * SMS reply anchor — a later texted Y would have targeted a proposal the
+ * owner never received text for (retargeting hazard).
+ *
+ *   WIRED (oneTapFallback.sendSms + a resolvable owner phone): send the
+ *     REAL re-render SMS through the existing m156–158 re-approval
+ *     machinery (`renderReapprovalSms`, the exact body the SMS edit path
+ *     sends) and record `reapproval_rendered` from the actual send —
+ *     send FIRST, record after, so an unsent render never anchors.
+ *   UNWIRED (or the send failed): record `voice_reapproval` instead —
+ *     the owner heard the updated values read back on the call, so the
+ *     pending-edit block clears, but the kind is EXCLUDED from
+ *     findRecentOutbound and can never become a reply anchor.
+ */
+async function deliverVoiceEditReapproval(
+  deps: VoiceApprovalDeps,
+  ref: VoiceApprovalSessionRef,
+  updated: Proposal,
+  instruction: string,
+  spokenReadback: string,
+): Promise<void> {
+  const fallback = deps.oneTapFallback;
+  let ownerPhone: string | null | undefined;
+  if (fallback?.sendSms && fallback.resolveOwnerPhone) {
+    try {
+      ownerPhone = await fallback.resolveOwnerPhone(ref.tenantId);
+    } catch {
+      ownerPhone = undefined;
+    }
+  }
+
+  if (fallback?.sendSms && ownerPhone) {
+    const body = renderReapprovalSms(
+      {
+        proposalType: updated.proposalType,
+        summary: updated.summary,
+        payload: updated.payload,
+      },
+      instruction,
+    );
+    try {
+      await fallback.sendSms(ownerPhone, body);
+      // Real send → real anchor. Clears hasUnappliedEditRequest and, like
+      // the SMS re-render, becomes the latest reply target so a later
+      // texted Y correctly targets the proposal just edited.
+      await recordVoiceEditEvent(deps, ref.tenantId, updated.id, 'reapproval_rendered', body);
+      return;
+    } catch (err) {
+      await audit(deps, ref, 'proposal.voice_reapproval_send_failed', updated.id, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      // Fall through: the spoken readback was still delivered on the call.
+    }
+  }
+
+  await recordVoiceEditEvent(deps, ref.tenantId, updated.id, 'voice_reapproval', spokenReadback);
+}
+
+export interface StartVoiceEditInput extends VoiceApprovalSessionRef {
+  /** The owner's words identifying the target proposal (or the utterance). */
+  reference: string;
+  /** The owner's change instruction ("change the second line to $200"). */
+  instruction: string;
+}
+
+/**
+ * RV-225 — "change the second line to $200" on a verified owner line.
+ *
+ *   1. Owner gate (defense in depth — routing already gates).
+ *   2. Target resolution via the SAME pendingProposals resolver the
+ *      approve dialogue uses (single-pending fallback included).
+ *   3. The instruction is recorded as an `edit_request` FIRST (SMS-flow
+ *      parity): if the apply fails — or never happens — approval stays
+ *      blocked by `hasUnappliedEditRequest` until the queue resolves it.
+ *   4. Delta interpretation via the shared `editInterpreter` seam, applied
+ *      through the EXISTING `editProposal` path (Zod-validated merge, same
+ *      audit). On success a `reapproval_rendered` event clears the block
+ *      and the EDITED values are read back from the UPDATED payload.
+ *   5. The proposal stays pending — an edit never approves anything.
+ */
+export async function startVoiceEdit(
+  deps: VoiceApprovalDeps,
+  input: StartVoiceEditInput,
+): Promise<VoiceApprovalTurnResult> {
+  if (!input.ownerSession) {
+    await audit(deps, input, 'proposal.voice_edit_denied_not_owner', '');
+    return {
+      speak: 'I can’t take changes to pending work on this line. How else can I help?',
+      pending: null,
+      outcome: 'denied_not_owner',
+    };
+  }
+
+  // ── Target resolution (same source as the approve dialogue) ──
+  const resolver = new PendingProposalResolver(deps.proposalRepo);
+  const { result, pending } = await resolver.resolve({
+    tenantId: input.tenantId,
+    reference: input.reference,
+  });
+
+  let proposal: Proposal | undefined;
+  if (result.kind === 'resolved') {
+    proposal = pending.find((p) => p.id === result.candidate.id);
+  } else if (result.kind === 'not_found' || result.kind === 'skipped') {
+    // No usable signals ("change it to $200") + exactly one pending →
+    // that one is the only thing the owner can mean.
+    const signals = extractReferenceSignals(input.reference);
+    const hasSignals =
+      signals.nameTokens.length > 0 ||
+      signals.types !== null ||
+      signals.amountCents !== null ||
+      parseOrdinalReference(input.reference) !== null;
+    if (!hasSignals && pending.length === 1) {
+      proposal = pending[0];
+    } else if (!hasSignals && pending.length === 0) {
+      await audit(deps, input, 'proposal.voice_edit_nothing_pending', '');
+      return {
+        speak: 'Nothing is waiting for your review right now.',
+        pending: null,
+        outcome: 'nothing_pending',
+      };
+    }
+  }
+
+  if (!proposal && result.kind === 'ambiguous') {
+    // ONE spoken clarification, stateless: the owner repeats the command
+    // with a clearer reference ("change the HENDERSON estimate to ...").
+    const candidates = result.candidates
+      .map((c) => pending.find((p) => p.id === c.id))
+      .filter((p): p is Proposal => Boolean(p));
+    await audit(deps, input, 'proposal.voice_edit_clarification', '', {
+      candidateCount: candidates.length,
+    });
+    return {
+      speak: `${clarificationLine(candidates, candidates.length)} Say the change again with that one's name.`,
+      pending: null,
+      outcome: 'clarification',
+    };
+  }
+
+  if (!proposal) {
+    await audit(deps, input, 'proposal.voice_edit_target_not_found', '');
+    return { speak: NOT_FOUND_LINE, pending: null, outcome: 'not_found' };
+  }
+
+  // ── Record-first (SMS parity), then interpret + apply ──
+  await recordVoiceEditEvent(deps, input.tenantId, proposal.id, 'edit_request', input.instruction);
+
+  if (deps.editInterpreter) {
+    try {
+      const delta = await deps.editInterpreter({ proposal, instruction: input.instruction });
+      if (delta && Object.keys(delta).length > 0) {
+        // Track E — chain-ref guard: a chained dependent can hold unresolved
+        // `$ref:chain[N].…` tokens (resolved from the parent's resultEntityId
+        // at execution time). A delta touching one of those fields would
+        // overwrite the chain wiring — refuse with a clear spoken line.
+        // (Deltas that DON'T touch the token field already fail closed for
+        // uuid-typed contract fields: editProposal Zod-validates the merged
+        // payload and the still-present token is not a uuid — see
+        // chainRefFieldsTouchedByDelta in proposals/edit-interpreter.ts.)
+        const refFields = chainRefFieldsTouchedByDelta(proposal.payload, delta);
+        if (refFields.length > 0) {
+          await audit(deps, input, 'proposal.voice_edit_blocked_chain_ref', proposal.id, {
+            fields: refFields,
+          });
+          // Stamp sourceContext so the review queue shows WHAT the owner asked
+          // to change — parity with the edit_recorded path and the SMS handler.
+          // The edit_request was already recorded above (record-first parity),
+          // so approval is blocked on every channel until the queue resolves it.
+          await deps.proposalRepo.update(input.tenantId, proposal.id, {
+            sourceContext: {
+              ...(proposal.sourceContext ?? {}),
+              pendingVoiceEditRequest: {
+                instruction: input.instruction,
+                receivedAt: new Date().toISOString(),
+              },
+            },
+          });
+          return {
+            speak:
+              'That one’s waiting on an earlier step — approval by text is paused until then. Edit it after that step runs.',
+            pending: null,
+            outcome: 'edit_blocked_chain_ref',
+            proposalId: proposal.id,
+          };
+        }
+        // editProposal Zod-validates the merged payload — a hallucinated
+        // delta fails closed into the recorded-note path below.
+        const { proposal: updated, editedFields } = await editProposal(
+          deps.proposalRepo,
+          input.tenantId,
+          proposal.id,
+          VOICE_APPROVAL_ACTOR_ID,
+          'owner',
+          delta,
+          deps.auditRepo,
+        );
+        const speak = composeEditedReadback(updated);
+        // Clears hasUnappliedEditRequest (insertion order decides). When the
+        // SMS deps are wired this also sends the REAL re-render text and
+        // anchors it; otherwise a voice_reapproval row clears the block
+        // without ever becoming a reply anchor (see deliverVoiceEditReapproval).
+        await deliverVoiceEditReapproval(deps, input, updated, input.instruction, speak);
+        await audit(deps, input, 'proposal.voice_edited', updated.id, {
+          proposalType: updated.proposalType,
+          editedFields,
+        });
+        return { speak, pending: null, outcome: 'edited', proposalId: updated.id };
+      }
+    } catch (err) {
+      await audit(deps, input, 'proposal.voice_edit_failed', proposal.id, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // No interpreter, an empty delta, or a failed/invalid one: the request
+  // stays recorded (edit_request — approval is blocked on every channel)
+  // and the instruction is stamped on sourceContext so the review queue
+  // shows WHAT the owner asked to change. Never a silent guess.
+  await deps.proposalRepo.update(input.tenantId, proposal.id, {
+    sourceContext: {
+      ...(proposal.sourceContext ?? {}),
+      pendingVoiceEditRequest: {
+        instruction: input.instruction,
+        receivedAt: new Date().toISOString(),
+      },
+    },
+  });
+  await audit(deps, input, 'proposal.voice_edit_requested', proposal.id);
+  return {
+    speak: EDIT_RECORDED_LINE,
+    pending: null,
+    outcome: 'edit_recorded',
+    proposalId: proposal.id,
+  };
 }
 
 // ─── Turn 2+ — continue ──────────────────────────────────────────────────────

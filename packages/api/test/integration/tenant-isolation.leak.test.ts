@@ -55,6 +55,8 @@ import { PgAttachmentRepository } from '../../src/attachments/pg-attachment';
 import { PgDailyDigestRepository } from '../../src/digest/pg-daily-digest';
 import type { DailyDigestPayload } from '../../src/digest/digest-service';
 import { PgTenantFeatureFlagRepository } from '../../src/flags/pg-tenant-feature-flags';
+import { PgSupervisorPolicyRepository } from '../../src/proposals/supervisor/policies-repo';
+import { PgTenantBudgetCounterRepository } from '../../src/proposals/supervisor/budget-counters-repo';
 import { InMemoryFeatureFlagRepository } from '../../src/flags/feature-flags';
 import { PgTriageEventRepository } from '../../src/ai/agents/customer-calling/pg-triage-events';
 import { PgConsentEventRepository } from '../../src/compliance/consent-events';
@@ -750,6 +752,37 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
     });
   });
 
+  // ── supervisor_policies + tenant_budget_counters (F-1, migration 167) ─────
+  describe('PgSupervisorPolicyRepository', () => {
+    it('createVersion/activate/getActive round-trip per tenant and never cross tenants (pins real column names)', async () => {
+      const repo = new PgSupervisorPolicyRepository(pool);
+      const a1 = await repo.createVersion(tenantA.tenantId, { perProposalCapCents: 5_000 }, 'owner-a');
+      const b1 = await repo.createVersion(tenantB.tenantId, { dailySpendCapCents: 9_000 }, 'owner-b');
+      // Independent per-tenant version sequences.
+      expect(a1.version).toBe(1);
+      expect(b1.version).toBe(1);
+
+      await repo.activate(tenantA.tenantId, a1.version);
+      const activeA = await repo.getActive(tenantA.tenantId);
+      const activeB = await repo.getActive(tenantB.tenantId);
+      expect(activeA?.rules).toEqual({ perProposalCapCents: 5_000 });
+      // Activating A's policy must not surface (or activate) anything for
+      // B — B's same-numbered version 1 stays inactive.
+      expect(activeB).toBeNull();
+    });
+
+    it('tenant A policy rows are invisible to tenant B via RLS (raw query cross-check)', async () => {
+      const n = await asTenant(pool, tenantB.tenantId, async (client) => {
+        const res = await client.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM supervisor_policies WHERE tenant_id = $1`,
+          [tenantA.tenantId],
+        );
+        return res.rows[0].n;
+      });
+      expect(n).toBe(0);
+    });
+  });
+
   // ── consent_events (RV-130, migration 168) ─────────────────────────────────
   describe('PgConsentEventRepository', () => {
     const PHONE = '+1 (512) 555-0188';
@@ -785,6 +818,33 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
       const n = await asTenant(pool, tenantB.tenantId, async (client) => {
         const res = await client.query<{ n: number }>(
           `SELECT count(*)::int AS n FROM consent_events WHERE tenant_id = $1`,
+          [tenantA.tenantId],
+        );
+        return res.rows[0].n;
+      });
+      expect(n).toBe(0);
+    });
+  });
+
+  describe('PgTenantBudgetCounterRepository', () => {
+    const WINDOW = new Date('2026-06-11T00:00:00.000Z');
+
+    it('increment accumulates per tenant and read never crosses tenants (pins real column names)', async () => {
+      const repo = new PgTenantBudgetCounterRepository(pool);
+      await repo.increment(tenantA.tenantId, 'daily_spend_cents', WINDOW, 100);
+      await repo.increment(tenantA.tenantId, 'daily_spend_cents', WINDOW, 250);
+      await repo.increment(tenantB.tenantId, 'daily_spend_cents', WINDOW, 7);
+
+      expect(await repo.read(tenantA.tenantId, 'daily_spend_cents', WINDOW)).toBe(350);
+      expect(await repo.read(tenantB.tenantId, 'daily_spend_cents', WINDOW)).toBe(7);
+      // Absent counter reads as 0, not as the other tenant's value.
+      expect(await repo.read(tenantB.tenantId, 'auto_approvals', WINDOW)).toBe(0);
+    });
+
+    it('tenant A counter rows are invisible to tenant B via RLS (raw query cross-check)', async () => {
+      const n = await asTenant(pool, tenantB.tenantId, async (client) => {
+        const res = await client.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM tenant_budget_counters WHERE tenant_id = $1`,
           [tenantA.tenantId],
         );
         return res.rows[0].n;
@@ -912,6 +972,42 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
         await client.query(`RESET app.current_tenant_id`);
         await expect(
           client.query('SELECT count(*) FROM daily_digests'),
+        ).rejects.toThrow(/unrecognized configuration parameter|invalid input syntax for type uuid/);
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined);
+        client.release();
+      }
+    });
+
+    it('SELECT on supervisor_policies throws when GUC is not set (fail-closed policy)', async () => {
+      // supervisor_policies policy (schema.ts migration 167):
+      //   USING (tenant_id = current_setting('app.current_tenant_id')::UUID)
+      // No missing_ok → same fail-closed error as customers above.
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+        await client.query(`RESET app.current_tenant_id`);
+        await expect(
+          client.query('SELECT count(*) FROM supervisor_policies'),
+        ).rejects.toThrow(/unrecognized configuration parameter|invalid input syntax for type uuid/);
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined);
+        client.release();
+      }
+    });
+
+    it('SELECT on tenant_budget_counters throws when GUC is not set (fail-closed policy)', async () => {
+      // tenant_budget_counters policy (schema.ts migration 167):
+      //   USING (tenant_id = current_setting('app.current_tenant_id')::UUID)
+      // No missing_ok → same fail-closed error as customers above.
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+        await client.query(`RESET app.current_tenant_id`);
+        await expect(
+          client.query('SELECT count(*) FROM tenant_budget_counters'),
         ).rejects.toThrow(/unrecognized configuration parameter|invalid input syntax for type uuid/);
       } finally {
         await client.query('ROLLBACK').catch(() => undefined);

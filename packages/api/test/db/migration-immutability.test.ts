@@ -236,9 +236,13 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // RV-063: per-tenant digest delivery settings (enabled/time/channel)
   ['163_tenant_settings_digest', '3fb34512c152ba262d2e21e4aa84608374156f89c07d5f71e3cd43d38b718836'],
   ['164_dispatch_entity_daily_digest', '4d3ad093b4319cf786bfd047df3d5898720a4d6712e5037704c5a06fffc492e9'],
+  // RV-074: widen proposal_sms_events kind CHECK for 'review_required_rendered'
+  ['165_proposal_sms_events_review_required_kind', '0a1ccd582e840a57ec622344a0a41a690229bfd30b7b9e87b0265c255b1dff56'],
   // RV-120: per-call vulnerability triage outcomes (turn-batch grader log)
   // tier CHECK added (none/low/elevated/critical = UrgencyTier enum) — branch-local, pre-deploy
   ['166_create_triage_events', 'a6e1f2eeefc1aba830d600aa36b1635535938bd9a83abc16c371c590f7568147'],
+  // tenant_budget_counters (fixed-window budget counters), both RLS'd.
+  ['167_create_supervisor_policies', '6bf3ba1a21e1bc1a829fe4addd9a71cd8e9c64587c23338909df15c0f6988d48'],
   // RV-130: append-only consent ledger (recording/sms/marketing events)
   ['168_create_consent_events', '6c9ba983361d9dec2a5a28e97ff13b210628cd194d22b6b5bd5b880a4af11970'],
   // RV-132: per-tenant retention horizon + legal hold + purge tombstone
@@ -246,6 +250,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['169_recording_retention', 'aac50e6e535fc4347f0c9f3dc45f27ac8016902bc0fbbceb2b9ba9cd0d033afa'],
   // RV-115: FSM context snapshot on dropped-call recovery rows
   ['170_dropped_call_recovery_context', 'f05149c2f4fb0fabaa390b35054ba3bd9c8caeb75298cf729992e5a3955d91f6'],
+  // block, never a reply anchor)
+  ['171_proposal_sms_events_voice_reapproval_kind', '84e29ec755102c0b5f00bddc21544610d2c6d6e05ad9e20fafad6f0e700b99fe'],
 ];
 
 function hashMigration(value: string): string {
