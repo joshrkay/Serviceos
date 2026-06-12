@@ -200,6 +200,33 @@ describe('RV-072 — ordinal references', () => {
     expect(parseOrdinalReference('the $450 invoice')).toBeNull();
   });
 
+  // ITEM 3 — table-driven tests ensuring capture and validation agree.
+  it.each<[string, number | 'last' | null]>([
+    ['the 1st', 0],
+    ['the 2nd', 1],
+    ['the 3rd', 2],
+    ['the 4th', 3],
+    ['the 5th', 4],
+    ['number 1', 0],
+    ['number 3', 2],
+    ['the first one', 0],
+    ['the second one', 1],
+    ['the third', 2],
+    ['the last one', 'last'],
+    // The bug case: "approve 2 of the 3rd" — "2" is a bare number, not
+    // a validated ordinal. The ONLY ordinal in this string is "3rd", so
+    // the result must be index 2 (3rd → 0-based 2), NOT 1 (from "2").
+    ['approve 2 of the 3rd', 2],
+    // Bare integers without ordinal suffix or "number" prefix are NOT ordinals.
+    ['approve 2 proposals', null],
+    // Not ordinals at all.
+    ['the Henderson estimate', null],
+    ['the $450 invoice', null],
+    ['', null],
+  ])('parseOrdinalReference(%j) → %j', (input, expected) => {
+    expect(parseOrdinalReference(input)).toBe(expected);
+  });
+
   it('resolves "the second one" against the session-provided ordered list', async () => {
     const repo = new InMemoryProposalRepository();
     const a = await seed(repo, makeProposal({ summary: 'Estimate for Henderson' }));
