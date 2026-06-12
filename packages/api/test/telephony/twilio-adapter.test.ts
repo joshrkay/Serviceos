@@ -14,11 +14,19 @@ import {
   type OnCallEntry,
 } from '../../src/oncall/rotation';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
-import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { InMemoryProposalRepository, createProposal } from '../../src/proposals/proposal';
 import { InMemoryLeadRepository } from '../../src/leads/lead';
 import { InMemoryVoiceSessionRepository } from '../../src/voice/voice-session';
 import { MEDIA_STREAM_PATH } from '../../src/telephony/media-streams/twilio-mediastream-server';
 import { InMemorySettingsRepository, type TenantSettings } from '../../src/settings/settings';
+import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
+import type { Appointment } from '../../src/appointments/appointment';
+import { InMemoryJobRepository, type Job } from '../../src/jobs/job';
+import { InMemoryDailyDigestRepository } from '../../src/digest/digest-service';
+import { InMemoryEstimateRepository, type Estimate } from '../../src/estimates/estimate';
+import { InMemoryInvoiceRepository, type Invoice } from '../../src/invoices/invoice';
+import type { DocumentTotals } from '../../src/shared/billing-engine';
+import { InMemoryDroppedCallRecoveryRepository } from '../../src/sms/recovery/scheduler';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -652,6 +660,189 @@ describe('TwilioGatherAdapter.handleGather', () => {
     }
   });
 
+  describe('Phase-2 Track A owner lookup wiring', () => {
+    const tenantId = 'tenant-owner';
+
+    function advanceToIntentCapture(session: Awaited<ReturnType<VoiceSessionStore['get']>>) {
+      if (!session) throw new Error('missing session');
+      session.machine.dispatch({ type: 'incoming_call', tenantId, callSid: 'CA-owner', from: '+15125550111', to: '+15125550000' });
+      session.machine.dispatch({ type: 'greeted_ok' });
+      session.machine.dispatch({ type: 'caller_known', customerId: 'cust-temp' });
+      session.customerId = undefined;
+    }
+
+    function totals(totalCents: number): DocumentTotals {
+      return {
+        subtotalCents: totalCents,
+        discountCents: 0,
+        taxRateBps: 0,
+        taxableSubtotalCents: totalCents,
+        taxCents: 0,
+        totalCents,
+      };
+    }
+
+    async function ownerAdapter(intentType: string, ownerSession = true, extendedIntents = true) {
+      const store = new VoiceSessionStore();
+      const gateway = makeGatewayReturning(JSON.stringify({ intentType, confidence: 0.96 }));
+      const appointmentRepo = new InMemoryAppointmentRepository();
+      const jobRepo = new InMemoryJobRepository();
+      const proposalRepo = new InMemoryProposalRepository();
+      const dailyDigestRepo = new InMemoryDailyDigestRepository();
+      const estimateRepo = new InMemoryEstimateRepository();
+      const invoiceRepo = new InMemoryInvoiceRepository();
+      const droppedCallRecoveryRepo = new InMemoryDroppedCallRecoveryRepository();
+      const adapter = new TwilioGatherAdapter({
+        store,
+        gateway,
+        businessName: 'Acme Plumbing',
+        publicBaseUrl: 'https://example.com',
+        appointmentRepo,
+        jobRepo,
+        proposalRepo,
+        dailyDigestRepo,
+        estimateRepo,
+        invoiceRepo,
+        droppedCallRecoveryRepo,
+      });
+      const session = store.create(tenantId, 'telephony', {
+        callSid: `CA-${intentType}`,
+        ...(ownerSession ? { ownerSession: true } : {}),
+        ...(extendedIntents ? { extendedIntents: true } : {}),
+      });
+      advanceToIntentCapture(session);
+      return {
+        adapter,
+        session,
+        appointmentRepo,
+        jobRepo,
+        proposalRepo,
+        dailyDigestRepo,
+        estimateRepo,
+        invoiceRepo,
+        droppedCallRecoveryRepo,
+      };
+    }
+
+    it.each([
+      ['lookup_day_overview', 'You have 1 appointment today'],
+      ['lookup_digest', 'Owner digest: revenue was strong'],
+      ['lookup_pending_items', '1 estimate is out waiting on a yes'],
+    ])('owner session dispatches %s without a customerId and speaks the summary', async (intentType, expected) => {
+      const deps = await ownerAdapter(intentType);
+      await deps.jobRepo.create({
+        id: 'job-owner-1',
+        tenantId,
+        customerId: 'cust-1',
+        locationId: 'loc-1',
+        jobNumber: 'JOB-1',
+        summary: 'Main drain repair',
+        status: 'scheduled',
+        priority: 'normal',
+        createdBy: 'u1',
+        createdAt: new Date('2026-06-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-06-01T00:00:00.000Z'),
+      } as Job);
+      await deps.appointmentRepo.create({
+        id: 'appt-owner-1',
+        tenantId,
+        jobId: 'job-owner-1',
+        scheduledStart: new Date(),
+        scheduledEnd: new Date(Date.now() + 60_000),
+        status: 'scheduled',
+        holdPendingApproval: false,
+        createdBy: 'u1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as Appointment);
+      await deps.proposalRepo.create(createProposal({
+        tenantId,
+        proposalType: 'draft_invoice',
+        payload: {},
+        summary: 'Needs approval',
+        createdBy: 'u1',
+      }));
+      await deps.dailyDigestRepo.upsert(
+        tenantId,
+        new Date().toISOString().slice(0, 10),
+        {} as Parameters<InMemoryDailyDigestRepository['upsert']>[2],
+        'Owner digest: revenue was strong',
+      );
+      await deps.estimateRepo.create({
+        id: 'est-owner-1',
+        tenantId,
+        jobId: 'job-owner-1',
+        estimateNumber: 'EST-1',
+        status: 'sent',
+        lineItems: [],
+        totals: totals(12300),
+        sentAt: new Date(Date.now() - 86_400_000),
+        version: 1,
+        createdBy: 'u1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as Estimate);
+      await deps.invoiceRepo.create({
+        id: 'inv-owner-1',
+        tenantId,
+        jobId: 'job-owner-1',
+        invoiceNumber: 'INV-1',
+        status: 'open',
+        lineItems: [],
+        totals: totals(45600),
+        amountPaidCents: 0,
+        amountDueCents: 45600,
+        createdBy: 'u1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as Invoice);
+
+      const xml = await deps.adapter.handleGather({
+        sessionId: deps.session.id,
+        callSid: `CA-${intentType}`,
+        speechResult: 'owner lookup please',
+        confidence: 0.95,
+        tenantId,
+      });
+
+      expect(xml).toContain(expected);
+      expect(xml).toContain('Anything else I can help you with?');
+    });
+
+    it.each(['lookup_day_overview', 'lookup_digest', 'lookup_pending_items'])(
+      'non-owner session refuses %s and speaks the existing lookup fallback',
+      async (intentType) => {
+        const deps = await ownerAdapter(intentType, false);
+        const xml = await deps.adapter.handleGather({
+          sessionId: deps.session.id,
+          callSid: `CA-${intentType}-non-owner`,
+          speechResult: 'owner lookup please',
+          confidence: 0.95,
+          tenantId,
+        });
+
+        expect(xml).toContain('I&apos;m having trouble pulling that up right now');
+        expect(xml).not.toContain('Owner digest: revenue was strong');
+      },
+    );
+
+    it('flag-off owner session refuses a forced lookup_digest classification without calling the skill', async () => {
+      const deps = await ownerAdapter('lookup_digest', true, false);
+      const findLatest = vi.spyOn(deps.dailyDigestRepo, 'findLatest');
+
+      const xml = await deps.adapter.handleGather({
+        sessionId: deps.session.id,
+        callSid: 'CA-lookup_digest-flag-off-owner',
+        speechResult: 'read me my day',
+        confidence: 0.95,
+        tenantId,
+      });
+
+      expect(xml).toContain('I&apos;m having trouble pulling that up right now');
+      expect(findLatest).not.toHaveBeenCalled();
+    });
+  });
+
   it('classifies a clear utterance and advances FSM through intent_confirm', async () => {
     const xml = await adapter.handleGather({
       sessionId,
@@ -709,6 +900,155 @@ describe('TwilioGatherAdapter.handleGather', () => {
     const snap = await s2.snapshot(sid);
     expect(snap?.state).toBe('intent_capture'); // reprompt, not escalated yet
     expect(xml).toContain('<Gather');
+  });
+
+  it('flag-off live calls omit extendedIntents from classifier context and resolve the flag once per call', async () => {
+    const extendedIntentsEnabled = vi.fn(async () => false);
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0.2}');
+    const store = new VoiceSessionStore();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      extendedIntentsEnabled,
+    });
+    await adapter.handleInbound({
+      callSid: 'CA-flag-off',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    const sid = Array.from((store as unknown as { sessions: Map<string, unknown> }).sessions.keys())[0] as string;
+    const sess = await store.get(sid);
+    if (sess && sess.machine.currentState === 'ask_caller') {
+      sess.machine.dispatch({ type: 'caller_known', customerId: 'c1' });
+    }
+
+    await adapter.handleGather({
+      sessionId: sid,
+      callSid: 'CA-flag-off',
+      speechResult: "What's my day look like?",
+      confidence: 0.95,
+      tenantId: 'tenant-abc',
+    });
+
+    expect(extendedIntentsEnabled).toHaveBeenCalledTimes(1);
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+    expect(systemMessages).toHaveLength(1);
+    expect(systemMessages[0].content).not.toContain('lookup_day_overview');
+  });
+
+  it('flag-on customer calls keep the legacy classifier prompt while flag-on owner calls append extended intents', async () => {
+    const settingsRepo = new InMemorySettingsRepository();
+    const now = new Date();
+    await settingsRepo.create({
+      id: 'settings-owner-extended',
+      tenantId: 'tenant-extended',
+      businessName: 'Acme Plumbing',
+      timezone: 'America/Phoenix',
+      estimatePrefix: 'EST-',
+      invoicePrefix: 'INV-',
+      nextEstimateNumber: 1,
+      nextInvoiceNumber: 1,
+      defaultPaymentTermDays: 30,
+      ownerPhone: '+15125550100',
+      createdAt: now,
+      updatedAt: now,
+    } as TenantSettings);
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0.2}');
+    const store = new VoiceSessionStore();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      settingsRepo,
+      extendedIntentsEnabled: vi.fn(async () => true),
+    });
+
+    await adapter.handleInbound({
+      callSid: 'CA-flag-on-customer',
+      from: '+15125559999',
+      to: '+15125550000',
+      tenantId: 'tenant-extended',
+    });
+    const customerSession = store.findByCallSid('CA-flag-on-customer')!;
+    if (customerSession.machine.currentState === 'ask_caller') {
+      customerSession.machine.dispatch({ type: 'caller_known', customerId: 'cust-flag-on' });
+    }
+    await adapter.handleGather({
+      sessionId: customerSession.id,
+      callSid: 'CA-flag-on-customer',
+      speechResult: 'tell me what is going on',
+      confidence: 0.95,
+      tenantId: 'tenant-extended',
+    });
+
+    await adapter.handleInbound({
+      callSid: 'CA-flag-on-owner',
+      from: '+15125550100',
+      to: '+15125550000',
+      tenantId: 'tenant-extended',
+    });
+    const ownerSession = store.findByCallSid('CA-flag-on-owner')!;
+    if (ownerSession.machine.currentState === 'ask_caller') {
+      ownerSession.machine.dispatch({ type: 'caller_known', customerId: 'cust-temp' });
+      ownerSession.customerId = undefined;
+    }
+    await adapter.handleGather({
+      sessionId: ownerSession.id,
+      callSid: 'CA-flag-on-owner',
+      speechResult: 'tell me what is going on',
+      confidence: 0.95,
+      tenantId: 'tenant-extended',
+    });
+
+    const calls = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls;
+    const customerSystemMessages = calls[0][0].messages.filter((m: { role: string }) => m.role === 'system');
+    const ownerSystemMessages = calls[1][0].messages.filter((m: { role: string }) => m.role === 'system');
+    expect(customerSystemMessages).toHaveLength(1);
+    expect(customerSystemMessages[0].content).not.toContain('lookup_day_overview');
+    expect(ownerSystemMessages.some((m: { content: string }) => m.content.includes('lookup_day_overview'))).toBe(true);
+  });
+
+  it('extended-intents resolver error is non-fatal and resolves false for the session', async () => {
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0.2}');
+    const store = new VoiceSessionStore();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      extendedIntentsEnabled: vi.fn(async () => {
+        throw new Error('flag store down');
+      }),
+    });
+    await adapter.handleInbound({
+      callSid: 'CA-flag-error',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    const sid = Array.from((store as unknown as { sessions: Map<string, unknown> }).sessions.keys())[0] as string;
+    const sess = await store.get(sid);
+    if (sess && sess.machine.currentState === 'ask_caller') {
+      sess.machine.dispatch({ type: 'caller_known', customerId: 'c1' });
+    }
+
+    await adapter.handleGather({
+      sessionId: sid,
+      callSid: 'CA-flag-error',
+      speechResult: "What's my day look like?",
+      confidence: 0.95,
+      tenantId: 'tenant-abc',
+    });
+
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+    expect(systemMessages).toHaveLength(1);
+    expect(systemMessages[0].content).not.toContain('lookup_day_overview');
   });
 
   it('emergency_dispatch fast-paths to escalating and skips intent_confirm', async () => {

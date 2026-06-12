@@ -126,6 +126,17 @@ export interface DroppedCallRecoveryRepository {
   /** Cross-tenant: due rows not yet sent or suppressed (worker drain). */
   findDue(now: Date, limit: number): Promise<DroppedCallRecoveryRow[]>;
   /**
+   * Tenant-scoped owner lookup read: recovery SMS rows that have been sent
+   * and remain actionable. This table has no inbound-reply-consumed column;
+   * the durable resolved signal it owns is `suppressed_reason`, so
+   * "unanswered" is defined here as sent_at IS NOT NULL and
+   * suppressed_reason IS NULL. Newest first, bounded by limit.
+   */
+  listUnansweredRecoveries(
+    tenantId: string,
+    limit?: number,
+  ): Promise<DroppedCallRecoveryRow[]>;
+  /**
    * RV-116 — most recent recovery row for a caller within the resume
    * window (matched on digits so formatting drift never misses). Pending
    * AND sent rows both match — a reply can arrive before the worker sends.
@@ -274,6 +285,21 @@ export class InMemoryDroppedCallRecoveryRepository
       .map((r) => ({ ...r }));
   }
 
+  async listUnansweredRecoveries(
+    tenantId: string,
+    limit = 10,
+  ): Promise<DroppedCallRecoveryRow[]> {
+    return this.rows
+      .filter((r) => r.tenantId === tenantId && !!r.sentAt && !r.suppressedReason)
+      .sort((a, b) => {
+        const aTime = a.sentAt?.getTime() ?? a.createdAt.getTime();
+        const bTime = b.sentAt?.getTime() ?? b.createdAt.getTime();
+        return bTime - aTime;
+      })
+      .slice(0, limit)
+      .map((r) => ({ ...r }));
+  }
+
   async markSent(
     tenantId: string,
     id: string,
@@ -381,6 +407,29 @@ export class PgDroppedCallRecoveryRepository
           ORDER BY scheduled_for ASC
           LIMIT $2`,
         [now, limit],
+      );
+      return rows.map(mapRow);
+    });
+  }
+
+  async listUnansweredRecoveries(
+    tenantId: string,
+    limit = 10,
+  ): Promise<DroppedCallRecoveryRow[]> {
+    return this.withTenant(tenantId, async (client) => {
+      // "Unanswered" uses the columns this table owns: a recovery SMS was
+      // sent, and no durable suppression/resolution reason has been stamped.
+      const { rows } = await client.query(
+        `SELECT id, tenant_id, voice_session_id, caller_e164,
+                scheduled_for, sent_at, suppressed_reason,
+                sms_message_sid, context, created_at
+           FROM dropped_call_recoveries
+          WHERE tenant_id = current_setting('app.current_tenant_id')::uuid
+            AND sent_at IS NOT NULL
+            AND suppressed_reason IS NULL
+          ORDER BY sent_at DESC, created_at DESC
+          LIMIT $1`,
+        [limit],
       );
       return rows.map(mapRow);
     });

@@ -179,6 +179,10 @@ export const EXTENDED_INTENT_TYPES = new Set<IntentType>([
   'lookup_pending_items',
 ]);
 
+export const OWNER_LOOKUP_INTENT_TYPES = new Set<IntentType>(
+  [...EXTENDED_INTENT_TYPES].filter((intent): intent is IntentType => intent !== 'complaint'),
+);
+
 export function isExtendedIntent(intent: IntentType | undefined | null): boolean {
   return typeof intent === 'string' && EXTENDED_INTENT_TYPES.has(intent as IntentType);
 }

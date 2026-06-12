@@ -130,6 +130,7 @@ import { InMemoryAppointmentRepository } from './appointments/appointment';
 import { InMemoryAssignmentRepository } from './appointments/assignment';
 import { InMemoryEstimateRepository } from './estimates/estimate';
 import { InMemoryInvoiceRepository } from './invoices/invoice';
+import { InMemoryDunningConfigRepository } from './invoices/dunning-config';
 import { InMemoryInvoiceScheduleRepository } from './invoices/invoice-schedule';
 import { PgInvoiceScheduleRepository } from './invoices/pg-invoice-schedule';
 import { InMemoryBatchInvoiceRunRepository } from './invoices/batch-invoice-run';
@@ -217,6 +218,7 @@ import { PgJobTimelineRepository } from './jobs/pg-job-lifecycle';
 import { PgAppointmentRepository } from './appointments/pg-appointment';
 import { PgEstimateRepository } from './estimates/pg-estimate';
 import { PgInvoiceRepository } from './invoices/pg-invoice';
+import { PgDunningConfigRepository } from './invoices/pg-dunning-config';
 import { PgPaymentRepository } from './invoices/pg-payment';
 import { InMemoryExpenseRepository } from './expenses/expense';
 import { PgExpenseRepository } from './expenses/pg-expense';
@@ -806,6 +808,7 @@ export function createApp(): express.Express {
   const skillMatcher           = new StubSkillMatcher();
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
   const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
+  const dunningConfigRepo  = pool ? new PgDunningConfigRepository(pool)  : new InMemoryDunningConfigRepository();
   const invoiceScheduleRepo = pool ? new PgInvoiceScheduleRepository(pool) : new InMemoryInvoiceScheduleRepository();
   const batchInvoiceRunRepo = pool ? new PgBatchInvoiceRunRepository(pool) : new InMemoryBatchInvoiceRunRepository();
   const batchInvoiceTxRunner = pool ? new PgTenantTransactionRunner(pool) : new InMemoryTransactionRunner();
@@ -902,6 +905,14 @@ export function createApp(): express.Express {
     return operatorVerticalPromptResolver
       ? operatorVerticalPromptResolver(tenantId)
       : undefined;
+  };
+  let voiceExtendedIntentsFlagResolver:
+    | ((tenantId: string) => Promise<boolean>)
+    | null = null;
+  const voiceExtendedIntentsFlagShim = async (tenantId: string): Promise<boolean> => {
+    return voiceExtendedIntentsFlagResolver
+      ? voiceExtendedIntentsFlagResolver(tenantId)
+      : false;
   };
   const trainingAssetService = new TrainingAssetService({
     assetRepo: trainingAssetRepo,
@@ -1640,6 +1651,7 @@ export function createApp(): express.Express {
     // constructed, `operatorVerticalPromptResolver` is assigned and the
     // shim starts returning live data on the next classifier call.
     verticalPromptResolver: operatorVerticalResolverShim,
+    extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
     // P12-004 — unsupervised proposal routing: when no supervisor is
     // present and the tenant routing is queue_and_sms (default), send the
     // owner a one-tap approve SMS with a signed single-use link. Audit
@@ -2160,6 +2172,8 @@ export function createApp(): express.Express {
       tenantId,
     });
   };
+  voiceExtendedIntentsFlagResolver = (tenantId: string) =>
+    isFlagEnabledForTenant(tenantId, 'voice_extended_intents');
 
   const twilioAdapter = new TwilioGatherAdapter({
     store: voiceSessionStore,
@@ -2210,11 +2224,17 @@ export function createApp(): express.Express {
     jobRepo,
     appointmentRepo,
     invoiceRepo,
+    estimateRepo,
+    customerRepo,
     agreementRepo,
     moneyDashboardRepo,
     catalogRepo,
+    dailyDigestRepo,
+    dunningConfigRepo,
+    droppedCallRecoveryRepo,
     availabilityFinder,
     lookupEvents: lookupEventService,
+    extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
     systemActorId: 'system:inbound-call',
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
     ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
