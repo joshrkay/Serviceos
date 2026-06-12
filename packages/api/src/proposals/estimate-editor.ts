@@ -113,7 +113,11 @@ export function editEstimateProposal(
   if (touchedLineItems) {
     const meta = payload._meta;
     if (meta !== null && typeof meta === 'object') {
-      const m = meta as Record<string, unknown>;
+      // Shallow-copy _meta before mutating so the original proposal's payload
+      // reference is not written through (payload itself is already a shallow
+      // copy of proposal.payload, but _meta is still the same object reference).
+      const m = { ...(meta as Record<string, unknown>) };
+      payload._meta = m;
       if (m.fieldConfidence !== null && typeof m.fieldConfidence === 'object') {
         const fc = { ...(m.fieldConfidence as Record<string, unknown>) };
         for (const key of Object.keys(fc)) {

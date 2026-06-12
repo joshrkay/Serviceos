@@ -354,7 +354,6 @@ describe('PROPOSAL_TYPE_SCHEMAS — no strict-mode schemas', () => {
     // 'strict' when .strict() has been called. ZodEffects (from .refine())
     // wrap an innerType — we unwrap one level if needed.
     const isStrictObject = (schema: import('zod').ZodSchema): boolean => {
-      const { z } = require('zod');
       // Unwrap ZodEffects
       let s: import('zod').ZodSchema = schema;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

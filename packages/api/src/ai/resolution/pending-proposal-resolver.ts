@@ -100,6 +100,12 @@ const ORDINAL_WORDS: Record<string, number> = {
  * Parse an ordinal reference ("the second one", "number 3", "the last
  * one"). Returns a zero-based index, 'last', or null when the reference
  * is not ordinal.
+ *
+ * Ambiguity rule: if the utterance contains both an anchored ordinal
+ * (Nth-suffix or "number N") AND a bare digit that disagrees with it
+ * (e.g. "approve 2 of the 3rd"), the reference is ambiguous — return null
+ * rather than guessing. A bare digit that MATCHES the anchored value (or
+ * no bare digit at all) resolves as before.
  */
 export function parseOrdinalReference(reference: string): number | 'last' | null {
   const ref = reference.toLowerCase();
@@ -107,15 +113,29 @@ export function parseOrdinalReference(reference: string): number | 'last' | null
   for (const [word, index] of Object.entries(ORDINAL_WORDS)) {
     if (new RegExp(`\\b${word}\\b`).test(ref)) return index;
   }
-  // Anchored regex: capture and validation are the same match — the number
-  // that validates IS the number captured. This prevents a split like
-  // "approve 2 of the 3rd" matching capture="2" but validate="3rd".
+  // Anchored ordinal: "Nth" suffix form or "number N" form.
   const numbered = ref.match(/\b(number\s+(\d+)|(\d+)(st|nd|rd|th))\b/);
   if (numbered) {
     // Group 2: "number N" form. Group 3: "Nth" ordinal form.
     const raw = numbered[2] ?? numbered[3];
     const n = raw !== undefined ? parseInt(raw, 10) : NaN;
-    if (!Number.isNaN(n) && n >= 1) return n - 1;
+    if (Number.isNaN(n) || n < 1) return null;
+
+    // Detect bare digit references — digits NOT anchored by an ordinal suffix
+    // and NOT preceded by "number ". Strip the already-matched anchored token
+    // first so its own digit doesn't count as a bare number.
+    const withoutAnchor = ref.replace(numbered[0], ' ');
+    const bareMatches = [...withoutAnchor.matchAll(/\b(\d+)\b/g)].filter(
+      (m) => !(m[0] === raw && numbered[2] !== undefined), // "number N" anchor already removed
+    );
+    const bareNumbers = bareMatches
+      .map((m) => parseInt(m[1], 10))
+      .filter((v) => !Number.isNaN(v));
+
+    // If any bare number disagrees with the anchored value → ambiguous → null.
+    if (bareNumbers.some((v) => v !== n)) return null;
+
+    return n - 1;
   }
   return null;
 }

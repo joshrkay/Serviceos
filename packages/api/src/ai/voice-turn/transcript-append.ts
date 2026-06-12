@@ -2,10 +2,12 @@
  * appendAgentTts — shared helper used wherever the voice turn appends the
  * last agent TTS line to the session transcript.
  *
- * This block appeared verbatim in three places:
+ * This block appeared verbatim in five places:
  *   1. createVoiceTurnProcessor — pending-dialogue branch (approval turn)
  *   2. createVoiceTurnProcessor — intent branch (voice approval intent)
- *   3. TwilioGatherAdapter.finalizeTwiml — normal + transfer paths
+ *   3. createVoiceTurnProcessor — fallback/default branch
+ *   4. TwilioGatherAdapter.finalizeTwiml — normal path
+ *   5. TwilioGatherAdapter.finalizeTwiml — transfer path
  *
  * Extracted here (inside the `ai/voice-turn` package) so the helper has no
  * dependency on `telephony/` — avoiding the circular import that would arise

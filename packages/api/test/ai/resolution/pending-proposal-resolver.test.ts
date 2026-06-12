@@ -213,10 +213,12 @@ describe('RV-072 — ordinal references', () => {
     ['the second one', 1],
     ['the third', 2],
     ['the last one', 'last'],
-    // The bug case: "approve 2 of the 3rd" — "2" is a bare number, not
-    // a validated ordinal. The ONLY ordinal in this string is "3rd", so
-    // the result must be index 2 (3rd → 0-based 2), NOT 1 (from "2").
-    ['approve 2 of the 3rd', 2],
+    // Ambiguity: bare "2" disagrees with anchored "3rd" → null (never guess).
+    ['approve 2 of the 3rd', null],
+    // Consistent: bare "3" agrees with "3rd" → index 2.
+    ['approve 3 of the 3rd', 2],
+    // "the 2nd of the 3" — anchored ordinal "2nd" + bare "3" disagree → null.
+    ['the 2nd of the 3', null],
     // Bare integers without ordinal suffix or "number" prefix are NOT ordinals.
     ['approve 2 proposals', null],
     // Not ordinals at all.

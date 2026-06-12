@@ -294,6 +294,27 @@ describe('applyEstimateEdits — _meta lineItems-scoped strip', () => {
     expect(markers).toHaveLength(3);
   });
 
+  it('_meta mutation isolation — original proposal.payload._meta is unchanged after edit', () => {
+    const proposal = makeWithMeta();
+    // Capture a reference to the original _meta object before the edit.
+    const originalMeta = proposal.payload._meta as Record<string, unknown>;
+    const originalFc = { ...(originalMeta.fieldConfidence as Record<string, unknown>) };
+    const originalMarkers = [...(originalMeta.markers as Array<{ path: string; reason: string }>)];
+
+    editEstimateProposal(proposal, [
+      { type: 'remove_line_item', index: 0 },
+    ]);
+
+    // The original proposal's _meta must not have been mutated.
+    const fc = originalMeta.fieldConfidence as Record<string, unknown>;
+    expect(Object.keys(fc)).toEqual(Object.keys(originalFc));
+    expect(fc['lineItems[0].unitPrice']).toBe('low');
+    expect(fc['lineItems[1].unitPrice']).toBe('medium');
+    const markers = originalMeta.markers as Array<{ path: string }>;
+    expect(markers).toHaveLength(originalMarkers.length);
+    expect(markers.some((m) => m.path.startsWith('lineItems'))).toBe(true);
+  });
+
   it('no _meta on payload — lineItems edit does not crash', () => {
     const input: CreateProposalInput = {
       tenantId: 'tenant-1',
