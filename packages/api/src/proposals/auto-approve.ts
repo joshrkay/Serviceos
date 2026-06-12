@@ -417,6 +417,7 @@ export interface RouteUnsupervisedProposalInput {
    * link appended as a fallback.
    */
   smsBody?: string;
+  /**
    * P2-034 — full SMS body builder (proposal summary + key facts + reply
    * tokens + the one-tap link). When absent the legacy link-only body is
    * sent, so existing callers keep their exact behavior.
@@ -485,24 +486,6 @@ export async function routeUnsupervisedProposal(
   }
 
   if (effective === 'queue_and_sms') {
-    if (deps.sendSms && deps.secret && input.ownerPhone) {
-      const { token, expiresAt } = createOneTapApproveToken({
-        proposalId: input.proposalId,
-        tenantId: input.tenantId,
-        secret: deps.secret,
-        ...(input.nowMs !== undefined ? { nowMs: input.nowMs } : {}),
-      });
-      const url = deps.buildApproveUrl
-        ? deps.buildApproveUrl(token)
-        : `/p/approve?token=${encodeURIComponent(token)}`;
-      const summary = input.summaryText ?? 'A proposal needs your approval';
-      const linkTail = `Link (30 min): ${url}`;
-      const body = input.smsBody
-        ? `${input.smsBody}\n${linkTail}`
-        : `${summary}. Tap to approve (link expires in 30 min): ${url}`;
-      await deps.sendSms(input.ownerPhone, body);
-      smsSent = true;
-      approveLinkExpiresAt = expiresAt;
     if (deps.sendSms && input.ownerPhone) {
       // RV-074 (F-4) — low/very_low proposals must never get a Y-able one-tap
       // link. When the payload carries a blocking confidence level, mint no

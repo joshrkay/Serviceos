@@ -4,10 +4,11 @@ import { LLMGateway } from '../ai/gateway/gateway';
 import { Proposal, ProposalRepository, createProposal, CreateProposalInput, ProposalType, actionClassForProposalType } from '../proposals/proposal';
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
-import { routeUnsupervisedProposal } from '../proposals/auto-approve';
-import { renderProposalSms } from '../proposals/sms/render';
+import { confidenceMetaBlocksAutoApprove, routeUnsupervisedProposal } from '../proposals/auto-approve';
+import { renderChainSms, renderProposalSms } from '../proposals/sms/render';
 import { runSupervisorReview } from '../ai/supervisor/review';
 import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
+import type { OutboundAnchorKind } from '../proposals/sms/sms-event';
 import type { AuditRepository } from '../audit/audit';
 import type { UnsupervisedProposalRouting } from '../settings/settings';
 import { ConflictError } from '../shared/errors';
@@ -1563,7 +1564,7 @@ export function createVoiceActionRouterWorker(
           try {
             const routing = await ur.resolveRouting?.(tenantId);
             const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
-            const { body: smsBody } = renderProposalSms(reviewed);
+            const smsBody = renderProposalSms(reviewed);
             const proposal = outcome.proposal;
             await routeUnsupervisedProposal(
               {

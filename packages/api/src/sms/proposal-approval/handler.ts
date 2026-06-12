@@ -290,7 +290,7 @@ async function handleEditDelta(
 
   const refreshed = await deps.proposalRepo.findById(ctx.tenantId, proposalId);
   if (refreshed && deps.sendSms) {
-    const { body } = renderProposalSms(refreshed);
+    const body = renderProposalSms(refreshed);
     await deps.sendSms(ctx.fromE164, `Updated. ${body}`);
     await recordOutboundProposalSms(deps, {
       tenantId: ctx.tenantId,

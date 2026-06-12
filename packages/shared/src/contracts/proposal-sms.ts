@@ -34,3 +34,36 @@ export interface ProposalSmsEventRecord {
   bodyPreview: string;
   createdAt: Date;
 }
+
+
+export const APPROVE_TOKENS = PROPOSAL_APPROVE_KEYWORDS;
+export const REJECT_TOKENS = PROPOSAL_REJECT_KEYWORDS;
+export const EDIT_TOKENS = PROPOSAL_EDIT_KEYWORDS;
+
+export type ParsedProposalSmsReply =
+  | { intent: 'approve'; remainder: string }
+  | { intent: 'reject'; remainder: string }
+  | { intent: 'edit'; remainder: string }
+  | { intent: 'unrecognized'; remainder: string };
+
+function normalizeReplyBody(body: string): string {
+  return body.trim().replace(/^["'“”‘’]+|["'“”‘’.,!?;:]+$/g, '').trim();
+}
+
+export function parseProposalSmsReply(body: string): ParsedProposalSmsReply {
+  const normalized = normalizeReplyBody(body);
+  if (!normalized) return { intent: 'unrecognized', remainder: '' };
+  const [rawFirst = '', ...rest] = normalized.split(/\s+/);
+  const first = rawFirst.toLowerCase().replace(/[^a-z]/g, '');
+  const remainder = rest.join(' ').trim();
+  if ((APPROVE_TOKENS as readonly string[]).includes(first)) {
+    return { intent: 'approve', remainder };
+  }
+  if ((REJECT_TOKENS as readonly string[]).includes(first)) {
+    return { intent: 'reject', remainder };
+  }
+  if ((EDIT_TOKENS as readonly string[]).includes(first)) {
+    return { intent: 'edit', remainder };
+  }
+  return { intent: 'unrecognized', remainder: normalized };
+}

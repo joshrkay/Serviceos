@@ -26,6 +26,7 @@ import type { Logger } from '../../logging/logger';
 import type { AuditRepository } from '../../audit/audit';
 import { createAuditEvent } from '../../audit/audit';
 import { extractContextCue } from '../../voice/recovery/extract-context-cue';
+import { composeStateAwareCue } from './state-aware-cue';
 import { registerDroppedCallSession } from '../../telephony/dropped-call-session-bridge';
 import type {
   DroppedCallRecoveryRepository,

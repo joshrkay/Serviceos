@@ -13,6 +13,7 @@ import { createIntegrationResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
+import { TwilioRecordingControl } from './telephony/recording-control';
 import { createBusinessPhoneDispatcherResolver } from './telephony/dispatcher-phone-resolver';
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
@@ -111,8 +112,12 @@ import { createFilesRouter, createDevStorageRouter } from './routes/files';
 import { createJobFilesRouter } from './routes/job-files';
 import { createJobPhotosRouter } from './routes/job-photos';
 import { createInvoicePhotosRouter } from './routes/invoice-photos';
+import { createAttachmentsRouter } from './routes/attachments';
 import { createJobChecklistsRouter } from './routes/job-checklists';
 import { JobPhotoService } from './jobs/job-photo-service';
+import { AttachmentService } from './attachments/attachment-service';
+import { InMemoryAttachmentRepository } from './attachments/attachment';
+import { PgAttachmentRepository } from './attachments/pg-attachment';
 import { InMemoryJobPhotoRepository } from './jobs/job-photo';
 import { PgJobPhotoRepository } from './jobs/pg-job-photo';
 import { InMemoryInvoicePhotoRepository } from './invoices/invoice-photo';
@@ -457,18 +462,30 @@ import { runAppointmentReminderSweep } from './workers/appointment-reminder-work
 import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
 import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
+import { PgConsentEventRepository, InMemoryConsentEventRepository } from './compliance/consent-events';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
-import { registerKeywordHandler } from './sms/inbound-dispatch';
+import { registerKeywordHandler, registerRecoveryResumeHandler } from './sms/inbound-dispatch';
 import {
   registerProposalApprovalKeywords,
+  InMemoryProposalSmsEventRepository as InMemoryLegacyProposalSmsEventRepository,
+  PgProposalSmsEventRepository as PgLegacyProposalSmsEventRepository,
+} from './sms/proposal-approval';
+import {
+  registerProposalReplySms,
+  createLlmEditInterpreter,
+  createProposalSmsEvent,
   InMemoryProposalSmsEventRepository,
   PgProposalSmsEventRepository,
-} from './sms/proposal-approval';
+  type OutboundAnchorKind,
+} from './proposals/sms';
 import {
   registerTechStatusKeywords,
   PgTechStatusTodayRepository,
   InMemoryTechStatusTodayRepository,
+  registerMmsIngestHandler,
+  createTwilioMediaFetcher,
 } from './sms/tech-status';
+import { createMmsIngestWorker } from './workers/mms-ingest-worker';
 import { PgUnavailableBlockRepository } from './availability/pg-unavailable-block';
 import { InMemoryDigestEntryRepository, PgDigestEntryRepository } from './digest/repository';
 import { runDigestSweep } from './digest/worker';
@@ -476,7 +493,9 @@ import { handleDigestAckSms } from './sms/digest/handler';
 import {
   DroppedCallScheduler,
   PgDroppedCallRecoveryRepository,
+  InMemoryDroppedCallRecoveryRepository,
 } from './sms/recovery/scheduler';
+import { createDroppedCallResumeHandler } from './sms/recovery/resume-handler';
 import { runDroppedCallRecoverySweep } from './workers/dropped-call-worker';
 
 // Auth middleware
@@ -1104,10 +1123,8 @@ export function createApp(): express.Express {
   });
   const droppedCallRecoveryRepo = pool
     ? new PgDroppedCallRecoveryRepository(pool)
-    : undefined;
-  const droppedCallScheduler = droppedCallRecoveryRepo
-    ? new DroppedCallScheduler(droppedCallRecoveryRepo, droppedCallRecoveryLogger)
-    : undefined;
+    : new InMemoryDroppedCallRecoveryRepository();
+  const droppedCallScheduler = new DroppedCallScheduler(droppedCallRecoveryRepo, droppedCallRecoveryLogger);
   const droppedCallHandlerDeps =
     pool && messageDelivery && droppedCallRecoveryRepo
       ? createDroppedCallHandlerDeps({
@@ -1679,14 +1696,14 @@ export function createApp(): express.Express {
     appointmentRepo,
     assignmentRepo,
   });
-  const proposalSmsEventRepo = pool
-    ? new PgProposalSmsEventRepository(pool)
-    : new InMemoryProposalSmsEventRepository();
+  const legacyProposalSmsEventRepo = pool
+    ? new PgLegacyProposalSmsEventRepository(pool)
+    : new InMemoryLegacyProposalSmsEventRepository();
   registerProposalApprovalKeywords(
     {
       userRepo,
       proposalRepo,
-      smsEventRepo: proposalSmsEventRepo,
+      smsEventRepo: legacyProposalSmsEventRepo,
       auditRepo,
       ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
     },
@@ -2226,19 +2243,8 @@ export function createApp(): express.Express {
   const dailyDigestRepo = pool
     ? new PgDailyDigestRepository(pool)
     : new InMemoryDailyDigestRepository();
-  // RV-115/RV-116 — durable dropped-call recovery: the scheduler persists
-  // the FSM context snapshot at termination; the resume handler picks the
-  // thread back up when the caller replies to the recovery SMS.
-  const droppedCallRecoveryRepo = pool
-    ? new PgDroppedCallRecoveryRepository(pool)
-    : new InMemoryDroppedCallRecoveryRepository();
-  const droppedCallScheduler = new DroppedCallScheduler(
-    droppedCallRecoveryRepo,
-    createLogger({
-      service: 'sms.dropped-call-recovery',
-      environment: process.env.NODE_ENV || 'development',
-    }),
-  );
+  // RV-115/RV-116 — inbound SMS resume uses the dropped-call recovery repo/scheduler
+  // created near the voice-session store so all recovery paths share one durable tail.
   if (messageDelivery) {
     registerRecoveryResumeHandler(
       createDroppedCallResumeHandler({
@@ -3122,6 +3128,12 @@ export function createApp(): express.Express {
     '/api/invoices',
     createInvoicePhotosRouter({
       service: invoicePhotoService,
+      fileRepo,
+      storage: storageProvider,
+      bucket: storageBucket,
+      auditRepo,
+    }),
+  );
   app.use(
     '/api/attachments',
     createAttachmentsRouter({
