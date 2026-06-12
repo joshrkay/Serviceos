@@ -56,6 +56,8 @@ import { PgDailyDigestRepository } from '../../src/digest/pg-daily-digest';
 import type { DailyDigestPayload } from '../../src/digest/digest-service';
 import { PgTenantFeatureFlagRepository } from '../../src/flags/pg-tenant-feature-flags';
 import { InMemoryFeatureFlagRepository } from '../../src/flags/feature-flags';
+import { PgTriageEventRepository } from '../../src/ai/agents/customer-calling/pg-triage-events';
+import { PgConsentEventRepository } from '../../src/compliance/consent-events';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 
 const APP_ROLE = 'rls_app_runtime';
@@ -702,6 +704,95 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
     });
   });
 
+  // ── triage_events (RV-120, migration 166) ─────────────────────────────────
+  describe('PgTriageEventRepository', () => {
+    const SESSION_A = 'sess-triage-a';
+    const SESSION_B = 'sess-triage-b';
+
+    it('record + listBySession round-trips per tenant and never crosses tenants (pins real column names)', async () => {
+      const repo = new PgTriageEventRepository(pool);
+      const rowA = await repo.record({
+        tenantId: tenantA.tenantId,
+        voiceSessionId: SESSION_A,
+        score: 2,
+        tier: 'critical',
+        signals: [{ kind: 'medical', evidence: 'caller mentioned oxygen', weight: 1 }],
+        actionTaken: 'patch_owner',
+      });
+      const rowB = await repo.record({
+        tenantId: tenantB.tenantId,
+        voiceSessionId: SESSION_B,
+        score: 0,
+        tier: 'none',
+        signals: [],
+        actionTaken: 'normal',
+      });
+      expect(rowA.id).not.toBe(rowB.id);
+      expect(rowA.tier).toBe('critical');
+      expect(rowA.signals[0]?.evidence).toBe('caller mentioned oxygen');
+
+      const seenByA = await repo.listBySession(tenantA.tenantId, SESSION_A);
+      expect(seenByA.map((r) => r.id)).toEqual([rowA.id]);
+      // A's scope cannot see B's session — and vice versa.
+      expect(await repo.listBySession(tenantA.tenantId, SESSION_B)).toEqual([]);
+      expect(await repo.listBySession(tenantB.tenantId, SESSION_A)).toEqual([]);
+    });
+
+    it('tenant A triage row is invisible to tenant B via RLS (raw query cross-check)', async () => {
+      const n = await asTenant(pool, tenantB.tenantId, async (client) => {
+        const res = await client.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM triage_events WHERE tenant_id = $1`,
+          [tenantA.tenantId],
+        );
+        return res.rows[0].n;
+      });
+      expect(n).toBe(0);
+    });
+  });
+
+  // ── consent_events (RV-130, migration 168) ─────────────────────────────────
+  describe('PgConsentEventRepository', () => {
+    const PHONE = '+1 (512) 555-0188';
+
+    it('append + listByPhone round-trips per tenant and never crosses tenants (pins real column names)', async () => {
+      const repo = new PgConsentEventRepository(pool);
+      const rowA = await repo.append({
+        tenantId: tenantA.tenantId,
+        phone: PHONE,
+        kind: 'recording',
+        state: 'implicit',
+        source: 'voice',
+        voiceSessionId: 'sess-consent-a',
+      });
+      const rowB = await repo.append({
+        tenantId: tenantB.tenantId,
+        phone: PHONE,
+        kind: 'sms',
+        state: 'revoked',
+        source: 'sms',
+      });
+      expect(rowA.phoneNormalized).toBe('15125550188');
+      expect(rowA.id).not.toBe(rowB.id);
+
+      const seenByA = await repo.listByPhone(tenantA.tenantId, PHONE);
+      const seenByB = await repo.listByPhone(tenantB.tenantId, PHONE);
+      // Same phone, different tenants: each ledger sees only its own rows.
+      expect(seenByA.map((r) => r.id)).toEqual([rowA.id]);
+      expect(seenByB.map((r) => r.id)).toEqual([rowB.id]);
+    });
+
+    it('tenant A consent row is invisible to tenant B via RLS (raw query cross-check)', async () => {
+      const n = await asTenant(pool, tenantB.tenantId, async (client) => {
+        const res = await client.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM consent_events WHERE tenant_id = $1`,
+          [tenantA.tenantId],
+        );
+        return res.rows[0].n;
+      });
+      expect(n).toBe(0);
+    });
+  });
+
   // ── GUC-unset (fail-closed) coverage ──────────────────────────────────────
   //
   // Nothing in the repo previously tested what happens when no tenant context
@@ -767,6 +858,42 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
         await client.query(`RESET app.current_tenant_id`);
         await expect(
           client.query('SELECT count(*) FROM attachments'),
+        ).rejects.toThrow(/unrecognized configuration parameter|invalid input syntax for type uuid/);
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined);
+        client.release();
+      }
+    });
+
+    it('SELECT on triage_events throws when GUC is not set (fail-closed policy)', async () => {
+      // triage_events policy (schema.ts migration 166):
+      //   USING (tenant_id = current_setting('app.current_tenant_id')::UUID)
+      // No missing_ok → same fail-closed error as customers above.
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+        await client.query(`RESET app.current_tenant_id`);
+        await expect(
+          client.query('SELECT count(*) FROM triage_events'),
+        ).rejects.toThrow(/unrecognized configuration parameter|invalid input syntax for type uuid/);
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined);
+        client.release();
+      }
+    });
+
+    it('SELECT on consent_events throws when GUC is not set (fail-closed policy)', async () => {
+      // consent_events policy (schema.ts migration 168):
+      //   USING (tenant_id = current_setting('app.current_tenant_id')::UUID)
+      // No missing_ok → same fail-closed error as customers above.
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+        await client.query(`RESET app.current_tenant_id`);
+        await expect(
+          client.query('SELECT count(*) FROM consent_events'),
         ).rejects.toThrow(/unrecognized configuration parameter|invalid input syntax for type uuid/);
       } finally {
         await client.query('ROLLBACK').catch(() => undefined);
