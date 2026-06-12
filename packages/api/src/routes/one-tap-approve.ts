@@ -23,7 +23,11 @@ import {
   createOneTapApproveToken,
   verifyOneTapApproveToken,
 } from '../proposals/auto-approve';
-import { approveProposal } from '../proposals/actions';
+import {
+  approveChainSet,
+  formatChainSetApprovalMessage,
+  summarizeChainSetResult,
+} from '../proposals/actions';
 import type { ProposalRepository } from '../proposals/proposal';
 import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
 import {
@@ -331,7 +335,7 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
       // guard, approvedAt stamp (undo window), `proposal.approved` audit
       // event — and the execution worker picks up the approved proposal
       // through its normal idempotent path.
-      const approved = await approveProposal(
+      const result = await approveChainSet(
         deps.proposalRepo,
         verified.tenantId,
         verified.proposalId,
@@ -339,7 +343,13 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
         ONE_TAP_ACTOR_ROLE,
         deps.auditRepo,
         'one_tap', // RV-073 — HMAC one-tap link approval
+        deps.smsEventRepo
+          ? (tenantId, proposalId) =>
+              deps.smsEventRepo!.hasUnappliedEditRequest(tenantId, proposalId)
+          : undefined,
       );
+      const approved = result.approved[0];
+      const summary = summarizeChainSetResult(result);
 
       // P12-004 — record that this approval came through the one-tap SMS
       // link specifically (in addition to the standard proposal.approved
@@ -352,7 +362,12 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
           eventType: 'proposal.one_tap_approved',
           entityType: 'proposal',
           entityId: verified.proposalId,
-          metadata: { channel: 'sms_one_tap' },
+          metadata: {
+            channel: 'sms_one_tap',
+            approvedCount: summary.approvedCount,
+            skippedCount: summary.followCount,
+            skipped: summary.skipped,
+          },
         }),
       );
 
@@ -362,7 +377,10 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
         .send(
           page(
             'Approved',
-            `”${escapeHtml(approved.summary)}” has been approved and will execute shortly.`,
+            formatChainSetApprovalMessage(
+              summary,
+              `”${escapeHtml(approved?.summary ?? 'Proposal')}” has been approved and will execute shortly.`,
+            ),
           ),
         );
     } catch (err) {

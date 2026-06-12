@@ -17,6 +17,9 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { Proposal, ProposalType } from '../../../src/proposals/proposal';
+import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
+import { applyChainMetadata } from '../../../src/proposals/chain';
+import { resolveChainReferences } from '../../../src/proposals/execution/chain-resolution';
 import {
   AddNoteExecutionHandler,
   SendInvoiceExecutionHandler,
@@ -92,6 +95,56 @@ describe('AddNoteExecutionHandler — real NoteRepository wire-up', () => {
     expect(stored!.entityType).toBe('job');
     expect(stored!.entityId).toBe(validUuid);
     expect(stored!.authorId).toBe('u-1');
+  });
+
+  it('resolves a chained add_note token onto targetId and attaches to the parent-created entity', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const handler = new AddNoteExecutionHandler(noteRepo);
+    const parentJobId = '770e8400-e29b-41d4-a716-446655440002';
+    const parent = fakeApproved('create_job', {
+      customerId: validUuid,
+      title: 'Install',
+    });
+    parent.id = 'p-parent';
+    parent.status = 'executed';
+    parent.resultEntityId = parentJobId;
+    applyChainMetadata(parent, {
+      chainId: 'c-note',
+      chainIndex: 0,
+      chainLength: 2,
+      dependsOnChainIndices: [],
+      chainRefs: [],
+    });
+    const note = fakeApproved('add_note', {
+      body: 'Gate code is 1234',
+      targetKind: 'customer',
+      targetId: validUuid,
+    });
+    note.id = 'p-note';
+    applyChainMetadata(note, {
+      chainId: 'c-note',
+      chainIndex: 1,
+      chainLength: 2,
+      dependsOnChainIndices: [0],
+      chainRefs: [{ payloadPath: 'targetId', parentChainIndex: 0, entityKind: 'jobId' }],
+    });
+    note.status = 'approved';
+    await proposalRepo.createMany([parent, note]);
+
+    const resolution = await resolveChainReferences(note, { proposalRepo });
+    expect(resolution).toMatchObject({ status: 'resolved' });
+    const result = await handler.execute(
+      { ...note, payload: resolution.status === 'resolved' ? resolution.payload : note.payload },
+      { tenantId: 't-1', executedBy: 'u-1' },
+    );
+
+    expect(result.success).toBe(true);
+    const stored = await noteRepo.findById('t-1', result.resultEntityId!);
+    expect(stored).toMatchObject({
+      entityType: 'job',
+      entityId: parentJobId,
+      content: 'Gate code is 1234',
+    });
   });
 
   it('rejects when only targetReference is supplied — needs a resolved UUID', async () => {

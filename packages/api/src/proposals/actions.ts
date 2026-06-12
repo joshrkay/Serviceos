@@ -1,4 +1,4 @@
-import { Proposal, ProposalRepository, missingFieldsFor } from './proposal';
+import { Proposal, ProposalRepository, missingFieldsFor, actionClassForProposalType } from './proposal';
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from './lifecycle';
 import { validateProposalPayload } from './contracts';
 import { Role, hasPermission } from '../auth/rbac';
@@ -6,10 +6,58 @@ import { AppError, ForbiddenError, ValidationError, NotFoundError } from '../sha
 import { AppointmentRepository, updateAppointment } from '../appointments/appointment';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { logProposalEvent } from './audit';
+import { confidenceMetaBlocksAutoApprove } from './auto-approve';
+import { chainMetaFor } from './chain';
 
 export interface BatchApproveResult {
   approved: string[];
   failed: { id: string; reason: string }[];
+}
+
+export interface ApproveChainSetResult {
+  approved: Proposal[];
+  skipped: {
+    id: string;
+    reason:
+      | 'non_capture'
+      | 'not_reviewable'
+      | 'low_confidence'
+      | 'pending_edit'
+      | 'missing_fields'
+      | 'error';
+  }[];
+}
+
+export interface ChainSetApprovalSummary {
+  approvedCount: number;
+  /** Skips that require a separate follow-up; excludes already non-reviewable siblings. */
+  followCount: number;
+  skipped: ApproveChainSetResult['skipped'];
+}
+
+export type PendingEditChecker = (tenantId: string, proposalId: string) => Promise<boolean>;
+
+export function summarizeChainSetResult(result: ApproveChainSetResult): ChainSetApprovalSummary {
+  return {
+    approvedCount: result.approved.length,
+    followCount: result.skipped.filter((skip) => skip.reason !== 'not_reviewable').length,
+    skipped: result.skipped,
+  };
+}
+
+export function formatChainSetApprovalMessage(
+  summary: ChainSetApprovalSummary,
+  fallbackMessage: string,
+): string {
+  if (summary.approvedCount > 1 || summary.followCount > 0) {
+    const actionWord = summary.approvedCount === 1 ? 'action' : 'actions';
+    const follows =
+      summary.followCount > 0
+        ? ` — ${summary.followCount} ${summary.followCount === 1 ? 'follows' : 'follow'} separately.`
+        : '.';
+    return `Approved ${summary.approvedCount} linked ${actionWord}${follows}`;
+  }
+  return fallbackMessage;
 }
 
 /**
@@ -147,6 +195,144 @@ export async function approveProposal(
   }
 
   return updated;
+}
+
+function isReviewableForChainSet(proposal: Proposal): boolean {
+  return proposal.status === 'draft' || proposal.status === 'ready_for_review';
+}
+
+/**
+ * Approve a chain head plus eligible capture-class chain siblings.
+ *
+ * Execution correctness does not depend on this approval order:
+ * `resolveChainReferences` blocks a dependent until its parent has executed.
+ * We still approve in `chainIndex` order so audit rows and future execution
+ * sweeps see the chain in natural order.
+ */
+export async function approveChainSet(
+  proposalRepo: ProposalRepository,
+  tenantId: string,
+  headId: string,
+  actorId: string,
+  actorRole: Role,
+  auditRepo?: AuditRepository,
+  channel?: ApprovalChannel,
+  hasPendingEdit?: PendingEditChecker,
+): Promise<ApproveChainSetResult> {
+  const head = await proposalRepo.findById(tenantId, headId);
+  if (!head) throw new NotFoundError('Proposal', headId);
+
+  const headMeta = chainMetaFor(head);
+  if (!headMeta || headMeta.chainIndex !== 0) {
+    const approved = await approveProposal(
+      proposalRepo,
+      tenantId,
+      headId,
+      actorId,
+      actorRole,
+      auditRepo,
+      channel,
+    );
+    return { approved: [approved], skipped: [] };
+  }
+
+  const approvedHead = await approveProposal(
+    proposalRepo,
+    tenantId,
+    headId,
+    actorId,
+    actorRole,
+    auditRepo,
+    channel,
+  );
+  const approved: Proposal[] = [approvedHead];
+  const skipped: ApproveChainSetResult['skipped'] = [];
+
+  const siblings = await proposalRepo.findByChain(tenantId, headMeta.chainId);
+  if (!siblings.some((p) => p.id === headId)) {
+    if (auditRepo) {
+      await auditRepo.create(
+        createAuditEvent({
+          tenantId,
+          actorId,
+          actorRole,
+          eventType: 'proposal.chain_set_warning',
+          entityType: 'proposal',
+          entityId: headId,
+          metadata: {
+            reason: 'head_missing_from_chain_lookup',
+            chainId: headMeta.chainId,
+          },
+        }),
+      );
+    }
+    return { approved, skipped };
+  }
+
+  const ordered = siblings.sort((a, b) => {
+    const ai = chainMetaFor(a)?.chainIndex ?? Number.MAX_SAFE_INTEGER;
+    const bi = chainMetaFor(b)?.chainIndex ?? Number.MAX_SAFE_INTEGER;
+    return ai - bi;
+  });
+
+  for (const proposal of ordered) {
+    if (proposal.id === headId) continue;
+
+    if (actionClassForProposalType(proposal.proposalType) !== 'capture') {
+      skipped.push({ id: proposal.id, reason: 'non_capture' });
+      continue;
+    }
+    if (!isReviewableForChainSet(proposal)) {
+      skipped.push({ id: proposal.id, reason: 'not_reviewable' });
+      continue;
+    }
+    if (confidenceMetaBlocksAutoApprove(proposal.payload)) {
+      skipped.push({ id: proposal.id, reason: 'low_confidence' });
+      continue;
+    }
+    if (hasPendingEdit && (await hasPendingEdit(tenantId, proposal.id))) {
+      skipped.push({ id: proposal.id, reason: 'pending_edit' });
+      continue;
+    }
+    if (missingFieldsFor(proposal).length > 0) {
+      skipped.push({ id: proposal.id, reason: 'missing_fields' });
+      continue;
+    }
+
+    try {
+      const updated = await approveProposal(
+        proposalRepo,
+        tenantId,
+        proposal.id,
+        actorId,
+        actorRole,
+        auditRepo,
+        channel,
+      );
+      approved.push(updated);
+    } catch (err) {
+      skipped.push({ id: proposal.id, reason: 'error' });
+      if (auditRepo) {
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId,
+            actorRole,
+            eventType: 'proposal.chain_set_member_skipped',
+            entityType: 'proposal',
+            entityId: proposal.id,
+            metadata: {
+              reason: 'error',
+              headId,
+              error: err instanceof Error ? err.message : String(err),
+            },
+          }),
+        );
+      }
+    }
+  }
+
+  return { approved, skipped };
 }
 
 /**

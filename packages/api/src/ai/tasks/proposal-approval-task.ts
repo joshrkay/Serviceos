@@ -38,7 +38,14 @@
  */
 import type { Proposal, ProposalRepository } from '../../proposals/proposal';
 import { actionClassForProposalType } from '../../proposals/proposal';
-import { approveProposal, rejectProposal, editProposal } from '../../proposals/actions';
+import {
+  approveChainSet,
+  type ApproveChainSetResult,
+  editProposal,
+  formatChainSetApprovalMessage,
+  rejectProposal,
+  summarizeChainSetResult,
+} from '../../proposals/actions';
 import { routeUnsupervisedProposal } from '../../proposals/auto-approve';
 import { renderProposalSms, renderReapprovalSms } from '../../proposals/sms/render';
 import { payloadHeadlineCents } from '../../proposals/payload-money';
@@ -581,8 +588,11 @@ async function executeApprove(
   }
 
   let approved: Proposal;
+  let approvedCount = 0;
+  let skippedCount = 0;
+  let skipped: ApproveChainSetResult['skipped'] = [];
   try {
-    approved = await approveProposal(
+    const result = await approveChainSet(
       deps.proposalRepo,
       ref.tenantId,
       proposalId,
@@ -590,7 +600,15 @@ async function executeApprove(
       'owner',
       deps.auditRepo,
       'voice', // RV-073 — voice approval channel
+      deps.smsEventRepo
+        ? (tenantId, id) => deps.smsEventRepo!.hasUnappliedEditRequest(tenantId, id)
+        : undefined,
     );
+    const summary = summarizeChainSetResult(result);
+    approved = result.approved[0];
+    approvedCount = summary.approvedCount;
+    skippedCount = summary.followCount;
+    skipped = summary.skipped;
   } catch (err) {
     if (err instanceof ValidationError) {
       await audit(deps, ref, 'proposal.voice_approve_blocked', proposalId, {
@@ -616,9 +634,15 @@ async function executeApprove(
   }
   await audit(deps, ref, 'proposal.voice_approved', approved.id, {
     proposalType: approved.proposalType,
+    approvedCount,
+    skippedCount,
+    skipped,
   });
   return {
-    speak: `Approved — "${approved.summary}" will run shortly.`,
+    speak: formatChainSetApprovalMessage(
+      { approvedCount, followCount: skippedCount, skipped },
+      `Approved — "${approved.summary}" will run shortly.`,
+    ),
     pending: null,
     outcome: 'approved',
     proposalId: approved.id,

@@ -647,7 +647,7 @@ function member(overrides: Partial<ChainSmsMember> = {}): ChainSmsMember {
 }
 
 describe('renderChainSms — RV-221 chain summaries', () => {
-  it('renders a 2-member capture chain as one numbered summary with the truthful head-only reply prompt', () => {
+  it('renders a 2-member capture chain as one numbered summary with the truthful set-approval reply prompt', () => {
     const body = renderChainSms(
       [
         member(),
@@ -661,9 +661,8 @@ describe('renderChainSms — RV-221 chain summaries', () => {
     expect(body).toContain('2 linked actions:');
     expect(body).toContain('1) Create customer Jane Doe');
     expect(body).toContain('2) Open a job for Jane Doe');
-    // Track E truthful copy: Y approves the HEAD (item 1) only — the
-    // dependents are drafts approved from the queue.
-    expect(body).toContain('Reply Y to approve 1); the rest follow in your queue.');
+    // Track E truthful copy: Y approves the capture-class setup steps together.
+    expect(body).toContain('Reply Y to approve the setup steps; starred items follow separately.');
     expect(body).toContain(URL);
     // No money/comms member → no separate-approval legend.
     expect(body).not.toContain('Approval follows separately');
@@ -691,7 +690,7 @@ describe('renderChainSms — RV-221 chain summaries', () => {
     // Money fact extracted from the payload; comms member flagged.
     expect(body).toContain('3) Send Jane the estimate ($450.00)*');
     expect(body).toContain('*Approval follows separately.');
-    expect(body).toContain('Reply Y to approve 1); the rest follow in your queue.');
+    expect(body).toContain('Reply Y to approve the setup steps; starred items follow separately.');
     expect(body).toContain(URL);
   });
 
@@ -757,8 +756,8 @@ describe('renderChainSms — RV-221 chain summaries', () => {
       ],
       { approveUrl: URL },
     );
-    // Y only ever approves the (capture) head; the money member is starred.
-    expect(body).toContain('Reply Y to approve 1); the rest follow in your queue.');
+    // Y approves the capture setup steps; the money member is starred.
+    expect(body).toContain('Reply Y to approve the setup steps; starred items follow separately.');
     expect(body).toContain('2) Record a payment from Jane ($200.00)*');
     expect(body).toContain('*Approval follows separately.');
     expect(body).toContain(URL);
@@ -810,7 +809,7 @@ describe('renderChainSms — RV-221 chain summaries', () => {
     );
     const humanPart = body.includes(' Or tap') ? body.slice(0, body.indexOf(' Or tap')) : body;
     expect(humanPart.length).toBeLessThanOrEqual(PROPOSAL_SMS_MAX_CHARS);
-    expect(body).toContain('Reply Y to approve 1); the rest follow in your queue.');
+    expect(body).toContain('Reply Y to approve the setup steps; starred items follow separately.');
     expect(body).toContain(URL);
     expect(body).toContain('…');
   });

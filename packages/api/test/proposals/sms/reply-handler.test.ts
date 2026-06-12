@@ -25,6 +25,7 @@ import {
   createProposal,
   type Proposal,
 } from '../../../src/proposals/proposal';
+import { applyChainMetadata } from '../../../src/proposals/chain';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import type { SettingsRepository } from '../../../src/settings/settings';
 import type { UserRepository } from '../../../src/users/user';
@@ -232,6 +233,140 @@ describe('handleProposalSmsReply — approve', () => {
       'ready_for_review',
     );
     expect(h.sent[0].body).toContain("Can't approve yet");
+  });
+
+  it('Y on a chain head approves capture members and reports linked-action counts', async () => {
+    const h = makeHarness();
+    const chainId = 'sms-chain-1';
+    const head = createProposal({
+      tenantId: TENANT,
+      proposalType: 'create_customer',
+      payload: { name: 'Jane Chain' },
+      summary: 'Create Jane Chain',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(head, {
+      chainId,
+      chainIndex: 0,
+      chainLength: 3,
+      dependsOnChainIndices: [],
+      chainRefs: [],
+    });
+    const job = createProposal({
+      tenantId: TENANT,
+      proposalType: 'create_job',
+      payload: { customerId: 'placeholder', title: 'Install' },
+      summary: 'Create install job',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(job, {
+      chainId,
+      chainIndex: 1,
+      chainLength: 3,
+      dependsOnChainIndices: [0],
+      chainRefs: [{ payloadPath: 'customerId', parentChainIndex: 0, entityKind: 'customerId' }],
+    });
+    const sendEstimate = createProposal({
+      tenantId: TENANT,
+      proposalType: 'send_estimate',
+      payload: { estimateId: '550e8400-e29b-41d4-a716-446655440001' },
+      summary: 'Send estimate',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(sendEstimate, {
+      chainId,
+      chainIndex: 2,
+      chainLength: 3,
+      dependsOnChainIndices: [1],
+      chainRefs: [{ payloadPath: 'estimateId', parentChainIndex: 1, entityKind: 'estimateId' }],
+    });
+    await h.proposalRepo.createMany([
+      { ...head, status: 'ready_for_review' },
+      { ...job, status: 'draft' },
+      { ...sendEstimate, status: 'draft' },
+    ]);
+    await h.smsEventRepo.create(
+      createProposalSmsEvent({
+        tenantId: TENANT,
+        proposalId: head.id,
+        direction: 'outbound',
+        kind: 'proposal_rendered',
+        body: 'Chain summary. Reply Y to approve the setup steps; starred items follow separately.',
+      }),
+    );
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'approved' });
+    expect((await h.proposalRepo.findById(TENANT, head.id))?.status).toBe('approved');
+    expect((await h.proposalRepo.findById(TENANT, job.id))?.status).toBe('approved');
+    expect((await h.proposalRepo.findById(TENANT, sendEstimate.id))?.status).toBe('draft');
+    expect(h.sent[0].body).toContain('Approved 2 linked actions');
+    expect(h.sent[0].body).toContain('1 follows separately');
+    expect(h.auditRepo.getAll()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventType: 'proposal.sms_approved',
+          metadata: expect.objectContaining({
+            skipped: [{ id: sendEstimate.id, reason: 'non_capture' }],
+          }),
+        }),
+      ]),
+    );
+  });
+
+  it('Y on a non-head chain member confirms only the single approved proposal', async () => {
+    const h = makeHarness();
+    const chainId = 'sms-chain-member';
+    const head = createProposal({
+      tenantId: TENANT,
+      proposalType: 'create_customer',
+      payload: { name: 'Jane Chain' },
+      summary: 'Create Jane Chain',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(head, {
+      chainId,
+      chainIndex: 0,
+      chainLength: 2,
+      dependsOnChainIndices: [],
+      chainRefs: [],
+    });
+    const job = createProposal({
+      tenantId: TENANT,
+      proposalType: 'create_job',
+      payload: { customerId: 'placeholder', title: 'Install' },
+      summary: 'Create install job',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(job, {
+      chainId,
+      chainIndex: 1,
+      chainLength: 2,
+      dependsOnChainIndices: [0],
+      chainRefs: [{ payloadPath: 'customerId', parentChainIndex: 0, entityKind: 'customerId' }],
+    });
+    await h.proposalRepo.createMany([
+      { ...head, status: 'ready_for_review' },
+      { ...job, status: 'draft' },
+    ]);
+    await h.smsEventRepo.create(
+      createProposalSmsEvent({
+        tenantId: TENANT,
+        proposalId: job.id,
+        direction: 'outbound',
+        kind: 'proposal_rendered',
+        body: 'Create install job. Reply Y to approve, N to reject, EDIT to change.',
+      }),
+    );
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'approved' });
+    expect((await h.proposalRepo.findById(TENANT, head.id))?.status).toBe('ready_for_review');
+    expect((await h.proposalRepo.findById(TENANT, job.id))?.status).toBe('approved');
+    expect(h.sent[0].body).toContain('Approved — "Create install job" will run shortly.');
+    expect(h.sent[0].body).not.toContain('follows separately');
   });
 });
 
