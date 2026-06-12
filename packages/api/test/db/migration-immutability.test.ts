@@ -236,6 +236,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // RV-063: per-tenant digest delivery settings (enabled/time/channel)
   ['163_tenant_settings_digest', '3fb34512c152ba262d2e21e4aa84608374156f89c07d5f71e3cd43d38b718836'],
   ['164_dispatch_entity_daily_digest', '4d3ad093b4319cf786bfd047df3d5898720a4d6712e5037704c5a06fffc492e9'],
+  // Rivet P2 F-1: supervisor_policies (versioned per-tenant rules) +
+  // tenant_budget_counters (fixed-window budget counters), both RLS'd.
+  ['167_create_supervisor_policies', '6bf3ba1a21e1bc1a829fe4addd9a71cd8e9c64587c23338909df15c0f6988d48'],
 ];
 
 function hashMigration(value: string): string {
