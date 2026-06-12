@@ -10,7 +10,7 @@ import {
   type QuickBooksStatus,
 } from '../../api/integrations';
 
-export function QuickBooksConnect({ onConnected }: { onConnected?: () => void }) {
+export function QuickBooksConnect({ onStatusChange }: { onStatusChange?: () => void }) {
   const [integration, setIntegration] = useState<AccountingIntegrationSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState(false);
@@ -35,7 +35,6 @@ export function QuickBooksConnect({ onConnected }: { onConnected?: () => void })
     try {
       const url = await connectQuickBooks('/settings');
       window.open(url, '_self');
-      onConnected?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connect failed');
       setConnecting(false);
@@ -47,6 +46,7 @@ export function QuickBooksConnect({ onConnected }: { onConnected?: () => void })
     try {
       await disconnectQuickBooks();
       setIntegration(null);
+      onStatusChange?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Disconnect failed');
     }

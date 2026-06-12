@@ -7,7 +7,7 @@ import {
   AccountingIntegrationRepository,
   AccountingSyncLogRepository,
 } from './types';
-import { QuickBooksClient } from './quickbooks-client';
+import { createAccountingProvider, AccountingProviderClient } from './accounting-provider';
 import {
   QuickBooksFetch,
   QuickBooksOAuthConfig,
@@ -87,13 +87,11 @@ export class AccountingSyncService {
     return result;
   }
 
-  private makeClient(integration: AccountingIntegration, accessToken: string): QuickBooksClient {
-    return new QuickBooksClient(
-      integration.realmId,
-      accessToken,
-      this.deps.fetchFn ?? fetch,
-      this.deps.qboConfig.environment,
-    );
+  private makeClient(integration: AccountingIntegration, accessToken: string): AccountingProviderClient {
+    return createAccountingProvider(integration, accessToken, {
+      fetchFn: this.deps.fetchFn ?? fetch,
+      qboConfig: this.deps.qboConfig,
+    });
   }
 
   private async refreshIfNeeded(

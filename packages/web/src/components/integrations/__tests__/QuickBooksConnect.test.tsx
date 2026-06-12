@@ -4,6 +4,7 @@ import { QuickBooksConnect } from '../QuickBooksConnect';
 
 vi.mock('../../../api/integrations', () => ({
   connectQuickBooks: vi.fn(async () => 'https://intuit.example/oauth'),
+  fetchIntegrations: vi.fn(async () => []),
   fetchQuickBooksStatus: vi.fn(async () => null),
   disconnectQuickBooks: vi.fn(async () => undefined),
   triggerQuickBooksSync: vi.fn(async () => undefined),
@@ -19,6 +20,9 @@ describe('QuickBooksConnect (P15-001)', () => {
   it('Connect button kicks off OAuth URL fetch', async () => {
     const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
     render(<QuickBooksConnect />);
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /connect quickbooks/i })).toBeInTheDocument();
+    });
     fireEvent.click(screen.getByRole('button', { name: /connect quickbooks/i }));
     await waitFor(() => {
       expect(integrationsApi.connectQuickBooks).toHaveBeenCalled();
