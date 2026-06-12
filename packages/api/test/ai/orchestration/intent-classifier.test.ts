@@ -688,3 +688,196 @@ describe('RV-071 — approve_proposal / reject_proposal intents', () => {
     }
   });
 });
+
+// eslint-disable-next-line import/first
+import {
+  EXTENDED_INTENTS_PROMPT_SECTION,
+  EXTENDED_INTENT_TYPES,
+  isLookupIntent,
+  matchExtendedIntentPhrase,
+} from '../../../src/ai/orchestration/intent-classifier';
+
+// ─── Consistency pin: EXTENDED_INTENT_TYPES ↔ EXTENDED_INTENTS_PROMPT_SECTION ──
+//
+// Encodes three invariants established by the Architect:
+//   1. The set of intent names quoted in EXTENDED_INTENTS_PROMPT_SECTION equals
+//      the set of members in EXTENDED_INTENT_TYPES.
+//   2. Every EXTENDED_INTENT_TYPES member appears in SUPPORTED_INTENTS.
+//   3. Every EXTENDED_INTENT_PHRASES entry is in the read-only-entity-free
+//      allowlist {lookup_day_overview, lookup_digest, lookup_pending_items} —
+//      i.e. `complaint` (proposal-driving) is excluded.
+//
+// These tests will fail red if a new extended intent is added to one place
+// but not the other, or if a proposal-driving intent is accidentally added
+// to the phrase short-circuit list.
+
+describe('consistency pin — EXTENDED_INTENT_TYPES', () => {
+  const PHRASE_MATCH_ALLOWLIST = new Set([
+    'lookup_day_overview',
+    'lookup_digest',
+    'lookup_pending_items',
+  ]);
+
+  // Extract quoted intent names from EXTENDED_INTENTS_PROMPT_SECTION.
+  // The prompt uses `- "intent_name"` syntax; this regex collects every
+  // quoted token on a line that starts with `- "`.
+  function intentNamesFromPrompt(section: string): Set<string> {
+    const names = new Set<string>();
+    for (const line of section.split('\n')) {
+      const m = /^-\s+"([a-z_]+)"/.exec(line.trim());
+      if (m) names.add(m[1]);
+    }
+    return names;
+  }
+
+  it('quoted intents in EXTENDED_INTENTS_PROMPT_SECTION match EXTENDED_INTENT_TYPES', () => {
+    const fromPrompt = intentNamesFromPrompt(EXTENDED_INTENTS_PROMPT_SECTION);
+    const fromSet = new Set(EXTENDED_INTENT_TYPES);
+    for (const name of fromPrompt) {
+      expect(fromSet.has(name as never), `"${name}" in prompt but not in EXTENDED_INTENT_TYPES`).toBe(true);
+    }
+    for (const name of fromSet) {
+      expect(fromPrompt.has(name), `"${name}" in EXTENDED_INTENT_TYPES but not quoted in prompt`).toBe(true);
+    }
+  });
+
+  it('every EXTENDED_INTENT_TYPES member is in SUPPORTED_INTENTS', () => {
+    // SUPPORTED_INTENTS is not exported; test via parseClassifierJson (imported
+    // at the top of this file): it returns non-null only for supported intents.
+    for (const intent of EXTENDED_INTENT_TYPES) {
+      const result = parseClassifierJson(JSON.stringify({ intentType: intent, confidence: 0.9 }));
+      expect(result, `"${intent}" in EXTENDED_INTENT_TYPES but not accepted by parseClassifierJson`).not.toBeNull();
+    }
+  });
+
+  it('every EXTENDED_INTENT_PHRASES key is in the entity-free read-only allowlist', () => {
+    // matchExtendedIntentPhrase tests reveal which intents are phrase-matched.
+    // We verify indirectly: all phrase-triggered intents must be in PHRASE_MATCH_ALLOWLIST.
+    // Use a set of unambiguous stereotype transcripts for each allowlist member.
+    const triggersByIntent: Record<string, string[]> = {
+      lookup_day_overview: ["What's my day look like?", 'Give me my morning overview'],
+      lookup_digest: ['Read me my day', 'give me the daily digest'],
+      lookup_pending_items: ['What am I waiting on?', 'what are we still waiting on'],
+    };
+    for (const [intent, transcripts] of Object.entries(triggersByIntent)) {
+      expect(PHRASE_MATCH_ALLOWLIST.has(intent), `"${intent}" must be in the phrase-match allowlist`).toBe(true);
+      for (const tx of transcripts) {
+        expect(matchExtendedIntentPhrase(tx), `"${tx}" should match "${intent}"`).toBe(intent);
+      }
+    }
+    // complaint must NOT be phrase-matchable (it's proposal-driving).
+    expect(matchExtendedIntentPhrase('I want to file a complaint about the install')).toBeNull();
+    expect(matchExtendedIntentPhrase('I have a complaint')).toBeNull();
+  });
+});
+
+describe('Phase-2 Track A — extended operator intents', () => {
+  it('parseClassifierJson accepts the new intents', () => {
+    for (const intentType of ['lookup_day_overview', 'lookup_digest', 'lookup_pending_items', 'complaint'] as const) {
+      const out = parseClassifierJson(JSON.stringify({ intentType, confidence: 0.9 }));
+      expect(out?.intentType).toBe(intentType);
+    }
+  });
+
+  it('isLookupIntent covers the new lookup intents', () => {
+    expect(isLookupIntent('lookup_day_overview')).toBe(true);
+    expect(isLookupIntent('lookup_digest')).toBe(true);
+    expect(isLookupIntent('lookup_pending_items')).toBe(true);
+  });
+
+  it('matchExtendedIntentPhrase matches the canonical pending-items phrasings only', () => {
+    expect(matchExtendedIntentPhrase('What am I waiting on?')).toBe('lookup_pending_items');
+    expect(matchExtendedIntentPhrase('what are we still waiting on')).toBe('lookup_pending_items');
+    expect(matchExtendedIntentPhrase('I am waiting on a delivery tomorrow')).toBeNull();
+  });
+
+  it('matchExtendedIntentPhrase does NOT match complaint phrasings (complaint is LLM-path only)', () => {
+    // complaint was removed from EXTENDED_INTENT_PHRASES because it is
+    // a proposal-driving intent that extracts entities (noteBody /
+    // customerName / jobReference). The deterministic path returns no
+    // entities, creating a quality cliff. The LLM prompt section
+    // (EXTENDED_INTENTS_PROMPT_SECTION) owns complaint classification
+    // and entity extraction entirely.
+    expect(matchExtendedIntentPhrase('I want to file a complaint about the install')).toBeNull();
+    expect(matchExtendedIntentPhrase('I would like to complain')).toBeNull();
+    expect(matchExtendedIntentPhrase("I'd like to complain about the service")).toBeNull();
+    expect(matchExtendedIntentPhrase('I have a complaint')).toBeNull();
+    // Corpus safety: vague unhappiness also not matched (trivially true
+    // now that the whole complaint block is absent).
+    expect(matchExtendedIntentPhrase("I'm not happy with my last service.")).toBeNull();
+  });
+
+  it('matchExtendedIntentPhrase matches the canonical digest phrasings only', () => {
+    expect(matchExtendedIntentPhrase('Read me my day')).toBe('lookup_digest');
+    expect(matchExtendedIntentPhrase('read my day')).toBe('lookup_digest');
+    expect(matchExtendedIntentPhrase('give me the daily digest')).toBe('lookup_digest');
+    expect(matchExtendedIntentPhrase('what did the digest say?')).toBe('lookup_digest');
+    expect(matchExtendedIntentPhrase('read me the Smith invoice')).toBeNull();
+  });
+
+  it('matchExtendedIntentPhrase matches the canonical day-overview phrasings only', () => {
+    expect(matchExtendedIntentPhrase("What's my day look like?")).toBe('lookup_day_overview');
+    expect(matchExtendedIntentPhrase('what does my day look like')).toBe('lookup_day_overview');
+    expect(matchExtendedIntentPhrase("how's my day looking?")).toBe('lookup_day_overview');
+    expect(matchExtendedIntentPhrase('Give me my morning overview')).toBe('lookup_day_overview');
+    // Ordinary commands never collapse into a lookup.
+    expect(matchExtendedIntentPhrase('Create an invoice for Acme for 450 dollars')).toBeNull();
+    expect(matchExtendedIntentPhrase('Schedule my day off next Tuesday')).toBeNull();
+    expect(matchExtendedIntentPhrase('')).toBeNull();
+  });
+
+  it('extendedIntents: deterministic phrase short-circuits WITHOUT an LLM call', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent(
+      "What's my day look like?",
+      { tenantId: 't1', extendedIntents: true },
+      gateway,
+    );
+    expect(result.intentType).toBe('lookup_day_overview');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('extendedIntents: true appends the section as a SEPARATE system message for non-matching transcripts', async () => {
+    const gateway = mockGateway('{"intentType":"lookup_day_overview","confidence":0.85}');
+    const result = await classifyIntent(
+      'morning rundown please, schedule and approvals',
+      { tenantId: 't1', extendedIntents: true },
+      gateway,
+    );
+    expect(result.intentType).toBe('lookup_day_overview');
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+    expect(systemMessages.length).toBe(2);
+    expect(systemMessages[1].content).toBe(EXTENDED_INTENTS_PROMPT_SECTION);
+    // The BASE prompt is untouched — it must not mention the new intents.
+    expect(systemMessages[0].content).not.toContain('lookup_day_overview');
+  });
+
+  it('without extendedIntents the prompt messages are byte-identical to the legacy shape (cassette stability)', async () => {
+    const gatewayA = mockGateway('{"intentType":"unknown","confidence":0.9}');
+    const gatewayB = mockGateway('{"intentType":"unknown","confidence":0.9}');
+
+    await classifyIntent("What's my day look like?", { tenantId: 't1' }, gatewayA);
+    await classifyIntent(
+      "What's my day look like?",
+      { tenantId: 't1', extendedIntents: false },
+      gatewayB,
+    );
+
+    const messagesA = (gatewayA.complete as ReturnType<typeof vi.fn>).mock.calls[0][0].messages;
+    const messagesB = (gatewayB.complete as ReturnType<typeof vi.fn>).mock.calls[0][0].messages;
+    expect(messagesB).toEqual(messagesA);
+    expect(messagesA.filter((m: { role: string }) => m.role === 'system')).toHaveLength(1);
+    for (const m of messagesA) {
+      expect(m.content).not.toContain('lookup_day_overview');
+    }
+  });
+
+  it('without extendedIntents the deterministic matcher never fires (LLM result wins)', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.9}');
+    const result = await classifyIntent("What's my day look like?", { tenantId: 't1' }, gateway);
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+    expect(result.intentType).toBe('unknown');
+  });
+});

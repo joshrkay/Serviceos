@@ -428,6 +428,77 @@ describe('runDailyDigestSweep', () => {
     expect(tokenPayload.e - Date.now()).toBeLessThanOrEqual(30 * 60 * 1000 + 1000);
   });
 
+  it('RV-065: embeds a verifiable mint_draft_invoice one-tap link per unbilled job', async () => {
+    const jobId = '11111111-1111-4111-8111-111111111111';
+    const acceptedEstimate = {
+      id: '55555555-5555-4555-8555-555555555555',
+      tenantId: 't1',
+      jobId,
+      estimateNumber: 'EST-1',
+      status: 'accepted',
+      lineItems: [
+        {
+          id: '44444444-4444-4444-8444-444444444444',
+          description: 'Replace heater',
+          quantity: 1,
+          unitPriceCents: 48000,
+          totalCents: 48000,
+          sortOrder: 0,
+          taxable: true,
+        },
+      ],
+      totals: {
+        subtotalCents: 48000,
+        taxableSubtotalCents: 48000,
+        discountCents: 0,
+        taxRateBps: 0,
+        taxCents: 0,
+        totalCents: 48000,
+      },
+      version: 1,
+    };
+    const computeDeps: DigestComputeDeps = {
+      ...stubComputeDeps({}, settingsRepo),
+      jobRepo: {
+        findByTenant: async () => [
+          {
+            id: jobId,
+            tenantId: 't1',
+            customerId: 'cust-1',
+            status: 'completed',
+            moneyState: 'estimate_accepted',
+            updatedAt: new Date('2026-06-01T00:00:00Z'),
+          },
+        ],
+      } as unknown as JobRepository,
+      estimateRepo: {
+        findByJobs: async () => [acceptedEstimate],
+      } as unknown as EstimateRepository,
+    };
+
+    const result = await runDailyDigestSweep(deps({ computeDeps }));
+    expect(result.sent).toBe(1);
+    const body: string = sendSms.mock.calls[0][0].body;
+    expect(body.length).toBeLessThanOrEqual(480);
+    expect(body).toContain('Bill');
+
+    const match = /Bill[^h]*?(https:\/\/api\.x\/approve\?token=[^\s]+)/.exec(body);
+    expect(match).not.toBeNull();
+    const token = decodeURIComponent(match![1].split('token=')[1]);
+    const verified = await verifyOneTapApproveToken({
+      token,
+      secret: SECRET,
+      expectedTenantId: 't1',
+      consumeNonce: () => true,
+    });
+    expect(verified).toEqual({
+      ok: true,
+      action: 'mint_draft_invoice',
+      jobId,
+      tenantId: 't1',
+    });
+  });
+
   it('isolates tenant failures: one tenant exploding never blocks the others', async () => {
     await settingsRepo.create(settingsRow('t2', { ownerPhone: '+15559990000' }));
     const computeDepsByTenant: DigestComputeDeps = {

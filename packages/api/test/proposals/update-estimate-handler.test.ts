@@ -16,6 +16,17 @@ import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { Proposal } from '../../src/proposals/proposal';
 import { buildLineItem, calculateDocumentTotals, LineItem } from '../../src/shared/billing-engine';
+import type { Job, JobRepository } from '../../src/jobs/job';
+
+/** Minimal job repo: resolves job-1 with the given paid deposit. */
+function makeJobRepo(depositPaidCents = 0): Pick<JobRepository, 'findById'> {
+  return {
+    findById: async (tenantId: string, id: string) =>
+      id === 'job-1' && tenantId === 't-1'
+        ? ({ id: 'job-1', tenantId: 't-1', depositPaidCents } as Job)
+        : null,
+  };
+}
 
 function makeEstimate(overrides: Partial<Estimate> = {}): Estimate {
   const lineItems: LineItem[] = [
@@ -68,7 +79,13 @@ describe('UpdateEstimateExecutionHandler', () => {
   beforeEach(async () => {
     estimateRepo = new InMemoryEstimateRepository();
     await estimateRepo.create(makeEstimate());
-    handler = new UpdateEstimateExecutionHandler(estimateRepo);
+    handler = new UpdateEstimateExecutionHandler(
+      estimateRepo,
+      undefined,
+      undefined,
+      undefined,
+      makeJobRepo(),
+    );
   });
 
   it('applies an add_line_item and persists the updated estimate', async () => {
@@ -84,7 +101,13 @@ describe('UpdateEstimateExecutionHandler', () => {
 
   it('bumps version and emits an audit event so the stale-accept guard catches voice edits', async () => {
     const auditRepo = new InMemoryAuditRepository();
-    const h = new UpdateEstimateExecutionHandler(estimateRepo, auditRepo);
+    const h = new UpdateEstimateExecutionHandler(
+      estimateRepo,
+      auditRepo,
+      undefined,
+      undefined,
+      makeJobRepo(),
+    );
     await estimateRepo.update('t-1', 'est-1', { version: 1 });
 
     const result = await h.execute(makeProposal(), { tenantId: 't-1', executedBy: 'u-1' });
@@ -191,9 +214,90 @@ describe('UpdateEstimateExecutionHandler', () => {
         throw new Error('db down');
       }),
     } as unknown as EstimateRepository;
-    const failingHandler = new UpdateEstimateExecutionHandler(failingRepo);
+    const failingHandler = new UpdateEstimateExecutionHandler(
+      failingRepo,
+      undefined,
+      undefined,
+      undefined,
+      makeJobRepo(),
+    );
     await expect(
       failingHandler.execute(makeProposal(), { tenantId: 't-1', executedBy: 'u-1' })
     ).rejects.toThrow(/db down/);
+  });
+
+  describe('deposit lock (linked job depositPaidCents)', () => {
+    function acceptedOverrides(): Partial<Estimate> {
+      return {
+        status: 'accepted',
+        version: 1,
+        acceptedAt: new Date('2026-06-05T12:00:00Z'),
+        acceptedByName: 'Jane Henderson',
+      };
+    }
+
+    it('refuses an accepted estimate whose job has a PAID deposit (no invalidation)', async () => {
+      await estimateRepo.update('t-1', 'est-1', acceptedOverrides());
+      const h = new UpdateEstimateExecutionHandler(
+        estimateRepo,
+        undefined,
+        undefined,
+        undefined,
+        makeJobRepo(50_000),
+      );
+
+      const result = await h.execute(makeProposal(), { tenantId: 't-1', executedBy: 'u-1' });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/deposit has already been paid/i);
+
+      const unchanged = await estimateRepo.findById('t-1', 'est-1');
+      expect(unchanged!.status).toBe('accepted');
+      expect(unchanged!.acceptedAt).toEqual(new Date('2026-06-05T12:00:00Z'));
+      expect(unchanged!.lineItems).toHaveLength(2);
+    });
+
+    it('still invalidates acceptance when the job has NO deposit paid', async () => {
+      await estimateRepo.update('t-1', 'est-1', acceptedOverrides());
+      const h = new UpdateEstimateExecutionHandler(
+        estimateRepo,
+        undefined,
+        undefined,
+        undefined,
+        makeJobRepo(0),
+      );
+
+      const result = await h.execute(makeProposal(), { tenantId: 't-1', executedBy: 'u-1' });
+      expect(result.success).toBe(true);
+
+      const after = await estimateRepo.findById('t-1', 'est-1');
+      expect(after!.status).toBe('sent');
+      expect(after!.acceptedAt == null).toBe(true);
+      expect(after!.lineItems).toHaveLength(3);
+    });
+
+    it('fails closed when the estimate has a jobId but no jobRepo is wired', async () => {
+      const h = new UpdateEstimateExecutionHandler(estimateRepo);
+      const result = await h.execute(makeProposal(), { tenantId: 't-1', executedBy: 'u-1' });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/deposit/i);
+
+      const unchanged = await estimateRepo.findById('t-1', 'est-1');
+      expect(unchanged!.lineItems).toHaveLength(2);
+    });
+
+    it('registry wires the jobRepo: deposit-locked estimate refuses through the registry handler', async () => {
+      await estimateRepo.update('t-1', 'est-1', acceptedOverrides());
+      const { createExecutionHandlerRegistry } = await import(
+        '../../src/proposals/execution/handlers'
+      );
+      const registry = createExecutionHandlerRegistry({
+        estimateRepo,
+        jobRepo: makeJobRepo(25_000) as unknown as JobRepository,
+      });
+      const h = registry.get('update_estimate')!;
+      const result = await h.execute(makeProposal(), { tenantId: 't-1', executedBy: 'u-1' });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/deposit has already been paid/i);
+    });
   });
 });

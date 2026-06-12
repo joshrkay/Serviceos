@@ -178,8 +178,18 @@ import type { OutboundAnchorKind } from './sms/sms-event';
 /** Hard ceiling on one-tap link lifetime (risk note: TTL ≤ 30 minutes). */
 export const ONE_TAP_APPROVE_MAX_TTL_MS = 30 * 60 * 1000;
 
+/**
+ * RV-065 — one-tap action discriminator. 'approve' is the original P12-004
+ * behavior (approve an existing proposal); 'mint_draft_invoice' is the
+ * digest's "invoice it" tap: mint a draft_invoice proposal for a completed
+ * unbilled job, then continue into the standard approve flow. Defaults to
+ * 'approve' everywhere so pre-RV-065 tokens (no `a` key) keep verifying —
+ * and freshly minted approve tokens stay byte-identical to the old format.
+ */
+export type OneTapAction = 'approve' | 'mint_draft_invoice';
+
 interface OneTapPayload {
-  /** proposal_id */
+  /** Subject id: proposal_id for 'approve', job_id for 'mint_draft_invoice'. */
   p: string;
   /** tenant_id */
   t: string;
@@ -187,6 +197,11 @@ interface OneTapPayload {
   n: string;
   /** expiry, epoch ms */
   e: number;
+  /**
+   * Action discriminator (RV-065). OMITTED for 'approve' so legacy approve
+   * tokens are byte-identical; present only for 'mint_draft_invoice'.
+   */
+  a?: 'mint_draft_invoice';
 }
 
 function sign(payloadB64: string, secret: string): string {
@@ -194,7 +209,12 @@ function sign(payloadB64: string, secret: string): string {
 }
 
 export interface CreateOneTapApproveTokenInput {
-  proposalId: string;
+  /** Required for action 'approve' (the default). */
+  proposalId?: string;
+  /** RV-065 — required for action 'mint_draft_invoice'; binds tenant+jobId. */
+  jobId?: string;
+  /** RV-065 — defaults to 'approve' (back-compat: token bytes unchanged). */
+  action?: OneTapAction;
   tenantId: string;
   /** HMAC secret (server-side, e.g. config.appSecret). */
   secret: string;
@@ -211,20 +231,32 @@ export interface OneTapApproveToken {
 }
 
 /**
- * Mint an HMAC-signed, single-use approve token bound to
- * proposal_id + tenant_id + nonce. TTL is clamped to 30 minutes.
+ * Mint an HMAC-signed, single-use one-tap token bound to
+ * (proposal_id | job_id) + tenant_id + nonce. TTL is clamped to 30 minutes.
+ * Signature/nonce/TTL machinery is identical across both action variants;
+ * the default 'approve' variant produces byte-identical payloads to the
+ * pre-RV-065 format (no `a` key).
  */
 export function createOneTapApproveToken(
   input: CreateOneTapApproveTokenInput,
 ): OneTapApproveToken {
   if (!input.secret) throw new Error('one-tap token requires a secret');
+  const action: OneTapAction = input.action ?? 'approve';
+  if (action === 'approve' && !input.proposalId) {
+    throw new Error("one-tap 'approve' token requires a proposalId");
+  }
+  if (action === 'mint_draft_invoice' && !input.jobId) {
+    throw new Error("one-tap 'mint_draft_invoice' token requires a jobId");
+  }
   const now = input.nowMs ?? Date.now();
   const ttl = Math.min(input.ttlMs ?? ONE_TAP_APPROVE_MAX_TTL_MS, ONE_TAP_APPROVE_MAX_TTL_MS);
   const payload: OneTapPayload = {
-    p: input.proposalId,
+    p: action === 'approve' ? (input.proposalId as string) : (input.jobId as string),
     t: input.tenantId,
     n: randomBytes(16).toString('base64url'),
     e: now + ttl,
+    // Key omitted entirely for 'approve' — legacy byte-identity.
+    ...(action === 'mint_draft_invoice' ? { a: 'mint_draft_invoice' as const } : {}),
   };
   const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const token = `${payloadB64}.${sign(payloadB64, input.secret)}`;
@@ -253,7 +285,8 @@ export interface VerifyOneTapApproveTokenInput {
 }
 
 export type OneTapVerifyResult =
-  | { ok: true; proposalId: string; tenantId: string }
+  | { ok: true; action: 'approve'; proposalId: string; tenantId: string }
+  | { ok: true; action: 'mint_draft_invoice'; jobId: string; tenantId: string }
   | { ok: false; reason: OneTapVerifyFailure };
 
 /** Verify an HMAC one-tap approve token. Consumes the nonce on success. */
@@ -281,7 +314,9 @@ export async function verifyOneTapApproveToken(
     typeof payload.p !== 'string' ||
     typeof payload.t !== 'string' ||
     typeof payload.n !== 'string' ||
-    typeof payload.e !== 'number'
+    typeof payload.e !== 'number' ||
+    // RV-065: `a` is either absent (legacy approve) or the mint literal.
+    (payload.a !== undefined && payload.a !== 'mint_draft_invoice')
   ) {
     return { ok: false, reason: 'malformed' };
   }
@@ -295,7 +330,10 @@ export async function verifyOneTapApproveToken(
   const fresh = await input.consumeNonce(payload.n);
   if (!fresh) return { ok: false, reason: 'already_used' };
 
-  return { ok: true, proposalId: payload.p, tenantId: payload.t };
+  if (payload.a === 'mint_draft_invoice') {
+    return { ok: true, action: 'mint_draft_invoice', jobId: payload.p, tenantId: payload.t };
+  }
+  return { ok: true, action: 'approve', proposalId: payload.p, tenantId: payload.t };
 }
 
 /**

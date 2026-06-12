@@ -361,6 +361,25 @@ import { requireTwilioSignature } from './telephony/twilio-signature';
 import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation';
 import { InMemoryProposalRepository } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
+// Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy hook + advisory annotator).
+import { configureSupervisorCreationHook } from './proposals/supervisor/hook';
+import {
+  SupervisorPolicyService,
+  recordExecutedProposalSpend,
+} from './proposals/supervisor/service';
+import {
+  InMemorySupervisorPolicyRepository,
+  PgSupervisorPolicyRepository,
+} from './proposals/supervisor/policies-repo';
+import {
+  InMemoryTenantBudgetCounterRepository,
+  PgTenantBudgetCounterRepository,
+} from './proposals/supervisor/budget-counters-repo';
+import {
+  runSupervisorAnnotationSweep,
+  SUPERVISOR_ANNOTATE_SWEEP_INTERVAL_MS,
+} from './workers/supervisor-review-worker';
+import { PgTenantFeatureFlagRepository } from './flags/pg-tenant-feature-flags';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { IdempotencyGuard } from './proposals/execution/idempotency';
 import {
@@ -399,6 +418,13 @@ import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import { registerKeywordHandler } from './sms/inbound-dispatch';
+// RV-050 — inbound MMS photo ingestion from registered tech phones.
+// P0-009: the webhook seam enqueues; the worker runs the pipeline.
+import {
+  registerMmsIngestHandler,
+  createTwilioMediaFetcher,
+} from './sms/tech-status/mms-ingest';
+import { createMmsIngestWorker } from './workers/mms-ingest-worker';
 import {
   registerProposalReplySms,
   PgProposalSmsEventRepository,
@@ -1328,6 +1354,10 @@ export function createApp(): express.Express {
     timeEntryService: new TimeEntryService(timeEntryRepo, auditRepo),
     feedbackRepo: feedbackRequestRepo,
     delayNotificationService,
+    // RV-086 — send_estimate_nudge: re-send via the unified SendService
+    // path; message_dispatches backs the 48h cooldown.
+    ...(sendService ? { sendService } : {}),
+    dispatchRepo,
   });
   // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
   // default to `proposal-run:{tenant}:{id}` when callers omit one.
@@ -1343,6 +1373,16 @@ export function createApp(): express.Express {
   // proposal-correction-worker. The onExecuted callback is failure-soft
   // inside the executor itself (logs via console, never rethrows), so
   // queue-send errors here can't break the executor's invariants.
+  // Rivet P2 F-1: late-bound supervisor spend recorder. The
+  // SupervisorPolicyService is constructed further down (it needs the
+  // feature-flag repo built near the end of createApp); the executor's
+  // onExecuted callback closes over this slot so executed money-class
+  // spend feeds the daily budget counter once the service is wired.
+  // Null until then — and recordExecutedProposalSpend never throws, so
+  // this can never break the execution path.
+  let supervisorSpendRecorder:
+    | ((tenantId: string, proposalId: string) => Promise<void>)
+    | null = null;
   const proposalExecutor = new ProposalExecutor(
     executionHandlers,
     proposalRepo,
@@ -1351,6 +1391,12 @@ export function createApp(): express.Express {
       executionRepo: proposalExecutionRepo,
       onExecuted: async (event) => {
         if (event.status !== 'succeeded') return;
+        // Rivet P2 F-1: executed money-class spend increments the daily
+        // budget counter. Failure-isolated twice over — the recorder
+        // never throws, and the executor's onExecuted is failure-soft.
+        if (supervisorSpendRecorder) {
+          await supervisorSpendRecorder(event.tenantId, event.proposalId);
+        }
         try {
           await queue.send(
             'proposal_correction',
@@ -1462,6 +1508,8 @@ export function createApp(): express.Express {
     batchInvoice: 590007,
     callMeBack: 590008,
     dailyDigest: 590009,
+    // 590010/590011 reserved by parallel Rivet P2 tracks.
+    supervisorAnnotate: 590012,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -1536,6 +1584,9 @@ export function createApp(): express.Express {
     thresholdResolver,
     tenantSchedulingResolver,
     appointmentRepo,
+    // RV-042 — lets update_estimate proposals stamp the acceptance-void
+    // marker at creation when they target a currently accepted estimate.
+    estimateRepo,
     // P22 — catalog grounding: drafted invoice/estimate line items get
     // priced from the tenant's catalog instead of trusting the LLM.
     catalogRepo,
@@ -1734,6 +1785,10 @@ export function createApp(): express.Express {
       // P2-034 — a pending manual edit request blocks the link too, not
       // just SMS Y replies; both paths approve the same stale payload.
       smsEventRepo: proposalSmsEventRepo,
+      // RV-065 — digest "invoice it" tokens: mint a draft_invoice proposal
+      // for the bound job (batch-invoice eligibility machinery), then
+      // redirect into the standard approve flow.
+      invoiceMintDeps: { jobRepo, invoiceRepo, estimateRepo },
     }),
   );
 
@@ -2676,6 +2731,62 @@ export function createApp(): express.Express {
       auditRepo,
     })
   );
+  // RV-050 — inbound MMS photo ingestion. P0-009 async split: the media
+  // handler registered with the P2-034 dispatcher only ENQUEUES an
+  // `mms_ingest` job (idempotency-keyed on the Twilio MessageSid, so
+  // webhook retry-duplicates dedupe at the queue) and the worker below
+  // runs the pipeline: photos texted from a REGISTERED TECH phone attach
+  // to the tech's active job (open time entry); media bytes are fetched
+  // from Twilio with the tenant's subaccount Basic-auth credentials (same
+  // pattern as the recording webhook). The "clock in first" reply is sent
+  // by the worker through the same MessageDelivery transport. Webhook
+  // latency stays in the ms; failures ride the queue retry/DLQ semantics.
+  registerMmsIngestHandler({ queue }, { overwrite: true });
+  const mmsIngestWorker = createMmsIngestWorker({
+    userRepo,
+    timeEntries: new TimeEntryService(timeEntryRepo, auditRepo),
+    attachmentService: new AttachmentService(
+      attachmentRepo,
+      fileRepo,
+      storageProvider,
+      auditRepo,
+      {
+        job: async (tenantId, id) => (await jobRepo.findById(tenantId, id)) !== null,
+      },
+      queue,
+    ),
+    fileRepo,
+    storage: storageProvider,
+    storageBucket,
+    fetchMedia: createTwilioMediaFetcher(async (tenantId) => {
+      const integration = await integrationResolver?.(tenantId, 'twilio');
+      if (
+        !integration ||
+        integration.provider !== 'twilio' ||
+        !integration.subaccountSid ||
+        !integration.authTokenPrimary
+      ) {
+        return null;
+      }
+      return {
+        accountSid: integration.subaccountSid,
+        authToken: integration.authTokenPrimary,
+      };
+    }),
+    ...(messageDelivery
+      ? {
+          sendReply: async (tenantId: string, to: string, body: string) => {
+            await messageDelivery!.sendSms({ to, body, tenantId });
+          },
+        }
+      : {}),
+    auditRepo,
+  });
+  workerRegistry.set(
+    mmsIngestWorker.type,
+    mmsIngestWorker as import('./queues/queue').WorkerHandler<unknown>,
+  );
+
   app.use(
     '/api/appointments',
     createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo, {
@@ -2995,6 +3106,8 @@ export function createApp(): express.Express {
       proposalRepo,
       // QA-2026-06-05 (AST-05): read-only query intents answer from data.
       invoiceRepo,
+      // RV-042 — acceptance-void marker on update_estimate proposals.
+      estimateRepo,
       // P22 — catalog grounding for assistant-drafted invoices/estimates.
       catalogRepo,
       // §3B/3D/3E — assistant chat shares the operator-side resolver
@@ -3536,6 +3649,82 @@ export function createApp(): express.Express {
   // DB pool; the queue is always present (Pg- or in-memory).
   if (pool) {
     app.use('/api/admin/tenants', createAdminTenantsRouter({ pool, queue }));
+  }
+
+  // ── Rivet P2 F-1: Supervisor Agent v1 ─────────────────────────────────────
+  //
+  // Two halves: (a) the deterministic policy hook installed into
+  // createProposal via module-level configure (see supervisor/hook.ts for
+  // the injection rationale — createProposal is a sync pure builder with
+  // 50+ call sites, so a repo dep can't be threaded through them), and
+  // (b) the advisory annotator sweep that adds LLM risk notes to
+  // ready_for_review proposals. Both are gated per tenant by the
+  // 'supervisor_agent' flag (tenant_feature_flags override → platform
+  // flag → false), so the supervisor is INERT for every tenant until the
+  // flag is turned on. Routes/settings exposure for policy versions is
+  // deferred to a follow-up track.
+  //
+  // NOTE for merges: a parallel track may also construct a
+  // PgTenantFeatureFlagRepository — the instance below is scoped to the
+  // supervisor wiring on purpose (its 30s cache is per-instance only),
+  // so a duplicate construction is harmless.
+  const supervisorTenantFlags = pool
+    ? new PgTenantFeatureFlagRepository(pool, featureFlagRepo)
+    : null;
+  const supervisorFlagGate = supervisorTenantFlags
+    ? (tenantId: string) => supervisorTenantFlags.isEnabledForTenant(tenantId, 'supervisor_agent')
+    : undefined;
+  const supervisorLogger = createLogger({
+    service: 'supervisor-agent',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  const supervisorService = new SupervisorPolicyService({
+    policies: pool
+      ? new PgSupervisorPolicyRepository(pool)
+      : new InMemorySupervisorPolicyRepository(),
+    counters: pool
+      ? new PgTenantBudgetCounterRepository(pool)
+      : new InMemoryTenantBudgetCounterRepository(),
+    auditRepo,
+    ...(supervisorFlagGate ? { isEnabledForTenant: supervisorFlagGate } : {}),
+    logger: supervisorLogger,
+  });
+  // Process-global hook: second createApp() in one process re-binds (last-wins).
+  // Never uninstalled on shutdown — benign: fail-open + fire-and-forget.
+  // Tests must reset via configureSupervisorCreationHook(null).
+  configureSupervisorCreationHook(supervisorService);
+  // Close the executed-spend loop declared next to the ProposalExecutor.
+  supervisorSpendRecorder = (tenantId, proposalId) =>
+    recordExecutedProposalSpend({
+      service: supervisorService,
+      proposalRepo,
+      tenantId,
+      proposalId,
+      logger: supervisorLogger,
+    });
+  // Advisory annotator sweep — only with a REAL LLM provider (the mock
+  // gateway's canned JSON must never be written into proposal payloads as
+  // a "risk note"), and per-tenant flag-gated inside the sweep itself.
+  if (config.AI_PROVIDER_API_KEY) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.supervisorAnnotate, async () => {
+        await runSupervisorAnnotationSweep({
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          proposalRepo,
+          gateway: llmGateway,
+          ...(supervisorFlagGate ? { isEnabledForTenant: supervisorFlagGate } : {}),
+          logger: supervisorLogger,
+        });
+      }).catch((err) => {
+        supervisorLogger.error('Supervisor annotation sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, SUPERVISOR_ANNOTATE_SWEEP_INTERVAL_MS));
   }
 
   // Wire the WS publish-side kill switches: every call to publish()

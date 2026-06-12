@@ -14,6 +14,8 @@ import { ConflictError } from '../shared/errors';
 import { voiceProposalIdempotencyKey } from '../voice/voice-audit';
 import {
   classifyIntent,
+  isLookupIntent,
+  isExtendedIntent,
   isVoiceApprovalIntent,
   isVoiceEditIntent,
   ExtractedEntities,
@@ -72,6 +74,14 @@ import {
   RequestFeedbackTaskHandler,
 } from '../ai/tasks/voice-extended-tasks';
 import { instrument } from '../monitoring/instrumentation';
+import {
+  ComplaintTaskHandler,
+  complaintSeverity,
+  COMPLAINT_HIGH_SEVERITY_REASON,
+} from '../ai/tasks/complaint-task';
+
+// Re-export for callers that import these from this module (e.g. router tests).
+export { complaintSeverity, COMPLAINT_HIGH_SEVERITY_REASON };
 
 /**
  * voice-action-router — the bridge between "Whisper gave us a
@@ -252,6 +262,28 @@ export interface VoiceActionRouterDeps {
    * records the unsupervised routing audit event. Optional for tests.
    */
   unsupervisedRouting?: UnsupervisedRoutingDeps;
+  /**
+   * RV-042 — review-time visibility of acceptance voiding: lets the
+   * update_estimate task handler read the targeted estimate and stamp the
+   * `_meta.markers` acceptance-void warning when it is currently accepted.
+   * Optional; absent -> marker skipped (execute-time audit still records it).
+   */
+  estimateRepo?: Pick<
+    import('../estimates/estimate').EstimateRepository,
+    'findById' | 'findByTenant'
+  >;
+  /**
+   * Phase-2 Track A — per-tenant opt-in for the extended operator intents
+   * (lookup_day_overview / lookup_digest / lookup_pending_items /
+   * complaint). Threaded as `ClassifyContext.extendedIntents` so the
+   * classifier appends the extra prompt section as a SEPARATE system
+   * message and enables the deterministic phrase short-circuits. When
+   * absent or falsy the classifier prompt stays byte-identical to the
+   * pre-Track-A prompt — voice-quality cassettes replay unchanged.
+   * Mirrors `multiActionEnabled`: optional, resolved once per message,
+   * non-fatal on resolver error.
+   */
+  extendedIntentsEnabled?: (tenantId: string) => Promise<boolean>;
 }
 
 // P11-001: lookup_* intents are READ-ONLY and never produce a
@@ -374,7 +406,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
     ),
   );
   handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway));
-  handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway));
+  handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo));
   handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo, deps.thresholdResolver));
   handlers.set('create_customer', new CreateCustomerTaskHandler());
   handlers.set('create_job', new CreateJobVoiceTaskHandler());
@@ -401,6 +433,12 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('log_time_entry', new LogTimeEntryTaskHandler());
   handlers.set('notify_delay', new NotifyDelayTaskHandler(deps.appointmentRepo, deps.jobRepo));
   handlers.set('request_feedback', new RequestFeedbackTaskHandler());
+  // RV-080 — complaint uses 'add_note' proposal type but needs its own
+  // handler (pinned-prefix note + companion callback). Registered under
+  // a synthetic key ('_complaint') so it doesn't collide with the plain
+  // add_note handler above. processSegment resolves it by intent name,
+  // not by proposal type, so the key here is just a stable map slot.
+  handlers.set('_complaint' as ProposalType, new ComplaintTaskHandler(deps.proposalRepo));
   return handlers;
 }
 
@@ -811,6 +849,8 @@ interface SegmentParams {
   recordingId?: string;
   customerId?: string;
   verticalPromptSection?: string;
+  /** Phase-2 Track A — tenant opted in to the extended operator intents. */
+  extendedIntents?: boolean;
   /**
    * When true (single-action path only), thread `recordingId` into the task
    * context — so the held-slot appointment is keyed `voice-hold:<recordingId>`
@@ -857,7 +897,13 @@ async function processSegment(
 
   const classification = await classifyIntent(
     segmentText,
-    { tenantId, ...(params.verticalPromptSection ? { verticalPromptSection: params.verticalPromptSection } : {}) },
+    {
+      tenantId,
+      ...(params.verticalPromptSection ? { verticalPromptSection: params.verticalPromptSection } : {}),
+      // Phase-2 Track A — opt-in only: leaves the classifier prompt
+      // byte-identical for tenants without the flag (cassette hashes).
+      ...(params.extendedIntents ? { extendedIntents: true } : {}),
+    },
     deps.gateway,
   );
 
@@ -888,6 +934,56 @@ async function processSegment(
     return { kind: 'clarified', classification };
   }
 
+  // Phase-2 Track A — belt-and-braces gate: extended intents (complaint,
+  // lookup_day_overview, lookup_digest, lookup_pending_items) are ONLY
+  // actionable when the calling surface opted in via extendedIntentsEnabled.
+  // The classifier prompt gate (appending EXTENDED_INTENTS_PROMPT_SECTION
+  // only when opted in) is the primary defence; this re-check is the
+  // backstop against LLM hallucination on a non-opted surface. Route to
+  // the clarification path (same as 'unknown') rather than silently
+  // skipping, so the caller gets an auditable response.
+  // Must run BEFORE the isLookupIntent check so that hallucinated
+  // lookup_day_overview / lookup_digest / lookup_pending_items on a
+  // non-opted surface produce an auditable clarification rather than a
+  // silent skip.
+  if (isExtendedIntent(classification.intentType) && !params.extendedIntents) {
+    log.warn('voice-action-router: extended intent refused — surface not opted in', {
+      intent: classification.intentType,
+    });
+    await emitClarification(
+      deps,
+      {
+        tenantId,
+        userId,
+        transcript: segmentText,
+        classification: { ...classification, intentType: 'unknown' as IntentType },
+        conversationId,
+        recordingId,
+        ...(params.applyDedup && recordingId
+          ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
+          : {}),
+      },
+      log,
+    );
+    return { kind: 'clarified', classification };
+  }
+
+  // P11-001 / RV-010 — lookup_* intents are READ-ONLY and never produce a
+  // proposal. The voice adapters (twilio-adapter / text-mode-driver)
+  // dispatch them to the lookup-skill family (lookup-day-overview and
+  // siblings in src/ai/skills) and speak the returned summary; this worker
+  // processes recorded memos with no voice back-channel, so its only
+  // correct move is to skip. Previously this fell out of the
+  // INTENT_TO_PROPOSAL_TYPE map by omission (a warn log); the explicit
+  // guard makes the read-only invariant loud, exactly like the RV-071
+  // approval-intent gate below.
+  if (isLookupIntent(classification.intentType)) {
+    log.info('voice-action-router: read-only lookup intent — no proposal to draft', {
+      intent: classification.intentType,
+    });
+    return { kind: 'skipped', classification };
+  }
+
   // RV-071 / RV-225 — HARD routing gate: the owner approval AND edit
   // intents are only actionable on a live, verified owner call (the
   // telephony FSM path, gated by RV-070's ownerSession). This worker
@@ -908,8 +1004,19 @@ async function processSegment(
     return { kind: 'skipped', classification };
   }
 
+  // RV-080 — complaint is dispatched to its dedicated handler (pinned-
+  // prefix add_note + companion callback). It reuses the EXISTING
+  // add_note proposal type, so it lives outside the intent→type map
+  // (which would collide with the plain add_note intent's handler).
+  // The handler is registered in buildHandlers under the '_complaint'
+  // sentinel key and is constructed ONCE (not per-segment).
   const proposalType = INTENT_TO_PROPOSAL_TYPE[classification.intentType];
-  const handler = proposalType ? handlers.get(proposalType) : undefined;
+  const handler =
+    classification.intentType === 'complaint'
+      ? handlers.get('_complaint' as ProposalType)
+      : proposalType
+        ? handlers.get(proposalType)
+        : undefined;
   if (!handler) {
     log.warn('voice-action-router: no handler for intent', {
       intent: classification.intentType,
@@ -1336,6 +1443,21 @@ export function createVoiceActionRouterWorker(
         }
       }
 
+      // Phase-2 Track A — resolve the extended-intents opt-in once per
+      // message (mirrors multiActionEnabled). Non-fatal: a resolver error
+      // degrades to the pre-Track-A classifier prompt.
+      let extendedIntents = false;
+      if (deps.extendedIntentsEnabled) {
+        try {
+          extendedIntents = await deps.extendedIntentsEnabled(tenantId);
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          log.warn('voice-action-router: extendedIntentsEnabled resolver failed, continuing without extended intents', {
+            error: error.message,
+          });
+        }
+      }
+
       // Multi-action chaining (feature-flagged). When enabled AND the
       // utterance decomposes into more than one action, route each
       // segment through the existing single-intent pipeline and link the
@@ -1385,6 +1507,7 @@ export function createVoiceActionRouterWorker(
               recordingId,
               customerId,
               verticalPromptSection,
+              ...(extendedIntents ? { extendedIntents: true } : {}),
             },
             log,
           );
@@ -1403,6 +1526,7 @@ export function createVoiceActionRouterWorker(
           recordingId,
           customerId,
           verticalPromptSection,
+          ...(extendedIntents ? { extendedIntents: true } : {}),
           // Single-action path: apply the per-recording dedup keys.
           applyDedup: true,
         },

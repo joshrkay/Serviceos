@@ -1,7 +1,9 @@
 import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
-import { assessConfidence } from '../guardrails/confidence';
+import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
+import type { ProposalConfidenceMeta } from '../../proposals/contracts';
+import type { Estimate, EstimateRepository } from '../../estimates/estimate';
 
 /**
  * EstimateEditTaskHandler — produces `update_estimate` proposals from
@@ -76,6 +78,13 @@ function buildPayload(parsed: Record<string, unknown> | null): Record<string, un
     payload.estimateReference = parsed.estimateReference;
   }
 
+  // Rare but allowed by the contract: a concrete estimateId (e.g. when the
+  // classifier hints carried a verified id). Passed through so execution
+  // can skip reference resolution.
+  if (typeof parsed.estimateId === 'string') {
+    payload.estimateId = parsed.estimateId;
+  }
+
   if (Array.isArray(parsed.editActions)) {
     payload.editActions = parsed.editActions;
   } else {
@@ -85,12 +94,32 @@ function buildPayload(parsed: Record<string, unknown> | null): Record<string, un
   return payload;
 }
 
+/** RV-042 — review-time marker for edits that void a customer's acceptance. */
+export const ACCEPTANCE_VOID_MARKER = {
+  path: '_acceptance',
+  reason: "approving voids the customer's prior acceptance",
+} as const;
+
 export class EstimateEditTaskHandler implements TaskHandler {
   readonly taskType = 'update_estimate' as const;
   private readonly gateway: LLMGateway;
+  /**
+   * RV-042 — review-time visibility of acceptance voiding. When wired, the
+   * handler resolves the targeted estimate (by id when the payload carries
+   * one, else by an unambiguous estimateReference match) and, if it is
+   * CURRENTLY ACCEPTED, stamps `_meta.markers` with ACCEPTANCE_VOID_MARKER
+   * so the SMS/UI review surfaces warn the approver that approving voids
+   * the customer's prior acceptance. Absent repo → marker skipped (the
+   * execute-time invalidation audit still records the voiding).
+   */
+  private readonly estimateRepo?: Pick<EstimateRepository, 'findById' | 'findByTenant'>;
 
-  constructor(gateway: LLMGateway) {
+  constructor(
+    gateway: LLMGateway,
+    estimateRepo?: Pick<EstimateRepository, 'findById' | 'findByTenant'>,
+  ) {
     this.gateway = gateway;
+    this.estimateRepo = estimateRepo;
   }
 
   async handle(context: TaskContext): Promise<TaskResult> {
@@ -106,6 +135,15 @@ export class EstimateEditTaskHandler implements TaskHandler {
     const parsed = tryParseJson(llmResponse.content);
     const payload = buildPayload(parsed);
     const confidence = assessConfidence(parsed ?? {});
+
+    const target = await this.resolveTargetEstimate(context.tenantId, payload);
+    if (target?.status === 'accepted') {
+      const meta: ProposalConfidenceMeta = {
+        overallConfidence: getConfidenceLevel(confidence.score),
+        markers: [ACCEPTANCE_VOID_MARKER],
+      };
+      payload._meta = meta;
+    }
 
     const input: CreateProposalInput = {
       tenantId: context.tenantId,
@@ -134,6 +172,36 @@ export class EstimateEditTaskHandler implements TaskHandler {
     };
 
     return { proposal: createProposal(input), taskType: this.taskType };
+  }
+
+  /**
+   * Best-effort target resolution for the acceptance-void marker. Never
+   * throws — a repo hiccup or an ambiguous reference simply skips the
+   * marker (the hard guarantees live at execute time).
+   */
+  private async resolveTargetEstimate(
+    tenantId: string,
+    payload: Record<string, unknown>,
+  ): Promise<Estimate | null> {
+    if (!this.estimateRepo) return null;
+    try {
+      if (typeof payload.estimateId === 'string' && payload.estimateId.length > 0) {
+        return await this.estimateRepo.findById(tenantId, payload.estimateId);
+      }
+      const reference = payload.estimateReference;
+      if (typeof reference === 'string' && reference.trim().length > 0) {
+        // ILIKE search on estimate_number / customer_message; only an
+        // UNAMBIGUOUS single match identifies the target.
+        const matches = await this.estimateRepo.findByTenant(tenantId, {
+          search: reference.trim(),
+          limit: 2,
+        });
+        if (matches.length === 1) return matches[0];
+      }
+    } catch {
+      // Marker resolution must never block proposal creation.
+    }
+    return null;
   }
 
   private buildUserMessage(context: TaskContext): string {

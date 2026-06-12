@@ -659,19 +659,62 @@ export class AddServiceLocationTaskHandler implements TaskHandler {
 // ───────────── log_time_entry ─────────────
 //
 // Clocks the speaking technician in on a job/task. entryType defaults to
-// 'job'. jobReference is carried for the executor to resolve to a jobId.
+// 'job'.
+//
+// RV-051 finding — the confirm turn IS the proposal. This handler creates
+// a capture-class proposal with no sourceTrustTier, so decideInitialStatus
+// lands it in 'draft': a human always confirms (review card / one-tap SMS)
+// before LogTimeEntryExecutionHandler actually clocks anyone in. There is
+// no separate spoken confirm turn to invent on this path — what was
+// missing was the CONTENT of that confirmation:
+//
+//   1. The router's entity resolver (P8) already resolves the free-text
+//      jobReference ("the Patel job") to a verified jobId on
+//      context.existingEntities.jobId — but this handler used to DROP it,
+//      so the executor (which reads ONLY payload.jobId) clocked in with
+//      no job even after a successful resolution. The resolved id now
+//      lands on the payload (jobReference kept for display).
+//   2. A job-type entry with no resolved job now flags `jobId` missing,
+//      holding the proposal in draft for the operator to complete instead
+//      of silently clocking in unattached to any job. (An AMBIGUOUS
+//      reference never reaches here — the router short-circuits to a
+//      voice_clarification with the candidate list first.)
+//   3. The proposal summary is now a readback — "Clocking you in on the
+//      Patel job — right?" — so every confirm surface (review card, SMS
+//      render, voice readback) asks the question instead of echoing the
+//      raw transcript.
 export class LogTimeEntryTaskHandler implements TaskHandler {
   readonly taskType = 'log_time_entry' as const;
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
-    const payload: Record<string, unknown> = {
-      entryType: ee.timeEntryType ?? 'job',
-    };
+    const entryType = ee.timeEntryType ?? 'job';
+    const payload: Record<string, unknown> = { entryType };
+    const missing: string[] = [];
+
+    // P8 — verified jobId resolved by the router from the spoken name.
+    const resolvedJobId =
+      typeof context.existingEntities?.jobId === 'string'
+        ? context.existingEntities.jobId
+        : undefined;
+    if (resolvedJobId) payload.jobId = resolvedJobId;
     if (ee.jobReference) payload.jobReference = ee.jobReference;
+    if (entryType === 'job' && !resolvedJobId) missing.push('jobId');
+
+    const readback =
+      entryType === 'job'
+        ? `Clocking you in on ${ee.jobReference ?? 'a job'} — right?`
+        : entryType === 'drive'
+          ? 'Starting your drive time — right?'
+          : entryType === 'break'
+            ? 'Starting your break — right?'
+            : 'Logging admin time — right?';
 
     return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, [])),
+      proposal: createProposal({
+        ...inputFor(context, this.taskType, payload, missing),
+        summary: readback,
+      }),
       taskType: this.taskType,
     };
   }
