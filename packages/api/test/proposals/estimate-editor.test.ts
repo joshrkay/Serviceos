@@ -6,6 +6,7 @@ import {
 } from '../../src/proposals/estimate-editor';
 import { createProposal, Proposal, CreateProposalInput } from '../../src/proposals/proposal';
 import { ValidationError } from '../../src/shared/errors';
+import { describe, it, expect } from 'vitest';
 
 function makeEstimateProposal(overrides?: Partial<Proposal>): Proposal {
   const input: CreateProposalInput = {
@@ -198,5 +199,115 @@ describe('P2-017 — Estimate proposal review + inline edit workflow', () => {
     expect(updatedProposal.payload.disclaimer).toBe('No warranty');
     expect(editedFields).toContain('title');
     expect(editedFields).toContain('disclaimer');
+  });
+});
+
+// ─── ITEM 1: _meta strip behavior on lineItems edits ─────────────────────────
+
+describe('applyEstimateEdits — _meta lineItems-scoped strip', () => {
+  function makeWithMeta(overrides?: Partial<Proposal>): Proposal {
+    const input: CreateProposalInput = {
+      tenantId: 'tenant-1',
+      proposalType: 'draft_estimate',
+      payload: {
+        customerId: '550e8400-e29b-41d4-a716-446655440000',
+        lineItems: [
+          { description: 'Labor', quantity: 2, unitPrice: 75.0 },
+          { description: 'Parts', quantity: 1, unitPrice: 50.0 },
+        ],
+        _meta: {
+          overallConfidence: 'medium',
+          fieldConfidence: {
+            'lineItems[0].unitPrice': 'low',
+            'lineItems[1].unitPrice': 'medium',
+            customerName: 'high',
+          },
+          markers: [
+            { path: 'lineItems[0].unitPrice', reason: 'not in catalog' },
+            { path: 'lineItems[1].unitPrice', reason: 'ambiguous pricing' },
+            { path: 'customerName', reason: 'inferred from transcript' },
+          ],
+        },
+      },
+      summary: 'Estimate with meta',
+      createdBy: 'ai',
+    };
+    const proposal = createProposal(input);
+    if (overrides) Object.assign(proposal, overrides);
+    return proposal;
+  }
+
+  it('splice (remove_line_item) → lineItems-scoped fieldConfidence and markers removed; overallConfidence retained', () => {
+    const proposal = makeWithMeta();
+    const { updatedProposal } = editEstimateProposal(proposal, [
+      { type: 'remove_line_item', index: 0 },
+    ]);
+    const meta = updatedProposal.payload._meta as Record<string, unknown>;
+    expect(meta.overallConfidence).toBe('medium');
+    // lineItems-scoped entries gone
+    const fc = meta.fieldConfidence as Record<string, unknown>;
+    expect(Object.keys(fc)).not.toContain('lineItems[0].unitPrice');
+    expect(Object.keys(fc)).not.toContain('lineItems[1].unitPrice');
+    // non-lineItems key retained
+    expect(fc.customerName).toBe('high');
+    // markers: only non-lineItems remain
+    const markers = meta.markers as Array<{ path: string }>;
+    expect(markers.every((m) => !m.path.startsWith('lineItems'))).toBe(true);
+    expect(markers.some((m) => m.path === 'customerName')).toBe(true);
+  });
+
+  it('add_line_item → lineItems-scoped entries stripped, overallConfidence retained', () => {
+    const proposal = makeWithMeta();
+    const { updatedProposal } = editEstimateProposal(proposal, [
+      { type: 'add_line_item', lineItem: { description: 'New item', quantity: 1, unitPrice: 100 } },
+    ]);
+    const meta = updatedProposal.payload._meta as Record<string, unknown>;
+    expect(meta.overallConfidence).toBe('medium');
+    const fc = meta.fieldConfidence as Record<string, unknown>;
+    expect(Object.keys(fc)).not.toContain('lineItems[0].unitPrice');
+    expect(fc.customerName).toBe('high');
+  });
+
+  it('update_line_item → lineItems-scoped entries stripped', () => {
+    const proposal = makeWithMeta();
+    const { updatedProposal } = editEstimateProposal(proposal, [
+      { type: 'update_line_item', index: 0, lineItem: { description: 'Updated', quantity: 1, unitPrice: 80 } },
+    ]);
+    const meta = updatedProposal.payload._meta as Record<string, unknown>;
+    expect(meta.overallConfidence).toBe('medium');
+    const fc = meta.fieldConfidence as Record<string, unknown>;
+    expect(Object.keys(fc)).not.toContain('lineItems[0].unitPrice');
+    expect(fc.customerName).toBe('high');
+  });
+
+  it('non-lineItems edit (update_notes) → _meta is untouched', () => {
+    const proposal = makeWithMeta();
+    const { updatedProposal } = editEstimateProposal(proposal, [
+      { type: 'update_notes', notes: 'New notes' },
+    ]);
+    const meta = updatedProposal.payload._meta as Record<string, unknown>;
+    expect(meta.overallConfidence).toBe('medium');
+    const fc = meta.fieldConfidence as Record<string, unknown>;
+    expect(Object.keys(fc)).toContain('lineItems[0].unitPrice');
+    expect(Object.keys(fc)).toContain('lineItems[1].unitPrice');
+    const markers = meta.markers as Array<{ path: string }>;
+    expect(markers).toHaveLength(3);
+  });
+
+  it('no _meta on payload — lineItems edit does not crash', () => {
+    const input: CreateProposalInput = {
+      tenantId: 'tenant-1',
+      proposalType: 'draft_estimate',
+      payload: {
+        customerId: '550e8400-e29b-41d4-a716-446655440000',
+        lineItems: [{ description: 'Labor', quantity: 1, unitPrice: 75 }],
+      },
+      summary: 'No meta estimate',
+      createdBy: 'ai',
+    };
+    const proposal = createProposal(input);
+    expect(() =>
+      editEstimateProposal(proposal, [{ type: 'remove_line_item', index: 0 }])
+    ).not.toThrow();
   });
 });

@@ -342,3 +342,36 @@ describe('RV-007 — payload _meta confidence marker', () => {
     ).toThrow(ValidationError);
   });
 });
+
+// ─── ITEM 1: No schema in PROPOSAL_TYPE_SCHEMAS is strict-mode ────────────────
+// A future `.strict()` call on any per-type schema would silently break the
+// `_meta` passthrough envelope — unknown keys would be rejected before the
+// envelope validator even runs. This test pins the invariant so such a
+// regression is caught immediately.
+describe('PROPOSAL_TYPE_SCHEMAS — no strict-mode schemas', () => {
+  it('every schema in PROPOSAL_TYPE_SCHEMAS is strip-mode (never strict)', () => {
+    // ZodObject exposes `_def.unknownKeys` which is 'strip' by default and
+    // 'strict' when .strict() has been called. ZodEffects (from .refine())
+    // wrap an innerType — we unwrap one level if needed.
+    const isStrictObject = (schema: import('zod').ZodSchema): boolean => {
+      const { z } = require('zod');
+      // Unwrap ZodEffects
+      let s: import('zod').ZodSchema = schema;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      while ((s as any)._def?.typeName === 'ZodEffects') {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        s = (s as any)._def.schema;
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (s as any)._def?.unknownKeys === 'strict';
+    };
+
+    const strictSchemas: string[] = [];
+    for (const [type, schema] of Object.entries(PROPOSAL_TYPE_SCHEMAS)) {
+      if (isStrictObject(schema)) {
+        strictSchemas.push(type);
+      }
+    }
+    expect(strictSchemas).toEqual([]);
+  });
+});

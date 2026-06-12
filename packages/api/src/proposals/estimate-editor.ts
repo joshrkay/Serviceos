@@ -1,5 +1,4 @@
-import { Proposal, ProposalRepository } from './proposal';
-import { validateProposalPayload } from './contracts';
+import { Proposal } from './proposal';
 import { ValidationError } from '../shared/errors';
 
 export const ALLOWED_WORDING_FIELDS = [
@@ -102,6 +101,35 @@ export function editEstimateProposal(
   }
 
   payload.lineItems = lineItems;
+
+  // Strip stale lineItems-scoped _meta entries produced during AI drafting.
+  // Human line-item edits (splice / push) shift indices, so any
+  // fieldConfidence keys or markers whose path starts with "lineItems" are
+  // no longer meaningful. overallConfidence is payload-level and is kept.
+  // Non-lineItems markers (e.g. "customerName") are also kept.
+  const touchedLineItems = editedFields.some(
+    (f) => f === 'lineItems' || f.startsWith('lineItems['),
+  );
+  if (touchedLineItems) {
+    const meta = payload._meta;
+    if (meta !== null && typeof meta === 'object') {
+      const m = meta as Record<string, unknown>;
+      if (m.fieldConfidence !== null && typeof m.fieldConfidence === 'object') {
+        const fc = { ...(m.fieldConfidence as Record<string, unknown>) };
+        for (const key of Object.keys(fc)) {
+          if (key.startsWith('lineItems')) {
+            delete fc[key];
+          }
+        }
+        m.fieldConfidence = fc;
+      }
+      if (Array.isArray(m.markers)) {
+        m.markers = (m.markers as Array<{ path: string; reason: string }>).filter(
+          (marker) => !marker.path.startsWith('lineItems'),
+        );
+      }
+    }
+  }
 
   const updatedProposal: Proposal = {
     ...proposal,
