@@ -41,6 +41,7 @@ import type {
 } from '../../sms/inbound-dispatch';
 import type { Proposal, ProposalRepository } from '../proposal';
 import { approveProposal, rejectProposal, editProposal } from '../actions';
+import { confidenceMetaBlocksAutoApprove } from '../auto-approve';
 import type { SettingsRepository } from '../../settings/settings';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { UserRepository } from '../../users/user';
@@ -234,6 +235,23 @@ async function handleApprove(
   proposal: Proposal,
 ): Promise<HandlerResult> {
   await recordInbound(deps, ctx, proposal.id, 'reply_approve');
+
+  // RV-074 — a low/very_low-confidence proposal was sent as the
+  // "needs review in app" form (no Y prompt, no one-tap link), but nothing
+  // stops the owner texting Y anyway. The same predicate that suppressed
+  // the approve affordance re-checks here, so an SMS Y can never approve
+  // what the renderer said required in-app review.
+  if (confidenceMetaBlocksAutoApprove(proposal.payload)) {
+    await audit(deps, ctx, 'proposal.sms_approve_blocked_low_confidence', proposal.id, {
+      proposalType: proposal.proposalType,
+    });
+    await reply(
+      deps,
+      ctx.fromE164,
+      'This one needs review in the app before it can be approved.',
+    );
+    return { handled: true, handler: HANDLER_NAME, reason: 'approve_blocked_low_confidence' };
+  }
 
   // A recorded-but-unapplied edit request means the owner asked for a
   // change that needs the review queue — approving now would execute the

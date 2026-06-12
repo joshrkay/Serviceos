@@ -31,7 +31,11 @@ import { AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS } from '../auto-approve';
 export const PROPOSAL_SMS_MAX_CHARS = 320;
 
 const REPLY_INSTRUCTIONS = 'Reply Y to approve, N to reject, EDIT to change.';
-const REVIEW_IN_APP_INSTRUCTIONS = 'Reply N to reject or review in app.';
+// RV-074 review fix: the low-confidence send anchors the reply transport
+// (review_required_rendered), so "reply N to reject" is correctly targeted
+// at THIS proposal. Approval stays in-app only.
+const REVIEW_IN_APP_INSTRUCTIONS =
+  'Needs review in app before approval — reply N to reject.';
 
 export interface RenderProposalSmsInput {
   proposalType: ProposalType;
@@ -217,8 +221,16 @@ export function renderProposalSms(
 
   // ── LOW / VERY_LOW: never-approvable form — no Reply Y, no one-tap link ──
   if (isBlocking(overallConfidence)) {
-    const body = `${prefix}${summary} Needs review in app. ${REVIEW_IN_APP_INSTRUCTIONS}`;
-    return truncate(body, PROPOSAL_SMS_MAX_CHARS);
+    // Same truncation contract as the normal form: the instructions are
+    // sacred ("reply N to reject" must survive), the summary gives way.
+    const summaryBudget = Math.max(
+      PROPOSAL_SMS_MAX_CHARS -
+        prefix.length -
+        1 - // space before instructions
+        REVIEW_IN_APP_INSTRUCTIONS.length,
+      20,
+    );
+    return `${prefix}${truncate(summary, summaryBudget)} ${REVIEW_IN_APP_INSTRUCTIONS}`;
   }
 
   // ── HIGH (or absent _meta): existing behavior, byte-identical ──

@@ -423,7 +423,11 @@ describe('P2-034 — routeUnsupervisedProposal SMS transport seams', () => {
   it('renderSmsBody builds the body around the one-tap URL and onSmsSent records it', async () => {
     const audit = new InMemoryAuditRepository();
     const sms: { to: string; body: string }[] = [];
-    const recorded: { body: string; expiresAt: Date }[] = [];
+    const recorded: {
+      body: string;
+      kind: 'proposal_rendered' | 'review_required_rendered';
+      expiresAt?: Date;
+    }[] = [];
 
     const result = await routeUnsupervisedProposal(
       {
@@ -447,6 +451,7 @@ describe('P2-034 — routeUnsupervisedProposal SMS transport seams', () => {
     expect(sms[0].body).toMatch(/^Custom body\. Reply Y\/N\/EDIT\. https:\/\/app\.test/);
     expect(recorded).toHaveLength(1);
     expect(recorded[0].body).toBe(sms[0].body);
+    expect(recorded[0].kind).toBe('proposal_rendered');
     expect(recorded[0].expiresAt).toEqual(result.approveLinkExpiresAt);
   });
 
@@ -699,10 +704,14 @@ describe('RV-074 — routeUnsupervisedProposal: low/very_low confidence suppress
   };
 
   for (const level of ['low', 'very_low'] as const) {
-    it(`${level}: sends SMS without approve URL, no onSmsSent anchor`, async () => {
+    it(`${level}: sends SMS without approve URL, anchors as review_required_rendered, audits the suppression`, async () => {
       const audit = new InMemoryAuditRepository();
       const sms: { to: string; body: string }[] = [];
-      const smsSentCalls: { body: string; expiresAt: Date }[] = [];
+      const smsSentCalls: {
+        body: string;
+        kind: 'proposal_rendered' | 'review_required_rendered';
+        expiresAt?: Date;
+      }[] = [];
 
       const result = await routeUnsupervisedProposal(
         {
@@ -729,15 +738,31 @@ describe('RV-074 — routeUnsupervisedProposal: low/very_low confidence suppress
       expect(sms[0].body).toContain('Needs review in app');
       // No one-tap link expiry (no token was minted)
       expect(result.approveLinkExpiresAt).toBeUndefined();
-      // onSmsSent is NOT called — no token to anchor
-      expect(smsSentCalls).toHaveLength(0);
+      // RV-074 review fix: the low-confidence send IS anchored — it solicits
+      // "reply N to reject", so it must become the latest reply target.
+      expect(smsSentCalls).toHaveLength(1);
+      expect(smsSentCalls[0].kind).toBe('review_required_rendered');
+      expect(smsSentCalls[0].body).toBe(sms[0].body);
+      expect(smsSentCalls[0].expiresAt).toBeUndefined();
+      // The suppressed approve affordance is auditable.
+      const events = await audit.findByEntity('tenant-1', 'proposal', 'prop-1');
+      expect(events).toHaveLength(1);
+      expect(events[0].metadata).toMatchObject({
+        smsSent: true,
+        approveLinkSuppressed: true,
+        suppressReason: 'low_confidence',
+      });
     });
   }
 
   it('high confidence (control): sends SMS with approve URL and calls onSmsSent', async () => {
     const audit = new InMemoryAuditRepository();
     const sms: { to: string; body: string }[] = [];
-    const smsSentCalls: { body: string; expiresAt: Date }[] = [];
+    const smsSentCalls: {
+      body: string;
+      kind: 'proposal_rendered' | 'review_required_rendered';
+      expiresAt?: Date;
+    }[] = [];
 
     const result = await routeUnsupervisedProposal(
       {
@@ -758,6 +783,11 @@ describe('RV-074 — routeUnsupervisedProposal: low/very_low confidence suppress
     expect(sms[0].body).toContain('https://app.test/p/approve');
     expect(result.approveLinkExpiresAt).toBeInstanceOf(Date);
     expect(smsSentCalls).toHaveLength(1);
+    expect(smsSentCalls[0].kind).toBe('proposal_rendered');
+    expect(smsSentCalls[0].expiresAt).toBeInstanceOf(Date);
+    // No suppression metadata on the normal path.
+    const events = await audit.findByEntity('tenant-1', 'proposal', 'prop-1');
+    expect(events[0].metadata).not.toHaveProperty('approveLinkSuppressed');
   });
 
   it('absent _meta: preserves original behavior (one-tap link sent)', async () => {

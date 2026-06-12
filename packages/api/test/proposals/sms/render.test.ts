@@ -138,49 +138,9 @@ describe('renderProposalSms — RV-074 confidence markers', () => {
     jobId: 'abc-123',
   };
 
-  // ── absent _meta — byte-identical regression ──────────────────────────────
-
-  it('absent _meta: estimate output is byte-identical to no-meta call', () => {
-    const withoutMeta = renderProposalSms(
-      {
-        proposalType: 'draft_estimate',
-        summary: 'Estimate for furnace replacement',
-        payload: { ...estimatePayloadBase },
-      },
-      { approveUrl: URL },
-    );
-    const withHighMeta = renderProposalSms(
-      {
-        proposalType: 'draft_estimate',
-        summary: 'Estimate for furnace replacement',
-        payload: { ...estimatePayloadBase },
-      },
-      { approveUrl: URL },
-    );
-    expect(withoutMeta).toBe(withHighMeta);
-  });
-
-  it('absent _meta: appointment output is byte-identical to no-meta call', () => {
-    const withoutMeta = renderProposalSms(
-      {
-        proposalType: 'create_appointment',
-        summary: 'Book 2pm Tuesday for Bob Smith',
-        payload: { ...appointmentPayloadBase },
-      },
-      { approveUrl: URL },
-    );
-    const withHighMeta = renderProposalSms(
-      {
-        proposalType: 'create_appointment',
-        summary: 'Book 2pm Tuesday for Bob Smith',
-        payload: { ...appointmentPayloadBase },
-      },
-      { approveUrl: URL },
-    );
-    expect(withoutMeta).toBe(withHighMeta);
-  });
-
   // ── HIGH confidence — byte-identical to no-meta ───────────────────────────
+  // (These also pin the absent-_meta form: each compares a no-meta call
+  // against a HIGH-meta call, so a change to either side fails.)
 
   it('high confidence (estimate): output is byte-identical to absent-_meta', () => {
     const noMeta = renderProposalSms(
@@ -424,7 +384,7 @@ describe('renderProposalSms — RV-074 confidence markers', () => {
     expect(body).not.toContain('Reply Y to approve');
     expect(body).not.toContain(URL);
     expect(body).toContain('Needs review in app');
-    expect(body).toContain('Reply N to reject');
+    expect(body).toContain('reply N to reject');
   });
 
   it('low confidence (appointment): no Reply Y, no approveUrl', () => {
@@ -442,7 +402,7 @@ describe('renderProposalSms — RV-074 confidence markers', () => {
     expect(body).not.toContain('Reply Y to approve');
     expect(body).not.toContain(URL);
     expect(body).toContain('Needs review in app');
-    expect(body).toContain('Reply N to reject');
+    expect(body).toContain('reply N to reject');
   });
 
   it('low confidence: stays within PROPOSAL_SMS_MAX_CHARS', () => {
@@ -476,7 +436,7 @@ describe('renderProposalSms — RV-074 confidence markers', () => {
     expect(body).not.toContain('Reply Y to approve');
     expect(body).not.toContain(URL);
     expect(body).toContain('Needs review in app');
-    expect(body).toContain('Reply N to reject');
+    expect(body).toContain('reply N to reject');
   });
 
   it('very_low confidence (appointment): no Reply Y, no approveUrl', () => {

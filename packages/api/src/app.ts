@@ -1206,13 +1206,17 @@ export function createApp(): express.Express {
     tenantId: string;
     proposalId: string;
     body: string;
+    // RV-074 — low/very_low-confidence sends anchor as
+    // `review_required_rendered` so the "reply N to reject" they solicit
+    // targets THIS proposal, not an older render.
+    kind: 'proposal_rendered' | 'review_required_rendered';
   }): Promise<void> => {
     await proposalSmsEventRepo.create(
       createProposalSmsEvent({
         tenantId: args.tenantId,
         proposalId: args.proposalId,
         direction: 'outbound',
-        kind: 'proposal_rendered',
+        kind: args.kind,
         body: args.body,
       }),
     );

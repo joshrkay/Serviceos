@@ -162,6 +162,7 @@ export interface OneTapFallbackDeps {
     tenantId: string;
     proposalId: string;
     body: string;
+    kind: 'proposal_rendered' | 'review_required_rendered';
   }) => Promise<void>;
 }
 
@@ -399,11 +400,18 @@ async function sendOneTapFallback(
         ...(fallback.buildApproveUrl ? { buildApproveUrl: fallback.buildApproveUrl } : {}),
         ...(fallback.recordSmsEvent
           ? {
-              onSmsSent: async ({ body }: { body: string }) =>
+              onSmsSent: async ({
+                body,
+                kind,
+              }: {
+                body: string;
+                kind: 'proposal_rendered' | 'review_required_rendered';
+              }) =>
                 fallback.recordSmsEvent!({
                   tenantId: ref.tenantId,
                   proposalId: proposal.id,
                   body,
+                  kind,
                 }),
             }
           : {}),

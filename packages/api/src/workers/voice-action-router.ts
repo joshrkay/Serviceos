@@ -124,12 +124,14 @@ export interface UnsupervisedRoutingDeps extends RouteUnsupervisedProposalDeps {
   resolveRouting?: (tenantId: string) => Promise<UnsupervisedProposalRouting | undefined>;
   /**
    * P2-034 — records the outbound proposal SMS (`proposal_sms_events`,
-   * kind `proposal_rendered`) that anchors the inbound reply transport.
+   * kind `proposal_rendered`, or `review_required_rendered` for the RV-074
+   * low-confidence form) that anchors the inbound reply transport.
    */
   recordSmsEvent?: (args: {
     tenantId: string;
     proposalId: string;
     body: string;
+    kind: 'proposal_rendered' | 'review_required_rendered';
   }) => Promise<void>;
 }
 
@@ -1348,11 +1350,18 @@ export function createVoiceActionRouterWorker(
                 // owner is answering.
                 ...(ur.recordSmsEvent
                   ? {
-                      onSmsSent: async ({ body }: { body: string }) =>
+                      onSmsSent: async ({
+                        body,
+                        kind,
+                      }: {
+                        body: string;
+                        kind: 'proposal_rendered' | 'review_required_rendered';
+                      }) =>
                         ur.recordSmsEvent!({
                           tenantId,
                           proposalId: proposal.id,
                           body,
+                          kind,
                         }),
                     }
                   : {}),
