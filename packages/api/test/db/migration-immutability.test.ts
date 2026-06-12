@@ -237,11 +237,13 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['163_tenant_settings_digest', '3fb34512c152ba262d2e21e4aa84608374156f89c07d5f71e3cd43d38b718836'],
   ['164_dispatch_entity_daily_digest', '4d3ad093b4319cf786bfd047df3d5898720a4d6712e5037704c5a06fffc492e9'],
   // RV-120: per-call vulnerability triage outcomes (turn-batch grader log)
-  ['166_create_triage_events', '3cc9945612942bd20d47e3c0c9f42c31bbda12a2845ac43e933df5d444b15179'],
+  // tier CHECK added (none/low/elevated/critical = UrgencyTier enum) — branch-local, pre-deploy
+  ['166_create_triage_events', 'a6e1f2eeefc1aba830d600aa36b1635535938bd9a83abc16c371c590f7568147'],
   // RV-130: append-only consent ledger (recording/sms/marketing events)
   ['168_create_consent_events', '6c9ba983361d9dec2a5a28e97ff13b210628cd194d22b6b5bd5b880a4af11970'],
   // RV-132: per-tenant retention horizon + legal hold + purge tombstone
-  ['169_recording_retention', '66876164455447307c0e6d75486bffc9669c57b0930386772ece8512d415cd4a'],
+  // CHECK (recording_retention_days > 0) added — branch-local, pre-deploy
+  ['169_recording_retention', 'aac50e6e535fc4347f0c9f3dc45f27ac8016902bc0fbbceb2b9ba9cd0d033afa'],
   // RV-115: FSM context snapshot on dropped-call recovery rows
   ['170_dropped_call_recovery_context', 'f05149c2f4fb0fabaa390b35054ba3bd9c8caeb75298cf729992e5a3955d91f6'],
 ];

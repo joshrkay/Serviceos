@@ -4119,7 +4119,7 @@ export const MIGRATIONS = {
       voice_session_id TEXT NOT NULL,
       customer_id UUID,
       score NUMERIC NOT NULL,
-      tier TEXT NOT NULL,
+      tier TEXT NOT NULL CHECK (tier IN ('none', 'low', 'elevated', 'critical')),
       signals JSONB NOT NULL DEFAULT '[]'::jsonb,
       action_taken TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -4169,6 +4169,11 @@ export const MIGRATIONS = {
   '169_recording_retention': `
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS recording_retention_days INT NOT NULL DEFAULT 365;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS chk_recording_retention_days_positive;
+    ALTER TABLE tenant_settings
+      ADD CONSTRAINT chk_recording_retention_days_positive
+        CHECK (recording_retention_days > 0);
     ALTER TABLE voice_recordings
       ADD COLUMN IF NOT EXISTS legal_hold BOOLEAN NOT NULL DEFAULT false;
     ALTER TABLE voice_recordings
@@ -4177,6 +4182,9 @@ export const MIGRATIONS = {
       ON voice_recordings (created_at)
       WHERE purged_at IS NULL AND legal_hold = false;
   `,
+  // NOTE: recording_retention_days is not currently exposed at any settings
+  // write surface (no API endpoint, no settings contract field). If a write
+  // route is added in the future, validate retention_days > 0 there too.
 
   // RV-115 — state-aware dropped-call recovery. The scheduler snapshots
   // {state, intent, entitiesResolved, proposalIds} from the FSM at the moment

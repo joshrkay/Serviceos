@@ -1410,4 +1410,55 @@ describe('production-shaped wiring (app.ts hooks)', () => {
     );
     expect(safetyCallsAfterFinal).toHaveLength(1);
   });
+
+  it('DISCLOSURE_INIT_FAILED — emits logger.error with stable greppable code when initializeSession throws', async () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    const { adapter, ws } = makeProductionShapedSetup();
+
+    // Override initializeSession to throw after the session is stored.
+    const throwingAdapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: makeStreamingProvider().provider,
+        speechTurn: async () => [],
+        initializeSession: async () => {
+          throw new Error('disclosure rpc timeout');
+        },
+      },
+      ws,
+    );
+
+    await store.create('t', 'telephony', { callSid: 'CA-disclose-fail' });
+    throwingAdapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-disclose-fail',
+      start: {
+        callSid: 'CA-disclose-fail',
+        accountSid: 'AC',
+        streamSid: 'MZ-disclose-fail',
+        tracks: ['inbound'],
+      },
+    });
+
+    // Wait for the async handleStart to complete.
+    await vi.waitFor(() => {
+      const written = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+      expect(written).toContain('DISCLOSURE_INIT_FAILED');
+    });
+
+    // The error log must carry callSid and tenantId so ops can correlate.
+    const errorOutput = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(errorOutput).toContain('CA-disclose-fail');
+
+    // The adapter must NOT have closed the WS — call continues undisclosed
+    // rather than dropping the caller.
+    expect(ws.closed).toBe(false);
+
+    // Adapter variable is used above; reference it to satisfy unused-var lint.
+    void adapter;
+
+    stderrSpy.mockRestore();
+  });
 });

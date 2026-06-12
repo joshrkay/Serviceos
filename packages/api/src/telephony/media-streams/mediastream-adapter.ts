@@ -646,6 +646,17 @@ export class TwilioMediaStreamAdapter {
           error: err instanceof Error ? err.message : String(err),
           callSid,
         });
+        // DISCLOSURE_INIT_FAILED — the call continues but the caller was never
+        // given the recording-consent disclosure and the session is unledgered.
+        // This is a compliance gap that must be countable/alertable.
+        // TODO(follow-up): emit a voice.disclosure_init_failed audit/quality event
+        // once a session-scoped event type is added to VoiceSessionEvent so ops
+        // dashboards can count & alert on this failure mode without a log scrape.
+        logger.error('DISCLOSURE_INIT_FAILED', {
+          callSid,
+          tenantId: session.tenantId,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
   }
