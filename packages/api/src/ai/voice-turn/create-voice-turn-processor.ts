@@ -48,14 +48,16 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
 import { appendAgentTts } from './transcript-append';
-import { classifyIntent, isVoiceApprovalIntent } from '../orchestration/intent-classifier';
+import { classifyIntent, isVoiceApprovalIntent, isVoiceEditIntent } from '../orchestration/intent-classifier';
 import {
   startVoiceApproval,
   continueVoiceApproval,
+  startVoiceEdit,
   type OneTapFallbackDeps,
   type VoiceApprovalDeps,
   type VoiceApprovalTurnResult,
 } from '../tasks/proposal-approval-task';
+import { createLlmEditInterpreter } from '../../proposals/edit-interpreter';
 import type { ProposalSmsEventRepository } from '../../proposals/sms/sms-event';
 import { confirmIntent } from '../skills/confirm-intent';
 import { summarizeSession } from '../skills/summarize-session';
@@ -278,8 +280,12 @@ export interface VoiceTurnProcessorDeps {
    * RV-071 — pending-edit parity guard for voice approvals (same repo
    * method the SMS reply transport and the one-tap route use). Optional:
    * without it the guard is skipped, mirroring pre-P2-034 wiring.
+   * RV-225 — `create` (when wired, i.e. the full repo) additionally lets
+   * the voice edit dialogue record edit_request / reapproval_rendered
+   * events so unapplied voice edits block approval on every channel.
    */
-  smsEventRepo?: Pick<ProposalSmsEventRepository, 'hasUnappliedEditRequest'>;
+  smsEventRepo?: Pick<ProposalSmsEventRepository, 'hasUnappliedEditRequest'> &
+    Partial<Pick<ProposalSmsEventRepository, 'create'>>;
   /**
    * RV-071 — one-tap SMS fallback wiring for refused money/irreversible
    * voice approvals. Same values app.ts already wires for P12-004
@@ -358,6 +364,21 @@ export interface VoiceTurnProcessor {
     session: VoiceSession,
     args: {
       intentType: string;
+      entities: Record<string, unknown>;
+      utterance: string;
+      tenantId: string;
+    },
+  ): Promise<SideEffect[]>;
+  /**
+   * RV-225 — route a classified `edit_proposal` intent ("change the
+   * second line to $200"). Same layered gating as the approval intents:
+   * HARD-GATED on the session's RV-070 `ownerSession` flag, never
+   * prompt-only. The edit applies through the existing `editProposal`
+   * path and the proposal STAYS pending (an edit never approves).
+   */
+  handleVoiceEditIntent(
+    session: VoiceSession,
+    args: {
       entities: Record<string, unknown>;
       utterance: string;
       tenantId: string;
@@ -999,6 +1020,9 @@ export function createVoiceTurnProcessor(
       ...(deps.smsEventRepo ? { smsEventRepo: deps.smsEventRepo } : {}),
       ...(deps.appointmentRepo ? { appointmentRepo: deps.appointmentRepo } : {}),
       ...(deps.voiceApprovalOneTap ? { oneTapFallback: deps.voiceApprovalOneTap } : {}),
+      // RV-225 — the voice edit dialogue interprets deltas through the
+      // SAME LLM seam as the SMS EDIT reply (proposals/edit-interpreter.ts).
+      editInterpreter: createLlmEditInterpreter(deps.gateway),
     };
   }
 
@@ -1096,6 +1120,65 @@ export function createVoiceTurnProcessor(
     // The FSM deliberately stays in intent_capture / closing (the
     // lookup-skill pattern): the dialogue is session-scoped adapter
     // state, so existing FSM flows are untouched.
+    return applyVoiceApprovalResult(session, result);
+  }
+
+  /**
+   * RV-225 — owner voice edit ("change the second line to $200"). Same
+   * layered gating as approve/reject: the classifier only sees the intent
+   * on an owner session (prompt section), and this handler HARD-gates on
+   * ownerSession + a wired proposalRepo — a non-owner "change ..." gets
+   * the normal bounded reprompt, never an edit.
+   */
+  async function handleVoiceEditIntent(
+    session: VoiceSession,
+    args: {
+      entities: Record<string, unknown>;
+      utterance: string;
+      tenantId: string;
+    },
+  ): Promise<SideEffect[]> {
+    const ownerSession = session.machine.currentContext.ownerSession === true;
+    const approvalDeps = ownerSession ? voiceApprovalDeps() : null;
+
+    if (!ownerSession || !approvalDeps) {
+      const sideEffects: SideEffect[] = [
+        {
+          type: 'audit_log',
+          payload: {
+            eventType: 'agent.calling.voice_edit_denied',
+            reason: ownerSession ? 'not_configured' : 'not_owner_session',
+            intentType: 'edit_proposal',
+            sessionId: session.id,
+            tenantId: args.tenantId,
+            ts: Date.now(),
+          },
+        },
+      ];
+      sideEffects.push(
+        ...session.machine.dispatch({ type: 'confidence_low', threshold: TAU_INT, score: 0 }),
+      );
+      return sideEffects;
+    }
+
+    const reference =
+      typeof args.entities.proposalReference === 'string' &&
+      args.entities.proposalReference.trim().length > 0
+        ? args.entities.proposalReference
+        : args.utterance;
+    const instruction =
+      typeof args.entities.editInstruction === 'string' &&
+      args.entities.editInstruction.trim().length > 0
+        ? args.entities.editInstruction
+        : args.utterance;
+    const result = await startVoiceEdit(approvalDeps, {
+      tenantId: args.tenantId,
+      sessionId: session.id,
+      ownerSession,
+      sessionState: session.voiceApprovalState,
+      reference,
+      instruction,
+    });
     return applyVoiceApprovalResult(session, result);
   }
 
@@ -1279,6 +1362,23 @@ export function createVoiceTurnProcessor(
         return sideEffectsAll;
       }
 
+      // RV-225 — owner voice edit. Same out-of-FSM routing as the approval
+      // dialogue; handleVoiceEditIntent hard-gates on ownerSession.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        isVoiceEditIntent(classifierEvent.intentType)
+      ) {
+        const editFx = await handleVoiceEditIntent(session, {
+          entities: classifierEvent.entities,
+          utterance: speechResult,
+          tenantId,
+        });
+        sideEffectsAll.push(...editFx);
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        appendAgentTts(deps.store, session.id, sideEffectsAll);
+        return sideEffectsAll;
+      }
+
       // P12-004 — emergency-intent immediate Dial. When the classified
       // intent is in the emergency set AND the tenant is unsupervised
       // (checked inside the wrapper via isSupervisorPresent), bypass the
@@ -1406,5 +1506,6 @@ export function createVoiceTurnProcessor(
     runSummary,
     handlePendingVoiceApproval,
     handleVoiceApprovalIntent,
+    handleVoiceEditIntent,
   };
 }

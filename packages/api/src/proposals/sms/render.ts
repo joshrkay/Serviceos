@@ -25,12 +25,25 @@
  *     prompt and approveUrl are OMITTED — no approve affordance.
  */
 import type { ProposalType } from '../proposal';
+import { actionClassForProposalType } from '../proposal';
 import { CONFIDENCE_LEVELS, type ConfidenceLevel } from '../../ai/guardrails/confidence';
 import { AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS } from '../auto-approve';
 
 export const PROPOSAL_SMS_MAX_CHARS = 320;
 
 const REPLY_INSTRUCTIONS = 'Reply Y to approve, N to reject, EDIT to change.';
+// RV-071 one-tap fallback: money/comms/irreversible proposals are sent with a
+// signed link as the ONLY approval affordance (the reply-handler's class guard
+// refuses a texted Y for these classes). The copy leads with the link so the
+// owner knows how to approve; N and EDIT remain accurate over SMS.
+const NON_CAPTURE_REPLY_INSTRUCTIONS =
+  'Tap the link to approve, reply N to reject, or EDIT to change.';
+// Truthful no-link variant for non-capture proposals that are re-sent
+// WITHOUT an approveUrl (reapproval renders and chain-head review forms).
+// The link-based form would reference a nonexistent URL; "Review and approve
+// in the app" is accurate — the owner must act from the review queue.
+const NON_CAPTURE_NO_LINK_INSTRUCTIONS =
+  'Review and approve in the app — reply N to reject, EDIT to change.';
 // RV-074 review fix: the low-confidence send anchors the reply transport
 // (review_required_rendered), so "reply N to reject" is correctly targeted
 // at THIS proposal. Approval stays in-app only.
@@ -234,6 +247,23 @@ export function renderProposalSms(
 
   // ── HIGH (or absent _meta): existing behavior, byte-identical ──
   // ── MEDIUM: same structure but (?) on flagged facts + optional Check: line ──
+  // ── Non-capture (money/comms/irreversible): link-based instructions ──
+  // RV-071: the one-tap fallback is the ONLY approve affordance for these
+  // classes. The reply-handler's class guard refuses a texted Y, so we drop
+  // the "Reply Y" prompt and lead with the link instead.
+  //
+  // Truthfulness guard: the link-based copy ("Tap the link to approve…")
+  // is only correct when an approveUrl was actually provided. Reapproval
+  // renders (renderReapprovalSms) and chain-head review forms carry NO
+  // approveUrl — those paths call renderProposalSms without one, so the
+  // link instruction would point at a nonexistent link. When approveUrl
+  // is absent for a non-capture proposal, use the in-app variant instead.
+  const replyInstructions =
+    actionClassForProposalType(input.proposalType) !== 'capture'
+      ? options.approveUrl
+        ? NON_CAPTURE_REPLY_INSTRUCTIONS
+        : NON_CAPTURE_NO_LINK_INSTRUCTIONS
+      : REPLY_INSTRUCTIONS;
 
   const facts: string[] = [];
   const customer = extractCustomerName(input.payload);
@@ -285,8 +315,184 @@ export function renderProposalSms(
       factsPart.length -
       checkLine.length -
       1 - // space before instructions
-      REPLY_INSTRUCTIONS.length,
+      replyInstructions.length,
     20,
   );
-  return `${prefix}${truncate(summary, summaryBudget)}${factsPart} ${REPLY_INSTRUCTIONS}${checkLine}${linkPart}`;
+  return `${prefix}${truncate(summary, summaryBudget)}${factsPart} ${replyInstructions}${checkLine}${linkPart}`;
+}
+
+/**
+ * P2-034 / RV-225 — the re-approval SMS sent after an owner edit was
+ * applied (SMS EDIT reply or voice edit with SMS deps wired). The stored
+ * summary was written BEFORE the edit, so it can still describe the old
+ * value (a time, a price). The owner must never re-approve text that
+ * contradicts what will execute — echo their own instruction so the change
+ * is explicit. Money/customer facts are appended from the NEW payload by
+ * the renderer. The base summary is pre-truncated because the renderer
+ * trims the summary tail to fit and the change note must survive that trim.
+ */
+export function renderReapprovalSms(
+  input: RenderProposalSmsInput,
+  instruction: string,
+): string {
+  const instructionNote =
+    instruction.trim().length > 80
+      ? `${instruction.trim().slice(0, 79)}…`
+      : instruction.trim();
+  const baseSummary =
+    input.summary.length > 140 ? `${input.summary.slice(0, 139)}…` : input.summary;
+  return renderProposalSms(
+    {
+      proposalType: input.proposalType,
+      summary: `${baseSummary} — your change: "${instructionNote}"`,
+      payload: input.payload,
+    },
+    { reapproval: true },
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RV-221 — chain summary rendering.
+//
+// A multi-action chain is announced to the owner as ONE SMS instead of N:
+//
+//   "3 linked actions: 1) create customer Jane 2) book Tue 9am
+//    3) send estimate ($450.00)* *Approval follows separately.
+//    Reply Y to approve 1); the rest follow in your queue. Or tap (30 min): …"
+//
+// Budget note (P2-034 module contract, see the header up top): the chain SMS
+// follows the same contract as the single-proposal render — the
+// human-readable part (list + legend + instructions) fits in
+// PROPOSAL_SMS_MAX_CHARS (320, two GSM-7 segments) and the one-tap URL rides
+// ON TOP of that budget. The 480-char budget mentioned in the digest plan is
+// digest-specific (daily-digest-worker) and does NOT apply here.
+//
+// Reply mapping (documented here because the copy must stay truthful):
+//   - The send site anchors the outbound render (`proposal_rendered` /
+//     `review_required_rendered`) on the chain HEAD member, so Y / N /
+//     EDIT and the one-tap link act on the HEAD proposal only. The
+//     approvable-form copy says exactly that: "Reply Y to approve 1); the
+//     rest follow in your queue."
+//   - Chained dependents are forced to 'draft' at creation
+//     (applyChainMetadata) and follow the existing chain-resolution
+//     execution ordering once approved from the queue. Money/comms
+//     members never ride the Y: they are listed but marked
+//     "*Approval follows separately."  (Capture-class set-approval on a
+//     single Y is a follow-up that needs the reply handler to approve a
+//     chain SET — see the send site in workers/voice-action-router.ts.)
+//   - Track E (HIGH fix): a chain whose HEAD member is not capture-class
+//     (money / comms / irreversible) must not be Y-approvable at all — Y
+//     acts on the head, and those classes never ride an SMS Y. The WHOLE
+//     SMS switches to the review-in-app form (no Reply-Y prompt, no
+//     one-tap link), matching the send site, which suppresses the token
+//     and anchors the send as `review_required_rendered`.
+//   - Any member carrying a blocking confidence level (low / very_low,
+//     same predicate as RV-074) switches the WHOLE SMS to the
+//     review-in-app form: no Reply-Y prompt, no one-tap link — only
+//     "reply N to reject", which the send site anchors as
+//     `review_required_rendered` so that N targets the chain head.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ChainSmsMember {
+  proposalType: ProposalType;
+  summary: string;
+  payload: Record<string, unknown>;
+}
+
+export interface RenderChainSmsOptions {
+  /** Public one-tap approve URL for the chain HEAD (already token-signed). */
+  approveUrl?: string;
+}
+
+const CHAIN_SEPARATE_APPROVAL_LEGEND = '*Approval follows separately.';
+
+// Truthful chain reply prompt: Y approves the HEAD (item 1) only — the
+// dependents are drafts that the owner approves from the review queue
+// (chain-resolution execution ordering). The single-proposal
+// REPLY_INSTRUCTIONS would overpromise ("Y to approve" reads as approving
+// the whole list).
+const CHAIN_REPLY_INSTRUCTIONS =
+  'Reply Y to approve 1); the rest follow in your queue.';
+
+/** Minimum readable per-member summary length once the budget is split. */
+const CHAIN_MIN_MEMBER_CHARS = 12;
+
+/** True when any member's `_meta.overallConfidence` is low / very_low. */
+function chainHasBlockingMember(members: readonly ChainSmsMember[]): boolean {
+  return members.some((m) => isBlocking(extractMeta(m.payload).overallConfidence));
+}
+
+export function renderChainSms(
+  members: readonly ChainSmsMember[],
+  options: RenderChainSmsOptions = {},
+): string {
+  // Guard: an empty member list has no head and no content to render.
+  // Callers must provide at least one member; throw rather than emit a
+  // nonsensical "0 linked actions:" message.
+  if (members.length === 0) {
+    throw new Error('renderChainSms: members must not be empty');
+  }
+
+  const anyBlocking = chainHasBlockingMember(members);
+  // Track E — Y acts on the HEAD member only, and money/comms/irreversible
+  // proposals are never Y-approvable over SMS, so a non-capture head flips
+  // the whole SMS to the review form (same form the blocking-confidence
+  // case uses; the send site suppresses the token to match).
+  const headNotCapture =
+    members.length > 0 && actionClassForProposalType(members[0].proposalType) !== 'capture';
+  const reviewForm = anyBlocking || headNotCapture;
+
+  // Per-member fragments. Money facts reuse the single-proposal
+  // extraction rules (integer cents only, never derived floats; skipped
+  // when the summary already carries the formatted amount). The
+  // separate-approval marker applies to every non-capture member — but
+  // only on the approvable form (on the review form NOTHING is Y-able,
+  // so "separately" would be meaningless).
+  const items = members.map((m) => {
+    const cents = extractAmountCents(m.payload);
+    const money = cents !== null ? formatCents(cents) : null;
+    const moneyFact = money !== null && !m.summary.includes(money) ? ` (${money})` : '';
+    const flagged = !reviewForm && actionClassForProposalType(m.proposalType) !== 'capture';
+    return { summary: m.summary.trim(), moneyFact, flagged };
+  });
+
+  const prefix = `${members.length} linked actions: `;
+  const legend = items.some((i) => i.flagged) ? ` ${CHAIN_SEPARATE_APPROVAL_LEGEND}` : '';
+  const instructions = reviewForm ? REVIEW_IN_APP_INSTRUCTIONS : CHAIN_REPLY_INSTRUCTIONS;
+
+  // Same truncation contract as renderProposalSms: the instructions (and
+  // legend) are sacred, the member summaries absorb all truncation. The
+  // one-tap link rides on top of the budget (see module note up top).
+  const fixedOverhead =
+    prefix.length +
+    items.reduce(
+      (acc, it, i) =>
+        acc + `${i + 1}) `.length + it.moneyFact.length + (it.flagged ? 1 : 0),
+      0,
+    ) +
+    (items.length - 1) + // single-space separators between items
+    legend.length +
+    1 + // space before instructions
+    instructions.length;
+  // The CHAIN_MIN_MEMBER_CHARS floor (12) is an intentional exception to the
+  // 320-char contract: with many long-named members the per-member budget can
+  // fall below 12, at which point the total may exceed 320. Readability wins
+  // over byte budget when every slot is already at the minimum — the owner
+  // still sees all items, just over the two-segment target.
+  const perMemberBudget = Math.max(
+    Math.floor((PROPOSAL_SMS_MAX_CHARS - fixedOverhead) / items.length),
+    CHAIN_MIN_MEMBER_CHARS,
+  );
+
+  const list = items
+    .map(
+      (it, i) =>
+        `${i + 1}) ${truncate(it.summary, perMemberBudget)}${it.moneyFact}${it.flagged ? '*' : ''}`,
+    )
+    .join(' ');
+
+  const linkPart =
+    !reviewForm && options.approveUrl ? ` Or tap (30 min): ${options.approveUrl}` : '';
+
+  return `${prefix}${list}${legend} ${instructions}${linkPart}`;
 }

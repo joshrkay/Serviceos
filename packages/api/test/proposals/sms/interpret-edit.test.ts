@@ -100,3 +100,22 @@ describe('createLlmEditInterpreter', () => {
     ).resolves.toBeNull();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RV-225 — the SMS module is a re-export of the shared edit interpreter:
+// both channels (SMS EDIT reply + voice edit dialogue) share ONE seam.
+// ─────────────────────────────────────────────────────────────────────────────
+
+import {
+  createLlmEditInterpreter as sharedCreate,
+  PROPOSAL_SMS_EDIT_TASK_TYPE as sharedTaskType,
+} from '../../../src/proposals/edit-interpreter';
+import { PROPOSAL_SMS_EDIT_TASK_TYPE } from '../../../src/proposals/sms/interpret-edit';
+
+describe('RV-225 — shared edit-interpreter extraction', () => {
+  it('the SMS exports ARE the shared module exports (no fork)', () => {
+    expect(createLlmEditInterpreter).toBe(sharedCreate);
+    expect(PROPOSAL_SMS_EDIT_TASK_TYPE).toBe(sharedTaskType);
+    expect(PROPOSAL_SMS_EDIT_TASK_TYPE).toBe('proposal_sms_edit');
+  });
+});

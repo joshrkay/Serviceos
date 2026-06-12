@@ -98,6 +98,11 @@ export type IntentType =
   // additionally hard-gate on the session flag (never prompt-only).
   | 'approve_proposal'
   | 'reject_proposal'
+  // RV-225 — owner voice edit channel ("change the second line to $200").
+  // Same owner-session-only gating as approve/reject: documented to the
+  // model exclusively via the appended owner system message, hard-gated
+  // by the routing layers on the session flag.
+  | 'edit_proposal'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
@@ -147,6 +152,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'confirm',
   'approve_proposal',
   'reject_proposal',
+  'edit_proposal',
   'unknown',
 ] as const;
 
@@ -252,6 +258,11 @@ export interface ExtractedEntities {
   // estimate", "the second one", "the $450 invoice"). Resolved downstream
   // by the pendingProposals entity-resolver source — never trusted as an id.
   proposalReference?: string;
+  // RV-225 — edit_proposal (owner sessions only): the owner's words
+  // describing WHAT to change ("change the second line to $200"). Fed to
+  // the shared edit interpreter (proposals/edit-interpreter.ts), whose
+  // delta is Zod-validated by editProposal — never trusted as a payload.
+  editInstruction?: string;
 }
 
 /**
@@ -789,7 +800,7 @@ Never invent entities. Extract only what the transcript actually says.`;
  * every non-owner call's prompt stays byte-identical to the pre-RV-071
  * prompt (voice-quality cassettes replay unchanged).
  */
-export const OWNER_APPROVAL_PROMPT_SECTION = `Owner-session intents (this caller is the VERIFIED business owner — these two intents exist only on this call):
+export const OWNER_APPROVAL_PROMPT_SECTION = `Owner-session intents (this caller is the VERIFIED business owner — these intents exist only on this call):
 - "approve_proposal" — the owner wants to APPROVE a pending proposal/draft awaiting review.
                         Put the owner's words identifying WHICH proposal in
                         extractedEntities.proposalReference (verbatim phrase).
@@ -801,11 +812,18 @@ export const OWNER_APPROVAL_PROMPT_SECTION = `Owner-session intents (this caller
                         Examples: "Reject the Acme invoice"
                                   "Decline the Henderson estimate"
                                   "Don't send that estimate — reject it"
+- "edit_proposal"    — the owner wants to CHANGE a pending proposal before approving.
+                        Extract proposalReference the same way (when the owner
+                        names one) and put the owner's change instruction in
+                        extractedEntities.editInstruction (verbatim phrase).
+                        Examples: "Change the second line to 200 dollars"
+                                  "Make the Henderson estimate 450"
+                                  "On that invoice, change the labor to two hours"
 Notes:
-- "approve"/"reject" must target a proposal or draft ("the estimate", "the invoice",
-  "the second one"). A bare "yes"/"go ahead" answering YOUR question is still "confirm".
-- Do not change the JSON output schema; proposalReference is just an extra
-  optional key inside extractedEntities.`;
+- "approve"/"reject"/"edit" must target a proposal or draft ("the estimate", "the
+  invoice", "the second one"). A bare "yes"/"go ahead" answering YOUR question is still "confirm".
+- Do not change the JSON output schema; proposalReference and editInstruction are
+  just extra optional keys inside extractedEntities.`;
 
 /**
  * Phase-2 Track A — extended operator intents prompt section. Delivered as
@@ -907,6 +925,13 @@ export function isVoiceApprovalIntent(
   intent: IntentType | string | undefined | null,
 ): intent is 'approve_proposal' | 'reject_proposal' {
   return intent === 'approve_proposal' || intent === 'reject_proposal';
+}
+
+/** RV-225 — predicate the voice routing layers use to gate the owner edit intent. */
+export function isVoiceEditIntent(
+  intent: IntentType | string | undefined | null,
+): intent is 'edit_proposal' {
+  return intent === 'edit_proposal';
 }
 
 function isSupportedIntent(value: unknown): value is IntentType {
@@ -1058,6 +1083,8 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.delayMinutes === 'number') extracted.delayMinutes = ee.delayMinutes;
     // approve_proposal / reject_proposal fields (RV-071)
     if (typeof ee.proposalReference === 'string') extracted.proposalReference = ee.proposalReference;
+    // edit_proposal fields (RV-225)
+    if (typeof ee.editInstruction === 'string') extracted.editInstruction = ee.editInstruction;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

@@ -965,3 +965,169 @@ describe('RV-074 — review_required_rendered (low-confidence) anchoring', () =>
     expect(h.smsEventRepo.events.find((e) => e.kind === 'edit_request')).toBeUndefined();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Track E — action-class belt-and-braces: a Y that resolves (via the anchor)
+// to a money/comms/irreversible proposal must NEVER approve it, regardless
+// of how the Y arrived. The RV-071 one-tap fallback renders these proposals
+// with link-based instructions ("Tap the link to approve…") — no Y prompt —
+// but an owner can still text Y out of habit. The class guard makes that fail
+// closed: the HMAC link is the only sanctioned SMS approval path for these
+// classes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Track E — SMS Y blocked for non-capture action classes', () => {
+  it.each([
+    ['record_payment', 'money', { invoiceId: '6f9619ff-8b86-d011-b42d-00c04fc964ff', amountCents: 20000, paymentMethod: 'cash' }],
+    ['send_estimate', 'comms', { estimateId: '6f9619ff-8b86-d011-b42d-00c04fc964ff' }],
+    ['cancel_appointment', 'irreversible', { appointmentId: '6f9619ff-8b86-d011-b42d-00c04fc964ff' }],
+  ] as const)(
+    'Y on a hypothetically-anchored %s (%s) proposal is refused with truthful copy + audit',
+    async (proposalType, actionClass, payload) => {
+      const h = makeHarness();
+      // Hypothetical: SOMETHING anchored a Y-able render on a non-capture
+      // proposal (a mis-anchor or future bug — no legitimate path does).
+      const proposal = await seedPendingProposal(h, TENANT, {
+        proposalType,
+        payload: payload as Record<string, unknown>,
+        summary: `Pending ${proposalType}`,
+      });
+
+      const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+      expect(result).toMatchObject({
+        handled: true,
+        reason: 'approve_blocked_action_class',
+      });
+      // Not approved — the proposal is untouched.
+      expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe(
+        'ready_for_review',
+      );
+      expect(h.auditRepo.getAll().map((e) => e.eventType)).not.toContain('proposal.approved');
+      // Truthful refusal: the app or the proposal's own approval link.
+      expect(h.sent).toHaveLength(1);
+      expect(h.sent[0].body).toBe(
+        'This one needs the app or its own approval link — a texted Y can’t approve it.',
+      );
+      // Audit names the proposal and the class that fired.
+      const blocked = h.auditRepo
+        .getAll()
+        .find((e) => e.eventType === 'proposal.sms_approve_blocked_action_class');
+      expect(blocked?.entityId).toBe(proposal.id);
+      expect(blocked?.metadata).toMatchObject({ proposalType, actionClass });
+    },
+  );
+
+  it('N still rejects a non-capture proposal (rejection stays allowed)', async () => {
+    const h = makeHarness();
+    const proposal = await seedPendingProposal(h, TENANT, {
+      proposalType: 'record_payment',
+      payload: { invoiceId: '6f9619ff-8b86-d011-b42d-00c04fc964ff', amountCents: 20000, paymentMethod: 'cash' },
+      summary: 'Record $200 payment',
+    });
+
+    const result = await handleProposalSmsReply(ctx('N wrong amount'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'rejected' });
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('rejected');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Track E — chain-ref edit guard: a delta that touches a payload field still
+// holding an unresolved `$ref:chain[…]` token is refused (it would overwrite
+// the chain wiring). NOTE the pre-existing fail-closed behavior this guard
+// sharpens: for uuid-typed contract fields (draft_estimate.customerId) the
+// merged payload would already fail Zod (the token is not a uuid) into the
+// generic recorded-note path — this guard adds the truthful copy and covers
+// PLAIN-STRING contract fields (issue_invoice.invoiceId) where the overwrite
+// would otherwise pass validation silently.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Track E — SMS edit refused when the delta touches an unresolved chain ref', () => {
+  it('refuses with "waiting on an earlier step — approval by text is paused until then" copy, audits, and leaves the token in place', async () => {
+    const h = makeHarness({
+      interpretEdit: async () => ({ invoiceId: 'INV-1024' }),
+    });
+    const proposal = await seedPendingProposal(h, TENANT, {
+      proposalType: 'issue_invoice',
+      payload: {
+        // Unresolved chain token in a PLAIN-STRING contract field
+        // (z.string().min(1)) — without the guard, the overwrite would
+        // pass Zod and silently detach the dependent from its parent.
+        invoiceId: '$ref:chain[0].invoiceId',
+      },
+      summary: 'Issue the new invoice',
+    });
+
+    const result = await handleProposalSmsReply(
+      ctx('EDIT issue invoice 1024 instead'),
+      h.deps,
+    );
+
+    expect(result).toMatchObject({ handled: true, reason: 'edit_blocked_chain_ref' });
+    // The chain wiring is intact.
+    const stored = await h.proposalRepo.findById(TENANT, proposal.id);
+    expect(stored?.payload.invoiceId).toBe('$ref:chain[0].invoiceId');
+    // Clear, truthful copy — includes the "paused until then" phrasing.
+    expect(h.sent.some((s) => s.body.includes('waiting on an earlier step'))).toBe(true);
+    expect(h.sent.some((s) => s.body.includes('approval by text is paused until then'))).toBe(true);
+    // Audited with the touched fields.
+    const blocked = h.auditRepo
+      .getAll()
+      .find((e) => e.eventType === 'proposal.sms_edit_blocked_chain_ref');
+    expect(blocked?.entityId).toBe(proposal.id);
+    expect(blocked?.metadata).toMatchObject({ fields: ['invoiceId'] });
+    // The recorded edit_request stays unapplied → approval remains blocked.
+    expect(await h.smsEventRepo.hasUnappliedEditRequest(TENANT, proposal.id)).toBe(true);
+  });
+
+  it('a delta NOT touching the token field still applies normally (plain-string contract)', async () => {
+    const h = makeHarness({
+      interpretEdit: async () => ({ paymentTermDays: 30 }),
+    });
+    const proposal = await seedPendingProposal(h, TENANT, {
+      proposalType: 'issue_invoice',
+      payload: { invoiceId: '$ref:chain[0].invoiceId', paymentTermDays: 14 },
+      summary: 'Issue the new invoice',
+    });
+
+    const result = await handleProposalSmsReply(ctx('EDIT make it net 30'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'edited' });
+    const stored = await h.proposalRepo.findById(TENANT, proposal.id);
+    expect(stored?.payload.invoiceId).toBe('$ref:chain[0].invoiceId');
+    expect(stored?.payload.paymentTermDays).toBe(30);
+  });
+
+  it('pre-existing uuid fail-closed: a non-touching delta on a uuid-typed token field lands in the recorded-note path', async () => {
+    // draft_estimate.customerId is z.string().uuid() — the merged payload
+    // still carries the token, so editProposal's Zod validation throws and
+    // the edit falls into the generic recorded-note path (documented
+    // behavior the chain-ref guard does NOT change).
+    const h = makeHarness({
+      interpretEdit: async () => ({
+        lineItems: [{ description: 'Service', quantity: 1, unitPrice: 20000 }],
+      }),
+    });
+    const proposal = await seedPendingProposal(h, TENANT, {
+      proposalType: 'draft_estimate',
+      payload: {
+        customerId: '$ref:chain[0].customerId',
+        lineItems: [{ description: 'Service', quantity: 1, unitPrice: 30000 }],
+      },
+      summary: 'Estimate for the new customer',
+    });
+
+    const result = await handleProposalSmsReply(ctx('EDIT make it $200'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'edit_recorded' });
+    const stored = await h.proposalRepo.findById(TENANT, proposal.id);
+    // Nothing changed — token intact, line items untouched.
+    expect(stored?.payload.customerId).toBe('$ref:chain[0].customerId');
+    expect((stored?.payload.lineItems as Array<Record<string, unknown>>)[0].unitPrice).toBe(30000);
+    expect(
+      h.auditRepo.getAll().some((e) => e.eventType === 'proposal.sms_edit_failed'),
+    ).toBe(true);
+  });
+});

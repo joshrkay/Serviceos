@@ -240,6 +240,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['165_proposal_sms_events_review_required_kind', '0a1ccd582e840a57ec622344a0a41a690229bfd30b7b9e87b0265c255b1dff56'],
   // tenant_budget_counters (fixed-window budget counters), both RLS'd.
   ['167_create_supervisor_policies', '6bf3ba1a21e1bc1a829fe4addd9a71cd8e9c64587c23338909df15c0f6988d48'],
+  // block, never a reply anchor)
+  ['171_proposal_sms_events_voice_reapproval_kind', '84e29ec755102c0b5f00bddc21544610d2c6d6e05ad9e20fafad6f0e700b99fe'],
 ];
 
 function hashMigration(value: string): string {

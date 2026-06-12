@@ -812,6 +812,65 @@ describe('RV-074 — routeUnsupervisedProposal: low/very_low confidence suppress
     expect(sms[0].body).toContain('https://app.test/p/approve');
     expect(result.approveLinkExpiresAt).toBeInstanceOf(Date);
   });
+
+  // Item 2 pin: when BOTH low-confidence AND suppressApproveLink fire,
+  // the audit metadata records 'low_confidence+action_class'.
+  it('both low_confidence AND suppressApproveLink: suppressReason is "low_confidence+action_class"', async () => {
+    const audit = new InMemoryAuditRepository();
+    const sms: { to: string; body: string }[] = [];
+
+    await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        sendSms: async (to, body) => sms.push({ to, body }),
+        buildApproveUrl: (token) => `https://app.test/p/approve?token=${token}`,
+      },
+      {
+        ...baseInput,
+        // Low-confidence payload AND caller-asserted suppression.
+        payload: { _meta: { overallConfidence: 'low' } },
+        suppressApproveLink: true,
+        renderSmsBody: (approveUrl: string) =>
+          approveUrl ? `Approve: ${approveUrl}` : 'Needs review in app.',
+      },
+    );
+
+    const events = await audit.findByEntity('tenant-1', 'proposal', 'prop-1');
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata).toMatchObject({
+      approveLinkSuppressed: true,
+      suppressReason: 'low_confidence+action_class',
+    });
+    // No one-tap link in the body.
+    expect(sms[0].body).not.toContain('https://app.test/p/approve');
+  });
+
+  it('only suppressApproveLink (no low confidence): suppressReason is "action_class"', async () => {
+    const audit = new InMemoryAuditRepository();
+    const sms: { to: string; body: string }[] = [];
+
+    await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        sendSms: async (to, body) => sms.push({ to, body }),
+        buildApproveUrl: (token) => `https://app.test/p/approve?token=${token}`,
+      },
+      {
+        ...baseInput,
+        // No low-confidence payload; only caller-asserted suppression.
+        suppressApproveLink: true,
+        renderSmsBody: (_approveUrl: string) => 'Needs review in app.',
+      },
+    );
+
+    const events = await audit.findByEntity('tenant-1', 'proposal', 'prop-1');
+    expect(events[0].metadata).toMatchObject({
+      approveLinkSuppressed: true,
+      suppressReason: 'action_class',
+    });
+  });
 });
 
 // Wiring proof: createProposal threads its payload into decideInitialStatus,
