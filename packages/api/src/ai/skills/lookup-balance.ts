@@ -13,6 +13,7 @@ import type {
   RecordLookupEventInput,
 } from '../../lookup-events/lookup-event-service';
 import { t, type Language } from '../i18n/i18n';
+import { formatCents } from './spoken-format';
 
 export interface LookupBalanceInput {
   tenantId: string;
@@ -40,11 +41,6 @@ export interface LookupBalanceDeps {
   jobRepo: JobRepository;
   invoiceRepo: InvoiceRepository;
   lookupEvents?: LookupEventService;
-}
-
-function formatCents(cents: number): string {
-  const dollars = (cents / 100).toFixed(2);
-  return `$${dollars}`;
 }
 
 function formatDueDate(d: Date | undefined, timezone?: string, language: Language = 'en'): string | null {
