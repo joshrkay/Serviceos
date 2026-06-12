@@ -59,6 +59,7 @@ describe('AssistantPage', () => {
   it('shows welcome message when no conversationId', async () => {
     renderPage();
     await waitFor(() => {
+      expect(screen.getByText(/Hi Ada!/)).toBeInTheDocument();
       expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
     });
   });
