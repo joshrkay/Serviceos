@@ -102,6 +102,19 @@ export class PgDailyDigestRepository extends PgBaseRepository implements DailyDi
     });
   }
 
+  async findLatest(tenantId: string): Promise<DailyDigestRecord | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const { rows } = await client.query(
+        `SELECT ${COLUMNS} FROM daily_digests
+         WHERE tenant_id = $1
+         ORDER BY digest_date DESC
+         LIMIT 1`,
+        [tenantId],
+      );
+      return rows.length > 0 ? mapRow(rows[0]) : null;
+    });
+  }
+
   async setSmsDispatchId(
     tenantId: string,
     digestDate: string,
