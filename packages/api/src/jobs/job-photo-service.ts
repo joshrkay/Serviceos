@@ -21,6 +21,11 @@ import {
 } from '../attachments/attachment';
 import { FileRepository, StorageProvider } from '../files/file-service';
 import { ValidationError, NotFoundError } from '../shared/errors';
+import { Queue } from '../queues/queue';
+import {
+  IMAGE_POST_PROCESS_TYPE,
+  imagePostProcessIdempotencyKey,
+} from '../workers/image-post-process-worker';
 
 /**
  * RV-005 — map a job-photo category onto the attachments category enum.
@@ -53,7 +58,13 @@ export class JobPhotoService {
     // behavior is exactly as before. `job_photos` remains the system of
     // record for this flow; the shadow row lets new attachment surfaces
     // see job photos without a backfill.
-    private readonly attachmentRepo?: AttachmentRepository
+    private readonly attachmentRepo?: AttachmentRepository,
+    // RV-006: optional queue for the image post-process pipeline. The
+    // job-photo flow does NOT go through AttachmentService.attach (it
+    // writes the shadow attachment row directly), so it needs its own
+    // enqueue hook. Same optional-dependency + failure-isolation pattern
+    // as the dual-write above.
+    private readonly queue?: Pick<Queue, 'send'>
   ) {}
 
   async attachPhotoToJob(
@@ -107,6 +118,24 @@ export class JobPhotoService {
       } catch (err) {
         console.error(
           `RV-005 attachments shadow write failed for job photo ${photo.id}:`,
+          err
+        );
+      }
+    }
+
+    // RV-006: kick the image post-process pipeline. Failure-isolated — the
+    // photo attach must never fail because the queue is down; the worker's
+    // content_hash idempotency marker also makes duplicate enqueues safe.
+    if (this.queue) {
+      try {
+        await this.queue.send(
+          IMAGE_POST_PROCESS_TYPE,
+          { tenantId, fileId },
+          imagePostProcessIdempotencyKey(fileId)
+        );
+      } catch (err) {
+        console.error(
+          `RV-006 image post-process enqueue failed for file ${fileId}:`,
           err
         );
       }
