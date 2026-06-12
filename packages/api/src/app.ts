@@ -105,6 +105,7 @@ import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
 import { createPublicBookingRouter } from './routes/public-booking';
 import { createReportsRouter } from './routes/reports';
+import { createDigestsRouter } from './routes/digests';
 import { RepoBackedTimeGivenBackReporter } from './reports/time-given-back';
 import { createTimeEntriesRouter } from './routes/time-entries';
 import { InMemoryTimeEntryRepository } from './time-tracking/time-entry';
@@ -1981,6 +1982,12 @@ export function createApp(): express.Express {
     paymentRepo,
     expenseRepo,
   );
+  // RV-062 — shared by the digest worker (writes) and the /api/digests
+  // web-view router (reads). Created once here so both wire to the same
+  // instance (Pg-backed in prod, in-memory in dev where the sweep no-ops).
+  const dailyDigestRepo = pool
+    ? new PgDailyDigestRepository(pool)
+    : new InMemoryDailyDigestRepository();
   const twilioAdapter = new TwilioGatherAdapter({
     store: voiceSessionStore,
     gateway: llmGateway,
@@ -2788,6 +2795,8 @@ export function createApp(): express.Express {
       },
     }),
   );
+  // RV-062 — end-of-day digest web view (SMS deep link target).
+  app.use('/api/digests', createDigestsRouter({ digestRepo: dailyDigestRepo }));
   app.use(
     '/api/payments',
     createPaymentRouter(
@@ -3187,9 +3196,6 @@ export function createApp(): express.Express {
     service: 'daily-digest-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  const dailyDigestRepo = pool
-    ? new PgDailyDigestRepository(pool)
-    : new InMemoryDailyDigestRepository();
   // Capture as const so the closure narrows (messageDelivery is a let).
   const digestDelivery = messageDelivery;
   registerInterval(setInterval(() => {

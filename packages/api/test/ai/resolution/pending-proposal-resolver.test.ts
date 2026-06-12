@@ -200,6 +200,44 @@ describe('RV-072 — ordinal references', () => {
     expect(parseOrdinalReference('the $450 invoice')).toBeNull();
   });
 
+  // Table-driven tests ensuring capture and ambiguity rules agree.
+  it.each<[string, number | 'last' | null]>([
+    ['the 1st', 0],
+    ['the 2nd', 1],
+    ['the 3rd', 2],
+    ['the 4th', 3],
+    ['the 5th', 4],
+    ['number 1', 0],
+    ['number 3', 2],
+    ['the first one', 0],
+    ['the second one', 1],
+    ['the third', 2],
+    ['the last one', 'last'],
+    // Ambiguity: bare "2" disagrees with anchored "3rd" → null (never guess).
+    ['approve 2 of the 3rd', null],
+    // Consistent: bare "3" agrees with "3rd" → index 2.
+    ['approve 3 of the 3rd', 2],
+    // "the 2nd of the 3" — anchored ordinal "2nd" + bare "3" disagree → null.
+    ['the 2nd of the 3', null],
+    // Bare integers without ordinal suffix or "number" prefix are NOT ordinals.
+    ['approve 2 proposals', null],
+    // Word-ordinal + disagreeing bare digit → null (ASR non-determinism).
+    ['approve 2 of the third', null],
+    // Word-ordinal + agreeing bare digit → resolves (index 2, 1-based 3).
+    ['approve 3 of the third', 2],
+    // 'last' + disagreeing bare digit → null.
+    ['the last one, number 2', null],
+    // Amount-digit interaction: bare digit from "2nd" ordinal but also $450
+    // amount → the amount digit (450) disagrees with ordinal value (2) → null.
+    ['the 2nd, the 450 dollar one', null],
+    // Not ordinals at all.
+    ['the Henderson estimate', null],
+    ['the $450 invoice', null],
+    ['', null],
+  ])('parseOrdinalReference(%j) → %j', (input, expected) => {
+    expect(parseOrdinalReference(input)).toBe(expected);
+  });
+
   it('resolves "the second one" against the session-provided ordered list', async () => {
     const repo = new InMemoryProposalRepository();
     const a = await seed(repo, makeProposal({ summary: 'Estimate for Henderson' }));

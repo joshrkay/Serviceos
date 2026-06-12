@@ -41,6 +41,7 @@ import { actionClassForProposalType } from '../../proposals/proposal';
 import { approveProposal, rejectProposal } from '../../proposals/actions';
 import { routeUnsupervisedProposal } from '../../proposals/auto-approve';
 import { renderProposalSms } from '../../proposals/sms/render';
+import { payloadHeadlineCents } from '../../proposals/payload-money';
 import type { ProposalSmsEventRepository, OutboundAnchorKind } from '../../proposals/sms/sms-event';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import { createAuditEvent, type AuditRepository } from '../../audit/audit';
@@ -114,6 +115,12 @@ export interface VoiceApprovalSessionState {
    * proposals (no challenge required) remain voice-approvable.
    */
   challengeLockedOut?: boolean;
+  /**
+   * Set after the one-tap SMS is sent following a challenge lockout.
+   * Prevents re-texting the owner on every subsequent refused attempt —
+   * subsequent refusal copy tells the owner the link was already sent.
+   */
+  oneTapSmsSentAfterLockout?: boolean;
 }
 
 export type VoiceApprovalOutcome =
@@ -195,39 +202,6 @@ function formatCents(cents: number): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
-}
-
-/** Headline money value carried by the payload, in priority order. */
-const MONEY_KEYS = [
-  'totalCents',
-  'totalAmountCents',
-  'amountCents',
-  'amountDueCents',
-  'total',
-  'amount',
-] as const;
-
-export function payloadHeadlineCents(payload: Record<string, unknown>): number | null {
-  for (const key of MONEY_KEYS) {
-    const v = payload[key];
-    if (typeof v === 'number' && Number.isFinite(v)) return Math.round(v);
-  }
-  const lineItems = payload.lineItems;
-  if (Array.isArray(lineItems)) {
-    let sum = 0;
-    let saw = false;
-    for (const item of lineItems) {
-      if (item && typeof item === 'object') {
-        const t = (item as Record<string, unknown>).total;
-        if (typeof t === 'number' && Number.isFinite(t)) {
-          sum += Math.round(t);
-          saw = true;
-        }
-      }
-    }
-    if (saw) return sum;
-  }
-  return null;
 }
 
 function payloadCustomerName(payload: Record<string, unknown>): string | null {
@@ -476,19 +450,30 @@ async function prepareResolvedTarget(
   }
 
   // Challenge lockout — 3 failed attempts this session; refuse without prompting.
+  // Send-once: the one-tap SMS is sent on the FIRST post-lockout refusal only —
+  // subsequent attempts get a "link already sent" message to avoid re-texting
+  // the owner on every repeated attempt.
   if (action === 'approve' && requiresChallenge(proposal) && ref.sessionState?.challengeLockedOut) {
-    const smsSent = await sendOneTapFallback(deps, ref, proposal);
+    const alreadySent = ref.sessionState.oneTapSmsSentAfterLockout === true;
+    const smsSent = alreadySent ? false : await sendOneTapFallback(deps, ref, proposal);
     await audit(deps, ref, 'proposal.voice_approve_refused_challenge_lockout', proposal.id, {
       proposalType: proposal.proposalType,
       oneTapSmsSent: smsSent,
+      smsSendSkippedAlreadySent: alreadySent,
     });
+    const sessionState: Partial<VoiceApprovalSessionState> | undefined =
+      smsSent ? { oneTapSmsSentAfterLockout: true } : undefined;
+    const speak = alreadySent
+      ? "For security, I can’t take that approval by voice this call. The text link was already sent."
+      : smsSent
+      ? "For security, I can’t take that approval by voice right now — I’ve sent you a text link instead."
+      : "For security, I can’t take that approval by voice right now. Use the app or your review queue.";
     return {
-      speak: smsSent
-        ? "For security, I can’t take that approval by voice right now — I’ve sent you a text link instead."
-        : "For security, I can’t take that approval by voice right now. Use the app or your review queue.",
+      speak,
       pending: null,
       outcome: 'challenge_lockout',
       proposalId: proposal.id,
+      ...(sessionState ? { sessionState } : {}),
     };
   }
 

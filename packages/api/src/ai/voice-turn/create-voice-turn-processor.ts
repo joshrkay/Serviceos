@@ -47,6 +47,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
+import { appendAgentTts } from './transcript-append';
 import { classifyIntent, isVoiceApprovalIntent } from '../orchestration/intent-classifier';
 import {
   startVoiceApproval,
@@ -1137,14 +1138,7 @@ export function createVoiceTurnProcessor(
     const approvalTurn = await handlePendingVoiceApproval(session, speechResult, tenantId);
     if (approvalTurn) {
       await executeSideEffects(session, approvalTurn, tenantId);
-      const lastTts = [...approvalTurn].reverse().find((e) => e.type === 'tts_play');
-      if (lastTts && typeof lastTts.payload.text === 'string') {
-        deps.store.appendTranscript(session.id, {
-          speaker: 'agent',
-          text: lastTts.payload.text,
-          ts: Date.now(),
-        });
-      }
+      appendAgentTts(deps.store, session.id, approvalTurn);
       return approvalTurn;
     }
 
@@ -1281,14 +1275,7 @@ export function createVoiceTurnProcessor(
         });
         sideEffectsAll.push(...approvalFx);
         await executeSideEffects(session, sideEffectsAll, tenantId);
-        const lastTts = [...sideEffectsAll].reverse().find((e) => e.type === 'tts_play');
-        if (lastTts && typeof lastTts.payload.text === 'string') {
-          deps.store.appendTranscript(session.id, {
-            speaker: 'agent',
-            text: lastTts.payload.text,
-            ts: Date.now(),
-          });
-        }
+        appendAgentTts(deps.store, session.id, sideEffectsAll);
         return sideEffectsAll;
       }
 
@@ -1376,16 +1363,7 @@ export function createVoiceTurnProcessor(
 
     await executeSideEffects(session, sideEffectsAll, tenantId);
 
-    const ttsLast = [...sideEffectsAll]
-      .reverse()
-      .find((e) => e.type === 'tts_play');
-    if (ttsLast && typeof ttsLast.payload.text === 'string') {
-      deps.store.appendTranscript(session.id, {
-        speaker: 'agent',
-        text: ttsLast.payload.text,
-        ts: Date.now(),
-      });
-    }
+    appendAgentTts(deps.store, session.id, sideEffectsAll);
     if (session.machine.currentState === 'terminated' && !session.ended) {
       session.ended = true;
       finalizeTerminatedSession(session, sideEffectsAll, 'caller_hangup');

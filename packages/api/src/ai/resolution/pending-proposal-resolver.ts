@@ -32,6 +32,7 @@
  */
 import type { Proposal, ProposalRepository } from '../../proposals/proposal';
 import { TAU_ENT, type EntityCandidate, type EntityResolverResult } from './entity-resolver';
+import { payloadAmountsCents as sharedPayloadAmountsCents } from '../../proposals/payload-money';
 
 /** Reviewable statuses — mirrors `isReviewable` in the SMS reply handler. */
 const PENDING_STATUSES = ['draft', 'ready_for_review'] as const;
@@ -99,17 +100,92 @@ const ORDINAL_WORDS: Record<string, number> = {
  * Parse an ordinal reference ("the second one", "number 3", "the last
  * one"). Returns a zero-based index, 'last', or null when the reference
  * is not ordinal.
+ *
+ * Ambiguity rule: if the utterance contains both an anchored ordinal
+ * (Nth-suffix or "number N") AND a bare digit that disagrees with it
+ * (e.g. "approve 2 of the 3rd"), the reference is ambiguous — return null
+ * rather than guessing. A bare digit that MATCHES the anchored value (or
+ * no bare digit at all) resolves as before.
  */
 export function parseOrdinalReference(reference: string): number | 'last' | null {
   const ref = reference.toLowerCase();
-  if (/\blast\s*(one)?\b/.test(ref)) return 'last';
-  for (const [word, index] of Object.entries(ORDINAL_WORDS)) {
-    if (new RegExp(`\\b${word}\\b`).test(ref)) return index;
+
+  /**
+   * Extract the anchored ordinal value from ref (Nth-suffix or "number N"),
+   * if one is present.  Returns the 1-based integer, or null.
+   */
+  function anchoredOrdinal(): number | null {
+    const m = ref.match(/\b(number\s+(\d+)|(\d+)(st|nd|rd|th))\b/);
+    if (!m) return null;
+    const raw = m[2] ?? m[3];
+    const n = raw !== undefined ? parseInt(raw, 10) : NaN;
+    return Number.isNaN(n) || n < 1 ? null : n;
   }
-  const numbered = ref.match(/\b(?:number\s+)?(\d+)(?:st|nd|rd|th)?\b/);
-  if (numbered && /\b(number\s+\d+|\d+(st|nd|rd|th))\b/.test(ref)) {
-    const n = parseInt(numbered[1], 10);
-    if (n >= 1) return n - 1;
+
+  /**
+   * Bare-digit disagreement helper — scans the full `ref` string for bare
+   * digit sequences (no ordinal suffix, not preceded by "number ") that
+   * disagree with a resolved ordinal value `n` (1-based).  Returns true
+   * when a disagreeing digit is found.
+   *
+   * Used by the word-ordinal and 'last' paths as well as the anchored-
+   * ordinal ("Nth" / "number N") path so ASR word/digit transcription
+   * ambiguity is handled consistently.
+   */
+  function hasDisagreeingBareDigit(n: number | null): boolean {
+    // Collect all bare digit sequences (not followed by an ordinal suffix,
+    // not preceded by "number").
+    const bareNumbers = [...ref.matchAll(/\b(\d+)\b/g)]
+      .filter((m) => {
+        const after = ref.slice((m.index ?? 0) + m[0].length);
+        if (/^(st|nd|rd|th)\b/.test(after)) return false; // ordinal suffix
+        const before = ref.slice(0, m.index ?? 0);
+        if (/\bnumber\s+$/.test(before)) return false; // "number N" form
+        return true;
+      })
+      .map((m) => parseInt(m[1], 10))
+      .filter((v) => !Number.isNaN(v));
+
+    if (n === null) return bareNumbers.length > 0;
+    return bareNumbers.some((v) => v !== n);
+  }
+
+  if (/\blast\s*(one)?\b/.test(ref)) {
+    // 'last' with any disagreeing bare digit OR any anchored ordinal → ambiguous.
+    if (hasDisagreeingBareDigit(null) || anchoredOrdinal() !== null) return null;
+    return 'last';
+  }
+  for (const [word, index] of Object.entries(ORDINAL_WORDS)) {
+    if (new RegExp(`\\b${word}\\b`).test(ref)) {
+      // Word-ordinal with a disagreeing bare digit or a non-matching anchored
+      // ordinal → ambiguous.  A matching anchored ordinal is fine (they agree).
+      const anchored = anchoredOrdinal();
+      if (anchored !== null && anchored !== index + 1) return null;
+      if (hasDisagreeingBareDigit(index + 1)) return null;
+      return index;
+    }
+  }
+  // Anchored ordinal: "Nth" suffix form or "number N" form.
+  const numbered = ref.match(/\b(number\s+(\d+)|(\d+)(st|nd|rd|th))\b/);
+  if (numbered) {
+    // Group 2: "number N" form. Group 3: "Nth" ordinal form.
+    const raw = numbered[2] ?? numbered[3];
+    const n = raw !== undefined ? parseInt(raw, 10) : NaN;
+    if (Number.isNaN(n) || n < 1) return null;
+
+    // Detect bare digit references — digits NOT anchored by an ordinal suffix
+    // and NOT preceded by "number ". Slice out the already-matched anchored
+    // token by position so only content outside the anchor is scanned.
+    const anchorEnd = (numbered.index ?? 0) + numbered[0].length;
+    const withoutAnchor = ref.slice(0, numbered.index ?? 0) + ' ' + ref.slice(anchorEnd);
+    const bareNumbers = [...withoutAnchor.matchAll(/\b(\d+)\b/g)]
+      .map((m) => parseInt(m[1], 10))
+      .filter((v) => !Number.isNaN(v));
+
+    // If any bare number disagrees with the anchored value → ambiguous → null.
+    if (bareNumbers.some((v) => v !== n)) return null;
+
+    return n - 1;
   }
   return null;
 }
@@ -128,29 +204,7 @@ export function parseAmountMention(reference: string): number | null {
 }
 
 /** All plausible integer-cent money values carried by a proposal payload. */
-function payloadAmountsCents(payload: Record<string, unknown>): number[] {
-  const out: number[] = [];
-  for (const key of ['total', 'totalCents', 'amount', 'amountCents', 'amountDueCents']) {
-    const v = payload[key];
-    if (typeof v === 'number' && Number.isFinite(v)) out.push(Math.round(v));
-  }
-  const lineItems = payload.lineItems;
-  if (Array.isArray(lineItems)) {
-    let sum = 0;
-    let sawTotal = false;
-    for (const item of lineItems) {
-      if (item && typeof item === 'object') {
-        const t = (item as Record<string, unknown>).total;
-        if (typeof t === 'number' && Number.isFinite(t)) {
-          sum += Math.round(t);
-          sawTotal = true;
-        }
-      }
-    }
-    if (sawTotal) out.push(sum);
-  }
-  return out;
-}
+const payloadAmountsCents = sharedPayloadAmountsCents;
 
 /** Customer-name-ish strings carried by a proposal (payload first, then summary). */
 function candidateNameHaystack(proposal: Proposal): string {

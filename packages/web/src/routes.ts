@@ -33,6 +33,7 @@ import { TechnicianDayPage } from './components/technician/TechnicianDayPage';
 import { MaintenanceContractsPage } from './components/contracts/MaintenanceContractsPage';
 import { ContractDetailPage } from './components/contracts/ContractDetailPage';
 import { MoneyDashboardPage } from './components/reports/MoneyDashboardPage';
+import { DigestPage } from './pages/digest/DigestPage';
 import { RevenueBySourcePage } from './components/reports/RevenueBySourcePage';
 import { InboxPage } from './components/inbox/InboxPage';
 import { PortalShell } from './pages/portal/PortalShell';
@@ -186,6 +187,10 @@ export const router = createBrowserRouter([
       { path: 'settings/feedback', Component: FeedbackDashboard },
       { path: 'settings/language', Component: LanguageSettingsPage },
       { path: 'reports/money', Component: MoneyDashboardPage },
+      // RV-062 — end-of-day digest web view (SMS deep link `/digest/<date>`;
+      // no param / `latest` resolve to the most recent digest).
+      { path: 'digest',         Component: DigestPage },
+      { path: 'digest/:date',   Component: DigestPage },
       { path: 'reports/revenue-by-source', Component: RevenueBySourcePage },
       { path: 'technician/day', Component: TechnicianDayPage },
       { path: 'design',         Component: Showcase },

@@ -125,8 +125,9 @@ export function shouldAutoApprove(
 //   - payloads without `_meta` (all pre-RV-007 proposals) are untouched —
 //     the numeric-threshold rules apply exactly as before;
 //   - 'medium' does NOT block (per F-4 it renders as a marker downstream);
-//   - a malformed `_meta` never blocks and never throws — the payload
-//     contract gate (assertValidProposalPayload) rejects it upstream.
+//   - a malformed `_meta` never blocks and never throws — it is a
+//     defensively structural guard; assertValidProposalPayload is wired
+//     only where AI task handlers emit proposals, not on every path.
 //
 // `decideInitialStatus` (proposals/proposal.ts) is the single place that
 // can return 'approved', so the check is applied there — every
