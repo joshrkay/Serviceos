@@ -923,6 +923,15 @@ export class TwilioGatherAdapter {
    * those (TTS synthesis for the WS path; <Say> for Gather).
    */
   /**
+   * RV-121/RV-122 — caller-ID accessor for the vulnerability triage wiring
+   * (the map itself stays private; same value the processor's
+   * callerPhoneResolver reads). Empty string (blocked caller-id) → undefined.
+   */
+  getCallerPhone(sessionId: string): string | undefined {
+    return this.callerIdBySession.get(sessionId) || undefined;
+  }
+
+  /**
    * RV-140 — the ONE shared deterministic safety scan. Runs on every caller
    * transcript chunk from BOTH entry points (Gather finals via
    * `_handleGatherLocked`, media-streams finals via `processCallerUtterance`)

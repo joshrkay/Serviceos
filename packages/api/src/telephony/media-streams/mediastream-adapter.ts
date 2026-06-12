@@ -270,6 +270,20 @@ export interface MediaStreamAdapterDeps {
    * sentiment is disabled.
    */
   resolveEscalationSettings?: (tenantId: string) => Promise<EscalationSettings>;
+  /**
+   * RV-122 — per-turn vulnerability triage hook. Fired after each
+   * `speechTurn` exactly like the sentiment classifier (fire-and-forget,
+   * never blocks the audio path). The hook owns its own per-tenant flag
+   * gate (`voice_vulnerability_triage`), grading, triage persistence
+   * (RV-120) and the patch-owner action (RV-121) — the adapter only
+   * supplies the turn context.
+   */
+  vulnerabilityTriageHook?: (args: {
+    session: VoiceSession;
+    transcript: string;
+    priorTurns: ReadonlyArray<{ role: 'caller' | 'ai'; text: string }>;
+    tenantId: string;
+  }) => Promise<void>;
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
@@ -712,6 +726,30 @@ export class TwilioMediaStreamAdapter {
             error: err instanceof Error ? err.message : String(err),
           }),
       );
+    }
+
+    // RV-122 — per-turn vulnerability triage, fire-and-forget behind the
+    // tenant flag (gated inside the hook). Same skip conditions as the
+    // sentiment classifier: an ending/escalated call is wasted LLM spend.
+    if (
+      !alreadyEnding &&
+      callState !== 'escalating' &&
+      callState !== 'terminated' &&
+      this.deps.vulnerabilityTriageHook
+    ) {
+      void this.deps
+        .vulnerabilityTriageHook({
+          session,
+          transcript: event.transcript,
+          priorTurns: this.extractPriorTurns(session, 4),
+          tenantId,
+        })
+        .catch((err) =>
+          logger.warn('vulnerability triage hook failed', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: session.id,
+          }),
+        );
     }
 
     // FSM may have terminated this turn — close the call.
