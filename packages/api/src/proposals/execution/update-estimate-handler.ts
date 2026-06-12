@@ -61,9 +61,16 @@ export class UpdateEstimateExecutionHandler implements ExecutionHandler {
       // updateEstimate so version/revision/audit stay consistent with the
       // authenticated PUT/PATCH path (which is the source of truth for the
       // optimistic-lock + stale-accept guards).
+      //
+      // RV-042: an update_estimate against an ACCEPTED estimate invalidates
+      // the acceptance instead of refusing — updateEstimate clears the
+      // acceptance fields, returns the estimate to 'sent' (re-sendable),
+      // and records the prior acceptance in an
+      // `estimate.acceptance_invalidated` audit event.
       const { updatedEstimate } = applyEstimateEdits(
         estimate,
-        editActions as EstimateEditAction[]
+        editActions as EstimateEditAction[],
+        { allowAccepted: true },
       );
       const persisted = await updateEstimate(
         proposal.tenantId,
@@ -76,6 +83,7 @@ export class UpdateEstimateExecutionHandler implements ExecutionHandler {
           editDeltaRepo: this.editDeltaRepo,
           actorId: context.executedBy,
           actorRole: 'system',
+          invalidateAcceptance: true,
         },
       );
       if (!persisted) {

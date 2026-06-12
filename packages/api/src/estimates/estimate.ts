@@ -120,6 +120,16 @@ export interface EstimateMutationDeps {
    * skipped (status lock still applies).
    */
   depositPaidCents?: number;
+  /**
+   * RV-042 — re-approval invalidation. When true, updateEstimate is allowed
+   * to mutate an ACCEPTED estimate: the prior acceptance is recorded in an
+   * `estimate.acceptance_invalidated` audit event, the acceptance fields are
+   * cleared, and the estimate returns to 'sent' (re-sendable; version bumped
+   * so the stale-accept guard engages; reminder budget reset). Default false
+   * preserves the hard lock — the authenticated edit route still refuses
+   * with "Clone it". The deposit lock applies regardless of this flag.
+   */
+  invalidateAcceptance?: boolean;
 }
 
 export interface EstimateListOptions {
@@ -284,17 +294,22 @@ export async function getEstimate(
  * drift between them.
  *
  * Locks (throw ConflictError):
- *   - `accepted`: the customer has accepted/signed — immutable.
- *   - linked job has a paid deposit — financial commitment made.
+ *   - `accepted`: the customer has accepted/signed — immutable, UNLESS the
+ *     caller opts into RV-042 acceptance invalidation via `allowAccepted`
+ *     (updateEstimate with `invalidateAcceptance: true` is the only such
+ *     caller; it clears the acceptance and re-opens the estimate for
+ *     re-approval).
+ *   - linked job has a paid deposit — financial commitment made. Applies
+ *     even with `allowAccepted`.
  *   - `sent` without `allowSent`: must go through reviseEstimate so the
  *     prior version is snapshotted and the customer is re-notified.
  *   - `rejected` / `expired`: reopen to draft first (status transition).
  */
 export function assertEstimateEditable(
   estimate: Estimate,
-  opts: { allowSent?: boolean; depositPaidCents?: number } = {},
+  opts: { allowSent?: boolean; allowAccepted?: boolean; depositPaidCents?: number } = {},
 ): void {
-  if (estimate.status === 'accepted') {
+  if (estimate.status === 'accepted' && !opts.allowAccepted) {
     throw new ConflictError(
       'Estimate is locked: the customer has already accepted/signed it. Clone it to a new estimate to make changes.',
     );
@@ -436,13 +451,43 @@ export async function updateEstimate(
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
 
-  assertEstimateEditable(existing, { depositPaidCents: deps?.depositPaidCents });
+  // RV-042: invalidation only engages when the caller opted in AND the
+  // estimate is actually accepted.
+  const invalidatingAcceptance =
+    deps?.invalidateAcceptance === true && existing.status === 'accepted';
+
+  assertEstimateEditable(existing, {
+    depositPaidCents: deps?.depositPaidCents,
+    allowAccepted: invalidatingAcceptance,
+  });
   assertVersionMatch(existing, input.expectedVersion);
 
   const lineItems = input.lineItems ?? existing.lineItems;
   const discountCents = input.discountCents ?? existing.totals.discountCents;
   const taxRateBps = input.taxRateBps ?? existing.totals.taxRateBps;
   const totals = calculateDocumentTotals(lineItems, discountCents, taxRateBps);
+  const now = new Date();
+
+  // RV-042 — acceptance invalidation: the content the customer accepted is
+  // changing, so the acceptance is void. Back to 'sent' (the view token /
+  // link is preserved and SendService can re-send), acceptance fields
+  // cleared (`null` so the Pg layer writes SQL NULL — `undefined` keys are
+  // skipped by the partial-update builder), reminder budget reset and
+  // lastRevisedAt stamped so the reminder worker re-notifies and the public
+  // approve page's version guard blocks a stale accept.
+  const acceptanceInvalidation = invalidatingAcceptance
+    ? ({
+        status: 'sent',
+        acceptedAt: null,
+        acceptedByName: null,
+        acceptedByIp: null,
+        acceptedUserAgent: null,
+        acceptedSignatureData: null,
+        acceptedSelection: null,
+        lastRevisedAt: now,
+        reminderCount: 0,
+      } as unknown as Partial<Estimate>)
+    : {};
 
   const updated = await repository.update(tenantId, id, {
     lineItems,
@@ -451,10 +496,40 @@ export async function updateEstimate(
     customerMessage: input.customerMessage ?? existing.customerMessage,
     internalNotes: input.internalNotes ?? existing.internalNotes,
     version: existing.version + 1,
-    updatedAt: new Date(),
+    updatedAt: now,
+    ...acceptanceInvalidation,
   });
 
   if (updated) {
+    if (invalidatingAcceptance && deps?.auditRepo) {
+      // Prior acceptance recorded — who accepted, when, and which version
+      // they accepted — before the generic estimate.updated event.
+      try {
+        await deps.auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: deps.actorId ?? 'system',
+            actorRole: deps.actorRole ?? 'unknown',
+            eventType: 'estimate.acceptance_invalidated',
+            entityType: 'estimate',
+            entityId: id,
+            metadata: {
+              estimateNumber: existing.estimateNumber,
+              priorAcceptedAt: existing.acceptedAt?.toISOString() ?? null,
+              priorAcceptedByName: existing.acceptedByName ?? null,
+              priorAcceptedSelection: existing.acceptedSelection ?? null,
+              priorVersion: existing.version,
+              newVersion: updated.version,
+            },
+          }),
+        );
+      } catch (err) {
+        deps.logger?.warn('estimate acceptance-invalidation audit failed', {
+          estimateId: id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     await recordEstimateHistory(existing, updated, 'estimate.updated', deps);
   }
   return updated;
