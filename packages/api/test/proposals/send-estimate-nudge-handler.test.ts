@@ -239,6 +239,25 @@ describe('SendEstimateNudgeExecutionHandler', () => {
     expect(result.success).toBe(true);
   });
 
+  it('ignores bounced dispatch rows for the cooldown (never reached the customer)', async () => {
+    await dispatchRepo.create({
+      tenantId: TENANT,
+      entityType: 'estimate',
+      entityId: ESTIMATE_ID,
+      channel: 'sms',
+      recipient: '+15550001111',
+      provider: 'twilio',
+      status: 'bounced',
+      errorMessage: 'undeliverable',
+    });
+    const result = await handler.execute(makeProposal({ estimateId: ESTIMATE_ID }), {
+      tenantId: TENANT,
+      executedBy: 'owner-1',
+    });
+    expect(result.success).toBe(true);
+    expect(sendService.sendEstimate).toHaveBeenCalledTimes(1);
+  });
+
   it('falls back to lastReminderAt for the cooldown when no dispatch repo is wired', async () => {
     await estimateRepo.update(TENANT, ESTIMATE_ID, {
       reminderCount: 1,
