@@ -99,22 +99,32 @@ export function evaluateSupervisorPolicy(
     blockReasons.push(`proposal type '${input.proposalType}' is blocked by tenant policy`);
   }
 
-  if (
-    rules.perProposalCapCents !== undefined &&
-    input.amountCents !== null &&
-    input.amountCents > rules.perProposalCapCents
-  ) {
-    blockReasons.push(
-      `amount ${input.amountCents}c exceeds per-proposal cap ${rules.perProposalCapCents}c`,
-    );
-  }
-
-  if (rules.dailySpendCapCents !== undefined) {
-    const projected = input.counters.dailySpendCents + (input.amountCents ?? 0);
-    if (projected > rules.dailySpendCapCents) {
-      reviewReasons.push(
-        `projected daily spend ${projected}c exceeds daily spend cap ${rules.dailySpendCapCents}c`,
+  // Money-class alignment: perProposalCapCents and dailySpendCapCents are
+  // money counters — they only make sense for proposals that carry a
+  // monetary value. Applying them to capture/comms/irreversible proposals
+  // would mis-fire (a 'create_customer' with no amount would be blocked by
+  // a stale spend projection). The spend counter itself only increments on
+  // money-class executions (recordExecutedProposalSpend), so the projection
+  // must be evaluated with the same class gate to stay aligned.
+  // blockedProposalTypes and maxAutoApprovalsPerHour remain class-agnostic.
+  if (input.actionClass === 'money') {
+    if (
+      rules.perProposalCapCents !== undefined &&
+      input.amountCents !== null &&
+      input.amountCents > rules.perProposalCapCents
+    ) {
+      blockReasons.push(
+        `amount ${input.amountCents}c exceeds per-proposal cap ${rules.perProposalCapCents}c`,
       );
+    }
+
+    if (rules.dailySpendCapCents !== undefined) {
+      const projected = input.counters.dailySpendCents + (input.amountCents ?? 0);
+      if (projected > rules.dailySpendCapCents) {
+        reviewReasons.push(
+          `projected daily spend ${projected}c exceeds daily spend cap ${rules.dailySpendCapCents}c`,
+        );
+      }
     }
   }
 

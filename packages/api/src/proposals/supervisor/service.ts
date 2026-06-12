@@ -63,6 +63,7 @@ interface TenantSnapshot {
 
 interface SupervisorLogger {
   warn(message: string, meta?: Record<string, unknown>): void;
+  error?(message: string, meta?: Record<string, unknown>): void;
 }
 
 export interface SupervisorPolicyServiceDeps {
@@ -83,9 +84,14 @@ export interface SupervisorPolicyServiceDeps {
 
 const DEFAULT_SNAPSHOT_TTL_MS = 30_000;
 
+/** Consecutive snapshot-refresh failures before escalating warn → error. */
+const REFRESH_ERROR_ESCALATION_THRESHOLD = 3;
+
 export class SupervisorPolicyService implements SupervisorCreationHook {
   private readonly snapshots = new Map<string, TenantSnapshot>();
   private readonly inflight = new Map<string, Promise<void>>();
+  /** Consecutive refresh failures per tenant; reset on success. */
+  private readonly refreshFailures = new Map<string, number>();
   private readonly ttlMs: number;
   private readonly logger: SupervisorLogger;
   private readonly now: () => Date;
@@ -100,13 +106,31 @@ export class SupervisorPolicyService implements SupervisorCreationHook {
   evaluate(input: SupervisorCreationHookInput): SupervisorDecision | null {
     const now = this.now();
     const snapshot = this.snapshots.get(input.tenantId);
+
+    // Kill-switch precedence (Rivet P2 review): the per-tenant flag gate must
+    // short-circuit BEFORE any stale-snapshot enforcement. A readable 'false'
+    // means the tenant has turned the supervisor OFF; we must not apply a
+    // stale-but-enabled snapshot in that case. If the flag read fails we keep
+    // the current behavior (fail-open → permissive).
+    //
+    // The flag gate is async (`isEnabledForTenant`), but `evaluate` is
+    // intentionally synchronous (50+ call sites, synchronous hot path). The
+    // SNAPSHOT already captures the flag value from the last refresh: when the
+    // flag is false the refresh stores `enabled: false`, so the check below is
+    // synchronous and correct. A stale snapshot with `enabled: false` is safe:
+    // it means the supervisor was last seen OFF → permissive is the right
+    // outcome. A stale snapshot with `enabled: true` will be refreshed below;
+    // if the flag has since flipped to false, the next refresh will store the
+    // new state.
+    if (snapshot && !snapshot.enabled) return null;
+
     if (!snapshot || snapshot.expiresAtMs <= now.getTime()) {
       // Stale or cold: refresh in the background (deduplicated). A cold
       // cache evaluates permissive (fail-open); a stale one keeps
       // serving the previous snapshot until the refresh lands.
       void this.refresh(input.tenantId);
     }
-    if (!snapshot || !snapshot.enabled) return null;
+    if (!snapshot) return null;
 
     // Counter values only apply inside their window; when the cached
     // window has rolled over, the fresh window starts at zero until the
@@ -213,9 +237,22 @@ export class SupervisorPolicyService implements SupervisorCreationHook {
     const job = (async () => {
       try {
         const now = this.now();
-        const enabled = this.deps.isEnabledForTenant
-          ? await this.deps.isEnabledForTenant(tenantId)
-          : true;
+
+        // Kill-switch precedence: read the flag gate FIRST. A 'false' result
+        // means the supervisor is OFF for this tenant; store an
+        // `enabled: false` snapshot so evaluate() short-circuits immediately.
+        // A flag-read FAILURE is treated as "unknown" — we fall through to
+        // load the policy snapshot so the existing stale-snapshot behavior is
+        // preserved (fail-open on flag errors, not fail-closed).
+        let enabled = true;
+        if (this.deps.isEnabledForTenant) {
+          try {
+            enabled = await this.deps.isEnabledForTenant(tenantId);
+          } catch {
+            // Flag-read failure: keep enabled=true and fall through to
+            // snapshot refresh — current behavior preserved.
+          }
+        }
         if (!enabled) {
           this.snapshots.set(tenantId, {
             enabled: false,
@@ -226,6 +263,7 @@ export class SupervisorPolicyService implements SupervisorCreationHook {
             autoApprovalsThisHour: 0,
             expiresAtMs: now.getTime() + this.ttlMs,
           });
+          this.refreshFailures.delete(tenantId);
           return;
         }
         const active = await this.deps.policies.getActive(tenantId);
@@ -245,13 +283,34 @@ export class SupervisorPolicyService implements SupervisorCreationHook {
           autoApprovalsThisHour,
           expiresAtMs: now.getTime() + this.ttlMs,
         });
+        // Success: reset the consecutive-failure counter.
+        this.refreshFailures.delete(tenantId);
       } catch (err) {
         // Fail open: keep the stale snapshot (or none). The next
         // evaluate() retries the refresh.
-        this.logger.warn('supervisor: snapshot refresh failed', {
+        //
+        // Observability escalation: after REFRESH_ERROR_ESCALATION_THRESHOLD
+        // consecutive failures for the same tenant, emit logger.error ONCE
+        // (a greppable signal for on-call), then revert to warn. This avoids
+        // alert fatigue on transient blips while surfacing persistent failures.
+        const prev = this.refreshFailures.get(tenantId) ?? 0;
+        const next = prev + 1;
+        this.refreshFailures.set(tenantId, next);
+        const meta = {
           tenantId,
+          consecutiveFailures: next,
           error: err instanceof Error ? err.message : String(err),
-        });
+        };
+        if (next === REFRESH_ERROR_ESCALATION_THRESHOLD) {
+          // Escalate once when the threshold is first crossed.
+          if (this.logger.error) {
+            this.logger.error('supervisor: snapshot refresh failing repeatedly', meta);
+          } else {
+            this.logger.warn('supervisor: snapshot refresh failing repeatedly', meta);
+          }
+        } else {
+          this.logger.warn('supervisor: snapshot refresh failed', meta);
+        }
       } finally {
         this.inflight.delete(tenantId);
       }

@@ -228,16 +228,22 @@ describe("verdict 'block'", () => {
     expect(events[0].eventType).toBe(SUPERVISOR_BLOCKED_EVENT);
   });
 
-  it('per-proposal cap blocks via the shared payloadHeadlineCents extraction', async () => {
+  it('per-proposal cap blocks money-class proposals via the shared payloadHeadlineCents extraction', async () => {
     await installService({ perProposalCapCents: 50_000 });
+    // Must use a money-class proposal type (issue_invoice / record_payment) —
+    // the cap is class-gated and does not apply to capture/comms/irreversible.
     const over = createProposal(
-      autoApprovableInput({ payload: { name: 'big job', totalCents: 60_000 } }),
+      baseInput({ proposalType: 'issue_invoice', payload: { totalCents: 60_000 } }),
     );
     expect(over.status).toBe('draft');
     const under = createProposal(
-      autoApprovableInput({ payload: { name: 'small job', totalCents: 40_000 } }),
+      baseInput({ proposalType: 'issue_invoice', payload: { totalCents: 40_000 } }),
     );
-    expect(under.status).toBe('approved');
+    // Money class always starts at 'draft' (never auto-approves) — the
+    // supervisor verdicts cannot upgrade it but the marker is still written.
+    expect(under.status).toBe('draft');
+    // Under-cap money proposal should NOT carry a per-proposal-cap marker.
+    expect(JSON.stringify(under.payload._meta ?? {})).not.toMatch(/per-proposal cap/);
   });
 
   it('suppresses unsupervised ready_for_review routing too (block beats queue)', async () => {
@@ -308,6 +314,88 @@ describe('service mechanics', () => {
       'supervisor: snapshot refresh failed',
       expect.objectContaining({ tenantId: TENANT }),
     );
+  });
+
+  it('kill-switch precedence: flag=false short-circuits BEFORE stale-snapshot enforcement', async () => {
+    // Prime with a blocking rule and enabled=true; then check that passing
+    // isEnabledForTenant=false keeps supervisor inert even when the snapshot
+    // is stale (expired TTL).
+    const policies = new InMemorySupervisorPolicyRepository();
+    const v = await policies.createVersion(TENANT, { blockedProposalTypes: ['create_customer'] }, 'test');
+    await policies.activate(TENANT, v.version);
+    const counters = new InMemoryTenantBudgetCounterRepository();
+
+    // Force very short TTL so the snapshot expires immediately.
+    const service = new SupervisorPolicyService({
+      policies,
+      counters,
+      isEnabledForTenant: async () => false, // flag is OFF
+      logger: { warn: () => undefined },
+      now: () => NOW,
+      snapshotTtlMs: -1, // snapshot expires instantly
+    });
+    await service.prime(TENANT); // primes with enabled=false
+    configureSupervisorCreationHook(service);
+
+    // Even with a stale or expired snapshot, flag=false → supervisor is OFF.
+    const proposal = createProposal(autoApprovableInput());
+    expect(proposal.status).toBe('approved'); // flag gate overrides stale snapshot
+  });
+
+  it('observability: after 3 consecutive refresh failures, escalates to logger.error once then reverts to warn', async () => {
+    const policies = new InMemorySupervisorPolicyRepository();
+    vi.spyOn(policies, 'getActive').mockRejectedValue(new Error('pg down'));
+    const warn = vi.fn();
+    const error = vi.fn();
+    const service = new SupervisorPolicyService({
+      policies,
+      counters: new InMemoryTenantBudgetCounterRepository(),
+      logger: { warn, error },
+      now: () => NOW,
+      snapshotTtlMs: -1, // force a refresh on each prime()
+    });
+
+    // prime() triggers refresh; call it 4 times to see escalation pattern.
+    await service.prime(TENANT); // failure 1 → warn
+    await service.prime(TENANT); // failure 2 → warn
+    await service.prime(TENANT); // failure 3 → error (first escalation)
+    await service.prime(TENANT); // failure 4 → warn again
+
+    expect(warn).toHaveBeenCalledTimes(3); // failures 1, 2, 4
+    expect(error).toHaveBeenCalledTimes(1); // only failure 3
+    expect(error).toHaveBeenCalledWith(
+      'supervisor: snapshot refresh failing repeatedly',
+      expect.objectContaining({ tenantId: TENANT, consecutiveFailures: 3 }),
+    );
+  });
+
+  it('observability: consecutive failure counter resets after a successful refresh', async () => {
+    const policies = new InMemorySupervisorPolicyRepository();
+    const getActive = vi.spyOn(policies, 'getActive');
+    getActive
+      .mockRejectedValueOnce(new Error('blip'))
+      .mockRejectedValueOnce(new Error('blip'))
+      .mockResolvedValueOnce(null) // success
+      .mockRejectedValueOnce(new Error('blip')); // failure after reset
+
+    const warn = vi.fn();
+    const error = vi.fn();
+    const service = new SupervisorPolicyService({
+      policies,
+      counters: new InMemoryTenantBudgetCounterRepository(),
+      logger: { warn, error },
+      now: () => NOW,
+      snapshotTtlMs: -1,
+    });
+
+    await service.prime(TENANT); // failure 1
+    await service.prime(TENANT); // failure 2
+    await service.prime(TENANT); // success → reset counter
+    await service.prime(TENANT); // failure 1 again (counter was reset)
+
+    // error must NOT have fired (threshold is 3, max consecutive was 2 before reset).
+    expect(error).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(3); // failures 1, 2, and the post-reset 1
   });
 });
 

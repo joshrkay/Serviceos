@@ -58,7 +58,7 @@ export interface AnnotatorGateway {
 
 export interface SupervisorAnnotationSweepDeps {
   listTenantIds: () => Promise<string[]>;
-  proposalRepo: Pick<ProposalRepository, 'findByStatus' | 'update'>;
+  proposalRepo: Pick<ProposalRepository, 'findByStatus' | 'findById' | 'update'>;
   gateway: AnnotatorGateway;
   /** Per-tenant 'supervisor_agent' flag gate; absent → all tenants swept. */
   isEnabledForTenant?: (tenantId: string) => Promise<boolean>;
@@ -136,12 +136,29 @@ async function annotateProposal(
     return false;
   }
   const annotation: SupervisorAnnotation = { ...parsed, annotatedAt: now.toISOString() };
+
+  // Narrow-merge fix: re-fetch the FRESH payload immediately before writing so
+  // any concurrent edits made during the (multi-second) LLM window are not
+  // clobbered. We merge ONLY `_meta.supervisorAnnotation` into the fresh
+  // payload — every other field from the sweep-time snapshot is discarded.
+  //
+  // Stale-status guard: if the proposal has left ready_for_review between
+  // our sweep-read and now, skip the annotation write. A status change is
+  // the strongest signal that the proposal is no longer a candidate (it may
+  // have been approved or rejected while we were calling the LLM).
+  const fresh = await deps.proposalRepo.findById(proposal.tenantId, proposal.id);
+  if (!fresh) return false;
+  if (fresh.status !== 'ready_for_review') {
+    deps.logger.warn('supervisor-annotator: proposal status changed during annotation, skipping', {
+      tenantId: proposal.tenantId,
+      proposalId: proposal.id,
+      newStatus: fresh.status,
+    });
+    return false;
+  }
+
   const updated = await deps.proposalRepo.update(proposal.tenantId, proposal.id, {
-    payload: payloadWithSupervisorAnnotation(
-      proposal.payload,
-      annotation,
-      proposal.confidenceScore,
-    ),
+    payload: payloadWithSupervisorAnnotation(fresh.payload, annotation),
   });
   return updated !== null;
 }

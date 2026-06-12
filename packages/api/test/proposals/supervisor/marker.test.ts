@@ -16,11 +16,13 @@ import {
 import { validateProposalPayload } from '../../../src/proposals/contracts';
 
 describe('payloadWithSupervisorMarker', () => {
-  it('appends a supervisor marker and synthesizes overallConfidence when _meta is absent', () => {
+  it('appends a supervisor marker and synthesizes overallConfidence=medium when _meta is absent (neutral synthesis — never score-derived)', () => {
     const payload = { name: 'Ada Lovelace' };
+    // confidenceScore intentionally passed but must NOT influence the synthesized value.
     const next = payloadWithSupervisorMarker(payload, ['daily cap exceeded'], 0.93);
     const meta = next._meta as Record<string, unknown>;
-    expect(meta.overallConfidence).toBe('high'); // 0.93 → high via canonical mapping
+    // Architect ruling: always 'medium' on synthesis, never score-derived ('high').
+    expect(meta.overallConfidence).toBe('medium');
     expect(meta.markers).toEqual([
       { path: SUPERVISOR_MARKER_PATH, reason: 'supervisor: daily cap exceeded' },
     ]);

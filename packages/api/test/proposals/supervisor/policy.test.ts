@@ -14,6 +14,7 @@ import {
   capInitialStatus,
   evaluateSupervisorPolicy,
   type InitialProposalStatus,
+  type SupervisorActionClass,
   type SupervisorPolicyInput,
   type SupervisorRules,
   type SupervisorVerdict,
@@ -81,16 +82,21 @@ describe('evaluateSupervisorPolicy — blockedProposalTypes', () => {
 describe('evaluateSupervisorPolicy — perProposalCapCents', () => {
   const rules: SupervisorRules = { perProposalCapCents: 50_000 };
 
-  const table: Array<[string, number | null, SupervisorVerdict]> = [
-    ['amount under cap', 49_999, 'allow'],
-    ['amount exactly at cap', 50_000, 'allow'],
-    ['amount over cap', 50_001, 'block'],
-    ['no amount on payload — cap cannot apply', null, 'allow'],
-    ['zero amount', 0, 'allow'],
+  // actionClass alignment: cap only fires for money-class proposals.
+  const table: Array<[string, number | null, SupervisorActionClass, SupervisorVerdict]> = [
+    ['money: amount under cap', 49_999, 'money', 'allow'],
+    ['money: amount exactly at cap', 50_000, 'money', 'allow'],
+    ['money: amount over cap', 50_001, 'money', 'block'],
+    ['money: no amount on payload — cap cannot apply', null, 'money', 'allow'],
+    ['money: zero amount', 0, 'money', 'allow'],
+    // Non-money classes must never be blocked by the money cap even with an amount.
+    ['capture: large amount ignored', 50_001, 'capture', 'allow'],
+    ['comms: large amount ignored', 99_999, 'comms', 'allow'],
+    ['irreversible: large amount ignored', 100_000, 'irreversible', 'allow'],
   ];
 
-  it.each(table)('%s → %s', (_name, amountCents, verdict) => {
-    const result = evaluateSupervisorPolicy(input({ amountCents }), rules);
+  it.each(table)('%s → %s', (_name, amountCents, actionClass, verdict) => {
+    const result = evaluateSupervisorPolicy(input({ amountCents, actionClass }), rules);
     expect(result.verdict).toBe(verdict);
     if (verdict === 'block') {
       expect(result.reasons[0]).toMatch(/per-proposal cap/);
@@ -101,19 +107,24 @@ describe('evaluateSupervisorPolicy — perProposalCapCents', () => {
 describe('evaluateSupervisorPolicy — dailySpendCapCents', () => {
   const rules: SupervisorRules = { dailySpendCapCents: 100_000 };
 
-  const table: Array<[string, number, number | null, SupervisorVerdict]> = [
-    // [name, dailySpendCents already counted, amountCents, expected]
-    ['projected spend under cap', 40_000, 50_000, 'allow'],
-    ['projected spend exactly at cap', 50_000, 50_000, 'allow'],
-    ['projected spend over cap', 60_000, 50_000, 'force_review'],
-    ['counter alone already over cap, amountless proposal', 100_001, null, 'force_review'],
-    ['counter alone at cap, amountless proposal', 100_000, null, 'allow'],
-    ['no amount and counter below cap', 0, null, 'allow'],
+  // actionClass alignment: cap only fires for money-class proposals.
+  const table: Array<[string, number, number | null, SupervisorActionClass, SupervisorVerdict]> = [
+    // [name, dailySpendCents already counted, amountCents, actionClass, expected]
+    ['money: projected spend under cap', 40_000, 50_000, 'money', 'allow'],
+    ['money: projected spend exactly at cap', 50_000, 50_000, 'money', 'allow'],
+    ['money: projected spend over cap', 60_000, 50_000, 'money', 'force_review'],
+    ['money: counter alone already over cap, amountless proposal', 100_001, null, 'money', 'force_review'],
+    ['money: counter alone at cap, amountless proposal', 100_000, null, 'money', 'allow'],
+    ['money: no amount and counter below cap', 0, null, 'money', 'allow'],
+    // Non-money classes must never trigger the daily spend cap projection.
+    ['capture: large spend counter ignored', 100_001, 50_000, 'capture', 'allow'],
+    ['comms: large spend counter ignored', 100_001, 50_000, 'comms', 'allow'],
+    ['irreversible: large spend counter ignored', 100_001, null, 'irreversible', 'allow'],
   ];
 
-  it.each(table)('%s → %s', (_name, dailySpendCents, amountCents, verdict) => {
+  it.each(table)('%s → %s', (_name, dailySpendCents, amountCents, actionClass, verdict) => {
     const result = evaluateSupervisorPolicy(
-      input({ amountCents, counters: { dailySpendCents, autoApprovalsThisHour: 0 } }),
+      input({ amountCents, actionClass, counters: { dailySpendCents, autoApprovalsThisHour: 0 } }),
       rules,
     );
     expect(result.verdict).toBe(verdict);
@@ -151,7 +162,7 @@ describe('evaluateSupervisorPolicy — maxAutoApprovalsPerHour', () => {
 });
 
 describe('evaluateSupervisorPolicy — combined rules', () => {
-  it('block outranks force_review and reasons accumulate from every tripped rule', () => {
+  it('block outranks force_review and reasons accumulate from every tripped rule (money class)', () => {
     const rules: SupervisorRules = {
       blockedProposalTypes: ['issue_invoice'],
       perProposalCapCents: 10_000,
@@ -161,24 +172,69 @@ describe('evaluateSupervisorPolicy — combined rules', () => {
     const result = evaluateSupervisorPolicy(
       input({
         proposalType: 'issue_invoice',
-        actionClass: 'money',
+        actionClass: 'money', // required for money caps to apply
         amountCents: 20_000,
         counters: { dailySpendCents: 6_000, autoApprovalsThisHour: 3 },
       }),
       rules,
     );
     expect(result.verdict).toBe('block');
+    // blockedProposalTypes + perProposalCapCents (block) + dailySpendCap + hourly (review)
     expect(result.reasons.length).toBe(4);
   });
 
-  it('force_review reasons accumulate when several review rules trip', () => {
+  it('non-money class skips money caps (blockedProposalTypes and hourly still apply)', () => {
+    const rules: SupervisorRules = {
+      blockedProposalTypes: ['send_invoice'],
+      perProposalCapCents: 10_000,
+      dailySpendCapCents: 5_000,
+      maxAutoApprovalsPerHour: 0,
+    };
+    // capture class: money caps must not trip even with matching amounts/counters.
+    const result = evaluateSupervisorPolicy(
+      input({
+        proposalType: 'send_invoice',
+        actionClass: 'capture',
+        amountCents: 20_000,
+        counters: { dailySpendCents: 6_000, autoApprovalsThisHour: 3 },
+      }),
+      rules,
+    );
+    expect(result.verdict).toBe('block');
+    // only blockedProposalTypes + maxAutoApprovalsPerHour — two reasons, no money cap reasons
+    expect(result.reasons.length).toBe(2);
+    expect(result.reasons.some((r) => r.includes('send_invoice'))).toBe(true);
+    expect(result.reasons.some((r) => r.includes('auto-approvals'))).toBe(true);
+  });
+
+  it('force_review reasons accumulate when several review rules trip (money class)', () => {
     const rules: SupervisorRules = { dailySpendCapCents: 100, maxAutoApprovalsPerHour: 1 };
     const result = evaluateSupervisorPolicy(
-      input({ amountCents: 500, counters: { dailySpendCents: 0, autoApprovalsThisHour: 1 } }),
+      input({
+        actionClass: 'money',
+        amountCents: 500,
+        counters: { dailySpendCents: 0, autoApprovalsThisHour: 1 },
+      }),
       rules,
     );
     expect(result.verdict).toBe('force_review');
     expect(result.reasons.length).toBe(2);
+  });
+
+  it('force_review: non-money class only trips maxAutoApprovalsPerHour, not dailySpendCap', () => {
+    const rules: SupervisorRules = { dailySpendCapCents: 100, maxAutoApprovalsPerHour: 1 };
+    const result = evaluateSupervisorPolicy(
+      input({
+        actionClass: 'capture',
+        amountCents: 500,
+        counters: { dailySpendCents: 0, autoApprovalsThisHour: 1 },
+      }),
+      rules,
+    );
+    expect(result.verdict).toBe('force_review');
+    // Only maxAutoApprovalsPerHour — the dailySpendCap is money-only.
+    expect(result.reasons.length).toBe(1);
+    expect(result.reasons[0]).toMatch(/auto-approvals/);
   });
 });
 

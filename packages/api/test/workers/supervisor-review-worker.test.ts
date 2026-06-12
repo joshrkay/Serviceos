@@ -182,6 +182,7 @@ describe('runSupervisorAnnotationSweep', () => {
           if (tenantId === TENANT_A) throw new Error('tenant A repo exploded');
           return repo.findByStatus(tenantId, status);
         },
+        findById: (tenantId, id) => repo.findById(tenantId, id),
         update: (tenantId, id, updates) => repo.update(tenantId, id, updates),
       },
     });
@@ -219,6 +220,60 @@ describe('runSupervisorAnnotationSweep', () => {
     const result = await runSupervisorAnnotationSweep(deps);
     expect(result.annotated).toBe(2);
     expect(deps.complete).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('annotateProposal — narrow merge (concurrent-edit safety)', () => {
+  it('merges ONLY supervisorAnnotation into the fresh payload — concurrent edits are preserved', async () => {
+    const repo = new InMemoryProposalRepository();
+    const proposal = await seedReadyProposal(repo, TENANT_A, {
+      payload: { totalCents: 125_000, notes: 'original note' },
+    });
+
+    // Simulate a concurrent edit that lands DURING the LLM call window:
+    // update the payload in the repo with a new field before the sweep writes.
+    const concurrentEdit = { totalCents: 200_000, notes: 'edited by dispatcher' };
+    await repo.update(TENANT_A, proposal.id, { payload: concurrentEdit });
+
+    const deps = makeDeps(repo);
+    const result = await runSupervisorAnnotationSweep(deps);
+    expect(result.annotated).toBe(1);
+
+    // The stored proposal should have the CONCURRENT edit preserved, not the
+    // stale sweep-time payload overwriting it.
+    const stored = await repo.findById(TENANT_A, proposal.id);
+    const payload = stored!.payload as Record<string, unknown>;
+    expect(payload.totalCents).toBe(200_000);
+    expect(payload.notes).toBe('edited by dispatcher');
+    // The annotation must still be present.
+    expect(hasSupervisorAnnotation(stored!.payload)).toBe(true);
+  });
+
+  it('skips annotation when proposal status changed from ready_for_review during LLM call', async () => {
+    const repo = new InMemoryProposalRepository();
+    const proposal = await seedReadyProposal(repo, TENANT_A);
+
+    // Simulate a status change that occurs DURING the LLM window: the gateway
+    // complete() call changes the proposal status in the repo before the write.
+    // We do this by wrapping the gateway so the status change happens inside
+    // the async LLM call, after findByStatus returned the proposal as a
+    // candidate but before annotateProposal calls update().
+    const complete = vi.fn(async (_req: LLMRequest) => {
+      // Concurrent approval during LLM latency.
+      await repo.update(TENANT_A, proposal.id, { status: 'approved' });
+      return okResponse(GOOD_JSON);
+    });
+    const deps = makeDeps(repo, { gateway: { complete } });
+    const result = await runSupervisorAnnotationSweep(deps);
+
+    // Gateway was called (LLM completed) but write was skipped due to status change.
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(result.annotated).toBe(0);
+    expect(result.skipped).toBe(1);
+
+    const stored = await repo.findById(TENANT_A, proposal.id);
+    expect(hasSupervisorAnnotation(stored!.payload)).toBe(false);
+    expect(stored!.status).toBe('approved');
   });
 });
 
