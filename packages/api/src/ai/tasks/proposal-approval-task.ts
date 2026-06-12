@@ -40,9 +40,12 @@ import type { Proposal, ProposalRepository } from '../../proposals/proposal';
 import { actionClassForProposalType } from '../../proposals/proposal';
 import { approveProposal, rejectProposal, editProposal } from '../../proposals/actions';
 import { routeUnsupervisedProposal } from '../../proposals/auto-approve';
-import { renderProposalSms } from '../../proposals/sms/render';
+import { renderProposalSms, renderReapprovalSms } from '../../proposals/sms/render';
 import { payloadHeadlineCents } from '../../proposals/payload-money';
-import type { ProposalEditInterpreter } from '../../proposals/edit-interpreter';
+import {
+  chainRefFieldsTouchedByDelta,
+  type ProposalEditInterpreter,
+} from '../../proposals/edit-interpreter';
 import {
   type ProposalSmsEventRepository,
   type OutboundAnchorKind,
@@ -150,7 +153,11 @@ export type VoiceApprovalOutcome =
   // could not be applied automatically and was recorded (blocking later
   // approval until it is resolved in the review queue).
   | 'edited'
-  | 'edit_recorded';
+  | 'edit_recorded'
+  // Track E — the edit targeted a chained dependent whose payload still
+  // holds an unresolved `$ref:chain[…]` token in a field the delta
+  // touches. Refused: the edit would overwrite the chain wiring.
+  | 'edit_blocked_chain_ref';
 
 export interface VoiceApprovalTurnResult {
   /** TTS-ready line for this turn. */
@@ -551,6 +558,28 @@ async function executeApprove(
   ref: VoiceApprovalSessionRef,
   proposalId: string,
 ): Promise<VoiceApprovalTurnResult> {
+  // Track E — confirm-stage race: `prepareResolvedTarget` checked the
+  // pending-edit guard at READBACK time, but between the readback and the
+  // owner's "yes" (and, for money targets, the challenge turn) an SMS
+  // edit_request may have landed. Re-run the guard at the moment the
+  // mutation would actually apply, so a strict affirmative can never
+  // execute a payload the owner just asked to change.
+  if (
+    deps.smsEventRepo &&
+    (await deps.smsEventRepo.hasUnappliedEditRequest(ref.tenantId, proposalId))
+  ) {
+    await audit(deps, ref, 'proposal.voice_approve_blocked_pending_edit', proposalId, {
+      stage: 'confirm',
+    });
+    return {
+      speak:
+        'You asked to change that one — your note is attached. Review and approve it in your queue.',
+      pending: null,
+      outcome: 'blocked_pending_edit',
+      proposalId,
+    };
+  }
+
   let approved: Proposal;
   try {
     approved = await approveProposal(
@@ -778,7 +807,7 @@ async function recordVoiceEditEvent(
   deps: VoiceApprovalDeps,
   tenantId: string,
   proposalId: string,
-  kind: 'edit_request' | 'reapproval_rendered',
+  kind: 'edit_request' | 'reapproval_rendered' | 'voice_reapproval',
   body: string,
 ): Promise<void> {
   if (!deps.smsEventRepo?.create) return;
@@ -791,6 +820,69 @@ async function recordVoiceEditEvent(
       body,
     }),
   );
+}
+
+/**
+ * Track E (architect ruling) — deliver the re-approval render after an
+ * APPLIED voice edit.
+ *
+ * The pre-fix behavior recorded `reapproval_rendered` for a message that
+ * was never sent, making the voice-edited proposal the owner's latest
+ * SMS reply anchor — a later texted Y would have targeted a proposal the
+ * owner never received text for (retargeting hazard).
+ *
+ *   WIRED (oneTapFallback.sendSms + a resolvable owner phone): send the
+ *     REAL re-render SMS through the existing m156–158 re-approval
+ *     machinery (`renderReapprovalSms`, the exact body the SMS edit path
+ *     sends) and record `reapproval_rendered` from the actual send —
+ *     send FIRST, record after, so an unsent render never anchors.
+ *   UNWIRED (or the send failed): record `voice_reapproval` instead —
+ *     the owner heard the updated values read back on the call, so the
+ *     pending-edit block clears, but the kind is EXCLUDED from
+ *     findRecentOutbound and can never become a reply anchor.
+ */
+async function deliverVoiceEditReapproval(
+  deps: VoiceApprovalDeps,
+  ref: VoiceApprovalSessionRef,
+  updated: Proposal,
+  instruction: string,
+  spokenReadback: string,
+): Promise<void> {
+  const fallback = deps.oneTapFallback;
+  let ownerPhone: string | null | undefined;
+  if (fallback?.sendSms && fallback.resolveOwnerPhone) {
+    try {
+      ownerPhone = await fallback.resolveOwnerPhone(ref.tenantId);
+    } catch {
+      ownerPhone = undefined;
+    }
+  }
+
+  if (fallback?.sendSms && ownerPhone) {
+    const body = renderReapprovalSms(
+      {
+        proposalType: updated.proposalType,
+        summary: updated.summary,
+        payload: updated.payload,
+      },
+      instruction,
+    );
+    try {
+      await fallback.sendSms(ownerPhone, body);
+      // Real send → real anchor. Clears hasUnappliedEditRequest and, like
+      // the SMS re-render, becomes the latest reply target so a later
+      // texted Y correctly targets the proposal just edited.
+      await recordVoiceEditEvent(deps, ref.tenantId, updated.id, 'reapproval_rendered', body);
+      return;
+    } catch (err) {
+      await audit(deps, ref, 'proposal.voice_reapproval_send_failed', updated.id, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      // Fall through: the spoken readback was still delivered on the call.
+    }
+  }
+
+  await recordVoiceEditEvent(deps, ref.tenantId, updated.id, 'voice_reapproval', spokenReadback);
 }
 
 export interface StartVoiceEditInput extends VoiceApprovalSessionRef {
@@ -887,6 +979,27 @@ export async function startVoiceEdit(
     try {
       const delta = await deps.editInterpreter({ proposal, instruction: input.instruction });
       if (delta && Object.keys(delta).length > 0) {
+        // Track E — chain-ref guard: a chained dependent can hold unresolved
+        // `$ref:chain[N].…` tokens (resolved from the parent's resultEntityId
+        // at execution time). A delta touching one of those fields would
+        // overwrite the chain wiring — refuse with a clear spoken line.
+        // (Deltas that DON'T touch the token field already fail closed for
+        // uuid-typed contract fields: editProposal Zod-validates the merged
+        // payload and the still-present token is not a uuid — see
+        // chainRefFieldsTouchedByDelta in proposals/edit-interpreter.ts.)
+        const refFields = chainRefFieldsTouchedByDelta(proposal.payload, delta);
+        if (refFields.length > 0) {
+          await audit(deps, input, 'proposal.voice_edit_blocked_chain_ref', proposal.id, {
+            fields: refFields,
+          });
+          return {
+            speak:
+              'That one’s waiting on an earlier step — edit it after that step runs.',
+            pending: null,
+            outcome: 'edit_blocked_chain_ref',
+            proposalId: proposal.id,
+          };
+        }
         // editProposal Zod-validates the merged payload — a hallucinated
         // delta fails closed into the recorded-note path below.
         const { proposal: updated, editedFields } = await editProposal(
@@ -899,10 +1012,11 @@ export async function startVoiceEdit(
           deps.auditRepo,
         );
         const speak = composeEditedReadback(updated);
-        // Clears hasUnappliedEditRequest (insertion order decides) and —
-        // like the SMS re-render — becomes the latest reply anchor, so a
-        // later texted Y correctly targets the proposal just edited.
-        await recordVoiceEditEvent(deps, input.tenantId, updated.id, 'reapproval_rendered', speak);
+        // Clears hasUnappliedEditRequest (insertion order decides). When the
+        // SMS deps are wired this also sends the REAL re-render text and
+        // anchors it; otherwise a voice_reapproval row clears the block
+        // without ever becoming a reply anchor (see deliverVoiceEditReapproval).
+        await deliverVoiceEditReapproval(deps, input, updated, input.instruction, speak);
         await audit(deps, input, 'proposal.voice_edited', updated.id, {
           proposalType: updated.proposalType,
           editedFields,

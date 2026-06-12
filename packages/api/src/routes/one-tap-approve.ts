@@ -113,6 +113,20 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
       return;
     }
 
+    // Track E note — action-class check deliberately NOT added here
+    // (unlike the SMS Y reply handler's `sms_approve_blocked_action_class`
+    // guard). A texted Y is contextless — it targets whatever render is
+    // latest — so non-capture classes must refuse it. This link is the
+    // opposite: HMAC-bound to ONE proposal, and tokens for money/comms/
+    // irreversible proposals are only minted by deliberate, sanctioned
+    // paths (RV-071's voice-approval fallback "I've sent you a text link",
+    // RV-061's daily-digest approval links). The Y-refusal copy itself
+    // directs the owner to "its own approval link" — blocking the class
+    // here would brick both shipped flows. Mint sites stay class-gated:
+    // the unsupervised single path only routes ready_for_review (capture-
+    // only by decideInitialStatus) and the chain send site suppresses the
+    // token for non-capture heads (`suppressApproveLink`).
+    //
     // P2-034 — pending manual edit: the owner asked to change this
     // proposal and the change awaits the review queue. Approving from
     // the (older) link would execute the stale payload. The nonce is

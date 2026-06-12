@@ -292,6 +292,36 @@ export function renderProposalSms(
   return `${prefix}${truncate(summary, summaryBudget)}${factsPart} ${REPLY_INSTRUCTIONS}${checkLine}${linkPart}`;
 }
 
+/**
+ * P2-034 / RV-225 — the re-approval SMS sent after an owner edit was
+ * applied (SMS EDIT reply or voice edit with SMS deps wired). The stored
+ * summary was written BEFORE the edit, so it can still describe the old
+ * value (a time, a price). The owner must never re-approve text that
+ * contradicts what will execute — echo their own instruction so the change
+ * is explicit. Money/customer facts are appended from the NEW payload by
+ * the renderer. The base summary is pre-truncated because the renderer
+ * trims the summary tail to fit and the change note must survive that trim.
+ */
+export function renderReapprovalSms(
+  input: RenderProposalSmsInput,
+  instruction: string,
+): string {
+  const instructionNote =
+    instruction.trim().length > 80
+      ? `${instruction.trim().slice(0, 79)}…`
+      : instruction.trim();
+  const baseSummary =
+    input.summary.length > 140 ? `${input.summary.slice(0, 139)}…` : input.summary;
+  return renderProposalSms(
+    {
+      proposalType: input.proposalType,
+      summary: `${baseSummary} — your change: "${instructionNote}"`,
+      payload: input.payload,
+    },
+    { reapproval: true },
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // RV-221 — chain summary rendering.
 //
@@ -299,12 +329,21 @@ export function renderProposalSms(
 //
 //   "3 linked actions: 1) create customer Jane 2) book Tue 9am
 //    3) send estimate ($450.00)* *Approval follows separately.
-//    Reply Y to approve, N to reject, EDIT to change. Or tap (30 min): …"
+//    Reply Y to approve 1); the rest follow in your queue. Or tap (30 min): …"
+//
+// Budget note (P2-034 module contract, see the header up top): the chain SMS
+// follows the same contract as the single-proposal render — the
+// human-readable part (list + legend + instructions) fits in
+// PROPOSAL_SMS_MAX_CHARS (320, two GSM-7 segments) and the one-tap URL rides
+// ON TOP of that budget. The 480-char budget mentioned in the digest plan is
+// digest-specific (daily-digest-worker) and does NOT apply here.
 //
 // Reply mapping (documented here because the copy must stay truthful):
 //   - The send site anchors the outbound render (`proposal_rendered` /
 //     `review_required_rendered`) on the chain HEAD member, so Y / N /
-//     EDIT and the one-tap link act on the HEAD proposal only.
+//     EDIT and the one-tap link act on the HEAD proposal only. The
+//     approvable-form copy says exactly that: "Reply Y to approve 1); the
+//     rest follow in your queue."
 //   - Chained dependents are forced to 'draft' at creation
 //     (applyChainMetadata) and follow the existing chain-resolution
 //     execution ordering once approved from the queue. Money/comms
@@ -312,6 +351,12 @@ export function renderProposalSms(
 //     "*Approval follows separately."  (Capture-class set-approval on a
 //     single Y is a follow-up that needs the reply handler to approve a
 //     chain SET — see the send site in workers/voice-action-router.ts.)
+//   - Track E (HIGH fix): a chain whose HEAD member is not capture-class
+//     (money / comms / irreversible) must not be Y-approvable at all — Y
+//     acts on the head, and those classes never ride an SMS Y. The WHOLE
+//     SMS switches to the review-in-app form (no Reply-Y prompt, no
+//     one-tap link), matching the send site, which suppresses the token
+//     and anchors the send as `review_required_rendered`.
 //   - Any member carrying a blocking confidence level (low / very_low,
 //     same predicate as RV-074) switches the WHOLE SMS to the
 //     review-in-app form: no Reply-Y prompt, no one-tap link — only
@@ -332,6 +377,14 @@ export interface RenderChainSmsOptions {
 
 const CHAIN_SEPARATE_APPROVAL_LEGEND = '*Approval follows separately.';
 
+// Truthful chain reply prompt: Y approves the HEAD (item 1) only — the
+// dependents are drafts that the owner approves from the review queue
+// (chain-resolution execution ordering). The single-proposal
+// REPLY_INSTRUCTIONS would overpromise ("Y to approve" reads as approving
+// the whole list).
+const CHAIN_REPLY_INSTRUCTIONS =
+  'Reply Y to approve 1); the rest follow in your queue.';
+
 /** Minimum readable per-member summary length once the budget is split. */
 const CHAIN_MIN_MEMBER_CHARS = 12;
 
@@ -345,6 +398,13 @@ export function renderChainSms(
   options: RenderChainSmsOptions = {},
 ): string {
   const anyBlocking = chainHasBlockingMember(members);
+  // Track E — Y acts on the HEAD member only, and money/comms/irreversible
+  // proposals are never Y-approvable over SMS, so a non-capture head flips
+  // the whole SMS to the review form (same form the blocking-confidence
+  // case uses; the send site suppresses the token to match).
+  const headNotCapture =
+    members.length > 0 && actionClassForProposalType(members[0].proposalType) !== 'capture';
+  const reviewForm = anyBlocking || headNotCapture;
 
   // Per-member fragments. Money facts reuse the single-proposal
   // extraction rules (integer cents only, never derived floats; skipped
@@ -356,13 +416,13 @@ export function renderChainSms(
     const cents = extractAmountCents(m.payload);
     const money = cents !== null ? formatCents(cents) : null;
     const moneyFact = money !== null && !m.summary.includes(money) ? ` (${money})` : '';
-    const flagged = !anyBlocking && actionClassForProposalType(m.proposalType) !== 'capture';
+    const flagged = !reviewForm && actionClassForProposalType(m.proposalType) !== 'capture';
     return { summary: m.summary.trim(), moneyFact, flagged };
   });
 
   const prefix = `${members.length} linked actions: `;
   const legend = items.some((i) => i.flagged) ? ` ${CHAIN_SEPARATE_APPROVAL_LEGEND}` : '';
-  const instructions = anyBlocking ? REVIEW_IN_APP_INSTRUCTIONS : REPLY_INSTRUCTIONS;
+  const instructions = reviewForm ? REVIEW_IN_APP_INSTRUCTIONS : CHAIN_REPLY_INSTRUCTIONS;
 
   // Same truncation contract as renderProposalSms: the instructions (and
   // legend) are sacred, the member summaries absorb all truncation. The
@@ -391,7 +451,7 @@ export function renderChainSms(
     .join(' ');
 
   const linkPart =
-    !anyBlocking && options.approveUrl ? ` Or tap (30 min): ${options.approveUrl}` : '';
+    !reviewForm && options.approveUrl ? ` Or tap (30 min): ${options.approveUrl}` : '';
 
   return `${prefix}${list}${legend} ${instructions}${linkPart}`;
 }

@@ -238,6 +238,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['164_dispatch_entity_daily_digest', '4d3ad093b4319cf786bfd047df3d5898720a4d6712e5037704c5a06fffc492e9'],
   // RV-074: widen proposal_sms_events kind CHECK for 'review_required_rendered'
   ['165_proposal_sms_events_review_required_kind', '0a1ccd582e840a57ec622344a0a41a690229bfd30b7b9e87b0265c255b1dff56'],
+  // Track E (RV-225 audit fix): widen proposal_sms_events kind CHECK for
+  // 'voice_reapproval' (voice-only re-render — clears the pending-edit
+  // block, never a reply anchor)
+  ['171_proposal_sms_events_voice_reapproval_kind', '84e29ec755102c0b5f00bddc21544610d2c6d6e05ad9e20fafad6f0e700b99fe'],
 ];
 
 function hashMigration(value: string): string {

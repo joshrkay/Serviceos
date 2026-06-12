@@ -208,24 +208,49 @@ describe('voice-action-router — RV-221 chain SMS routing', () => {
     setSupervisorPresenceLoader(null);
   });
 
-  function chainProviderImpl(opts: { lowConfidenceJob?: boolean } = {}) {
+  function chainProviderImpl(
+    opts: { lowConfidenceJob?: boolean; moneyHead?: boolean } = {},
+  ) {
+    // `lowConfidenceJob`: the second segment becomes a draft_estimate whose
+    // drafting response carries confidence_score 0.3 → the estimate task
+    // stamps payload._meta.overallConfidence 'low' (the RV-074 blocking
+    // predicate) — the chain's BLOCKING member.
+    // `moneyHead`: the FIRST segment is record_payment (money class) — the
+    // Track E non-Y-approvable chain head.
+    const secondSegment = opts.lowConfidenceJob
+      ? { index: 1, text: 'draft Jane an estimate', dependsOn: [0], dependencyEntityKind: 'customerId' }
+      : { index: 1, text: 'open a job for Jane', dependsOn: [0], dependencyEntityKind: 'customerId' };
     const decomposition = JSON.stringify({
-      segments: [
-        { index: 0, text: 'create a customer named Jane Doe', dependsOn: [] },
-        { index: 1, text: 'open a job for Jane', dependsOn: [0], dependencyEntityKind: 'customerId' },
-      ],
+      segments: opts.moneyHead
+        ? [
+            { index: 0, text: 'record a 200 dollar payment from Jane', dependsOn: [] },
+            { index: 1, text: 'add a note that Jane paid', dependsOn: [] },
+          ]
+        : [{ index: 0, text: 'create a customer named Jane Doe', dependsOn: [] }, secondSegment],
     });
-    const classifications = [
-      JSON.stringify({ intentType: 'create_customer', confidence: 0.95, extractedEntities: { displayName: 'Jane Doe' } }),
-      JSON.stringify({ intentType: 'create_job', confidence: 0.9, extractedEntities: { jobTitle: 'Service' } }),
-    ];
+    const classifications = opts.moneyHead
+      ? [
+          JSON.stringify({ intentType: 'record_payment', confidence: 0.95, extractedEntities: { customerName: 'Jane Doe', amount: 20000 } }),
+          JSON.stringify({ intentType: 'add_note', confidence: 0.9, extractedEntities: { customerName: 'Jane Doe' } }),
+        ]
+      : [
+          JSON.stringify({ intentType: 'create_customer', confidence: 0.95, extractedEntities: { displayName: 'Jane Doe' } }),
+          opts.lowConfidenceJob
+            ? JSON.stringify({ intentType: 'draft_estimate', confidence: 0.9, extractedEntities: { customerName: 'Jane Doe' } })
+            : JSON.stringify({ intentType: 'create_job', confidence: 0.9, extractedEntities: { jobTitle: 'Service' } }),
+        ];
+    const lowConfidenceEstimate = JSON.stringify({
+      lineItems: [{ description: 'Service', quantity: 1, unitPrice: 30000 }],
+      notes: '',
+      confidence_score: 0.3, // getConfidenceLevel(0.3) === 'low'
+    });
     let classifyCall = 0;
     return async (req: { taskType?: string }) => {
       let content = '{}';
       if (req.taskType === 'decompose_transcript') content = decomposition;
       else if (req.taskType === 'classify_intent') {
         content = classifications[Math.min(classifyCall++, classifications.length - 1)];
-      }
+      } else if (req.taskType === 'draft_estimate') content = lowConfidenceEstimate;
       return { content, model: 'mock', provider: 'mock', tokenUsage: { input: 10, output: 10, total: 20 }, latencyMs: 1 };
     };
   }
@@ -285,7 +310,8 @@ describe('voice-action-router — RV-221 chain SMS routing', () => {
     expect(body).toContain('2 linked actions:');
     expect(body).toContain('1)');
     expect(body).toContain('2)');
-    expect(body).toContain('Reply Y to approve, N to reject, EDIT to change.');
+    // Track E truthful copy: Y approves the head only.
+    expect(body).toContain('Reply Y to approve 1); the rest follow in your queue.');
     expect(body).toContain('https://api.example.com/approve?token=');
 
     // The outbound render anchors on the HEAD member, kind proposal_rendered —
@@ -303,6 +329,107 @@ describe('voice-action-router — RV-221 chain SMS routing', () => {
       .filter((e) => e.eventType === 'unsupervised_proposal_routed');
     expect(routed).toHaveLength(1);
     expect(routed[0].entityId).toBe(head.id);
+  });
+
+  it('Track E: a MONEY chain head routes as the review form — no token, anchored review_required_rendered', async () => {
+    setSupervisorPresenceLoader(async () => false);
+    const { gateway, provider } = createMockLLMGateway();
+    vi.spyOn(provider, 'complete').mockImplementation(chainProviderImpl({ moneyHead: true }) as never);
+
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const sendSms = vi.fn(async () => {});
+    const recordSmsEvent = vi.fn(async () => {});
+    const worker = makeRoutedWorker(repo, auditRepo, sendSms, recordSmsEvent, gateway);
+
+    await worker.handle(
+      makeMessage('record a 200 dollar payment from Jane and add a note that she paid'),
+      silentLogger(),
+    );
+
+    const all = await repo.findByTenant('tenant-1');
+    expect(all).toHaveLength(2);
+    const head = all.find((p) => p.proposalType === 'record_payment')!;
+    expect(head).toBeDefined();
+
+    // ONE SMS — but the review form: no Reply-Y prompt, NO one-tap token.
+    expect(sendSms).toHaveBeenCalledTimes(1);
+    const [, body] = sendSms.mock.calls[0] as unknown as [string, string];
+    expect(body).toContain('2 linked actions:');
+    expect(body).toContain('Needs review in app before approval — reply N to reject.');
+    expect(body).not.toContain('Reply Y to approve');
+    expect(body).not.toContain('https://api.example.com/approve?token=');
+
+    // Anchored on the head as review_required_rendered, so the N the
+    // message solicits targets the money head.
+    expect(recordSmsEvent).toHaveBeenCalledTimes(1);
+    expect(recordSmsEvent.mock.calls[0][0]).toMatchObject({
+      tenantId: 'tenant-1',
+      proposalId: head.id,
+      kind: 'review_required_rendered',
+    });
+
+    // Audit records the suppressed affordance and why.
+    const routed = auditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'unsupervised_proposal_routed');
+    expect(routed).toHaveLength(1);
+    expect(routed[0].metadata).toMatchObject({
+      approveLinkSuppressed: true,
+      suppressReason: 'action_class',
+    });
+  });
+
+  it('Track E: a LOW-confidence member threads the BLOCKING payload — review form, no token (lowConfidenceJob)', async () => {
+    setSupervisorPresenceLoader(async () => false);
+    const { gateway, provider } = createMockLLMGateway();
+    vi.spyOn(provider, 'complete').mockImplementation(
+      chainProviderImpl({ lowConfidenceJob: true }) as never,
+    );
+
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const sendSms = vi.fn(async () => {});
+    const recordSmsEvent = vi.fn(async () => {});
+    const worker = makeRoutedWorker(repo, auditRepo, sendSms, recordSmsEvent, gateway);
+
+    await worker.handle(
+      makeMessage('create a customer named Jane Doe and draft her an estimate'),
+      silentLogger(),
+    );
+
+    const all = await repo.findByTenant('tenant-1');
+    expect(all).toHaveLength(2);
+    const head = all.find((p) => p.proposalType === 'create_customer')!;
+    const estimate = all.find((p) => p.proposalType === 'draft_estimate')!;
+    // Sanity: the estimate member really carries the blocking level.
+    expect((estimate.payload._meta as Record<string, unknown>).overallConfidence).toBe('low');
+
+    // The send site threads the BLOCKING member's payload, so the head's
+    // (capture, non-blocking) payload cannot un-suppress the token: one
+    // SMS, review form, no token minted.
+    expect(sendSms).toHaveBeenCalledTimes(1);
+    const [, body] = sendSms.mock.calls[0] as unknown as [string, string];
+    expect(body).toContain('2 linked actions:');
+    expect(body).toContain('Needs review in app before approval — reply N to reject.');
+    expect(body).not.toContain('https://api.example.com/approve?token=');
+
+    // Anchored review_required_rendered on the HEAD member.
+    expect(recordSmsEvent).toHaveBeenCalledTimes(1);
+    expect(recordSmsEvent.mock.calls[0][0]).toMatchObject({
+      tenantId: 'tenant-1',
+      proposalId: head.id,
+      kind: 'review_required_rendered',
+    });
+
+    const routed = auditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'unsupervised_proposal_routed');
+    expect(routed).toHaveLength(1);
+    expect(routed[0].metadata).toMatchObject({
+      approveLinkSuppressed: true,
+      suppressReason: 'low_confidence',
+    });
   });
 
   it('supervised: no chain SMS is sent', async () => {

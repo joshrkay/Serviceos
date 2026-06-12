@@ -4122,6 +4122,26 @@ export const MIGRATIONS = {
           'review_required_rendered'
         ));
   `,
+
+  // Track E (RV-225 audit fix): widen the proposal_sms_events kind CHECK
+  // from 165 to allow 'voice_reapproval' — recorded when a VOICE edit is
+  // applied and the updated values were read back by voice only (no SMS
+  // re-render deps wired at the call site). It clears
+  // hasUnappliedEditRequest like reapproval_rendered, but is EXCLUDED from
+  // findRecentOutbound: no text was sent for it, so it must never become
+  // the owner's Y/N reply anchor. Mirrors the CHECK-widening style of
+  // 165_proposal_sms_events_review_required_kind.
+  '171_proposal_sms_events_voice_reapproval_kind': `
+    ALTER TABLE proposal_sms_events
+      DROP CONSTRAINT IF EXISTS proposal_sms_events_kind_check;
+    ALTER TABLE proposal_sms_events
+      ADD CONSTRAINT proposal_sms_events_kind_check
+        CHECK (kind IN (
+          'proposal_rendered','reapproval_rendered','clarification_sent',
+          'reply_approve','reply_reject','edit_session_opened','edit_request',
+          'review_required_rendered','voice_reapproval'
+        ));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -23,6 +23,7 @@
  */
 import type { LLMGateway } from '../ai/gateway/gateway';
 import type { Proposal } from './proposal';
+import { isChainRefToken } from './chain';
 
 export const PROPOSAL_SMS_EDIT_TASK_TYPE = 'proposal_sms_edit';
 
@@ -97,4 +98,33 @@ export function createLlmEditInterpreter(
       return null;
     }
   };
+}
+
+/**
+ * Track E — chain-ref edit guard, shared by the SMS EDIT reply and the
+ * voice edit dialogue (the two callers of this interpreter).
+ *
+ * A chained dependent's payload can hold unresolved symbolic tokens
+ * (`$ref:chain[N].customerId` — see proposals/chain.ts) that are swapped
+ * for the parent's resultEntityId at EXECUTION time. An owner edit whose
+ * delta touches one of those fields would overwrite the chain wiring with
+ * an LLM-produced value, silently detaching the dependent from its parent.
+ * Callers refuse such edits with a clear "waiting on an earlier step"
+ * message instead.
+ *
+ * Pre-existing fail-closed note: for uuid-typed contract fields (e.g.
+ * draft_estimate.customerId / create_job.customerId are
+ * `z.string().uuid()`), ANY edit to a token-bearing proposal already
+ * failed closed — editProposal Zod-validates the MERGED payload, and the
+ * still-present token is not a uuid — landing in the recorded-note path
+ * with a generic message. This guard adds the truthful copy for
+ * token-touching deltas and covers PLAIN-STRING contract fields (e.g.
+ * issue_invoice.invoiceId is `z.string().min(1)`), where a token
+ * overwrite would otherwise pass validation silently.
+ */
+export function chainRefFieldsTouchedByDelta(
+  payload: Record<string, unknown>,
+  delta: Record<string, unknown>,
+): string[] {
+  return Object.keys(delta).filter((key) => isChainRefToken(payload[key]));
 }

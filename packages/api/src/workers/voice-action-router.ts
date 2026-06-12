@@ -1,7 +1,7 @@
 import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { LLMGateway } from '../ai/gateway/gateway';
-import { Proposal, ProposalRepository, createProposal, CreateProposalInput, ProposalType } from '../proposals/proposal';
+import { Proposal, ProposalRepository, createProposal, CreateProposalInput, ProposalType, actionClassForProposalType } from '../proposals/proposal';
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
 import { routeUnsupervisedProposal, confidenceMetaBlocksAutoApprove } from '../proposals/auto-approve';
@@ -15,6 +15,7 @@ import { voiceProposalIdempotencyKey } from '../voice/voice-audit';
 import {
   classifyIntent,
   isVoiceApprovalIntent,
+  isVoiceEditIntent,
   ExtractedEntities,
   IntentClassification,
   IntentType,
@@ -887,17 +888,21 @@ async function processSegment(
     return { kind: 'clarified', classification };
   }
 
-  // RV-071 — HARD routing gate: the owner approval intents are only
-  // actionable on a live, verified owner call (the telephony FSM path,
-  // gated by RV-070's ownerSession). This worker processes recorded
-  // operator memos and synthetic transcripts, which carry NO caller-ID
-  // identity and have no confirm turn — so approve_proposal /
-  // reject_proposal must NEVER dispatch a mutation here, regardless of
-  // what the classifier returned. (They are also absent from
-  // INTENT_TO_PROPOSAL_TYPE; this explicit guard makes the invariant
-  // loud instead of an accident of the map.)
-  if (isVoiceApprovalIntent(classification.intentType)) {
-    log.warn('voice-action-router: owner approval intent refused on this channel', {
+  // RV-071 / RV-225 — HARD routing gate: the owner approval AND edit
+  // intents are only actionable on a live, verified owner call (the
+  // telephony FSM path, gated by RV-070's ownerSession). This worker
+  // processes recorded operator memos and synthetic transcripts, which
+  // carry NO caller-ID identity and have no confirm turn — so
+  // approve_proposal / reject_proposal / edit_proposal must NEVER
+  // dispatch a mutation here, regardless of what the classifier
+  // returned. (They are also absent from INTENT_TO_PROPOSAL_TYPE; this
+  // explicit guard makes the invariant loud instead of an accident of
+  // the map.)
+  if (
+    isVoiceApprovalIntent(classification.intentType) ||
+    isVoiceEditIntent(classification.intentType)
+  ) {
+    log.warn('voice-action-router: owner approval/edit intent refused on this channel', {
       intent: classification.intentType,
     });
     return { kind: 'skipped', classification };
@@ -1174,6 +1179,13 @@ async function processChain(
   // the existing predicate suppresses the one-tap token and anchors the
   // send as `review_required_rendered` — and renderChainSms emits the
   // matching review-in-app form for the whole chain.
+  //
+  // Track E (HIGH fix): the same suppression applies when the HEAD member
+  // is not capture-class. Y and the one-tap link act on the head, and
+  // money / comms / irreversible proposals are never Y-approvable over
+  // SMS — so a non-capture head routes as the review form
+  // (`suppressApproveLink`): no token minted, anchored
+  // `review_required_rendered`, renderChainSms emits the matching copy.
   const head = built[0].proposal;
   if (
     deps.unsupervisedRouting &&
@@ -1187,6 +1199,7 @@ async function processChain(
       const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
       const ordered = built.map((b) => b.proposal);
       const blockingMember = ordered.find((p) => confidenceMetaBlocksAutoApprove(p.payload));
+      const headNotCapture = actionClassForProposalType(head.proposalType) !== 'capture';
       await routeUnsupervisedProposal(
         {
           auditRepo: ur.auditRepo,
@@ -1219,6 +1232,8 @@ async function processChain(
           // Blocking-member payload (if any) drives the token-suppression /
           // review_required_rendered anchoring; otherwise the head's.
           payload: (blockingMember ?? head).payload,
+          // Non-capture head: never Y-approvable — review form, no token.
+          ...(headNotCapture ? { suppressApproveLink: true } : {}),
         },
       );
     } catch (err) {

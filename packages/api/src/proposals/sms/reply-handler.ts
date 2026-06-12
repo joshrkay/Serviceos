@@ -40,8 +40,10 @@ import type {
   FallbackHandler,
 } from '../../sms/inbound-dispatch';
 import type { Proposal, ProposalRepository } from '../proposal';
+import { actionClassForProposalType } from '../proposal';
 import { approveProposal, rejectProposal, editProposal } from '../actions';
 import { confidenceMetaBlocksAutoApprove } from '../auto-approve';
+import { chainRefFieldsTouchedByDelta } from '../edit-interpreter';
 import type { SettingsRepository } from '../../settings/settings';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { UserRepository } from '../../users/user';
@@ -54,7 +56,7 @@ import {
   type ProposalSmsEventRepository,
   createProposalSmsEvent,
 } from './sms-event';
-import { renderProposalSms } from './render';
+import { renderReapprovalSms } from './render';
 
 /** Synthetic actor for SMS reply approvals (no Clerk session). */
 export const SMS_REPLY_ACTOR_ID = 'sms_reply';
@@ -235,6 +237,31 @@ async function handleApprove(
   proposal: Proposal,
 ): Promise<HandlerResult> {
   await recordInbound(deps, ctx, proposal.id, 'reply_approve');
+
+  // Track E (HIGH fix) — action-class guard, the strongest invariant here
+  // (a proposal's class never changes). Money / comms / irreversible
+  // proposals are NEVER legitimately rendered with a Y prompt:
+  // decideInitialStatus only returns 'ready_for_review' for capture-class
+  // (everything else lands 'draft'), the single-action unsupervised send
+  // site only routes 'ready_for_review' proposals, and the chain send site
+  // suppresses the token for non-capture heads. So a Y that resolves to a
+  // non-capture proposal can only mean a mis-anchored or future-bug render —
+  // refuse truthfully instead of approving. (The HMAC one-tap link remains
+  // the sanctioned SMS path for these classes — RV-071 voice fallback and
+  // the RV-061 digest mint those deliberately.)
+  const actionClass = actionClassForProposalType(proposal.proposalType);
+  if (actionClass !== 'capture') {
+    await audit(deps, ctx, 'proposal.sms_approve_blocked_action_class', proposal.id, {
+      proposalType: proposal.proposalType,
+      actionClass,
+    });
+    await reply(
+      deps,
+      ctx.fromE164,
+      'This one needs the app or its own approval link — a texted Y can’t approve it.',
+    );
+    return { handled: true, handler: HANDLER_NAME, reason: 'approve_blocked_action_class' };
+  }
 
   // Low-confidence guard runs BEFORE the pending-edit guard because it is the
   // stronger invariant: an applied SMS edit can clear pending-edit state, but
@@ -576,6 +603,27 @@ async function applyEditInstruction(
     try {
       const edits = await deps.interpretEdit({ proposal, instruction });
       if (edits && Object.keys(edits).length > 0) {
+        // Track E — chain-ref guard: a chained dependent's payload can hold
+        // unresolved `$ref:chain[N].…` tokens (filled from the parent's
+        // resultEntityId at execution time). A delta that touches one of
+        // those fields would overwrite the chain wiring, so refuse with a
+        // clear message. (Deltas that DON'T touch the token field were
+        // already failing closed for uuid-typed contracts: the merged
+        // payload still carries the non-uuid token, so editProposal's Zod
+        // validation throws into the recorded-note path below — this guard
+        // adds the truthful copy and covers non-uuid contract fields.)
+        const refFields = chainRefFieldsTouchedByDelta(proposal.payload, edits);
+        if (refFields.length > 0) {
+          await audit(deps, ctx, 'proposal.sms_edit_blocked_chain_ref', proposal.id, {
+            fields: refFields,
+          });
+          await reply(
+            deps,
+            ctx.fromE164,
+            'That one’s waiting on an earlier step — edit it after that step runs.',
+          );
+          return { handled: true, handler: HANDLER_NAME, reason: 'edit_blocked_chain_ref' };
+        }
         // editProposal Zod-validates the merged payload — a hallucinated
         // delta fails closed into the manual-review path below.
         const { proposal: updated, editedFields } = await editProposal(
@@ -587,28 +635,16 @@ async function applyEditInstruction(
           edits,
           deps.auditRepo,
         );
-        // The stored summary was written BEFORE the edit, so it can still
-        // describe the old value (a time, a price). The owner must never
-        // re-approve text that contradicts what will execute — echo their
-        // own instruction so the change is explicit. Money/customer facts
-        // are appended from the NEW payload by the renderer.
-        const instructionNote =
-          instruction.trim().length > 80
-            ? `${instruction.trim().slice(0, 79)}…`
-            : instruction.trim();
-        // Pre-truncate the base summary: the renderer trims the summary
-        // tail to fit, and the change note must survive that trim.
-        const baseSummary =
-          updated.summary.length > 140
-            ? `${updated.summary.slice(0, 139)}…`
-            : updated.summary;
-        const body = renderProposalSms(
+        // Shared with the voice-edit re-render (proposal-approval-task):
+        // echoes the owner's instruction so the change is explicit and the
+        // re-approval text never contradicts what will execute.
+        const body = renderReapprovalSms(
           {
             proposalType: updated.proposalType,
-            summary: `${baseSummary} — your change: "${instructionNote}"`,
+            summary: updated.summary,
             payload: updated.payload,
           },
-          { reapproval: true },
+          instruction,
         );
         // Send FIRST, record after — mirroring the queue_and_sms anchor.
         // Recording an unsent render would unblock `Y` (and make it the

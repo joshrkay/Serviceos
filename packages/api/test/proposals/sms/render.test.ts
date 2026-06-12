@@ -568,7 +568,7 @@ function member(overrides: Partial<ChainSmsMember> = {}): ChainSmsMember {
 }
 
 describe('renderChainSms — RV-221 chain summaries', () => {
-  it('renders a 2-member capture chain as one numbered summary with the standard reply instructions', () => {
+  it('renders a 2-member capture chain as one numbered summary with the truthful head-only reply prompt', () => {
     const body = renderChainSms(
       [
         member(),
@@ -582,7 +582,9 @@ describe('renderChainSms — RV-221 chain summaries', () => {
     expect(body).toContain('2 linked actions:');
     expect(body).toContain('1) Create customer Jane Doe');
     expect(body).toContain('2) Open a job for Jane Doe');
-    expect(body).toContain('Reply Y to approve, N to reject, EDIT to change.');
+    // Track E truthful copy: Y approves the HEAD (item 1) only — the
+    // dependents are drafts approved from the queue.
+    expect(body).toContain('Reply Y to approve 1); the rest follow in your queue.');
     expect(body).toContain(URL);
     // No money/comms member → no separate-approval legend.
     expect(body).not.toContain('Approval follows separately');
@@ -610,7 +612,7 @@ describe('renderChainSms — RV-221 chain summaries', () => {
     // Money fact extracted from the payload; comms member flagged.
     expect(body).toContain('3) Send Jane the estimate ($450.00)*');
     expect(body).toContain('*Approval follows separately.');
-    expect(body).toContain('Reply Y to approve, N to reject, EDIT to change.');
+    expect(body).toContain('Reply Y to approve 1); the rest follow in your queue.');
     expect(body).toContain(URL);
   });
 
@@ -625,6 +627,62 @@ describe('renderChainSms — RV-221 chain summaries', () => {
     ]);
     expect(body).toContain('2) Record a payment from Jane ($200.00)*');
     expect(body).toContain('*Approval follows separately.');
+  });
+
+  it('Track E: a MONEY head (record_payment) switches the WHOLE SMS to the review-in-app form', () => {
+    const body = renderChainSms(
+      [
+        member({
+          proposalType: 'record_payment',
+          summary: 'Record a $200 payment from Jane',
+          payload: { amountCents: 20000 },
+        }),
+        member({ proposalType: 'add_note', summary: 'Note the payment on the job' }),
+      ],
+      { approveUrl: URL },
+    );
+    // Y acts on the head, and money is never Y-approvable over SMS.
+    expect(body).toContain('2 linked actions:');
+    expect(body).toContain('Needs review in app before approval — reply N to reject.');
+    expect(body).not.toContain('Reply Y to approve');
+    expect(body).not.toContain(URL);
+    expect(body).not.toContain('*Approval follows separately.');
+  });
+
+  it('Track E: a COMMS head (send_estimate) switches the WHOLE SMS to the review-in-app form', () => {
+    const body = renderChainSms(
+      [
+        member({
+          proposalType: 'send_estimate',
+          summary: 'Send Jane the estimate',
+          payload: { totalCents: 45000 },
+        }),
+        member({ proposalType: 'add_note', summary: 'Note the send on the job' }),
+      ],
+      { approveUrl: URL },
+    );
+    expect(body).toContain('Needs review in app before approval — reply N to reject.');
+    expect(body).not.toContain('Reply Y to approve');
+    expect(body).not.toContain(URL);
+  });
+
+  it('Track E: a non-capture member BEHIND a capture head keeps the approvable form (legend stars it)', () => {
+    const body = renderChainSms(
+      [
+        member(),
+        member({
+          proposalType: 'record_payment',
+          summary: 'Record a payment from Jane',
+          payload: { amountCents: 20000 },
+        }),
+      ],
+      { approveUrl: URL },
+    );
+    // Y only ever approves the (capture) head; the money member is starred.
+    expect(body).toContain('Reply Y to approve 1); the rest follow in your queue.');
+    expect(body).toContain('2) Record a payment from Jane ($200.00)*');
+    expect(body).toContain('*Approval follows separately.');
+    expect(body).toContain(URL);
   });
 
   it('a low/very_low member switches the WHOLE SMS to the review-in-app form', () => {
@@ -673,7 +731,7 @@ describe('renderChainSms — RV-221 chain summaries', () => {
     );
     const humanPart = body.includes(' Or tap') ? body.slice(0, body.indexOf(' Or tap')) : body;
     expect(humanPart.length).toBeLessThanOrEqual(PROPOSAL_SMS_MAX_CHARS);
-    expect(body).toContain('Reply Y to approve, N to reject, EDIT to change.');
+    expect(body).toContain('Reply Y to approve 1); the rest follow in your queue.');
     expect(body).toContain(URL);
     expect(body).toContain('…');
   });

@@ -1259,16 +1259,17 @@ describe('voice-action-router entity resolution', () => {
   });
 });
 
-// ─── RV-071 — owner approval intents are NOT routable from this worker ───────
+// ─── RV-071 / RV-225 — owner approval & edit intents are NOT routable here ───
 //
-// approve_proposal / reject_proposal are only actionable on a live,
-// verified owner call (telephony FSM, RV-070 ownerSession). This worker
-// processes recorded memos with no caller-ID identity and no confirm
-// turn — even a classifier that returns the intent at 0.99 must produce
-// NO proposal and NO mutation here.
+// approve_proposal / reject_proposal / edit_proposal are only actionable
+// on a live, verified owner call (telephony FSM, RV-070 ownerSession).
+// This worker processes recorded memos with no caller-ID identity and no
+// confirm turn — even a classifier that returns the intent at 0.99 must
+// produce NO proposal and NO mutation here (Track E: edit_proposal joins
+// the same loud-warn refusal).
 
-describe('RV-071 — voice-action-router refuses owner approval intents', () => {
-  it.each(['approve_proposal', 'reject_proposal'])(
+describe('RV-071 / RV-225 — voice-action-router refuses owner approval/edit intents', () => {
+  it.each(['approve_proposal', 'reject_proposal', 'edit_proposal'])(
     'a high-confidence %s classification produces no proposal and no mutation',
     async (intentType) => {
       const proposalRepo = new InMemoryProposalRepository();

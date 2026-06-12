@@ -1143,16 +1143,27 @@ interface EditHarness {
   auditRepo: InMemoryAuditRepository;
   smsEvents: InMemoryProposalSmsEventRepository;
   interpreterCalls: { proposalId: string; instruction: string }[];
+  sent: { to: string; body: string }[];
 }
 
 function makeEditHarness(opts: {
   delta?: Record<string, unknown> | null;
   interpreter?: ProposalEditInterpreter | false;
+  /**
+   * Track E — wire the SMS re-render deps (oneTapFallback.sendSms + owner
+   * phone), the same deps the one-tap fallback already carries. With these
+   * present, an applied voice edit sends the REAL re-approval SMS and
+   * anchors `reapproval_rendered`; without them it records `voice_reapproval`.
+   */
+  withSmsRerender?: boolean;
+  /** Make sendSms fail, to exercise the wired-but-failed fallback. */
+  smsSendFails?: boolean;
 } = {}): EditHarness {
   const proposalRepo = new InMemoryProposalRepository();
   const auditRepo = new InMemoryAuditRepository();
   const smsEvents = new InMemoryProposalSmsEventRepository();
   const interpreterCalls: { proposalId: string; instruction: string }[] = [];
+  const sent: { to: string; body: string }[] = [];
   const interpreter: ProposalEditInterpreter = async ({ proposal, instruction }) => {
     interpreterCalls.push({ proposalId: proposal.id, instruction });
     return opts.delta ?? null;
@@ -1165,8 +1176,19 @@ function makeEditHarness(opts: {
     ...(opts.interpreter === false
       ? {}
       : { editInterpreter: opts.interpreter ?? interpreter }),
+    ...(opts.withSmsRerender
+      ? {
+          oneTapFallback: {
+            sendSms: async (to: string, body: string) => {
+              if (opts.smsSendFails) throw new Error('provider down');
+              sent.push({ to, body });
+            },
+            resolveOwnerPhone: async () => '+15125550100',
+          },
+        }
+      : {}),
   };
-  return { deps, proposalRepo, auditRepo, smsEvents, interpreterCalls };
+  return { deps, proposalRepo, auditRepo, smsEvents, interpreterCalls, sent };
 }
 
 /** Contract-valid draft_estimate payload (editProposal Zod-validates the merge). */
@@ -1218,9 +1240,13 @@ describe('RV-225 — voice edit dialogue', () => {
     const voiceEdited = events.find((e) => e.eventType === 'proposal.voice_edited');
     expect(voiceEdited?.metadata).toMatchObject({ editedFields: ['totalCents'] });
 
-    // The applied edit clears the pending-edit block (edit_request followed
-    // by reapproval_rendered — same insertion-order contract as SMS).
+    // The applied edit clears the pending-edit block. This harness has NO
+    // SMS re-render deps wired (no oneTapFallback), so the clearing row is
+    // the Track E `voice_reapproval` kind — which is deliberately NOT a
+    // reply anchor (see the Track E tests below).
     expect(await h.smsEvents.hasUnappliedEditRequest(TENANT, proposal.id)).toBe(false);
+    expect(h.smsEvents.events.some((e) => e.kind === 'voice_reapproval')).toBe(true);
+    expect(h.smsEvents.events.some((e) => e.kind === 'reapproval_rendered')).toBe(false);
   });
 
   it('non-owner sessions cannot trigger an edit (layered gate, same as approve)', async () => {
@@ -1366,5 +1392,211 @@ describe('RV-226 — edit-then-approve sequencing', () => {
     const stored = await h.proposalRepo.findById(TENANT, proposal.id);
     expect(stored?.status).toBe('approved');
     expect(stored?.payload.totalCents).toBe(20000);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Track E — voice-edit re-approval delivery (architect ruling).
+//
+// WIRED (sendSms + owner phone): the applied edit sends the REAL re-render
+// SMS through the m156–158 machinery and anchors `reapproval_rendered` from
+// the actual send. UNWIRED: a `voice_reapproval` row clears the pending-edit
+// block but is EXCLUDED from findRecentOutbound — a voice edit must never
+// retarget the owner's next texted Y onto a proposal they got no text for.
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { createProposalSmsEvent } from '../../../src/proposals/sms/sms-event';
+
+describe('Track E — voice edit re-approval: wired path sends the real SMS and anchors it', () => {
+  it('sends the re-render SMS, records reapproval_rendered from the send, clears the block', async () => {
+    const h = makeEditHarness({ delta: { totalCents: 20000 }, withSmsRerender: true });
+    const proposal = await seedEditablePending(h.proposalRepo);
+
+    const result = await startVoiceEdit(h.deps, {
+      ...ref,
+      reference: 'the Henderson estimate',
+      instruction: 'change the total to 200 dollars',
+    });
+
+    expect(result.outcome).toBe('edited');
+
+    // Real SMS went to the owner with the re-approval form + change note.
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].to).toBe('+15125550100');
+    expect(h.sent[0].body).toContain('Updated:');
+    expect(h.sent[0].body).toContain('your change: "change the total to 200 dollars"');
+    expect(h.sent[0].body).toContain('$200.00');
+
+    // The anchor row is the ACTUAL sent body, kind reapproval_rendered.
+    const anchor = h.smsEvents.events.find((e) => e.kind === 'reapproval_rendered');
+    expect(anchor).toBeDefined();
+    expect(anchor?.proposalId).toBe(proposal.id);
+    expect(anchor?.body).toBe(h.sent[0].body);
+    expect(h.smsEvents.events.some((e) => e.kind === 'voice_reapproval')).toBe(false);
+
+    // It IS the latest reply target (a texted Y now correctly targets the
+    // proposal the owner just received updated text for).
+    const [latest] = await h.smsEvents.findRecentOutbound(TENANT, 1);
+    expect(latest?.proposalId).toBe(proposal.id);
+    expect(latest?.kind).toBe('reapproval_rendered');
+
+    // And the pending-edit block is cleared.
+    expect(await h.smsEvents.hasUnappliedEditRequest(TENANT, proposal.id)).toBe(false);
+  });
+
+  it('wired but send fails: falls back to voice_reapproval (block cleared, no false anchor)', async () => {
+    const h = makeEditHarness({
+      delta: { totalCents: 20000 },
+      withSmsRerender: true,
+      smsSendFails: true,
+    });
+    const proposal = await seedEditablePending(h.proposalRepo);
+
+    const result = await startVoiceEdit(h.deps, {
+      ...ref,
+      reference: 'the Henderson estimate',
+      instruction: 'change the total to 200 dollars',
+    });
+
+    expect(result.outcome).toBe('edited');
+    expect(h.sent).toHaveLength(0);
+    // No unsent render is ever recorded as an anchor.
+    expect(h.smsEvents.events.some((e) => e.kind === 'reapproval_rendered')).toBe(false);
+    expect(h.smsEvents.events.some((e) => e.kind === 'voice_reapproval')).toBe(true);
+    // The owner heard the updated values on the call — block cleared.
+    expect(await h.smsEvents.hasUnappliedEditRequest(TENANT, proposal.id)).toBe(false);
+    expect(
+      h.auditRepo.getAll().some((e) => e.eventType === 'proposal.voice_reapproval_send_failed'),
+    ).toBe(true);
+  });
+});
+
+describe('Track E — voice edit re-approval: unwired path records voice_reapproval (never a reply anchor)', () => {
+  it('clears hasUnappliedEditRequest but findRecentOutbound still targets the older RENDERED proposal', async () => {
+    const h = makeEditHarness({ delta: { totalCents: 20000 } }); // no SMS deps
+    // An OLDER proposal was rendered by SMS — it is the owner's latest text.
+    const older = await seedPending(h.proposalRepo, {
+      summary: 'Invoice for Acme — spring service',
+      proposalType: 'draft_invoice',
+      payload: {
+        customerId: CUSTOMER_UUID,
+        customerName: 'Acme Corp',
+        lineItems: [{ description: 'Spring service', quantity: 1, unitPrice: 9900 }],
+        totalCents: 9900,
+      },
+    });
+    await h.smsEvents.create(
+      createProposalSmsEvent({
+        tenantId: TENANT,
+        proposalId: older.id,
+        direction: 'outbound',
+        kind: 'proposal_rendered',
+        body: 'Invoice for Acme. Reply Y to approve, N to reject, EDIT to change.',
+      }),
+    );
+    const edited = await seedEditablePending(h.proposalRepo);
+
+    const result = await startVoiceEdit(h.deps, {
+      ...ref,
+      reference: 'the Henderson estimate',
+      instruction: 'change the total to 200 dollars',
+    });
+
+    expect(result.outcome).toBe('edited');
+    // voice_reapproval recorded for the edited proposal…
+    const row = h.smsEvents.events.find((e) => e.kind === 'voice_reapproval');
+    expect(row?.proposalId).toBe(edited.id);
+    // …clearing the block…
+    expect(await h.smsEvents.hasUnappliedEditRequest(TENANT, edited.id)).toBe(false);
+    // …but the OLDER rendered proposal stays the Y target — the retargeting
+    // hazard is pinned closed: a voice-only edit must not steal the reply
+    // anchor from the last message the owner actually received.
+    const [latest] = await h.smsEvents.findRecentOutbound(TENANT, 1);
+    expect(latest?.proposalId).toBe(older.id);
+    expect(latest?.kind).toBe('proposal_rendered');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Track E — confirm-stage race: an SMS edit_request can land between the
+// readback and the owner's "yes". The guard re-runs at apply time.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Track E — confirm-stage pending-edit race', () => {
+  it('an edit_request landing between readback and "yes" blocks the approval', async () => {
+    const h = makeEditHarness({ delta: null });
+    const proposal = await seedEditablePending(h.proposalRepo);
+
+    // Turn 1: readback — pending-edit guard passes (no edit yet).
+    const start = await startVoiceApproval(h.deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Henderson estimate',
+    });
+    expect(start.outcome).toBe('readback');
+
+    // INTERLEAVE: the owner's SMS edit lands (recorded by the SMS transport).
+    await h.smsEvents.create(
+      createProposalSmsEvent({
+        tenantId: TENANT,
+        proposalId: proposal.id,
+        direction: 'inbound',
+        kind: 'edit_request',
+        body: 'actually make it $300',
+      }),
+    );
+
+    // Turn 2: the strict affirmative must NOT execute the stale payload.
+    const confirm = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: 'yes',
+      pending: start.pending!,
+    });
+
+    expect(confirm.outcome).toBe('blocked_pending_edit');
+    expect(confirm.speak.toLowerCase()).toContain('queue');
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+    expect(
+      h.auditRepo
+        .getAll()
+        .some((e) => e.eventType === 'proposal.voice_approve_blocked_pending_edit'),
+    ).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Track E — voice edit refused when the delta touches an unresolved chain ref.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Track E — voice edit chain-ref guard', () => {
+  it('a delta touching a $ref:chain[…] field is refused with the "earlier step" line', async () => {
+    const h = makeEditHarness({ delta: { invoiceId: 'INV-1024' } });
+    // A chained dependent: invoiceId still holds the unresolved token
+    // (plain-string contract field — Zod alone would let the overwrite by).
+    const proposal = await seedPending(h.proposalRepo, {
+      proposalType: 'issue_invoice',
+      payload: { invoiceId: '$ref:chain[0].invoiceId' },
+      summary: 'Issue the new invoice',
+    });
+
+    const result = await startVoiceEdit(h.deps, {
+      ...ref,
+      // No usable signals (stopwords only) + single pending → fallback.
+      reference: 'it',
+      instruction: 'issue invoice 1024 instead',
+    });
+
+    expect(result.outcome).toBe('edit_blocked_chain_ref');
+    expect(result.speak).toContain('waiting on an earlier step');
+    // The chain wiring is intact.
+    const stored = await h.proposalRepo.findById(TENANT, proposal.id);
+    expect(stored?.payload.invoiceId).toBe('$ref:chain[0].invoiceId');
+    const blocked = h.auditRepo
+      .getAll()
+      .find((e) => e.eventType === 'proposal.voice_edit_blocked_chain_ref');
+    expect(blocked?.entityId).toBe(proposal.id);
+    expect(blocked?.metadata).toMatchObject({ fields: ['invoiceId'] });
+    // The recorded edit_request stays unapplied → approval remains blocked.
+    expect(await h.smsEvents.hasUnappliedEditRequest(TENANT, proposal.id)).toBe(true);
   });
 });

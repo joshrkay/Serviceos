@@ -386,6 +386,16 @@ export interface RouteUnsupervisedProposalInput {
    * renderSmsBody, called without an approveUrl).
    */
   payload?: unknown;
+  /**
+   * Track E (RV-221 audit fix) — caller-asserted "this send must be the
+   * review form". Set by the chain send site when the chain HEAD is not
+   * capture-class (money / comms / irreversible): those classes are never
+   * Y-approvable over SMS, so the one-tap token must not be minted and the
+   * SMS anchors as `review_required_rendered` — exactly the same path the
+   * low/very_low-confidence flip uses. The two conditions are OR'd; the
+   * audit metadata records which one fired.
+   */
+  suppressApproveLink?: boolean;
   nowMs?: number;
 }
 
@@ -407,9 +417,11 @@ export async function routeUnsupervisedProposal(
   let smsSent = false;
   let escalated = false;
   let approveLinkExpiresAt: Date | undefined;
-  // RV-074 — true when a low/very_low-confidence payload suppressed the
-  // one-tap approve link on an SMS that still went out.
+  // RV-074 / Track E — true when the one-tap approve link was suppressed on
+  // an SMS that still went out (low/very_low payload, or a caller-asserted
+  // non-Y-approvable target like a money/comms chain head).
   let approveLinkSuppressed = false;
+  let suppressReason: 'low_confidence' | 'action_class' | undefined;
 
   if (requested === 'escalate_to_oncall' && (input.channel !== 'voice_inbound' || !deps.escalateToOnCall)) {
     // Non-call channels (or no escalation seam wired) fall back to queue_only.
@@ -427,12 +439,18 @@ export async function routeUnsupervisedProposal(
       // link. When the payload carries a blocking confidence level, mint no
       // token and call renderSmsBody without an approveUrl so the renderer
       // emits the "needs review in app" form.
+      //
+      // Track E — the same suppression applies when the caller asserted the
+      // target is not Y-approvable (`suppressApproveLink`, e.g. a money/comms
+      // chain head). Both conditions share one code path: no token, review
+      // form, `review_required_rendered` anchor.
       const isLowConfidence = confidenceMetaBlocksAutoApprove(input.payload);
+      const reviewRequired = isLowConfidence || input.suppressApproveLink === true;
 
       let body: string;
       let expiresAt: Date | undefined;
 
-      if (!isLowConfidence && deps.secret) {
+      if (!reviewRequired && deps.secret) {
         // Normal path: mint a one-tap token and include the approve URL.
         const { token, expiresAt: exp } = createOneTapApproveToken({
           proposalId: input.proposalId,
@@ -449,16 +467,17 @@ export async function routeUnsupervisedProposal(
           ? input.renderSmsBody(url)
           : `${summary}. Tap to approve (link expires in 30 min): ${url}`;
         approveLinkExpiresAt = expiresAt;
-      } else if (isLowConfidence) {
-        // Low/very_low confidence: no token, no Y-able link. The renderer
-        // (renderProposalSms) emits the "needs review in app" form when it
-        // sees the blocking confidence level; pass an empty string so the
+      } else if (reviewRequired) {
+        // Low/very_low confidence OR caller-asserted suppression: no token,
+        // no Y-able link. The renderer (renderProposalSms / renderChainSms)
+        // emits the review-in-app form; pass an empty string so the
         // renderSmsBody callback signature is satisfied.
         const summary = input.summaryText ?? 'A proposal needs your approval';
         body = input.renderSmsBody
           ? input.renderSmsBody('')
           : `${summary}. Review in app.`;
         approveLinkSuppressed = true;
+        suppressReason = isLowConfidence ? 'low_confidence' : 'action_class';
       } else {
         // No secret and not low confidence: preserve original behavior —
         // no token to mint, so no SMS goes out.
@@ -476,7 +495,7 @@ export async function routeUnsupervisedProposal(
         if (deps.onSmsSent) {
           await deps.onSmsSent({
             body,
-            kind: isLowConfidence ? 'review_required_rendered' : 'proposal_rendered',
+            kind: reviewRequired ? 'review_required_rendered' : 'proposal_rendered',
             ...(expiresAt ? { expiresAt } : {}),
           });
         }
@@ -501,9 +520,10 @@ export async function routeUnsupervisedProposal(
         channel: input.channel,
         smsSent,
         escalated,
-        // RV-074 — make the suppressed approve affordance auditable.
+        // RV-074 / Track E — make the suppressed approve affordance (and
+        // which guard fired) auditable.
         ...(approveLinkSuppressed
-          ? { approveLinkSuppressed: true, suppressReason: 'low_confidence' }
+          ? { approveLinkSuppressed: true, suppressReason }
           : {}),
       },
     }),
