@@ -1733,6 +1733,10 @@ export function createApp(): express.Express {
       // P2-034 — a pending manual edit request blocks the link too, not
       // just SMS Y replies; both paths approve the same stale payload.
       smsEventRepo: proposalSmsEventRepo,
+      // RV-065 — digest "invoice it" tokens: mint a draft_invoice proposal
+      // for the bound job (batch-invoice eligibility machinery), then
+      // redirect into the standard approve flow.
+      invoiceMintDeps: { jobRepo, invoiceRepo, estimateRepo },
     }),
   );
 

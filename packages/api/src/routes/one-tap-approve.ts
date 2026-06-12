@@ -19,10 +19,17 @@
  *   410 — expired or already used (single-use nonce consumed)
  */
 import { Router, Request, Response } from 'express';
-import { verifyOneTapApproveToken } from '../proposals/auto-approve';
+import {
+  createOneTapApproveToken,
+  verifyOneTapApproveToken,
+} from '../proposals/auto-approve';
 import { approveProposal } from '../proposals/actions';
 import type { ProposalRepository } from '../proposals/proposal';
 import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
+import {
+  mintDraftInvoiceProposalForJob,
+  type MintDraftInvoiceDeps,
+} from '../digest/invoice-one-tap';
 import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import type { Role } from '../auth/rbac';
 import { createLogger } from '../logging/logger';
@@ -54,6 +61,15 @@ export interface OneTapApproveRouterDeps {
    * needs the review queue. Optional so pre-P2-034 wiring keeps working.
    */
   smsEventRepo?: Pick<ProposalSmsEventRepository, 'hasUnappliedEditRequest'>;
+  /**
+   * RV-065 — deps for the digest "invoice it" token variant
+   * (action: 'mint_draft_invoice'). When the tapped token carries that
+   * action, the route mints a draft_invoice proposal for the bound job via
+   * the batch-invoice eligibility/payload machinery, then 302-redirects to
+   * this same route with a fresh single-use approve token for the new
+   * proposal. Optional: when absent, mint tokens answer 503.
+   */
+  invoiceMintDeps?: Omit<MintDraftInvoiceDeps, 'proposalRepo'>;
 }
 
 function page(title: string, body: string): string {
@@ -110,6 +126,83 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
                 : 'This approval link is not valid.',
           ),
         );
+      return;
+    }
+
+    // RV-065 — digest "invoice it" tap. The token binds tenant+jobId; the
+    // nonce above is already consumed, so a replayed link can never mint a
+    // second draft. Mint the draft_invoice proposal through the existing
+    // batch-invoice eligibility/payload machinery, then hand off to the
+    // STANDARD approve flow via a 302 with a fresh single-use approve token
+    // — approval itself stays on the one path (undo window, audit,
+    // executor) with no bypass.
+    if (verified.action === 'mint_draft_invoice') {
+      if (!deps.invoiceMintDeps) {
+        res
+          .status(503)
+          .type('html')
+          .send(page('Unavailable', 'Invoice drafting from this link is not configured.'));
+        return;
+      }
+      let minted;
+      try {
+        minted = await mintDraftInvoiceProposalForJob(
+          verified.tenantId,
+          verified.jobId,
+          ONE_TAP_ACTOR_ID,
+          { ...deps.invoiceMintDeps, proposalRepo: deps.proposalRepo },
+        );
+      } catch (err) {
+        logger.warn('one-tap invoice mint failed after token verify', {
+          jobId: verified.jobId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        res
+          .status(500)
+          .type('html')
+          .send(page('Could not draft invoice', 'Something went wrong — try again from your queue.'));
+        return;
+      }
+      if (!minted.ok) {
+        const alreadyMinted = minted.reason === 'already_minted';
+        res
+          .status(alreadyMinted ? 409 : 404)
+          .type('html')
+          .send(
+            page(
+              alreadyMinted ? 'Already drafted' : 'Nothing to invoice',
+              alreadyMinted
+                ? 'An invoice draft for this job is already waiting in your review queue.'
+                : 'This job has nothing left to invoice — it may already be billed.',
+            ),
+          );
+        return;
+      }
+
+      await deps.auditRepo.create(
+        createAuditEvent({
+          tenantId: verified.tenantId,
+          actorId: ONE_TAP_ACTOR_ID,
+          actorRole: 'system',
+          eventType: 'proposal.one_tap_invoice_minted',
+          entityType: 'proposal',
+          entityId: minted.proposalId,
+          metadata: { channel: 'sms_one_tap', jobId: verified.jobId },
+        }),
+      );
+
+      // Fresh approve token for the freshly minted proposal (same TTL/nonce
+      // machinery), then 302 into the standard approve page — this same
+      // route, approve variant.
+      const { token: approveToken } = createOneTapApproveToken({
+        proposalId: minted.proposalId,
+        tenantId: verified.tenantId,
+        secret: deps.secret,
+      });
+      res.redirect(
+        302,
+        `${req.baseUrl}${req.path}?token=${encodeURIComponent(approveToken)}`,
+      );
       return;
     }
 

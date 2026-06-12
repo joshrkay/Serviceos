@@ -52,6 +52,7 @@ import {
   type DailyDigestRepository,
   type DigestComputeDeps,
   type DigestSmsApprovalLink,
+  type DigestSmsInvoiceLink,
 } from '../digest/digest-service';
 
 /** Sweep cadence app.ts drives — and the bucket width for due matching. */
@@ -417,6 +418,9 @@ async function sendDigestSms(
     payload: record.payload,
     deepLinkUrl: `${deps.publicBaseUrl.replace(/\/+$/, '')}/digest/${record.digestDate}`,
     approvalLinks: buildApprovalLinks(tenantId, record.payload, deps),
+    // RV-065 — "invoice it" one-tap links for completed-unbilled jobs.
+    // Lowest budget priority inside renderDigestSms (dropped first).
+    invoiceLinks: buildInvoiceLinks(tenantId, record.payload, deps),
   });
 
   const idempotencyKey = `daily_digest:${record.digestDate}`;
@@ -496,4 +500,30 @@ function buildApprovalLinks(
     links.push({ approval, url: buildUrl(token) });
   }
   return links;
+}
+
+/**
+ * RV-065 — one "invoice it" link per completed-unbilled job in the digest
+ * payload. The token's action discriminator is 'mint_draft_invoice' and it
+ * binds tenant+jobId; tapping it mints a draft_invoice proposal for the job
+ * and redirects into the standard one-tap approve page. Same secret /
+ * nonce / ≤30-min TTL machinery as the approve links.
+ */
+function buildInvoiceLinks(
+  tenantId: string,
+  payload: DailyDigestPayload,
+  deps: DailyDigestWorkerDeps,
+): DigestSmsInvoiceLink[] {
+  if (!deps.oneTapSecret || !deps.buildApproveUrl) return [];
+  const buildUrl = deps.buildApproveUrl;
+  const secret = deps.oneTapSecret;
+  return payload.unbilledJobs.map((job) => {
+    const { token } = createOneTapApproveToken({
+      action: 'mint_draft_invoice',
+      jobId: job.jobId,
+      tenantId,
+      secret,
+    });
+    return { job, url: buildUrl(token) };
+  });
 }
