@@ -20,7 +20,14 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
-import { classifyIntent, isLookupIntent, isVoiceApprovalIntent, isVoiceEditIntent } from '../ai/orchestration/intent-classifier';
+import {
+  classifyIntent,
+  isLookupIntent,
+  isVoiceApprovalIntent,
+  isVoiceEditIntent,
+  OWNER_LOOKUP_INTENT_TYPES,
+  type IntentType,
+} from '../ai/orchestration/intent-classifier';
 import {
   CreateCustomerVoiceTaskHandler,
   CREATE_CUSTOMER_CONFIRMATION_TTS,
@@ -128,14 +135,8 @@ const logger = createLogger({
   environment: process.env.NODE_ENV || 'development',
 });
 
-const OWNER_LOOKUP_INTENTS = new Set([
-  'lookup_day_overview',
-  'lookup_digest',
-  'lookup_pending_items',
-]);
-
 function isOwnerLookupIntent(intentType: string): boolean {
-  return OWNER_LOOKUP_INTENTS.has(intentType);
+  return OWNER_LOOKUP_INTENT_TYPES.has(intentType as IntentType);
 }
 
 // ─── Deps ────────────────────────────────────────────────────────────────────
@@ -785,10 +786,13 @@ export class TwilioGatherAdapter {
       ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
       : [];
     const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
-    const extendedIntents = await this.resolveExtendedIntents(opts.tenantId);
+    const extendedIntentsFlag = await this.resolveExtendedIntents(opts.tenantId);
     // RV-070 — owner-line recognition happens at session establishment:
     // recognized owner line (caller-ID match; see approver-identity.ts).
     const ownerSession = await this.resolveOwnerSession(opts.tenantId, opts.from);
+    // Live-call customer complaint handling is unwired today; revisit this AND
+    // when the FSM complaint path ships.
+    const extendedIntents = extendedIntentsFlag && ownerSession;
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
       ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
@@ -1349,10 +1353,13 @@ export class TwilioGatherAdapter {
       ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
       : [];
     const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
-    const extendedIntents = await this.resolveExtendedIntents(opts.tenantId);
+    const extendedIntentsFlag = await this.resolveExtendedIntents(opts.tenantId);
     // RV-070 — owner-line recognition happens at session establishment:
     // recognized owner line (caller-ID match; see approver-identity.ts).
     const ownerSession = await this.resolveOwnerSession(opts.tenantId, opts.from);
+    // Live-call customer complaint handling is unwired today; revisit this AND
+    // when the FSM complaint path ships.
+    const extendedIntents = extendedIntentsFlag && ownerSession;
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
       ...(repairTemplatesForInbound.length > 0 ? { repairTemplates: repairTemplatesForInbound } : {}),
@@ -1959,21 +1966,24 @@ export class TwilioGatherAdapter {
   ): Promise<string> {
     const customerId = session.customerId;
     const ownerSession = session.machine.currentContext.ownerSession === true;
+    const extendedIntents = session.machine.currentContext.extendedIntents === true;
     const ownerLookup = isOwnerLookupIntent(intentType);
-    if (!customerId && !ownerLookup) {
+    if (ownerLookup) {
+      if (!ownerSession || !extendedIntents) {
+        return this.lookupNotWiredFallback();
+      }
+      return this.runOwnerLookupSkill(session, intentType, tenantId);
+    }
+    if (!customerId) {
       // Lookups are customer-scoped. An anonymous caller doesn't have
       // an account to read from; we never want to leak a different
       // tenant's summary. Degrade gracefully.
       return "I can't pull up your account without identifying you first. Let me get a person to help.";
     }
-    if (ownerLookup && !ownerSession) {
-      return this.lookupNotWiredFallback();
-    }
-    const customerScopedCustomerId = customerId as string;
 
     const sharedInput = {
       tenantId,
-      customerId: customerScopedCustomerId,
+      customerId,
       sessionId: session.id,
     };
 
@@ -2091,7 +2101,7 @@ export class TwilioGatherAdapter {
           const result = await lookupCustomer(
             {
               tenantId,
-              identifier: { type: 'id', value: customerScopedCustomerId },
+              identifier: { type: 'id', value: customerId },
               sessionId: session.id,
             },
             {
@@ -2193,6 +2203,32 @@ export class TwilioGatherAdapter {
             ? this.lookupNotWiredFallback()
             : result.message;
         }
+        default:
+          return this.lookupNotWiredFallback();
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.warn('runLookupSkill failed', {
+        sessionId: session.id,
+        intentType,
+        error: message,
+      });
+      session.events.emit(
+        'voice-event',
+        lookupExecutedEvent(intentType, Date.now() - startMs, false, message),
+      );
+      return this.lookupNotWiredFallback();
+    }
+  }
+
+  private async runOwnerLookupSkill(
+    session: VoiceSession,
+    intentType: string,
+    tenantId: string,
+  ): Promise<string> {
+    const startMs = Date.now();
+    try {
+      switch (intentType) {
         case 'lookup_day_overview': {
           if (!this.deps.appointmentRepo || !this.deps.jobRepo || !this.deps.proposalRepo) {
             return this.lookupNotWiredFallback();
@@ -2262,9 +2298,10 @@ export class TwilioGatherAdapter {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      logger.warn('runLookupSkill failed', {
-        sessionId: session.id,
+      logger.warn('runOwnerLookupSkill failed', {
         intentType,
+        tenantId,
+        sessionId: session.id,
         error: message,
       });
       session.events.emit(

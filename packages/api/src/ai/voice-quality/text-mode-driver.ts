@@ -58,6 +58,7 @@ import { LLMGateway } from '../gateway/gateway';
 import {
   classifyIntent,
   isLookupIntent,
+  OWNER_LOOKUP_INTENT_TYPES,
   type IntentType,
 } from '../orchestration/intent-classifier';
 import {
@@ -1028,22 +1029,22 @@ export class TextModeDriver implements AgentDriver {
     const tenantId = session.tenantId;
     const customerId = session.customerId;
     const ownerSession = session.machine.currentContext.ownerSession === true;
-    const ownerLookup =
-      intentType === 'lookup_day_overview' ||
-      intentType === 'lookup_digest' ||
-      intentType === 'lookup_pending_items';
+    const extendedIntents = session.machine.currentContext.extendedIntents === true;
+    const ownerLookup = OWNER_LOOKUP_INTENT_TYPES.has(intentType);
 
+    if (ownerLookup) {
+      if (!ownerSession || !extendedIntents) {
+        return LOOKUP_NOT_WIRED_FALLBACK;
+      }
+      return this.runOwnerLookupSkill(session, intentType);
+    }
     // Lookups are customer-scoped. An anonymous caller doesn't have
     // an account to read from; degrade gracefully.
-    if (!customerId && !ownerLookup) {
+    if (!customerId) {
       return "I can't pull up your account without identifying you first. Let me get a person to help.";
     }
-    if (ownerLookup && !ownerSession) {
-      return LOOKUP_NOT_WIRED_FALLBACK;
-    }
-    const customerScopedCustomerId = customerId as string;
 
-    const sharedInput = { tenantId, customerId: customerScopedCustomerId, sessionId: session.id };
+    const sharedInput = { tenantId, customerId, sessionId: session.id };
     // `performance.now()` for sub-ms resolution — see speak() comment.
     const startMs = performance.now();
     try {
@@ -1150,7 +1151,7 @@ export class TextModeDriver implements AgentDriver {
           const result = await lookupCustomer(
             {
               tenantId,
-              identifier: { type: 'id', value: customerScopedCustomerId },
+              identifier: { type: 'id', value: customerId },
               sessionId: session.id,
             },
             {
@@ -1252,6 +1253,27 @@ export class TextModeDriver implements AgentDriver {
             ? LOOKUP_NOT_WIRED_FALLBACK
             : result.message;
         }
+        default:
+          return LOOKUP_NOT_WIRED_FALLBACK;
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      session.events.emit(
+        'voice-event',
+        lookupExecutedEvent(intentType, performance.now() - startMs, false, message),
+      );
+      return LOOKUP_NOT_WIRED_FALLBACK;
+    }
+  }
+
+  private async runOwnerLookupSkill(
+    session: VoiceSession,
+    intentType: IntentType,
+  ): Promise<string> {
+    const tenantId = session.tenantId;
+    const startMs = performance.now();
+    try {
+      switch (intentType) {
         case 'lookup_day_overview': {
           if (!this.deps.appointmentRepo || !this.deps.jobRepo || !this.deps.proposalRepo) {
             return LOOKUP_NOT_WIRED_FALLBACK;

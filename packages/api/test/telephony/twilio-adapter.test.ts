@@ -682,7 +682,7 @@ describe('TwilioGatherAdapter.handleGather', () => {
       };
     }
 
-    async function ownerAdapter(intentType: string, ownerSession = true) {
+    async function ownerAdapter(intentType: string, ownerSession = true, extendedIntents = true) {
       const store = new VoiceSessionStore();
       const gateway = makeGatewayReturning(JSON.stringify({ intentType, confidence: 0.96 }));
       const appointmentRepo = new InMemoryAppointmentRepository();
@@ -708,7 +708,7 @@ describe('TwilioGatherAdapter.handleGather', () => {
       const session = store.create(tenantId, 'telephony', {
         callSid: `CA-${intentType}`,
         ...(ownerSession ? { ownerSession: true } : {}),
-        extendedIntents: true,
+        ...(extendedIntents ? { extendedIntents: true } : {}),
       });
       advanceToIntentCapture(session);
       return {
@@ -825,6 +825,22 @@ describe('TwilioGatherAdapter.handleGather', () => {
         expect(xml).not.toContain('Owner digest: revenue was strong');
       },
     );
+
+    it('flag-off owner session refuses a forced lookup_digest classification without calling the skill', async () => {
+      const deps = await ownerAdapter('lookup_digest', true, false);
+      const findLatest = vi.spyOn(deps.dailyDigestRepo, 'findLatest');
+
+      const xml = await deps.adapter.handleGather({
+        sessionId: deps.session.id,
+        callSid: 'CA-lookup_digest-flag-off-owner',
+        speechResult: 'read me my day',
+        confidence: 0.95,
+        tenantId,
+      });
+
+      expect(xml).toContain('I&apos;m having trouble pulling that up right now');
+      expect(findLatest).not.toHaveBeenCalled();
+    });
   });
 
   it('classifies a clear utterance and advances FSM through intent_confirm', async () => {
@@ -922,6 +938,79 @@ describe('TwilioGatherAdapter.handleGather', () => {
     const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
     expect(systemMessages).toHaveLength(1);
     expect(systemMessages[0].content).not.toContain('lookup_day_overview');
+  });
+
+  it('flag-on customer calls keep the legacy classifier prompt while flag-on owner calls append extended intents', async () => {
+    const settingsRepo = new InMemorySettingsRepository();
+    const now = new Date();
+    await settingsRepo.create({
+      id: 'settings-owner-extended',
+      tenantId: 'tenant-extended',
+      businessName: 'Acme Plumbing',
+      timezone: 'America/Phoenix',
+      estimatePrefix: 'EST-',
+      invoicePrefix: 'INV-',
+      nextEstimateNumber: 1,
+      nextInvoiceNumber: 1,
+      defaultPaymentTermDays: 30,
+      ownerPhone: '+15125550100',
+      createdAt: now,
+      updatedAt: now,
+    } as TenantSettings);
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0.2}');
+    const store = new VoiceSessionStore();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      settingsRepo,
+      extendedIntentsEnabled: vi.fn(async () => true),
+    });
+
+    await adapter.handleInbound({
+      callSid: 'CA-flag-on-customer',
+      from: '+15125559999',
+      to: '+15125550000',
+      tenantId: 'tenant-extended',
+    });
+    const customerSession = store.findByCallSid('CA-flag-on-customer')!;
+    if (customerSession.machine.currentState === 'ask_caller') {
+      customerSession.machine.dispatch({ type: 'caller_known', customerId: 'cust-flag-on' });
+    }
+    await adapter.handleGather({
+      sessionId: customerSession.id,
+      callSid: 'CA-flag-on-customer',
+      speechResult: 'tell me what is going on',
+      confidence: 0.95,
+      tenantId: 'tenant-extended',
+    });
+
+    await adapter.handleInbound({
+      callSid: 'CA-flag-on-owner',
+      from: '+15125550100',
+      to: '+15125550000',
+      tenantId: 'tenant-extended',
+    });
+    const ownerSession = store.findByCallSid('CA-flag-on-owner')!;
+    if (ownerSession.machine.currentState === 'ask_caller') {
+      ownerSession.machine.dispatch({ type: 'caller_known', customerId: 'cust-temp' });
+      ownerSession.customerId = undefined;
+    }
+    await adapter.handleGather({
+      sessionId: ownerSession.id,
+      callSid: 'CA-flag-on-owner',
+      speechResult: 'tell me what is going on',
+      confidence: 0.95,
+      tenantId: 'tenant-extended',
+    });
+
+    const calls = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls;
+    const customerSystemMessages = calls[0][0].messages.filter((m: { role: string }) => m.role === 'system');
+    const ownerSystemMessages = calls[1][0].messages.filter((m: { role: string }) => m.role === 'system');
+    expect(customerSystemMessages).toHaveLength(1);
+    expect(customerSystemMessages[0].content).not.toContain('lookup_day_overview');
+    expect(ownerSystemMessages.some((m: { content: string }) => m.content.includes('lookup_day_overview'))).toBe(true);
   });
 
   it('extended-intents resolver error is non-fatal and resolves false for the session', async () => {

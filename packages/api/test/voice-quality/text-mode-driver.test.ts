@@ -17,7 +17,7 @@
  * for unit tests. Production CI (Phase 2 corpus) will use the cassette
  * gateway; unit tests just need a deterministic gateway shim.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import { AgentEventBus } from '../../src/ai/voice-quality/event-bus';
 import { TextModeDriver } from '../../src/ai/voice-quality/text-mode-driver';
@@ -30,6 +30,7 @@ import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
 import { InMemoryJobRepository } from '../../src/jobs/job';
 import { InMemoryLeadRepository } from '../../src/leads/in-memory-lead';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryDailyDigestRepository } from '../../src/digest/digest-service';
 
 import type { Customer } from '../../src/customers/customer';
 import type { MockLLMProvider } from '../../src/ai/providers/mock';
@@ -59,6 +60,7 @@ interface Harness {
   proposalRepo: InMemoryProposalRepository;
   customerRepo: InMemoryCustomerRepository;
   appointmentRepo: InMemoryAppointmentRepository;
+  dailyDigestRepo: InMemoryDailyDigestRepository;
 }
 
 function buildHarness(): Harness {
@@ -74,6 +76,7 @@ function buildHarness(): Harness {
   const jobRepo = new InMemoryJobRepository();
   const leadRepo = new InMemoryLeadRepository();
   const auditRepo = new InMemoryAuditRepository();
+  const dailyDigestRepo = new InMemoryDailyDigestRepository();
 
   const driver = new TextModeDriver({
     voiceSessionStore: store,
@@ -87,10 +90,11 @@ function buildHarness(): Harness {
     jobRepo,
     leadRepo,
     auditRepo,
+    dailyDigestRepo,
     systemActorId: 'system:vq-test',
   });
 
-  return { store, bus, driver, provider, proposalRepo, customerRepo, appointmentRepo };
+  return { store, bus, driver, provider, proposalRepo, customerRepo, appointmentRepo, dailyDigestRepo };
 }
 
 describe('VQ-007 — TextModeDriver', () => {
@@ -223,6 +227,28 @@ describe('VQ-007 — TextModeDriver', () => {
     expect(lookups).toHaveLength(1);
     expect(lookups[0].skillName).toBe('lookup_customer');
     expect(lookups[0].success).toBe(true);
+  });
+
+  it('refuses forced owner lookup intent when extendedIntents is not set', async () => {
+    const { sessionId } = await h.driver.startSession({
+      tenantId: 't-owner-flag-off',
+      callerId: '+15555550109',
+      callerIdBlocked: false,
+    });
+    const session = h.store.get(sessionId);
+    if (!session) throw new Error('missing session');
+    session.machine.currentContext.ownerSession = true;
+    const findLatest = vi.spyOn(h.dailyDigestRepo, 'findLatest');
+
+    h.provider.setDefaultResponse(
+      JSON.stringify({ intentType: 'lookup_digest', confidence: 0.95 }),
+    );
+
+    const { agentResponse } = await h.driver.speak(sessionId, 'read me my day');
+
+    expect(agentResponse).toBe("I'm having trouble pulling that up right now. Let me get a person to help.");
+    expect(findLatest).not.toHaveBeenCalled();
+    expect(h.bus.filterByType('lookup_executed')).toHaveLength(0);
   });
 
   it('VQ-007 — speak() returns latencyMs > 0', async () => {
