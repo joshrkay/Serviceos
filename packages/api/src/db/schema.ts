@@ -4280,6 +4280,57 @@ export const MIGRATIONS = {
           'review_required_rendered','voice_reapproval'
         ));
   `,
+
+  // F17 / P15-001 — per-tenant QuickBooks (Xero enum reserved) accounting sync.
+  '172_create_accounting_integrations': `
+    CREATE TABLE IF NOT EXISTS accounting_integrations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL UNIQUE REFERENCES tenants(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL CHECK (provider IN ('quickbooks', 'xero')),
+      access_token_encrypted TEXT NOT NULL,
+      refresh_token_encrypted TEXT NOT NULL,
+      realm_id TEXT NOT NULL,
+      connected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_synced_at TIMESTAMPTZ,
+      status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'expired', 'disconnected', 'error')),
+      error_message TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE accounting_integrations ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY accounting_integrations_tenant ON accounting_integrations
+      USING (
+        tenant_id = current_setting('app.current_tenant_id', true)::uuid
+        OR current_setting('app.system_lookup', true) = 'true'
+      );
+
+    CREATE TABLE IF NOT EXISTS accounting_sync_log (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      integration_id UUID NOT NULL REFERENCES accounting_integrations(id) ON DELETE CASCADE,
+      entity_type TEXT NOT NULL CHECK (entity_type IN ('invoice', 'customer', 'payment')),
+      entity_id UUID NOT NULL,
+      external_id TEXT,
+      action TEXT NOT NULL CHECK (action IN ('push', 'pull', 'conflict')),
+      status TEXT NOT NULL CHECK (status IN ('success', 'failed')),
+      payload_hash TEXT NOT NULL,
+      error_message TEXT,
+      synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE accounting_sync_log ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY accounting_sync_log_tenant ON accounting_sync_log
+      USING (
+        tenant_id = current_setting('app.current_tenant_id', true)::uuid
+        OR current_setting('app.system_lookup', true) = 'true'
+      );
+    CREATE INDEX IF NOT EXISTS accounting_sync_log_tenant_integration_synced_idx
+      ON accounting_sync_log (tenant_id, integration_id, synced_at DESC);
+
+    ALTER TABLE oauth_states DROP CONSTRAINT IF EXISTS oauth_states_provider_check;
+    ALTER TABLE oauth_states ADD CONSTRAINT oauth_states_provider_check
+      CHECK (provider IN ('google', 'quickbooks', 'xero'));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
