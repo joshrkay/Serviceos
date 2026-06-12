@@ -26,7 +26,9 @@ vi.mock('@clerk/clerk-react', async (importOriginal) => {
 });
 
 vi.mock('../jobs/SuppliersSheet', () => ({ SuppliersSheet: () => null }));
-vi.mock('./QuickBooksModal', () => ({ QuickBooksModal: () => null }));
+vi.mock('./QuickBooksIntegrationSheet', () => ({
+  QuickBooksIntegrationSheet: () => null,
+}));
 vi.mock('../../hooks/useMe', async () => {
   const actual = await vi.importActual<typeof import('../../hooks/useMe')>(
     '../../hooks/useMe',
