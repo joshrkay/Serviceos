@@ -1430,3 +1430,73 @@ describe('Phase-2 Track A — extended intents routing', () => {
     expect(all[0].proposalType).toBe('draft_invoice');
   });
 });
+
+describe('RV-051 — voice clock-in confirmation through the router', () => {
+  const PATEL_JOB_ID = '44444444-4444-4444-8444-444444444444';
+
+  it('resolves the spoken job name to a verified jobId and reads back the confirmation', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'log_time_entry',
+        confidence: 0.92,
+        extractedEntities: { jobReference: 'the Patel job', timeEntryType: 'job' },
+      }),
+    ]);
+    const resolver: EntityResolver = {
+      resolve: vi.fn(async () => ({
+        kind: 'resolved' as const,
+        candidate: { id: PATEL_JOB_ID, kind: 'job' as const, label: 'JOB-0042 Patel', score: 0.95 },
+      })),
+    };
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, entityResolver: resolver });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'tech-1', transcript: 'Clock me in on the Patel job' }),
+      silentLogger(),
+    );
+
+    const all = await proposalRepo.findByTenant('t-1');
+    expect(all).toHaveLength(1);
+    const proposal = all[0];
+    expect(proposal.proposalType).toBe('log_time_entry');
+    // The execution handler clocks in by payload.jobId — the resolved id
+    // must land there, not just the free-text reference.
+    expect(proposal.payload.jobId).toBe(PATEL_JOB_ID);
+    expect(proposal.payload.jobReference).toBe('the Patel job');
+    expect(proposal.summary).toBe('Clocking you in on the Patel job — right?');
+    // The confirm gate: draft until a human says yes.
+    expect(proposal.status).toBe('draft');
+  });
+
+  it('an ambiguous job name becomes a voice_clarification, never a guessed clock-in', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'log_time_entry',
+        confidence: 0.92,
+        extractedEntities: { jobReference: 'the Patel job', timeEntryType: 'job' },
+      }),
+    ]);
+    const resolver: EntityResolver = {
+      resolve: vi.fn(async () => ({
+        kind: 'ambiguous' as const,
+        candidates: [
+          { id: PATEL_JOB_ID, kind: 'job' as const, label: 'JOB-0042 Patel (kitchen)', score: 0.9 },
+          { id: '55555555-5555-4555-8555-555555555555', kind: 'job' as const, label: 'JOB-0050 Patel (bath)', score: 0.88 },
+        ],
+      })),
+    };
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, entityResolver: resolver });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'tech-1', transcript: 'Clock me in on the Patel job' }),
+      silentLogger(),
+    );
+
+    const all = await proposalRepo.findByTenant('t-1');
+    expect(all).toHaveLength(1);
+    expect(all[0].proposalType).toBe('voice_clarification');
+    expect(all[0].payload.reason).toBe('ambiguous_entity');
+  });
+});
