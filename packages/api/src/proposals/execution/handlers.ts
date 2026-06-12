@@ -584,7 +584,12 @@ export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
         estimateId,
       );
       const recent = dispatches.find(
-        (d) => d.status !== 'failed' && d.sentAt.getTime() >= cooldownFloor,
+        (d) =>
+          // 'failed' and 'bounced' dispatches never reached the customer —
+          // neither counts against the 48h spacing.
+          d.status !== 'failed' &&
+          d.status !== 'bounced' &&
+          d.sentAt.getTime() >= cooldownFloor,
       );
       if (recent) {
         return {
@@ -794,6 +799,10 @@ export function createExecutionHandlerRegistry(deps?: {
       deps.auditRepo,
       deps.docRevisionRepo,
       deps.editDeltaRepo,
+      // Deposit lock: the handler resolves the linked job's
+      // depositPaidCents and refuses the edit once money was collected.
+      // Fail-closed inside the handler when the repo is absent.
+      deps.jobRepo,
     ));
   }
 

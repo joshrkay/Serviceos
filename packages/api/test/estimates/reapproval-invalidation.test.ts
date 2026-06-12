@@ -191,7 +191,17 @@ describe('RV-042 — update_estimate proposal machinery end-to-end', () => {
     const repo = new InMemoryEstimateRepository();
     const auditRepo = new InMemoryAuditRepository();
     await repo.create(makeAcceptedEstimate());
-    const handler = new UpdateEstimateExecutionHandler(repo, auditRepo);
+    // Deposit-lock wiring: a zero-deposit job lets the invalidation proceed.
+    const jobRepo = {
+      findById: async () => ({ id: 'job-1', tenantId: TENANT, depositPaidCents: 0 }),
+    } as unknown as import('../../src/jobs/job').JobRepository;
+    const handler = new UpdateEstimateExecutionHandler(
+      repo,
+      auditRepo,
+      undefined,
+      undefined,
+      jobRepo,
+    );
 
     const proposal: Proposal = {
       id: 'prop-42',
