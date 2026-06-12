@@ -229,11 +229,12 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['159_create_tenant_feature_flags', 'd30f579a89e543e42fec2f499dfd30b170994696d5f08b43b838a1cff483a319'],
   // RV-005: generalized attachments foundation (photos & documents on any entity)
   ['160_create_attachments', '25894a97ec6e05ddf8be60c0c90616e0b20355b9425008c334e188e5c21b1d9b'],
+  // RV-006: image post-process pipeline columns on files (dims, thumbnail, exif flag, content hash)
+  ['161_files_image_pipeline_columns', '237e44d6cf831a1fa52d972ccbe1de5180b2578f696857c642cc43f50c592464'],
   // RV-060: end-of-day digest snapshots (CHECK widening moved to 164)
   ['162_create_daily_digests', '2a55425f1609477624a0de73d215b33cff416a1aab7ad2e053619f41c76a702d'],
   // RV-063: per-tenant digest delivery settings (enabled/time/channel)
   ['163_tenant_settings_digest', '3fb34512c152ba262d2e21e4aa84608374156f89c07d5f71e3cd43d38b718836'],
-  // RV-061: widen message_dispatches entity_type CHECK to allow 'daily_digest'
   ['164_dispatch_entity_daily_digest', '4d3ad093b4319cf786bfd047df3d5898720a4d6712e5037704c5a06fffc492e9'],
 ];
 

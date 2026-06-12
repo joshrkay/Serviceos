@@ -176,6 +176,33 @@ export class S3StorageProvider implements StorageProvider {
     return { contentLength, contentType };
   }
 
+  async getObject(bucket: string, key: string): Promise<Buffer | null> {
+    // Always a presigned GET (never publicUrlBase) — pipeline reads must
+    // work for private buckets.
+    const url = this.presign('GET', bucket, key, 60);
+    const res = await fetch(url);
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      throw new Error(`S3 GET failed ${res.status}: ${await res.text().catch(() => '')}`);
+    }
+    return Buffer.from(await res.arrayBuffer());
+  }
+
+  async putObject(bucket: string, key: string, body: Buffer, contentType: string): Promise<void> {
+    // Content-Type is bound into the signature (same guarantee as client
+    // presigned uploads): the stored object's MIME type matches what the
+    // pipeline produced.
+    const url = this.presign('PUT', bucket, key, 60, contentType);
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { 'content-type': contentType },
+      body: new Uint8Array(body),
+    });
+    if (!res.ok) {
+      throw new Error(`S3 PUT failed ${res.status}: ${await res.text().catch(() => '')}`);
+    }
+  }
+
   async deleteObject(bucket: string, key: string): Promise<void> {
     const url = this.presign('DELETE', bucket, key, 60);
     const res = await fetch(url, { method: 'DELETE' });
@@ -227,6 +254,16 @@ export class DevStorageProvider implements StorageProvider {
 
   async getObjectMetadata(): Promise<ObjectMetadata | null> {
     return null;
+  }
+
+  // The dev receiver discards uploaded bytes, so there is nothing to fetch:
+  // returning null tells the image pipeline to skip processing locally.
+  async getObject(): Promise<Buffer | null> {
+    return null;
+  }
+
+  async putObject(): Promise<void> {
+    return;
   }
 
   async deleteObject(): Promise<void> {

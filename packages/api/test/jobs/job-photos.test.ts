@@ -37,6 +37,12 @@ class FakeStorageProvider implements StorageProvider {
   async getObjectMetadata(): Promise<ObjectMetadata | null> {
     return null;
   }
+  async getObject(): Promise<Buffer | null> {
+    return null;
+  }
+  async putObject(): Promise<void> {
+    return;
+  }
   async deleteObject(): Promise<void> {
     return;
   }
@@ -381,6 +387,83 @@ describe('job-photo dual-write shadow into attachments (RV-005)', () => {
       const deleted = await service.deleteJobPhoto(TENANT, JOB_ID, photo.id);
       expect(deleted).toBe(true);
       expect(await photoRepo.findById(TENANT, photo.id)).toBeNull();
+      expect(errorSpy).toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});
+
+describe('job-photo image post-process enqueue (RV-006)', () => {
+  const TENANT = 'tenant-photos-pipeline';
+  const JOB_ID = 'job-pipeline-1';
+  const USER_ID = 'user-pipeline-1';
+
+  class FakeQueue {
+    sent: Array<{ type: string; payload: unknown; idempotencyKey?: string }> = [];
+    constructor(private readonly opts: { fail?: boolean } = {}) {}
+    async send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string> {
+      if (this.opts.fail) throw new Error('queue unavailable');
+      this.sent.push({ type, payload, idempotencyKey });
+      return `msg-${this.sent.length}`;
+    }
+  }
+
+  async function seedFile(fileRepo: InMemoryFileRepository) {
+    return fileRepo.create({
+      id: 'file-pipeline-1',
+      tenantId: TENANT,
+      filename: 'before.jpg',
+      contentType: 'image/jpeg',
+      sizeBytes: 1024,
+      storageBucket: 'b',
+      storageKey: 'k',
+      uploadedBy: USER_ID,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  }
+
+  it('enqueues an image_post_process message after a successful photo attach', async () => {
+    const fileRepo = new InMemoryFileRepository();
+    const photoRepo = new InMemoryJobPhotoRepository();
+    const queue = new FakeQueue();
+    const service = new JobPhotoService(
+      photoRepo,
+      fileRepo,
+      new FakeStorageProvider(),
+      undefined,
+      queue
+    );
+    const file = await seedFile(fileRepo);
+
+    await service.attachPhotoToJob(TENANT, JOB_ID, file.id, 'before', undefined, undefined, USER_ID);
+
+    expect(queue.sent).toHaveLength(1);
+    expect(queue.sent[0].type).toBe('image_post_process');
+    expect(queue.sent[0].payload).toEqual({ tenantId: TENANT, fileId: file.id });
+    expect(queue.sent[0].idempotencyKey).toBe(`image_post_process:${file.id}`);
+  });
+
+  it('photo attach succeeds even when the enqueue fails (failure-isolated)', async () => {
+    const fileRepo = new InMemoryFileRepository();
+    const photoRepo = new InMemoryJobPhotoRepository();
+    const service = new JobPhotoService(
+      photoRepo,
+      fileRepo,
+      new FakeStorageProvider(),
+      undefined,
+      new FakeQueue({ fail: true })
+    );
+    const file = await seedFile(fileRepo);
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const photo = await service.attachPhotoToJob(
+        TENANT, JOB_ID, file.id, 'before', undefined, undefined, USER_ID
+      );
+      expect(photo.id).toBeTruthy();
+      expect(await photoRepo.findById(TENANT, photo.id)).not.toBeNull();
       expect(errorSpy).toHaveBeenCalled();
     } finally {
       errorSpy.mockRestore();

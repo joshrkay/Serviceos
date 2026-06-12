@@ -69,6 +69,22 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
       expect(src).toMatch(/if\s*\(shuttingDown\)\s*return/);
     });
 
+    it('unified poll loop has an in-flight guard (pollInFlight flag + try/finally)', () => {
+      // Guard prevents unbounded concurrency when image workers hold large
+      // in-memory buffers across slow 250ms ticks.
+      expect(src).toMatch(/let\s+pollInFlight\s*=\s*false/);
+      expect(src).toMatch(/if\s*\(pollInFlight\)\s*return/);
+      expect(src).toMatch(/pollInFlight\s*=\s*true/);
+      // The flag must be reset inside a finally block so exceptions don't
+      // permanently lock out further ticks.
+      const setTrueIdx = src.indexOf('pollInFlight = true;');
+      const finallyIdx = src.indexOf('} finally {', setTrueIdx);
+      const resetIdx = src.indexOf('pollInFlight = false;', finallyIdx);
+      expect(setTrueIdx).toBeGreaterThan(-1);
+      expect(finallyIdx).toBeGreaterThan(setTrueIdx);
+      expect(resetIdx).toBeGreaterThan(finallyIdx);
+    });
+
     it('tenant-wide sweeps are wrapped in runAsLeader with a pg advisory lock', () => {
       expect(src).toMatch(/pg_try_advisory_lock/);
       expect(src).toMatch(/pg_advisory_unlock/);
