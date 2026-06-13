@@ -1,12 +1,25 @@
-# Competitive analysis — feature parity with ServiceTitan & Jobber
+# Competitive analysis — expansion-suite feature backlog (deferred)
 
-**Last revised:** 2026-05-31
-**Framing:** "Win the ICP, AI-first." Keep the owner-operator focus from
-`docs/PRD.md` v2.0. Match the *table-stakes* field-service features the
-smallest Jobber customers expect — scheduling, payments, reviews,
-memberships — delivered the AI/SMS way. We do **not** chase ServiceTitan's
-enterprise surface (multi-location dispatch ops, warehouse inventory,
-payroll, marketing automation); those are explicit anti-personas in the PRD.
+> **⚠️ Superseded as positioning (2026-06-13).** The authoritative competitive
+> positioning is now **`docs/PRD-launch-v1.md` §10**, and the post-launch
+> sequencing is **§12 (Phased roadmap)**. The launch thesis is **run-by-text +
+> collect** — an AI that runs the office so the owner never opens the app — and
+> it **explicitly rejects feature parity as the strategy**: "the day we add the
+> suite to win the comparison, we forfeit the category and become a worse
+> Jobber." This document's original *"match table-stakes FSM features to win the
+> ICP"* framing therefore no longer drives launch. **It is retained only as the
+> deferred Phase-3 "expansion suite" backlog** — the menu we draw from *after*
+> the wedge is won, and only as the PRD's expansion story, never the launch one.
+> Treat the Top 10 below as a researched feature catalog (still-useful, with
+> verified build state), not a roadmap. When in doubt, the PRD wins.
+
+**Last revised:** 2026-05-31 · **Re-scoped to expansion backlog:** 2026-06-13
+**Original framing (historical):** "Win the ICP, AI-first." Match the
+*table-stakes* field-service features the smallest Jobber customers expect —
+scheduling, payments, reviews, memberships — delivered the AI/SMS way; do
+**not** chase ServiceTitan's enterprise surface (multi-location dispatch,
+warehouse inventory, payroll, marketing automation). This framing is preserved
+for context but is **subordinate to PRD §10/§12** — see the banner above.
 
 ## ⚠️ Verification correction (2026-05-31)
 
@@ -72,7 +85,14 @@ delivery**, plus a set of **launch-readiness blockers** that undermine trust
 
 ---
 
-## The Top 10 (prioritized)
+## The Top 10 (expansion backlog — NOT launch scope)
+
+> These are **deferred expansion-suite candidates**, drawn on only after the
+> run-by-text wedge is won (PRD §12 Phase 3). They do **not** gate launch, and
+> none of them is a reason to make the owner open the app. The build-state
+> verifications below remain accurate and useful; the *prioritization* is
+> historical and is superseded by the PRD's P0 set (text-approval spine →
+> collections → HFCR metric → reliability gates).
 
 ### Tier A — Trust & money integrity (codebase)
 
@@ -156,10 +176,17 @@ QBO invoice/payment sync. **~4–5 days (QBO is the long pole).**
 
 ---
 
-## Sequencing recommendation
+## Sequencing recommendation (superseded — see PRD §9 critical path)
 
-Tier A (#1, #2) is the foundation — sequence those via `/dispatch-story`
-against the existing blocker remediation plans; nothing else is credible
-while money integrity is at risk. Tier B ships the customer-visible
-competitive wins, starting with online booking (#3, in progress). Tier C is
-the "RFP checkbox" depth that closes larger deals.
+> **Authoritative sequencing now lives in `docs/PRD-launch-v1.md` §9 (P0
+> critical path)**: text-approval spine → finish collections → HFCR metric →
+> reliability gates. The tiering below is retained as historical context for the
+> *expansion* phase only.
+
+Within the deferred expansion phase, the original recommendation was: Tier A
+(#1, #2) money-integrity foundation first; Tier B customer-visible wins
+(starting with online booking, #3); Tier C the "RFP checkbox" depth that closes
+larger deals. Several Tier A blockers have since been resolved (see the
+verification block above and PRD §10/Appendix for current build state). Revisit
+this list only when planning Phase 3 expansion — and even then, every item is
+judged against the wedge: *more hands-free dollars, never more screens.*

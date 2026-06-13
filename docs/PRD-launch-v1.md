@@ -576,6 +576,8 @@ Once the text spine (Epic 0) and persisted outcomes (Epic 1) are live, the `prop
 ### Phase 3 — Suite expansion as the EXPANSION story only (later, gated)
 Only after the wedge is proven (HFCR-positive retention, §6) do we consider adjacent capability — and only where it *deepens hands-free dollars*, never where it adds a screen the owner must live in. Candidate adjacencies are evaluated against one test: *does it raise HFCR without making the owner operate software?* Anything that fails that test is out, permanently. This is the one place "more surface" is allowed, and it is a month-12+ motion, not a launch hedge.
 
+> **Phase 3 feature backlog:** the researched menu of expansion-suite candidates (tiered estimates, memberships engine, unified inbox, payments depth, QBO sync, etc. — each with verified current build-state) lives in **`docs/competitive-analysis.md`**, which is subordinate to this PRD: it is the *deferred expansion catalog*, not a launch roadmap. Draw from it only when this Phase-3 test is satisfied.
+
 ### Later / maybe — the currently-dead/unwired surfaces, explicitly deferred
 These exist in code but are dead/one-way today and are deliberately **not** v1, sequenced here so no one mistakes them for near-term:
 
