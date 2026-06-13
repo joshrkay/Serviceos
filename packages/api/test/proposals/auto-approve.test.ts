@@ -309,6 +309,123 @@ describe('P12-004 — one-tap approve token (HMAC, single-use, TTL)', () => {
   });
 });
 
+describe('Track-E — one-tap confirm flag (defense-in-depth for non-capture)', () => {
+  it('mints a confirm-flagged approve token that verifies with confirm: true', async () => {
+    const { token } = createOneTapApproveToken({
+      proposalId: 'p-money',
+      tenantId: 'tenant-1',
+      secret: SECRET,
+      confirm: true,
+    });
+    const result = await verifyOneTapApproveToken({
+      token,
+      secret: SECRET,
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      action: 'approve',
+      proposalId: 'p-money',
+      confirm: true,
+    });
+  });
+
+  it('a default approve token carries no confirm flag (legacy result shape preserved)', async () => {
+    const { token } = createOneTapApproveToken({
+      proposalId: 'p-cap',
+      tenantId: 'tenant-1',
+      secret: SECRET,
+    });
+    const result = await verifyOneTapApproveToken({
+      token,
+      secret: SECRET,
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    // `confirm` is omitted entirely when unset — the legacy approve result.
+    expect(result).toEqual({
+      ok: true,
+      action: 'approve',
+      proposalId: 'p-cap',
+      tenantId: 'tenant-1',
+    });
+  });
+
+  it('routeUnsupervisedProposal threads confirmNonCapture into the minted token', async () => {
+    const audit = new InMemoryAuditRepository();
+    const sms: { to: string; body: string }[] = [];
+    const result = await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        sendSms: async (to: string, body: string) => {
+          sms.push({ to, body });
+        },
+        buildApproveUrl: (token: string) => `https://app.test/p/approve?token=${token}`,
+      },
+      {
+        tenantId: 'tenant-1',
+        proposalId: 'prop-money',
+        channel: 'voice_inbound',
+        ownerPhone: '+15555550100',
+        routing: 'queue_and_sms',
+        summaryText: 'Refund $99',
+        renderSmsBody: (url: string) => `Approve refund: ${url}`,
+        confirmNonCapture: true,
+      },
+    );
+    expect(result.smsSent).toBe(true);
+    const match = sms[0].body.match(/token=([A-Za-z0-9._-]+)/);
+    expect(match).toBeTruthy();
+    const verified = await verifyOneTapApproveToken({
+      token: match![1],
+      secret: SECRET,
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(verified).toMatchObject({
+      ok: true,
+      action: 'approve',
+      proposalId: 'prop-money',
+      confirm: true,
+    });
+  });
+
+  it('routeUnsupervisedProposal without confirmNonCapture mints a plain (non-confirm) token', async () => {
+    const audit = new InMemoryAuditRepository();
+    const sms: { to: string; body: string }[] = [];
+    await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        sendSms: async (to: string, body: string) => {
+          sms.push({ to, body });
+        },
+        buildApproveUrl: (token: string) => `https://app.test/p/approve?token=${token}`,
+      },
+      {
+        tenantId: 'tenant-1',
+        proposalId: 'prop-cap',
+        channel: 'voice_inbound',
+        ownerPhone: '+15555550100',
+        routing: 'queue_and_sms',
+        summaryText: 'New booking',
+        renderSmsBody: (url: string) => `Approve booking: ${url}`,
+      },
+    );
+    const match = sms[0].body.match(/token=([A-Za-z0-9._-]+)/);
+    const verified = await verifyOneTapApproveToken({
+      token: match![1],
+      secret: SECRET,
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(verified).toEqual({
+      ok: true,
+      action: 'approve',
+      proposalId: 'prop-cap',
+      tenantId: 'tenant-1',
+    });
+  });
+});
+
 describe('P12-004 — routeUnsupervisedProposal', () => {
   const base = {
     tenantId: 'tenant-1',
