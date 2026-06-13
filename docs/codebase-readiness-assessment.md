@@ -1,5 +1,23 @@
 # ServiceOS — Codebase Readiness Assessment
 
+> **⚠️ Subordinate / gap framing corrected (2026-06-13).** For launch scope,
+> positioning, and sequencing, the authoritative document is
+> **`docs/PRD-launch-v1.md`**; the authoritative completed/bug-free feature
+> record is **`docs/feature-status-ledger.md`**. Two corrections from the ledger
+> apply to this assessment: **(1)** its "remaining gap = Phase 8 calling agent +
+> voice-provider upgrades + UI polish" framing is **wrong** (ledger correction
+> #3) — the verified launch-blocking gaps are the **dead owner-SMS channel**
+> (no reply-to-approve handler `app.ts:661-662`; no proactive owner-SMS sender
+> `proposals/proposal.ts`) and the **dead collections tail**
+> (`invoices/dunning-schedule.ts:35`, `invoices/late-fee.ts:47`, both
+> zero-caller), which this doc omits; **(2)** it lists **QuickBooks** as merely a
+> "deferred" P7 integration, but per the ledger (correction #5) it is a **live
+> UI mock that fakes a successful connection** (`components/settings/
+> QuickBooksModal.tsx:25` setTimeout, `:143` fake "#8821 QBO ID") — a demo
+> credibility landmine to hide, not a checkbox to schedule. The Phase-8 calling
+> agent is post-wedge expansion (PRD §12), not a launch blocker. When in doubt,
+> the PRD and the ledger win.
+
 ## Context
 
 Full audit of the ServiceOS codebase against the PRD, all 184 user stories
@@ -37,6 +55,15 @@ customer calling agent)**, **production-grade voice provider upgrades**
 domain knowledge** in agent prompts, and a finite list of UI polish items
 (13 settings stubs, conflict badges, post-execution refresh).
 
+> **(corrected 2026-06-13: this is the wrong gap.)** Per
+> `docs/feature-status-ledger.md` (correction #3), Phase 8 + voice upgrades +
+> UI polish are **not** the launch-blocking work. The verified launch gaps are
+> the **dead owner-SMS channel** (no reply-to-approve handler `app.ts:661-662`;
+> no proactive owner-SMS sender `proposals/proposal.ts`) and the **dead
+> collections tail** (`invoices/dunning-schedule.ts:35`, `invoices/late-fee.ts:47`,
+> both zero-caller) — the launch headline (PRD Epics 0/2). Phase 8 is post-wedge
+> expansion (PRD §12).
+
 ---
 
 ## Story Completion by Phase
@@ -50,7 +77,7 @@ domain knowledge** in agent prompts, and a finite list of UI polish items
 | **P4 — Vertical Packs + Estimate Intelligence** | 26 | 26/26 | 26/26 | — |
 | **P5 — Invoice Intelligence + Payments** | 29 | 28/29 | ~26/29 | invoice delivery notif |
 | **P6 — Dispatch Board + Scheduling** | 27 | 24/27 | ~20/27 | conflict badges, refresh |
-| **P7 — Integrations + Beta Hardening** | 18 | 8/18 | ~5/18 | QuickBooks, Zapier, runbook |
+| **P7 — Integrations + Beta Hardening** | 18 | 8/18 | ~5/18 | QuickBooks (see note), Zapier, runbook |
 | **P8 — Customer Calling Agent (new)** | 14 | 13/14 | ~12/14 | hardening + Tier 3 prompt work |
 | **TOTAL** | **198** | **183/198** | **~164/198** | **~34** |
 
@@ -174,7 +201,7 @@ it knows home services. From `remaining-features.md` §3.
 | Production smoke-test script (P7-023) | Manual today; needs `npm run smoke-test`. |
 | Load test (P7-025) | 50-concurrent-user simulation against staging. |
 | 8 `as any` escapes (P7-024) | Catalogued; cosmetic. |
-| Original P7 integrations (~10 stories) | QuickBooks sync, Zapier, support tooling, feature flags UI, degraded mode, backup/recovery, launch checklist. |
+| Original P7 integrations (~10 stories) | QuickBooks sync, Zapier, support tooling, feature flags UI, degraded mode, backup/recovery, launch checklist. **(corrected 2026-06-13: QuickBooks is not merely "deferred" — it is a *live UI mock* faking a successful connect, `components/settings/QuickBooksModal.tsx:25` setTimeout + `:143` fake "#8821 QBO ID"; ledger correction #5. A demo landmine to hide behind a flag, not just a backlog item.)** |
 
 ### Tier 6 — Edge cases (non-blocking)
 

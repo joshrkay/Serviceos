@@ -1,8 +1,24 @@
 # AI Service OS — Product Requirements Document
 
+> **⚠️ Subordinate for LAUNCH (2026-06-13).** For the launch thesis, scope,
+> positioning, and sequencing, the authoritative document is now
+> **`docs/PRD-launch-v1.md`** ("run-by-text + collect"). This v2.0 PRD remains
+> the **broader product/domain requirements reference** — personas, entity
+> model, the full feature surface — but it is **subordinate to the launch PRD
+> for any launch decision**. The authoritative record of what is **completed &
+> bug-free** (vs. partial / buggy / stub / dead) is
+> **`docs/feature-status-ledger.md`** (file:line-cited at HEAD, build gate
+> PASS). Where this doc and either of those disagree, **they win**. The "v2.0
+> supersedes v1 / canonical" line below is softened accordingly: it supersedes
+> the *old story-level v1 execution catalog*, **not** the launch PRD.
+
 **Version**: 2.0
-**Status**: Canonical product reference (supersedes v1)
-**Last revised**: 2026-05-17
+**Status**: Broad product/domain requirements reference. Supersedes the prior
+v1 *execution catalog* (`docs/PRD-execution-catalog.md`) for product strategy,
+but is **subordinate to `docs/PRD-launch-v1.md` for launch thesis, scope,
+positioning, and sequencing**, and to `docs/feature-status-ledger.md` for
+the verified completed/bug-free feature record.
+**Last revised**: 2026-05-17 · **Subordinated to launch PRD**: 2026-06-13
 **Owner**: Product
 
 ---
@@ -25,9 +41,13 @@ engineering, design, sales, support, and leadership.
 - `CLAUDE.md` — the persistent agent context (locked patterns, allowed
   files, build verification rules).
 
-**When this doc and v1 disagree, this doc wins.** Stories from v1 that
-are not contradicted here are still in effect; stories explicitly
-amended or replaced here override v1.
+**When this doc and the v1 *execution catalog* disagree, this doc wins.**
+Stories from that catalog not contradicted here are still in effect; stories
+explicitly amended or replaced here override it. **(corrected 2026-06-13: this
+precedence is scoped to the old execution catalog only. For the LAUNCH thesis,
+scope, positioning, and sequencing, `docs/PRD-launch-v1.md` governs and this
+doc is subordinate; for the verified completed/bug-free feature record,
+`docs/feature-status-ledger.md` governs.)**
 
 **Versioning rule**: This PRD is bumped (1.0 → 2.0 → 3.0) when product
 strategy changes. It is the artifact that boards, designers, and new hires

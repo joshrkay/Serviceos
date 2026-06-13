@@ -1,5 +1,19 @@
 # ServiceOS — Codebase Review (2026-05-31)
 
+> **⚠️ Subordinate + two seams now closed (2026-06-13).** For launch scope,
+> positioning, and sequencing, the authoritative document is
+> **`docs/PRD-launch-v1.md`**; the authoritative completed/bug-free feature
+> record is **`docs/feature-status-ledger.md`**. Two of this review's flagged
+> seams are now **resolved at HEAD** and are corrected in place below:
+> **(1)** webhook idempotency is no longer "in-memory (multi-instance hole)" —
+> it is a **durable, fail-closed** idempotency store in prod
+> (`webhooks/routes.ts:168-171,187-194`; the in-memory repo is the dev fallback
+> only), now COMPLETED & BUG-FREE per ledger §1 / correction #1; and **(2)** the
+> RLS count "74 ENABLE + 73 FORCE" is stale — at HEAD it is **78 ENABLE / 78
+> FORCE** raw lines, **~75/75 distinct-table parity with zero mismatch**
+> (`db/schema.ts`; ledger correction #2). When in doubt, the PRD and the ledger
+> win.
+
 Full-repo review of the canonical product (`packages/api`, `packages/web`,
 `packages/shared`) plus a targeted refactor of the highest-leverage debt.
 Conducted with four parallel deep-dive passes (build/test health, backend
@@ -31,7 +45,10 @@ build or the test suite.
   `...Cents`. A single shared `billing-engine.ts` owns document totals and is
   imported by every estimate/invoice path.
 - **Multi-tenant isolation is a strength.** `schema.ts` declares **74 ENABLE
-  + 73 FORCE ROW LEVEL SECURITY + 83 CREATE POLICY**, applied at boot by the
+  + 73 FORCE ROW LEVEL SECURITY + 83 CREATE POLICY** *(corrected 2026-06-13:
+  stale count — at HEAD it is **78 ENABLE / 78 FORCE** raw lines, **~75/75
+  distinct-table parity with zero mismatch**; the asymmetric "74/73" no longer
+  holds and FORCE parity is complete; ledger correction #2)*, applied at boot by the
   migrate step; Pg repos run tenant-scoped through `PgBaseRepository`
   (GUC set + reset, fail-closed). The production wiring **crashes fast** if
   `DATABASE_URL` is missing in prod/staging (`app.ts:732`), so the in-memory
@@ -70,8 +87,13 @@ build or the test suite.
    (test-only — `tsc -p tsconfig.build.json` excludes them, deploy unaffected).
 6. **A few correctness seams:** `StubSkillMatcher` + in-memory-only
    availability ships in prod (scheduling conflict warnings silently
-   degraded); webhook idempotency store and the idempotency middleware are
-   in-memory (multi-instance hole); outbound voice has a TODO'd TCPA/DNC gate.
+   degraded); ~~webhook idempotency store and the idempotency middleware are
+   in-memory (multi-instance hole)~~ *(corrected 2026-06-13: **now fixed** —
+   webhook dedup is a **durable, fail-closed** idempotency store in prod,
+   `webhooks/routes.ts:168-171,187-194`; the in-memory repo is the dev fallback
+   only. This seam is closed and the feature is COMPLETED & BUG-FREE per
+   `docs/feature-status-ledger.md` §1 / correction #1)*; outbound voice has a
+   TODO'd TCPA/DNC gate.
    These are tracked in `GO-LIVE-READINESS.md` / `BLOCKER-REMEDIATION-PLANS.md`.
 
 ## Doc accuracy note

@@ -1,5 +1,27 @@
 # Pre-Launch Hardening — Status Report + Dispatch List
 
+> **⚠️ Subordinate / many items now resolved (2026-06-13).** This hardening
+> sweep is **subordinate to `docs/PRD-launch-v1.md` §8 Epic 5 (Trust /
+> reliability launch gates, P0)** — the authoritative, current statement of the
+> launch trust/reliability gates (green CI, prod secrets, prod migration +
+> RLS-FORCE verification, money-render fix, `/ready` 503 on DB outage, two-tenant
+> isolation proof, webhook-replay drill). For launch scope, positioning, and
+> sequencing the authoritative document is **`docs/PRD-launch-v1.md`**; the
+> authoritative record of what is **completed & bug-free** is
+> **`docs/feature-status-ledger.md`**. **Many of the Tier 1–5 / D-day items
+> below are now resolved at HEAD** per the ledger — e.g. webhook idempotency is
+> now a **durable, fail-closed** store in prod (ledger §1 / correction #1,
+> `webhooks/routes.ts:168-171,187-194`), and RLS is at **~75/75 distinct-table
+> parity, zero mismatch** (ledger correction #2). Read this doc as a historical
+> cutover dispatch list, not current state; for the live trust/reliability
+> picture see **PRD-launch-v1.md §8 Epic 5** and **feature-status-ledger.md**.
+> Note also that the ledger's verified **launch-blocking** gaps — the dead
+> owner-SMS channel (no reply-to-approve handler `app.ts:661-662`; no proactive
+> owner-SMS sender `proposals/proposal.ts`) and the dead collections tail
+> (`invoices/dunning-schedule.ts:35`, `invoices/late-fee.ts:47`) — are **not** in
+> this doc's Tier list; they are PRD Epics 0/2. When in doubt, the PRD and the
+> ledger win.
+
 **Date:** 2026-05-16
 **Branch of record:** `claude/codebase-review-status-1nFGz`
 **Cutover target:** This week (Day 7 = Fri 2026-05-22)

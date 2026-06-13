@@ -1,6 +1,28 @@
 # Remaining Features
 
-*Last updated: 2026-04-29*
+> **⚠️ Subordinate / stale ranking corrected (2026-06-13).** For launch scope,
+> positioning, and sequencing, the authoritative document is
+> **`docs/PRD-launch-v1.md`** ("run-by-text + collect"; P0 critical path §9,
+> roadmap §12). The authoritative record of what is **completed & bug-free** is
+> **`docs/feature-status-ledger.md`**. This doc's "Shipped" + Phase-8 framing
+> **mis-ranks the real launch gaps** (ledger correction #4): it elevates
+> voice-provider upgrades (Deepgram/ElevenLabs) — which are **non-blocking
+> latency polish** — while omitting the launch-critical dead wires and a money
+> bug. **The actual launch-blocking gaps** are: the **owner's SMS channel**
+> (no reply-to-approve handler, `sms/inbound-dispatch.ts`/`app.ts:661-662`; no
+> proactive owner-SMS sender, `proposals/proposal.ts`); the **dead collections
+> tail** (multi-step dunning `invoices/dunning-schedule.ts:35`, late-fee math
+> `invoices/late-fee.ts:47`, both zero-caller); and the **9-site cents-render
+> bug** in `components/invoices/InvoicesPage.tsx:256…868`. None of these appear
+> in the lists below. Conversely, the ledger's **20 completed-&-bug-free
+> features** (proposal engine, mode-aware approve gate + unsupervised
+> hard-block, 5s undo, advisory-lock idempotency, in-call voice agent, Stripe
+> pay + webhook reconciliation, RLS-FORCE, encrypted transcripts, public
+> booking, tiered estimates, on-my-way/ETA, proactive reviews, onboarding) are
+> **DONE** — do not treat them as "to build." When in doubt, the PRD and the
+> ledger win.
+
+*Last updated: 2026-04-29 · Subordinated + ranking corrected: 2026-06-13*
 
 ## Shipped (this sprint)
 
@@ -17,6 +39,12 @@
 ---
 
 ## 1 — Voice Provider Upgrades
+
+> **(corrected 2026-06-13: not a launch priority.)** Per
+> `docs/feature-status-ledger.md` (correction #4) these streaming upgrades are
+> **non-blocking latency polish**, not the top of the queue. The launch-critical
+> work is the owner's SMS channel and the collections tail (see banner).
+> Treat §1 as post-launch latency tuning, subordinate to PRD §9.
 
 Before dispatching Phase 8, wire two provider additions into the existing pluggable interfaces. Both are isolated — no state machine changes.
 
