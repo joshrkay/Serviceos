@@ -3,7 +3,7 @@
 **Author:** Founder / Product Engineering
 **Date:** 2026-06-13
 **Status:** Draft for review
-**Ground truth:** `/home/user/Serviceos/docs/_state-map.md` (verified current-state audit, HEAD `db0dc31`) and `/home/user/Serviceos/docs/_strategy.md` (product strategy). Every current-state claim below carries a **[WIRED]** / **[EXISTS-UNVERIFIED]** / **[STUB]** tag and a `file:line` cite drawn from the state map.
+**Ground truth:** a file-level current-state audit of the canonical product (`packages/api`, `packages/web`, `packages/shared`) at HEAD `db0dc31`, build gate **PASS**. Every current-state claim below carries a **[WIRED]** / **[EXISTS-UNVERIFIED]** / **[STUB]** tag and a `file:line` cite; the citation appendix at the end of this document is the self-contained record.
 
 > **Tag legend.** **[WIRED]** = traced end-to-end, reachable in prod · **[EXISTS-UNVERIFIED]** = exists, wiring unconfirmed · **[STUB]** = placeholder / mock / dead code (defined but unreachable). The full citation appendix is at the end of this document.
 
@@ -687,7 +687,7 @@ Epics 1, 4, 7 (P1) are launch-adjacent: pricing and the autonomy ladder can foll
 
 ## Appendix — Verified current-state map (citations)
 
-Summarized from `/home/user/Serviceos/docs/_state-map.md` (HEAD `db0dc31`, audit 2026-06-13). Build gate **PASS** (exit 0): `cd packages/api && npx tsc --project tsconfig.build.json --noEmit`.
+File-level audit at HEAD `db0dc31` (2026-06-13). Build gate **PASS** (exit 0): `cd packages/api && npx tsc --project tsconfig.build.json --noEmit`.
 
 **WIRED (real, reachable in prod):**
 - Web approval single + batch ≤50 — `routes/proposals.ts:211-232`, `:187-209`, cap `:36`; `proposals/actions.ts`; `web/.../InboxPage.tsx`.
