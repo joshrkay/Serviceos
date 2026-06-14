@@ -4479,6 +4479,26 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_customers_parent_account
       ON customers(tenant_id, parent_account_id) WHERE parent_account_id IS NOT NULL;
   `,
+
+  // U5 (ACH async lifecycle) — durable IN-FLIGHT payment state. ACH /
+  // us_bank_account debits settle asynchronously: Stripe fires
+  // `payment_intent.processing` on initiation (we record status='processing'
+  // and credit the invoice in-flight), then `payment_intent.succeeded` on
+  // settlement (flip -> 'completed') or `payment_intent.payment_failed` /
+  // an ACH return (reverse the credit + reopen the invoice). The status
+  // column's CHECK already allows 'processing' (migration 026), but we
+  // RE-ASSERT it here idempotently so the in-flight state is guaranteed
+  // durable on any database whose 026 predated the value — recording a
+  // 'processing' payment would otherwise violate a stale CHECK and corrupt
+  // ACH accounting silently. Also adds a partial index on in-flight rows so
+  // settlement reconciliation / "money on the way" lookups stay cheap.
+  '179_ach_payment_processing_state': `
+    ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_status_check;
+    ALTER TABLE payments ADD CONSTRAINT payments_status_check
+      CHECK (status IN ('pending', 'processing', 'completed', 'failed', 'refunded'));
+    CREATE INDEX IF NOT EXISTS idx_payments_processing
+      ON payments(tenant_id, status) WHERE status = 'processing';
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
