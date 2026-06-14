@@ -50,6 +50,9 @@ README explaining why):
 - Mobile/public UI changes: ≥44px tap targets (min-h-11), no horizontal
   overflow at 320px. Pin with a jsdom class-contract test + a Playwright
   viewport test (pattern: e2e/estimate-approval-mobile.spec.ts).
+- Prior learnings live in `docs/solutions/` (categorized; frontmatter
+  `module`/`tags`/`problem_type`) — relevant to grep before debugging or
+  implementing in a documented area, so fixes compound instead of repeating.
 
 ## Story Execution Rules
 - Only modify files listed in "Allowed files/modules"
