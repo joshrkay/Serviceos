@@ -257,6 +257,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['174_service_agreements_member_discount', '06383ea2c1d89c9e3ac39411a2c2469b4146255d18106f27d949a788dd7e83bf'],
   ['175_service_agreements_priority_booking', '60fee2029f69335f9adafb133c3ae61b71cb11868e523c426fffd43845f6b9da'],
   ['176_customer_payment_methods', '6fe12975c7999002a67de1722a402a6bd017d0e8db4c84fd70d2d85dad439890'],
+  ['177_digest_entries', '8ebc2dc5b5c449bf7b94f2c6a11a17af2c91092e0fff24bdf6e824f0f1af21ac'],
 ];
 
 function hashMigration(value: string): string {

@@ -4412,6 +4412,29 @@ export const MIGRATIONS = {
     ALTER TABLE service_agreements
       ADD COLUMN IF NOT EXISTS auto_collect_dues BOOLEAN NOT NULL DEFAULT FALSE;
   `,
+
+  // P5-020: end-of-day digest entries with delivery tracking and owner reply.
+  '177_digest_entries': `
+    CREATE TABLE IF NOT EXISTS digest_entries (
+      id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id     UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      date          DATE NOT NULL,
+      status        TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending','delivered','failed','acked')),
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      rendered_text TEXT NOT NULL,
+      source_data   JSONB NOT NULL DEFAULT '{}',
+      delivered_at  TIMESTAMPTZ,
+      owner_reply   TEXT,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, date)
+    );
+    ALTER TABLE digest_entries ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE digest_entries FORCE ROW LEVEL SECURITY;
+    CREATE POLICY digest_entries_tenant_isolation ON digest_entries
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
