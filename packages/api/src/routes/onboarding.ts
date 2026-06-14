@@ -16,7 +16,10 @@ import {
   PackPickInputSchema,
   VoiceConfigInputSchema,
   CalendarChoiceInputSchema,
+  PhoneAvailableInputSchema,
+  PhoneClaimInputSchema,
 } from '../onboarding/contracts';
+import { searchAvailableNumbers } from '../integrations/twilio/provisioning';
 import { saveVoiceConfig } from '../voice/voice-config';
 import { VOICE_PRESETS } from '../integrations/vapi/assistant-config';
 import { getVapiClient, type VapiClient } from '../integrations/vapi/client';
@@ -627,6 +630,49 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         res.status(500).json({
           error: 'PHONE_RETRY_FAILED',
           message: error instanceof Error ? error.message : 'Failed to retry phone provisioning',
+        });
+      }
+    },
+  );
+
+  // Number picker — list purchasable numbers for an area code. Read-only:
+  // searches Twilio on the MASTER account (no subaccount needed yet), so the
+  // picker works before provisioning creates the tenant's subaccount. The
+  // actual (costly) purchase stays server-side in the worker (/phone/claim).
+  router.post(
+    '/phone/available',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const parsed = PhoneAvailableInputSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: 'INVALID_AREA_CODE',
+            message: parsed.error.issues[0]?.message ?? 'Invalid area code',
+          });
+          return;
+        }
+        const masterSid = process.env.TWILIO_ACCOUNT_SID;
+        const masterToken = process.env.TWILIO_AUTH_TOKEN;
+        if (!masterSid || !masterToken) {
+          // Twilio unconfigured (e.g. local dev) — the picker UI falls back to
+          // "let us pick a number for you" (the existing region-based retry).
+          res.status(503).json({
+            error: 'TWILIO_NOT_CONFIGURED',
+            message: 'Phone number search is not available',
+          });
+          return;
+        }
+        const numbers = await searchAvailableNumbers(masterSid, masterToken, {
+          areaCode: parsed.data.areaCode,
+          limit: parsed.data.limit ?? 10,
+        });
+        res.json({ numbers });
+      } catch (error: unknown) {
+        res.status(502).json({
+          error: 'PHONE_SEARCH_FAILED',
+          message: error instanceof Error ? error.message : 'Failed to search available numbers',
         });
       }
     },

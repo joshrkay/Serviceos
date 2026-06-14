@@ -61,6 +61,21 @@ export const CalendarChoiceInputSchema = z.object({
 });
 export type CalendarChoiceInput = z.infer<typeof CalendarChoiceInputSchema>;
 
+// Number picker — area-code search for purchasable numbers. A NANP area code
+// is exactly 3 digits; `limit` caps how many candidates to show.
+export const PhoneAvailableInputSchema = z.object({
+  areaCode: z.string().regex(/^\d{3}$/, 'expected a 3-digit area code'),
+  limit: z.number().int().min(1).max(20).optional(),
+});
+export type PhoneAvailableInput = z.infer<typeof PhoneAvailableInputSchema>;
+
+// Number picker — claim a specific number the tradesperson chose from the
+// search results. E.164 (+1 + 10 digits for US/Canada).
+export const PhoneClaimInputSchema = z.object({
+  phoneNumber: z.string().regex(/^\+1\d{10}$/, 'expected an E.164 US/Canada number'),
+});
+export type PhoneClaimInput = z.infer<typeof PhoneClaimInputSchema>;
+
 export const OnboardingStepIdSchema = z.enum(['signup', 'identity', 'pack', 'phone', 'billing', 'ai_check', 'test_call']);
 export type OnboardingStepId = z.infer<typeof OnboardingStepIdSchema>;
 
