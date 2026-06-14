@@ -4333,6 +4333,29 @@ export const MIGRATIONS = {
     ALTER TABLE oauth_states ADD CONSTRAINT oauth_states_provider_check
       CHECK (provider IN ('google', 'quickbooks', 'xero'));
   `,
+
+  // Membership engine (#6) — auto-renew on service_agreements. Additive ALTERs
+  // only: the runner re-executes every migration on every boot, so each
+  // statement is idempotent (ADD COLUMN IF NOT EXISTS, DROP+ADD the CHECK).
+  // renewal_term_months is the stable membership term the renewal sweep rolls
+  // ends_on forward by (positivity guarded here and in the Zod/service layer);
+  // renewal_count is an audit counter. The partial index backs findRenewable.
+  '173_service_agreements_auto_renew': `
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS auto_renew BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS renewal_term_months INTEGER;
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS renewal_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE service_agreements
+      DROP CONSTRAINT IF EXISTS chk_agreement_renewal_term_positive;
+    ALTER TABLE service_agreements
+      ADD CONSTRAINT chk_agreement_renewal_term_positive
+        CHECK (renewal_term_months IS NULL OR renewal_term_months > 0);
+    CREATE INDEX IF NOT EXISTS idx_agreements_auto_renew
+      ON service_agreements (tenant_id, ends_on)
+      WHERE auto_renew = TRUE AND status = 'active';
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

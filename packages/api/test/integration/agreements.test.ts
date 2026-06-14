@@ -153,4 +153,110 @@ describe('Postgres integration — service agreements', () => {
       expect(await repo.update(tenant.tenantId, crypto.randomUUID(), { status: 'cancelled' })).toBeNull();
     });
   });
+
+  // Membership engine (#6) — migration 173 columns + the findRenewable query.
+  // Pins the REAL column names/types and the CHECK constraint, since the
+  // in-memory repo can't prove the SQL matches the schema.
+  describe('auto-renew columns + findRenewable', () => {
+    let t: { tenantId: string; userId: string };
+    let cust: string;
+    const asOf = new Date('2026-06-01T00:00:00Z');
+
+    beforeAll(async () => {
+      t = await createTestTenant(pool);
+      cust = await createCustomer(pool, t.tenantId, t.userId);
+    });
+
+    it('round-trips auto_renew / renewal_term_months / renewal_count', async () => {
+      const created = await repo.create(
+        makeAgreement(t.tenantId, cust, t.userId, {
+          autoRenew: true,
+          renewalTermMonths: 12,
+          renewalCount: 0,
+          endsOn: '2027-01-01',
+        }),
+      );
+      const found = await repo.findById(t.tenantId, created.id);
+      expect(found!.autoRenew).toBe(true);
+      expect(found!.renewalTermMonths).toBe(12);
+      expect(typeof found!.renewalTermMonths).toBe('number');
+      expect(found!.renewalCount).toBe(0);
+    });
+
+    it('defaults the new columns for a plain agreement', async () => {
+      const created = await repo.create(makeAgreement(t.tenantId, cust, t.userId));
+      const found = await repo.findById(t.tenantId, created.id);
+      expect(found!.autoRenew).toBe(false);
+      expect(found!.renewalTermMonths).toBeUndefined();
+      expect(found!.renewalCount).toBe(0);
+    });
+
+    it('enforces the renewal_term_months > 0 CHECK constraint', async () => {
+      await expect(
+        repo.create(
+          makeAgreement(t.tenantId, cust, t.userId, {
+            autoRenew: true,
+            renewalTermMonths: 0,
+            endsOn: '2027-01-01',
+          }),
+        ),
+      ).rejects.toThrow();
+    });
+
+    it('findRenewable returns only active, auto-renew, lapsed-term agreements', async () => {
+      const rt = await createTestTenant(pool);
+      const rcust = await createCustomer(pool, rt.tenantId, rt.userId);
+      // Renewable: auto-renew, active, ends_on on/before asOf.
+      const renewable = await repo.create(
+        makeAgreement(rt.tenantId, rcust, rt.userId, {
+          autoRenew: true,
+          renewalTermMonths: 12,
+          endsOn: '2026-01-01',
+        }),
+      );
+      // Not renewable: term still in the future.
+      await repo.create(
+        makeAgreement(rt.tenantId, rcust, rt.userId, {
+          autoRenew: true,
+          renewalTermMonths: 12,
+          endsOn: '2027-01-01',
+        }),
+      );
+      // Not renewable: auto-renew off.
+      await repo.create(
+        makeAgreement(rt.tenantId, rcust, rt.userId, { autoRenew: false, endsOn: '2026-01-01' }),
+      );
+      // Not renewable: paused.
+      await repo.create(
+        makeAgreement(rt.tenantId, rcust, rt.userId, {
+          autoRenew: true,
+          renewalTermMonths: 12,
+          endsOn: '2026-01-01',
+          status: 'paused',
+        }),
+      );
+
+      const result = await repo.findRenewable(rt.tenantId, asOf);
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe(renewable.id);
+    });
+
+    it('persists a renewal update (ends_on advanced + renewal_count bumped)', async () => {
+      const created = await repo.create(
+        makeAgreement(t.tenantId, cust, t.userId, {
+          autoRenew: true,
+          renewalTermMonths: 12,
+          endsOn: '2026-01-01',
+          renewalCount: 0,
+        }),
+      );
+      const updated = await repo.update(t.tenantId, created.id, {
+        endsOn: '2027-01-01',
+        renewalCount: 1,
+      });
+      expect(updated!.endsOn).toBe('2027-01-01');
+      expect(updated!.renewalCount).toBe(1);
+      expect(updated!.autoRenew).toBe(true);
+    });
+  });
 });

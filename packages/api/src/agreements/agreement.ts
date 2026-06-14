@@ -22,6 +22,18 @@ export interface Agreement {
   /** Calendar dates (YYYY-MM-DD strings). Stored as DATE in Postgres. */
   startsOn: string;
   endsOn?: string;
+  /**
+   * Membership auto-renew. When true, the renewal sweep rolls `endsOn` forward
+   * by `renewalTermMonths` once the term lapses instead of letting the
+   * agreement silently stop. Optional in the domain because the DB columns
+   * carry defaults (false / 0) — the Pg repo and service always populate them;
+   * only legacy/in-memory rows omit them, correctly read as "no auto-renew".
+   */
+  autoRenew?: boolean;
+  /** Whole months the term extends by on each renewal. Required when autoRenew. */
+  renewalTermMonths?: number;
+  /** How many times the term has auto-renewed (audit counter). */
+  renewalCount?: number;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -40,6 +52,11 @@ export interface AgreementRepository {
   findByTenant(tenantId: string, options?: AgreementListOptions): Promise<Agreement[]>;
   /** Active agreements with next_run_at <= asOf. Used by runDueAgreements. */
   findDue(tenantId: string, asOf: Date): Promise<Agreement[]>;
+  /**
+   * Active, auto-renew agreements whose term (`ends_on`) has lapsed on/before
+   * asOf. Used by renewExpiringAgreements to roll the term forward.
+   */
+  findRenewable(tenantId: string, asOf: Date): Promise<Agreement[]>;
   update(tenantId: string, id: string, updates: Partial<Agreement>): Promise<Agreement | null>;
 }
 
@@ -75,6 +92,20 @@ export class InMemoryAgreementRepository implements AgreementRepository {
           a.status === 'active' &&
           a.nextRunAt.getTime() <= asOf.getTime() &&
           (!a.endsOn || a.endsOn >= asOf.toISOString().slice(0, 10)),
+      )
+      .map((a) => ({ ...a }));
+  }
+
+  async findRenewable(tenantId: string, asOf: Date): Promise<Agreement[]> {
+    const cutoff = asOf.toISOString().slice(0, 10);
+    return Array.from(this.rows.values())
+      .filter(
+        (a) =>
+          a.tenantId === tenantId &&
+          a.status === 'active' &&
+          a.autoRenew === true &&
+          a.endsOn !== undefined &&
+          a.endsOn <= cutoff,
       )
       .map((a) => ({ ...a }));
   }
