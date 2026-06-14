@@ -1,7 +1,9 @@
 import { Router, Request, Response } from 'express';
+import { z } from 'zod';
 import { AppConfig } from '../shared/config';
 import {
   verifyWebhookSignature,
+  verifyWebhookSignatureDetailed,
   handleWebhookEvent,
   InMemoryWebhookRepository,
   WebhookRepository,
@@ -42,6 +44,55 @@ import { dispatchInboundSms } from '../sms/inbound-dispatch';
 import { lookupDroppedCallSession } from '../telephony/dropped-call-session-bridge';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
+
+/**
+ * Stripe event envelope. We validate the envelope (id / type / data.object are
+ * present and well-typed) at the trust boundary instead of casting the raw
+ * `JSON.parse` result, so `event.data.object` can no longer be `undefined` when
+ * a per-type branch casts it (EC-17).
+ *
+ * Every classic ("snapshot") Stripe webhook — the only kind this handler reads,
+ * since each branch consumes `event.data.object` inline — always includes
+ * `data.object`, so this never rejects a real event (handled or unhandled). A
+ * signature-valid payload that is missing `data.object` is genuinely malformed:
+ * returning 400 (Stripe then retries / surfaces it) is the intended behavior,
+ * not the old silent 200. `.passthrough()` keeps extra Stripe fields (e.g.
+ * `account`, `previous_attributes`) the handler may read.
+ */
+const stripeEventEnvelopeSchema = z
+  .object({
+    id: z.string().min(1),
+    type: z.string().min(1),
+    data: z.object({ object: z.record(z.unknown()) }).passthrough(),
+  })
+  .passthrough();
+
+export type StripeEventEnvelope = z.infer<typeof stripeEventEnvelopeSchema>;
+
+export function parseStripeEventEnvelope(
+  rawBodyStr: string,
+): { ok: true; event: StripeEventEnvelope } | { ok: false; error: string } {
+  let json: unknown;
+  try {
+    json = JSON.parse(rawBodyStr);
+  } catch {
+    return { ok: false, error: 'Invalid JSON body' };
+  }
+  const result = stripeEventEnvelopeSchema.safeParse(json);
+  if (!result.success) {
+    return { ok: false, error: 'Invalid Stripe event payload' };
+  }
+  return { ok: true, event: result.data };
+}
+
+/**
+ * A short, non-sensitive prefix of a webhook signature header for debug logs —
+ * enough to correlate a delivery without logging the full HMAC.
+ */
+function signaturePrefix(signature: string | undefined): string | undefined {
+  if (!signature) return undefined;
+  return signature.length > 24 ? `${signature.slice(0, 24)}…` : signature;
+}
 
 /**
  * Best-effort mapping from a Stripe payment object to our domain
@@ -746,19 +797,29 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       ? req.body.toString('utf8')
       : (() => { throw new Error('Body pre-parsed; mount /webhooks/stripe before express.json()'); })();
 
-    // Re-use the existing verifyWebhookSignature() utility — handles timing-safe
-    // comparison and the 5-minute timestamp tolerance.
-    if (!verifyWebhookSignature(rawBodyStr, signatureHeader, secret)) {
-      logger.warn('Stripe webhook signature verification failed');
+    // Re-use the existing verifier — handles timing-safe comparison and the
+    // 5-minute timestamp tolerance. The detailed variant lets us log WHY it
+    // failed (stale-timestamp replay vs. forged signature) plus a non-sensitive
+    // signature prefix for correlation.
+    const sigCheck = verifyWebhookSignatureDetailed(rawBodyStr, signatureHeader, secret);
+    if (!sigCheck.ok) {
+      logger.warn('Stripe webhook signature verification failed', {
+        reason: sigCheck.reason,
+        signaturePrefix: signaturePrefix(signatureHeader),
+      });
       return res.status(401).json({ error: 'Invalid signature' });
     }
 
-    let event: { id: string; type: string; data: { object: Record<string, unknown> } };
-    try {
-      event = JSON.parse(rawBodyStr);
-    } catch {
-      return res.status(400).json({ error: 'Invalid JSON body' });
+    // Validate the event envelope at the trust boundary instead of casting the
+    // raw JSON.parse result.
+    const parsedEnvelope = parseStripeEventEnvelope(rawBodyStr);
+    if (!parsedEnvelope.ok) {
+      logger.warn('Stripe webhook rejected: invalid event payload', {
+        error: parsedEnvelope.error,
+      });
+      return res.status(400).json({ error: parsedEnvelope.error });
     }
+    const event = parsedEnvelope.event;
 
     // Idempotency guard: reject replays and concurrent deliveries of the same
     // Stripe event. webhookRepo is a module-level singleton so the dedup map

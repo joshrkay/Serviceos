@@ -2,16 +2,42 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { PublicInvoiceService } from '../invoices/public-invoice-service';
 import { toErrorResponse } from '../shared/errors';
+import { createLogger } from '../logging/logger';
 
+const logger = createLogger({
+  service: 'public-invoices',
+  environment: process.env.NODE_ENV || 'dev',
+});
+
+// Mirror the bounds the service layer enforces (public-invoice-service.ts) so a
+// malformed token is rejected at the route layer too, with a logged reason.
 const MIN_TOKEN_LENGTH = 16;
+const MAX_TOKEN_LENGTH = 512;
 
 const tokenGuard = (token: string | undefined, res: Response): boolean => {
-  if (!token || token.length < MIN_TOKEN_LENGTH) {
-    res.status(400).json({ error: 'INVALID_TOKEN', message: 'Token too short' });
+  if (!token || token.length < MIN_TOKEN_LENGTH || token.length > MAX_TOKEN_LENGTH) {
+    const reason = !token
+      ? 'missing'
+      : token.length < MIN_TOKEN_LENGTH
+        ? 'too_short'
+        : 'too_long';
+    logger.warn('Public invoice token rejected', { reason, length: token?.length ?? 0 });
+    res.status(400).json({ error: 'INVALID_TOKEN', message: 'Invalid token' });
     return false;
   }
   return true;
 };
+
+// Log the failure (5xx → error, expected 4xx → warn) before responding, so
+// route-layer errors aren't silent. The view token is capability-sensitive and
+// is never logged.
+function respondError(res: Response, err: unknown, op: string): void {
+  const { statusCode, body } = toErrorResponse(err);
+  const meta = { op, statusCode, error: err instanceof Error ? err.message : String(err) };
+  if (statusCode >= 500) logger.error('Public invoice request failed', meta);
+  else logger.warn('Public invoice request failed', meta);
+  res.status(statusCode).json(body);
+}
 
 export function createPublicInvoicesRouter(service: PublicInvoiceService): Router {
   const router = Router();
@@ -26,8 +52,7 @@ export function createPublicInvoicesRouter(service: PublicInvoiceService): Route
       const view = await service.getByToken(req.params.token);
       res.json(view);
     } catch (err) {
-      const { statusCode, body } = toErrorResponse(err);
-      res.status(statusCode).json(body);
+      respondError(res, err, 'getByToken');
     }
   });
 
@@ -41,8 +66,7 @@ export function createPublicInvoicesRouter(service: PublicInvoiceService): Route
       const result = await service.recordView(req.params.token);
       res.json(result);
     } catch (err) {
-      const { statusCode, body } = toErrorResponse(err);
-      res.status(statusCode).json(body);
+      respondError(res, err, 'recordView');
     }
   });
 
@@ -61,8 +85,7 @@ export function createPublicInvoicesRouter(service: PublicInvoiceService): Route
       const result = await service.getOrCreateCheckoutUrl(req.params.token);
       res.json(result);
     } catch (err) {
-      const { statusCode, body } = toErrorResponse(err);
-      res.status(statusCode).json(body);
+      respondError(res, err, 'getOrCreateCheckoutUrl');
     }
   });
 

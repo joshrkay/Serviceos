@@ -24,28 +24,48 @@ export interface WebhookRepository {
   updateStatus(id: string, status: WebhookEvent['status'], error?: string): Promise<void>;
 }
 
-export function verifyWebhookSignature(
+/**
+ * Why a signature verification failed. Lets callers log a distinct reason
+ * (e.g. a stale-timestamp replay vs. a genuinely forged signature) instead of
+ * one undifferentiated "verification failed" message.
+ */
+export type SignatureFailureReason =
+  | 'missing_input'
+  | 'malformed_header'
+  | 'malformed_timestamp'
+  | 'stale_timestamp'
+  | 'signature_mismatch';
+
+export type SignatureVerification =
+  | { ok: true }
+  | { ok: false; reason: SignatureFailureReason };
+
+/**
+ * Signature check that reports WHY it failed. `verifyWebhookSignature` below is
+ * the boolean wrapper for callers that don't need the reason.
+ */
+export function verifyWebhookSignatureDetailed(
   payload: string,
   signature: string,
   secret: string,
   toleranceSeconds: number = 300
-): boolean {
-  if (!payload || !signature || !secret) return false;
+): SignatureVerification {
+  if (!payload || !signature || !secret) return { ok: false, reason: 'missing_input' };
 
   const parts = signature.split(',');
   const timestampPart = parts.find((p) => p.startsWith('t='));
   const signaturePart = parts.find((p) => p.startsWith('v1='));
 
-  if (!timestampPart || !signaturePart) return false;
+  if (!timestampPart || !signaturePart) return { ok: false, reason: 'malformed_header' };
 
   const timestamp = parseInt(timestampPart.substring(2), 10);
-  if (isNaN(timestamp)) return false;
+  if (isNaN(timestamp)) return { ok: false, reason: 'malformed_timestamp' };
 
   const providedSig = signaturePart.substring(3);
-  if (!providedSig) return false;
+  if (!providedSig) return { ok: false, reason: 'malformed_header' };
 
   const now = Math.floor(Date.now() / 1000);
-  if (Math.abs(now - timestamp) > toleranceSeconds) return false;
+  if (Math.abs(now - timestamp) > toleranceSeconds) return { ok: false, reason: 'stale_timestamp' };
 
   const expectedSig = crypto
     .createHmac('sha256', secret)
@@ -55,11 +75,22 @@ export function verifyWebhookSignature(
   try {
     const providedBuf = Buffer.from(providedSig, 'hex');
     const expectedBuf = Buffer.from(expectedSig, 'hex');
-    if (providedBuf.length !== expectedBuf.length) return false;
-    return crypto.timingSafeEqual(providedBuf, expectedBuf);
+    if (providedBuf.length !== expectedBuf.length) return { ok: false, reason: 'signature_mismatch' };
+    return crypto.timingSafeEqual(providedBuf, expectedBuf)
+      ? { ok: true }
+      : { ok: false, reason: 'signature_mismatch' };
   } catch {
-    return false;
+    return { ok: false, reason: 'signature_mismatch' };
   }
+}
+
+export function verifyWebhookSignature(
+  payload: string,
+  signature: string,
+  secret: string,
+  toleranceSeconds: number = 300
+): boolean {
+  return verifyWebhookSignatureDetailed(payload, signature, secret, toleranceSeconds).ok;
 }
 
 export function createWebhookSignature(payload: string, secret: string, timestamp?: number): string {
