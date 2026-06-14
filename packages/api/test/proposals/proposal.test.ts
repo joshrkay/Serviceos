@@ -291,6 +291,14 @@ describe('actionClassForProposalType — D3 action-class registry', () => {
       expect(actionClassForProposalType(t)).toBe('capture');
     }
   });
+
+  it('classifies send_payment_reminder as comms (customer-facing dunning)', () => {
+    expect(actionClassForProposalType('send_payment_reminder')).toBe('comms');
+  });
+
+  it('classifies apply_late_fee as money (raises amount due)', () => {
+    expect(actionClassForProposalType('apply_late_fee')).toBe('money');
+  });
 });
 
 describe('decideInitialStatus — D3 trust-tier decision', () => {
@@ -349,6 +357,30 @@ describe('decideInitialStatus — D3 trust-tier decision', () => {
     expect(
       decideInitialStatus({
         proposalType: 'cancel_appointment',
+        sourceTrustTier: 'autonomous',
+        confidenceScore: 0.99,
+      })
+    ).toBe('draft');
+  });
+
+  it('autonomous + send_payment_reminder (comms) at high confidence → draft (never auto-approves)', () => {
+    // Dunning reminders are customer-facing comms — the owner must approve
+    // before a customer is contacted, even at maximum trust + confidence.
+    expect(
+      decideInitialStatus({
+        proposalType: 'send_payment_reminder',
+        sourceTrustTier: 'autonomous',
+        confidenceScore: 0.99,
+      })
+    ).toBe('draft');
+  });
+
+  it('autonomous + apply_late_fee (money) at high confidence → draft (never auto-applies money)', () => {
+    // Applying a late fee moves money — hard-blocked from auto-approval
+    // regardless of trust tier or confidence.
+    expect(
+      decideInitialStatus({
+        proposalType: 'apply_late_fee',
         sourceTrustTier: 'autonomous',
         confidenceScore: 0.99,
       })
