@@ -1,6 +1,11 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { FeedbackResponse, FeedbackResponseListOptions, FeedbackResponseRepository } from './feedback-response';
+import {
+  FeedbackResponse,
+  FeedbackResponseListOptions,
+  FeedbackResponseRepository,
+  RatingCounts,
+} from './feedback-response';
 
 function mapRow(row: Record<string, unknown>): FeedbackResponse {
   return {
@@ -64,6 +69,30 @@ export class PgFeedbackResponseRepository extends PgBaseRepository implements Fe
         responses: rowsResult.rows.map(mapRow),
         total: Number(countResult.rows[0]?.total ?? 0),
       };
+    });
+  }
+
+  async countByRatingInRange(
+    tenantId: string,
+    utcStart: Date,
+    utcEnd: Date
+  ): Promise<RatingCounts> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT rating, COUNT(*)::int AS count
+         FROM feedback_responses
+         WHERE tenant_id = $1 AND submitted_at >= $2 AND submitted_at < $3
+         GROUP BY rating`,
+        [tenantId, utcStart, utcEnd]
+      );
+      const counts: RatingCounts = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+      for (const row of result.rows) {
+        const rating = Number(row.rating);
+        if (rating >= 1 && rating <= 5) {
+          counts[rating as 1 | 2 | 3 | 4 | 5] = Number(row.count);
+        }
+      }
+      return counts;
     });
   }
 }

@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { LLMRequest, LLMResponse, LLMProvider } from '../gateway/gateway';
+import { LLMRequest, LLMResponse, LLMProvider, messagesContainImage } from '../gateway/gateway';
 
 export interface ShadowComparisonResult {
   id: string;
@@ -117,7 +117,14 @@ export class ShadowComparisonGateway implements LLMProvider {
   async complete(request: LLMRequest): Promise<LLMResponse> {
     const primaryResponse = await this.primaryProvider.complete(request);
 
-    if (this.config.enabled && this.sampleFn() < this.config.samplingRate) {
+    // Image-bearing requests are excluded from shadow sampling: vision calls
+    // are expensive (sampling double-bills them) and the shadow model may be
+    // text-only, which would only record a spurious shadowError.
+    if (
+      this.config.enabled &&
+      !messagesContainImage(request.messages) &&
+      this.sampleFn() < this.config.samplingRate
+    ) {
       const comparisonGroupId = uuidv4();
       let shadowResponse: LLMResponse | undefined;
       let shadowError: string | undefined;
