@@ -4501,6 +4501,26 @@ export const MIGRATIONS = {
         CHECK (discount_floor_cents IS NULL OR discount_floor_cents >= 0),
       ADD COLUMN IF NOT EXISTS discount_never_below_catalog BOOLEAN;
   `,
+
+  '179_estimate_line_items_pricing_source': `
+    -- P2-036 V2 (U-G — grounding prerequisite) — persist the per-line
+    -- catalog-grounding signal the catalog resolver already stamps on
+    -- PROPOSAL line items (pricingSource: catalog | ambiguous |
+    -- uncatalogued | manual) so a later unit can decide whether an
+    -- estimate's price is trustworthy enough to auto-allow a discount.
+    -- Until now this signal was DROPPED when the proposal became an
+    -- estimate — estimate_line_items had no such column.
+    --
+    -- NULLABLE with no DEFAULT: additive no-op for every existing row.
+    -- A NULL reads as "no grounding signal" — legacy rows and any
+    -- manual-create path that doesn't set it are treated as NOT grounded
+    -- (the conservative posture; see isEstimateCatalogGrounded). The
+    -- CHECK guards shape only and admits NULL.
+    ALTER TABLE estimate_line_items
+      ADD COLUMN IF NOT EXISTS pricing_source TEXT
+        CHECK (pricing_source IS NULL
+               OR pricing_source IN ('catalog','ambiguous','uncatalogued','manual'));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

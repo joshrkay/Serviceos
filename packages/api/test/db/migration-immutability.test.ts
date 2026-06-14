@@ -263,6 +263,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // P2-036 V2 (U1): per-tenant discount policy columns (max bps / floor cents /
   // never-below-catalog), all nullable; resolver fail-closes to V1 posture.
   ['178_tenant_settings_discount_policy', '91f7884b3b81fbd78cbe0f2d16ac6b8d0d78234358ee788f555ff478204b0760'],
+  // P2-036 V2 (U-G): persist per-line catalog-grounding signal
+  // (pricing_source) on estimate_line_items; nullable, additive, CHECK
+  // admits NULL. NULL reads as not-grounded (conservative).
+  ['179_estimate_line_items_pricing_source', '7ee44a4eb201341367064df3df6dcae61544a1873f88ee4b57d5429aef64f4bd'],
 ];
 
 function hashMigration(value: string): string {
