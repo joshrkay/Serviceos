@@ -41,6 +41,7 @@ import type { SettingsRepository, TenantSettings } from '../settings/settings';
 import type { MessageDeliveryProvider } from '../notifications/delivery-provider';
 import type { DispatchRepository } from '../notifications/dispatch-repository';
 import { createOneTapApproveToken } from '../proposals/auto-approve';
+import { actionClassForProposalType, type ProposalType } from '../proposals/proposal';
 import {
   buildFallbackNarrative,
   computeDigestPayload,
@@ -475,7 +476,7 @@ async function sendDigestSms(
   return 'sent';
 }
 
-function buildApprovalLinks(
+export function buildApprovalLinks(
   tenantId: string,
   payload: DailyDigestPayload,
   deps: DailyDigestWorkerDeps,
@@ -489,6 +490,15 @@ function buildApprovalLinks(
     // they require in-app review (reviewInApp is set). The digest deep link
     // covers them.  Absent _meta (overallConfidence undefined) → allowed.
     if (isBlockingConfidence(approval.overallConfidence)) {
+      continue;
+    }
+    // Track-E money-gating: a one-tap link approves with a SINGLE tap and no
+    // second factor, so it is minted ONLY for capture-class proposals. Money /
+    // comms / irreversible proposals still surface in the digest (via the deep
+    // link) for in-app review, but never carry a bare approve link — mirroring
+    // the chain-send `suppressApproveLink` invariant and the SMS Y-reply class
+    // refusal. A non-capture (or unknown) class fails closed: no link.
+    if (actionClassForProposalType(approval.proposalType as ProposalType) !== 'capture') {
       continue;
     }
     // TTL is clamped to ≤30 min inside createOneTapApproveToken.
