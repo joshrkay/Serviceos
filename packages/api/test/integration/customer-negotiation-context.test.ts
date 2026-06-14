@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
-import { PgCustomerNegotiationContextProvider } from '../../src/customers/customer-negotiation-context';
+import { PgCustomerNegotiationContextProvider } from '../../src/customers/pg-customer-negotiation-context';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgJobRepository } from '../../src/jobs/pg-job';

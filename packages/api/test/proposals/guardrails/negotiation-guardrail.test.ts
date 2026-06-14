@@ -7,9 +7,24 @@ import {
   detectNegotiationAskType,
   recommendNegotiationResponse,
   negotiationAskLabel,
+  customerValueTier,
+  buildNegotiationCallbackContent,
   NEGOTIATION_GUARDRAIL_MARKER_REASON,
   type NegotiationAskType,
 } from '../../../src/proposals/guardrails/negotiation-guardrail';
+import type { CustomerNegotiationContext } from '../../../src/customers/customer-negotiation-context';
+import type { NegotiationCallbackPayload } from '@ai-service-os/shared';
+
+const valuedRepeat: CustomerNegotiationContext = {
+  lifetimeValueCents: 250000, // $2,500
+  lastSeenAt: new Date(Date.now() - 21 * 86_400_000), // ~3 weeks ago
+  jobsCompletedCount: 5,
+};
+const firstTimer: CustomerNegotiationContext = {
+  lifetimeValueCents: 0,
+  lastSeenAt: null,
+  jobsCompletedCount: 0,
+};
 
 describe('detectNegotiationAskType', () => {
   it('detects discount asks', () => {
@@ -106,5 +121,78 @@ describe('negotiationAskLabel', () => {
 describe('NEGOTIATION_GUARDRAIL_MARKER_REASON', () => {
   it('is a stable, greppable marker reason', () => {
     expect(NEGOTIATION_GUARDRAIL_MARKER_REASON).toBe('negotiation_guardrail');
+  });
+});
+
+describe('customerValueTier', () => {
+  it('classifies a high-LTV or repeat customer as valued_repeat', () => {
+    expect(customerValueTier(valuedRepeat)).toBe('valued_repeat');
+    expect(
+      customerValueTier({ lifetimeValueCents: 100000, lastSeenAt: null, jobsCompletedCount: 0 }),
+    ).toBe('valued_repeat');
+    expect(
+      customerValueTier({ lifetimeValueCents: 0, lastSeenAt: null, jobsCompletedCount: 3 }),
+    ).toBe('valued_repeat');
+  });
+
+  it('classifies a customer with some history as established', () => {
+    expect(
+      customerValueTier({ lifetimeValueCents: 5000, lastSeenAt: null, jobsCompletedCount: 1 }),
+    ).toBe('established');
+  });
+
+  it('classifies a customer with no history as new_or_unknown', () => {
+    expect(customerValueTier(firstTimer)).toBe('new_or_unknown');
+  });
+});
+
+describe('recommendNegotiationResponse with customer context', () => {
+  it('includes the LTV dollar amount and recency for a valued repeat', () => {
+    const rec = recommendNegotiationResponse('discount', valuedRepeat);
+    expect(rec).toMatch(/don't auto-discount/i); // base guidance preserved
+    expect(rec).toContain('$2,500'); // LTV context
+    expect(rec).toMatch(/last seen/i); // recency context
+    expect(rec).toMatch(/valued repeat/i);
+  });
+
+  it('tells the owner to hold firm for a first-timer', () => {
+    const rec = recommendNegotiationResponse('discount', firstTimer);
+    expect(rec).toMatch(/hold firm|no real history/i);
+    expect(rec).toMatch(/new customer/i); // recency label for a null lastSeenAt
+  });
+
+  it('falls back to base guidance with no context (backward compatible)', () => {
+    expect(recommendNegotiationResponse('discount')).toBe(
+      recommendNegotiationResponse('discount', null),
+    );
+  });
+
+  it('never proposes a percentage discount', () => {
+    for (const ctx of [valuedRepeat, firstTimer, null]) {
+      expect(recommendNegotiationResponse('discount', ctx)).not.toMatch(/%\s*off/i);
+    }
+  });
+});
+
+describe('buildNegotiationCallbackContent customer context', () => {
+  it('embeds the serialized customer context and a value-aware recommendation', () => {
+    const content = buildNegotiationCallbackContent({
+      detectText: 'can you knock $50 off?',
+      customerName: 'Dana',
+      customerContext: valuedRepeat,
+    });
+    const payload = content.payload as NegotiationCallbackPayload;
+    expect(payload.negotiationAskType).toBe('discount');
+    expect(payload.customerContext).not.toBeNull();
+    expect(payload.customerContext?.lifetimeValueCents).toBe(250000);
+    expect(typeof payload.customerContext?.lastSeenAt).toBe('string'); // ISO string
+    expect(payload.customerContext?.recencyLabel).toMatch(/weeks ago/);
+    expect(payload.recommendation).toContain('$2,500');
+  });
+
+  it('sets customerContext to null for an unknown caller', () => {
+    const content = buildNegotiationCallbackContent({ detectText: 'best price?' });
+    const payload = content.payload as NegotiationCallbackPayload;
+    expect(payload.customerContext).toBeNull();
   });
 });
