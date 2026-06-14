@@ -7,15 +7,46 @@ day, with the persona lens applied (glove-on, truck-based, phone/SMS
 native, risk-averse): every item must reduce screen time or protect
 money/trust, and every human touchpoint must be one tap.
 
+## Shipped 2026-06-14 (this session)
+
+- **P2-034 SMS one-tap approval — INBOUND shipped.** Owner replies
+  APPROVE/YES or REJECT/NO (optionally with a short code) and the existing
+  approveProposal/rejectProposal lifecycle runs (`src/sms/proposal-approval/`).
+  Registered live; reuses webhook signature + MessageSid dedup. 31 tests.
+  **Remaining:** (a) auto-notify trigger — decide WHEN to text the owner
+  (no `ready_for_review` notifier worker exists yet; the
+  `sendProposalApprovalRequest` composer is ready to call); (b) EDIT-over-
+  SMS (multi-turn / voice-memo MMS).
+- **Voice-transcription robustness for the catalog money path (P3).**
+  Squashed-string matching + filler stopwords; new 29-case corpus. Noisy
+  Whisper joins/fillers now price correctly; residual hard cases defer to
+  one-tap confirm, never silent mispricing.
+
+## Production-safety audit (2026-06-14) — correcting a false alarm
+
+A safety sweep flagged "RLS enabled-but-not-FORCEd on 11-29 tables
+(users, audit_events, conversations…)" as a CRITICAL launch blocker.
+**This is false.** Ground truth from `db/schema.ts`: 76 tenant-scoped
+tables have RLS ENABLEd and all 76 are FORCEd (the cited core tables are
+forced in a later batch migration). The earlier count was a duplicate-
+line artifact (two tables are defined across two migrations). Webhook
+idempotency, Stripe/payment idempotency, and emergency-dispatch gating
+are all SOLID. **The one genuine gap:** no DB-level exclusion constraint
+on `appointments` (double-booking is prevented in app logic + held-slot
+flow, but a concurrent execution race is theoretically possible). Fixing
+it = an `EXCLUDE USING gist` constraint over the tech + time range; it
+MUST land with the Docker-gated `rls-tenant-isolation`-style integration
+test, so it's deferred to a Docker-enabled run (the registry is blocked
+in web sessions).
+
 ## Sprint 1
 
-1. **P2-034 — SMS one-tap approval transport** (JTBD #7 Admin Reduction,
-   #2, #5). The single biggest persona lever still unshipped: proposals
-   render to <320-char SMS with `APPROVE`/`EDIT`/`REJECT` replies,
-   idempotent on MessageSid. Spec is complete in
-   `wave-2-strategic-stories.md`; the keyword dispatcher (P6-028) and
-   batch-approve endpoint (P2-035) it builds on are live. Web approval
-   works, but the owner is in a truck — approval must come to the thumb.
+1. **P2-034 auto-notify trigger** (JTBD #7) — the remaining half of SMS
+   approval: text the owner `sendProposalApprovalRequest` when a proposal
+   lands in `ready_for_review` and the tenant opts in
+   (`tenant_settings.unsupervised_proposal_routing`), with a non-annoying
+   cadence + owner-resolution + dedup. Makes one-tap approval fire end to
+   end instead of relying on the "single pending" inbound path.
 2. **P2-035 markers — confidence markers on proposal renders** (JTBD #7).
    The `pricingSource: 'uncatalogued' | 'ambiguous'` and
    `catalogResolution` candidates now exist on draft payloads; surface

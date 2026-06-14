@@ -96,6 +96,17 @@ Two Tier-A-class gaps closed on `claude/tender-hamilton-pjhcbv`:
   the customer couldn't see what they were approving. Fixed + measured by
   Playwright at 320/390px (`e2e/estimate-approval-mobile.spec.ts`), with
   44px glove-friendly tap targets enforced.
+- **SMS one-tap proposal approval (P2-034, inbound).** The owner approves
+  or declines a pending proposal by replying to a text — no app, glove-
+  friendly from the truck (`src/sms/proposal-approval/`). Reuses the
+  Twilio signature + MessageSid dedup and the existing approve/reject
+  lifecycle. This is the JTBD #7 lever Jobber/ST don't have (they assume
+  a screen). Auto-notify trigger + EDIT-over-SMS tracked as follow-ups.
+- **Voice-transcription robustness on the money path (P3).** Catalog
+  resolver now survives Whisper joins/splits/fillers ("waterheater
+  install", "um water heater please") and still defers ambiguous noise to
+  one-tap confirm — exact pricing from the truck, out loud, in a noisy
+  cab.
 
 ## The Top 10 (prioritized)
 
