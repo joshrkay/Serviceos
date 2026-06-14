@@ -105,6 +105,7 @@ import {
   appendAgentTts,
   type VoiceTurnProcessor,
 } from '../ai/voice-turn';
+import type { CustomerNegotiationContextProvider } from '../customers/customer-negotiation-context';
 import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
 import { detectEmergency } from '../ai/agents/customer-calling/emergency-detector';
@@ -208,6 +209,11 @@ export interface TwilioAdapterDeps {
   agreementRepo?: AgreementRepository;
   /** VQ-006: read-only customer + estimate lookups. */
   customerRepo?: CustomerRepository;
+  /**
+   * N-003 (P2-036) — threaded through to the voice-turn processor so a live-call
+   * negotiation callback can carry the caller's LTV/recency.
+   */
+  customerNegotiationContextProvider?: CustomerNegotiationContextProvider;
   estimateRepo?: EstimateRepository;
   /** Full-app voice coverage: owner-scoped revenue + catalog lookups. */
   moneyDashboardRepo?: MoneyDashboardRepository;

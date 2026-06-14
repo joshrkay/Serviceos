@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { AppError, ValidationError } from '../../shared/errors';
 import {
@@ -11,7 +12,7 @@ import {
   failAiRun,
   AiRun,
 } from '../ai-run';
-import { AIRoutingConfig } from '../../config/ai-routing';
+import { AIRoutingConfig, isVisionCapableModel } from '../../config/ai-routing';
 import {
   resolveRouting,
   shouldWarnForUnmappedTaskType,
@@ -107,6 +108,51 @@ export interface LLMGatewayLogger {
 /** Sentinel tenant ID used when a request carries no tenantId. */
 export const SYSTEM_TENANT_ID = 'system';
 
+// Accepts an image data URL with optional RFC-2397 params before ;base64,
+// e.g. "data:image/png;base64," and "data:image/png;name=x.png;base64,".
+const DATA_URL_IMAGE_RE = /^data:image\/[a-zA-Z0-9.+-]+(?:;[a-zA-Z0-9.+=-]+)*;base64,/i;
+
+/** True for an http(s) URL or a base64 image data URL. */
+function isValidImageUrl(url: unknown): boolean {
+  if (typeof url !== 'string' || url.length === 0) return false;
+  return /^https?:\/\//i.test(url) || DATA_URL_IMAGE_RE.test(url);
+}
+
+/** Validate one message's optional multimodal `parts` array. */
+function validateContentParts(message: LLMMessage, index: number): string[] {
+  const errors: string[] = [];
+  const parts = message.parts;
+  if (!Array.isArray(parts) || parts.length === 0) {
+    errors.push(`messages[${index}].parts must be a non-empty array when present`);
+    return errors;
+  }
+  parts.forEach((rawPart, p) => {
+    const u: unknown = rawPart;
+    if (u === null || typeof u !== 'object') {
+      errors.push(`messages[${index}].parts[${p}]: must be a content part object`);
+      return;
+    }
+    const part = u as { type?: unknown; text?: unknown; url?: unknown };
+    if (part.type === 'text') {
+      if (typeof part.text !== 'string' || part.text.length === 0) {
+        errors.push(`messages[${index}].parts[${p}]: text part requires non-empty text`);
+      }
+      return;
+    }
+    if (part.type === 'image') {
+      if (message.role !== 'user') {
+        errors.push(`messages[${index}].parts[${p}]: image parts are only allowed on user messages`);
+      }
+      if (!isValidImageUrl(part.url)) {
+        errors.push(`messages[${index}].parts[${p}]: image url must be an http(s) or data:image/...;base64 URL`);
+      }
+      return;
+    }
+    errors.push(`messages[${index}].parts[${p}]: unknown content part type "${String(part.type)}"`);
+  });
+  return errors;
+}
+
 export function validateLLMRequest(request: LLMRequest): string[] {
   const errors: string[] = [];
   if (!request.taskType) errors.push('taskType is required');
@@ -144,6 +190,13 @@ export function validateLLMRequest(request: LLMRequest): string[] {
   }
   if (request.responseFormat !== undefined && request.responseFormat !== 'text' && request.responseFormat !== 'json') {
     errors.push('responseFormat must be "text" or "json"');
+  }
+  if (Array.isArray(request.messages)) {
+    request.messages.forEach((message, index) => {
+      if (message.parts !== undefined) {
+        errors.push(...validateContentParts(message, index));
+      }
+    });
   }
   return errors;
 }
@@ -213,6 +266,16 @@ export class LLMGateway {
       maxTokens: routingDecision.maxTokens,
       temperature: routingDecision.temperature,
     };
+
+    // Fail fast: an image-bearing request must resolve to a vision-capable
+    // model. Throwing here (before the ai_run row and provider dispatch)
+    // avoids an opaque provider 400 and leaves no orphaned state.
+    if (messagesContainImage(request.messages) && !isVisionCapableModel(resolvedModel)) {
+      throw new ValidationError(
+        'LLM request includes image content but the resolved model is not vision-capable',
+        { taskType: request.taskType, resolvedModel },
+      );
+    }
 
     // Warn once per process when taskType is not in the active tier mapping
     if (routingDecision.wasUnmapped && shouldWarnForUnmappedTaskType(request.taskType)) {

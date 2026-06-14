@@ -33,6 +33,8 @@ import {
   isInvoiceOwing,
   isInvoiceOverdue,
 } from '../reports/money-dashboard';
+import type { FeedbackResponseRepository } from '../feedback/feedback-response';
+import { totalResponses, averageRating, lowRatingCount } from '../feedback/feedback-response';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Payload shape (stored as the daily_digests.payload JSONB snapshot)
@@ -92,6 +94,15 @@ export interface DailyDigestPayload {
   overdueInvoicesCount: number;
   /** Completed jobs with nothing invoiced yet (same query the batch-invoice sweep runs). */
   unbilledJobs: DigestUnbilledJob[];
+  /**
+   * Today's review-request feedback outcome (PRD §6.11 step 5). Absent on
+   * pre-E5 stored digests — renderers must treat absence as "no feedback".
+   */
+  feedback?: {
+    responses: number;
+    averageRating: number | null;
+    lowRatingCount: number;
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -313,6 +324,17 @@ export function renderDigestSms(input: RenderDigestSmsInput): string {
   if (payload.unbilledJobs.length > 0) flagBits.push(`${payload.unbilledJobs.length} unbilled`);
   const flags = flagBits.length > 0 ? ` Flags: ${flagBits.join(', ')}.` : '';
 
+  // Review-request outcome (PRD §6.11 step 5). GSM-safe (no ★) so the digest
+  // stays single-encoding. Omitted entirely on quiet days / pre-E5 payloads.
+  const fb = payload.feedback;
+  const feedback =
+    fb && fb.responses > 0
+      ? ` Feedback: ${fb.responses} today` +
+        (fb.averageRating !== null ? `, avg ${fb.averageRating}/5` : '') +
+        (fb.lowRatingCount > 0 ? `, ${fb.lowRatingCount} low (<=3)` : '') +
+        '.'
+      : '';
+
   const tail = ` Full day: ${deepLinkUrl}`;
 
   // No punctuation ever directly follows a one-tap URL — a trailing '.'
@@ -338,7 +360,7 @@ export function renderDigestSms(input: RenderDigestSmsInput): string {
         : ` Approvals: ${total} waiting —` + entries.slice(0, apprIncluded).join('') + moreMarker;
     const invBlock = invoiceEntries.slice(0, invIncluded).join('');
     const linkNote = apprIncluded > 0 || invIncluded > 0 ? expiryNote : '';
-    return `${head}${approvalsBlock}${invBlock}${linkNote}${flags}${tail}`;
+    return `${head}${approvalsBlock}${invBlock}${linkNote}${flags}${feedback}${tail}`;
   };
 
   // Phase 1 — all approval entries, invoice links dropped greedily (last
@@ -354,7 +376,9 @@ export function renderDigestSms(input: RenderDigestSmsInput): string {
   }
   // Even the zero-entry form is over budget (pathological URLs): hard-cut.
   return truncateHard(
-    total === 0 ? `${head}${flags}${tail}` : `${head} Approvals: ${total} waiting${flags}${tail}`,
+    total === 0
+      ? `${head}${flags}${feedback}${tail}`
+      : `${head} Approvals: ${total} waiting${flags}${feedback}${tail}`,
     maxChars,
   );
 }
@@ -376,6 +400,7 @@ export interface DigestComputeDeps {
   proposalRepo: ProposalRepository;
   customerRepo: CustomerRepository;
   settingsRepo: SettingsRepository;
+  feedbackResponseRepo: FeedbackResponseRepository;
   /** Injectable clock — overdue is "as of now". Defaults to `new Date()`. */
   now?: () => Date;
 }
@@ -403,7 +428,7 @@ export async function computeDigestPayload(
 
   const paymentsFrom = new Date(today.start.getTime() - PAYMENT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
 
-  const [payments, completedJobs, tomorrowAppointments, openInvoices, partiallyPaidInvoices, readyProposals, draftProposals, unbilledCandidates] =
+  const [payments, completedJobs, tomorrowAppointments, openInvoices, partiallyPaidInvoices, readyProposals, draftProposals, unbilledCandidates, ratingCounts] =
     await Promise.all([
       deps.paymentRepo.findByTenant(tenantId, {
         status: 'completed',
@@ -421,6 +446,7 @@ export async function computeDigestPayload(
       deps.proposalRepo.findByStatus(tenantId, 'ready_for_review'),
       deps.proposalRepo.findByStatus(tenantId, 'draft'),
       findJobsRequiringInvoicing(tenantId, deps),
+      deps.feedbackResponseRepo.countByRatingInRange(tenantId, today.start, today.end),
     ]);
 
   // Combine both actionable statuses — mirrors the inbox's dual-fetch so the
@@ -480,6 +506,13 @@ export async function computeDigestPayload(
     });
   }
 
+  // Today's review-request feedback outcome (PRD §6.11 step 5: digest line).
+  const feedback = {
+    responses: totalResponses(ratingCounts),
+    averageRating: averageRating(ratingCounts),
+    lowRatingCount: lowRatingCount(ratingCounts),
+  };
+
   return {
     date,
     timezone,
@@ -498,6 +531,7 @@ export async function computeDigestPayload(
     },
     overdueInvoicesCount,
     unbilledJobs,
+    feedback,
   };
 }
 

@@ -116,4 +116,36 @@ describe('Postgres integration — feedback', () => {
     const replay = createFeedbackResponse({ tenantId: tenant.tenantId, requestId: request.id, jobId, rating: 1, comment: 'dupe' });
     await expect(responseRepo.create(replay)).rejects.toThrow();
   });
+
+  it('countByRatingInRange aggregates per-star within the window and is tenant-scoped', async () => {
+    // Fresh tenants so other tests in this file (which write responses at
+    // "now") cannot pollute the fixed-window assertion.
+    const t = await createTestTenant(pool);
+    const t2 = await createTestTenant(pool);
+    const start = new Date('2026-06-14T00:00:00.000Z');
+    const end = new Date('2026-06-15T00:00:00.000Z');
+
+    async function addResponse(owner: TestTenant, rating: number, submittedAt: Date): Promise<void> {
+      const jobId = await createJob(pool, owner);
+      const request = createFeedbackRequest({ tenantId: owner.tenantId, jobId });
+      await requestRepo.create(request);
+      const response = createFeedbackResponse({ tenantId: owner.tenantId, requestId: request.id, jobId, rating });
+      response.submittedAt = submittedAt;
+      await responseRepo.create(response);
+    }
+
+    await addResponse(t, 5, new Date('2026-06-14T09:00:00.000Z'));
+    await addResponse(t, 5, new Date('2026-06-14T10:00:00.000Z'));
+    await addResponse(t, 2, new Date('2026-06-14T11:00:00.000Z'));
+    await addResponse(t, 1, new Date('2026-06-13T23:00:00.000Z')); // before window
+    await addResponse(t2, 1, new Date('2026-06-14T12:00:00.000Z')); // other tenant
+
+    expect(await responseRepo.countByRatingInRange(t.tenantId, start, end)).toEqual({
+      1: 0, 2: 1, 3: 0, 4: 0, 5: 2,
+    });
+    // tenant isolation: t2's low rating is not visible to t, and vice versa
+    const t2Counts = await responseRepo.countByRatingInRange(t2.tenantId, start, end);
+    expect(t2Counts[1]).toBe(1);
+    expect(t2Counts[5]).toBe(0);
+  });
 });

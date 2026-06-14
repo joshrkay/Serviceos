@@ -58,6 +58,14 @@ import {
   type VoiceApprovalTurnResult,
 } from '../tasks/proposal-approval-task';
 import { createLlmEditInterpreter } from '../../proposals/edit-interpreter';
+import type {
+  CustomerNegotiationContext,
+  CustomerNegotiationContextProvider,
+} from '../../customers/customer-negotiation-context';
+import {
+  brandVoiceNegotiationTts,
+  NEGOTIATION_HOLDING_TTS_SOURCE,
+} from '../../conversations/negotiation/acknowledgment';
 import type { ProposalSmsEventRepository } from '../../proposals/sms/sms-event';
 import { confirmIntent } from '../skills/confirm-intent';
 import { summarizeSession } from '../skills/summarize-session';
@@ -211,6 +219,11 @@ export interface VoiceTurnProcessorDeps {
   proposalRepo?: ProposalRepository;
   onCallRepo?: OnCallRepository;
   leadRepo?: LeadRepository;
+  /**
+   * N-003 (P2-036) — when wired, a live-call negotiation guardrail callback is
+   * enriched with the caller's LTV/recency (resolved via the session customerId).
+   */
+  customerNegotiationContextProvider?: CustomerNegotiationContextProvider;
   systemActorId?: string;
   businessName: string;
   publicBaseUrl?: string;
@@ -539,11 +552,26 @@ export function createVoiceTurnProcessor(
           typeof entities.customerName === 'string' ? entities.customerName : undefined;
         const conversationId =
           typeof fx.payload.conversationId === 'string' ? fx.payload.conversationId : undefined;
+        const negotiationCustomerId =
+          typeof fx.payload.customerId === 'string' ? fx.payload.customerId : undefined;
+        // Best-effort LTV/recency enrichment — a read failure never blocks the callback.
+        let customerContext: CustomerNegotiationContext | null = null;
+        if (negotiationCustomerId && deps.customerNegotiationContextProvider) {
+          try {
+            customerContext = await deps.customerNegotiationContextProvider.getContext(
+              tenantId,
+              negotiationCustomerId,
+            );
+          } catch {
+            customerContext = null;
+          }
+        }
         const content = buildNegotiationCallbackContent({
           detectText,
           ...(askText ? { askText } : {}),
           ...(customerName ? { customerName } : {}),
           ...(conversationId ? { conversationId } : {}),
+          customerContext,
         });
         const negotiationProposal = buildProposal({
           tenantId,
@@ -872,6 +900,25 @@ export function createVoiceTurnProcessor(
   ): Promise<void> {
     if (sideEffects.length > 0) {
       deps.store.touch(session.id);
+    }
+    // N-003 (P2-036) — brand-voice the FSM's fixed negotiation holding line at
+    // this settings-aware layer so the live call matches the SMS channel. The
+    // guard keeps this a no-op (no settings read) on non-negotiation turns.
+    if (
+      deps.settingsRepo &&
+      sideEffects.some(
+        (s) => s.type === 'tts_play' && s.payload?.source === NEGOTIATION_HOLDING_TTS_SOURCE,
+      )
+    ) {
+      try {
+        const settings = await deps.settingsRepo.findByTenant(tenantId);
+        brandVoiceNegotiationTts(sideEffects, {
+          brandVoice: settings?.brandVoice ?? null,
+          businessName: settings?.businessName ?? null,
+        });
+      } catch {
+        // Keep the FSM's fixed holding line if settings can't be loaded.
+      }
     }
     for (const fx of sideEffects) {
       if (fx.type === 'audit_log') {

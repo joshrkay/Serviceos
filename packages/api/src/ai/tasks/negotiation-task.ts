@@ -19,6 +19,10 @@ import type { ProposalType } from '../../proposals/proposal';
 import type { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import type { ExtractedEntities } from '../orchestration/intent-classifier';
 import { buildNegotiationCallbackContent } from '../../proposals/guardrails/negotiation-guardrail';
+import type {
+  CustomerNegotiationContext,
+  CustomerNegotiationContextProvider,
+} from '../../customers/customer-negotiation-context';
 
 export class NegotiationGuardrailTaskHandler implements TaskHandler {
   // Reuses the capture-class `callback` proposal type. processSegment resolves
@@ -26,17 +30,30 @@ export class NegotiationGuardrailTaskHandler implements TaskHandler {
   // taskType is just the proposal it emits.
   readonly taskType: ProposalType = 'callback';
 
+  constructor(private readonly contextProvider?: CustomerNegotiationContextProvider) {}
+
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = (context.existingEntities ?? {}) as ExtractedEntities & {
       customerId?: string;
       negotiationAsk?: string;
     };
+    // Enrich the owner callback with the caller's LTV/recency when we resolved a
+    // customer. Best-effort: a read failure never blocks the guardrail callback.
+    let customerContext: CustomerNegotiationContext | null = null;
+    if (ee.customerId && this.contextProvider) {
+      try {
+        customerContext = await this.contextProvider.getContext(context.tenantId, ee.customerId);
+      } catch {
+        customerContext = null;
+      }
+    }
     const content = buildNegotiationCallbackContent({
       detectText: context.message,
       askText: ee.negotiationAsk ?? context.message,
       ...(ee.customerName ? { customerName: ee.customerName } : {}),
       transcript: context.message,
       ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+      customerContext,
     });
 
     // Deterministic dedup so at-least-once redelivery of the same recording

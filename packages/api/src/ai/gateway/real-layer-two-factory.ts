@@ -50,6 +50,7 @@ import type {
   LLMResponse,
   LLMGatewayConfig,
 } from './gateway';
+import { buildChatMessages } from '../providers/openai-compatible';
 import type { AgentEventBus } from '../voice-quality/event-bus';
 import { costIncurredEvent } from '../voice-quality/events';
 
