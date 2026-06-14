@@ -191,11 +191,11 @@ From the 30-item audit. Not blocking real payments but worth closing before high
 
 | ID | File | Issue | Status |
 |---|---|---|---|
-| EC-7 | `public-invoices.ts` | `tokenGuard` rejects with no logging; no max-length check at route layer (service has it) | **open** — guard still only checks `< 16`; file imports no logger |
-| EC-9 | `public-invoices.ts` | Route handlers don't log errors before re-throwing | **open** — handlers catch → `toErrorResponse`, no logging |
-| EC-11 | `webhooks/routes.ts` | Signature failures don't distinguish stale-timestamp vs bad-sig in logs | **open** — `verifyWebhookSignature` returns a bare boolean; both collapse to one warn |
-| EC-17 | `webhooks/routes.ts` | `event.data.object` cast with no Zod validation | **open** — `JSON.parse` + `as` casts, no schema |
-| EC-18 | `webhooks/routes.ts` | Mismatch log omits partial sig for debugging | **open** — single warn, no signature metadata |
+| EC-7 | `public-invoices.ts` | `tokenGuard` rejects with no logging; no max-length check at route layer (service has it) | **fixed** — `tokenGuard` enforces min 16 / max 512 and logs the reject reason |
+| EC-9 | `public-invoices.ts` | Route handlers don't log errors before re-throwing | **fixed** — shared `respondError` logs (5xx→error, 4xx→warn) before responding; token never logged |
+| EC-11 | `webhooks/routes.ts` | Signature failures don't distinguish stale-timestamp vs bad-sig in logs | **fixed** — `verifyWebhookSignatureDetailed` returns a reason; Stripe handler logs it |
+| EC-17 | `webhooks/routes.ts` | `event.data.object` cast with no Zod validation | **fixed** — `parseStripeEventEnvelope` (Zod) validates the envelope at the trust boundary |
+| EC-18 | `webhooks/routes.ts` | Mismatch log omits partial sig for debugging | **fixed** — failure log includes `reason` + a truncated `signaturePrefix` |
 | EC-20 | `InvoicePaymentPage.tsx` | No fallback if `window.location.href` is blocked (rare mobile WebViews) | **moot** — now inline `confirmPayment({ redirect: 'if_required' })`; no `location.href` redirect |
 | EC-22 | `InvoicePaymentPage.tsx` | `pingView` swallows errors silently; network error surfaces as "Error undefined" | **partial** — `pingView` still silently swallows (fire-and-forget); the "Error undefined" symptom is gone (`fetchInvoice`/`createPaymentIntent` fall back to `` `Error ${status}` ``) |
 | EC-24 | `InvoicePaymentPage.tsx` | `formatMoney` doesn't guard negative values | **partial** — delegates to `formatCurrencyAmount` (no throw on negatives) but no explicit guard; renders `$-x.xx` |
