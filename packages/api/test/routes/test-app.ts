@@ -21,6 +21,7 @@ import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
 import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
 import { InMemoryPaymentRepository } from '../../src/invoices/payment';
 import { InMemoryAppointmentRepository } from '../../src/appointments/appointment';
+import { InMemoryAgreementRepository } from '../../src/agreements/agreement';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemorySettingsRepository, TenantSettings } from '../../src/settings/settings';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -59,6 +60,7 @@ export interface TestApp {
   proposalRepo: InMemoryProposalRepository;
   settingsRepo: InMemorySettingsRepository;
   auditRepo: InMemoryAuditRepository;
+  agreementRepo: InMemoryAgreementRepository;
 }
 
 export async function buildTestApp(): Promise<TestApp> {
@@ -86,6 +88,7 @@ export async function buildTestApp(): Promise<TestApp> {
   const proposalRepo = new InMemoryProposalRepository();
   const settingsRepo = new InMemorySettingsRepository();
   const auditRepo = new InMemoryAuditRepository();
+  const agreementRepo = new InMemoryAgreementRepository();
 
   // Estimates and invoices need settings for number generation
   await settingsRepo.create(makeSeedSettings(TEST_TENANT_ID));
@@ -100,10 +103,18 @@ export async function buildTestApp(): Promise<TestApp> {
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
   app.use(
     '/api/estimates',
-    createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, undefined, undefined, {
-      jobRepo,
-      invoiceRepo,
-    }),
+    createEstimateRouter(
+      estimateRepo,
+      settingsRepo,
+      auditRepo,
+      ownership,
+      undefined,
+      undefined,
+      { jobRepo, invoiceRepo },
+      undefined,
+      undefined,
+      agreementRepo,
+    ),
   );
   app.use(
     '/api/invoices',
@@ -126,5 +137,5 @@ export async function buildTestApp(): Promise<TestApp> {
   app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo));
   app.use('/api/proposals', createProposalsRouter(proposalRepo));
 
-  return { app, jobRepo, customerRepo, estimateRepo, invoiceRepo, paymentRepo, appointmentRepo, proposalRepo, settingsRepo, auditRepo };
+  return { app, jobRepo, customerRepo, estimateRepo, invoiceRepo, paymentRepo, appointmentRepo, proposalRepo, settingsRepo, auditRepo, agreementRepo };
 }

@@ -51,6 +51,8 @@ export interface CreateAgreementInput {
   /** Membership auto-renew. Requires endsOn + renewalTermMonths (see validation). */
   autoRenew?: boolean;
   renewalTermMonths?: number;
+  /** Member-pricing discount this membership confers, in basis points. */
+  memberDiscountBps?: number;
   createdBy: string;
   actorRole?: string;
 }
@@ -65,6 +67,7 @@ export interface UpdateAgreementInput {
   endsOn?: string | null;
   autoRenew?: boolean;
   renewalTermMonths?: number | null;
+  memberDiscountBps?: number;
 }
 
 /**
@@ -204,6 +207,7 @@ export async function createAgreement(
     autoRenew: input.autoRenew ?? false,
     renewalTermMonths: input.autoRenew ? input.renewalTermMonths : undefined,
     renewalCount: 0,
+    memberDiscountBps: input.memberDiscountBps ?? 0,
     createdBy: input.createdBy,
     createdAt: now,
     updatedAt: now,
@@ -265,6 +269,7 @@ export async function updateAgreement(
   if (input.renewalTermMonths !== undefined) {
     updates.renewalTermMonths = input.renewalTermMonths ?? undefined;
   }
+  if (input.memberDiscountBps !== undefined) updates.memberDiscountBps = input.memberDiscountBps;
 
   return agreementRepo.update(tenantId, id, updates);
 }

@@ -259,4 +259,42 @@ describe('Postgres integration — service agreements', () => {
       expect(updated!.autoRenew).toBe(true);
     });
   });
+
+  // Membership engine (#6 phase 2) — migration 174 member_discount_bps column
+  // + its CHECK. Pins the real column/type the resolver depends on.
+  describe('member_discount_bps', () => {
+    let t: { tenantId: string; userId: string };
+    let cust: string;
+
+    beforeAll(async () => {
+      t = await createTestTenant(pool);
+      cust = await createCustomer(pool, t.tenantId, t.userId);
+    });
+
+    it('round-trips member_discount_bps and defaults to 0', async () => {
+      const plain = await repo.create(makeAgreement(t.tenantId, cust, t.userId));
+      expect((await repo.findById(t.tenantId, plain.id))!.memberDiscountBps).toBe(0);
+
+      const member = await repo.create(
+        makeAgreement(t.tenantId, cust, t.userId, { memberDiscountBps: 1500 }),
+      );
+      const found = await repo.findById(t.tenantId, member.id);
+      expect(found!.memberDiscountBps).toBe(1500);
+      expect(typeof found!.memberDiscountBps).toBe('number');
+    });
+
+    it('enforces the 0..10000 bps CHECK constraint', async () => {
+      await expect(
+        repo.create(makeAgreement(t.tenantId, cust, t.userId, { memberDiscountBps: 10_001 })),
+      ).rejects.toThrow();
+    });
+
+    it('persists a member_discount_bps update', async () => {
+      const created = await repo.create(
+        makeAgreement(t.tenantId, cust, t.userId, { memberDiscountBps: 500 }),
+      );
+      const updated = await repo.update(t.tenantId, created.id, { memberDiscountBps: 2500 });
+      expect(updated!.memberDiscountBps).toBe(2500);
+    });
+  });
 });

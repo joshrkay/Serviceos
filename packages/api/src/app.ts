@@ -3138,6 +3138,7 @@ export function createApp(): express.Express {
       { jobRepo, invoiceRepo },
       { docRevisionRepo: documentRevisionRepo, editDeltaRepo: deltaRepo },
       paymentRepo,
+      agreementRepo,
     ),
   );
   app.use(

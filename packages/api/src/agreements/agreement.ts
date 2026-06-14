@@ -34,6 +34,12 @@ export interface Agreement {
   renewalTermMonths?: number;
   /** How many times the term has auto-renewed (audit counter). */
   renewalCount?: number;
+  /**
+   * Member pricing: basis points (0..10000) discount this membership confers
+   * on the customer's estimates/invoices. 0 = not a discounting membership.
+   * Optional in the domain for the same default-column reason as above.
+   */
+  memberDiscountBps?: number;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;

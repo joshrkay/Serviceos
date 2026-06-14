@@ -539,3 +539,57 @@ describe('membership auto-renew: renewExpiringAgreements', () => {
     void a;
   });
 });
+
+describe('membership member pricing: createAgreement / updateAgreement', () => {
+  it('defaults memberDiscountBps to 0 and accepts a configured value', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const t = tenantId();
+    const plain = await createAgreement(
+      {
+        tenantId: t,
+        customerId: uuidv4(),
+        name: 'plain',
+        recurrenceRule: 'FREQ=MONTHLY',
+        priceCents: 1000,
+        startsOn: '2026-01-01',
+        createdBy: 'u',
+      },
+      repo,
+    );
+    expect(plain.memberDiscountBps).toBe(0);
+
+    const member = await createAgreement(
+      {
+        tenantId: t,
+        customerId: uuidv4(),
+        name: 'Gold',
+        recurrenceRule: 'FREQ=MONTHLY',
+        priceCents: 1000,
+        startsOn: '2026-01-01',
+        memberDiscountBps: 1500,
+        createdBy: 'u',
+      },
+      repo,
+    );
+    expect(member.memberDiscountBps).toBe(1500);
+  });
+
+  it('updateAgreement changes memberDiscountBps', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const t = tenantId();
+    const a = await createAgreement(
+      {
+        tenantId: t,
+        customerId: uuidv4(),
+        name: 'x',
+        recurrenceRule: 'FREQ=MONTHLY',
+        priceCents: 1000,
+        startsOn: '2026-01-01',
+        createdBy: 'u',
+      },
+      repo,
+    );
+    const updated = await updateAgreement(t, a.id, { memberDiscountBps: 2000 }, repo);
+    expect(updated?.memberDiscountBps).toBe(2000);
+  });
+});

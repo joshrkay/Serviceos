@@ -4356,6 +4356,20 @@ export const MIGRATIONS = {
       ON service_agreements (tenant_id, ends_on)
       WHERE auto_renew = TRUE AND status = 'active';
   `,
+
+  // Membership engine (#6 phase 2) — member pricing. A membership with
+  // member_discount_bps > 0 confers that percentage discount on the customer's
+  // estimates/invoices. Additive ALTER + re-run-safe DROP/ADD CHECK (0..10000
+  // bps = 0..100%). Resolution reuses the existing tenant+customer index.
+  '174_service_agreements_member_discount': `
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS member_discount_bps INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE service_agreements
+      DROP CONSTRAINT IF EXISTS chk_agreement_member_discount_bps;
+    ALTER TABLE service_agreements
+      ADD CONSTRAINT chk_agreement_member_discount_bps
+        CHECK (member_discount_bps >= 0 AND member_discount_bps <= 10000);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

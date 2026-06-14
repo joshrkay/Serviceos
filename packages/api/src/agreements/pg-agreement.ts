@@ -43,6 +43,7 @@ function mapRow(row: Record<string, unknown>): Agreement {
     renewalTermMonths:
       row.renewal_term_months != null ? Number(row.renewal_term_months) : undefined,
     renewalCount: row.renewal_count != null ? Number(row.renewal_count) : 0,
+    memberDiscountBps: row.member_discount_bps != null ? Number(row.member_discount_bps) : 0,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -61,8 +62,9 @@ export class PgAgreementRepository extends PgBaseRepository implements Agreement
           id, tenant_id, customer_id, location_id, name, description,
           recurrence_rule, price_cents, auto_generate_invoice, auto_generate_job,
           next_run_at, last_run_at, status, starts_on, ends_on, created_by,
-          created_at, updated_at, auto_renew, renewal_term_months, renewal_count
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+          created_at, updated_at, auto_renew, renewal_term_months, renewal_count,
+          member_discount_bps
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
         RETURNING *`,
         [
           agreement.id,
@@ -86,6 +88,7 @@ export class PgAgreementRepository extends PgBaseRepository implements Agreement
           agreement.autoRenew ?? false,
           agreement.renewalTermMonths ?? null,
           agreement.renewalCount ?? 0,
+          agreement.memberDiscountBps ?? 0,
         ],
       );
       return mapRow(result.rows[0]);
@@ -176,6 +179,7 @@ export class PgAgreementRepository extends PgBaseRepository implements Agreement
         autoRenew: 'auto_renew',
         renewalTermMonths: 'renewal_term_months',
         renewalCount: 'renewal_count',
+        memberDiscountBps: 'member_discount_bps',
         updatedAt: 'updated_at',
       };
       const setClauses: string[] = [];
