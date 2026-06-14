@@ -7,7 +7,7 @@ import { FILLER_LIBRARY } from './fillers/manifest';
  * audio is raw PCM 16-bit signed little-endian @ 16 kHz mono, as
  * produced by `scripts/render-fillers.ts` (ElevenLabs pcm_16000 format).
  * The mediastream-adapter passes the bytes directly to `streamPcmAsMedia`
- * without any further decoding (see decode-filler.ts).
+ * without any further decoding.
  *
  * Missing files do NOT throw — they are simply skipped. This lets a
  * partial render survive boot; the unrendered fillers are unavailable
