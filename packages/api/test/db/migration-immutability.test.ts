@@ -253,6 +253,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // block, never a reply anchor)
   ['171_proposal_sms_events_voice_reapproval_kind', '84e29ec755102c0b5f00bddc21544610d2c6d6e05ad9e20fafad6f0e700b99fe'],
   ['172_create_accounting_integrations', '70acc51d76a63c01b9047b15198502d8ae013bcf0985f457d67a03a405097d33'],
+  ['173_create_hfcr_weekly_sends', '2f1846bc7819304ca7af8db0a79f2a8aa99f25f4e076f50f88049122a035e2eb'],
 ];
 
 function hashMigration(value: string): string {
