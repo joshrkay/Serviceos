@@ -7,7 +7,11 @@ import {
   HandlerResult,
 } from '../inbound-dispatch';
 import { UserRepository } from '../../users/user';
-import { ProposalRepository } from '../../proposals/proposal';
+import {
+  ProposalRepository,
+  actionClassForProposalType,
+} from '../../proposals/proposal';
+import { confidenceMetaBlocksAutoApprove } from '../../proposals/auto-approve';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { approveProposal, rejectProposal } from '../../proposals/actions';
 import { parseInboundProposalSms } from '../../proposals/sms/parse-inbound';
@@ -36,6 +40,12 @@ async function audit(
   metadata: Record<string, unknown>,
 ): Promise<void> {
   if (!deps.auditRepo) return;
+  // No proposal entity to attach the event to (e.g. the unverified-mobile
+  // path runs before any proposal is resolved). createAuditEvent requires a
+  // non-empty entityId, so skip rather than throw — important now that this
+  // handler also serves as the free-text fallback: a non-owner reply must
+  // decline cleanly so dropped-call recovery-resume can claim it.
+  if (!proposalId) return;
   await deps.auditRepo.create(
     createAuditEvent({
       tenantId: ctx.tenantId,
@@ -153,6 +163,45 @@ export async function handleProposalApprovalSms(
   });
 
   if (parsed.action === 'approve') {
+    // Fail-closed guards mirroring the app/link review path: a bare SMS
+    // APPROVE must NEVER green-light a money / comms / irreversible proposal
+    // (anything not 'capture' class) or a low-confidence one. Those keep the
+    // "all require human approval" invariant by demanding richer in-app review,
+    // so the one-tap SMS path is hard-blocked here regardless of trust tier.
+    const actionClass = actionClassForProposalType(proposal.proposalType);
+    if (actionClass !== 'capture') {
+      await audit(deps, ctx, 'proposal_sms.approve_blocked_action_class', proposalId, {
+        ownerUserId: user.id,
+        actionClass,
+      });
+      if (deps.sendSms) {
+        await deps.sendSms(
+          ctx.fromE164,
+          'That one needs review in the app before it can be approved.',
+        );
+      }
+      return {
+        handled: true,
+        handler: 'proposal-approval',
+        reason: 'approve_blocked_action_class',
+      };
+    }
+    if (confidenceMetaBlocksAutoApprove(proposal.payload)) {
+      await audit(deps, ctx, 'proposal_sms.approve_blocked_low_confidence', proposalId, {
+        ownerUserId: user.id,
+      });
+      if (deps.sendSms) {
+        await deps.sendSms(
+          ctx.fromE164,
+          'That one needs review in the app before it can be approved.',
+        );
+      }
+      return {
+        handled: true,
+        handler: 'proposal-approval',
+        reason: 'approve_blocked_low_confidence',
+      };
+    }
     try {
       await approveProposal(
         deps.proposalRepo,

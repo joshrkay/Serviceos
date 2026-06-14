@@ -6,6 +6,7 @@ import {
 } from '../../src/sms/inbound-dispatch';
 import {
   handleProposalApprovalSms,
+  registerProposalApprovalKeywords,
   InMemoryProposalSmsEventRepository,
 } from '../../src/sms/proposal-approval';
 import { InMemoryUserRepository } from '../../src/users/user';
@@ -171,6 +172,104 @@ describe('P2-034 — proposal SMS transport', () => {
     expect(body.length).toBeLessThanOrEqual(320);
     expect(segmentCount).toBeLessThanOrEqual(3);
     expect(body).toContain('APPROVE');
+  });
+
+  async function seedTypedProposal(
+    id: string,
+    proposalType: Parameters<typeof createProposal>[0]['proposalType'],
+    payload: Record<string, unknown>,
+  ) {
+    const proposal = createProposal({
+      tenantId,
+      proposalType,
+      summary: `Proposal ${id}`,
+      payload,
+      createdBy: ownerId,
+      sourceTrustTier: 'operator_confirmed',
+    });
+    proposal.id = id;
+    proposal.status = 'ready_for_review';
+    await proposalRepo.create(proposal);
+    await smsEventRepo.recordEvent({
+      tenantId,
+      proposalId: id,
+      direction: 'outbound',
+      messageSid: `out-${id}`,
+      ownerE164: ownerPhone,
+      bodyPreview: 'outbound preview',
+    });
+  }
+
+  it('SMS APPROVE is hard-blocked for a non-capture (money) proposal — fails closed', async () => {
+    const proposalId = '00000000-0000-0000-0000-000000000020';
+    await seedTypedProposal(proposalId, 'record_payment', { amountCents: 50000 });
+
+    const result = await handleProposalApprovalSms(
+      { tenantId, fromE164: ownerPhone, body: 'APPROVE', messageSid: 'SM-block-class' },
+      deps(),
+    );
+
+    expect(result.reason).toBe('approve_blocked_action_class');
+    const updated = await proposalRepo.findById(tenantId, proposalId);
+    expect(updated?.status).toBe('ready_for_review'); // NOT approved
+    expect(sendSms).toHaveBeenCalledWith(ownerPhone, expect.stringContaining('review in the app'));
+  });
+
+  it('SMS APPROVE is hard-blocked for a low-confidence proposal — fails closed', async () => {
+    const proposalId = '00000000-0000-0000-0000-000000000021';
+    await seedTypedProposal(proposalId, 'add_note', {
+      note: 'x',
+      _meta: { overallConfidence: 'low' },
+    });
+
+    const result = await handleProposalApprovalSms(
+      { tenantId, fromE164: ownerPhone, body: 'yes', messageSid: 'SM-block-conf' },
+      deps(),
+    );
+
+    expect(result.reason).toBe('approve_blocked_low_confidence');
+    const updated = await proposalRepo.findById(tenantId, proposalId);
+    expect(updated?.status).toBe('ready_for_review'); // NOT approved
+  });
+
+  it('routes free-text after EDIT through the fallback into the edit session', async () => {
+    const proposalId = '00000000-0000-0000-0000-000000000022';
+    await seedProposal(proposalId);
+    registerProposalApprovalKeywords(deps(), { overwrite: true });
+
+    // Owner opens an edit session via the EDIT keyword.
+    const opened = await dispatchInboundSms({
+      tenantId,
+      fromE164: ownerPhone,
+      body: 'EDIT',
+      messageSid: 'SM-edit-open',
+    });
+    expect(opened.handled).toBe(true);
+
+    // The follow-up is free text with no registered keyword — it must reach
+    // the handler via the fallback and apply to the open edit session.
+    const delta = await dispatchInboundSms({
+      tenantId,
+      fromE164: ownerPhone,
+      body: 'make it $500',
+      messageSid: 'SM-edit-delta',
+    });
+    expect(delta.handled).toBe(true);
+    expect(delta.handler).toBe('proposal-approval');
+
+    const updated = await proposalRepo.findById(tenantId, proposalId);
+    expect(updated?.summary).toContain('edited: make it $500');
+  });
+
+  it('fallback declines free-text from a non-owner phone so recovery-resume can run', async () => {
+    registerProposalApprovalKeywords(deps(), { overwrite: true });
+    const result = await dispatchInboundSms({
+      tenantId,
+      fromE164: '+15555559999', // not the owner
+      body: 'some random text',
+      messageSid: 'SM-customer-reply',
+    });
+    expect(result.handled).toBe(false);
   });
 
   it('KeywordHandler class routes through handleProposalApprovalSms', async () => {
