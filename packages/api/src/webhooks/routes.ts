@@ -13,6 +13,10 @@ import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository, recordPayment, PaymentReceiptNotifier, PaymentMethod } from '../invoices/payment';
 import { recordRefund, reversePayment, recordFailedPaymentAttempt } from '../payments/payment-service';
+import { randomUUID } from 'crypto';
+import { CustomerPaymentMethodRepository } from '../payments/customer-payment-method';
+import { retrievePaymentMethod } from '../payments/stripe-saved-card';
+import { StripeFetch } from '../payments/stripe-payment-intent';
 import { JobRepository } from '../jobs/job';
 import { deriveDepositStatus } from '../jobs/deposit-rule';
 import { PendingInvitationRepository } from '../users/pending-invitation';
@@ -148,6 +152,14 @@ export interface WebhookRouterDeps {
     markProcessed(provider: string, eventId: string): Promise<void>;
   };
   auditRepo?: AuditRepository;
+  /**
+   * #6 phase 4 — when wired, `setup_intent.succeeded` persists the saved
+   * PaymentMethod (ids + display metadata) for off-session dues billing.
+   * stripeConfig + stripeFetch back the PaymentMethod-details retrieve.
+   */
+  customerPaymentMethodRepo?: CustomerPaymentMethodRepository;
+  stripeConfig?: { apiKey: string };
+  stripeFetch?: StripeFetch;
   integrationResolver?: (tenantId: string, provider: 'twilio' | 'sendgrid') => Promise<{
     tenantId: string;
     provider: 'twilio' | 'sendgrid';
@@ -772,6 +784,78 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     logger.info('Stripe webhook received', { eventId: event.id, type: event.type });
 
     try {
+      // #6 phase 4 — a customer saved a card on file. Persist the resulting
+      // PaymentMethod (ids + display metadata) so the dues sweep can charge it
+      // off-session. The PM lives on the connected account the event came from
+      // (event.account); we retrieve its card metadata there. Idempotent: a
+      // replay finds the row already stored and no-ops.
+      if (event.type === 'setup_intent.succeeded') {
+        const si = event.data.object as {
+          customer?: string;
+          payment_method?: string;
+          metadata?: { tenant_id?: string; customer_id?: string };
+        };
+        const siTenantId = si.metadata?.tenant_id;
+        const siCustomerId = si.metadata?.customer_id;
+        if (
+          deps.customerPaymentMethodRepo &&
+          deps.stripeConfig &&
+          siTenantId &&
+          siCustomerId &&
+          si.customer &&
+          si.payment_method
+        ) {
+          const already = await deps.customerPaymentMethodRepo.findByStripePaymentMethodId(
+            siTenantId,
+            si.payment_method,
+          );
+          if (!already) {
+            const connectedAccountId = (event as { account?: string }).account;
+            let brand: string | undefined;
+            let last4: string | undefined;
+            let expMonth: number | undefined;
+            let expYear: number | undefined;
+            try {
+              const details = await retrievePaymentMethod(
+                { apiKey: deps.stripeConfig.apiKey, stripeAccountId: connectedAccountId },
+                si.payment_method,
+                deps.stripeFetch,
+              );
+              ({ brand, last4, expMonth, expYear } = details);
+            } catch (retrieveErr) {
+              // Non-fatal: store the ids now; display metadata is cosmetic.
+              logger.warn('setup_intent.succeeded: payment-method retrieve failed', {
+                error: retrieveErr instanceof Error ? retrieveErr.message : String(retrieveErr),
+              });
+            }
+            // First saved card becomes the default for auto-collection.
+            const existingDefault = await deps.customerPaymentMethodRepo.findDefaultForCustomer(
+              siTenantId,
+              siCustomerId,
+            );
+            await deps.customerPaymentMethodRepo.create({
+              id: randomUUID(),
+              tenantId: siTenantId,
+              customerId: siCustomerId,
+              stripeCustomerId: si.customer,
+              stripePaymentMethodId: si.payment_method,
+              brand,
+              last4,
+              expMonth,
+              expYear,
+              isDefault: !existingDefault,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            });
+            logger.info('Saved customer payment method from setup_intent.succeeded', {
+              tenantId: siTenantId,
+            });
+          }
+        }
+        await webhookRepo.updateStatus(webhookEvent.id, 'processed');
+        return res.status(200).json({ received: true });
+      }
+
       // Trial-checkout marker clear on the ABANDONED path only.
       // checkout.session.expired fires when the session times out
       // without completion or when /v1/checkout/sessions/:id/expire
