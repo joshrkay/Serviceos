@@ -225,28 +225,28 @@ Jobber is the primary head-to-head competitor at this ICP. The table below is th
 | **Estimating (manual)** | Template-based editor | Voice-drafted, catalog-priced line items | No screen needed | ✅ Built |
 | **Tiered estimates (good/better/best)** | Yes | Yes | Parity | ✅ Built |
 | **Deposit on acceptance** | Yes | Yes (Stripe on portal accept) | Parity | ✅ Built |
-| **MMS-to-quote (plumbing)** | No | Photo → AI analysis → draft estimate | Differentiator | ✅ Built |
+| **MMS-to-quote (plumbing)** | No | Photo → AI analysis → draft estimate | Differentiator | 🔧 Partial — photo ingest only; image→estimate not built |
 | **Estimate portal approval** | Yes (Client Hub) | Yes (token-gated portal) | Parity | ✅ Built |
-| **Estimate follow-up** | Automated reminders | AI-proposed follow-up sequence | Parity | 📋 Specced (P8 follow-up agent) |
-| **Auto-invoice on completion** | Yes | Yes (job completion → draft invoice proposal) | Parity | 📋 Specced (P20) |
+| **Estimate follow-up** | Automated reminders | AI-proposed follow-up sequence | Parity | ✅ Built (reminder cadence) |
+| **Auto-invoice on completion** | Yes | Yes (job completion → draft invoice proposal) | Parity | ✅ Built |
 | **Voice-issued invoice** | No | "Invoice the Martins for today's job" → catalog-priced proposal | Differentiator | ✅ Built |
 | **Invoice portal (customer pay)** | Yes (Client Hub) | Yes (token-gated payment link) | Parity | ✅ Built |
-| **ACH payments** | Yes | Yes (Stripe automatic_payment_methods) | Parity | ✅ Built |
+| **ACH payments** | Yes | Yes (Stripe automatic_payment_methods) | Parity | 🔧 Partial — card + payment links live; ACH not configured/exercised |
 | **Tip capture** | Yes | Roadmap | Jobber leads | 📋 Specced (P22) |
 | **Consumer financing (Wisetack)** | Built-in | Roadmap | Jobber leads | 🔮 Wave 3 |
 | **Tap-to-pay (field)** | Yes | Roadmap (Stripe Terminal) | Jobber leads | 📋 Specced (P22) |
-| **Auto-pay / saved card** | Yes | Roadmap | Jobber leads | 📋 Specced (P22) |
-| **Dunning / overdue follow-up** | Automated reminders | Multi-step dunning cadence + digest summary | Parity | 📋 Specced (P20) |
-| **Late fees** | Yes | Roadmap | Jobber leads | 📋 Specced (P20) |
+| **Auto-pay / saved card** | Yes | Saved-card off-session (membership dues) | Jobber leads | ✅ Built (membership dues) |
+| **Dunning / overdue follow-up** | Automated reminders | Multi-step dunning cadence + digest summary | Parity | ✅ Built |
+| **Late fees** | Yes | Auto-accrual, capped (configurable) | Parity | ✅ Built |
 | **Customer management** | Full CRM | Full CRM + account types | Parity | ✅ Built |
-| **B2B account recognition** | Basic | Property manager routing, sub-accounts, priority flow | Differentiator | ✅ Built |
+| **B2B account recognition** | Basic | Property manager routing, sub-accounts, priority flow | Differentiator | 🔧 Partial — binary residential/b2b flag only; no PM type, sub-accounts, or routing |
 | **Equipment history (HVAC)** | No | Unit model + service age + repair history | Differentiator | 📋 Specced (P24) |
 | **Truck inventory** | No | Parts on truck → auto-deduct into invoice lines | Differentiator | 📋 Specced (P14) |
 | **Per-job profit (voice)** | Top plan only | "Did I make money on the Hernandez job?" by voice | Differentiator | 📋 Specced (P22-005) |
 | **Unified messaging inbox** | Yes (SMS + email threads) | Yes + AI-suggested replies in brand voice | Parity + AI drafts | ✅ Built |
 | **Review request (post-job)** | Automated | Automated + review gating (4+ stars → Google) | Parity | ✅ Built |
 | **Review response drafting** | No | AI drafts public response + private apology | Differentiator | ✅ Built |
-| **Memberships / maintenance plans** | Full engine (auto-renew, member pricing) | Engine built; auto-renew + member pricing in roadmap | Jobber leads (closing) | 🔧 Partial — deepening |
+| **Memberships / maintenance plans** | Full engine (auto-renew, member pricing) | Auto-renew (off-session) + member pricing + priority booking | Parity | ✅ Built |
 | **Client Hub / customer portal** | Full (book, approve, pay, history) | Lightweight (approve + pay only, no login) | Jobber leads on depth | ✅ Built (lightweight) |
 | **QuickBooks sync** | Deep, battle-tested | Basic sync (Wave 3) | Jobber leads | 📋 Specced (P23) |
 | **Route optimization** | Available | Drive-time feasibility (Google Maps) | Jobber leads on optimization | ✅ Built (feasibility) |
@@ -259,6 +259,8 @@ Jobber is the primary head-to-head competitor at this ICP. The table below is th
 | **Correction loop** | No | Owner edits → system learns → digest reports | Differentiator | 📋 Specced (N-009) |
 
 **Legend:** ✅ Built · 🔧 Partial · 📋 Specced (story exists, not yet built) · 🔮 Wave 3+
+
+> **Status verification (2026-06-14):** The Status column above was reconciled against the canonical `/packages` codebase (wiring + tests). This pass **downgraded** MMS-to-quote, ACH payments, and B2B account recognition (✅→🔧 — claimed built, only partially implemented) and **upgraded** memberships, auto-invoice on completion, dunning/overdue, late fees, estimate follow-up, and auto-pay/saved-card (📋/🔧→✅ — shipped ahead of their roadmap status). Three further suspected gaps — review-request gating, voice en-route/ETA, and voice dispatch reassignment — were investigated and found already built (left ✅). Rationale recorded in `docs/decisions.md` (D-012).
 
 ---
 
@@ -1098,6 +1100,7 @@ The pattern: every adjacent vertical has entrenched vertical software with zero 
 | 2.0 | 2026-05-17 | Re-framed around AI back office strategy. Added 11 new stories (SMS approval, supervisor agent, digest, review monitoring, dropped-call recovery, vulnerability triage, correction loop, brand voice, tech status). |
 | 3.0 | 2026-06-11 | **Voice-first reframe** — voice elevated to primary interface (both directions); SMS is async approval/notification channel. Added full Jobber feature parity map. Added job costing, memberships depth, client hub (lightweight portal), native mobile strategy. Updated ICP to include "going independent" persona. 6-month roadmap with phased priorities. Updated all 16 product decisions. |
 | 3.1 | 2026-06-11 | **Vertical expansion roadmap** (§9) — Wave 2: Electrical + Pest Control; Wave 3: Painting + Handyman. Per-vertical feature delta, platform investment estimates, ICP definitions, and competitive position by vertical. Pest control identified as architecturally distinct (route-dense, recurring-first); route optimization promoted from "post-PMF deferred" to Wave 2 required. |
+| 3.2 | 2026-06-14 | **Status reconciliation** — §5 parity Status column verified against the `/packages` codebase. Downgraded 3 rows (MMS-to-quote, ACH payments, B2B account recognition: ✅→🔧); upgraded 6 rows (memberships, auto-invoice on completion, dunning/overdue, late fees, estimate follow-up, auto-pay/saved-card → ✅). Rationale in `docs/decisions.md` D-012. |
 
 **Next review:** After Phase 1 exit (weeks 5–6), before Phase 2 kick-off.  
 **Change protocol:** PRD changes require a recorded decision in `docs/decisions.md` and a paired update to `docs/strategy/day-in-the-life.md` if the change affects the customer experience.

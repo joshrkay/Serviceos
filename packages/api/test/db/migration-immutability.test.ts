@@ -260,6 +260,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['176_customer_payment_methods', '6fe12975c7999002a67de1722a402a6bd017d0e8db4c84fd70d2d85dad439890'],
   ['177_digest_entries', '8ebc2dc5b5c449bf7b94f2c6a11a17af2c91092e0fff24bdf6e824f0f1af21ac'],
   ['177_customer_payment_methods_stripe_account', '4aac0f8afc6b5e3fb72ec4e866233905e9e7e4ea95699e61705c8da10878ab12'],
+  ['178_customer_b2b_hierarchy', '4c4adc2260d47abaa8a833d59ac20995902f0dd5d5a19d5ab9a25d61a3bd8523'],
+  ['179_ach_payment_processing_state', '866664ba47094254581ef04a5864f8529652c308b309ae11bf1abd5ebb47ec3d'],
+  ['180_correction_lessons', '1b75f1cb10c7754370eb74f2b2b4873375657920429d4839aa372e35ebad8139'],
+  ['181_tenant_settings_labor_rate', 'f650607b44e90ac94e357f83ad46fee1dbe74aef2e19dc8134147ec5901195aa'],
 ];
 
 function hashMigration(value: string): string {

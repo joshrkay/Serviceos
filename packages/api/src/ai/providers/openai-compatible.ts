@@ -1,5 +1,41 @@
 import OpenAI from 'openai';
-import type { LLMProvider, LLMRequest, LLMResponse } from '../gateway/gateway';
+import type { LLMProvider, LLMRequest, LLMResponse, LLMMessage } from '../gateway/gateway';
+
+type OpenAIChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
+type OpenAIContentPart = OpenAI.Chat.Completions.ChatCompletionContentPart;
+
+/**
+ * Translate gateway messages to the OpenAI chat format. Messages without
+ * `parts` pass through as plain string content (the text path is unchanged);
+ * messages with `parts` become an ordered content-part array — the message's
+ * text first, then each part. The provider-neutral `image` part maps to the
+ * OpenAI `image_url` shape. Pure + exported for unit testing.
+ */
+export function buildChatMessages(messages: LLMMessage[]): OpenAIChatMessage[] {
+  return messages.map((message): OpenAIChatMessage => {
+    if (!message.parts || message.parts.length === 0) {
+      return { role: message.role, content: message.content } as OpenAIChatMessage;
+    }
+    const content: OpenAIContentPart[] = [];
+    if (message.content) {
+      content.push({ type: 'text', text: message.content });
+    }
+    for (const part of message.parts) {
+      if (part.type === 'text') {
+        content.push({ type: 'text', text: part.text });
+      } else {
+        content.push({
+          type: 'image_url',
+          image_url: {
+            url: part.url,
+            ...(part.detail ? { detail: part.detail } : {}),
+          },
+        });
+      }
+    }
+    return { role: message.role, content } as OpenAIChatMessage;
+  });
+}
 
 export interface OpenAICompatibleConfig {
   apiKey: string;
@@ -98,7 +134,9 @@ export class OpenAICompatibleProvider implements LLMProvider, EmbeddingProvider 
     const completion = await this.client.chat.completions.create(
       {
         model,
-        messages: request.messages,
+        // Translate gateway messages (text + optional multimodal parts) to the
+        // OpenAI chat format via the shared pure helper.
+        messages: buildChatMessages(request.messages),
         temperature: request.temperature ?? 0.2,
         max_tokens: request.maxTokens,
         response_format:

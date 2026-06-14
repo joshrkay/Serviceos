@@ -108,6 +108,19 @@ export async function buildDigestData(
   );
   const correctionChunkIds = correctionChunksResult.rows.map((r) => r.id);
 
+  // Section 6 (N-009 / P2-038): correction-loop lessons applied today. Scoped
+  // by tenant-local calendar day (local_date), so an 11pm edit lands in the
+  // right day's digest regardless of UTC. Reverted lessons are excluded.
+  const correctionLessonsResult = await client.query<{ id: string; summary: string }>(
+    `SELECT id, summary FROM correction_lessons
+     WHERE status = 'applied'
+       AND local_date = $1
+     ORDER BY created_at ASC`,
+    [localDate],
+  );
+  const correctionLessonIds = correctionLessonsResult.rows.map((r) => r.id);
+  const correctionLessonLines = correctionLessonsResult.rows.map((r) => r.summary);
+
   // Build sections
   const sections: DigestSection[] = [];
 
@@ -173,8 +186,15 @@ export async function buildDigestData(
     });
   }
 
-  // Section 6: What I learned today (correction chunks) — omit when empty
-  if (correctionChunkIds.length > 0) {
+  // Section 6: What I learned today — omit when nothing learned. Prefer the
+  // structured correction-loop lessons (one line each); fall back to the
+  // knowledge-chunk count only when chunks exist but no structured lesson did.
+  if (correctionLessonLines.length > 0) {
+    sections.push({
+      label: 'What I learned today',
+      lines: correctionLessonLines,
+    });
+  } else if (correctionChunkIds.length > 0) {
     sections.push({
       label: 'What I learned today',
       lines: [
@@ -190,6 +210,7 @@ export async function buildDigestData(
     tomorrowAppointmentIds,
     uncertainProposalIds,
     correctionChunkIds,
+    correctionLessonIds,
   };
 
   return { sections, sourceData };

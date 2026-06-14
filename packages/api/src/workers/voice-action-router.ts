@@ -12,6 +12,7 @@ import type { AuditRepository } from '../audit/audit';
 import type { UnsupervisedProposalRouting } from '../settings/settings';
 import { ConflictError } from '../shared/errors';
 import { voiceProposalIdempotencyKey } from '../voice/voice-audit';
+import type { CustomerNegotiationContextProvider } from '../customers/customer-negotiation-context';
 import {
   classifyIntent,
   isLookupIntent,
@@ -156,6 +157,11 @@ export interface UnsupervisedRoutingDeps extends RouteUnsupervisedProposalDeps {
 export interface VoiceActionRouterDeps {
   gateway: LLMGateway;
   proposalRepo: ProposalRepository;
+  /**
+   * N-003 (P2-036) — when wired, the negotiation guardrail enriches the owner
+   * callback with the caller's LTV/recency (resolved via the verified customerId).
+   */
+  customerNegotiationContextProvider?: CustomerNegotiationContextProvider;
   recentReferents?: RecentReferentProvider;
   /**
    * Optional: pre-draft slot-conflict checker for `create_appointment`
@@ -460,7 +466,10 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   // callback with a recommendation). Registered under a synthetic
   // '_negotiation' key so it doesn't collide with any plain callback handler;
   // processSegment resolves it by intent name, like '_complaint'.
-  handlers.set('_negotiation' as ProposalType, new NegotiationGuardrailTaskHandler());
+  handlers.set(
+    '_negotiation' as ProposalType,
+    new NegotiationGuardrailTaskHandler(deps.customerNegotiationContextProvider),
+  );
   return handlers;
 }
 

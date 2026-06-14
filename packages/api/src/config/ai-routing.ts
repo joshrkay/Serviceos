@@ -45,3 +45,42 @@ export const DEFAULT_AI_ROUTING_CONFIG: AIRoutingConfig = {
     'multi_entity_proposal': 'complex',
   },
 };
+
+/**
+ * Models known to accept image content parts. Env-overridable so ops can
+ * update the set without a deploy: AI_VISION_CAPABLE_MODELS is a
+ * comma-separated list merged with these defaults. Matching is
+ * case-insensitive and also matches a provider-namespaced id (e.g.
+ * "openai/gpt-4o" or "openrouter/openai/gpt-4o" → "gpt-4o").
+ */
+const DEFAULT_VISION_CAPABLE_MODELS: readonly string[] = [
+  'claude-sonnet-4-6',
+  'claude-haiku-4-5-20251001',
+  'gpt-4o',
+  'gpt-4o-mini',
+];
+
+function visionCapableModelSet(): string[] {
+  const fromEnv = (process.env.AI_VISION_CAPABLE_MODELS ?? '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return [...DEFAULT_VISION_CAPABLE_MODELS.map((m) => m.toLowerCase()), ...fromEnv];
+}
+
+/**
+ * Whether the resolved model can accept image inputs. Compares on the last
+ * path segment so a provider namespace is ignored ("openai/gpt-4o" → "gpt-4o"),
+ * and treats a dated/versioned snapshot as the base family
+ * ("gpt-4o-2024-08-06", "gpt-4o-mini-2024-07-18" → capable). Matching a base
+ * family (e.g. "gpt-4o") therefore also covers its dated variants.
+ */
+export function isVisionCapableModel(model: string): boolean {
+  if (!model) return false;
+  const lastSegment = (id: string): string => id.toLowerCase().split('/').pop() ?? '';
+  const m = lastSegment(model);
+  return visionCapableModelSet().some((cap) => {
+    const c = lastSegment(cap);
+    return m === c || m.startsWith(`${c}-`);
+  });
+}
