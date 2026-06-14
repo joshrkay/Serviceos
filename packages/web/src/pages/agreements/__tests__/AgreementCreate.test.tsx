@@ -74,7 +74,20 @@ describe('AgreementCreate — membership auto-renew', () => {
     await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
     expect(mockCreate).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ autoRenew: false, memberDiscountBps: 0 }),
+      expect.objectContaining({ autoRenew: false, memberDiscountBps: 0, autoCollectDues: false }),
+    );
+  });
+
+  it('sends the auto-collect-dues flag when checked', async () => {
+    render(<AgreementCreate />);
+    fillBaseFields();
+    fireEvent.click(screen.getByLabelText('Auto-collect dues'));
+    fireEvent.click(screen.getByText('Create Agreement'));
+
+    await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
+    expect(mockCreate).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ autoCollectDues: true }),
     );
   });
 

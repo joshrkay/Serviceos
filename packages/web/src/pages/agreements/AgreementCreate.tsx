@@ -33,6 +33,7 @@ export function AgreementCreate({
   const [renewalTermMonths, setRenewalTermMonths] = useState('12');
   const [memberDiscountPct, setMemberDiscountPct] = useState('0');
   const [priorityBooking, setPriorityBooking] = useState(false);
+  const [autoCollectDues, setAutoCollectDues] = useState(false);
   const [recurrence, setRecurrence] = useState<RecurrenceBuilderValue>({
     frequency: 'quarterly',
     interval: 1,
@@ -79,6 +80,7 @@ export function AgreementCreate({
         renewalTermMonths: renewalTerm,
         memberDiscountBps,
         priorityBooking,
+        autoCollectDues,
       });
       onCreated?.(created.id);
     } catch (err) {
@@ -196,6 +198,15 @@ export function AgreementCreate({
           onChange={(e) => setPriorityBooking(e.target.checked)}
         />
         Priority booking — member can self-schedule further out
+      </label>
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          aria-label="Auto-collect dues"
+          checked={autoCollectDues}
+          onChange={(e) => setAutoCollectDues(e.target.checked)}
+        />
+        Auto-collect dues — charge the member&apos;s saved card each cycle
       </label>
       <button
         type="submit"

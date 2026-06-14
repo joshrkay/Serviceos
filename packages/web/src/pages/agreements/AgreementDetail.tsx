@@ -154,6 +154,11 @@ export function AgreementDetail({
             <span className="font-medium">Priority booking:</span> can self-schedule further out
           </p>
         ) : null}
+        {data.autoCollectDues ? (
+          <p data-testid="auto-collect-dues">
+            <span className="font-medium">Auto-collect dues:</span> charged to the saved card on file
+          </p>
+        ) : null}
       </section>
 
       <section>

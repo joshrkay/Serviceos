@@ -36,6 +36,8 @@ export interface Agreement {
   memberDiscountBps?: number;
   /** Priority booking: member can book further into the future. */
   priorityBooking?: boolean;
+  /** Auto-collect dues: charge each cycle against the saved card on file. */
+  autoCollectDues?: boolean;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -75,6 +77,8 @@ export interface CreateAgreementBody {
   memberDiscountBps?: number;
   /** Priority booking: member can book further into the future. */
   priorityBooking?: boolean;
+  /** Auto-collect dues: charge each cycle against the saved card on file. */
+  autoCollectDues?: boolean;
 }
 
 export type UpdateAgreementBody = Partial<
@@ -91,6 +95,7 @@ export type UpdateAgreementBody = Partial<
     | 'renewalTermMonths'
     | 'memberDiscountBps'
     | 'priorityBooking'
+    | 'autoCollectDues'
   >
 >;
 
