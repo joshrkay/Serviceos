@@ -260,6 +260,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['176_customer_payment_methods', '6fe12975c7999002a67de1722a402a6bd017d0e8db4c84fd70d2d85dad439890'],
   ['177_digest_entries', '8ebc2dc5b5c449bf7b94f2c6a11a17af2c91092e0fff24bdf6e824f0f1af21ac'],
   ['177_customer_payment_methods_stripe_account', '4aac0f8afc6b5e3fb72ec4e866233905e9e7e4ea95699e61705c8da10878ab12'],
+  // E2a: partial-unique index on payments(tenant_id, reference_number) — the
+  // ACH-processing idempotency backstop (duplicate-guarded; falls back to a
+  // non-unique index on dirty legacy data).
+  ['178_payments_provider_reference_unique', '16a874df5c8d6537fc4b2bfbf0cf1e149a46d47a6a4cc29357ca85f3a87c7053'],
 ];
 
 function hashMigration(value: string): string {
