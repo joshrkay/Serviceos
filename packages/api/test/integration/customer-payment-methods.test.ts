@@ -96,10 +96,17 @@ describe('Postgres integration — customer payment methods', () => {
     expect(list.filter((p) => p.isDefault).map((p) => p.id)).toEqual([b.id]);
   });
 
-  it('enforces the unique (tenant_id, stripe_payment_method_id) constraint', async () => {
-    await repo.create(makePm(tenant.tenantId, customerId, { stripePaymentMethodId: 'pm_dup' }));
-    await expect(
-      repo.create(makePm(tenant.tenantId, customerId, { stripePaymentMethodId: 'pm_dup' })),
-    ).rejects.toThrow();
+  it('is idempotent on (tenant_id, stripe_payment_method_id) — a duplicate save no-ops to the existing row', async () => {
+    const first = await repo.create(
+      makePm(tenant.tenantId, customerId, { stripePaymentMethodId: 'pm_dup' }),
+    );
+    // A racing/duplicate save with a different row id must NOT throw and must
+    // NOT create a second row — it returns the existing (winning) row.
+    const second = await repo.create(
+      makePm(tenant.tenantId, customerId, { stripePaymentMethodId: 'pm_dup' }),
+    );
+    expect(second.id).toBe(first.id);
+    const all = await repo.findByCustomer(tenant.tenantId, customerId);
+    expect(all.filter((p) => p.stripePaymentMethodId === 'pm_dup')).toHaveLength(1);
   });
 });

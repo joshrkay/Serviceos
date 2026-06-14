@@ -3567,11 +3567,12 @@ export function createApp(): express.Express {
   // sweep skips collection when either is absent. The invoice is issued before
   // charging so a decline leaves a payable invoice (dunning), never a draft.
   const duesInvoiceOps: DuesInvoiceOps = {
-    ensureIssued: async (tenantId, invoiceId) => {
-      const inv = await invoiceRepo.findById(tenantId, invoiceId);
+    ensureIssuedAmountDue: async (tenantId, invoiceId) => {
+      let inv = await invoiceRepo.findById(tenantId, invoiceId);
       if (inv && inv.status === 'draft') {
-        await issueInvoice(tenantId, invoiceId, 30, invoiceRepo);
+        inv = (await issueInvoice(tenantId, invoiceId, 30, invoiceRepo)) ?? inv;
       }
+      return inv?.amountDueCents ?? 0;
     },
     recordPayment: async ({ tenantId, invoiceId, amountCents, providerReference, createdBy }) => {
       await recordPayment(

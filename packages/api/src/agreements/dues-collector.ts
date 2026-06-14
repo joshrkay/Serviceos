@@ -18,19 +18,30 @@ export interface DuesCollectionInput {
   tenantId: string;
   customerId: string;
   invoiceId: string;
-  amountCents: number;
   agreementId: string;
   /** The run's scheduled date — part of the idempotency key. */
   scheduledFor: string;
   createdBy: string;
 }
 
-export type DuesCollectionStatus = 'collected' | 'no_card' | 'requires_action' | 'failed';
+export type DuesCollectionStatus =
+  | 'collected'
+  /**
+   * The card WAS charged but recording the payment failed — money moved, our
+   * books didn't. A distinct, loud state (never folded into 'failed') carrying
+   * the PaymentIntent id so it can be reconciled and is never re-charged.
+   */
+  | 'collected_unrecorded'
+  | 'no_card'
+  | 'requires_action'
+  | 'failed';
 
 export interface DuesCollectionResult {
   status: DuesCollectionStatus;
   paymentIntentId?: string;
   declineCode?: string;
+  /** Set when status is collected_unrecorded — the recordPayment error. */
+  recordError?: string;
 }
 
 export interface DuesCollector {
@@ -40,11 +51,13 @@ export interface DuesCollector {
 /**
  * Invoice operations the collector needs, kept as a port so the agreement
  * layer doesn't import the invoice/payment machinery directly (and tests can
- * mock it): make a draft dues invoice payable, and record a successful
- * off-session charge as a payment.
+ * mock it): issue the draft dues invoice (if needed) and return the authoritative
+ * amount it owes — we charge THAT, not the raw agreement price, so the charge,
+ * the invoice total, and the recorded payment can never disagree — and record a
+ * successful off-session charge as a payment.
  */
 export interface DuesInvoiceOps {
-  ensureIssued(tenantId: string, invoiceId: string): Promise<void>;
+  ensureIssuedAmountDue(tenantId: string, invoiceId: string): Promise<number>;
   recordPayment(input: {
     tenantId: string;
     invoiceId: string;
@@ -73,8 +86,13 @@ export class StripeDuesCollector implements DuesCollector {
     );
     if (!card) return { status: 'no_card' };
 
-    // Issue first so a decline still leaves a payable invoice (not a hidden draft).
-    await this.deps.invoiceOps.ensureIssued(input.tenantId, input.invoiceId);
+    // Issue first so a decline still leaves a payable invoice (not a hidden
+    // draft), and charge exactly what the issued invoice owes.
+    const amountDueCents = await this.deps.invoiceOps.ensureIssuedAmountDue(
+      input.tenantId,
+      input.invoiceId,
+    );
+    if (amountDueCents <= 0) return { status: 'collected' }; // nothing owed
 
     const connect = this.deps.connectAccountResolver
       ? await this.deps.connectAccountResolver
@@ -89,7 +107,7 @@ export class StripeDuesCollector implements DuesCollector {
     const result = await chargeOffSession(
       config,
       {
-        amount: input.amountCents,
+        amount: amountDueCents,
         currency: this.deps.currency ?? 'usd',
         stripeCustomerId: card.stripeCustomerId,
         paymentMethodId: card.stripePaymentMethodId,
@@ -105,13 +123,24 @@ export class StripeDuesCollector implements DuesCollector {
     );
 
     if (result.status === 'succeeded' && result.paymentIntentId) {
-      await this.deps.invoiceOps.recordPayment({
-        tenantId: input.tenantId,
-        invoiceId: input.invoiceId,
-        amountCents: input.amountCents,
-        providerReference: result.paymentIntentId,
-        createdBy: input.createdBy,
-      });
+      try {
+        await this.deps.invoiceOps.recordPayment({
+          tenantId: input.tenantId,
+          invoiceId: input.invoiceId,
+          amountCents: amountDueCents,
+          providerReference: result.paymentIntentId,
+          createdBy: input.createdBy,
+        });
+      } catch (recordErr) {
+        // Stripe captured the money but we failed to record it. Never report
+        // this as a plain failure (it would hide a real charge and could be
+        // re-attempted): surface it distinctly with the PaymentIntent id.
+        return {
+          status: 'collected_unrecorded',
+          paymentIntentId: result.paymentIntentId,
+          recordError: recordErr instanceof Error ? recordErr.message : String(recordErr),
+        };
+      }
       return { status: 'collected', paymentIntentId: result.paymentIntentId };
     }
 

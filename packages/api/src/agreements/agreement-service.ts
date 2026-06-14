@@ -488,7 +488,6 @@ export async function runDueAgreements(
           tenantId,
           customerId: agreement.customerId,
           invoiceId,
-          amountCents: agreement.priceCents,
           agreementId: agreement.id,
           scheduledFor,
           createdBy: agreement.createdBy,
@@ -497,15 +496,21 @@ export async function runDueAgreements(
         collection = { status: 'failed' };
       }
       if (deps.auditRepo) {
+        // Three outcomes: clean collection, a charge we couldn't record (money
+        // moved — its own loud event so ops reconcile, never re-charge), and
+        // everything else (decline / no card / auth required → dunning).
+        const collectionEventType =
+          collection.status === 'collected'
+            ? 'service_agreement.dues_collected'
+            : collection.status === 'collected_unrecorded'
+              ? 'service_agreement.dues_collected_unrecorded'
+              : 'service_agreement.auto_collect_failed';
         await deps.auditRepo.create(
           createAuditEvent({
             tenantId,
             actorId: 'system:agreements-worker',
             actorRole: 'system',
-            eventType:
-              collection.status === 'collected'
-                ? 'service_agreement.dues_collected'
-                : 'service_agreement.auto_collect_failed',
+            eventType: collectionEventType,
             entityType: 'service_agreement',
             entityId: agreement.id,
             metadata: {
@@ -514,6 +519,7 @@ export async function runDueAgreements(
               collectionStatus: collection.status,
               paymentIntentId: collection.paymentIntentId,
               declineCode: collection.declineCode,
+              recordError: collection.recordError,
             },
           }),
         );

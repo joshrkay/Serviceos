@@ -36,11 +36,16 @@ export class PgCustomerPaymentMethodRepository
 
   async create(pm: CustomerPaymentMethod): Promise<CustomerPaymentMethod> {
     return this.withTenant(pm.tenantId, async (client) => {
+      // ON CONFLICT DO NOTHING makes a concurrent/duplicate save of the same
+      // payment method idempotent instead of a UNIQUE-violation 500 — two
+      // setup_intent.succeeded deliveries for one card can race the
+      // findByStripePaymentMethodId guard.
       const result = await client.query(
         `INSERT INTO customer_payment_methods (
            id, tenant_id, customer_id, stripe_customer_id, stripe_payment_method_id,
            brand, last4, exp_month, exp_year, is_default, created_at, updated_at
          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         ON CONFLICT (tenant_id, stripe_payment_method_id) DO NOTHING
          RETURNING *`,
         [
           pm.id,
@@ -57,7 +62,14 @@ export class PgCustomerPaymentMethodRepository
           pm.updatedAt,
         ],
       );
-      return mapRow(result.rows[0]);
+      if (result.rows.length > 0) return mapRow(result.rows[0]);
+      // Lost the race — the row already exists; return the winner.
+      const existing = await client.query(
+        `SELECT * FROM customer_payment_methods
+         WHERE tenant_id = $1 AND stripe_payment_method_id = $2`,
+        [pm.tenantId, pm.stripePaymentMethodId],
+      );
+      return mapRow(existing.rows[0]);
     });
   }
 

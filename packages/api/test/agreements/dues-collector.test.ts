@@ -11,9 +11,9 @@ function jsonRes(ok: boolean, status: number, body: unknown) {
 const TENANT = uuidv4();
 const CUSTOMER = uuidv4();
 
-function makeInvoiceOps() {
+function makeInvoiceOps(amountDue = 5000) {
   return {
-    ensureIssued: vi.fn(async () => {}),
+    ensureIssuedAmountDue: vi.fn(async () => amountDue),
     recordPayment: vi.fn(async () => {}),
   } satisfies DuesInvoiceOps;
 }
@@ -35,7 +35,6 @@ const input = {
   tenantId: TENANT,
   customerId: CUSTOMER,
   invoiceId: 'inv_1',
-  amountCents: 5000,
   agreementId: 'agr_1',
   scheduledFor: '2026-06-01',
   createdBy: 'system',
@@ -54,15 +53,19 @@ describe('StripeDuesCollector', () => {
     });
     const r = await collector.collect(input);
     expect(r.status).toBe('no_card');
-    expect(invoiceOps.ensureIssued).not.toHaveBeenCalled();
+    expect(invoiceOps.ensureIssuedAmountDue).not.toHaveBeenCalled();
     expect(stripeFetch).not.toHaveBeenCalled();
   });
 
-  it('issues the invoice and records payment on a successful charge', async () => {
+  it('charges the invoice amount due (not the raw price) and records that exact amount', async () => {
     const repo = new InMemoryCustomerPaymentMethodRepository();
     await seedCard(repo);
-    const invoiceOps = makeInvoiceOps();
-    const stripeFetch: StripeFetch = async () => jsonRes(true, 200, { id: 'pi_ok', status: 'succeeded' });
+    const invoiceOps = makeInvoiceOps(7777); // invoice owes 7777, e.g. price + tax
+    let chargedBody = '';
+    const stripeFetch: StripeFetch = async (_url, init) => {
+      chargedBody = init.body;
+      return jsonRes(true, 200, { id: 'pi_ok', status: 'succeeded' });
+    };
     const collector = new StripeDuesCollector({
       customerPaymentMethodRepo: repo,
       stripeConfig: { apiKey: 'sk' },
@@ -71,10 +74,48 @@ describe('StripeDuesCollector', () => {
     });
     const r = await collector.collect(input);
     expect(r).toEqual({ status: 'collected', paymentIntentId: 'pi_ok' });
-    expect(invoiceOps.ensureIssued).toHaveBeenCalledWith(TENANT, 'inv_1');
+    expect(invoiceOps.ensureIssuedAmountDue).toHaveBeenCalledWith(TENANT, 'inv_1');
+    expect(chargedBody).toContain('amount=7777');
     expect(invoiceOps.recordPayment).toHaveBeenCalledWith(
-      expect.objectContaining({ invoiceId: 'inv_1', amountCents: 5000, providerReference: 'pi_ok' }),
+      expect.objectContaining({ invoiceId: 'inv_1', amountCents: 7777, providerReference: 'pi_ok' }),
     );
+  });
+
+  it('does not charge when the issued invoice owes nothing', async () => {
+    const repo = new InMemoryCustomerPaymentMethodRepository();
+    await seedCard(repo);
+    const invoiceOps = makeInvoiceOps(0);
+    const stripeFetch = vi.fn();
+    const collector = new StripeDuesCollector({
+      customerPaymentMethodRepo: repo,
+      stripeConfig: { apiKey: 'sk' },
+      invoiceOps,
+      stripeFetch: stripeFetch as unknown as StripeFetch,
+    });
+    const r = await collector.collect(input);
+    expect(r.status).toBe('collected');
+    expect(stripeFetch).not.toHaveBeenCalled();
+    expect(invoiceOps.recordPayment).not.toHaveBeenCalled();
+  });
+
+  it('returns collected_unrecorded (with the PI id) when recording fails after a successful charge', async () => {
+    const repo = new InMemoryCustomerPaymentMethodRepository();
+    await seedCard(repo);
+    const invoiceOps = makeInvoiceOps(5000);
+    invoiceOps.recordPayment = vi.fn(async () => {
+      throw new Error('db down');
+    });
+    const stripeFetch: StripeFetch = async () => jsonRes(true, 200, { id: 'pi_charged', status: 'succeeded' });
+    const collector = new StripeDuesCollector({
+      customerPaymentMethodRepo: repo,
+      stripeConfig: { apiKey: 'sk' },
+      invoiceOps,
+      stripeFetch,
+    });
+    const r = await collector.collect(input);
+    expect(r.status).toBe('collected_unrecorded');
+    expect(r.paymentIntentId).toBe('pi_charged');
+    expect(r.recordError).toContain('db down');
   });
 
   it('issues the invoice but does NOT record payment on a decline', async () => {
@@ -97,7 +138,7 @@ describe('StripeDuesCollector', () => {
     const r = await collector.collect(input);
     expect(r.status).toBe('failed');
     expect(r.declineCode).toBe('insufficient_funds');
-    expect(invoiceOps.ensureIssued).toHaveBeenCalled();
+    expect(invoiceOps.ensureIssuedAmountDue).toHaveBeenCalled();
     expect(invoiceOps.recordPayment).not.toHaveBeenCalled();
   });
 
