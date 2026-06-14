@@ -358,6 +358,24 @@ describe('P12-004 — routeUnsupervisedProposal', () => {
     });
   });
 
+  it('P2-034 — includes a reply-APPROVE/DECLINE line when a replyCode is given (tap OR reply)', async () => {
+    const d = deps();
+    const result = await routeUnsupervisedProposal(d.routeDeps, { ...base, replyCode: 'A7KQ' });
+    expect(result.smsSent).toBe(true);
+    // Still offers the tap link…
+    expect(d.sms[0].body).toContain('https://app.test/p/approve?token=');
+    // …and the glove-friendly reply path with the code.
+    expect(d.sms[0].body).toContain('APPROVE A7KQ');
+    expect(d.sms[0].body).toContain('DECLINE A7KQ');
+  });
+
+  it('P2-034 — omits the reply line when no replyCode (tap-only, unchanged)', async () => {
+    const d = deps();
+    await routeUnsupervisedProposal(d.routeDeps, { ...base });
+    expect(d.sms[0].body).not.toContain('reply');
+    expect(d.sms[0].body).not.toContain('APPROVE');
+  });
+
   it('queue_only sends no SMS but still audits', async () => {
     const d = deps();
     const result = await routeUnsupervisedProposal(d.routeDeps, {

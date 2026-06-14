@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-router';
 import { InMemoryProposalRepository, Proposal } from '../../src/proposals/proposal';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import {
   setSupervisorPresenceLoader,
   _resetSupervisorPresenceCache,
@@ -172,6 +173,56 @@ describe('voice-action-router worker', () => {
     expect(byTenant).toHaveLength(1);
     expect(byTenant[0].status).toBe('ready_for_review');
     expect(byTenant[0].approvedAt).toBeUndefined();
+  });
+
+  it('P2-034 — stamps a reply code and offers tap-OR-reply when routing an unsupervised proposal by SMS', async () => {
+    setSupervisorPresenceLoader(async () => false);
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'create_invoice',
+        confidence: 0.95,
+        extractedEntities: {},
+      } satisfies IntentClassification),
+      JSON.stringify({
+        customerId: 'c-1',
+        jobId: 'j-1',
+        lineItems: [{ description: 'Service call', quantity: 1, unitPrice: 12000 }],
+        confidence_score: 0.95,
+      }),
+    ]);
+    const sentSms: { to: string; body: string }[] = [];
+    const auditRepo = new InMemoryAuditRepository();
+
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      unsupervisedRouting: {
+        auditRepo,
+        secret: 'test-secret-at-least-32-bytes-long!!',
+        sendSms: async (to, body) => {
+          sentSms.push({ to, body });
+        },
+        buildApproveUrl: (token) => `https://app.test/p/approve?token=${token}`,
+        resolveOwnerPhone: async () => '+15555550123',
+        resolveRouting: async () => 'queue_and_sms',
+      },
+    });
+
+    await worker.handle(
+      msg({ tenantId: 't-unsup', userId: 'u-1', transcript: 'Invoice for the service call' }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant('t-unsup');
+    expect(proposals).toHaveLength(1);
+    // A reply code was stamped on the proposal…
+    const marker = proposals[0].sourceContext?.smsApproval as { code?: string } | undefined;
+    expect(marker?.code).toMatch(/^[A-Z0-9]{4}$/);
+    // …and the owner's SMS offers BOTH the tap link and the reply path.
+    expect(sentSms).toHaveLength(1);
+    expect(sentSms[0].to).toBe('+15555550123');
+    expect(sentSms[0].body).toContain('https://app.test/p/approve?token=');
+    expect(sentSms[0].body).toContain(`APPROVE ${marker!.code}`);
   });
 
   it('auto-approves the same high-confidence booking when a supervisor IS present', async () => {

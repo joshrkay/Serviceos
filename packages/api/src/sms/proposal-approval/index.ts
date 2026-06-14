@@ -21,9 +21,4 @@ export {
   buildProposalApprovalKeywordHandler,
 } from './handler';
 export type { ProposalApprovalHandlerDeps } from './handler';
-export { sendProposalApprovalRequest } from './compose';
-export type {
-  SendApprovalRequestDeps,
-  SendApprovalRequestInput,
-  SendApprovalRequestResult,
-} from './compose';
+export { stampSmsApprovalCode } from './compose';

@@ -44,6 +44,7 @@ import {
   EntityKind,
   EntityResolver,
 } from '../ai/resolution/entity-resolver';
+import { stampSmsApprovalCode } from '../sms/proposal-approval';
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
 import { CreateCustomerTaskHandler, TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
@@ -1309,6 +1310,22 @@ export function createVoiceActionRouterWorker(
           try {
             const routing = await ur.resolveRouting?.(tenantId);
             const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
+            // P2-034 — when we're about to text the owner, stamp a short
+            // reply code so the SMS can offer reply-APPROVE alongside the
+            // tap link, and an inbound reply resolves the right proposal
+            // even with several pending. Best-effort: a stamp failure just
+            // omits the reply line (tap link still works).
+            let replyCode: string | undefined;
+            if (ownerPhone && ur.sendSms) {
+              try {
+                replyCode = await stampSmsApprovalCode(deps.proposalRepo, outcome.proposal);
+              } catch (err) {
+                log.warn('voice-action-router: approval code stamp failed', {
+                  proposalId: outcome.proposal.id,
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              }
+            }
             await routeUnsupervisedProposal(
               {
                 auditRepo: ur.auditRepo,
@@ -1324,6 +1341,7 @@ export function createVoiceActionRouterWorker(
                 // `escalate_to_oncall` falls back to queue_only here by design.
                 channel: 'other',
                 ...(ownerPhone ? { ownerPhone } : {}),
+                ...(replyCode ? { replyCode } : {}),
                 summaryText: outcome.proposal.summary,
               },
             );

@@ -308,6 +308,15 @@ export interface RouteUnsupervisedProposalInput {
   ownerPhone?: string | null;
   /** Short human label for the SMS body, e.g. "New booking for Jane D." */
   summaryText?: string;
+  /**
+   * P2-034 — short reply code already stamped on the proposal. When
+   * present, the SMS offers a reply path (`APPROVE <code>` / `DECLINE
+   * <code>`) ALONGSIDE the tap link, so an owner who is gloved, driving,
+   * or on a bad-data connection can act without opening a link. The
+   * caller mints + stamps the code (stampSmsApprovalCode) so an inbound
+   * reply resolves the right proposal even when several are pending.
+   */
+  replyCode?: string;
   nowMs?: number;
 }
 
@@ -352,9 +361,14 @@ export async function routeUnsupervisedProposal(
         ? deps.buildApproveUrl(token)
         : `/p/approve?token=${encodeURIComponent(token)}`;
       const summary = input.summaryText ?? 'A proposal needs your approval';
+      // Offer tap AND reply: tap the signed link (needs data/screen) OR
+      // just reply by text (glove-friendly, works on a bad connection).
+      const replyLine = input.replyCode
+        ? ` Or reply APPROVE ${input.replyCode} / DECLINE ${input.replyCode}.`
+        : '';
       await deps.sendSms(
         input.ownerPhone,
-        `${summary}. Tap to approve (link expires in 30 min): ${url}`,
+        `${summary}. Tap to approve (link expires in 30 min): ${url}.${replyLine}`,
       );
       smsSent = true;
       approveLinkExpiresAt = expiresAt;
