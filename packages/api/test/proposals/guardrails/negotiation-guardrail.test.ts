@@ -157,8 +157,15 @@ describe('recommendNegotiationResponse with customer context', () => {
 
   it('tells the owner to hold firm for a first-timer', () => {
     const rec = recommendNegotiationResponse('discount', firstTimer);
-    expect(rec).toMatch(/hold firm|no real history/i);
-    expect(rec).toMatch(/new customer/i); // recency label for a null lastSeenAt
+    expect(rec).toMatch(/hold firm/i);
+    expect(rec).toMatch(/no real history/i);
+  });
+
+  it('phrases a missing recency cleanly for a customer with value but no recent visit', () => {
+    const valuedNoRecency = { lifetimeValueCents: 480000, lastSeenAt: null, jobsCompletedCount: 6 };
+    const rec = recommendNegotiationResponse('discount', valuedNoRecency);
+    expect(rec).toContain('no recent visit on record');
+    expect(rec).not.toMatch(/last seen new customer/i);
   });
 
   it('falls back to base guidance with no context (backward compatible)', () => {

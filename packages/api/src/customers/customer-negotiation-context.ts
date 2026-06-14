@@ -48,7 +48,11 @@ export function formatRecencyLabel(lastSeenAt: Date | null, now: Date = new Date
   if (days < 14) return 'last week';
   if (days < 31) return `${Math.floor(days / 7)} weeks ago`;
   if (days < 60) return 'last month';
-  if (days < 365) return `${Math.floor(days / 30)} months ago`;
-  const years = Math.floor(days / 365);
-  return years === 1 ? 'about a year ago' : `${years} years ago`;
+  // Cap months at ~11 so we never say "12 months ago"; then a year band that
+  // doesn't collapse 12–24 months into "about a year ago" (which under-reported
+  // age by up to a year).
+  if (days < 330) return `${Math.floor(days / 30)} months ago`;
+  if (days < 547) return 'about a year ago';
+  if (days < 730) return 'over a year ago';
+  return `${Math.floor(days / 365)} years ago`;
 }

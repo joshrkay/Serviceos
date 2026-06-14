@@ -18,7 +18,7 @@ import { z } from 'zod';
  * The deterministic ask types the guardrail refines a `negotiation` intent into
  * (the single source of truth — api `NegotiationAskType` imports these).
  */
-export const NEGOTIATION_ASK_TYPES = [
+const NEGOTIATION_ASK_TYPES = [
   'discount',
   'scope_change',
   'refund_leverage',
@@ -28,8 +28,7 @@ export const NEGOTIATION_ASK_TYPES = [
 export type NegotiationAskType = (typeof NEGOTIATION_ASK_TYPES)[number];
 
 /** Payload-level ask type: the detected types plus a `general` fallback (no pattern matched). */
-export const NEGOTIATION_PAYLOAD_ASK_TYPES = [...NEGOTIATION_ASK_TYPES, 'general'] as const;
-export type NegotiationPayloadAskType = (typeof NEGOTIATION_PAYLOAD_ASK_TYPES)[number];
+const NEGOTIATION_PAYLOAD_ASK_TYPES = [...NEGOTIATION_ASK_TYPES, 'general'] as const;
 
 /**
  * Customer history surfaced to the owner so the recommendation can reflect WHO
@@ -49,15 +48,15 @@ export type NegotiationCustomerContext = z.infer<typeof negotiationCustomerConte
  * union because `packages/shared` cannot import from `packages/api`; the values
  * are stable (the 4-tier system is locked by P2-035).
  */
-export const NEGOTIATION_CONFIDENCE_LEVELS = ['high', 'medium', 'low', 'very_low'] as const;
+const NEGOTIATION_CONFIDENCE_LEVELS = ['high', 'medium', 'low', 'very_low'] as const;
 
 /** Per-field review marker stamped on the proposal so review surfaces flag it. */
-export const negotiationMarkerSchema = z.object({
+const negotiationMarkerSchema = z.object({
   path: z.string().min(1),
   reason: z.string().min(1),
 });
 
-export const negotiationMetaSchema = z.object({
+const negotiationMetaSchema = z.object({
   overallConfidence: z.enum(NEGOTIATION_CONFIDENCE_LEVELS),
   markers: z.array(negotiationMarkerSchema),
 });

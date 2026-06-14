@@ -28,8 +28,10 @@ describe('formatRecencyLabel', () => {
     expect(formatRecencyLabel(daysAgo(90), NOW)).toBe('3 months ago');
   });
 
-  it('labels years', () => {
+  it('labels the year-transition bands without under-reporting or "12 months ago"', () => {
+    expect(formatRecencyLabel(daysAgo(364), NOW)).toBe('about a year ago'); // not "12 months ago"
     expect(formatRecencyLabel(daysAgo(400), NOW)).toBe('about a year ago');
+    expect(formatRecencyLabel(daysAgo(600), NOW)).toBe('over a year ago'); // not "about a year ago"
     expect(formatRecencyLabel(daysAgo(800), NOW)).toBe('2 years ago');
   });
 

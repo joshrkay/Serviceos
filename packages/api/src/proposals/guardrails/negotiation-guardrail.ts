@@ -14,6 +14,7 @@
  * fixed, inspectable rule, not an LLM mood read.
  */
 import {
+  formatUsdCents,
   negotiationCallbackPayloadSchema,
   type NegotiationAskType,
   type NegotiationCustomerContext as NegotiationCustomerContextPayload,
@@ -145,31 +146,25 @@ export function customerValueTier(ctx: CustomerNegotiationContext): CustomerValu
   return 'new_or_unknown';
 }
 
-/** Integer-cents → "$1,250" / "$1,250.50" for owner-facing prose (no float math). */
-function formatUsdFromCents(cents: number): string {
-  const sign = cents < 0 ? '-' : '';
-  const abs = Math.abs(cents);
-  const dollars = Math.floor(abs / 100);
-  const rem = abs % 100;
-  const dollarStr = dollars.toLocaleString('en-US');
-  return rem === 0 ? `${sign}$${dollarStr}` : `${sign}$${dollarStr}.${String(rem).padStart(2, '0')}`;
-}
-
 /**
  * A one-sentence value + recency framing that surfaces the customer's lifetime
  * value and recency so the owner can weigh the ask. Never proposes a discount.
+ * When recency is unknown the phrasing degrades cleanly (no "last seen new
+ * customer"). Money formatting goes through the shared `formatUsdCents`.
  */
 function customerValueFraming(ctx: CustomerNegotiationContext): string {
-  const ltv = formatUsdFromCents(ctx.lifetimeValueCents);
-  const recency = formatRecencyLabel(ctx.lastSeenAt);
+  const ltv = formatUsdCents(ctx.lifetimeValueCents);
   const jobs = `${ctx.jobsCompletedCount} completed ${ctx.jobsCompletedCount === 1 ? 'job' : 'jobs'}`;
+  const recencyPhrase = ctx.lastSeenAt
+    ? `last seen ${formatRecencyLabel(ctx.lastSeenAt)}`
+    : 'no recent visit on record';
   switch (customerValueTier(ctx)) {
     case 'valued_repeat':
-      return `Worth noting: valued repeat customer — ${ltv} lifetime, ${jobs}, last seen ${recency}. Keeping them happy may matter more than this one ask; a small courtesy is your call.`;
+      return `Worth noting: valued repeat customer — ${ltv} lifetime, ${jobs}, ${recencyPhrase}. Keeping them happy may matter more than this one ask; a small courtesy is your call.`;
     case 'established':
-      return `Context: some history — ${ltv} lifetime, ${jobs}, last seen ${recency}. Weigh that, but don't feel pressured to discount.`;
+      return `Context: some history — ${ltv} lifetime, ${jobs}, ${recencyPhrase}. Weigh that, but don't feel pressured to discount.`;
     case 'new_or_unknown':
-      return `Context: no real history yet (${recency}). Nothing here justifies a concession — hold firm.`;
+      return `Context: no real history yet. Nothing here justifies a concession — hold firm.`;
   }
 }
 
