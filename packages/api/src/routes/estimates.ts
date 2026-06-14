@@ -34,6 +34,9 @@ import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository } from '../invoices/payment';
 import { convertEstimateToInvoice } from '../invoices/convert-estimate';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
+import { applyBps } from '../shared/billing-engine';
+import { AgreementRepository } from '../agreements/agreement';
+import { getCustomerMemberDiscountBps } from '../agreements/member-pricing';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -86,6 +89,10 @@ export function createEstimateRouter(
   // build; when wired alongside moneyStateDeps the convert route credits
   // a paid deposit onto the new invoice.
   paymentRepo?: PaymentRepository,
+  // Membership member-pricing (#6). When wired alongside the job repo, a new
+  // estimate for a customer with an active discounting membership has that
+  // discount folded in automatically. Optional so legacy harnesses build.
+  agreementRepo?: AgreementRepository,
 ): Router {
   const router = Router();
 
@@ -138,13 +145,37 @@ export function createEstimateRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const parsed = createEstimateSchema.parse(req.body);
+        const tenantId = req.auth!.tenantId;
         // Cross-entity tenant guard: jobId must belong to the requesting tenant.
-        await ownership.requireExists(req.auth!.tenantId, 'job', parsed.jobId);
-        const estimateNumber = await getNextEstimateNumber(req.auth!.tenantId, settingsRepo);
+        await ownership.requireExists(tenantId, 'job', parsed.jobId);
+        const estimateNumber = await getNextEstimateNumber(tenantId, settingsRepo);
+
+        // Member pricing (#6): fold an active membership's discount into this
+        // estimate, additive to any manual discount. Resolved server-side from
+        // the job's customer so the rate can't be spoofed by the client; a
+        // best-effort enrichment that never blocks estimate creation.
+        let discountCents = parsed.discountCents ?? 0;
+        let memberDiscount: { bps: number; cents: number } | null = null;
+        if (jobRepo && agreementRepo) {
+          const job = await jobRepo.findById(tenantId, parsed.jobId);
+          if (job) {
+            const bps = await getCustomerMemberDiscountBps(tenantId, job.customerId, agreementRepo);
+            if (bps > 0) {
+              const subtotalCents = parsed.lineItems.reduce((sum, li) => sum + li.totalCents, 0);
+              const cents = applyBps(subtotalCents, bps);
+              if (cents > 0) {
+                discountCents += cents;
+                memberDiscount = { bps, cents };
+              }
+            }
+          }
+        }
+
         const result = await createEstimate(
           {
             ...parsed,
-            tenantId: req.auth!.tenantId,
+            discountCents,
+            tenantId,
             estimateNumber,
             validUntil: parsed.validUntil ? new Date(parsed.validUntil) : undefined,
             createdBy: req.auth!.userId,
@@ -152,6 +183,27 @@ export function createEstimateRouter(
           estimateRepo,
           auditRepo
         );
+
+        // Provenance: record the auto-applied member discount distinctly from
+        // the owner's manual discount (which is folded into the same total).
+        if (memberDiscount) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role ?? 'unknown',
+              eventType: 'estimate.member_discount_applied',
+              entityType: 'estimate',
+              entityId: result.id,
+              metadata: {
+                memberDiscountBps: memberDiscount.bps,
+                memberDiscountCents: memberDiscount.cents,
+                jobId: parsed.jobId,
+              },
+            }),
+          );
+        }
+
         res.status(201).json(result);
       } catch (err) {
         if (process.env.NODE_ENV !== 'production') {

@@ -48,6 +48,29 @@ export const isoDateSchema = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD');
 
+/**
+ * Membership term length (in whole months) the auto-renew sweep rolls
+ * `ends_on` forward by. 1..120 caps a single renewal at a decade so a typo
+ * can't push a term centuries out. The auto_renew⇒(endsOn + term) invariant
+ * is enforced in the service layer, where the existing agreement's values are
+ * also in scope on update.
+ */
+export const renewalTermMonthsSchema = z
+  .number()
+  .int('renewalTermMonths must be a whole number of months')
+  .min(1)
+  .max(120);
+
+/**
+ * Member discount in basis points (0..10000 = 0..100%). A membership with a
+ * non-zero member discount confers it on the customer's estimates/invoices.
+ */
+export const memberDiscountBpsSchema = z
+  .number()
+  .int('memberDiscountBps must be an integer (basis points)')
+  .min(0)
+  .max(10000);
+
 export const createAgreementSchema = z.object({
   customerId: z.string().uuid(),
   locationId: z.string().uuid().optional(),
@@ -59,6 +82,11 @@ export const createAgreementSchema = z.object({
   autoGenerateJob: z.boolean().optional(),
   startsOn: isoDateSchema,
   endsOn: isoDateSchema.optional(),
+  autoRenew: z.boolean().optional(),
+  renewalTermMonths: renewalTermMonthsSchema.optional(),
+  memberDiscountBps: memberDiscountBpsSchema.optional(),
+  priorityBooking: z.boolean().optional(),
+  autoCollectDues: z.boolean().optional(),
 });
 
 export const updateAgreementSchema = z.object({
@@ -69,4 +97,9 @@ export const updateAgreementSchema = z.object({
   autoGenerateInvoice: z.boolean().optional(),
   autoGenerateJob: z.boolean().optional(),
   endsOn: isoDateSchema.nullable().optional(),
+  autoRenew: z.boolean().optional(),
+  renewalTermMonths: renewalTermMonthsSchema.nullable().optional(),
+  memberDiscountBps: memberDiscountBpsSchema.optional(),
+  priorityBooking: z.boolean().optional(),
+  autoCollectDues: z.boolean().optional(),
 });

@@ -39,6 +39,13 @@ function mapRow(row: Record<string, unknown>): Agreement {
     status: row.status as AgreementStatus,
     startsOn,
     endsOn,
+    autoRenew: (row.auto_renew as boolean) ?? false,
+    renewalTermMonths:
+      row.renewal_term_months != null ? Number(row.renewal_term_months) : undefined,
+    renewalCount: row.renewal_count != null ? Number(row.renewal_count) : 0,
+    memberDiscountBps: row.member_discount_bps != null ? Number(row.member_discount_bps) : 0,
+    priorityBooking: (row.priority_booking as boolean) ?? false,
+    autoCollectDues: (row.auto_collect_dues as boolean) ?? false,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -57,8 +64,9 @@ export class PgAgreementRepository extends PgBaseRepository implements Agreement
           id, tenant_id, customer_id, location_id, name, description,
           recurrence_rule, price_cents, auto_generate_invoice, auto_generate_job,
           next_run_at, last_run_at, status, starts_on, ends_on, created_by,
-          created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+          created_at, updated_at, auto_renew, renewal_term_months, renewal_count,
+          member_discount_bps, priority_booking, auto_collect_dues
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
         RETURNING *`,
         [
           agreement.id,
@@ -79,6 +87,12 @@ export class PgAgreementRepository extends PgBaseRepository implements Agreement
           agreement.createdBy,
           agreement.createdAt,
           agreement.updatedAt,
+          agreement.autoRenew ?? false,
+          agreement.renewalTermMonths ?? null,
+          agreement.renewalCount ?? 0,
+          agreement.memberDiscountBps ?? 0,
+          agreement.priorityBooking ?? false,
+          agreement.autoCollectDues ?? false,
         ],
       );
       return mapRow(result.rows[0]);
@@ -137,6 +151,22 @@ export class PgAgreementRepository extends PgBaseRepository implements Agreement
     });
   }
 
+  async findRenewable(tenantId: string, asOf: Date): Promise<Agreement[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM service_agreements
+         WHERE tenant_id = $1
+           AND status = 'active'
+           AND auto_renew = TRUE
+           AND ends_on IS NOT NULL
+           AND ends_on <= $2
+         ORDER BY ends_on ASC`,
+        [tenantId, asOf.toISOString().slice(0, 10)],
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
   async update(tenantId: string, id: string, updates: Partial<Agreement>): Promise<Agreement | null> {
     return this.withTenant(tenantId, async (client) => {
       const fieldMap: Record<string, string> = {
@@ -150,6 +180,12 @@ export class PgAgreementRepository extends PgBaseRepository implements Agreement
         lastRunAt: 'last_run_at',
         status: 'status',
         endsOn: 'ends_on',
+        autoRenew: 'auto_renew',
+        renewalTermMonths: 'renewal_term_months',
+        renewalCount: 'renewal_count',
+        memberDiscountBps: 'member_discount_bps',
+        priorityBooking: 'priority_booking',
+        autoCollectDues: 'auto_collect_dues',
         updatedAt: 'updated_at',
       };
       const setClauses: string[] = [];
