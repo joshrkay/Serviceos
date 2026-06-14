@@ -90,65 +90,56 @@ Before dispatching Phase 8, wire two provider additions into the existing plugga
 
 ---
 
-## 3 — Domain Knowledge Gaps (close during Phase 8 build)
+## 3 — Domain Knowledge Gaps  ✅ SHIPPED
 
-These are prompt-engineering and data-wiring tasks that make the calling agent sound like it knows home services. They're added *while* Phase 8 is being built — not after.
+> **Status (2026-06-14):** the entire §3 set shipped during the Phase 8 /
+> rivet-architect build and is wired into the calling agent on **both** the
+> in-app and voice-turn channels. Retained here as a built-feature index, not
+> remaining work. Each item names its primary seam; grep before assuming a gap
+> remains (see
+> `docs/solutions/workflow-issues/verify-spec-gaps-against-shipped-code.md`).
 
-### 3A — Emergency detection fast-path
+### 3A — Emergency detection fast-path ✅
 
-**Gap:** The intent classifier has 14 intents; none is `emergency_dispatch`. A caller saying "my furnace is out at 15°F" is treated the same as a tune-up request.
+`emergency_dispatch` is the 15th intent (`ai/orchestration/intent-classifier.ts`);
+the FSM fast-paths it past `entity_resolution`/`intent_confirm` straight to
+`escalating` (`ai/agents/customer-calling/transitions.ts`). A deterministic
+pre-LLM keyword detector (`ai/agents/customer-calling/emergency-detector.ts`,
+RV-140) speaks the 911 safety line first (RV-142) and pages on-call with a
+retry ladder (RV-143). The execution handler creates an urgent job + owner SMS
+page (RV-141) and now also places a **tentative appointment hold** on the
+soonest feasible slot (`proposals/execution/emergency-dispatch-handler.ts` —
+this closed the documented RV-141 appointment-hold deviation). HVAC/Plumbing
+emergency indicators live in the detector's keyword table.
+Shipped: **PR #551** + this branch.
 
-**Fix:**
-- Add `emergency_dispatch` as a 15th intent in `packages/api/src/ai/orchestration/intent-classifier.ts`
-- In the P8-004 state machine, treat `emergency_dispatch` as a fast-path: skip `entity_resolution` and `intent_confirm`, go directly to `escalating` with on-call notification
-- Add emergency indicators to vertical packs:
-  - **HVAC:** "no heat," "no cool," "gas smell," "burning smell," "smoke," "sparks," "water leaking from furnace"
-  - **Plumbing:** "flooding," "burst pipe," "no water," "sewage backup," "gas smell," "no hot water" (elevated priority, not full emergency unless flooding)
+### 3B — Vertical terminology injection ✅
 
-### 3B — Vertical terminology injection into calling agent prompts
+`formatVerticalForCallerPrompt()` (`verticals/context-assembly.ts`) renders
+service types, equipment, and aliases into prompt text; surfaced via
+`verticals/resolve-active-pack.ts` and injected into the classifier system
+prompt through `verticalPromptResolver`
+(`ai/agents/customer-calling/inapp-adapter.ts`,
+`ai/voice-turn/create-voice-turn-processor.ts`).
 
-**Gap:** `context-builder.ts` loads `context.vertical` but the calling agent receives it as a raw JSON blob with no instructions on how to use it.
+### 3C — Maintenance plan / membership awareness ✅
 
-**Fix:** Add `formatVerticalForCallerPrompt(verticalContext)` to `packages/api/src/verticals/context-assembly.ts`. Outputs formatted prompt text including service types, equipment terminology, emergency indicators, and disambiguation questions. Called when building the `intent_capture` state's system prompt in P8-004.
+`buildCallerPlanContext()` + `formatCallerPlanForPrompt()`
+(`ai/orchestration/caller-plan-context.ts`) query active agreements
+(`hasActivePlan`, plan names, earliest next-service-due) and feed the classifier
+via `callerPlanResolver` on both channels.
 
-Example output:
-```
-Service vertical: HVAC
-Equipment recognized: furnace (heater, heating unit), AC (air conditioner, central air),
-  heat pump (mini split, ductless), thermostat
-Service types: diagnostic ($89), tune-up, repair, installation, emergency ($150 surcharge)
-Emergency indicators: no heat, no cool, gas smell, burning smell, sparks
-Disambiguation: "Is this for heating or cooling?" / "How old is the unit?"
-```
+### 3D — Service type disambiguation templates ✅
 
-### 3C — Maintenance plan / membership awareness
+`IntakeQuestion` (`verticals/registry.ts`) with per-pack `intake_questions`
+(hvac / plumbing / electrical), rendered by `formatIntakeQuestionsForPrompt()`
+(`verticals/context-assembly.ts`).
 
-**Gap:** When a plan member calls, the agent doesn't know they're a member and can't offer priority booking.
+### 3E — Objection handling scripts ✅
 
-**Fix:** Extend `buildCallerContext()` in `packages/api/src/ai/orchestration/context-builder.ts` to query `packages/api/src/contracts/` for active maintenance contracts on the resolved customer. Pass `{ hasActivePlan: true, planType: 'Gold', nextServiceDue: '2026-06-01' }` to the state machine. The `greeting` state uses this for personalization: *"Hi Sarah, I see you're on our Gold plan — you have priority scheduling."*
-
-### 3D — Service type disambiguation templates
-
-**Gap:** No structured way to ask vertical-specific clarifying questions. Generic "Can you tell me more?" is weaker than "Is this a heating or cooling issue?"
-
-**Fix:** Add `intake_questions` array to each vertical pack (`packages/api/src/verticals/packs/hvac.ts`, `plumbing.ts`):
-```ts
-intake_questions: [
-  { trigger: 'hvac', question: 'Is this for heating or cooling?', intent: 'service_disambiguation' },
-  { trigger: 'unknown_issue', question: 'Is this an emergency or can we schedule a visit?', intent: 'urgency_triage' },
-]
-```
-The `intent_capture` state uses these when classifier confidence < τ_int.
-
-### 3E — Objection handling scripts
-
-**Gap:** No handling for "that's too expensive," "why do I need a dispatch fee," "can you just tell me over the phone."
-
-**Fix:** Add `objection_scripts` to tenant settings (tenants can customize). Default scripts per vertical stored in vertical packs. When classifier detects an objection pattern, emit `objection_detected` → state machine plays scripted reframe.
-
-Default scripts:
-- "That's expensive" → *"Our technicians carry all parts on their truck so you won't pay for a second trip."*
-- "Dispatch fee?" → *"The $89 diagnostic fee goes toward your repair if you proceed today."*
+`ObjectionScript` (`verticals/registry.ts`) with per-pack `objection_scripts`
+(hvac / plumbing / electrical), rendered by `formatObjectionScriptsForPrompt()`
+(`verticals/context-assembly.ts`).
 
 ---
 
