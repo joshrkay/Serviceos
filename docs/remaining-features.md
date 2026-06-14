@@ -184,17 +184,22 @@ Closes the gap with Avoca Coach.
 
 From the 30-item audit. Not blocking real payments but worth closing before high traffic.
 
-| ID | File | Issue |
-|---|---|---|
-| EC-7 | `public-invoices.ts` | `tokenGuard` rejects with no logging; no max-length check at route layer (service has it) |
-| EC-9 | `public-invoices.ts` | Route handlers don't log errors before re-throwing |
-| EC-11 | `webhooks/routes.ts` | Signature failures don't distinguish stale-timestamp vs bad-sig in logs |
-| EC-17 | `webhooks/routes.ts` | `event.data.object` cast with no Zod validation |
-| EC-18 | `webhooks/routes.ts` | Mismatch log omits partial sig for debugging |
-| EC-20 | `InvoicePaymentPage.tsx` | No fallback if `window.location.href` is blocked (rare mobile WebViews) |
-| EC-22 | `InvoicePaymentPage.tsx` | `pingView` swallows errors silently; network error surfaces as "Error undefined" |
-| EC-24 | `InvoicePaymentPage.tsx` | `formatMoney` doesn't guard negative values |
-| EC-28 | `invoice.ts` | `InMemoryInvoiceRepository.findByViewToken` is O(n) — test-only, acceptable |
+> **Status (2026-06-14):** verified against the source (technique:
+> `docs/solutions/workflow-issues/verify-spec-gaps-against-shipped-code.md`).
+> The five backend logging/validation items are untouched and still open; two
+> are now moot/acceptable; two are partially mitigated.
+
+| ID | File | Issue | Status |
+|---|---|---|---|
+| EC-7 | `public-invoices.ts` | `tokenGuard` rejects with no logging; no max-length check at route layer (service has it) | **open** — guard still only checks `< 16`; file imports no logger |
+| EC-9 | `public-invoices.ts` | Route handlers don't log errors before re-throwing | **open** — handlers catch → `toErrorResponse`, no logging |
+| EC-11 | `webhooks/routes.ts` | Signature failures don't distinguish stale-timestamp vs bad-sig in logs | **open** — `verifyWebhookSignature` returns a bare boolean; both collapse to one warn |
+| EC-17 | `webhooks/routes.ts` | `event.data.object` cast with no Zod validation | **open** — `JSON.parse` + `as` casts, no schema |
+| EC-18 | `webhooks/routes.ts` | Mismatch log omits partial sig for debugging | **open** — single warn, no signature metadata |
+| EC-20 | `InvoicePaymentPage.tsx` | No fallback if `window.location.href` is blocked (rare mobile WebViews) | **moot** — now inline `confirmPayment({ redirect: 'if_required' })`; no `location.href` redirect |
+| EC-22 | `InvoicePaymentPage.tsx` | `pingView` swallows errors silently; network error surfaces as "Error undefined" | **partial** — `pingView` still silently swallows (fire-and-forget); the "Error undefined" symptom is gone (`fetchInvoice`/`createPaymentIntent` fall back to `` `Error ${status}` ``) |
+| EC-24 | `InvoicePaymentPage.tsx` | `formatMoney` doesn't guard negative values | **partial** — delegates to `formatCurrencyAmount` (no throw on negatives) but no explicit guard; renders `$-x.xx` |
+| EC-28 | `invoice.ts` | `InMemoryInvoiceRepository.findByViewToken` is O(n) — test-only, acceptable | **acceptable** (unchanged) — in-memory repo only; Pg path uses indexed `find_invoice_by_view_token()` |
 
 ---
 
