@@ -32,6 +32,7 @@ import { ExpenseRepository } from '../../expenses/expense';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { ConflictError } from '../../shared/errors';
 import { JobRepository, createJob } from '../../jobs/job';
+import { transitionJobStatus, JobTimelineRepository } from '../../jobs/job-lifecycle';
 import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
 import { AssignmentRepository, assignTechnician } from '../../appointments/assignment';
@@ -225,6 +226,59 @@ export class CreateJobExecutionHandler implements ExecutionHandler {
           createdBy: context.executedBy,
         },
         this.jobRepo,
+      );
+      return { success: true, resultEntityId: job.id };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+}
+
+/**
+ * update_job_status — move a job along its lifecycle ("start"/"complete")
+ * via the legal-transition gate. transitionJobStatus validates the
+ * transition, writes a timeline entry, and emits a job.status_changed
+ * audit event. An illegal transition (e.g. completing a job that never
+ * started) fails the execution with a clear error rather than corrupting
+ * state. Degrades to a passthrough when its repos aren't wired.
+ */
+export class UpdateJobStatusExecutionHandler implements ExecutionHandler {
+  proposalType: ProposalType = 'update_job_status';
+
+  constructor(
+    private readonly jobRepo?: JobRepository,
+    private readonly jobTimelineRepo?: JobTimelineRepository,
+    private readonly auditRepo?: AuditRepository,
+  ) {}
+
+  async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
+    const payload = proposal.payload as Record<string, unknown>;
+    const jobId = typeof payload.jobId === 'string' ? payload.jobId : undefined;
+    const targetStatus = payload.targetStatus;
+
+    if (!jobId) {
+      return { success: false, error: 'update_job_status requires a resolved jobId' };
+    }
+    if (targetStatus !== 'in_progress' && targetStatus !== 'completed') {
+      return { success: false, error: `unsupported targetStatus: ${String(targetStatus)}` };
+    }
+    if (!this.jobRepo || !this.jobTimelineRepo) {
+      return { success: true, resultEntityId: jobId };
+    }
+
+    try {
+      const { job } = await transitionJobStatus(
+        context.tenantId,
+        jobId,
+        targetStatus,
+        context.executedBy,
+        'technician',
+        this.jobRepo,
+        this.jobTimelineRepo,
+        this.auditRepo,
       );
       return { success: true, resultEntityId: job.id };
     } catch (err) {
@@ -498,6 +552,10 @@ export function createExecutionHandlerRegistry(deps?: {
   timeEntryService?: TimeEntryService;
   feedbackRepo?: FeedbackRequestRepository;
   delayNotificationService?: DelayNotificationService;
+  // Job execution by voice — update_job_status executes a legal status
+  // transition (timeline entry + job.status_changed audit). Needs jobRepo
+  // + jobTimelineRepo; absent → passthrough.
+  jobTimelineRepo?: JobTimelineRepository;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -520,6 +578,7 @@ export function createExecutionHandlerRegistry(deps?: {
     new CreateCustomerVoiceExecutionHandler(deps?.customerRepo, deps?.auditRepo),
     new UpdateCustomerExecutionHandler(deps?.customerRepo),
     new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo),
+    new UpdateJobStatusExecutionHandler(deps?.jobRepo, deps?.jobTimelineRepo, deps?.auditRepo),
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier, deps?.auditRepo),
     new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
     new DraftEstimateExecutionHandler(deps?.estimateRepo, deps?.settingsRepo),

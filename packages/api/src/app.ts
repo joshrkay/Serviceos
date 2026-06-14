@@ -1235,6 +1235,7 @@ export function createApp(): express.Express {
   const executionHandlers = createExecutionHandlerRegistry({
     customerRepo,
     jobRepo,
+    jobTimelineRepo: timelineRepo,
     locationRepo,
     appointmentRepo,
     assignmentRepo,

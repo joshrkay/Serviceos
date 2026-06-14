@@ -257,6 +257,22 @@ export const logTimeEntryPayloadSchema = z.object({
   notes: z.string().optional(),
 });
 
+// update_job_status: a field tech moves a job along its lifecycle by
+// voice ("start the Miller job" → in_progress, "mark the Henderson job
+// done" → completed). targetStatus is restricted to the two tech-driven
+// transitions; the legal-transition check (job-lifecycle) is the real
+// guard at execution. jobReference is the free-text reference until the
+// handler/review UI resolves a concrete jobId.
+export const updateJobStatusPayloadSchema = z
+  .object({
+    jobId: z.string().uuid().optional(),
+    jobReference: z.string().min(1).optional(),
+    targetStatus: z.enum(['in_progress', 'completed']),
+  })
+  .refine((v) => Boolean(v.jobId || v.jobReference), {
+    message: 'jobId or jobReference is required',
+  });
+
 // notify_delay: outbound delay notice to a customer. Comms-class.
 export const notifyDelayPayloadSchema = z
   .object({
@@ -332,6 +348,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   create_customer: createCustomerPayloadSchema,
   update_customer: updateCustomerPayloadSchema,
   create_job: createJobPayloadSchema,
+  update_job_status: updateJobStatusPayloadSchema,
   create_appointment: createAppointmentPayloadSchema,
   create_booking: createBookingPayloadSchema,
   // A callback request captured when the agent cannot complete an action

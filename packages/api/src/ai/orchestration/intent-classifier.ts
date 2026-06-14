@@ -21,6 +21,7 @@ export type IntentType =
   | 'issue_invoice'
   | 'create_customer'
   | 'create_job'
+  | 'update_job_status'
   | 'reschedule_appointment'
   | 'cancel_appointment'
   | 'reassign_appointment'
@@ -80,6 +81,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'issue_invoice',
   'create_customer',
   'create_job',
+  'update_job_status',
   'reschedule_appointment',
   'cancel_appointment',
   'reassign_appointment',
@@ -127,6 +129,10 @@ export function isLookupIntent(intent: IntentType | undefined | null): boolean {
 export interface ExtractedEntities {
   customerName?: string;
   jobReference?: string;
+  // update_job_status: which lifecycle transition the tech asked for.
+  // 'in_progress' = "start/begin/working on the job"; 'completed' =
+  // "mark done/finished/complete". Only these two tech-driven targets.
+  jobStatusTarget?: 'in_progress' | 'completed';
   amount?: number; // integer cents
   dateTimeDescription?: string; // raw natural language — downstream task parses
   lineItemDescriptions?: string[];
@@ -375,6 +381,26 @@ Supported intents (return exactly ONE):
                            and jobTitle.
                            Examples: "Start a new job for Bob's water heater"
                                      "Create a job for Smith plumbing — kitchen drain"
+- "update_job_status"   — a field tech moves an EXISTING job along its
+                           lifecycle. Extract jobReference (which job — a
+                           customer name, job number, or short description)
+                           and jobStatusTarget:
+                             • "in_progress" when starting/beginning work
+                               ("start the Miller job", "I'm starting on the
+                               Henderson water heater", "heading in on the
+                               Davis job now")
+                             • "completed" when the work is done
+                               ("mark the Henderson job done", "finished the
+                               Miller install", "wrap up the Davis job")
+                           DISTINGUISH from create_job: "start a NEW job for X"
+                           opens a record (create_job); "start THE [existing]
+                           job / the X job" updates status (update_job_status).
+                           Do NOT emit this for appointment confirmation or
+                           cancellation.
+                           Examples: "Mark the Henderson job complete" →
+                                       jobReference="Henderson", jobStatusTarget="completed"
+                                     "Start the Miller job" →
+                                       jobReference="Miller", jobStatusTarget="in_progress"
 - "reschedule_appointment" — user wants to move an EXISTING appointment to a
                            different time. Extract appointmentReference
                            (the old slot or the job/customer identifier)
@@ -660,6 +686,7 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
   "extractedEntities": {
     "customerName": "<string, optional — existing-customer reference on invoice/estimate/appointment>",
     "jobReference": "<string, optional>",
+    "jobStatusTarget": "<in_progress|completed, optional — on update_job_status>",
     "amount": <integer cents, optional>,
     "dateTimeDescription": "<verbatim date/time phrase from transcript, optional>",
     "lineItemDescriptions": ["<string>", ...],
@@ -751,6 +778,7 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     'scheduling_conflict',
     'other',
   ] as const;
+  const JOB_STATUS_TARGETS = ['in_progress', 'completed'] as const;
   const NOTE_TARGET_KINDS = [
     'job',
     'customer',
@@ -796,6 +824,8 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     const extracted: ExtractedEntities = {};
     if (typeof ee.customerName === 'string') extracted.customerName = ee.customerName;
     if (typeof ee.jobReference === 'string') extracted.jobReference = ee.jobReference;
+    const jobStatusTarget = pickEnum(ee, 'jobStatusTarget', JOB_STATUS_TARGETS);
+    if (jobStatusTarget) extracted.jobStatusTarget = jobStatusTarget;
     if (typeof ee.amount === 'number') extracted.amount = ee.amount;
     if (typeof ee.dateTimeDescription === 'string') extracted.dateTimeDescription = ee.dateTimeDescription;
     if (Array.isArray(ee.lineItemDescriptions)) {

@@ -21,6 +21,10 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // After-hours callback requests surface alongside booking work.
   callback: 2,
   create_job: 3,
+  // A field tech's job-status update is dispatch-day work the owner wants
+  // to see promptly (it gates money state — a completed job can be
+  // invoiced) — same tier as scheduling/dispatch.
+  update_job_status: 1,
   create_customer: 4,
   update_customer: 5,
   reassign_appointment: 1,

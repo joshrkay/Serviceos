@@ -25,7 +25,7 @@ import {
 } from '../../proposals/proposal';
 import { ExtractedEntities } from '../orchestration/intent-classifier';
 import type { AppointmentRepository } from '../../appointments/appointment';
-import type { JobRepository } from '../../jobs/job';
+import type { JobRepository, JobStatus } from '../../jobs/job';
 import type { LLMGateway } from '../gateway/gateway';
 import { resolveDateTime, DEFAULT_TENANT_TIMEZONE } from '../scheduling/resolve-datetime';
 
@@ -593,6 +593,115 @@ export class ConfirmAppointmentTaskHandler implements TaskHandler {
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── update_job_status ─────────────
+//
+// A field tech moves an existing job along its lifecycle by voice:
+// "start the Miller job" (→ in_progress) or "mark the Henderson job done"
+// (→ completed). The classifier returns a free-text jobReference + the
+// target; this handler resolves the concrete jobId from the jobs that can
+// LEGALLY reach that target, which is the key disambiguator:
+//   • target 'in_progress' → only 'scheduled' jobs are candidates
+//   • target 'completed'   → only 'in_progress' jobs are candidates
+// so "mark X done" never matches a job that hasn't started, and the
+// candidate set is small. Ambiguity (or no match) leaves jobId on
+// missingFields → the proposal holds for review (never guesses a job).
+
+function normalizeRef(s: string): string {
+  return s.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+/** Source status a job must be in to legally reach `target`. */
+function sourceStatusFor(target: 'in_progress' | 'completed'): JobStatus {
+  return target === 'completed' ? 'in_progress' : 'scheduled';
+}
+
+/**
+ * Resolve the single job the tech means, scoped to the legal source
+ * status for the requested transition. Prefers the speaker's own
+ * assigned jobs when that still leaves candidates, then narrows by the
+ * spoken reference. Returns undefined when zero or >1 remain (ambiguous
+ * → review), never an arbitrary pick.
+ */
+export async function resolveTechJob(
+  jobRepo: JobRepository | undefined,
+  tenantId: string,
+  opts: { technicianId?: string; jobReference?: string; target: 'in_progress' | 'completed' },
+): Promise<string | undefined> {
+  if (!jobRepo) return undefined;
+  let candidates = await jobRepo.findByTenant(tenantId, {
+    status: sourceStatusFor(opts.target),
+  });
+
+  // Prefer the speaker's own assigned jobs, but only when that leaves
+  // candidates (an owner/dispatcher speaking isn't assigned to jobs, so
+  // we must not empty the set for them).
+  if (opts.technicianId) {
+    const mine = candidates.filter((j) => j.assignedTechnicianId === opts.technicianId);
+    if (mine.length > 0) candidates = mine;
+  }
+
+  // Narrow by the spoken reference (substring either direction on the
+  // job summary). A reference that matches nothing yields no resolution.
+  if (opts.jobReference) {
+    const ref = normalizeRef(opts.jobReference);
+    candidates = candidates.filter((j) => {
+      const s = normalizeRef(j.summary);
+      return s.includes(ref) || ref.includes(s);
+    });
+  }
+
+  return candidates.length === 1 ? candidates[0].id : undefined;
+}
+
+export class UpdateJobStatusTaskHandler implements TaskHandler {
+  readonly taskType = 'update_job_status' as const;
+
+  constructor(private readonly jobRepo?: JobRepository) {}
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+
+    const target = ee.jobStatusTarget;
+    if (target) {
+      payload.targetStatus = target;
+    } else {
+      // Classifier should always extract a target for this intent; if it
+      // didn't, hold for review rather than guess start-vs-complete.
+      missing.push('targetStatus');
+    }
+
+    const resolvedId = target
+      ? await resolveTechJob(this.jobRepo, context.tenantId, {
+          technicianId: context.userId,
+          jobReference: ee.jobReference,
+          target,
+        })
+      : undefined;
+
+    if (resolvedId) {
+      payload.jobId = resolvedId;
+    } else if (ee.jobReference) {
+      payload.jobReference = ee.jobReference;
+      missing.push('jobId');
+    } else {
+      missing.push('jobId');
+    }
+
+    // Autonomous trust: capture-class, so an unambiguous, high-confidence
+    // self-report auto-approves under supervision and — for the solo
+    // owner-operator (unsupervised) — routes to one-tap SMS approval.
+    // missingFields (ambiguous job / missing target) still force 'draft'.
+    return {
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, missing, { trust: 'autonomous' }),
+      ),
       taskType: this.taskType,
     };
   }

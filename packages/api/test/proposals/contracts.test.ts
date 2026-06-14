@@ -169,6 +169,38 @@ describe('P2-002 — Typed proposal contracts', () => {
     ).not.toThrow();
   });
 
+  // Job execution by voice (update_job_status)
+  describe('update_job_status payload (job execution by voice)', () => {
+    it('accepts a resolved jobId + targetStatus', () => {
+      const r = validateProposalPayload('update_job_status', {
+        jobId: validJobId,
+        targetStatus: 'completed',
+      });
+      expect(r.valid).toBe(true);
+    });
+
+    it('accepts a free-text jobReference + targetStatus (pre-resolution)', () => {
+      const r = validateProposalPayload('update_job_status', {
+        jobReference: 'Henderson',
+        targetStatus: 'in_progress',
+      });
+      expect(r.valid).toBe(true);
+    });
+
+    it('rejects a payload with neither jobId nor jobReference', () => {
+      const r = validateProposalPayload('update_job_status', { targetStatus: 'completed' });
+      expect(r.valid).toBe(false);
+    });
+
+    it('rejects an out-of-range targetStatus (only start/complete allowed by voice)', () => {
+      const r = validateProposalPayload('update_job_status', {
+        jobId: validJobId,
+        targetStatus: 'canceled',
+      });
+      expect(r.valid).toBe(false);
+    });
+  });
+
   // P22 — line items accept either price field plus catalog annotations.
   describe('line item price fields (P22)', () => {
     const base = { customerId: validCustomerId, jobId: validJobId };

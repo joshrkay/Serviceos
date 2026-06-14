@@ -1309,3 +1309,44 @@ describe('voice-action-router entity resolution', () => {
       .toBeUndefined();
   });
 });
+
+// JTBD #4 — job execution by voice. Locks the intent→proposal wiring so an
+// unmapped intent (which the router silently skips) can't regress.
+describe('voice-action-router update_job_status (JTBD #4)', () => {
+  let proposalRepo: InMemoryProposalRepository;
+
+  beforeEach(() => {
+    proposalRepo = new InMemoryProposalRepository();
+  });
+
+  afterEach(() => {
+    _resetSupervisorPresenceCache();
+    setSupervisorPresenceLoader(null);
+  });
+
+  it('routes a "mark the job done" transcript to an update_job_status proposal', async () => {
+    // The handler makes no second LLM call — one classifier response only.
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'update_job_status',
+        confidence: 0.95,
+        extractedEntities: { jobReference: 'Henderson', jobStatusTarget: 'completed' },
+      } satisfies IntentClassification),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'tech-1', transcript: 'Mark the Henderson job done' }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant('t-1');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposalType).toBe('update_job_status');
+    // No jobRepo wired here → carries the reference for the review UI.
+    expect(proposals[0].payload).toMatchObject({
+      jobReference: 'Henderson',
+      targetStatus: 'completed',
+    });
+  });
+});
