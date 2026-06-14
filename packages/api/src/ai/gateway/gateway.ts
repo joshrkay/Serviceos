@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { AppError, ValidationError } from '../../shared/errors';
 import {
@@ -169,6 +170,70 @@ export function validateLLMRequest(request: LLMRequest): string[] {
   return errors;
 }
 
+/** Audit-safe stand-in for an image part — never carries the image bytes/URL. */
+export interface RedactedImagePart {
+  type: 'image';
+  redacted: true;
+  mimeType?: string;
+  bytes: number;
+  sha256: string;
+}
+
+function parseDataUrl(url: string): { mimeType?: string; bytes: number; sha256: string } | null {
+  const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(url);
+  if (!match) return null;
+  const isBase64 = Boolean(match[2]);
+  const data = match[3] ?? '';
+  const buf = isBase64
+    ? Buffer.from(data, 'base64')
+    : Buffer.from(decodeURIComponent(data), 'utf8');
+  return {
+    mimeType: match[1] || undefined,
+    bytes: buf.length,
+    sha256: createHash('sha256').update(buf).digest('hex'),
+  };
+}
+
+function redactImagePart(part: { url: string; mimeType?: string }): RedactedImagePart {
+  const fromData = part.url.startsWith('data:') ? parseDataUrl(part.url) : null;
+  if (fromData) {
+    return {
+      type: 'image',
+      redacted: true,
+      mimeType: part.mimeType ?? fromData.mimeType,
+      bytes: fromData.bytes,
+      sha256: fromData.sha256,
+    };
+  }
+  // http(s) or other reference: hash the URL (it may be a signed/tokenized
+  // link) and store no inline bytes.
+  return {
+    type: 'image',
+    redacted: true,
+    mimeType: part.mimeType,
+    bytes: 0,
+    sha256: createHash('sha256').update(part.url).digest('hex'),
+  };
+}
+
+/**
+ * Produce an audit-safe copy of messages for the ai_runs inputSnapshot.
+ * Image parts are replaced with a redacted reference (mime + byte count +
+ * sha256) so customer photos never persist to the database. Text content is
+ * preserved; text-only messages are byte-identical to the previous snapshot.
+ */
+export function redactMessagesForSnapshot(messages: LLMMessage[]): Array<Record<string, unknown>> {
+  return messages.map((message) => {
+    const redacted: Record<string, unknown> = { role: message.role, content: message.content };
+    if (message.parts && message.parts.length > 0) {
+      redacted.parts = message.parts.map((part) =>
+        part.type === 'image' ? redactImagePart(part) : { type: 'text', text: part.text },
+      );
+    }
+    return redacted;
+  });
+}
+
 export class LLMGateway {
   private readonly config: LLMGatewayConfig;
   private readonly providers: Map<string, LLMProvider>;
@@ -252,7 +317,7 @@ export class LLMGateway {
           model: resolvedModel,
           promptVersionId,
           inputSnapshot: {
-            messages: request.messages,
+            messages: redactMessagesForSnapshot(request.messages),
             temperature: request.temperature,
             maxTokens: request.maxTokens,
           },

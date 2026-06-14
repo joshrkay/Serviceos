@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import type { LLMRequest, LLMResponse, LLMGateway } from './gateway';
+import { redactMessagesForSnapshot } from './gateway';
 import type { AiRunRepository } from '../ai-run';
 import { createAiRun } from '../ai-run';
 import {
@@ -160,7 +161,7 @@ export class CachingGatewayWrapper {
         model: cachedResponse.model,
         promptVersionId,
         inputSnapshot: {
-          messages: request.messages,
+          messages: redactMessagesForSnapshot(request.messages),
           temperature: request.temperature,
           maxTokens: request.maxTokens,
         },
