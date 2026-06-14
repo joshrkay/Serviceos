@@ -17,9 +17,29 @@ import {
   shouldWarnForUnmappedTaskType,
 } from './router';
 
+/** Image fidelity hint passed to vision models (OpenAI "detail" semantics). */
+export type LLMImageDetail = 'low' | 'high' | 'auto';
+
+/**
+ * A single piece of multimodal message content. Text parts carry inline
+ * text; image parts carry an image URL (an `https://…` link or a
+ * `data:image/…;base64,…` data URL). This is the gateway's provider-neutral
+ * shape; the OpenAI-compatible adapter maps `image` → `image_url`.
+ */
+export type LLMContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; url: string; detail?: LLMImageDetail; mimeType?: string };
+
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
+  /**
+   * Optional multimodal parts (e.g. images). When present, the provider
+   * adapter sends `content` as the leading text part followed by these
+   * parts. Image parts are only permitted on `role: 'user'` messages.
+   * Text-only requests omit this field and the text path is unchanged.
+   */
+  parts?: LLMContentPart[];
 }
 
 export interface LLMRequest {
@@ -85,6 +105,45 @@ export interface LLMGatewayLogger {
 /** Sentinel tenant ID used when a request carries no tenantId. */
 export const SYSTEM_TENANT_ID = 'system';
 
+const DATA_URL_IMAGE_RE = /^data:image\/[a-zA-Z0-9.+-]+;base64,/;
+
+/** True for an http(s) URL or a base64 image data URL. */
+function isValidImageUrl(url: unknown): boolean {
+  if (typeof url !== 'string' || url.length === 0) return false;
+  return /^https?:\/\//i.test(url) || DATA_URL_IMAGE_RE.test(url);
+}
+
+/** Validate one message's optional multimodal `parts` array. */
+function validateContentParts(message: LLMMessage, index: number): string[] {
+  const errors: string[] = [];
+  const parts = message.parts;
+  if (!Array.isArray(parts) || parts.length === 0) {
+    errors.push(`messages[${index}].parts must be a non-empty array when present`);
+    return errors;
+  }
+  parts.forEach((part, p) => {
+    if (part.type === 'text') {
+      if (typeof part.text !== 'string' || part.text.length === 0) {
+        errors.push(`messages[${index}].parts[${p}]: text part requires non-empty text`);
+      }
+      return;
+    }
+    if (part.type === 'image') {
+      if (message.role !== 'user') {
+        errors.push(`messages[${index}].parts[${p}]: image parts are only allowed on user messages`);
+      }
+      if (!isValidImageUrl(part.url)) {
+        errors.push(`messages[${index}].parts[${p}]: image url must be an http(s) or data:image/...;base64 URL`);
+      }
+      return;
+    }
+    errors.push(
+      `messages[${index}].parts[${p}]: unknown content part type "${String((part as { type?: unknown }).type)}"`,
+    );
+  });
+  return errors;
+}
+
 export function validateLLMRequest(request: LLMRequest): string[] {
   const errors: string[] = [];
   if (!request.taskType) errors.push('taskType is required');
@@ -99,6 +158,13 @@ export function validateLLMRequest(request: LLMRequest): string[] {
   }
   if (request.responseFormat !== undefined && request.responseFormat !== 'text' && request.responseFormat !== 'json') {
     errors.push('responseFormat must be "text" or "json"');
+  }
+  if (Array.isArray(request.messages)) {
+    request.messages.forEach((message, index) => {
+      if (message.parts !== undefined) {
+        errors.push(...validateContentParts(message, index));
+      }
+    });
   }
   return errors;
 }
