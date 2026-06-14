@@ -12,7 +12,6 @@
 import { CustomerPaymentMethodRepository } from '../payments/customer-payment-method';
 import { chargeOffSession, StripeAccountConfig } from '../payments/stripe-saved-card';
 import { StripeFetch } from '../payments/stripe-payment-intent';
-import { ConnectAccountResolver } from '../invoices/public-invoice-service';
 
 export interface DuesCollectionInput {
   tenantId: string;
@@ -71,7 +70,6 @@ export interface StripeDuesCollectorDeps {
   customerPaymentMethodRepo: CustomerPaymentMethodRepository;
   stripeConfig: { apiKey: string };
   invoiceOps: DuesInvoiceOps;
-  connectAccountResolver?: ConnectAccountResolver;
   currency?: string;
   stripeFetch?: StripeFetch;
 }
@@ -94,14 +92,11 @@ export class StripeDuesCollector implements DuesCollector {
     );
     if (amountDueCents <= 0) return { status: 'collected' }; // nothing owed
 
-    const connect = this.deps.connectAccountResolver
-      ? await this.deps.connectAccountResolver
-          .resolveTenantConnectAccount(input.tenantId)
-          .catch(() => null)
-      : null;
     const config: StripeAccountConfig = {
       apiKey: this.deps.stripeConfig.apiKey,
-      stripeAccountId: connect && connect.chargesEnabled ? connect.accountId : undefined,
+      // Charge on the exact account the card was saved on — never re-resolve
+      // Connect (which can drift if the tenant's status changes).
+      stripeAccountId: card.stripeAccountId,
     };
 
     const result = await chargeOffSession(

@@ -839,6 +839,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               customerId: siCustomerId,
               stripeCustomerId: si.customer,
               stripePaymentMethodId: si.payment_method,
+              // The account the card lives on (connected account, or undefined
+              // for platform). The dues charge later targets exactly this.
+              stripeAccountId: connectedAccountId,
               brand,
               last4,
               expMonth,
