@@ -291,7 +291,7 @@ export interface VoiceActionRouterDeps {
 // proposal — the Twilio adapter routes them to the lookup-skill family
 // directly. They're omitted from this map; the action router falls back
 // to `voice_clarification` for any IntentType not present here.
-const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, ProposalType>> = {
+export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, ProposalType>> = {
   create_invoice: 'draft_invoice',
   draft_estimate: 'draft_estimate',
   create_appointment: 'create_appointment',

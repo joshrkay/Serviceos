@@ -113,7 +113,7 @@ export type IntentType =
   | 'edit_proposal'
   | 'unknown';
 
-const SUPPORTED_INTENTS: readonly IntentType[] = [
+export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'create_invoice',
   'draft_estimate',
   'create_appointment',
