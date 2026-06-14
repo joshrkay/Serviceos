@@ -30,13 +30,6 @@ export interface CustomerNegotiationContextProvider {
   getContext(tenantId: string, customerId: string): Promise<CustomerNegotiationContext>;
 }
 
-/** Context for an unknown caller (no resolved customer) — used by the wiring layer. */
-export const EMPTY_CUSTOMER_NEGOTIATION_CONTEXT: CustomerNegotiationContext = {
-  lifetimeValueCents: 0,
-  lastSeenAt: null,
-  jobsCompletedCount: 0,
-};
-
 /**
  * A short, human, audit-friendly recency phrase for the owner ("3 weeks ago").
  * Relative (not absolute), so it is timezone-independent — the owner reads it

@@ -159,7 +159,7 @@ function formatUsdFromCents(cents: number): string {
  * A one-sentence value + recency framing that surfaces the customer's lifetime
  * value and recency so the owner can weigh the ask. Never proposes a discount.
  */
-export function customerValueFraming(ctx: CustomerNegotiationContext): string {
+function customerValueFraming(ctx: CustomerNegotiationContext): string {
   const ltv = formatUsdFromCents(ctx.lifetimeValueCents);
   const recency = formatRecencyLabel(ctx.lastSeenAt);
   const jobs = `${ctx.jobsCompletedCount} completed ${ctx.jobsCompletedCount === 1 ? 'job' : 'jobs'}`;
