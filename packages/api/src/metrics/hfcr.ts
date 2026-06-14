@@ -165,6 +165,13 @@ export async function computeHfcrForTenant(
     return verdict;
   };
 
+  // Qualify each DISTINCT paid invoice once, in parallel — the audit lookups
+  // are I/O-bound and the hero-tile endpoint awaits this synchronously, so we
+  // don't serialize them. qualifyInvoice memoizes into invoiceVerdict, so the
+  // summing loop below just reads the resolved verdicts.
+  const uniqueInvoiceIds = [...new Set(payments.map((p) => p.invoiceId))];
+  await Promise.all(uniqueInvoiceIds.map((id) => qualifyInvoice(id)));
+
   let hfcrCents = 0;
   const handsFreeInvoices = new Set<string>();
   const recoveredCallInvoices = new Set<string>();
@@ -172,11 +179,11 @@ export async function computeHfcrForTenant(
   for (const payment of payments) {
     const net = payment.amountCents - (payment.refundedAmountCents ?? 0);
     if (net <= 0) continue;
-    const { handsFree, voiceRecovered } = await qualifyInvoice(payment.invoiceId);
-    if (!handsFree) continue;
+    const verdict = invoiceVerdict.get(payment.invoiceId);
+    if (!verdict || !verdict.handsFree) continue;
     hfcrCents += net;
     handsFreeInvoices.add(payment.invoiceId);
-    if (voiceRecovered) recoveredCallInvoices.add(payment.invoiceId);
+    if (verdict.voiceRecovered) recoveredCallInvoices.add(payment.invoiceId);
   }
 
   return {

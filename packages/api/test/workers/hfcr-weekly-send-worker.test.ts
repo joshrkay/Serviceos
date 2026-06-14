@@ -129,6 +129,31 @@ describe('runHfcrWeeklySendSweep', () => {
     expect(sentSms).toHaveLength(1); // not 2
   });
 
+  it('does not record the send when SMS delivery fails — so it retries next sweep', async () => {
+    await seedHandsFree('t1', 'inv-1', 50000);
+    let failSend = true;
+    const flakyDeps = deps({
+      sendSms: async (args) => {
+        if (failSend) throw new Error('gateway timeout');
+        sentSms.push(args);
+      },
+    });
+
+    const first = await runHfcrWeeklySendSweep(flakyDeps);
+    expect(first.sent).toBe(0);
+    expect(first.failed).toBe(1);
+    expect(sentSms).toHaveLength(0);
+    // No ledger row written → the week is NOT silently dropped.
+    expect(await hfcrSendRepo.findByWeek('t1', WEEK_KEY)).toBeNull();
+
+    // Sender recovers on the next tick → summary delivered + recorded once.
+    failSend = false;
+    const second = await runHfcrWeeklySendSweep(flakyDeps);
+    expect(second.sent).toBe(1);
+    expect(sentSms).toHaveLength(1);
+    expect(await hfcrSendRepo.findByWeek('t1', WEEK_KEY)).not.toBeNull();
+  });
+
   it('skips a tenant with no hands-free revenue (no $0 spam, no row)', async () => {
     // A web-approved invoice → not hands-free → nothing to summarize.
     const proposal: Proposal = {

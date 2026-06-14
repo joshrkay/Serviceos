@@ -50,11 +50,13 @@ function dateString(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
+const CURRENCY_FORMATTER = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+});
+
 function formatMoneyCents(cents: number): string {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-  }).format(cents / 100);
+  return CURRENCY_FORMATTER.format(cents / 100);
 }
 
 export function composeWeeklyHfcrSms(hfcrCents: number, recoveredCallCount: number): string {
@@ -107,8 +109,18 @@ export async function runHfcrWeeklySendSweep(
       const ownerPhone = await deps.resolveOwnerPhone(tenantId);
       if (!ownerPhone) continue; // no owner phone configured — can't send
 
-      // Record the send BEFORE texting (the UNIQUE gate) so a concurrent
-      // sweep can't double-send. A 23505 means another instance won the week.
+      // Send the summary FIRST, then record it. A transient SMS failure
+      // throws here → the per-tenant catch logs it and NO row is written, so
+      // the next daily tick retries this week (the deliverable is the SMS; a
+      // record-first order would let one failed send silently drop the week).
+      // The cross-instance runAsLeader lock + the top-of-loop existence check
+      // keep this to one send per week; a duplicate would require the DB write
+      // to fail in the narrow window after a successful send.
+      await deps.sendSms({
+        to: ownerPhone,
+        body: composeWeeklyHfcrSms(result.hfcrCents, result.recoveredCallCount),
+      });
+
       try {
         await deps.hfcrSendRepo.create({
           id: uuidv4(),
@@ -119,14 +131,11 @@ export async function runHfcrWeeklySendSweep(
           sentAt: now,
         });
       } catch (err) {
+        // Already recorded (another instance won the week): the SMS went out,
+        // so just move on without double-counting.
         if ((err as { code?: string }).code === '23505') continue;
         throw err;
       }
-
-      await deps.sendSms({
-        to: ownerPhone,
-        body: composeWeeklyHfcrSms(result.hfcrCents, result.recoveredCallCount),
-      });
       sent++;
     } catch (err) {
       failed++;

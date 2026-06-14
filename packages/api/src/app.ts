@@ -3781,6 +3781,11 @@ export function createApp(): express.Express {
   // idempotent via hfcr_weekly_sends. Only registered when an SMS sender is
   // wired (in-memory dev has none → no-op); reuses the owner-phone resolver
   // and the one-tap owner-SMS seam used by the unsupervised-routing path.
+  //
+  // Driven on a DAILY tick, not a 7-day one: a weekly setInterval would reset
+  // on every redeploy (Railway redeploys far more often than weekly) and could
+  // never elapse. The per-week hfcr_weekly_sends gate makes a daily run send
+  // exactly one summary per tenant per completed week — restart-safe.
   if (oneTapSmsSender) {
     const oneTapOwnerSms = oneTapSmsSender;
     const hfcrWeeklyLogger = createLogger({
@@ -3809,7 +3814,7 @@ export function createApp(): express.Express {
             error: err instanceof Error ? err.message : String(err),
           });
         });
-      }, 7 * 24 * 60 * 60_000),
+      }, 24 * 60 * 60_000),
     );
   }
 
