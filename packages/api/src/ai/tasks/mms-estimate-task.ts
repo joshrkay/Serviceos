@@ -33,7 +33,7 @@
  */
 import { createProposal, CreateProposalInput, Proposal } from '../../proposals/proposal';
 import { assertValidProposalPayload } from '../../proposals/contracts';
-import { LLMGateway, LLMContentBlock } from '../gateway/gateway';
+import { LLMGateway, type LLMContentPart } from '../gateway/gateway';
 import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
 import type { ProposalConfidenceMeta } from '../../proposals/contracts';
 import { CatalogItemRepository } from '../../catalog/catalog-item';
@@ -141,7 +141,7 @@ export class MmsEstimateTaskHandler {
         tenantId: input.tenantId,
         messages: [
           { role: 'system', content: MMS_ESTIMATE_SYSTEM_PROMPT },
-          { role: 'user', content: userContent },
+          { role: 'user', content: userContent.content, parts: userContent.parts },
         ],
         responseFormat: 'json',
       });
@@ -279,22 +279,21 @@ export class MmsEstimateTaskHandler {
    * wrapped in a <context> tag so the system prompt's "data only" rule
    * applies.
    */
-  private buildUserContent(input: MmsEstimateInput): LLMContentBlock[] {
-    const blocks: LLMContentBlock[] = [];
-    const parts: string[] = [];
+  private buildUserContent(input: MmsEstimateInput): { content: string; parts: LLMContentPart[] } {
+    const textParts: string[] = [];
     if (input.message && input.message.trim().length > 0) {
-      parts.push(`Customer message: ${input.message.slice(0, 2000)}`);
+      textParts.push(`Customer message: ${input.message.slice(0, 2000)}`);
     }
     if (input.context && Object.keys(input.context).length > 0) {
-      parts.push(`Customer/property: ${JSON.stringify(input.context).slice(0, 3000)}`);
+      textParts.push(`Customer/property: ${JSON.stringify(input.context).slice(0, 3000)}`);
     }
-    if (parts.length === 0) {
-      parts.push('No additional context was provided — estimate from the photo(s) alone.');
+    if (textParts.length === 0) {
+      textParts.push('No additional context was provided — estimate from the photo(s) alone.');
     }
-    blocks.push({ type: 'text', text: `<context>${parts.join('\n')}</context>` });
-    for (const image of input.images) {
-      blocks.push({ type: 'image_url', image_url: { url: image.url } });
-    }
-    return blocks;
+    const parts: LLMContentPart[] = input.images.map((image) => ({
+      type: 'image',
+      url: image.url,
+    }));
+    return { content: `<context>${textParts.join('\n')}</context>`, parts };
   }
 }

@@ -134,10 +134,9 @@ export class OpenAICompatibleProvider implements LLMProvider, EmbeddingProvider 
     const completion = await this.client.chat.completions.create(
       {
         model,
-        // Content may be a string or multimodal content-block array; the
-        // OpenAI SDK accepts both for vision-capable models. Cast at this
-        // boundary so the gateway's LLMMessage type stays provider-agnostic.
-        messages: request.messages as unknown as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+        // Translate gateway messages (text + optional multimodal parts) to the
+        // OpenAI chat format via the shared pure helper.
+        messages: buildChatMessages(request.messages),
         temperature: request.temperature ?? 0.2,
         max_tokens: request.maxTokens,
         response_format:

@@ -121,15 +121,11 @@ describe('U2 — MmsEstimateTaskHandler', () => {
     expect(req.taskType).toBe(MMS_ESTIMATE_TASK_TYPE);
     expect(req.responseFormat).toBe('json');
     const userMsg = req.messages[1];
-    expect(Array.isArray(userMsg.content)).toBe(true);
-    const blocks = userMsg.content as Array<{ type: string }>;
-    // One text context block + one image_url block per photo.
-    const imageBlocks = blocks.filter((b) => b.type === 'image_url');
-    expect(imageBlocks).toHaveLength(2);
-    expect(blocks[0].type).toBe('text');
-    expect((imageBlocks[0] as unknown as { image_url: { url: string } }).image_url.url).toBe(
-      'https://files.example/p1.jpg',
-    );
+    // Text context goes in `content`; one image part per photo in `parts`.
+    expect(typeof userMsg.content).toBe('string');
+    const imageParts = (userMsg.parts ?? []).filter((p) => p.type === 'image');
+    expect(imageParts).toHaveLength(2);
+    expect((imageParts[0] as { url: string }).url).toBe('https://files.example/p1.jpg');
   });
 
   it('catalog grounding — overrides the model price with the matched catalog price', async () => {

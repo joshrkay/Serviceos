@@ -264,13 +264,7 @@ export class ProviderTenantQuotaWrapper implements LLMProvider {
 
     // Estimate tokens from message text
     const estimatedTokens = request.messages.reduce(
-      (sum, m) =>
-        sum +
-        estimateTokens(
-          typeof m.content === 'string'
-            ? m.content
-            : m.content.map((b) => (b.type === 'text' ? b.text : '')).join(' '),
-        ),
+      (sum, m) => sum + estimateTokens(m.content),
       0,
     );
 

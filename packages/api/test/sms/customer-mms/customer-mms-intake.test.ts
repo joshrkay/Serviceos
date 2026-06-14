@@ -169,9 +169,9 @@ describe('U2 — ingestCustomerMms', () => {
     const completeMock = (baseDeps.gateway as unknown as { complete: ReturnType<typeof vi.fn> })
       .complete;
     const req = completeMock.mock.calls[0][0];
-    const blocks = req.messages[1].content as Array<{ type: string; image_url?: { url: string } }>;
-    const img = blocks.find((b) => b.type === 'image_url');
-    expect(img?.image_url?.url).toMatch(/^https:\/\/presigned\//);
+    const parts = (req.messages[1].parts ?? []) as Array<{ type: string; url?: string }>;
+    const img = parts.find((p) => p.type === 'image');
+    expect(img?.url).toMatch(/^https:\/\/presigned\//);
   });
 
   it('unknown sender → creates a new prefilled customer and drafts against it', async () => {

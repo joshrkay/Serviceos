@@ -18,31 +18,48 @@ import {
   shouldWarnForUnmappedTaskType,
 } from './router';
 
+/** Image detail hint passed through to vision-capable providers. */
+export type LLMImageDetail = 'low' | 'high' | 'auto';
+
 /** A text part of a multimodal message. */
-export interface LLMTextContentBlock {
+export interface LLMTextPart {
   type: 'text';
   text: string;
 }
 
 /**
  * An image part of a multimodal message. `url` may be an https URL or a
- * `data:` URI. Image URLs/bytes are redacted from ai_run snapshots
- * (see `redactMessagesForSnapshot`) to avoid PII at rest.
+ * `data:image/...;base64,` URI. Image URLs/bytes are redacted from ai_run
+ * snapshots (see `redactMessagesForSnapshot`) to avoid PII at rest.
  */
-export interface LLMImageContentBlock {
-  type: 'image_url';
-  image_url: { url: string };
+export interface LLMImagePart {
+  type: 'image';
+  url: string;
+  detail?: LLMImageDetail;
 }
 
-export type LLMContentBlock = LLMTextContentBlock | LLMImageContentBlock;
+export type LLMContentPart = LLMTextPart | LLMImagePart;
 
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant';
+  /** Plain text content. */
+  content: string;
   /**
-   * Plain text, or an ordered list of content blocks for multimodal
-   * (vision) requests. Only `user` messages should carry image blocks.
+   * Optional ordered multimodal parts (text / image) for vision requests.
+   * Only `user` messages may carry image parts. The provider sends `content`
+   * (when non-empty) followed by these parts.
    */
-  content: string | LLMContentBlock[];
+  parts?: LLMContentPart[];
+}
+
+/**
+ * True when any message carries an image part (drives vision-model routing).
+ * Robust to malformed `parts` (non-array / null elements) — never throws.
+ */
+export function messagesContainImage(messages: LLMMessage[]): boolean {
+  return messages.some(
+    (m) => Array.isArray(m.parts) && m.parts.some((p) => p != null && p.type === 'image'),
+  );
 }
 
 export interface LLMRequest {
@@ -158,29 +175,6 @@ export function validateLLMRequest(request: LLMRequest): string[] {
   if (!request.taskType) errors.push('taskType is required');
   if (!request.messages || !Array.isArray(request.messages) || request.messages.length === 0) {
     errors.push('messages must be a non-empty array');
-  } else {
-    request.messages.forEach((m, i) => {
-      if (Array.isArray(m.content)) {
-        if (m.content.length === 0) {
-          errors.push(`messages[${i}].content array must be non-empty`);
-        }
-        m.content.forEach((block, j) => {
-          if (block.type === 'image_url') {
-            if (!block.image_url || typeof block.image_url.url !== 'string' || block.image_url.url.length === 0) {
-              errors.push(`messages[${i}].content[${j}] image_url.url is required`);
-            }
-          } else if (block.type === 'text') {
-            if (typeof block.text !== 'string') {
-              errors.push(`messages[${i}].content[${j}] text must be a string`);
-            }
-          } else {
-            errors.push(`messages[${i}].content[${j}] has an unknown block type`);
-          }
-        });
-      } else if (typeof m.content !== 'string') {
-        errors.push(`messages[${i}].content must be a string or a content-block array`);
-      }
-    });
   }
   if (request.temperature !== undefined && (request.temperature < 0 || request.temperature > 2)) {
     errors.push('temperature must be between 0 and 2');
@@ -206,19 +200,47 @@ export function validateLLMRequest(request: LLMRequest): string[] {
  * written to an ai_runs input snapshot. Text is preserved for debugging;
  * image content is replaced with a placeholder to avoid PII at rest.
  */
-export function redactMessagesForSnapshot(messages: LLMMessage[]): LLMMessage[] {
-  return messages.map((m) =>
-    Array.isArray(m.content)
-      ? {
-          role: m.role,
-          content: m.content.map((b) =>
-            b.type === 'image_url'
-              ? { type: 'image_url' as const, image_url: { url: '[redacted-image]' } }
-              : b,
-          ),
-        }
-      : m,
-  );
+/**
+ * Redact one image part for the ai_run snapshot — never store the raw URL or
+ * bytes. For a base64 data: URL we keep mimeType + byte count; for any URL we
+ * keep a sha256 reference so identical images stay correlatable in the audit.
+ */
+function redactImagePart(part: LLMImagePart): Record<string, unknown> {
+  const dataUrl = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/i.exec(part.url);
+  if (dataUrl) {
+    const bytes = Buffer.from(dataUrl[2], 'base64');
+    return {
+      type: 'image',
+      redacted: true,
+      mimeType: dataUrl[1],
+      bytes: bytes.length,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      ...(part.detail ? { detail: part.detail } : {}),
+    };
+  }
+  return {
+    type: 'image',
+    redacted: true,
+    sha256: createHash('sha256').update(part.url).digest('hex'),
+    ...(part.detail ? { detail: part.detail } : {}),
+  };
+}
+
+export function redactMessagesForSnapshot(
+  messages: LLMMessage[],
+): Array<Record<string, unknown>> {
+  return messages.map((m): Record<string, unknown> => {
+    if (!m.parts || m.parts.length === 0) {
+      return { role: m.role, content: m.content };
+    }
+    return {
+      role: m.role,
+      content: m.content,
+      parts: m.parts.map((p) =>
+        p.type === 'image' ? redactImagePart(p) : { type: 'text', text: p.text },
+      ),
+    };
+  });
 }
 
 export class LLMGateway {
