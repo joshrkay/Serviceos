@@ -4353,6 +4353,8 @@ export const MIGRATIONS = {
     DROP POLICY IF EXISTS tenant_isolation_hfcr_weekly_sends ON hfcr_weekly_sends;
     CREATE POLICY tenant_isolation_hfcr_weekly_sends ON hfcr_weekly_sends
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
   // Membership engine (#6) — auto-renew on service_agreements. Additive ALTERs
   // only: the runner re-executes every migration on every boot, so each
   // statement is idempotent (ADD COLUMN IF NOT EXISTS, DROP+ADD the CHECK).
