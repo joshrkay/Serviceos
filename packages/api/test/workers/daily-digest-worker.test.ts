@@ -23,6 +23,7 @@ import type { JobRepository } from '../../src/jobs/job';
 import type { AppointmentRepository } from '../../src/appointments/appointment';
 import type { Proposal, ProposalRepository } from '../../src/proposals/proposal';
 import type { CustomerRepository } from '../../src/customers/customer';
+import type { FeedbackResponseRepository } from '../../src/feedback/feedback-response';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 
@@ -94,6 +95,9 @@ function stubComputeDeps(o: ComputeStubOverrides = {}, settingsRepo?: InMemorySe
     } as unknown as ProposalRepository,
     customerRepo: { findById: async () => null } as unknown as CustomerRepository,
     settingsRepo: (settingsRepo ?? new InMemorySettingsRepository()) as never,
+    feedbackResponseRepo: {
+      countByRatingInRange: async () => ({ 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }),
+    } as unknown as FeedbackResponseRepository,
     now: () => DUE_NOW,
   };
 }

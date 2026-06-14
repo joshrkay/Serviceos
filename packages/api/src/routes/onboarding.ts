@@ -16,7 +16,10 @@ import {
   PackPickInputSchema,
   VoiceConfigInputSchema,
   CalendarChoiceInputSchema,
+  PhoneAvailableInputSchema,
+  PhoneClaimInputSchema,
 } from '../onboarding/contracts';
+import { searchAvailableNumbers } from '../integrations/twilio/provisioning';
 import { saveVoiceConfig } from '../voice/voice-config';
 import { VOICE_PRESETS } from '../integrations/vapi/assistant-config';
 import { getVapiClient, type VapiClient } from '../integrations/vapi/client';
@@ -627,6 +630,141 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         res.status(500).json({
           error: 'PHONE_RETRY_FAILED',
           message: error instanceof Error ? error.message : 'Failed to retry phone provisioning',
+        });
+      }
+    },
+  );
+
+  // Number picker — list purchasable numbers for an area code. Read-only:
+  // searches Twilio on the MASTER account (no subaccount needed yet), so the
+  // picker works before provisioning creates the tenant's subaccount. The
+  // actual (costly) purchase stays server-side in the worker (/phone/claim).
+  router.post(
+    '/phone/available',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const parsed = PhoneAvailableInputSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: 'INVALID_AREA_CODE',
+            message: parsed.error.issues[0]?.message ?? 'Invalid area code',
+          });
+          return;
+        }
+        const masterSid = process.env.TWILIO_ACCOUNT_SID;
+        const masterToken = process.env.TWILIO_AUTH_TOKEN;
+        if (!masterSid || !masterToken) {
+          // Twilio unconfigured (e.g. local dev) — the picker UI falls back to
+          // "let us pick a number for you" (the existing region-based retry).
+          res.status(503).json({
+            error: 'TWILIO_NOT_CONFIGURED',
+            message: 'Phone number search is not available',
+          });
+          return;
+        }
+        const numbers = await searchAvailableNumbers(masterSid, masterToken, {
+          areaCode: parsed.data.areaCode,
+          limit: parsed.data.limit ?? 10,
+        });
+        res.json({ numbers });
+      } catch (error: unknown) {
+        res.status(502).json({
+          error: 'PHONE_SEARCH_FAILED',
+          message: error instanceof Error ? error.message : 'Failed to search available numbers',
+        });
+      }
+    },
+  );
+
+  // Number picker — claim the specific number the tradesperson chose. Mirrors
+  // /phone/retry's status gate, but threads the chosen E.164 to the worker so
+  // it orders exactly that number. The purchase itself (money, hard to undo)
+  // stays server-side in the worker — the client never buys directly.
+  router.post(
+    '/phone/claim',
+    requireAuth,
+    requireTenant,
+    // Claiming commits the tenant to a specific paid DID (recurring cost), so
+    // gate it to the owner — matching /pack and /billing, the other routes
+    // that spend money or change billing.
+    requireRole('owner'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!pool || !queue) {
+          res.status(503).json({
+            error: 'ONBOARDING_NOT_CONFIGURED',
+            message: 'Phone claim requires database and queue',
+          });
+          return;
+        }
+        const parsed = PhoneClaimInputSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: 'INVALID_PHONE_NUMBER',
+            message: parsed.error.issues[0]?.message ?? 'Invalid phone number',
+          });
+          return;
+        }
+        const tenantId = req.auth!.tenantId;
+        const db = currentTenantContext()?.client ?? pool;
+        const integ = await db.query<{ status: string }>(
+          `SELECT status FROM tenant_integrations
+           WHERE tenant_id = $1 AND provider = 'twilio' LIMIT 1`,
+          [tenantId],
+        );
+        const status = integ.rows[0]?.status;
+        if (status === 'full_readiness') {
+          res.json({ ok: true, skipped: true, reason: 'already_active' });
+          return;
+        }
+        if (status && status !== 't0_requested' && status !== 'failed') {
+          res.status(409).json({
+            error: 'PHONE_CLAIM_NOT_ALLOWED',
+            message: `Cannot claim from status ${status}`,
+          });
+          return;
+        }
+        const callbackBaseUrl =
+          process.env.PUBLIC_API_URL ??
+          process.env.APP_PUBLIC_URL ??
+          'http://localhost:3000';
+        const payload: ProvisionTwilioPayload = {
+          tenantId,
+          region: null,
+          baseUrl: callbackBaseUrl,
+          phoneNumber: parsed.data.phoneNumber,
+        };
+        // Share the canonical provisioning idempotency key (same as the
+        // signup auto-provision at webhooks/routes.ts) so the queue collapses a
+        // claim into an already-pending/in-flight provisioning job rather than
+        // running a second one — which would create a duplicate Twilio
+        // subaccount and buy a second paid number. (Residual: a claim landing
+        // in the narrow window after the auto job is picked up but before it
+        // persists state is not deduped; fully closing that needs worker-level
+        // per-tenant serialization — deferred, see the plan's follow-ups.)
+        await queue.send(
+          PROVISION_TWILIO_JOB_TYPE,
+          payload,
+          `provision-twilio-${tenantId}`,
+        );
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: req.auth!.userId,
+            actorRole: 'owner',
+            eventType: 'tenant.phone_number_claimed',
+            entityType: 'tenant_integrations',
+            entityId: tenantId,
+            metadata: { phoneNumber: parsed.data.phoneNumber },
+          }),
+        );
+        res.json({ ok: true, enqueued: true, phoneNumber: parsed.data.phoneNumber });
+      } catch (error: unknown) {
+        res.status(500).json({
+          error: 'PHONE_CLAIM_FAILED',
+          message: error instanceof Error ? error.message : 'Failed to claim phone number',
         });
       }
     },

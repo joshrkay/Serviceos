@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { AppError, ValidationError } from '../../shared/errors';
 import {
@@ -11,15 +12,54 @@ import {
   failAiRun,
   AiRun,
 } from '../ai-run';
-import { AIRoutingConfig } from '../../config/ai-routing';
+import { AIRoutingConfig, isVisionCapableModel } from '../../config/ai-routing';
 import {
   resolveRouting,
   shouldWarnForUnmappedTaskType,
 } from './router';
 
+/** Image detail hint passed through to vision-capable providers. */
+export type LLMImageDetail = 'low' | 'high' | 'auto';
+
+/** A text part of a multimodal message. */
+export interface LLMTextPart {
+  type: 'text';
+  text: string;
+}
+
+/**
+ * An image part of a multimodal message. `url` may be an https URL or a
+ * `data:image/...;base64,` URI. Image URLs/bytes are redacted from ai_run
+ * snapshots (see `redactMessagesForSnapshot`) to avoid PII at rest.
+ */
+export interface LLMImagePart {
+  type: 'image';
+  url: string;
+  detail?: LLMImageDetail;
+}
+
+export type LLMContentPart = LLMTextPart | LLMImagePart;
+
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant';
+  /** Plain text content. */
   content: string;
+  /**
+   * Optional ordered multimodal parts (text / image) for vision requests.
+   * Only `user` messages may carry image parts. The provider sends `content`
+   * (when non-empty) followed by these parts.
+   */
+  parts?: LLMContentPart[];
+}
+
+/**
+ * True when any message carries an image part (drives vision-model routing).
+ * Robust to malformed `parts` (non-array / null elements) — never throws.
+ */
+export function messagesContainImage(messages: LLMMessage[]): boolean {
+  return messages.some(
+    (m) => Array.isArray(m.parts) && m.parts.some((p) => p != null && p.type === 'image'),
+  );
 }
 
 export interface LLMRequest {
@@ -85,6 +125,51 @@ export interface LLMGatewayLogger {
 /** Sentinel tenant ID used when a request carries no tenantId. */
 export const SYSTEM_TENANT_ID = 'system';
 
+// Accepts an image data URL with optional RFC-2397 params before ;base64,
+// e.g. "data:image/png;base64," and "data:image/png;name=x.png;base64,".
+const DATA_URL_IMAGE_RE = /^data:image\/[a-zA-Z0-9.+-]+(?:;[a-zA-Z0-9.+=-]+)*;base64,/i;
+
+/** True for an http(s) URL or a base64 image data URL. */
+function isValidImageUrl(url: unknown): boolean {
+  if (typeof url !== 'string' || url.length === 0) return false;
+  return /^https?:\/\//i.test(url) || DATA_URL_IMAGE_RE.test(url);
+}
+
+/** Validate one message's optional multimodal `parts` array. */
+function validateContentParts(message: LLMMessage, index: number): string[] {
+  const errors: string[] = [];
+  const parts = message.parts;
+  if (!Array.isArray(parts) || parts.length === 0) {
+    errors.push(`messages[${index}].parts must be a non-empty array when present`);
+    return errors;
+  }
+  parts.forEach((rawPart, p) => {
+    const u: unknown = rawPart;
+    if (u === null || typeof u !== 'object') {
+      errors.push(`messages[${index}].parts[${p}]: must be a content part object`);
+      return;
+    }
+    const part = u as { type?: unknown; text?: unknown; url?: unknown };
+    if (part.type === 'text') {
+      if (typeof part.text !== 'string' || part.text.length === 0) {
+        errors.push(`messages[${index}].parts[${p}]: text part requires non-empty text`);
+      }
+      return;
+    }
+    if (part.type === 'image') {
+      if (message.role !== 'user') {
+        errors.push(`messages[${index}].parts[${p}]: image parts are only allowed on user messages`);
+      }
+      if (!isValidImageUrl(part.url)) {
+        errors.push(`messages[${index}].parts[${p}]: image url must be an http(s) or data:image/...;base64 URL`);
+      }
+      return;
+    }
+    errors.push(`messages[${index}].parts[${p}]: unknown content part type "${String(part.type)}"`);
+  });
+  return errors;
+}
+
 export function validateLLMRequest(request: LLMRequest): string[] {
   const errors: string[] = [];
   if (!request.taskType) errors.push('taskType is required');
@@ -100,7 +185,62 @@ export function validateLLMRequest(request: LLMRequest): string[] {
   if (request.responseFormat !== undefined && request.responseFormat !== 'text' && request.responseFormat !== 'json') {
     errors.push('responseFormat must be "text" or "json"');
   }
+  if (Array.isArray(request.messages)) {
+    request.messages.forEach((message, index) => {
+      if (message.parts !== undefined) {
+        errors.push(...validateContentParts(message, index));
+      }
+    });
+  }
   return errors;
+}
+
+/**
+ * Redact image payloads (URLs / data URIs) from messages before they are
+ * written to an ai_runs input snapshot. Text is preserved for debugging;
+ * image content is replaced with a placeholder to avoid PII at rest.
+ */
+/**
+ * Redact one image part for the ai_run snapshot — never store the raw URL or
+ * bytes. For a base64 data: URL we keep mimeType + byte count; for any URL we
+ * keep a sha256 reference so identical images stay correlatable in the audit.
+ */
+function redactImagePart(part: LLMImagePart): Record<string, unknown> {
+  const dataUrl = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/i.exec(part.url);
+  if (dataUrl) {
+    const bytes = Buffer.from(dataUrl[2], 'base64');
+    return {
+      type: 'image',
+      redacted: true,
+      mimeType: dataUrl[1],
+      bytes: bytes.length,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      ...(part.detail ? { detail: part.detail } : {}),
+    };
+  }
+  return {
+    type: 'image',
+    redacted: true,
+    sha256: createHash('sha256').update(part.url).digest('hex'),
+    ...(part.detail ? { detail: part.detail } : {}),
+  };
+}
+
+export function redactMessagesForSnapshot(
+  messages: LLMMessage[],
+): Array<Record<string, unknown>> {
+  return messages.map((m): Record<string, unknown> => {
+    if (!m.parts || m.parts.length === 0) {
+      return { role: m.role, content: m.content };
+    }
+    return {
+      role: m.role,
+      content: m.content,
+      parts: m.parts.map((p) =>
+        p.type === 'image' ? redactImagePart(p) : { type: 'text', text: p.text },
+      ),
+    };
+  });
 }
 
 export class LLMGateway {
@@ -149,6 +289,16 @@ export class LLMGateway {
       temperature: routingDecision.temperature,
     };
 
+    // Fail fast: an image-bearing request must resolve to a vision-capable
+    // model. Throwing here (before the ai_run row and provider dispatch)
+    // avoids an opaque provider 400 and leaves no orphaned state.
+    if (messagesContainImage(request.messages) && !isVisionCapableModel(resolvedModel)) {
+      throw new ValidationError(
+        'LLM request includes image content but the resolved model is not vision-capable',
+        { taskType: request.taskType, resolvedModel },
+      );
+    }
+
     // Warn once per process when taskType is not in the active tier mapping
     if (routingDecision.wasUnmapped && shouldWarnForUnmappedTaskType(request.taskType)) {
       this.logger?.info(`unmapped taskType "${request.taskType}" — defaulting to standard tier`, {
@@ -186,7 +336,7 @@ export class LLMGateway {
           model: resolvedModel,
           promptVersionId,
           inputSnapshot: {
-            messages: request.messages,
+            messages: redactMessagesForSnapshot(request.messages),
             temperature: request.temperature,
             maxTokens: request.maxTokens,
           },

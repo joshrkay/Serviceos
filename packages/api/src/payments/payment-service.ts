@@ -14,7 +14,12 @@
  * guard and skip the `payment.refunded` audit event.
  */
 import { v4 as uuidv4 } from 'uuid';
-import { PaymentRepository, Payment, PaymentMethod } from '../invoices/payment';
+import {
+  PaymentRepository,
+  Payment,
+  PaymentMethod,
+  RecordPaymentAuditContext,
+} from '../invoices/payment';
 import {
   Invoice,
   InvoiceRepository,
@@ -223,15 +228,30 @@ export async function reversePayment(
 
   // Atomic, idempotent flip. `null` means: not found, already reversed,
   // or not in 'completed' status (the guard lives in the WHERE clause).
-  const reversed = await paymentRepo.reversePaymentAtomic(input.tenantId, input.paymentId, {
+  let reversed = await paymentRepo.reversePaymentAtomic(input.tenantId, input.paymentId, {
     reversedAt,
     reason: input.reason,
   });
 
   if (!reversed) {
+    // U5 (ACH async lifecycle) — the completed-only flip missed. The
+    // payment may instead be IN-FLIGHT ('processing'): an ACH return that
+    // arrived BEFORE the debit ever settled. Try the in-flight reversal,
+    // which flips 'processing' -> 'failed' under its own guard. The
+    // invoice-reopen logic below is identical (it backs out the in-flight
+    // credit we applied at `payment_intent.processing`). Idempotent: a
+    // duplicate delivery finds the row already 'failed' and this also
+    // returns null, falling through to the no-op branch.
+    reversed = await paymentRepo.reverseInFlightPaymentAtomic(input.tenantId, input.paymentId, {
+      reversedAt,
+      reason: input.reason,
+    });
+  }
+
+  if (!reversed) {
     // Distinguish "row missing" (retryable — webhook ordering) from
-    // "already reversed / not completed" (terminal no-op), exactly like
-    // recordRefund's 0-row diagnostic read.
+    // "already reversed / not completed/processing" (terminal no-op),
+    // exactly like recordRefund's 0-row diagnostic read.
     const existing = await paymentRepo.findById(input.tenantId, input.paymentId);
     if (!existing) {
       throw new NotFoundError('Payment', input.paymentId);
@@ -403,4 +423,243 @@ export async function recordFailedPaymentAttempt(
   }
 
   return payment;
+}
+
+/**
+ * U5 (ACH async lifecycle) — record an IN-FLIGHT bank-debit payment.
+ *
+ * Stripe fires `payment_intent.processing` when an ACH / us_bank_account
+ * debit is initiated but funds have not cleared (settlement takes days).
+ * Unlike `recordPayment` (which writes 'completed' and treats the money as
+ * earned), this writes `status: 'processing'` and credits the invoice
+ * balance as IN-FLIGHT so the owner / AR / digest see the money is on its
+ * way, while gross-revenue math (which filters `status === 'completed'`)
+ * still excludes it. The later `payment_intent.succeeded` flips the row to
+ * 'completed' via `settleProcessingPayment` WITHOUT re-crediting; an ACH
+ * return / `payment_intent.payment_failed` calls `reversePayment`, which
+ * backs out this credit and reopens the invoice.
+ *
+ * Idempotency is the caller's responsibility (the webhook handler looks up
+ * an existing payment by provider reference and skips before calling this);
+ * the outer webhook-event-id dedup is the second line of defense.
+ *
+ * Amount handling mirrors `recordPayment`: integer-cents, payable-status
+ * gate (open / partially_paid), and an over-amount guard. An amount that
+ * exceeds the remaining due is capped to the balance (an ACH for the full
+ * invoice arriving after a partial cash payment must not push the balance
+ * negative) rather than rejected, so the in-flight credit is always exact.
+ */
+export interface RecordProcessingPaymentInput {
+  tenantId: string;
+  invoiceId: string;
+  amountCents: number;
+  method: PaymentMethod;
+  providerReference?: string;
+  note?: string;
+  processedBy: string;
+}
+
+export async function recordProcessingPayment(
+  input: RecordProcessingPaymentInput,
+  invoiceRepo: InvoiceRepository,
+  paymentRepo: PaymentRepository,
+  moneyStateDeps?: RefreshJobMoneyStateDeps,
+  auditRepo?: AuditRepository,
+  auditContext?: RecordPaymentAuditContext,
+): Promise<{ payment: Payment; invoice: Invoice }> {
+  if (!input.tenantId) throw new ValidationError('tenantId is required');
+  if (!input.invoiceId) throw new ValidationError('invoiceId is required');
+  if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) {
+    throw new ValidationError('amountCents must be a positive integer');
+  }
+  if (!input.method) throw new ValidationError('method is required');
+  if (!input.processedBy) throw new ValidationError('processedBy is required');
+
+  const invoice = await invoiceRepo.findById(input.tenantId, input.invoiceId);
+  if (!invoice) throw new ValidationError('Invoice not found');
+
+  const PAYABLE_STATUSES: InvoiceStatus[] = ['open', 'partially_paid'];
+  if (!PAYABLE_STATUSES.includes(invoice.status)) {
+    throw new ValidationError(
+      `Cannot record processing payment on invoice with status '${invoice.status}'`,
+    );
+  }
+
+  // Cap the in-flight credit to the remaining balance (never push due
+  // negative). Stripe's amount should match the balance for a full-invoice
+  // ACH, but a partial cash payment may have shrunk the due first.
+  const creditCents = Math.min(input.amountCents, invoice.amountDueCents);
+  if (creditCents <= 0) {
+    throw new ValidationError('Invoice already fully paid');
+  }
+
+  const now = new Date();
+  const payment: Payment = {
+    id: uuidv4(),
+    tenantId: input.tenantId,
+    invoiceId: input.invoiceId,
+    amountCents: creditCents,
+    method: input.method,
+    status: 'processing',
+    providerReference: input.providerReference,
+    note: input.note,
+    receivedAt: now,
+    processedBy: input.processedBy,
+    createdAt: now,
+    updatedAt: now,
+    refundedAmountCents: 0,
+    refundedAt: null,
+    lastRefundStripeId: null,
+    reversedAt: null,
+    reversalReason: null,
+  };
+
+  await paymentRepo.create(payment);
+
+  const newAmountPaid = invoice.amountPaidCents + creditCents;
+  const newAmountDue = Math.max(0, invoice.totals.totalCents - newAmountPaid);
+
+  let newStatus: InvoiceStatus = invoice.status;
+  if (newAmountDue === 0) {
+    newStatus = 'paid';
+  } else if (newAmountPaid > 0 && ['open', 'partially_paid'].includes(invoice.status)) {
+    newStatus = 'partially_paid';
+  }
+
+  const updatedInvoice = await invoiceRepo.update(input.tenantId, input.invoiceId, {
+    amountPaidCents: newAmountPaid,
+    amountDueCents: newAmountDue,
+    status: newStatus,
+    updatedAt: new Date(),
+  });
+
+  if (auditRepo) {
+    const actorRole = auditContext?.actorRole ?? 'system';
+    const correlationId = auditContext?.correlationId;
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId: input.tenantId,
+        actorId: input.processedBy,
+        actorRole,
+        eventType: 'payment.processing',
+        entityType: 'invoice',
+        entityId: input.invoiceId,
+        correlationId,
+        metadata: {
+          paymentId: payment.id,
+          amountCents: payment.amountCents,
+          method: payment.method,
+          providerReference: payment.providerReference ?? null,
+          newInvoiceStatus: (updatedInvoice ?? invoice).status,
+        },
+      }),
+    );
+
+    if (updatedInvoice && updatedInvoice.status !== invoice.status) {
+      await auditRepo.create(
+        createAuditEvent({
+          tenantId: input.tenantId,
+          actorId: input.processedBy,
+          actorRole,
+          eventType: 'invoice.status_changed',
+          entityType: 'invoice',
+          entityId: input.invoiceId,
+          correlationId,
+          metadata: {
+            oldStatus: invoice.status,
+            newStatus: updatedInvoice.status,
+            paymentId: payment.id,
+          },
+        }),
+      );
+    }
+  }
+
+  // §6 Time-to-Cash rollup (best-effort — the writes already succeeded).
+  if (updatedInvoice && moneyStateDeps) {
+    await refreshJobMoneyStateSafe(
+      input.tenantId,
+      updatedInvoice.jobId,
+      input.processedBy,
+      moneyStateDeps,
+    );
+  }
+
+  return { payment, invoice: updatedInvoice ?? invoice };
+}
+
+/**
+ * U5 (ACH async lifecycle) — SETTLE an in-flight payment.
+ *
+ * Stripe fires `payment_intent.succeeded` when a processing ACH debit
+ * clears. We flip the existing 'processing' row to 'completed' atomically
+ * (so a duplicate `succeeded`, or one that races the already-completed card
+ * path, is a no-op) WITHOUT touching the invoice balance — the credit was
+ * already applied at `payment_intent.processing`. Flipping to 'completed'
+ * is what finally moves the money into gross revenue.
+ *
+ * Emits a `payment.recorded` audit event (settled=true) so the settlement
+ * is on the timeline distinct from the earlier `payment.processing`. No
+ * `invoice.status_changed` is emitted — the invoice status was already set
+ * at processing time and does not change on settle.
+ *
+ * Returns `{ settled:false }` when the row is missing or no longer
+ * 'processing' (already settled, reversed, etc.) — a terminal no-op the
+ * caller treats as idempotent success.
+ */
+export interface SettleProcessingPaymentInput {
+  tenantId: string;
+  paymentId: string;
+  actorId?: string;
+  actorRole?: string;
+  correlationId?: string;
+}
+
+export interface SettleProcessingPaymentResult {
+  settled: boolean;
+  payment: Payment | null;
+}
+
+export async function settleProcessingPayment(
+  input: SettleProcessingPaymentInput,
+  paymentRepo: PaymentRepository,
+  auditRepo?: AuditRepository,
+): Promise<SettleProcessingPaymentResult> {
+  if (!input.tenantId) throw new ValidationError('tenantId is required');
+  if (!input.paymentId) throw new ValidationError('paymentId is required');
+
+  const settled = await paymentRepo.settleProcessingPaymentAtomic(
+    input.tenantId,
+    input.paymentId,
+  );
+
+  if (!settled) {
+    // Not found OR not 'processing' (already completed/reversed). Either
+    // way a terminal no-op; the caller already deduped on provider ref.
+    const existing = await paymentRepo.findById(input.tenantId, input.paymentId);
+    return { settled: false, payment: existing };
+  }
+
+  if (auditRepo) {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId: input.tenantId,
+        actorId: input.actorId ?? 'system:stripe_webhook',
+        actorRole: input.actorRole ?? 'system',
+        eventType: 'payment.recorded',
+        entityType: 'invoice',
+        entityId: settled.invoiceId,
+        correlationId: input.correlationId,
+        metadata: {
+          paymentId: settled.id,
+          amountCents: settled.amountCents,
+          method: settled.method,
+          providerReference: settled.providerReference ?? null,
+          settled: true,
+        },
+      }),
+    );
+  }
+
+  return { settled: true, payment: settled };
 }

@@ -27,6 +27,7 @@ import {
   buildNegotiationCallbackContent,
 } from '../../proposals/guardrails/negotiation-guardrail';
 import { composeNegotiationAcknowledgment } from '../../conversations/negotiation/acknowledgment';
+import type { CustomerNegotiationContext } from '../../customers/customer-negotiation-context';
 
 export interface NegotiationBrandContext {
   ownerFirstName?: string | null;
@@ -41,6 +42,15 @@ export interface InboundNegotiationDeps {
   auditRepo?: AuditRepository;
   /** Per-tenant brand voice / owner name for the holding line. */
   resolveBrandContext?: (tenantId: string) => Promise<NegotiationBrandContext>;
+  /**
+   * Resolve the caller's LTV/recency from their phone (E.164). Returns null when
+   * the phone matches zero or multiple customers (no silent guess). When unwired
+   * the owner callback falls back to a generic recommendation.
+   */
+  resolveCustomerContext?: (
+    tenantId: string,
+    phoneE164: string,
+  ) => Promise<CustomerNegotiationContext | null>;
   systemActorId?: string;
   logger?: Logger;
 }
@@ -93,10 +103,20 @@ export function createInboundNegotiationHandler(
         }
       }
 
+      let customerContext: CustomerNegotiationContext | null = null;
+      if (deps.resolveCustomerContext) {
+        try {
+          customerContext = await deps.resolveCustomerContext(ctx.tenantId, ctx.fromE164);
+        } catch {
+          /* best-effort enrichment — the callback still ships without it */
+        }
+      }
+
       const content = buildNegotiationCallbackContent({
         detectText: ctx.body,
         askText: ctx.body,
         transcript: ctx.body,
+        customerContext,
       });
 
       let proposalId: string | undefined;
