@@ -1,26 +1,29 @@
 /**
  * RV-141 — `emergency_dispatch` execution handler.
  *
- * The proposal type has existed in the Zod contract (and the FSM fast-path
- * queues it) since Phase 12, but NO handler was registered — an approved
- * emergency_dispatch proposal silently failed. This closes that gap:
+ * Executes an approved emergency_dispatch proposal:
  *
  *   1. Create an URGENT job (priority 'urgent', summary from the
  *      emergencyDescription) for the matched customer.
- *   2. Page the owner by SMS via the existing dispatch infra
+ *   2. Place a TENTATIVE appointment hold on the soonest feasible slot for
+ *      that job (holdPendingApproval = true, short holdExpiryAt) so the
+ *      emergency lands pre-slotted on the dispatch board for a human to
+ *      confirm. A hold — not a booking — keeps the human-approval gate (it is
+ *      confirmed via create-booking-handler.ts) and means a wrong auto-slot is
+ *      reversible: the hold auto-releases at expiry if nobody confirms it.
+ *   3. Page the owner by SMS via the existing dispatch infra
  *      (MessageDeliveryProvider + tenant_settings.owner_phone, falling back
- *      to transfer_number when no owner cell is on file).
+ *      to transfer_number when no owner cell is on file). When a hold landed,
+ *      the page names the held time so the owner knows a slot is reserved.
  *
- * DOCUMENTED DEVIATION (appointment HOLD): the story's "appointment HOLD on
- * the soonest slot" is intentionally NOT implemented here. Held slots are
- * created by the voice booking path with availability/feasibility deps
- * (AvailabilityFinder + working-hours + assignment conflict machinery) that
- * the execution registry does not carry, and a wrong auto-picked slot on an
- * emergency is worse than none. Instead the urgent job lands on the dispatch
- * board immediately and the owner page directs a human to slot it. If hold
- * mechanics are later wanted, thread an AvailabilityFinder into
- * `createExecutionHandlerRegistry` and create the appointment with
- * holdPendingApproval (see create-booking-handler.ts).
+ * Graceful degradation (the previously-documented appointment-HOLD deviation,
+ * now closed): the hold needs an AppointmentRepository — threaded through
+ * `createExecutionHandlerRegistry` — and a feasible slot. With no repo, no
+ * feasible slot (after-hours / fully booked), or an anonymous caller (no job),
+ * the handler skips the hold and still creates the job + pages the owner. The
+ * hold never fails or delays the dispatch; this runs at proposal-execution
+ * time, off the live-call path (the FSM already spoke the 911 line and fired
+ * notify_oncall at detection).
  *
  * Payload tolerance: voice proposals arrive in the generic
  * `{ intent, entities, sessionId, callSid }` envelope (handleCreateProposal),
@@ -38,6 +41,21 @@ import { JobRepository, createJob } from '../../jobs/job';
 import type { LocationRepository } from '../../locations/location';
 import type { SettingsRepository } from '../../settings/settings';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
+import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
+import type { AssignmentRepository } from '../../appointments/assignment';
+import { findBookableSlots } from '../../scheduling/booking-availability';
+import { isValidTimezone } from '../../shared/timezone';
+
+/** Duration of the tentatively-held emergency slot. */
+const EMERGENCY_SLOT_DURATION_MIN = 60;
+/**
+ * How long the tentative emergency hold survives before auto-releasing if a
+ * dispatcher hasn't confirmed it — long enough for a paged owner to act,
+ * short enough that an unactioned hold returns the slot to availability.
+ */
+const EMERGENCY_HOLD_TTL_MS = 2 * 60 * 60 * 1000;
+/** How many days ahead to search for the soonest feasible emergency slot. */
+const EMERGENCY_SLOT_SEARCH_DAYS = 2;
 
 /** Minimal SMS seam — satisfied by MessageDeliveryProvider and test stubs. */
 export interface EmergencySmsSender {
@@ -83,18 +101,34 @@ export function extractEmergencyFields(
   };
 }
 
+/** Render a held-slot start in the tenant timezone, e.g. "Tue 2:30 PM". */
+function formatHeldSlot(start: Date, timezone: string): string {
+  const tz = isValidTimezone(timezone) ? timezone : 'UTC';
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    weekday: 'short',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(start);
+}
+
 /** Compose the owner page (≤320 chars, no PII beyond the caller number). */
 export function composeEmergencyPageSms(opts: {
   businessName: string;
   emergencyDescription: string;
   callerPhone?: string;
   jobCreated: boolean;
+  /** When a tentative hold landed, name the held time (rendered in tenant tz). */
+  heldSlot?: { start: Date; timezone: string };
 }): string {
   const who = opts.callerPhone ? ` Caller: ${opts.callerPhone}.` : '';
   const job = opts.jobCreated
     ? ' An urgent job was opened on your board.'
     : ' No customer match — call back immediately.';
-  const body = `${opts.businessName} EMERGENCY: ${opts.emergencyDescription}.${who}${job}`;
+  const hold = opts.heldSlot
+    ? ` Held ${formatHeldSlot(opts.heldSlot.start, opts.heldSlot.timezone)} pending your confirmation.`
+    : '';
+  const body = `${opts.businessName} EMERGENCY: ${opts.emergencyDescription}.${who}${job}${hold}`;
   return body.length > 320 ? `${body.slice(0, 317)}…` : body;
 }
 
@@ -107,6 +141,10 @@ export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
     private readonly settingsRepo?: SettingsRepository,
     private readonly smsSender?: EmergencySmsSender,
     private readonly auditRepo?: AuditRepository,
+    // RV-141 hold — when wired, place a tentative hold on the soonest feasible
+    // slot. Appended so existing positional callers stay compatible.
+    private readonly appointmentRepo?: AppointmentRepository,
+    private readonly assignmentRepo?: AssignmentRepository,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -199,14 +237,84 @@ export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
       jobSkipReason = 'job_repos_not_wired';
     }
 
-    // 2. Owner SMS page via the existing dispatch infra.
+    // Tenant settings drive both the hold timezone and the owner page
+    // target/copy. Fetched once; a lookup failure degrades both to safe
+    // defaults rather than failing the dispatch.
+    const settings = this.settingsRepo
+      ? await this.settingsRepo.findByTenant(context.tenantId).catch(() => null)
+      : null;
+    const timezone =
+      settings?.timezone && isValidTimezone(settings.timezone)
+        ? settings.timezone
+        : 'UTC';
+
+    // 2. Tentative appointment hold on the soonest feasible slot. Only for an
+    //    identified caller whose urgent job exists, and only when an
+    //    appointmentRepo is wired. The hold is tentative (holdPendingApproval)
+    //    — a human confirms it via the create_booking path, and it auto-
+    //    releases at expiry if untouched, so a wrong auto-slot is never
+    //    committed. A hold failure never blocks the page/dispatch below.
+    let heldAppointmentId: string | undefined;
+    let heldSlotStart: Date | undefined;
+    let holdSkipReason: string | undefined;
+    if (jobId && this.appointmentRepo) {
+      try {
+        const now = new Date();
+        const slots = await findBookableSlots(
+          { appointmentRepo: this.appointmentRepo, assignmentRepo: this.assignmentRepo },
+          {
+            tenantId: context.tenantId,
+            fromDate: now.toISOString().slice(0, 10),
+            toDate: new Date(
+              now.getTime() + EMERGENCY_SLOT_SEARCH_DAYS * 24 * 60 * 60 * 1000,
+            )
+              .toISOString()
+              .slice(0, 10),
+            timezone,
+            durationMin: EMERGENCY_SLOT_DURATION_MIN,
+            maxSlots: 1,
+            now,
+          },
+        );
+        const soonest = slots[0];
+        if (!soonest) {
+          holdSkipReason = 'no_feasible_slot';
+        } else {
+          const held = await createAppointment(
+            {
+              tenantId: context.tenantId,
+              jobId,
+              scheduledStart: soonest.start,
+              scheduledEnd: soonest.end,
+              timezone,
+              notes: `EMERGENCY hold — ${fields.emergencyDescription}`.slice(0, 200),
+              createdBy: context.executedBy,
+              holdPendingApproval: true,
+              holdExpiryAt: new Date(now.getTime() + EMERGENCY_HOLD_TTL_MS),
+              // Per-proposal dedup: a re-run returns the existing hold instead
+              // of placing a second one (belt-and-braces behind the handler's
+              // top-level idempotency guards above).
+              idempotencyKey: `emergency_dispatch_hold:${proposal.id}`,
+            },
+            this.appointmentRepo,
+          );
+          heldAppointmentId = held.id;
+          heldSlotStart = held.scheduledStart;
+        }
+      } catch (err) {
+        holdSkipReason = err instanceof Error ? err.message : String(err);
+      }
+    } else if (!jobId) {
+      holdSkipReason = 'no_job_to_hold';
+    } else {
+      holdSkipReason = 'appointment_repo_not_wired';
+    }
+
+    // 3. Owner SMS page via the existing dispatch infra.
     let pagedTo: string | undefined;
     let pageError: string | undefined;
     if (this.smsSender) {
       try {
-        const settings = this.settingsRepo
-          ? await this.settingsRepo.findByTenant(context.tenantId)
-          : null;
         const ownerPhone =
           settings?.ownerPhone ?? settings?.transferNumber ?? undefined;
         if (ownerPhone) {
@@ -217,6 +325,9 @@ export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
               emergencyDescription: fields.emergencyDescription,
               callerPhone: fields.callerPhone,
               jobCreated: jobId !== undefined,
+              ...(heldSlotStart
+                ? { heldSlot: { start: heldSlotStart, timezone } }
+                : {}),
             }),
             tenantId: context.tenantId,
             idempotencyKey: `emergency_dispatch:${proposal.id}`,
@@ -252,6 +363,9 @@ export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
             metadata: {
               jobId: jobId ?? null,
               jobSkipReason: jobSkipReason ?? null,
+              appointmentHoldId: heldAppointmentId ?? null,
+              appointmentHoldStart: heldSlotStart ? heldSlotStart.toISOString() : null,
+              holdSkipReason: holdSkipReason ?? null,
               pagedOwner: pagedTo !== undefined,
               pageError: pageError ?? null,
               detectedKeywords: fields.detectedKeywords,
