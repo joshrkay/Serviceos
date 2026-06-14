@@ -4499,6 +4499,43 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_payments_processing
       ON payments(tenant_id, status) WHERE status = 'processing';
   `,
+  // N-009 / P2-038 — correction loop. When the owner edits an AI-drafted
+  // proposal, the edit is distilled into a STRUCTURED LESSON (labor rate, part
+  // price, banned phrase, scope reclass) that applies forward within the
+  // tenant-local day and is reversible. Each lesson carries its cascaded
+  // config change in `payload` as { before, after } so a single undo reverses
+  // both the lesson and the config. tenant_id + FORCE RLS; audited on
+  // apply/undo. local_date is the tenant-local calendar day (storage is UTC;
+  // forward application + digest window scope to this day). Status flips
+  // applied -> reverted on undo.
+  '180_correction_lessons': `
+    CREATE TABLE IF NOT EXISTS correction_lessons (
+      id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id          UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      lesson_type        TEXT NOT NULL
+                         CHECK (lesson_type IN (
+                           'labor_rate_changed','part_price_changed',
+                           'banned_phrase','scope_reclassified')),
+      status             TEXT NOT NULL DEFAULT 'applied'
+                         CHECK (status IN ('applied','reverted')),
+      source_proposal_id UUID NOT NULL,
+      owner_id           UUID NOT NULL,
+      summary            TEXT NOT NULL,
+      payload            JSONB NOT NULL,
+      local_date         DATE NOT NULL,
+      created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      reverted_at        TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_correction_lessons_day
+      ON correction_lessons (tenant_id, local_date)
+      WHERE status = 'applied';
+    CREATE INDEX IF NOT EXISTS idx_correction_lessons_source
+      ON correction_lessons (tenant_id, source_proposal_id);
+    ALTER TABLE correction_lessons ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE correction_lessons FORCE ROW LEVEL SECURITY;
+    CREATE POLICY correction_lessons_tenant_isolation ON correction_lessons
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

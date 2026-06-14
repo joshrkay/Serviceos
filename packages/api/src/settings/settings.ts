@@ -95,6 +95,13 @@ export interface BrandVoiceSettings {
   pronoun?: 'we' | 'i';
   vibe_words?: string[];
   business_name?: string;
+  /**
+   * N-009 / P2-038 — brand-voice negative prompt. Phrases the AI must never
+   * use in customer-facing copy. Grown by the correction loop when an owner
+   * edit removes a phrase (each addition is a reversible `banned_phrase`
+   * lesson); rendered as a non-overridable "never say" instruction.
+   */
+  banned_phrases?: string[];
 }
 
 /**

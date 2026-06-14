@@ -75,4 +75,26 @@ describe('P4-015 — brand-voice prompt templates', () => {
     expect(isBrandVoiceIntent('nope')).toBe(false);
     expect(isBrandVoiceIntent(42)).toBe(false);
   });
+
+  it('N-009 — banned_phrases render as a non-overridable "never use" instruction', () => {
+    const { system } = buildBrandVoicePrompt({
+      intent: 'review_public_response',
+      tone: { banned_phrases: ['cheapest in town', 'no refunds'] },
+      context: {},
+      maxChars: 200,
+    });
+    expect(system).toContain('NEVER use these phrases');
+    expect(system).toContain('"cheapest in town"');
+    expect(system).toContain('"no refunds"');
+  });
+
+  it('N-009 — no negative-prompt line when no banned_phrases configured', () => {
+    const { system } = buildBrandVoicePrompt({
+      intent: 'review_public_response',
+      tone: { formality: 'casual' },
+      context: {},
+      maxChars: 200,
+    });
+    expect(system).not.toContain('NEVER use these phrases');
+  });
 });

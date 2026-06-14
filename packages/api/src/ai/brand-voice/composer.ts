@@ -89,6 +89,13 @@ function readToneFromSettings(settings: unknown): BrandVoiceTone | null {
   if (typeof obj.business_name === 'string') {
     tone.business_name = obj.business_name;
   }
+  // N-009 / P2-038 — negative prompt grown by the correction loop.
+  if (
+    Array.isArray(obj.banned_phrases) &&
+    obj.banned_phrases.every((p) => typeof p === 'string')
+  ) {
+    tone.banned_phrases = obj.banned_phrases as string[];
+  }
   return tone;
 }
 
