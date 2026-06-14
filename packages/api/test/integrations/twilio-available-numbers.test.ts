@@ -56,6 +56,12 @@ describe('searchAvailableNumbers', () => {
     expect(numbers).toEqual([]);
   });
 
+  it('returns an empty list (no TypeError) when Twilio omits available_phone_numbers', async () => {
+    mockFetch({ body: {} });
+    const numbers = await searchAvailableNumbers('ACx', 'token', { areaCode: '512' });
+    expect(numbers).toEqual([]);
+  });
+
   it('clamps the result list to the requested limit', async () => {
     mockFetch({
       body: {

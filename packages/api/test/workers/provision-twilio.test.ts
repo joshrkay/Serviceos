@@ -40,7 +40,7 @@ interface Call {
  * row so the worker provisions from scratch, and every write is recorded so
  * tests can assert what was persisted.
  */
-function makePool(opts: { selectRow?: Record<string, unknown> } = {}) {
+function makePool(opts: { selectRow?: Record<string, unknown>; failOnStatusFailed?: boolean } = {}) {
   const calls: Call[] = [];
   const client = {
     query: vi.fn(async (sql: unknown, params: unknown[] = []) => {
@@ -49,6 +49,9 @@ function makePool(opts: { selectRow?: Record<string, unknown> } = {}) {
           ? sql
           : ((sql as { text?: string })?.text ?? String(sql));
       calls.push({ sql: s, params });
+      if (opts.failOnStatusFailed && /status = 'failed'/i.test(s)) {
+        throw new Error('db write failed');
+      }
       if (/INSERT INTO tenant_integrations/i.test(s) && /RETURNING/i.test(s)) {
         return { rows: [{ subaccount_sid: null, auth_token_primary_enc: null, provider_data: {} }] };
       }
@@ -169,6 +172,34 @@ describe('provision-twilio worker — number picker', () => {
     expect(failedWrite).toBeDefined();
     // It stopped before attaching: subaccount, messaging service, list, failed purchase.
     expect(fetchFn).toHaveBeenCalledTimes(4);
+  });
+
+  it('rethrows (so the queue retries) if it cannot even record the unavailable-number failure', async () => {
+    configureTwilio();
+    mockFetch(
+      { body: { sid: 'ACsub', auth_token: 'subtoken' } }, // create subaccount
+      { body: { sid: 'MG123' } }, // messaging service
+      { body: { incoming_phone_numbers: [] } }, // list owned (none)
+      { ok: false, status: 400, body: { message: 'Number not available' } }, // purchase fails (permanent)
+    );
+
+    // The 'failed' status write itself fails — the worker must NOT return
+    // normally (which the queue would treat as success), stranding the tenant
+    // at 't0_requested'. It must rethrow so the job retries.
+    const { pool } = makePool({ failOnStatusFailed: true });
+    const worker = createProvisionTwilioWorker({ pool });
+
+    await expect(
+      worker.handle(
+        buildMessage({
+          tenantId: TENANT,
+          region: null,
+          baseUrl: 'https://api.test',
+          phoneNumber: '+15125550123',
+        }),
+        logger,
+      ),
+    ).rejects.toThrow();
   });
 
   it('rethrows a transient purchase error (5xx) so the queue retries — does NOT permanently fail a claimed number', async () => {

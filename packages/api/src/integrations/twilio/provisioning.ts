@@ -145,7 +145,7 @@ export async function searchAvailableNumbers(
   const result = await twilioGet<{
     available_phone_numbers: Array<{ phone_number: string; locality?: string; region?: string }>;
   }>(url, accountSid, authToken);
-  return result.available_phone_numbers
+  return (result.available_phone_numbers ?? [])
     .slice(0, limit)
     .map((n) => ({ phoneNumber: n.phone_number, locality: n.locality, region: n.region }));
 }

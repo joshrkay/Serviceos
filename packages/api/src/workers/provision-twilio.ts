@@ -236,14 +236,25 @@ export function createProvisionTwilioWorker(deps: {
               if (permanentlyUnavailable) {
                 const msg = `Selected number ${preferredNumber} is no longer available — please choose another`;
                 logger.warn('Preferred number unavailable at purchase', { tenantId, error: errMsg });
-                await tenantQuery(
-                  pool,
-                  tenantId,
-                  `UPDATE tenant_integrations
-                   SET status = 'failed', last_error = $1, updated_at = NOW()
-                   WHERE tenant_id = $2 AND provider = 'twilio'`,
-                  [msg, tenantId]
-                ).catch(() => {});
+                try {
+                  await tenantQuery(
+                    pool,
+                    tenantId,
+                    `UPDATE tenant_integrations
+                     SET status = 'failed', last_error = $1, updated_at = NOW()
+                     WHERE tenant_id = $2 AND provider = 'twilio'`,
+                    [msg, tenantId]
+                  );
+                } catch (dbErr) {
+                  // If we can't even record the failure, don't silently complete
+                  // the job and strand the tenant at 't0_requested' — rethrow so
+                  // the queue retries and the status eventually lands.
+                  logger.error('Failed to record preferred-number failure', {
+                    tenantId,
+                    error: dbErr instanceof Error ? dbErr.message : String(dbErr),
+                  });
+                  throw purchaseErr;
+                }
                 return;
               }
               throw purchaseErr;
