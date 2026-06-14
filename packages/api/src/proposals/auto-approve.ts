@@ -202,6 +202,14 @@ interface OneTapPayload {
    * tokens are byte-identical; present only for 'mint_draft_invoice'.
    */
   a?: 'mint_draft_invoice';
+  /**
+   * Track-E confirm flag. Present (true) ONLY on a token minted for a
+   * SANCTIONED non-capture approval (the voice-approval one-tap fallback).
+   * OMITTED for ordinary capture approve tokens so the legacy four-key shape
+   * (and byte-identity) is preserved. At redeem time, a non-capture proposal
+   * may be approved over one-tap only when its token carries this flag.
+   */
+  c?: true;
 }
 
 function sign(payloadB64: string, secret: string): string {
@@ -215,6 +223,13 @@ export interface CreateOneTapApproveTokenInput {
   jobId?: string;
   /** RV-065 — defaults to 'approve' (back-compat: token bytes unchanged). */
   action?: OneTapAction;
+  /**
+   * Track-E — mint a token that may approve a NON-capture proposal (money /
+   * comms / irreversible) over one-tap. Set ONLY by sanctioned, deliberate,
+   * per-proposal flows (the voice-approval fallback). Defaults to false; a
+   * default token can only approve a capture-class proposal at redeem time.
+   */
+  confirm?: boolean;
   tenantId: string;
   /** HMAC secret (server-side, e.g. config.appSecret). */
   secret: string;
@@ -257,6 +272,9 @@ export function createOneTapApproveToken(
     e: now + ttl,
     // Key omitted entirely for 'approve' — legacy byte-identity.
     ...(action === 'mint_draft_invoice' ? { a: 'mint_draft_invoice' as const } : {}),
+    // Track-E — confirm flag rides only on sanctioned non-capture approve
+    // tokens; omitted otherwise so the legacy approve shape stays byte-identical.
+    ...(action === 'approve' && input.confirm ? { c: true as const } : {}),
   };
   const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const token = `${payloadB64}.${sign(payloadB64, input.secret)}`;
@@ -285,7 +303,7 @@ export interface VerifyOneTapApproveTokenInput {
 }
 
 export type OneTapVerifyResult =
-  | { ok: true; action: 'approve'; proposalId: string; tenantId: string }
+  | { ok: true; action: 'approve'; proposalId: string; tenantId: string; confirm?: true }
   | { ok: true; action: 'mint_draft_invoice'; jobId: string; tenantId: string }
   | { ok: false; reason: OneTapVerifyFailure };
 
@@ -316,7 +334,9 @@ export async function verifyOneTapApproveToken(
     typeof payload.n !== 'string' ||
     typeof payload.e !== 'number' ||
     // RV-065: `a` is either absent (legacy approve) or the mint literal.
-    (payload.a !== undefined && payload.a !== 'mint_draft_invoice')
+    (payload.a !== undefined && payload.a !== 'mint_draft_invoice') ||
+    // Track-E: `c` is either absent or the boolean literal true.
+    (payload.c !== undefined && payload.c !== true)
   ) {
     return { ok: false, reason: 'malformed' };
   }
@@ -333,7 +353,15 @@ export async function verifyOneTapApproveToken(
   if (payload.a === 'mint_draft_invoice') {
     return { ok: true, action: 'mint_draft_invoice', jobId: payload.p, tenantId: payload.t };
   }
-  return { ok: true, action: 'approve', proposalId: payload.p, tenantId: payload.t };
+  return {
+    ok: true,
+    action: 'approve',
+    proposalId: payload.p,
+    tenantId: payload.t,
+    // Track-E — surface the confirm flag (present only when set) so the redeem
+    // route can let a sanctioned non-capture approval through its class gate.
+    ...(payload.c === true ? { confirm: true as const } : {}),
+  };
 }
 
 /**
@@ -445,6 +473,14 @@ export interface RouteUnsupervisedProposalInput {
    *   'low_confidence+action_class' — both fired simultaneously
    */
   suppressApproveLink?: boolean;
+  /**
+   * Track-E — mint the one-tap token with the `confirm` flag so it may approve
+   * a NON-capture proposal (money / irreversible) at redeem time. Set ONLY by
+   * the voice-approval fallback, where the owner explicitly asked to act on
+   * this proposal on a live call. The ordinary unsupervised route never sets
+   * it — those targets are capture-class (left in ready_for_review).
+   */
+  confirmNonCapture?: boolean;
   nowMs?: number;
 }
 
@@ -508,6 +544,7 @@ export async function routeUnsupervisedProposal(
           proposalId: input.proposalId,
           tenantId: input.tenantId,
           secret: deps.secret,
+          ...(input.confirmNonCapture ? { confirm: true } : {}),
           ...(input.nowMs !== undefined ? { nowMs: input.nowMs } : {}),
         });
         expiresAt = exp;
