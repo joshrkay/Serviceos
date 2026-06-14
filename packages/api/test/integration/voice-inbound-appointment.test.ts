@@ -1,8 +1,12 @@
 /**
  * Keystone integration proof — inbound voice appointment-setting.
  *
- * Certifies the substantive chain a real inbound call traverses, against REAL
- * Postgres (pins the columns mocked-DB tests can't):
+ * Scope: certifies routing + reason-persistence + the approval gate against
+ * REAL Postgres (pins the columns mocked-DB tests can't). It deliberately uses
+ * the no-technician appointment path; the technician assignment / TOCTOU
+ * compensation branch is covered separately by
+ * test/proposals/execution/create-appointment-handler.test.ts. The three
+ * things proven here:
  *
  *   1. Routing: a dialed number resolves to its tenant via
  *      PgPhoneNumberRepository.findByNumber, reading the real

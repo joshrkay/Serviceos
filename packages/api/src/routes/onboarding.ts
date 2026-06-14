@@ -686,6 +686,10 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     '/phone/claim',
     requireAuth,
     requireTenant,
+    // Claiming commits the tenant to a specific paid DID (recurring cost), so
+    // gate it to the owner — matching /pack and /billing, the other routes
+    // that spend money or change billing.
+    requireRole('owner'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!pool || !queue) {
@@ -732,10 +736,18 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           baseUrl: callbackBaseUrl,
           phoneNumber: parsed.data.phoneNumber,
         };
+        // Share the canonical provisioning idempotency key (same as the
+        // signup auto-provision at webhooks/routes.ts) so the queue collapses a
+        // claim into an already-pending/in-flight provisioning job rather than
+        // running a second one — which would create a duplicate Twilio
+        // subaccount and buy a second paid number. (Residual: a claim landing
+        // in the narrow window after the auto job is picked up but before it
+        // persists state is not deduped; fully closing that needs worker-level
+        // per-tenant serialization — deferred, see the plan's follow-ups.)
         await queue.send(
           PROVISION_TWILIO_JOB_TYPE,
           payload,
-          `provision-twilio-claim-${tenantId}`,
+          `provision-twilio-${tenantId}`,
         );
         await auditRepo.create(
           createAuditEvent({

@@ -103,6 +103,10 @@ function NumberPicker({
     setSearching(true);
     setSearchError(null);
     setSelected(null);
+    // Clear any prior result/claim error so a new search starts clean rather
+    // than showing a stale "couldn't claim" message over fresh candidates.
+    setClaimError(null);
+    setCandidates([]);
     try {
       const res = await apiFetch('/api/onboarding/phone/available', {
         method: 'POST',

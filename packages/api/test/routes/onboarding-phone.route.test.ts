@@ -35,7 +35,9 @@ function setEnv(key: string, value: string | undefined): string | undefined {
   return prev;
 }
 
-function buildApp(deps: { pool?: Pool; queue?: InMemoryQueue; auditRepo?: InMemoryAuditRepository } = {}) {
+function buildApp(
+  deps: { pool?: Pool; queue?: InMemoryQueue; auditRepo?: InMemoryAuditRepository; role?: string } = {},
+) {
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -43,7 +45,7 @@ function buildApp(deps: { pool?: Pool; queue?: InMemoryQueue; auditRepo?: InMemo
       userId: USER_ID,
       sessionId: 'session-test-1',
       tenantId: TENANT_ID,
-      role: 'owner',
+      role: (deps.role ?? 'owner') as NonNullable<AuthenticatedRequest['auth']>['role'],
     };
     next();
   });
@@ -125,6 +127,7 @@ describe('POST /api/onboarding/phone/claim', () => {
   it('enqueues provisioning with the chosen number and audits the claim', async () => {
     const queue = new InMemoryQueue();
     const auditRepo = new InMemoryAuditRepository();
+    const createSpy = vi.spyOn(auditRepo, 'create');
     const { app } = buildApp({ pool: fakePool('t0_requested'), queue, auditRepo });
 
     const res = await request(app)
@@ -137,11 +140,13 @@ describe('POST /api/onboarding/phone/claim', () => {
     const msg = await queue.receive<{ tenantId: string; phoneNumber?: string }>();
     expect(msg?.type).toBe(PROVISION_TWILIO_JOB_TYPE);
     expect(msg?.payload.phoneNumber).toBe('+15125550123');
+    // Canonical key (shared with the signup auto-provision) so the production
+    // queue dedupes a claim against an in-flight provisioning job.
+    expect(msg?.idempotencyKey).toBe(`provision-twilio-${TENANT_ID}`);
 
-    const events = auditRepo.events.filter(
-      (e: { eventType: string }) => e.eventType === 'tenant.phone_number_claimed',
+    expect(createSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: 'tenant.phone_number_claimed' }),
     );
-    expect(events).toHaveLength(1);
   });
 
   it('rejects a non-E.164 number with 400', async () => {
@@ -172,5 +177,17 @@ describe('POST /api/onboarding/phone/claim', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ ok: true, skipped: true, reason: 'already_active' });
+  });
+
+  it('forbids a non-owner from claiming a (paid) number', async () => {
+    const queue = new InMemoryQueue();
+    const { app } = buildApp({ pool: fakePool('t0_requested'), queue, role: 'dispatcher' });
+    const res = await request(app)
+      .post('/api/onboarding/phone/claim')
+      .send({ phoneNumber: '+15125550123' });
+
+    expect(res.status).toBe(403);
+    // No provisioning job enqueued for a forbidden caller.
+    expect(await queue.receive()).toBeNull();
   });
 });

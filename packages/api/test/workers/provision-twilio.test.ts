@@ -40,7 +40,7 @@ interface Call {
  * row so the worker provisions from scratch, and every write is recorded so
  * tests can assert what was persisted.
  */
-function makePool() {
+function makePool(opts: { selectRow?: Record<string, unknown> } = {}) {
   const calls: Call[] = [];
   const client = {
     query: vi.fn(async (sql: unknown, params: unknown[] = []) => {
@@ -53,7 +53,7 @@ function makePool() {
         return { rows: [{ subaccount_sid: null, auth_token_primary_enc: null, provider_data: {} }] };
       }
       if (/^\s*SELECT\s+status/i.test(s)) {
-        return { rows: [] };
+        return { rows: opts.selectRow ? [opts.selectRow] : [] };
       }
       return { rows: [], rowCount: 1 };
     }),
@@ -169,5 +169,61 @@ describe('provision-twilio worker — number picker', () => {
     expect(failedWrite).toBeDefined();
     // It stopped before attaching: subaccount, messaging service, list, failed purchase.
     expect(fetchFn).toHaveBeenCalledTimes(4);
+  });
+
+  it('rethrows a transient purchase error (5xx) so the queue retries — does NOT permanently fail a claimed number', async () => {
+    configureTwilio();
+    mockFetch(
+      { body: { sid: 'ACsub', auth_token: 'subtoken' } }, // create subaccount
+      { body: { sid: 'MG123' } }, // messaging service
+      { body: { incoming_phone_numbers: [] } }, // list owned (none)
+      { ok: false, status: 503, body: { message: 'service unavailable' } }, // transient purchase failure
+    );
+
+    const { pool, calls } = makePool();
+    const worker = createProvisionTwilioWorker({ pool });
+
+    // A transient error must propagate so the queue retries (the auto-pick
+    // path already does this; the claimed-number path must not regress it).
+    await expect(
+      worker.handle(
+        buildMessage({
+          tenantId: TENANT,
+          region: null,
+          baseUrl: 'https://api.test',
+          phoneNumber: '+15125550123',
+        }),
+        logger,
+      ),
+    ).rejects.toThrow();
+
+    // It did NOT record the permanent "no longer available" re-pick failure.
+    const permanentFail = calls.find(
+      (c) => /status = 'failed'/i.test(c.sql) && JSON.stringify(c.params).includes('no longer available'),
+    );
+    expect(permanentFail).toBeUndefined();
+  });
+
+  it('is idempotent: skips entirely when the tenant is already fully provisioned', async () => {
+    configureTwilio();
+    const fetchFn = mockFetch(); // any Twilio call would be an error
+
+    const { pool } = makePool({
+      selectRow: {
+        status: 'full_readiness',
+        subaccount_sid: 'ACexisting',
+        auth_token_primary_enc: null,
+        provider_data: { phoneE164: '+15125550999' },
+      },
+    });
+    const worker = createProvisionTwilioWorker({ pool });
+
+    await worker.handle(
+      buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test', phoneNumber: '+15125550123' }),
+      logger,
+    );
+
+    // The early-return guard fired: no subaccount created, no number bought.
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 });

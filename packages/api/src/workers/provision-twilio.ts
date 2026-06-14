@@ -219,17 +219,23 @@ export function createProvisionTwilioWorker(deps: {
                 preferredNumber
               );
             } catch (purchaseErr) {
-              if (preferredNumber) {
-                // The tradesperson picked a specific number Twilio can no
-                // longer sell us (taken since the picker listed it). Don't
-                // retry-loop on a number that won't come back — record a
-                // re-pickable failure (status 'failed') and stop so the UI
-                // can prompt for another choice.
+              const errMsg =
+                purchaseErr instanceof Error ? purchaseErr.message : String(purchaseErr);
+              // twilioPost embeds the HTTP status as "→ <status>:". For a
+              // CLAIMED number, a 4xx (other than 429) means the number itself
+              // is the problem — taken since the picker listed it, or otherwise
+              // unpurchasable — which retrying can't fix: record a re-pickable
+              // failure and stop (don't retry-loop). 429 / 5xx / network errors
+              // are transient and MUST rethrow so the queue retries, exactly
+              // like the auto-pick path; otherwise a momentary Twilio blip would
+              // wrongly tell the user their valid number is gone.
+              const statusMatch = errMsg.match(/→\s*(\d{3}):/);
+              const status = statusMatch ? Number(statusMatch[1]) : 0;
+              const permanentlyUnavailable =
+                !!preferredNumber && status >= 400 && status < 500 && status !== 429;
+              if (permanentlyUnavailable) {
                 const msg = `Selected number ${preferredNumber} is no longer available — please choose another`;
-                logger.warn('Preferred number unavailable at purchase', {
-                  tenantId,
-                  error: purchaseErr instanceof Error ? purchaseErr.message : String(purchaseErr),
-                });
+                logger.warn('Preferred number unavailable at purchase', { tenantId, error: errMsg });
                 await tenantQuery(
                   pool,
                   tenantId,
