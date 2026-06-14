@@ -166,6 +166,25 @@ export interface CustomerRepository {
     tenantId: string,
     phoneNormalized: string
   ): Promise<Customer[]>;
+  /**
+   * U4 (B2B inbound recognition) — load the direct sub-accounts of a parent
+   * account (`parent_account_id = parentAccountId`), tenant-scoped. Used when
+   * an inbound caller resolves to a business / property-manager account so the
+   * call / triage / booking context can carry the managed-property hierarchy
+   * and route with priority.
+   *
+   * tenant_id MUST be the first WHERE predicate (defense-in-depth alongside
+   * RLS). Excludes archived rows — a managed property that's been archived is
+   * no longer part of the live account context.
+   *
+   * Optional on the interface so existing CustomerRepository test fakes keep
+   * type-checking; the recognition path treats a missing method as "no
+   * sub-accounts on file" (graceful standalone).
+   */
+  findByParentAccount?(
+    tenantId: string,
+    parentAccountId: string
+  ): Promise<Customer[]>;
 }
 
 /** Server-side pagination defaults / caps. */
@@ -590,6 +609,26 @@ export class InMemoryCustomerRepository implements CustomerRepository {
           !!emailNorm && c.email && normalizeEmail(c.email) === emailNorm;
         return phoneMatch || emailMatch;
       })
+      .map((c) => ({ ...c }));
+  }
+
+  /**
+   * U4: in-memory mirror of the Pg sub-account lookup. Tenant-scope FIRST,
+   * then match on parentAccountId. Excludes archived rows (parity with the
+   * Pg query).
+   */
+  async findByParentAccount(
+    tenantId: string,
+    parentAccountId: string
+  ): Promise<Customer[]> {
+    if (!parentAccountId) return [];
+    return Array.from(this.customers.values())
+      .filter(
+        (c) =>
+          c.tenantId === tenantId &&
+          !c.isArchived &&
+          c.parentAccountId === parentAccountId
+      )
       .map((c) => ({ ...c }));
   }
 

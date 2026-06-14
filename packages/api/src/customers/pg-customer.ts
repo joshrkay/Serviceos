@@ -331,6 +331,34 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
   }
 
   /**
+   * U4 (B2B inbound recognition) — direct sub-accounts of a parent account.
+   *
+   * tenant_id is the FIRST WHERE predicate (defense-in-depth alongside RLS).
+   * Excludes archived rows so a managed property that's been archived drops
+   * out of the live account context. Ordered by display_name for a stable,
+   * human-readable hierarchy in the assembled call context. The partial index
+   * `idx_customers_parent_account (tenant_id, parent_account_id)` (migration
+   * 178) keeps the lookup cheap.
+   */
+  async findByParentAccount(
+    tenantId: string,
+    parentAccountId: string
+  ): Promise<Customer[]> {
+    if (!parentAccountId) return [];
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM customers
+         WHERE tenant_id = $1
+           AND parent_account_id = $2
+           AND is_archived = false
+         ORDER BY display_name ASC`,
+        [tenantId, parentAccountId]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
+  /**
    * P1-019: Pg-backed dedup candidate query.
    *
    * Hard requirement (see /docs/superpowers/contracts/repository-conventions.md):
