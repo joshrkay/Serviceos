@@ -793,14 +793,17 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.reviewPrivateMessageSender,
       deps?.auditRepo,
     ),
-    // RV-141 — emergency_dispatch: urgent job + owner SMS page. The
-    // appointment-hold deviation is documented in the handler header.
+    // RV-141 — emergency_dispatch: urgent job + tentative appointment hold on
+    // the soonest feasible slot + owner SMS page. appointmentRepo/assignmentRepo
+    // drive the hold; absent → the handler skips the hold and still pages.
     new EmergencyDispatchExecutionHandler(
       deps?.jobRepo,
       deps?.locationRepo,
       deps?.settingsRepo,
       deps?.emergencySmsSender,
       deps?.auditRepo,
+      deps?.appointmentRepo,
+      deps?.assignmentRepo,
     ),
     // Collections cadence — send_payment_reminder. Comms-class: only runs
     // after owner approval. Sends through the Layer-A transactional-comms
