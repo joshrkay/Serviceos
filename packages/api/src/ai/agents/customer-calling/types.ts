@@ -145,6 +145,14 @@ export interface CallingAgentContext {
    * classifier appends the extended owner-lookup/complaint prompt section.
    */
   extendedIntents?: boolean;
+  /**
+   * N-003 (P2-036) — set once the negotiation guardrail has fired this
+   * session. The guardrail speaks a holding line on every negotiation turn
+   * (so a haggling caller is always deflected) but creates the owner callback
+   * only on the FIRST one, so repeated pushback doesn't spawn a callback per
+   * turn. Inert for every other flow — only the negotiation global guard reads it.
+   */
+  negotiationFlagged?: boolean;
 }
 
 // ─── Side effects ─────────────────────────────────────────────────────────────

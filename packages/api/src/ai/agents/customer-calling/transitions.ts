@@ -42,6 +42,16 @@ const MAX_INTENT_CAPTURE_RETRIES = 1;
  */
 const MAX_REPROMPTS = 3;
 
+/**
+ * N-003 (P2-036) — fixed holding line spoken when the caller pushes on price,
+ * scope, or terms. The agent must never negotiate; it defers to the owner.
+ * Fixed script (not brand-voiced) — consistent with how operator_request /
+ * emergency lines are scripted in the pure FSM (brand voice needs async
+ * settings the pure reducer can't load). Exported so adapters/tests share it.
+ */
+export const NEGOTIATION_HOLDING_LINE =
+  "That's a good question — I'll need to check with the owner on that, and we'll get right back to you. Is there anything else I can help with in the meantime?";
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function auditLog(
@@ -240,6 +250,45 @@ function checkGlobalGuards(
       ],
       updatedContext,
     };
+  }
+
+  // N-003 (P2-036) — negotiation guardrail. The caller is pushing on price,
+  // scope, or terms. The agent must NOT negotiate: it speaks a fixed holding
+  // line and routes the ask to the owner (a `callback` proposal the voice-turn
+  // processor enriches via the shared guardrail builder). Unlike
+  // operator_request it does NOT escalate — the conversation continues in the
+  // current state. Idempotent per session via `negotiationFlagged`: the holding
+  // line is spoken every time (so a haggling caller is always deflected) but
+  // the owner callback is created only on the first negotiation turn.
+  if (event.type === 'intent_classified' && event.intentType === 'negotiation') {
+    if (state === 'escalating' || state === 'terminated') {
+      return { nextState: state, sideEffects: [], updatedContext: context };
+    }
+    const alreadyFlagged = context.negotiationFlagged === true;
+    const updatedContext: CallingAgentContext = { ...context, negotiationFlagged: true };
+    const sideEffects: SideEffect[] = [
+      auditLog(updatedContext, state, state, 'negotiation_guardrail', { alreadyFlagged }),
+      ttsPlay(NEGOTIATION_HOLDING_LINE),
+    ];
+    if (!alreadyFlagged) {
+      sideEffects.push({
+        type: 'create_proposal',
+        payload: {
+          tenantId: updatedContext.tenantId,
+          intent: 'negotiation',
+          entities: {
+            ...updatedContext.extractedEntities,
+            ...event.entities,
+            ...(updatedContext.customerId ? { customerId: updatedContext.customerId } : {}),
+          },
+          sessionId: updatedContext.sessionId,
+          callSid: updatedContext.callSid,
+          conversationId: updatedContext.conversationId,
+          customerId: updatedContext.customerId,
+        },
+      });
+    }
+    return { nextState: state, sideEffects, updatedContext };
   }
 
   // RV-140/RV-142 — deterministic emergency keyword hit. Fast-paths to

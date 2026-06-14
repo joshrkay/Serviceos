@@ -94,6 +94,7 @@ import type {
   ProposalType,
 } from '../../proposals/proposal';
 import { createProposal as buildProposal } from '../../proposals/proposal';
+import { buildNegotiationCallbackContent } from '../../proposals/guardrails/negotiation-guardrail';
 import type { LeadRepository } from '../../leads/lead';
 import type { AuditRepository } from '../../audit/audit';
 import { createAuditEvent } from '../../audit/audit';
@@ -524,6 +525,49 @@ export function createVoiceTurnProcessor(
         : {};
     try {
       const tenantThresholdOverride = await resolveThresholdOverride(tenantId);
+
+      // N-003 (P2-036) — negotiation guardrail. The FSM emits this when the
+      // caller pushes on price/scope/terms. Build the rich owner `callback`
+      // (shared with the SMS + voice-action-router surfaces) and DO NOT dispatch
+      // `proposal_queued`: the negotiation guard stays in the current state, so
+      // a proposal_queued transition would be wrong here.
+      if (intent === 'negotiation') {
+        const askText = typeof entities.negotiationAsk === 'string' ? entities.negotiationAsk : '';
+        const transcript = typeof entities.transcript === 'string' ? entities.transcript : '';
+        const detectText = `${askText} ${transcript}`.trim();
+        const customerName =
+          typeof entities.customerName === 'string' ? entities.customerName : undefined;
+        const conversationId =
+          typeof fx.payload.conversationId === 'string' ? fx.payload.conversationId : undefined;
+        const content = buildNegotiationCallbackContent({
+          detectText,
+          ...(askText ? { askText } : {}),
+          ...(customerName ? { customerName } : {}),
+          ...(conversationId ? { conversationId } : {}),
+        });
+        const negotiationProposal = buildProposal({
+          tenantId,
+          proposalType: 'callback',
+          payload: content.payload,
+          summary: content.summary,
+          explanation: content.explanation,
+          sourceContext: {
+            source: 'calling-agent',
+            channel: 'telephony',
+            sessionId: session.id,
+          },
+          aiRunId: uuidv4(),
+          createdBy:
+            typeof fx.payload.customerId === 'string'
+              ? fx.payload.customerId
+              : deps.systemActorId ?? 'calling-agent',
+          ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
+        });
+        const storedNegotiation = await deps.proposalRepo.create(negotiationProposal);
+        session.proposalIds.push(storedNegotiation.id);
+        return;
+      }
+
       const proposal = buildProposal({
         tenantId,
         proposalType: intentToProposalType(intent),
