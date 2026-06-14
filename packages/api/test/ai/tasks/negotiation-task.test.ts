@@ -10,6 +10,7 @@ import { NegotiationGuardrailTaskHandler } from '../../../src/ai/tasks/negotiati
 import { NEGOTIATION_GUARDRAIL_MARKER_REASON } from '../../../src/proposals/guardrails/negotiation-guardrail';
 import type { TaskContext } from '../../../src/ai/tasks/task-handlers';
 import { assertValidProposalPayload } from '../../../src/proposals/contracts';
+import type { CustomerNegotiationContextProvider } from '../../../src/customers/customer-negotiation-context';
 
 function makeContext(overrides: Partial<TaskContext> = {}): TaskContext {
   return {
@@ -94,5 +95,51 @@ describe('NegotiationGuardrailTaskHandler', () => {
     const handler = new NegotiationGuardrailTaskHandler();
     const { proposal } = await handler.handle(makeContext());
     expect(proposal.idempotencyKey).toBeUndefined();
+  });
+});
+
+describe('NegotiationGuardrailTaskHandler customer context', () => {
+  it('enriches the callback with LTV/recency when a customer is resolved', async () => {
+    const provider: CustomerNegotiationContextProvider = {
+      getContext: async () => ({
+        lifetimeValueCents: 480000,
+        lastSeenAt: new Date(Date.now() - 30 * 86_400_000),
+        jobsCompletedCount: 6,
+      }),
+    };
+    const handler = new NegotiationGuardrailTaskHandler(provider);
+    const { proposal } = await handler.handle(
+      makeContext({ existingEntities: { customerId: 'c-1', customerName: 'Mr. Lee' } }),
+    );
+    const cc = proposal.payload.customerContext as { lifetimeValueCents: number } | null;
+    expect(cc).not.toBeNull();
+    expect(cc?.lifetimeValueCents).toBe(480000);
+    expect(String(proposal.payload.recommendation)).toContain('$4,800');
+    expect(() => assertValidProposalPayload('callback', proposal.payload)).not.toThrow();
+  });
+
+  it('leaves context null when no customer was resolved', async () => {
+    const provider: CustomerNegotiationContextProvider = {
+      getContext: async () => {
+        throw new Error('should not be called without a customerId');
+      },
+    };
+    const handler = new NegotiationGuardrailTaskHandler(provider);
+    const { proposal } = await handler.handle(makeContext({ existingEntities: {} }));
+    expect(proposal.payload.customerContext).toBeNull();
+  });
+
+  it('degrades gracefully when the context read throws', async () => {
+    const provider: CustomerNegotiationContextProvider = {
+      getContext: async () => {
+        throw new Error('db down');
+      },
+    };
+    const handler = new NegotiationGuardrailTaskHandler(provider);
+    const { proposal } = await handler.handle(
+      makeContext({ existingEntities: { customerId: 'c-1' } }),
+    );
+    expect(proposal.payload.customerContext).toBeNull();
+    expect(proposal.proposalType).toBe('callback'); // the callback still ships
   });
 });
