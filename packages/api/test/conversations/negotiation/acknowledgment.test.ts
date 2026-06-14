@@ -3,7 +3,13 @@
  * (src/conversations/negotiation/acknowledgment.ts).
  */
 import { describe, it, expect } from 'vitest';
-import { composeNegotiationAcknowledgment } from '../../../src/conversations/negotiation/acknowledgment';
+import {
+  composeNegotiationAcknowledgment,
+  brandVoiceNegotiationTts,
+  NEGOTIATION_HOLDING_TTS_SOURCE,
+} from '../../../src/conversations/negotiation/acknowledgment';
+
+type Fx = { type: string; payload: Record<string, unknown> };
 
 describe('composeNegotiationAcknowledgment', () => {
   it('never concedes — it defers to a person and promises a follow-up', () => {
@@ -54,5 +60,43 @@ describe('composeNegotiationAcknowledgment', () => {
     const line = composeNegotiationAcknowledgment({ callbackWindow: 'by end of day' });
     expect(line).toContain('by end of day');
     expect(line).not.toContain('within the hour');
+  });
+});
+
+describe('brandVoiceNegotiationTts', () => {
+  it('swaps the tagged holding line for the brand-voiced acknowledgment', () => {
+    const effects: Fx[] = [
+      { type: 'tts_play', payload: { text: 'FIXED FALLBACK', source: NEGOTIATION_HOLDING_TTS_SOURCE } },
+    ];
+    brandVoiceNegotiationTts(effects, { brandVoice: { business_name: 'M&R Mechanical' } });
+    expect(effects[0].payload.text).not.toBe('FIXED FALLBACK');
+    expect(String(effects[0].payload.text)).toContain('the team at M&R Mechanical');
+    // Still a non-conceding holding line — no price/discount/deal language.
+    expect(String(effects[0].payload.text)).not.toMatch(/discount|\$|deal/i);
+  });
+
+  it('honors the professional register', () => {
+    const effects: Fx[] = [
+      { type: 'tts_play', payload: { text: 'X', source: NEGOTIATION_HOLDING_TTS_SOURCE } },
+    ];
+    brandVoiceNegotiationTts(effects, {
+      ownerFirstName: 'Jenna',
+      brandVoice: { formality: 'professional' },
+    });
+    expect(String(effects[0].payload.text)).toMatch(/confirm that with Jenna/);
+  });
+
+  it('leaves untagged tts_play and non-tts effects untouched', () => {
+    const effects: Fx[] = [
+      { type: 'tts_play', payload: { text: 'Anything else?' } },
+      { type: 'audit_log', payload: { source: NEGOTIATION_HOLDING_TTS_SOURCE } },
+    ];
+    brandVoiceNegotiationTts(effects, {});
+    expect(effects[0].payload.text).toBe('Anything else?');
+    expect(effects[1].payload.text).toBeUndefined();
+  });
+
+  it('exposes a stable source tag matching the FSM', () => {
+    expect(NEGOTIATION_HOLDING_TTS_SOURCE).toBe('negotiation_holding');
   });
 });

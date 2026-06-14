@@ -21,6 +21,7 @@ import type { Appointment, AppointmentRepository } from '../../src/appointments/
 import type { Proposal, ProposalRepository } from '../../src/proposals/proposal';
 import type { CustomerRepository } from '../../src/customers/customer';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
+import type { FeedbackResponseRepository, RatingCounts } from '../../src/feedback/feedback-response';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 
 const TENANT = 'tenant-1';
@@ -78,6 +79,7 @@ interface DepsOverrides {
   invoicesByJob?: Invoice[];
   customerNames?: Record<string, string>;
   settings?: TenantSettings | null;
+  ratingCounts?: RatingCounts;
 }
 
 function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
@@ -117,6 +119,10 @@ function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
       findByTenant: async () =>
         o.settings === undefined ? settingsRow() : o.settings,
     } as unknown as SettingsRepository,
+    feedbackResponseRepo: {
+      countByRatingInRange: async () =>
+        o.ratingCounts ?? { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 },
+    } as unknown as FeedbackResponseRepository,
     now: () => NOW,
   };
 }
@@ -302,6 +308,20 @@ describe('computeDigestPayload', () => {
     const result = await computeDigestPayload(TENANT, DATE, makeDeps({ settings: null }));
     expect(result.timezone).toBe('America/New_York');
     expect(result.revenueCents).toBe(0);
+  });
+
+  it('summarizes the day\'s feedback (responses, average, low-rating count)', async () => {
+    const result = await computeDigestPayload(
+      TENANT,
+      DATE,
+      makeDeps({ ratingCounts: { 1: 0, 2: 1, 3: 0, 4: 1, 5: 3 } }),
+    );
+    expect(result.feedback).toEqual({ responses: 5, averageRating: 4.2, lowRatingCount: 1 });
+  });
+
+  it('reports zero/null feedback on a day with no responses', async () => {
+    const result = await computeDigestPayload(TENANT, DATE, makeDeps());
+    expect(result.feedback).toEqual({ responses: 0, averageRating: null, lowRatingCount: 0 });
   });
 });
 
@@ -504,6 +524,42 @@ describe('renderDigestSms', () => {
     });
     expect(body).not.toContain('links expire');
     expect(body.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
+  });
+
+  it('renders the feedback line with average and low-rating flag', () => {
+    const body = renderDigestSms({
+      payload: basePayload({ feedback: { responses: 4, averageRating: 4.3, lowRatingCount: 1 } }),
+      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
+      approvalLinks: [],
+    });
+    expect(body).toContain('Feedback: 4 today, avg 4.3/5, 1 low (<=3).');
+    expect(body.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
+  });
+
+  it('drops the low-rating flag when every rating is 4+', () => {
+    const body = renderDigestSms({
+      payload: basePayload({ feedback: { responses: 2, averageRating: 5, lowRatingCount: 0 } }),
+      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
+      approvalLinks: [],
+    });
+    expect(body).toContain('Feedback: 2 today, avg 5/5.');
+    expect(body).not.toContain('low (<=3)');
+  });
+
+  it('omits the feedback line on a no-response day and on pre-E5 payloads', () => {
+    const noResponses = renderDigestSms({
+      payload: basePayload({ feedback: { responses: 0, averageRating: null, lowRatingCount: 0 } }),
+      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
+      approvalLinks: [],
+    });
+    expect(noResponses).not.toContain('Feedback:');
+
+    const preE5 = renderDigestSms({
+      payload: basePayload(), // no feedback field at all
+      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
+      approvalLinks: [],
+    });
+    expect(preE5).not.toContain('Feedback:');
   });
 });
 

@@ -43,11 +43,13 @@ const MAX_INTENT_CAPTURE_RETRIES = 1;
 const MAX_REPROMPTS = 3;
 
 /**
- * N-003 (P2-036) — fixed holding line spoken when the caller pushes on price,
- * scope, or terms. The agent must never negotiate; it defers to the owner.
- * Fixed script (not brand-voiced) — consistent with how operator_request /
- * emergency lines are scripted in the pure FSM (brand voice needs async
- * settings the pure reducer can't load). Exported so adapters/tests share it.
+ * N-003 (P2-036) — deterministic holding line spoken when the caller pushes on
+ * price, scope, or terms. The agent must never negotiate; it defers to the owner.
+ * The pure FSM emits this FIXED fallback (it can't load async settings) tagged
+ * `source: 'negotiation_holding'`; the settings-aware voice-turn processor swaps
+ * it for the brand-voiced composer (conversations/negotiation/acknowledgment.ts)
+ * so the live call sounds like the shop, matching the SMS channel. Exported so
+ * adapters/tests share it.
  */
 export const NEGOTIATION_HOLDING_LINE =
   "That's a good question — I'll need to check with the owner on that, and we'll get right back to you. Is there anything else I can help with in the meantime?";
@@ -268,7 +270,8 @@ function checkGlobalGuards(
     const updatedContext: CallingAgentContext = { ...context, negotiationFlagged: true };
     const sideEffects: SideEffect[] = [
       auditLog(updatedContext, state, state, 'negotiation_guardrail', { alreadyFlagged }),
-      ttsPlay(NEGOTIATION_HOLDING_LINE),
+      // Tagged so the settings-aware voice-turn processor can brand-voice it.
+      ttsPlay(NEGOTIATION_HOLDING_LINE, { source: 'negotiation_holding' }),
     ];
     if (!alreadyFlagged) {
       sideEffects.push({

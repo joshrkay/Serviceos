@@ -50,6 +50,7 @@ import type {
   LLMResponse,
   LLMGatewayConfig,
 } from './gateway';
+import { buildChatMessages } from '../providers/openai-compatible';
 import type { AgentEventBus } from '../voice-quality/event-bus';
 import { costIncurredEvent } from '../voice-quality/events';
 
@@ -285,7 +286,7 @@ class AnthropicCompatibleProvider implements LLMProvider {
     const completion = await this.client.chat.completions.create(
       {
         model,
-        messages: request.messages,
+        messages: buildChatMessages(request.messages),
         temperature: request.temperature ?? 0.2,
         max_tokens: request.maxTokens,
         response_format:

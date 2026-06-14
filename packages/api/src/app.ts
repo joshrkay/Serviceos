@@ -481,6 +481,8 @@ import {
   registerNegotiationHandler,
 } from './sms/inbound-dispatch';
 import { createInboundNegotiationHandler } from './sms/negotiation/inbound-negotiation-handler';
+import { PgCustomerNegotiationContextProvider } from './customers/pg-customer-negotiation-context';
+import { normalizePhone } from './customers/dedup';
 import {
   DroppedCallScheduler,
   PgDroppedCallRecoveryRepository,
@@ -839,6 +841,10 @@ export function createApp(): express.Express {
   }
 
   const customerRepo       = pool ? new PgCustomerRepository(pool)       : new InMemoryCustomerRepository();
+  // N-003 (P2-036) — caller LTV/recency for the negotiation guardrail callback.
+  const customerNegotiationContextProvider = pool
+    ? new PgCustomerNegotiationContextProvider(pool)
+    : undefined;
   const leadRepo           = pool ? new PgLeadRepository(pool)           : new InMemoryLeadRepository();
   const locationRepo       = pool ? new PgLocationRepository(pool)       : new InMemoryLocationRepository();
   // jobRepo is hoisted earlier so the Stripe webhook + everything else
@@ -1781,6 +1787,7 @@ export function createApp(): express.Express {
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
     gateway: llmGateway,
     proposalRepo,
+    ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
     slotConflictChecker,
     availabilityFinder,
     thresholdResolver,
@@ -2306,9 +2313,20 @@ export function createApp(): express.Express {
     // fires on a customer negotiation ask no other handler claimed. Declines
     // to negotiate: drafts an owner callback + replies with a brand-voiced
     // holding line.
+    const resolveNegotiationCustomerContext = async (tenantId: string, phoneE164: string) => {
+      if (!customerNegotiationContextProvider) return null;
+      try {
+        const matches = await customerRepo.findByPhoneNormalized(tenantId, normalizePhone(phoneE164));
+        if (matches.length !== 1) return null; // zero or many matches → no silent guess
+        return await customerNegotiationContextProvider.getContext(tenantId, matches[0].id);
+      } catch {
+        return null;
+      }
+    };
     registerNegotiationHandler(
       createInboundNegotiationHandler({
         proposalRepo,
+        resolveCustomerContext: resolveNegotiationCustomerContext,
         sendSms: (args: { to: string; body: string }) =>
           messageDelivery.sendSms({ to: args.to, body: args.body }),
         auditRepo,
@@ -2387,6 +2405,7 @@ export function createApp(): express.Express {
     ...(pool ? { pool } : {}),
     ...(droppedCallScheduler ? { droppedCallScheduler } : {}),
     proposalRepo,
+    ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     callControl: telephonyCallControl,
@@ -3895,6 +3914,7 @@ export function createApp(): express.Express {
           proposalRepo,
           customerRepo,
           settingsRepo,
+          feedbackResponseRepo,
         },
         listTenantIds: async () => {
           if (!pool) return [];

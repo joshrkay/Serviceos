@@ -19,3 +19,4 @@ export * from './contracts/proposal-sms.js';
 export * from './contracts/confidence-marker.js';
 export * from './contracts/supervisor-flag.js';
 export * from './contracts/digest.js';
+export * from './contracts/negotiation-event.js';
