@@ -3153,6 +3153,7 @@ export function createApp(): express.Express {
       jobRepo,
       estimateRepo,
       paymentLinkProvider,
+      agreementRepo,
     ),
   );
 
