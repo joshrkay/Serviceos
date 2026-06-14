@@ -587,6 +587,7 @@ function validateCommonSettingsFields(
     digestChannel?: string;
     discountMaxBps?: number | null;
     discountFloorCents?: number | null;
+    laborRateCentsPerHour?: number | null;
   }
 ): string[] {
   const errors: string[] = [];
