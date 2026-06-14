@@ -45,6 +45,19 @@ export const PackPickInputSchema = z.object({
 });
 export type PackPickInput = z.infer<typeof PackPickInputSchema>;
 
+// Voice-first onboarding intake. The operator speaks a free-form description
+// of their business ("I run Bob's HVAC, open 8 to 5 weekdays, charge $120 an
+// hour…"); the transcript (already produced by the shared capture/transcribe
+// pipeline client-side) is POSTed here and run through the OnboardingOrchestrator,
+// which extracts a business profile, hours, pack, pricing, and team into
+// human-approved onboarding_* proposals. conversationId threads multi-utterance
+// sessions so clarifications can reference the same context.
+export const OnboardingVoiceInputSchema = z.object({
+  transcript: z.string().min(1).max(4000),
+  conversationId: z.string().min(1).max(120).optional(),
+});
+export type OnboardingVoiceInput = z.infer<typeof OnboardingVoiceInputSchema>;
+
 // Feature 4 — voice agent configuration. voiceId is a preset key (e.g.
 // 'rachel'); greeting is an optional override (empty/absent → auto-generated
 // from business name + services).

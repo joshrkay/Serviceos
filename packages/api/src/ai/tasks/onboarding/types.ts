@@ -1,6 +1,7 @@
 import { VerticalType, ServiceCategory } from '../../../shared/vertical-types';
 import { LineItemCategory } from '../../../shared/billing-engine';
 import { ConfidenceMetadata } from '../../guardrails/confidence';
+import type { Proposal } from '../../../proposals/proposal';
 
 // --- Extractor interface ---
 
@@ -166,6 +167,14 @@ export interface OnboardingBatch {
 
 export interface OnboardingResult {
   extraction: OnboardingExtraction;
+  /**
+   * The built (not-yet-persisted) proposals, in dependency order. The
+   * orchestrator is a pure builder — the caller (POST /api/onboarding/voice)
+   * persists these via the ProposalRepository so the route owns the
+   * tenant-transaction + draft→ready_for_review promotion. Includes a
+   * trailing `voice_clarification` proposal when extraction was ambiguous.
+   */
+  proposals: Proposal[];
   proposalIds: string[];
   batches: OnboardingBatch[];
   needsClarification: boolean;

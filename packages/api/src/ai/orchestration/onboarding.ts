@@ -175,9 +175,6 @@ export class OnboardingOrchestrator {
       proposals.push(createProposal(input));
     }
 
-    // Group into batches of MAX_BATCH_SIZE
-    const batches = groupIntoBatches(proposals);
-
     // Collect clarification needs
     const allClarificationQuestions: string[] = [];
     const needsClarification = [profileResult, categoryResult, pricingResult, teamResult, scheduleResult]
@@ -189,8 +186,51 @@ export class OnboardingOrchestrator {
       }
     }
 
+    // Ambiguity becomes a one-tap voice_clarification (Core Patterns: voice
+    // free-text references resolve through the resolver; ambiguity is never a
+    // silent guess). Emitted as a real proposal so it lands in the operator's
+    // feed alongside the onboarding_* proposals — the operator answers by
+    // speaking again or filling the form, never a dropped extraction.
+    //
+    // Note on catalog grounding (Core Patterns): onboarding is the flow that
+    // *seeds* the tenant catalog (pack activation runs seedPackDefaults at
+    // approval time), so there is no pre-existing catalog to resolve voice
+    // prices against here. The grounding invariant is honored structurally
+    // instead — every onboarding proposal is built WITHOUT a sourceTrustTier,
+    // so it can never auto-approve (decideInitialStatus → 'draft') and always
+    // requires explicit human approval before any config is written.
+    if (needsClarification && allClarificationQuestions.length > 0) {
+      proposals.push(
+        createProposal({
+          tenantId,
+          proposalType: 'voice_clarification',
+          payload: {
+            transcript: transcript.trim().slice(0, 4000) || '(empty)',
+            reason: 'missing_entities',
+            // The targeted follow-up questions render as one-tap chips in the
+            // review card; the operator answers by speaking again.
+            suggestedIntents: allClarificationQuestions.slice(0, 5),
+            ...(conversationId ? { conversationId } : {}),
+          },
+          summary: 'A few details were unclear — tap to answer',
+          explanation:
+            'I captured most of your business, but some details were ambiguous. ' +
+            'Answer below or fill them in on the form.',
+          sourceContext: {
+            source: 'onboarding_voice',
+            ...(conversationId ? { conversationId } : {}),
+          },
+          createdBy: userId,
+        }),
+      );
+    }
+
+    // Group into batches of MAX_BATCH_SIZE
+    const batches = groupIntoBatches(proposals);
+
     return {
       extraction,
+      proposals,
       proposalIds: proposals.map((p) => p.id),
       batches,
       needsClarification,

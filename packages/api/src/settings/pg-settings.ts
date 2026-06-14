@@ -290,8 +290,11 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         depositRequiredAboveCents: 'deposit_required_above_cents',
         // Tier 4 — migration 079.
         depositTimingPolicy: 'deposit_timing_policy',
-        // §9 — migration 098.
+        // §9 / §10 — migration 098. job_buffer_minutes is a plain int and
+        // flows through the generic handler; business_hours is JSONB and is
+        // special-cased below.
         hourlyRateCents: 'hourly_rate_cents',
+        jobBufferMinutes: 'job_buffer_minutes',
         // B1 — migration 088.
         voiceAgentName: 'voice_agent_name',
         voiceGreeting: 'voice_greeting',
@@ -381,6 +384,23 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           setClauses.push(`supported_languages = $${paramIndex}::text[]`);
           const v = value as string[] | undefined | null;
           params.push(Array.isArray(v) && v.length > 0 ? v : ['en']);
+          paramIndex++;
+          continue;
+        }
+        // §10 onboarding — business_hours is JSONB ({ mon: {open, close}, … }).
+        // Previously this column was write-only via the PUT /identity raw SQL
+        // and merely projected onto reads here, so settingsRepo.update({
+        // businessHours }) silently dropped it. The voice-onboarding schedule
+        // execution handler writes hours through the repo, so persist it for
+        // real. Cast ::jsonb and JSON.stringify; null/empty clears to '{}'.
+        if (key === 'businessHours') {
+          setClauses.push(`business_hours = $${paramIndex}::jsonb`);
+          const v = value as Record<string, unknown> | undefined | null;
+          params.push(
+            v && typeof v === 'object' && Object.keys(v).length > 0
+              ? JSON.stringify(v)
+              : '{}',
+          );
           paramIndex++;
           continue;
         }

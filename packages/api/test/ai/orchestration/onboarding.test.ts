@@ -172,6 +172,44 @@ describe('P4-EXT-008 — Onboarding proposal orchestration and sequencing', () =
     expect(result.needsClarification).toBe(true);
   });
 
+  // Ambiguity becomes a one-tap voice_clarification proposal (Core Patterns)
+  // rather than a silent drop — so a vague intake still lands something
+  // actionable in the operator's feed.
+  it('emits a voice_clarification proposal when extraction is ambiguous', async () => {
+    provider.setDefaultResponse(JSON.stringify({
+      business_name: null,
+      verticals: [],
+      categories: [],
+      prices: [],
+      members: [],
+      working_hours: [],
+      sla: null,
+      confidence_score: 0.15,
+    }));
+
+    const result = await orchestrator.run('tenant-001', 'user-001', 'We fix stuff.');
+
+    expect(result.needsClarification).toBe(true);
+    const clarification = result.proposals.find(
+      (p) => p.proposalType === 'voice_clarification',
+    );
+    expect(clarification).toBeDefined();
+    // Never auto-approves — onboarding proposals carry no trust tier.
+    expect(clarification?.status).toBe('draft');
+    expect(result.proposalIds).toContain(clarification?.id);
+  });
+
+  // Onboarding proposals must never auto-execute — built without a trust tier,
+  // they always require explicit human approval (Core Patterns).
+  it('builds every onboarding proposal in draft (never auto-approved)', async () => {
+    setFullPipelineResponses(provider);
+    const result = await orchestrator.run(
+      'tenant-001', 'user-001', loadFixture('fixture-01-hvac-happy-path.txt'),
+    );
+    expect(result.proposals.length).toBeGreaterThan(0);
+    expect(result.proposals.every((p) => p.status === 'draft')).toBe(true);
+  });
+
   // T4-007: Schema validation — all generated proposals should have valid types
   it('T4-007 — all proposals have valid proposal types', async () => {
     setFullPipelineResponses(provider);

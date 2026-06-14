@@ -16,7 +16,11 @@ import {
   PackPickInputSchema,
   VoiceConfigInputSchema,
   CalendarChoiceInputSchema,
+  OnboardingVoiceInputSchema,
 } from '../onboarding/contracts';
+import type { LLMGateway } from '../ai/gateway/gateway';
+import type { ProposalRepository } from '../proposals/proposal';
+import { OnboardingOrchestrator } from '../ai/orchestration/onboarding';
 import { saveVoiceConfig } from '../voice/voice-config';
 import { VOICE_PRESETS } from '../integrations/vapi/assistant-config';
 import { getVapiClient, type VapiClient } from '../integrations/vapi/client';
@@ -52,6 +56,17 @@ export interface OnboardingRouterDeps {
   /** Injectable Vapi client for voice-config assistant pushes. Defaults to
    * getVapiClient() (off-by-default without VAPI_API_KEY). */
   vapiClient?: VapiClient | null;
+  /**
+   * Voice-first onboarding: the LLM gateway drives the OnboardingOrchestrator
+   * extraction pipeline. When absent, POST /api/onboarding/voice returns 503
+   * (the form path is unaffected).
+   */
+  gateway?: LLMGateway;
+  /**
+   * Where the orchestrator's extracted onboarding_* proposals are persisted
+   * for human approval. When absent, POST /api/onboarding/voice returns 503.
+   */
+  proposalRepo?: ProposalRepository;
 }
 
 export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
@@ -63,6 +78,8 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     billingService,
     queue,
     packSeedDeps,
+    gateway,
+    proposalRepo,
   } = deps;
   const router = Router();
 
@@ -408,6 +425,88 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         res.status(500).json({
           error: 'PACK_ACTIVATION_FAILED',
           message: error instanceof Error ? error.message : 'Failed to activate pack',
+        });
+      }
+    }
+  );
+
+  // Voice-first onboarding intake. Runs the operator's spoken business
+  // description through the OnboardingOrchestrator and persists the extracted
+  // onboarding_* proposals for human approval. Owner-gated like /identity and
+  // /pack: approving these proposals writes the same tenant config those form
+  // endpoints do (business name, pack activation + seed, business hours), so
+  // the wizard advances identically — voice is just a faster way in.
+  router.post(
+    '/voice',
+    requireAuth,
+    requireTenant,
+    requireRole('owner'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!gateway || !proposalRepo) {
+          res.status(503).json({
+            error: 'ONBOARDING_VOICE_NOT_CONFIGURED',
+            message: 'Voice onboarding requires the AI gateway and proposal store',
+          });
+          return;
+        }
+
+        const parsed = OnboardingVoiceInputSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', issues: parsed.error.issues });
+          return;
+        }
+
+        const tenantId = req.auth!.tenantId;
+        const userId = req.auth!.userId;
+        const { transcript, conversationId } = parsed.data;
+
+        const orchestrator = new OnboardingOrchestrator(gateway);
+        const result = await orchestrator.run(tenantId, userId, transcript, conversationId);
+
+        // Persist all built proposals atomically (single transaction) so a
+        // partial failure never leaves orphaned members behind — mirrors the
+        // voice chain builder's createMany contract.
+        if (result.proposals.length > 0) {
+          await proposalRepo.createMany(result.proposals);
+          // Onboarding proposals are built without a sourceTrustTier, so they
+          // land in 'draft' — invisible to the inbox and unapprovable under
+          // the lifecycle guard. Promote complete drafts to 'ready_for_review'
+          // so the operator can act on them (parity with the assistant route).
+          for (const proposal of result.proposals) {
+            if (proposal.status === 'draft') {
+              await proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
+            }
+          }
+        }
+
+        // Provenance: a single audit event for the voice intake (each approved
+        // proposal emits its own mutation audit on execution).
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: userId,
+            actorRole: 'owner',
+            eventType: 'onboarding.voice_intake',
+            entityType: 'tenant',
+            entityId: tenantId,
+            metadata: {
+              proposalCount: result.proposals.length,
+              needsClarification: result.needsClarification,
+              ...(conversationId ? { conversationId } : {}),
+            },
+          })
+        );
+
+        res.json({
+          proposalIds: result.proposalIds,
+          needsClarification: result.needsClarification,
+          clarificationQuestions: result.clarificationQuestions,
+        });
+      } catch (error: unknown) {
+        res.status(500).json({
+          error: 'ONBOARDING_VOICE_FAILED',
+          message: error instanceof Error ? error.message : 'Failed to process voice onboarding',
         });
       }
     }

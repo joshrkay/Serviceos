@@ -79,6 +79,16 @@ import {
   EmergencyDispatchExecutionHandler,
   EmergencySmsSender,
 } from './emergency-dispatch-handler';
+import {
+  OnboardingTenantSettingsExecutionHandler,
+  OnboardingScheduleExecutionHandler,
+  OnboardingEstimateTemplateExecutionHandler,
+  OnboardingServiceCategoryExecutionHandler,
+  OnboardingTeamMemberExecutionHandler,
+} from './onboarding-handlers';
+import { PackActivationRepository } from '../../settings/pack-activation';
+import type { SeedPackDefaultsDeps } from '../../packs/seed-pack-defaults';
+import type { EstimateTemplateRepository } from '../../templates/estimate-template';
 import { dispatchEstimateNudge } from '../../estimates/estimate-nudge';
 import type { SendService } from '../../notifications/send-service';
 import type { DispatchRepository } from '../../notifications/dispatch-repository';
@@ -702,6 +712,13 @@ export function createExecutionHandlerRegistry(deps?: {
   // documented on the handler.
   sendService?: Pick<SendService, 'sendEstimate'>;
   dispatchRepo?: DispatchRepository;
+  // Voice-first onboarding — approving onboarding_* proposals writes the same
+  // tenant config the onboarding form endpoints do. packActivationRepo +
+  // packSeedDeps drive pack activation/seed; templateRepo persists bespoke
+  // estimate templates. Absent → the handlers degrade to a validated passthrough.
+  packActivationRepo?: PackActivationRepository;
+  packSeedDeps?: SeedPackDefaultsDeps;
+  templateRepo?: EstimateTemplateRepository;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -812,6 +829,20 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.transactionalComms,
       deps?.auditRepo,
     ),
+    // Voice-first onboarding — approving an extracted onboarding_* proposal
+    // writes the same tenant config the form endpoints do, so the wizard
+    // advances identically. tenant_settings + schedule are load-bearing
+    // (flip the identity/pack steps); the rest are enrichment/provenance.
+    new OnboardingTenantSettingsExecutionHandler(
+      deps?.settingsRepo,
+      deps?.packActivationRepo,
+      deps?.packSeedDeps,
+      deps?.auditRepo,
+    ),
+    new OnboardingScheduleExecutionHandler(deps?.settingsRepo, deps?.auditRepo),
+    new OnboardingEstimateTemplateExecutionHandler(deps?.templateRepo, deps?.auditRepo),
+    new OnboardingServiceCategoryExecutionHandler(deps?.auditRepo),
+    new OnboardingTeamMemberExecutionHandler(deps?.auditRepo),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered

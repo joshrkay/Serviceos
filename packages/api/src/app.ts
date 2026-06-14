@@ -1448,6 +1448,12 @@ export function createApp(): express.Express {
     // path; message_dispatches backs the 48h cooldown.
     ...(sendService ? { sendService } : {}),
     dispatchRepo,
+    // Voice-first onboarding — approving onboarding_* proposals activates +
+    // seeds packs and persists templates through the same paths the form
+    // endpoints use.
+    packActivationRepo,
+    packSeedDeps: { catalogRepo, templateRepo },
+    templateRepo,
   });
   // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
   // default to `proposal-run:{tenant}:{id}` when callers omit one.
@@ -3474,6 +3480,10 @@ export function createApp(): express.Express {
       billingService,
       queue,
       packSeedDeps: { catalogRepo, templateRepo },
+      // Voice-first onboarding — POST /api/onboarding/voice runs the
+      // OnboardingOrchestrator and persists extracted onboarding_* proposals.
+      gateway: llmGateway,
+      proposalRepo,
     }),
   );
   app.use(
