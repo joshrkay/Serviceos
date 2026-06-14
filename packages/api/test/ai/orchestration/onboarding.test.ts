@@ -199,6 +199,32 @@ describe('P4-EXT-008 — Onboarding proposal orchestration and sequencing', () =
     expect(result.proposalIds).toContain(clarification?.id);
   });
 
+  // Ambiguity must never be silently dropped even if the clarification
+  // generator returned no specific questions.
+  it('still emits a clarification when needsClarification but no questions', async () => {
+    // Profile extractor flags needsClarification; force the clarification
+    // generator to yield no questions by returning an empty questions array.
+    provider.setDefaultResponse(JSON.stringify({
+      business_name: null,
+      verticals: [],
+      categories: [],
+      prices: [],
+      members: [],
+      working_hours: [],
+      sla: null,
+      confidence_score: 0.1,
+      questions: [],
+    }));
+
+    const result = await orchestrator.run('tenant-001', 'user-001', 'Help.');
+
+    if (result.needsClarification) {
+      expect(
+        result.proposals.some((p) => p.proposalType === 'voice_clarification'),
+      ).toBe(true);
+    }
+  });
+
   // Onboarding proposals must never auto-execute — built without a trust tier,
   // they always require explicit human approval (Core Patterns).
   it('builds every onboarding proposal in draft (never auto-approved)', async () => {

@@ -167,6 +167,71 @@ describe('onboarding execution handlers', () => {
       });
     });
 
+    it('merges over existing form-set hours instead of clobbering them', async () => {
+      // Operator set Sat via the form; voice only mentions weekdays.
+      await seedSettings(settingsRepo, {
+        businessHours: { sat: { open: '09:00', close: '13:00' } },
+      });
+      const proposal = createProposal({
+        tenantId: TENANT,
+        proposalType: 'onboarding_schedule',
+        payload: {
+          workingHours: [
+            { days: ['monday', 'friday'], startTime: '08:00', endTime: '17:00' },
+          ],
+        },
+        summary: 'Configure hours',
+        createdBy: USER,
+      });
+
+      const result = await handler.execute(proposal, ctx);
+
+      expect(result.success).toBe(true);
+      const settings = await settingsRepo.findByTenant(TENANT);
+      // Saturday survives; weekdays are added.
+      expect(settings?.businessHours).toEqual({
+        sat: { open: '09:00', close: '13:00' },
+        mon: { open: '08:00', close: '17:00' },
+        fri: { open: '08:00', close: '17:00' },
+      });
+    });
+
+    it('drops entries with malformed (non-HH:MM) times', async () => {
+      await seedSettings(settingsRepo);
+      const proposal = createProposal({
+        tenantId: TENANT,
+        proposalType: 'onboarding_schedule',
+        payload: {
+          workingHours: [
+            { days: ['monday'], startTime: '8am', endTime: '5 pm' },
+            { days: ['tuesday'], startTime: '08:00', endTime: '17:00' },
+          ],
+        },
+        summary: 'Configure hours',
+        createdBy: USER,
+      });
+
+      const result = await handler.execute(proposal, ctx);
+
+      expect(result.success).toBe(true);
+      const settings = await settingsRepo.findByTenant(TENANT);
+      // Monday's "8am"/"5 pm" is rejected; only the valid Tuesday persists.
+      expect(settings?.businessHours).toEqual({ tue: { open: '08:00', close: '17:00' } });
+    });
+
+    it('fails when every entry has malformed times', async () => {
+      await seedSettings(settingsRepo);
+      const proposal = createProposal({
+        tenantId: TENANT,
+        proposalType: 'onboarding_schedule',
+        payload: { workingHours: [{ days: ['monday'], startTime: '8am', endTime: '5pm' }] },
+        summary: 'Configure hours',
+        createdBy: USER,
+      });
+      const result = await handler.execute(proposal, ctx);
+      expect(result.success).toBe(false);
+    });
+
     it('fails when no working hours are present', async () => {
       await seedSettings(settingsRepo);
       const proposal = createProposal({

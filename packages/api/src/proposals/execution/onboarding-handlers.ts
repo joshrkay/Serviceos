@@ -62,6 +62,12 @@ function normalizeDayKey(day: string): string | null {
   return DAY_KEYS.has(key) ? key : null;
 }
 
+// Same 24h HH:MM contract the PUT /identity form enforces (contracts.ts
+// TimeOfDay). The LLM extractor can emit loose strings ("8am", "5 pm",
+// "8:00"); reject them rather than persist malformed times that break
+// downstream HH:MM parsers (scheduling, availability rendering).
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
 // ─── onboarding_tenant_settings ───────────────────────────────────────────
 //
 // THE load-bearing onboarding proposal. Writes the business name and activates
@@ -130,8 +136,12 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
         });
       }
 
-      // Activate + seed each pack (idempotent — activatePack no-ops an
-      // already-active pack; seedPackDefaults skips when canonical rows exist).
+      // Activate + seed each pack. The executor runs handlers outside any
+      // wrapping transaction, so a multi-pack approval that fails partway
+      // leaves the earlier packs committed. That is safe because every step is
+      // IDEMPOTENT — activatePack no-ops an already-active pack and
+      // seedPackDefaults skips when canonical rows exist — so re-running the
+      // proposal completes the remaining packs without duplicating anything.
       for (const packId of verticalPacks) {
         if (this.packActivationRepo) {
           await activatePack(
@@ -189,23 +199,24 @@ export class OnboardingScheduleExecutionHandler implements ExecutionHandler {
       return { success: false, error: 'onboarding_schedule requires at least one workingHours entry' };
     }
 
-    // Translate [{ days:[...], startTime, endTime }] → { mon:{open,close}, … }.
-    const businessHours: Record<string, { open: string; close: string }> = {};
+    // Translate [{ days:[...], startTime, endTime }] → { mon:{open,close}, … },
+    // dropping entries whose times aren't valid HH:MM.
+    const spokenHours: Record<string, { open: string; close: string }> = {};
     for (const entry of workingHours) {
       if (!entry || typeof entry !== 'object') continue;
       const e = entry as Record<string, unknown>;
       const days = Array.isArray(e.days) ? e.days : [];
       const open = typeof e.startTime === 'string' ? e.startTime : undefined;
       const close = typeof e.endTime === 'string' ? e.endTime : undefined;
-      if (!open || !close) continue;
+      if (!open || !close || !TIME_RE.test(open) || !TIME_RE.test(close)) continue;
       for (const day of days) {
         if (typeof day !== 'string') continue;
         const key = normalizeDayKey(day);
-        if (key) businessHours[key] = { open, close };
+        if (key) spokenHours[key] = { open, close };
       }
     }
 
-    if (Object.keys(businessHours).length === 0) {
+    if (Object.keys(spokenHours).length === 0) {
       return { success: false, error: 'onboarding_schedule produced no recognizable day/time entries' };
     }
 
@@ -214,6 +225,15 @@ export class OnboardingScheduleExecutionHandler implements ExecutionHandler {
     }
 
     try {
+      // Merge over any hours already set (e.g. via the IdentityStep form) so a
+      // partial spoken update ("we're open weekdays 8 to 5") doesn't clobber
+      // the Saturday hours the operator entered earlier — last-writer-wins on
+      // the whole JSONB column would silently drop them.
+      const existing = await this.settingsRepo.findByTenant(context.tenantId);
+      if (!existing) {
+        return { success: false, error: 'Tenant settings not found — set business identity first' };
+      }
+      const businessHours = { ...(existing.businessHours ?? {}), ...spokenHours };
       const updated = await this.settingsRepo.update(context.tenantId, { businessHours });
       if (!updated) {
         return { success: false, error: 'Tenant settings not found — set business identity first' };

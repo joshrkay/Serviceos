@@ -106,17 +106,33 @@ describe('voice-first onboarding (integration)', () => {
     const persisted = await proposalRepo.findByTenant(currentTenant.tenantId);
     const types = persisted.map((p) => p.proposalType);
     expect(types).toContain('onboarding_tenant_settings');
-    // Persisted proposals are promoted to ready_for_review (visible in inbox),
+    // Config proposals are promoted to ready_for_review (approvable in inbox),
     // never auto-approved.
-    expect(
-      persisted.every((p) => p.status === 'ready_for_review' || p.status === 'draft'),
-    ).toBe(true);
+    const config = persisted.filter((p) => p.proposalType !== 'voice_clarification');
+    expect(config.length).toBeGreaterThan(0);
+    expect(config.every((p) => p.status === 'ready_for_review')).toBe(true);
+    // Returned proposalIds count only approvable config items, not clarifications.
+    expect([...res.body.proposalIds].sort()).toEqual(config.map((p) => p.id).sort());
 
     const ev = await pool.query(
       "SELECT 1 FROM audit_events WHERE tenant_id=$1 AND event_type='onboarding.voice_intake'",
       [currentTenant.tenantId],
     );
     expect(ev.rows.length).toBe(1);
+  });
+
+  it('is idempotent — re-submitting the same transcript does not duplicate proposals', async () => {
+    const transcript = "I run Bob's HVAC, AC repair, open 8 to 5 weekdays.";
+    const first = await request(app).post('/api/onboarding/voice').send({ transcript });
+    expect(first.status).toBe(200);
+    const countAfterFirst = (await proposalRepo.findByTenant(currentTenant.tenantId)).length;
+
+    const second = await request(app).post('/api/onboarding/voice').send({ transcript });
+    expect(second.status).toBe(200);
+    expect(second.body.duplicate).toBe(true);
+
+    const countAfterSecond = (await proposalRepo.findByTenant(currentTenant.tenantId)).length;
+    expect(countAfterSecond).toBe(countAfterFirst);
   });
 
   it('returns 400 on an empty transcript', async () => {

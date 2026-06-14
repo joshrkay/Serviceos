@@ -199,7 +199,11 @@ export class OnboardingOrchestrator {
     // instead — every onboarding proposal is built WITHOUT a sourceTrustTier,
     // so it can never auto-approve (decideInitialStatus → 'draft') and always
     // requires explicit human approval before any config is written.
-    if (needsClarification && allClarificationQuestions.length > 0) {
+    if (needsClarification) {
+      // A sub-extractor flagged ambiguity; emit the clarification even when it
+      // produced no specific questions, so ambiguity is never silently dropped
+      // (Core Patterns). The questions, when present, render as one-tap chips.
+      const questions = allClarificationQuestions.slice(0, 5);
       proposals.push(
         createProposal({
           tenantId,
@@ -207,9 +211,7 @@ export class OnboardingOrchestrator {
           payload: {
             transcript: transcript.trim().slice(0, 4000) || '(empty)',
             reason: 'missing_entities',
-            // The targeted follow-up questions render as one-tap chips in the
-            // review card; the operator answers by speaking again.
-            suggestedIntents: allClarificationQuestions.slice(0, 5),
+            ...(questions.length > 0 ? { suggestedIntents: questions } : {}),
             ...(conversationId ? { conversationId } : {}),
           },
           summary: 'A few details were unclear — tap to answer',

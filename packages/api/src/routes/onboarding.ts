@@ -21,6 +21,8 @@ import {
 import type { LLMGateway } from '../ai/gateway/gateway';
 import type { ProposalRepository } from '../proposals/proposal';
 import { OnboardingOrchestrator } from '../ai/orchestration/onboarding';
+import { ConflictError } from '../shared/errors';
+import { createHash } from 'crypto';
 import { saveVoiceConfig } from '../voice/voice-config';
 import { VOICE_PRESETS } from '../integrations/vapi/assistant-config';
 import { getVapiClient, type VapiClient } from '../integrations/vapi/client';
@@ -464,16 +466,49 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         const orchestrator = new OnboardingOrchestrator(gateway);
         const result = await orchestrator.run(tenantId, userId, transcript, conversationId);
 
-        // Persist all built proposals atomically (single transaction) so a
-        // partial failure never leaves orphaned members behind — mirrors the
-        // voice chain builder's createMany contract.
+        // Idempotency: the orchestrator builds proposals with fresh uuids and
+        // no idempotency key, so a retried POST (audit hiccup, lost response,
+        // double-tap) would duplicate the whole batch. Derive a STABLE key per
+        // proposal from a hash of the transcript so re-submitting the same
+        // utterance collides on the unique index instead of duplicating. A
+        // genuinely different utterance hashes differently and proceeds.
+        const submissionHash = createHash('sha256')
+          .update(`${tenantId}:${transcript.trim()}`)
+          .digest('hex')
+          .slice(0, 24);
+        result.proposals.forEach((p, i) => {
+          p.idempotencyKey = `onboarding-voice:${submissionHash}:${p.proposalType}:${i}`;
+        });
+
+        // voice_clarification is a dismissible feed item, NOT an approvable
+        // config card: it has no execution handler (approving it would error),
+        // so it must stay 'draft' and is not counted as a captured setup item —
+        // matching how the telephony voice path persists clarifications.
+        const configProposals = result.proposals.filter(
+          (p) => p.proposalType !== 'voice_clarification',
+        );
+
+        // Persist all built proposals atomically (single transaction). A
+        // retried identical submission collides on the idempotency key; treat
+        // that as success (the originals are already queued) rather than 500.
         if (result.proposals.length > 0) {
-          await proposalRepo.createMany(result.proposals);
-          // Onboarding proposals are built without a sourceTrustTier, so they
-          // land in 'draft' — invisible to the inbox and unapprovable under
-          // the lifecycle guard. Promote complete drafts to 'ready_for_review'
-          // so the operator can act on them (parity with the assistant route).
-          for (const proposal of result.proposals) {
+          try {
+            await proposalRepo.createMany(result.proposals);
+          } catch (err) {
+            if (err instanceof ConflictError) {
+              res.json({
+                proposalIds: [],
+                duplicate: true,
+                needsClarification: result.needsClarification,
+                clarificationQuestions: result.clarificationQuestions,
+              });
+              return;
+            }
+            throw err;
+          }
+          // Promote only the config proposals to 'ready_for_review' so the
+          // operator can approve them; clarifications stay 'draft'.
+          for (const proposal of configProposals) {
             if (proposal.status === 'draft') {
               await proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
             }
@@ -481,25 +516,31 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         }
 
         // Provenance: a single audit event for the voice intake (each approved
-        // proposal emits its own mutation audit on execution).
-        await auditRepo.create(
-          createAuditEvent({
-            tenantId,
-            actorId: userId,
-            actorRole: 'owner',
-            eventType: 'onboarding.voice_intake',
-            entityType: 'tenant',
-            entityId: tenantId,
-            metadata: {
-              proposalCount: result.proposals.length,
-              needsClarification: result.needsClarification,
-              ...(conversationId ? { conversationId } : {}),
-            },
-          })
-        );
+        // proposal emits its own mutation audit on execution). Best-effort — an
+        // audit-store hiccup must not 500 the request and trigger a duplicating
+        // retry of the proposals we already persisted above.
+        try {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: userId,
+              actorRole: 'owner',
+              eventType: 'onboarding.voice_intake',
+              entityType: 'tenant',
+              entityId: tenantId,
+              metadata: {
+                proposalCount: configProposals.length,
+                needsClarification: result.needsClarification,
+                ...(conversationId ? { conversationId } : {}),
+              },
+            })
+          );
+        } catch {
+          // Swallow — the proposals are the durable artifact, not this event.
+        }
 
         res.json({
-          proposalIds: result.proposalIds,
+          proposalIds: configProposals.map((p) => p.id),
           needsClarification: result.needsClarification,
           clarificationQuestions: result.clarificationQuestions,
         });
