@@ -2,7 +2,7 @@
 
 > **⚠️ Subordinate for LAUNCH (2026-06-13).** For the launch thesis, scope,
 > positioning, and sequencing, the authoritative document is now
-> **`docs/PRD-launch-v1.md`** ("run-by-text + collect"). This v2.0 PRD remains
+> **`docs/PRD-launch-v1.md`** ("voice-first + collect"). This v2.0 PRD remains
 > the **broader product/domain requirements reference** — personas, entity
 > model, the full feature surface — but it is **subordinate to the launch PRD
 > for any launch decision**. The authoritative record of what is **completed &

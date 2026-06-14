@@ -2,9 +2,11 @@
 
 > **⚠️ Superseded as positioning (2026-06-13).** The authoritative competitive
 > positioning is now **`docs/PRD-launch-v1.md` §10**, and the post-launch
-> sequencing is **§12 (Phased roadmap)**. The launch thesis is **run-by-text +
-> collect** — an AI that runs the office so the owner never opens the app — and
-> it **explicitly rejects feature parity as the strategy**: "the day we add the
+> sequencing is **§12 (Phased roadmap)**. The launch thesis is **voice-first +
+> collect** — the owner *speaks* (text and a confirming tap as first-class
+> alternatives), the AI does the work, and the app is the proof surface where
+> the owner verifies it — and it **explicitly rejects feature parity as the
+> strategy**: "the day we add the
 > suite to win the comparison, we forfeit the category and become a worse
 > Jobber." This document's original *"match table-stakes FSM features to win the
 > ICP"* framing therefore no longer drives launch. **It is retained only as the
@@ -88,11 +90,12 @@ delivery**, plus a set of **launch-readiness blockers** that undermine trust
 ## The Top 10 (expansion backlog — NOT launch scope)
 
 > These are **deferred expansion-suite candidates**, drawn on only after the
-> run-by-text wedge is won (PRD §12 Phase 3). They do **not** gate launch, and
-> none of them is a reason to make the owner open the app. The build-state
+> voice-first wedge is won (PRD §12 Phase 3). They do **not** gate launch, and
+> none of them is a reason to make the owner *operate software to do the work*
+> (the app is the proof surface, not the data-entry surface). The build-state
 > verifications below remain accurate and useful; the *prioritization* is
-> historical and is superseded by the PRD's P0 set (text-approval spine →
-> collections → HFCR metric → reliability gates).
+> historical and is superseded by the PRD's P0 set (voice/text/tap approval
+> spine with proof in the UI → collections → HFCR metric → reliability gates).
 
 ### Tier A — Trust & money integrity (codebase)
 
@@ -179,7 +182,7 @@ QBO invoice/payment sync. **~4–5 days (QBO is the long pole).**
 ## Sequencing recommendation (superseded — see PRD §9 critical path)
 
 > **Authoritative sequencing now lives in `docs/PRD-launch-v1.md` §9 (P0
-> critical path)**: text-approval spine → finish collections → HFCR metric →
+> critical path)**: voice/text/tap approval spine with proof in the UI → finish collections → HFCR metric →
 > reliability gates. The tiering below is retained as historical context for the
 > *expansion* phase only.
 

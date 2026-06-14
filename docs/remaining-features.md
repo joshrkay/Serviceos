@@ -2,7 +2,7 @@
 
 > **⚠️ Subordinate / stale ranking corrected (2026-06-13).** For launch scope,
 > positioning, and sequencing, the authoritative document is
-> **`docs/PRD-launch-v1.md`** ("run-by-text + collect"; P0 critical path §9,
+> **`docs/PRD-launch-v1.md`** ("voice-first + collect"; P0 critical path §9,
 > roadmap §12). The authoritative record of what is **completed & bug-free** is
 > **`docs/feature-status-ledger.md`**. This doc's "Shipped" + Phase-8 framing
 > **mis-ranks the real launch gaps** (ledger correction #4): it elevates

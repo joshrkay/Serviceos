@@ -1,4 +1,4 @@
-# PRD — AI Service OS v1 ("Run-By-Text AI Office Manager") — Launch
+# PRD — AI Service OS v1 ("Voice-First AI Office Manager" — text optional, proof in the app) — Launch
 
 **Author:** Founder / Product Engineering
 **Date:** 2026-06-13
@@ -13,13 +13,13 @@
 
 ## 1. TL;DR
 
-AI Service OS is **an AI office manager you hire by the phone number.** It answers the calls a tradesperson misses, books the job, drafts the quote and invoice, and chases the money — and it texts the owner only when it needs a yes.
+AI Service OS is **an AI office manager you hire by the phone number.** It answers the calls a tradesperson misses, books the job, drafts the quote and invoice, and chases the money. The owner operates it by **voice** — they open the app and *say* what they need, and the AI does the work — and the **UI is the proof**: it's where the owner sees what the AI did and verifies it was done right. (They can also approve by a quick text or a confirming tap if they prefer.)
 
 The brutal-honesty finding from the audit reorders the entire roadmap: **the hard half is already built and green; the easy-sounding half is dead.** The in-call voice agent (12 lookup + 5 mutation skills) **[WIRED]** (`telephony/twilio-adapter.ts:28-39`), the 38-type proposal engine **[WIRED]** (`proposals/proposal.ts:24`), the mode-aware auto-approve gate with an unsupervised hard-block **[WIRED]** (`proposals/auto-approve.ts:21-25,82`), 5s undo + advisory-lock idempotency **[WIRED]** (`proposals/lifecycle.ts:40`, `proposals/execution/idempotency-lock.ts:31`), Stripe pay + webhook reconciliation **[WIRED]** (`payments/stripe-payment-intent.ts:56-103`, `webhooks/routes.ts:718`), and RLS 75/75 FORCE **[WIRED]** (`db/schema.ts`) are all real.
 
 What is dead is the owner's **channel**: there is **no SMS reply-to-approve handler** (`sms/inbound-dispatch.ts:94` — only STOP/START registered) **[CONFIRMED ABSENT]**, the proactive owner-SMS sender does not exist (`queue_and_sms` routing has no sender) **[STUB]** (`proposals/proposal.ts:399`), operator voice-approval is test-only **[STUB]** (`ai/tts/readback.ts:19-21`), multi-step dunning is dead code **[STUB]** (`invoices/dunning-schedule.ts:35`), and late-fee math has zero callers **[STUB]** (`invoices/late-fee.ts:47`).
 
-**Translation: we built an AI employee that can do the work and asks permission correctly — but has no way to reach the owner when the owner isn't already staring at the app.** The thesis ("never open the app") is blocked by a notification channel and an approve-by-text handler, not by AI capability. That is a weeks-not-quarters gap sitting on a quarters-of-work moat. v1's job is to **stop building new surfaces and connect the owner to the engine that already exists** — then make collections actually collect, surface one dollar-denominated ROI number, and harden trust for launch.
+**Translation: we built an AI employee that can do the work and asks permission correctly — but the owner can't yet direct or approve it hands-free, by voice or by text, and the proof of what it did is thin.** The thesis (the owner *speaks*, the AI does the work, the UI is the receipt) is blocked by a voice-approval wire, a notification channel, and an approve-by-text handler — not by AI capability. That is a weeks-not-quarters gap sitting on a quarters-of-work moat. v1's job is to **stop building new surfaces and connect the owner to the engine that already exists** — wire voice-approval, give the owner the option to approve by text, make the UI a clear proof surface — then make collections actually collect, surface one dollar-denominated ROI number, and harden trust for launch.
 
 **The wedge leads. The suite is an expansion story only and must not be built now.**
 
@@ -27,15 +27,15 @@ What is dead is the owner's **channel**: there is **no SMS reply-to-approve hand
 
 ## 2. Vision & positioning
 
-**Positioning:** *Not field-service software. An AI office manager you hire by the phone number.* It answers the calls you miss, books the job, sends the invoice, and chases the money — and texts you only when it needs a yes.
+**Positioning:** *Not field-service software. An AI office manager you hire by the phone number.* It answers the calls you miss, books the job, sends the invoice, and chases the money. You run it by **voice** — open the app, say what you need, and the AI does it — and the app shows you the proof. Prefer to text or tap to approve? You can.
 
-**One-liner:** **"It answers your phone and gets you paid. You just reply YES."**
+**One-liner:** **"Run your office out loud — say what you need, the AI does it, and the proof's in the app. Prefer to text? You can."**
 
-**Internal positioning statement:** For the solo-to-10-truck trade owner who is drowning in admin and allergic to apps, AI Service OS is an AI employee that runs quote-to-cash over text and voice. Unlike ServiceTitan / Jobber / Housecall (software you must operate), the owner operates nothing — the AI does the work and asks permission.
+**Internal positioning statement:** For the solo-to-10-truck trade owner who is drowning in admin and hates operating software, AI Service OS is an AI employee that runs quote-to-cash by **voice first** (in-app, spoken), with text and a confirming tap as first-class alternatives. Unlike ServiceTitan / Jobber / Housecall (software you must operate to do the work), the owner doesn't operate forms — they *speak*, the AI does the work, and the UI is where they *verify* it. The app is valued, not avoided: the proof lives there.
 
-**The product category claim:** Run-by-text is a different *product category* from "a suite with an AI add-on." Every incumbent's instinct is to add a screen; ours is to remove the app. The app is the AI's toolbox, not the owner's workplace. The interaction model — voice + text, approve-by-reply, never open the app — is the moat, not the feature list.
+**The product category claim:** Voice-first, AI-does-the-work is a different *product category* from "a suite with an AI add-on." Every incumbent makes the owner operate forms and screens to do the work themselves; ours lets the owner **speak (or text)** while the AI does the work, and the UI is where they *verify* it — not where they do data entry. The interaction model — voice primary, text/tap optional, AI does the work, proof in the UI — is the moat, not the feature list.
 
-**The line we will not cross:** the moment the strategy becomes "all the features of Jobber plus AI," we have built a worse Jobber. The whole reason to exist is that the owner does not operate the software.
+**The line we will not cross:** the moment the strategy becomes "all the features of Jobber plus AI," we have built a worse Jobber. The whole reason to exist is that the owner *directs* the software by voice and *verifies* it in the UI instead of operating it to do the work.
 
 ---
 
@@ -45,10 +45,10 @@ Tradespeople are great at the trade and bad at the business side — and they ha
 
 1. **Missed calls are lost jobs.** When the owner is under a sink, the phone rings out. A missed call at a trade is a lost job worth roughly **$300–$3,000**. This is pure *new* revenue that evaporates silently — the most visceral pain and the most visceral "aha."
 2. **The back-office tail leaks money.** Invoices go out late or not at all; overdue invoices get one nudge (if any) and then silence; late fees are never charged. Cash that was earned never gets collected.
-3. **Incumbent software makes it worse, not better.** ServiceTitan / Jobber / Housecall sell a better filing cabinet the owner still has to open and operate. A tradesperson who refuses to learn Jobber will happily reply YES to a text. Every screen the owner is expected to live in is a screen they won't use.
-4. **The owner is not at a desk.** Their channel is the phone and SMS — the two things they already live in. Any product that requires opening an app, email, or a web chat to act has already lost them.
+3. **Incumbent software makes it worse, not better.** ServiceTitan / Jobber / Housecall sell a better filing cabinet the owner still has to open and *operate* — they make the owner do the work in forms and screens. A tradesperson who refuses to fill out Jobber's screens will happily *say* "send it" or reply YES to a text. Every screen the owner is expected to do data entry in is a screen they won't use.
+4. **The owner is not at a desk.** Their hands are dirty and their natural input is their voice. Any product that makes the owner *operate* forms — type the invoice, tab through fields, manually chase payment — has already lost them. They will, however, open the app to *speak* a command and to *see* that it got done.
 
-The product must therefore deliver **the work getting done**, not features available — measured in calls answered and dollars collected — and must reach the owner where they are (text/voice), asking only for a yes.
+The product must therefore deliver **the work getting done**, not features available — measured in calls answered and dollars collected — let the owner *direct* it by voice (or text, or a tap), and show the proof in the UI rather than make the owner do the work in it.
 
 ---
 
@@ -58,7 +58,7 @@ The product must therefore deliver **the work getting done**, not features avail
 - Solo-to-10-truck trade business (HVAC, plumbing, electrical, etc.). Likely starting vertical: **the highest missed-call-pain emergency trade (HVAC or plumbing).**
 - Spends the day in the field, hands dirty, phone in pocket. Misses calls constantly.
 - Reluctant business owner: never wanted to run admin, does it badly, resents it.
-- **App-averse.** Will not log into a dashboard daily. Lives in phone calls and text messages.
+- **Allergic to *operating* software.** Won't fill out forms or work a dashboard — but will open the app to *say* what he needs and to *check* it got done. His natural input is his voice (and a text or tap when that's easier).
 - Cares about exactly two things: *did I lose a job?* and *did I get paid?*
 - Trusts other trade owners over any ad or salesperson.
 
@@ -74,7 +74,7 @@ The product must therefore deliver **the work getting done**, not features avail
 ## 5. Goals & non-goals
 
 ### Goals (v1)
-- **G1 — Make "never open the app" true.** Ship the text-approval spine: proactive owner SMS on every proposal needing sign-off + an inbound YES/APPROVE/EDIT/APPROVE-ALL handler, reusing the existing autonomy engine and SMS dispatch registry. Move Approval-over-text rate off its structural zero.
+- **G1 — Make "the owner directs by voice/text/tap and verifies in the UI" true.** Ship the owner-in-the-loop approval spine across voice + text + tap, with proof in the UI: wire in-app voice-approval (co-primary), add proactive owner SMS on every proposal needing sign-off + an inbound YES/APPROVE/EDIT/APPROVE-ALL handler (text as a first-class option), and make the UI clearly present pending proposals and a receipt of what the AI executed (the proof surface) — reusing the existing autonomy engine and SMS dispatch registry. Move the low-friction approval rate (voice/text/tap) off its structural zero.
 - **G2 — Make collections actually collect.** Wire the dead multi-step dunning cadence and late-fee math into the overdue worker so cash that was earned gets chased and recovered.
 - **G3 — Prove the value in dollars.** Surface **Hands-Free Collected Revenue (HFCR)** as the in-product hero metric + a weekly owner summary, and make the onboarding payoff a recovered-call/dollar moment.
 - **G4 — Earn the next autonomy rung with data.** Persist proposal outcomes to the DB (not in-memory), build per-tenant trust telemetry and tunable thresholds — so capture-class capabilities a given owner always approves can stop asking. Money/comms/irreversible never auto-execute.
@@ -97,25 +97,25 @@ The product must therefore deliver **the work getting done**, not features avail
 ## 6. Success metrics + North Star
 
 ### North Star (single, dollar-denominated)
-**Hands-Free Collected Revenue (HFCR):** *invoiced-and-paid dollars per tenant per month where every required step (book → invoice → chase → collect) was driven by the AI and approved by voice/text, with **zero app session.***
+**Hands-Free Collected Revenue (HFCR):** *invoiced-and-paid dollars per tenant per month where the **AI drove** the work (the autonomy/proposal engine executed the book → invoice → chase → collect loop) and the owner only **directed or approved** it — by voice, text, or a confirming tap — i.e., not a workflow the owner operated manually.*
 
-One dollar number. It can only rise if the *entire compounding loop works over text*. It is deliberately punishing: today HFCR is **structurally near zero**, because every approval currently requires opening the app (no SMS approve handler **[CONFIRMED ABSENT]** `sms/inbound-dispatch.ts:94`) and collections fire exactly once **[WIRED]** (`workers/overdue-invoice-worker.ts:110`) then go silent. HFCR forces us to fix the text-approval gap *and* make collections fire. It is also the basis of the commission pricing meter (§14).
+One dollar number. It can only rise if the *entire compounding loop is AI-driven* end to end, with the owner merely directing/approving it through a low-friction channel. It is deliberately punishing: today HFCR is **structurally near zero**, because voice-approval is test-only **[STUB]** (`ai/tts/readback.ts:19-21`), there is no SMS approve handler **[CONFIRMED ABSENT]** (`sms/inbound-dispatch.ts:94`), and collections fire exactly once **[WIRED]** (`workers/overdue-invoice-worker.ts:110`) then go silent — so the loop can't run AI-driven and hands-free. HFCR forces us to wire voice/text approval *and* make collections fire. It is also the basis of the commission pricing meter (§14).
 
 **The core loop HFCR proves:**
 > call answered → job booked → work done → invoice sent → payment collected → (data captured) → AI trusted with more.
 
 ### Supporting metrics (diagnostic, not the goal)
 - **Missed-call recovery rate** — % of unanswered inbound calls that become a booked job or live lead. Proves the front.
-- **Approval-over-text rate** — % of proposals approved without an app session. **Today ~0 by construction.** The single most important number to move off the floor.
+- **Low-friction approval rate** — % of proposals approved by voice, text, or a confirming tap (the AI did the work; the owner just directed it), vs. proposals the owner had to operate a manual workflow to clear. **Today ~0 for voice/text by construction.** The single most important number to move off the floor.
 - **Time-to-cash** — completion → payment received, in hours. Proves the dunning tail is live.
-- **Autonomy rung mix** — share of tenants at tap / text / auto. The flywheel's gauge.
+- **Autonomy rung mix** — share of tenants at voice / text / tap / auto. The flywheel's gauge.
 - **Revenue retention by HFCR cohort** — does delivered hands-free money predict who stays. The investability proof.
 
 ### Vanity metrics to explicitly ignore
 Seats, MAU, logins, "AI calls handled" (handling a call that books nothing is theater).
 
 ### Launch targets (first cohort, directional)
-- Approval-over-text rate **> 50%** of eligible (capture/comms) proposals within 30 days of a tenant going live.
+- Low-friction approval rate (voice/text/tap) **> 50%** of eligible (capture/comms) proposals within 30 days of a tenant going live.
 - Every live tenant has **HFCR > $0** within 30 days (proof the loop closes end-to-end at least once).
 - Median **Time-to-cash** for AI-driven invoices trends down month-over-month once dunning ships.
 
@@ -159,9 +159,9 @@ Seats, MAU, logins, "AI calls handled" (handling a call that books nothing is th
 
 ---
 
-### Epic 0 — The text-approval spine (P0, **HEADLINE**)
+### Epic 0 — The owner-in-the-loop approval spine: voice + text + tap, with proof in the UI (P0, **HEADLINE**)
 
-**Why:** This is *the* unlock. The thesis is blocked here and only here. The engine underneath (classification, auto-approve gate, undo, idempotency) is done; what's missing is the owner's channel.
+**Why:** This is *the* unlock. The thesis is blocked here and only here. The engine underneath (classification, auto-approve gate, undo, idempotency) is done; what's missing is the owner's ability to *direct and approve* it hands-free — by **voice** (co-primary), by text, or by a confirming tap — and a UI that clearly *proves* what the AI did. Voice is the primary interaction model; text is a first-class option; the in-app tap/receipt is the trust surface.
 
 **The three dead wires to connect (named):**
 1. `queue_and_sms` routing — the setting/enum/schema/`/me`-read all exist (`db/schema.ts:1831-1832`, `settings/settings.ts:64-69`, `app.ts:2620,2628`, `routes/me.ts:46`) but **no code reads `unsupervised_proposal_routing` to send an SMS** **[STUB]** (`proposals/proposal.ts:399`).
@@ -176,6 +176,7 @@ Seats, MAU, logins, "AI calls handled" (handling a call that books nothing is th
 - R0.5 — **Operator voice-approval.** Wire `readback.ts` into a runtime voice handler: capture-class gets "Say approve or cancel"; money/comms/irreversible get "Tap to confirm on screen" (mirroring R0.3). `classifyVoiceApproval` drives the decision.
 - R0.6 — **APPROVE-ALL parity.** Text APPROVE-ALL maps to the existing batch action with the same ≤50 cap and the same client-side-equivalent gating that the web "APPROVE ALL" enforces (`InboxPage.tsx`), and still excludes money/irreversible from the batch.
 - R0.7 — **Audit + idempotency.** Every text/voice approval emits an audit event (`audit_events` **[WIRED]** `db/schema.ts:60-78`) and is idempotent (duplicate inbound SMS for the same proposal does not double-approve; reuse advisory-lock idempotency `idempotency-lock.ts:31`).
+- R0.8 — **Proof in the UI (trust surface).** The in-app approval path is already **[WIRED]** (`routes/proposals.ts:211-232`, `web/.../InboxPage.tsx`); v1 must make the UI a clear *proof surface*, presenting both (a) **pending proposals awaiting the owner's word** (what the AI wants to do, approvable by tap right there) and (b) a **receipt/record of what the AI executed** — the as-executed proof of work done, so the owner can open the app and *verify* it was done right. This is where the owner *sees* what the AI did after directing it by voice or text; it is the valued surface, not an avoided one. (The app is the receipt; the channels above are how the owner directs the work.)
 
 **Acceptance criteria (testable)**
 - AC0.1 — Creating a capture-class proposal for a tenant with proactive routing enabled sends exactly one owner SMS containing the proposal summary and a reply instruction (assert outbound SMS via the test send provider).
@@ -186,6 +187,7 @@ Seats, MAU, logins, "AI calls handled" (handling a call that books nothing is th
 - AC0.6 — Operator voice "approve" approves a capture-class proposal; voice "approve" on a money proposal is refused with the tap-to-confirm script (`classifyVoiceApproval` unit + integration test).
 - AC0.7 — Duplicate inbound SMS for the same proposal results in a single approval and a single execution (idempotency proof).
 - AC0.8 — Build gate stays green: `cd packages/api && npx tsc --project tsconfig.build.json --noEmit` exits 0.
+- AC0.9 — **Proof in the UI:** the in-app surface shows pending proposals awaiting the owner's word (tap-approvable, reflecting the same gating as voice/text) **and** a receipt of what the AI executed (the as-executed record); a proposal directed/approved by voice or text appears in the UI as a verifiable receipt without the owner having had to do data entry to produce it.
 
 #### Implementation
 
@@ -234,7 +236,7 @@ Seats, MAU, logins, "AI calls handled" (handling a call that books nothing is th
 | **SPINE-8** | Operator voice-approval wiring | Wire `readback.ts` exports into `create-voice-turn-processor.ts`; capture → "say approve", money → "tap to confirm" | AC0.6 (voice approve capture; refuse money) | M | SPINE-4 |
 | **SPINE-9** | Two-tenant isolation + build-gate green | Cross-tenant approve/token tests; tsc build gate | Cross-tenant approve is a no-op on B's rows; AC0.8 | S | SPINE-5, SPINE-6, SPINE-7 |
 
-Critical path within Epic 0: **SPINE-1 → SPINE-2 → SPINE-3 → SPINE-4 → SPINE-5** (notify + approve + gate + token is the minimum spine that makes "never open the app" safely true). SPINE-6/7/8 parallelize after SPINE-4; SPINE-9 closes the epic.
+Critical path within Epic 0: **SPINE-1 → SPINE-2 → SPINE-3 → SPINE-4 → SPINE-5** (notify + approve + gate + token is the minimum spine that lets the owner direct & approve by voice/text/tap and see proof in the UI safely). SPINE-6/7/8 parallelize after SPINE-4; SPINE-9 closes the epic.
 
 ---
 
@@ -325,24 +327,24 @@ Critical path: **COLLECT-1 → COLLECT-2 → COLLECT-3** (reminders live) then *
 **Why:** The owner cares about exactly one thing the product can prove: *did the AI make/collect me money without my having to do anything?* This is the North Star surfaced to the user and the investor.
 
 **Requirements**
-- R3.1 — **Compute HFCR.** A metric that sums invoiced-and-paid dollars per tenant per month where every required step (book → invoice → chase → collect) was AI-driven and approved by voice/text with **zero app session**. Source from the WIRED loop: voice bookings, auto-invoice proposals (`auto-invoice-on-completion.ts:55`), Stripe webhook payments (`webhooks/routes.ts:927,1030`), and the persisted approval channel (Epic 1) to confirm "zero app session."
+- R3.1 — **Compute HFCR.** A metric that sums invoiced-and-paid dollars per tenant per month where every required step (book → invoice → chase → collect) was **AI-driven** (the autonomy/proposal engine executed the loop) and the owner only **directed/approved** it through a low-friction channel (voice, text, or a confirming tap) — i.e., not a workflow the owner operated manually. Source from the WIRED loop: voice bookings, auto-invoice proposals (`auto-invoice-on-completion.ts:55`), Stripe webhook payments (`webhooks/routes.ts:927,1030`), and the persisted **proposal-execution** lineage (Epic 1) to confirm the loop was AI-executed and owner-approved (not manually operated).
 - R3.2 — **In-app hero tile (single number, not a dashboard).** One prominent ROI tile showing this month's HFCR + the count of recovered missed calls. No charts, no console (non-goal §5).
 - R3.3 — **Weekly owner summary by SMS.** A weekly text: "This week I collected $X hands-free and recovered N calls." Reuses the Epic 0 send primitive.
 - R3.4 — **Onboarding payoff.** The onboarding terminal experience surfaces the first recovered call / first hands-free dollar as the activation moment (ties to Epic 4 and GTM "the phone number is the install").
 
 **Acceptance criteria**
-- AC3.1 — HFCR for a tenant equals the sum of paid invoice cents whose full loop (book/invoice/chase/collect) was AI-driven and text/voice-approved with no app session, verified against a seeded fixture with a mix of hands-free and app-touched invoices (only the hands-free ones count).
-- AC3.2 — An invoice approved via an app session is **excluded** from HFCR (proof the "zero app session" constraint bites).
+- AC3.1 — HFCR for a tenant equals the sum of paid invoice cents whose full loop (book/invoice/chase/collect) was **AI-driven** (proposal-executed) and owner-approved through a low-friction channel (voice/text/tap), verified against a seeded fixture with a mix of AI-driven and manually-operated invoices (only the AI-driven ones count).
+- AC3.2 — An invoice whose loop a human created or collected **manually** (not driven by the proposal engine) is **excluded** from HFCR (proof the "AI-driven loop" constraint bites). A confirming tap in the app on an AI-driven proposal does **not** disqualify it.
 - AC3.3 — The in-app hero tile renders the current-month HFCR using the shared money formatter (correct cents — see Epic 5/6) and the recovered-call count.
 - AC3.4 — The weekly summary SMS is sent once per tenant per week with the correct HFCR figure (assert via test send provider).
 
 #### Implementation
 
-**The "zero app session" determination is the crux.** HFCR is not just "paid invoices" — it is paid invoices whose *every required approval* happened over text/voice. The signal lives in the **approval channel**: an SMS/voice approval (Epic 0) vs an HTTP web approval (`routes/proposals.ts:211-232`). To compute HFCR you must record, per proposal approval, the channel it came through.
+**The "AI-driven loop" determination is the crux.** HFCR is not just "paid invoices" — it is paid invoices whose *entire loop was driven by the proposal engine* and merely **directed/approved by the owner** through a low-friction channel (voice, text, or a confirming tap). The discriminator is **AI-driven (proposal-executed) vs manually-operated** — NOT "web vs sms/voice." An owner who opens the app to tap-approve an AI-drafted proposal is still hands-free (the AI did the work; the tap is just the direction/proof). What disqualifies an invoice is work the owner did **manually** without the AI driving it (e.g. hand-typing an invoice, manually chasing payment outside the engine). To compute HFCR you must record, per proposal, whether its execution went through the autonomy/proposal engine and was owner-approved through a low-friction channel.
 
 **Files / modules to touch**
-- **Approval-channel stamp (depends on Epic 0/1):** extend the approval write path (`proposals/actions.ts:35,67`) to record `approval_channel ∈ {web, sms, voice, auto}`. Store on the proposal-outcome row (Epic 1's `proposal_outcomes` table) and/or directly on the invoice/job lineage. A web approval anywhere in the chain disqualifies that invoice from HFCR.
-- **HFCR computation (new):** `metrics/hfcr.ts` — `computeHfcrForTenant(tenantId, period, deps)` joining: paid invoices (Stripe webhook `recordPayment`, `webhooks/routes.ts:927,1030`), their originating job/booking (voice-originated), the auto-invoice proposal (`auto-invoice-on-completion.ts:55`), and the approval channel of every gating proposal in the chain. Sum `amount_paid_cents` only where the chain is fully non-web. Integer cents throughout.
+- **Approval-channel + AI-driven stamp (depends on Epic 0/1):** extend the approval write path (`proposals/actions.ts:35,67`) to record `approval_channel ∈ {web_tap, sms, voice, auto}` AND that the step was driven by the proposal engine. Store on the proposal-outcome row (Epic 1's `proposal_outcomes` table) and/or directly on the invoice/job lineage. The HFCR discriminator is whether the loop was **AI-driven (proposal-executed) and low-friction-approved** — a `web_tap` confirming an AI-drafted proposal still counts as hands-free; what disqualifies an invoice is a leg of the loop done **manually**, with no proposal driving it.
+- **HFCR computation (new):** `metrics/hfcr.ts` — `computeHfcrForTenant(tenantId, period, deps)` joining: paid invoices (Stripe webhook `recordPayment`, `webhooks/routes.ts:927,1030`), their originating job/booking (voice-originated), the auto-invoice proposal (`auto-invoice-on-completion.ts:55`), and the proposal-execution lineage of every gating step in the chain. Sum `amount_paid_cents` only where the chain is **fully AI-driven** (every required step was proposal-executed and owner-approved by voice/text/tap), excluding any invoice with a manually-operated leg. Integer cents throughout.
 - **Hero tile (new, web):** a single tile component (NOT a dashboard) on `HomePage.tsx` rendering current-month HFCR + recovered-call count, using the **shared money formatter** from Epic 5/6 (the same fix that corrects `InvoicesPage.tsx`). Backed by a `GET /me/hfcr` (or similar) read endpoint.
 - **Weekly summary (new):** a weekly job (same setInterval-driver style as the overdue sweep `app.ts:2927-2939`) that composes and sends the summary SMS via the Epic 0 `sendSms` primitive; idempotent once-per-tenant-per-week (a `hfcr_weekly_sends(tenant_id, week_key)` UNIQUE, RLS-FORCE).
 - **Recovered-call count:** derived from voice sessions that produced a booked-job proposal (`find-or-create-lead.ts:33` lead creation + booking proposal in `create-voice-turn-processor.ts:423-484`).
@@ -360,7 +362,7 @@ Critical path: **COLLECT-1 → COLLECT-2 → COLLECT-3** (reminders live) then *
 - Shared money formatter (Epic 5/6) for the tile (R3.2/AC3.3).
 
 **Test plan**
-- *Unit:* HFCR sum over a seeded fixture mixing hands-free and app-touched chains — only hands-free counts (AC3.1); an app-session approval anywhere in a chain excludes that invoice (AC3.2); recovered-call count from seeded voice sessions.
+- *Unit:* HFCR sum over a seeded fixture mixing AI-driven and manually-operated chains — only AI-driven counts (AC3.1); a manually-operated leg anywhere in a chain excludes that invoice while a confirming in-app tap on an AI-drafted proposal does not (AC3.2); recovered-call count from seeded voice sessions.
 - *Integration:* `GET /me/hfcr` returns the right figure; weekly job sends once per tenant per week (AC3.4) and is idempotent on re-run (`hfcr_weekly_sends` UNIQUE).
 - *Two-tenant isolation:* HFCR for tenant A never includes tenant B's payments/proposals (RLS + tenant-scoped query). Explicit assertion.
 - *Render:* tile uses the shared formatter; `$X.05` never renders `$X` (AC3.3, shared with Epic 5/6).
@@ -370,7 +372,7 @@ Critical path: **COLLECT-1 → COLLECT-2 → COLLECT-3** (reminders live) then *
 | ID | Title | Scope | Acceptance | Size | Depends on |
 |---|---|---|---|---|---|
 | **HFCR-1** | Stamp approval channel | Record `approval_channel` on approval in `actions.ts`; persist on outcome row | Every approval records web/sms/voice/auto | S | SPINE-3, Epic 1 outcome table |
-| **HFCR-2** | HFCR computation | `metrics/hfcr.ts`: join paid invoices → chain → channel; sum non-web only, integer cents | AC3.1, AC3.2 (app-touched excluded) | M | HFCR-1, COLLECT-3 |
+| **HFCR-2** | HFCR computation | `metrics/hfcr.ts`: join paid invoices → chain → execution lineage; sum AI-driven (proposal-executed, voice/text/tap-approved) only, integer cents | AC3.1, AC3.2 (manually-operated excluded; in-app tap still counts) | M | HFCR-1, COLLECT-3 |
 | **HFCR-3** | Read endpoint + hero tile | `GET /me/hfcr`; single `HomePage.tsx` tile via shared formatter | AC3.3 (correct cents, recovered-call count) | M | HFCR-2, GATE-4 (formatter) |
 | **HFCR-4** | Weekly summary SMS | Weekly driver; compose + send via Epic 0 primitive; `hfcr_weekly_sends` idempotency | AC3.4 (once/week, correct figure) | M | HFCR-2, SPINE-1 |
 | **HFCR-5** | Onboarding payoff + isolation | Surface first hands-free dollar/recovered call at onboarding terminal; two-tenant HFCR isolation test | AC3.4 payoff present; A's HFCR excludes B | S | HFCR-3, HFCR-4 |
@@ -465,7 +467,7 @@ GATE-1 and GATE-4 unblock other epics' ACs (isolation tests; HFCR tile). GATE-2/
 
 ### Epic 7 — Employee-style pricing + in-product ROI framing (P1)
 
-**Why:** Price the employee, not the seat. Seats punish the exact thing we want (the owner not logging in; the AI doing more).
+**Why:** Price the employee, not the seat. Seats punish the exact thing we want (the AI doing more of the work; the owner directing rather than operating the software).
 
 **Requirements**
 - R7.1 — **One plan, two meters:** a flat monthly **salary** (anchored against a part-time receptionist/bookkeeper ~$2–4k/mo, priced at a fraction) + a small **commission** on HFCR.
@@ -488,7 +490,7 @@ GATE-1 and GATE-4 unblock other epics' ACs (isolation tests; HFCR tile). GATE-2/
 The launch wedge is buildable in this sequence. Tickets across Epics 0/2/3/5 are interleaved so the longest pole (HFCR, which needs both the text spine and live collections) is unblocked as early as possible.
 
 1. **Foundations (parallel, no deps):** `GATE-1` (isolation harness), `GATE-4` (money formatter), `GATE-2` (/ready 503), `GATE-3` (webhook replay), `SPINE-1` (notify primitive), `COLLECT-1` (dunning-event repo).
-2. **Spine core (serial):** `SPINE-2` (hook notifier) → `SPINE-3` (inbound approve) → `SPINE-4` (screen-gating) → `SPINE-5` (confirm token). *Exit: "never open the app" is safely true for capture; money requires a token.*
+2. **Spine core (serial):** `SPINE-2` (hook notifier) → `SPINE-3` (inbound approve) → `SPINE-4` (screen-gating) → `SPINE-5` (confirm token). *Exit: the owner can direct & approve capture-class work by voice/text/tap and see proof in the UI; money requires a token.*
 3. **Spine fan-out (parallel after SPINE-4):** `SPINE-6` (APPROVE-ALL), `SPINE-7` (audit/idempotency), `SPINE-8` (voice-approval).
 4. **Collections (after SPINE-2):** `COLLECT-2` → `COLLECT-3` (reminders are proposals) → `COLLECT-4` (late fees) → `COLLECT-5` (idempotent) → `COLLECT-6` (cents + isolation).
 5. **HFCR (after COLLECT-3 + Epic 1 outcome table + GATE-4):** `HFCR-1` (channel stamp) → `HFCR-2` (compute) → {`HFCR-3` (tile), `HFCR-4` (weekly SMS)} → `HFCR-5` (payoff + isolation).
@@ -500,31 +502,31 @@ The launch wedge is buildable in this sequence. Tickets across Epics 0/2/3/5 are
 
 ## 10. Competitive analysis
 
-The trade-software market splits into two camps the wedge sits between — and neither can copy run-by-text without abandoning their own business model.
+The trade-software market splits into two camps the wedge sits between — and neither can copy the voice-first, AI-does-the-work model (with the UI as the proof surface, not the data-entry surface) without abandoning their own business model.
 
 ### 10.1 The incumbents — "a suite you must live in"
 
 | Competitor | What they are | Where they're strong | Why they can't be us |
 |---|---|---|---|
-| **ServiceTitan** | Enterprise FSM suite (dispatch, CRM, inventory, marketing, payroll, reporting). | Multi-location, high-ACV operators; deep ops + analytics. | Built for the owner who *staffs an office to operate the software*. The product IS the screens. Mike will never log in. Their incentive is to add screens, not remove them. |
-| **Jobber** | SMB FSM (scheduling, quoting, invoicing, client hub). | The 1–10-truck SMB; clean UX; the obvious "graduation" tool. | Still "software you operate." An AI add-on bolted onto a suite is still a suite. A tradesperson who won't learn Jobber will reply YES to a text. |
+| **ServiceTitan** | Enterprise FSM suite (dispatch, CRM, inventory, marketing, payroll, reporting). | Multi-location, high-ACV operators; deep ops + analytics. | Built for the owner who *staffs an office to operate the software*. The product IS the screens you do the work in. Mike won't operate forms — he'll *say* what he needs. Their incentive is to add screens to do work in, not let the AI do the work. |
+| **Jobber** | SMB FSM (scheduling, quoting, invoicing, client hub). | The 1–10-truck SMB; clean UX; the obvious "graduation" tool. | Still "software you operate to do the work." An AI add-on bolted onto a suite is still a suite. A tradesperson who won't learn Jobber's forms will happily *say* "send it" (or tap/text to approve) and check the proof in the app. |
 | **Housecall Pro** | SMB FSM + consumer-grade payments/booking. | Solo-to-small; good payments; consumer booking. | Same structural trap — the owner is the operator. Their AI is a feature inside the app, not a replacement for opening it. |
 | **Angi (Angie's List)** | Lead marketplace. | Demand generation. | Sells *leads*, not the office. Doesn't answer the phone, book, invoice, or collect. Complementary, not competitive. |
 
-The common failure mode: **they sell a better filing cabinet the owner still has to open.** Every one of them, asked to improve, adds a screen. Their revenue model (per-seat / per-tier SaaS) *requires* the owner to operate the tool — so "the owner never opens the app" is structurally off-limits to them. That is the moat: not a feature they lack, a business model they can't adopt.
+The common failure mode: **they sell a better filing cabinet the owner still has to operate to do the work.** Every one of them, asked to improve, adds a screen the owner must do data entry in. Their revenue model (per-seat / per-tier SaaS) *requires* the owner to operate the tool — so "the owner *speaks*, the AI does the work, and the UI is only where they verify it" is structurally off-limits to them. That is the moat: not a feature they lack, a business model they can't adopt.
 
 ### 10.2 The answering services — "dumb call-answering"
 
-Human answering services and basic AI voice-bots (e.g. generic receptionist bots) answer the missed call — and stop there. They take a message or book into a calendar, then hand off. They do **not** run quote-to-cash: no auto-invoice, no Stripe collect, no multi-step dunning, no late fees, no approve-by-text spine, no per-business autonomy earned from history. They capture the front of the pipe and leak the entire back half — exactly the half where HFCR is made.
+Human answering services and basic AI voice-bots (e.g. generic receptionist bots) answer the missed call — and stop there. They take a message or book into a calendar, then hand off. They do **not** run quote-to-cash: no auto-invoice, no Stripe collect, no multi-step dunning, no late fees, no voice/text/tap approval spine with proof in the UI, no per-business autonomy earned from history. They capture the front of the pipe and leak the entire back half — exactly the half where HFCR is made.
 
-### 10.3 Our position — "run-by-text + collect," and why it's defensible
+### 10.3 Our position — "voice-first, the AI does the work, proof in the app," and why it's defensible
 
-We are neither a suite nor a call-answering bot. We **join the two ends of the money pipe** — answer the missed call (front) *and* invoice-and-collect (back) — through an AI that asks permission by text and never makes the owner operate software. Defensibility:
+We are neither a suite nor a call-answering bot. We **join the two ends of the money pipe** — answer the missed call (front) *and* invoice-and-collect (back) — through an AI the owner *directs by voice* (text and a confirming tap as first-class alternatives) and that does the work itself, with the UI as the proof surface where the owner verifies it rather than does data entry. Defensibility:
 
-1. **A different product category, not a better feature.** "Remove the app" is incompatible with per-seat SaaS. Incumbents would have to cannibalize their model to copy us.
-2. **The interaction model is the moat.** Voice + text, approve-by-reply, never open the app. Copying the AI feature isn't copying the category.
+1. **A different product category, not a better feature.** "The AI does the work; the owner directs it and verifies in the UI" is incompatible with per-seat SaaS (which monetizes the owner operating the tool). Incumbents would have to cannibalize their model to copy us.
+2. **The interaction model is the moat.** Voice primary, text/tap optional, the AI does the work, and the UI is the receipt — not the data-entry surface. Copying the AI feature isn't copying the category.
 3. **The data moat compounds and is hard to replicate.** Every executed proposal stores its **as-executed payload** **[WIRED]** (`proposal_executions`, `executor.ts:165,259`, table `db/schema.ts:1541-1565`) and every call stores a full **transcript** **[WIRED]** (`voice/pg-voice-audit.ts:126`, encrypted AES-256-GCM `integrations/crypto.ts:15-22`). This is a labeled corpus of *what a trade office actually did, decision by decision, per business* — the exact substrate for per-business/per-capability autonomy (Epic 1). An incumbent can ship an AI button; they cannot retroactively manufacture this run-history per customer. (Today it's underused because proposal-outcome analytics is in-memory-only **[STUB]** `proposals/analytics.ts:35` — Epic 1 turns the latent moat on.)
-4. **Outcome pricing aligns us with the moat.** We get paid on HFCR (§14), so our incentive is the owner's collected dollars, not their seat count — the opposite of the incumbents' incentive to keep them logging in.
+4. **Outcome pricing aligns us with the moat.** We get paid on HFCR (§14), so our incentive is the owner's collected dollars, not their seat count — the opposite of the incumbents' incentive to keep the owner operating the software.
 
 **The line we hold:** the day we add the suite to "win the comparison," we forfeit the category and become a worse Jobber (§2). Competitive pressure must be answered with *more hands-free dollars*, never more screens.
 
@@ -595,11 +597,11 @@ These exist in code but are dead/one-way today and are deliberately **not** v1, 
 
 ## 13. Key user journeys
 
-1. **Missed call → booked job (the front wedge).** Owner is under a sink; phone rings out; AI answers (in-call voice agent **[WIRED]** `twilio-adapter.ts:28-39`), runs lookups, books the slot or captures the lead (lead auto-create **[WIRED]** `find-or-create-lead.ts:33`) as an approval-gated proposal. Owner gets a text, replies **YES**, job is on the books. *(Epic 0 makes the YES possible.)*
-2. **Job done → invoice → paid (the back wedge).** Job marked complete → auto-invoice drafts a `draft_invoice` proposal **[WIRED]** (`auto-invoice-on-completion.ts:55`). Owner replies **YES** (or a confirm token, money-class). Invoice sent; customer pays via Stripe **[WIRED]** (`stripe-payment-intent.ts:56-103`); webhook reconciles **[WIRED]** (`webhooks/routes.ts:927`). HFCR ticks up.
-3. **Overdue → chased → collected (the dunning tail).** Invoice goes overdue; the sweep raises the next due dunning step as a comms proposal (Epic 2). Owner replies **YES**; reminder goes out; if still unpaid, the next step + (policy-permitting) a late fee proposal follows. Money lands; Time-to-cash drops.
+1. **Missed call → booked job (the front wedge).** Owner is under a sink; phone rings out; AI answers (in-call voice agent **[WIRED]** `twilio-adapter.ts:28-39`), runs lookups, books the slot or captures the lead (lead auto-create **[WIRED]** `find-or-create-lead.ts:33`) as an approval-gated proposal. Owner opens the app and **says "approve"** (or replies YES by text, or taps it) and sees the booking as proof; job is on the books. *(Epic 0 makes voice/text/tap approval possible.)*
+2. **Job done → invoice → paid (the back wedge).** Job marked complete → auto-invoice drafts a `draft_invoice` proposal **[WIRED]** (`auto-invoice-on-completion.ts:55`). Owner **says/taps approve** (or, money-class, replies with a confirm token). Invoice sent; customer pays via Stripe **[WIRED]** (`stripe-payment-intent.ts:56-103`); webhook reconciles **[WIRED]** (`webhooks/routes.ts:927`); the paid receipt shows in the app. HFCR ticks up.
+3. **Overdue → chased → collected (the dunning tail).** Invoice goes overdue; the sweep raises the next due dunning step as a comms proposal (Epic 2). Owner **says/taps/texts approve**; reminder goes out; if still unpaid, the next step + (policy-permitting) a late fee proposal follows. Money lands; Time-to-cash drops.
 4. **Trust earned → AI stops asking (the ladder).** After the owner has approved the same capture-class proposal type many times (persisted outcomes, Epic 1), that capability auto-approves for that tenant, with 5s undo as the net. Money/comms/irreversible still always ask.
-5. **Weekly proof.** Sunday text: "This week I collected $X hands-free and recovered N calls." Owner never opened the app. *(Epic 3.)*
+5. **Weekly proof.** Sunday text: "This week I collected $X hands-free and recovered N calls." The AI drove the whole loop; the owner only directed/approved it by voice/text/tap and can open the app to see the receipts. *(Epic 3.)*
 6. **Money/irreversible — the deliberate confirm.** AI proposes a refund/credit (money-class). Owner gets a text with a confirm token; a bare YES is refused; owner replies `APPROVE 7421` to confirm. The screen-tap guarantee is preserved over text. *(Epic 0, R0.4.)*
 
 ---
@@ -611,7 +613,7 @@ These exist in code but are dead/one-way today and are deliberately **not** v1, 
 - **Base "salary" (flat monthly):** the AI mans the phone and runs the office. Anchored against the fully-loaded cost of a part-time receptionist/bookkeeper (~$2–4k/mo), priced at a fraction (a few hundred dollars/month). The owner compares to a *human*, not to Jobber's $49 tier — that comparison is the pricing power.
 - **Commission (outcome fee) — the core innovation:** a small % of **HFCR** — money the AI booked and collected. We get paid when the owner gets paid. It makes the recovered-missed-call wedge self-justifying.
 - **One plan, two meters.** No Pro/Enterprise feature ladder (laddering = suite-think). The autonomy *rung* is earned by trust, not bought.
-- **Why not per-seat:** seats punish the owner *not* logging in and the AI doing more — both of which are the whole point — and cap revenue at company size.
+- **Why not per-seat:** seats punish the AI doing more of the work and the owner *directing rather than operating* the software — both of which are the whole point — and cap revenue at company size.
 
 **Open risk to validate (§18):** commission can feel like a "tax on my own money." May need a cap or a flat-rate escape hatch for variable-pricing-averse owners. Test both.
 
@@ -621,13 +623,13 @@ These exist in code but are dead/one-way today and are deliberately **not** v1, 
 
 Launch is **done** when all of the following hold:
 
-- [ ] **Epic 0 shipped:** proactive owner SMS fires on every proposal needing sign-off; YES/APPROVE/EDIT/APPROVE-ALL handler works; money/irreversible require a confirm token (screen-tap guarantee preserved); voice-approval wired. (AC0.1–AC0.8; SPINE-1..9.)
+- [ ] **Epic 0 shipped:** voice-approval wired (co-primary); proactive owner SMS fires on every proposal needing sign-off; YES/APPROVE/EDIT/APPROVE-ALL handler works (text as a first-class option); money/irreversible require a confirm token (screen-tap guarantee preserved); the UI presents pending proposals + a receipt of what the AI executed (proof surface). (AC0.1–AC0.9; SPINE-1..9.)
 - [ ] **Epic 2 shipped:** multi-step dunning + late-fee math wired into the overdue worker, idempotent, cents-only. (AC2.1–AC2.5; COLLECT-1..6.)
 - [ ] **Epic 3 shipped:** HFCR computed correctly, in-app hero tile + weekly owner SMS summary live, onboarding payoff present. (AC3.1–AC3.4; HFCR-1..5.)
 - [ ] **Epic 5 all gates green:** green CI + build gate; prod secrets; prod migration + RLS 75/75 FORCE verified live; money-render fixed; `/ready` 503s on DB outage; two-tenant isolation proof; webhook-replay drill. (R5.1–R5.7; GATE-1..6.)
 - [ ] **Credibility landmines removed:** greeting fixed, money formatter applied (9 sites), QuickBooks mock hidden, dead-but-dangerous reconciler deleted + misleading docstrings fixed. (Epic 6.)
 - [ ] **Invariants hold:** money/comms/irreversible never auto-execute; all money is integer cents; all mutations emit audit events; all tenants RLS-isolated.
-- [ ] **Approval-over-text rate is measurably > 0** for at least one live tenant (proof the spine works in prod).
+- [ ] **Low-friction approval rate (voice/text/tap) is measurably > 0** for at least one live tenant (proof the spine works in prod).
 - [ ] Prototypes (`service-os-app`, `service-os-agent`, `/infra`) quarantined / not deployable.
 
 Epics 1, 4, 7 (P1) are launch-adjacent: pricing and the autonomy ladder can follow within the first weeks; they are not blockers for the wedge to be true, but Epic 7 must be settled before charging the first cohort, and Epic 1's `proposal_outcomes` table must land alongside SPINE-2 because HFCR's channel stamp lives there.
@@ -636,7 +638,7 @@ Epics 1, 4, 7 (P1) are launch-adjacent: pricing and the autonomy ladder can foll
 
 ## 16. Milestones
 
-- **M0 — Spine (P0, week 1–2):** Epic 0 spine core (SPINE-1..5) + Epic 5 foundations (GATE-1 isolation harness, GATE-2 /ready 503, GATE-4 money-render, build/CI green). *Exit: Approval-over-text rate off zero in staging.*
+- **M0 — Spine (P0, week 1–2):** Epic 0 spine core (SPINE-1..5) + Epic 5 foundations (GATE-1 isolation harness, GATE-2 /ready 503, GATE-4 money-render, build/CI green). *Exit: Low-friction approval rate (voice/text/tap) off zero in staging.*
 - **M1 — Collect (P0, week 2–3):** Epic 0 fan-out (SPINE-6..9) + Epic 2 (COLLECT-1..6 dunning + late fees) + Epic 3 (HFCR-1..5 metric + weekly summary). *Exit: HFCR computes end-to-end on a seeded tenant; first hands-free dollar demoable.*
 - **M2 — Launch gates (P0, week 3–4):** Epic 5 remainder (GATE-3 webhook replay, GATE-5 prod RLS verify, GATE-6 secrets) + Epic 6 polish. *Exit: Launch DoD green; first cohort onboarded.*
 - **M3 — Ladder + price (P1, week 4–6):** Epic 1 (persist outcomes, trust telemetry, tunable thresholds) + Epic 7 (salary+commission billing) + Epic 4 (founder-led concierge for first cohorts). *Exit: at least one tenant auto-acting on a capture capability; commission billing live.*
@@ -660,7 +662,7 @@ Epics 1, 4, 7 (P1) are launch-adjacent: pricing and the autonomy ladder can foll
 | # | Risk | Mitigation |
 |---|---|---|
 | 1 | **Owner won't trust an AI to talk to their customers.** Existential to the front wedge. | One trade first; concierge-led first cohort; emergency escalation **[WIRED]** (`escalate-to-human.ts`); show the recovered-money proof fast. |
-| 2 | **Text-approval inbox becomes noise the owner ignores** → Approval-over-text collapses → churn. | Notification batching/cadence (Open Q §19); APPROVE-ALL; weekly summary instead of per-event spam where possible; tune via telemetry (Epic 1). |
+| 2 | **Approval notifications become noise the owner ignores** → the low-friction approval rate (voice/text/tap) collapses → churn. | Notification batching/cadence (Open Q §19); APPROVE-ALL; weekly summary instead of per-event spam where possible; let the owner verify a batch of receipts in the UI in one pass; tune via telemetry (Epic 1). |
 | 3 | **Owner approves something half-looking that's wrong** (AI booked a bad slot, quoted low, dunned an already-paid customer). | Reliability-as-feature (Epic 5); 5s undo **[WIRED]**; money/irreversible require confirm token (R0.4); comms/money never auto-execute. |
 | 4 | **A bare YES approving a money/irreversible action.** | Confirm-token requirement (R0.4) + screen-gating classifier **[WIRED]** (`proposal.ts:225-322`); AC0.3/AC0.4 enforce. |
 | 5 | **Commission feels like a tax on my own money.** | Test cap / flat-rate escape hatch (Epic 7); ROI framing (Epic 3) makes value legible. |
@@ -676,7 +678,7 @@ Epics 1, 4, 7 (P1) are launch-adjacent: pricing and the autonomy ladder can foll
 ## 19. Open questions
 
 1. **Will an app-averse owner actually let the AI answer their phone?** Existential to the wedge. Test before scaling.
-2. **Will owners reply YES, or will the inbox become noise?** What's the right notification batching/cadence for Epic 0? Drives whether Rung 1 holds.
+2. **Will owners actually direct/approve by voice or text (or will the notifications become noise)?** What's the right notification batching/cadence for Epic 0? Drives whether the low-friction approval rate holds.
 3. **Outcome-pricing acceptance:** is "% of money I collected" fair or extractive? What % is the ceiling? Is a flat-rate escape hatch required? (Sets the commission band in §11.)
 4. **Real dollar value of a recovered missed call, by trade?** Drives wedge ROI, pricing anchor, vertical choice, and the entire §11 financial model. Needs field data.
 5. **Which trade first?** HVAC vs plumbing vs electrical vs landscaping differ on missed-call pain, job value, dunning norms, emergency mix.
@@ -737,4 +739,4 @@ File-level audit at HEAD `db0dc31` (2026-06-13). Build gate **PASS** (exit 0): `
 - InvoicesPage drops cents via `toLocaleString` (9 sites) — `web/.../invoices/InvoicesPage.tsx:256,257,275,376,552,723,735,744,868` (edit path `.toFixed(2)` at `:247` is correct).
 - `/ready` never 503s on DB blip — DB check emits only `degraded`, never `down` — `app.ts:530`; `health/health.ts:45,60`.
 
-**Net headline:** the autonomy/approval core is genuinely WIRED and reachable; the drift since the prior audit is uniformly in the degrade direction — the owner's *channel* (proactive SMS, approve-by-text, voice-approval), collections tail (dunning, late fees), and proposal-outcome analytics are dead. The thesis is ~3 wires from true.
+**Net headline:** the autonomy/approval core is genuinely WIRED and reachable; the drift since the prior audit is uniformly in the degrade direction — the owner's *channel* (voice-approval, proactive SMS, approve-by-text), collections tail (dunning, late fees), and proposal-outcome analytics are dead. The thesis is ~3 wires from true.
