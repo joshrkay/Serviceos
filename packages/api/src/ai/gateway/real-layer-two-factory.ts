@@ -285,7 +285,9 @@ class AnthropicCompatibleProvider implements LLMProvider {
     const completion = await this.client.chat.completions.create(
       {
         model,
-        messages: request.messages,
+        // Content may be a string or multimodal content-block array; cast at
+        // the provider boundary (the gateway LLMMessage type is provider-agnostic).
+        messages: request.messages as unknown as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
         temperature: request.temperature ?? 0.2,
         max_tokens: request.maxTokens,
         response_format:

@@ -17,9 +17,31 @@ import {
   shouldWarnForUnmappedTaskType,
 } from './router';
 
+/** A text part of a multimodal message. */
+export interface LLMTextContentBlock {
+  type: 'text';
+  text: string;
+}
+
+/**
+ * An image part of a multimodal message. `url` may be an https URL or a
+ * `data:` URI. Image URLs/bytes are redacted from ai_run snapshots
+ * (see `redactMessagesForSnapshot`) to avoid PII at rest.
+ */
+export interface LLMImageContentBlock {
+  type: 'image_url';
+  image_url: { url: string };
+}
+
+export type LLMContentBlock = LLMTextContentBlock | LLMImageContentBlock;
+
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  /**
+   * Plain text, or an ordered list of content blocks for multimodal
+   * (vision) requests. Only `user` messages should carry image blocks.
+   */
+  content: string | LLMContentBlock[];
 }
 
 export interface LLMRequest {
@@ -90,6 +112,29 @@ export function validateLLMRequest(request: LLMRequest): string[] {
   if (!request.taskType) errors.push('taskType is required');
   if (!request.messages || !Array.isArray(request.messages) || request.messages.length === 0) {
     errors.push('messages must be a non-empty array');
+  } else {
+    request.messages.forEach((m, i) => {
+      if (Array.isArray(m.content)) {
+        if (m.content.length === 0) {
+          errors.push(`messages[${i}].content array must be non-empty`);
+        }
+        m.content.forEach((block, j) => {
+          if (block.type === 'image_url') {
+            if (!block.image_url || typeof block.image_url.url !== 'string' || block.image_url.url.length === 0) {
+              errors.push(`messages[${i}].content[${j}] image_url.url is required`);
+            }
+          } else if (block.type === 'text') {
+            if (typeof block.text !== 'string') {
+              errors.push(`messages[${i}].content[${j}] text must be a string`);
+            }
+          } else {
+            errors.push(`messages[${i}].content[${j}] has an unknown block type`);
+          }
+        });
+      } else if (typeof m.content !== 'string') {
+        errors.push(`messages[${i}].content must be a string or a content-block array`);
+      }
+    });
   }
   if (request.temperature !== undefined && (request.temperature < 0 || request.temperature > 2)) {
     errors.push('temperature must be between 0 and 2');
@@ -101,6 +146,26 @@ export function validateLLMRequest(request: LLMRequest): string[] {
     errors.push('responseFormat must be "text" or "json"');
   }
   return errors;
+}
+
+/**
+ * Redact image payloads (URLs / data URIs) from messages before they are
+ * written to an ai_runs input snapshot. Text is preserved for debugging;
+ * image content is replaced with a placeholder to avoid PII at rest.
+ */
+export function redactMessagesForSnapshot(messages: LLMMessage[]): LLMMessage[] {
+  return messages.map((m) =>
+    Array.isArray(m.content)
+      ? {
+          role: m.role,
+          content: m.content.map((b) =>
+            b.type === 'image_url'
+              ? { type: 'image_url' as const, image_url: { url: '[redacted-image]' } }
+              : b,
+          ),
+        }
+      : m,
+  );
 }
 
 export class LLMGateway {
@@ -186,7 +251,7 @@ export class LLMGateway {
           model: resolvedModel,
           promptVersionId,
           inputSnapshot: {
-            messages: request.messages,
+            messages: redactMessagesForSnapshot(request.messages),
             temperature: request.temperature,
             maxTokens: request.maxTokens,
           },
