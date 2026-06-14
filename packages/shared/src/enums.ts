@@ -202,6 +202,8 @@ export enum ProposalType {
   ONBOARDING_TEAM_MEMBER = 'onboarding_team_member',
   ONBOARDING_SCHEDULE = 'onboarding_schedule',
   REVIEW_RESPONSE_PROPOSAL = 'review_response_proposal',
+  SEND_PAYMENT_REMINDER = 'send_payment_reminder',
+  APPLY_LATE_FEE = 'apply_late_fee',
 }
 
 export enum RejectionCategory {

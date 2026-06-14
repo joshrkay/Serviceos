@@ -6,6 +6,8 @@ import { InvoiceScheduleRepository } from '../../invoices/invoice-schedule';
 import { BatchInvoiceExecutionHandler } from './batch-invoice-handler';
 import { UpdateInvoiceExecutionHandler } from './update-invoice-handler';
 import { IssueInvoiceExecutionHandler } from './issue-invoice-handler';
+import { SendPaymentReminderExecutionHandler } from './send-payment-reminder-handler';
+import { ApplyLateFeeExecutionHandler } from './apply-late-fee-handler';
 import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
 import { RescheduleAppointmentExecutionHandler } from './reschedule-handler';
@@ -810,6 +812,13 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.emergencySmsSender,
       deps?.auditRepo,
     ),
+    // Collections cadence — send_payment_reminder. Comms-class: only runs
+    // after owner approval. Sends through the Layer-A transactional-comms
+    // path; degrades to a synthetic-id passthrough when comms is absent.
+    new SendPaymentReminderExecutionHandler(
+      deps?.transactionalComms,
+      deps?.auditRepo,
+    ),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered
@@ -822,6 +831,14 @@ export function createExecutionHandlerRegistry(deps?: {
     handlers.push(new IssueInvoiceExecutionHandler(
       deps.invoiceRepo,
       deps.settingsRepo,
+      deps.auditRepo,
+      moneyStateDeps,
+    ));
+    // Collections cadence — apply_late_fee: appends a non-taxable late-fee
+    // line to an overdue invoice and refreshes the money-state rollup.
+    // Money-class: only runs after explicit owner approval.
+    handlers.push(new ApplyLateFeeExecutionHandler(
+      deps.invoiceRepo,
       deps.auditRepo,
       moneyStateDeps,
     ));

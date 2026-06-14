@@ -130,6 +130,53 @@ describe('P2-002 — Typed proposal contracts', () => {
     expect(result.errors![0]).toContain('Unknown proposal type');
   });
 
+  it('happy path — validates send_payment_reminder payload', () => {
+    const result = validateProposalPayload('send_payment_reminder', {
+      invoiceId: uuidv4(),
+      stepKey: '3:sms',
+      offsetDays: 3,
+      channel: 'sms',
+    });
+    expect(result.valid).toBe(true);
+  });
+
+  it('validation — rejects send_payment_reminder with non-uuid invoice / bad channel', () => {
+    const result = validateProposalPayload('send_payment_reminder', {
+      invoiceId: 'not-a-uuid',
+      stepKey: '3:sms',
+      offsetDays: 3,
+      channel: 'carrier-pigeon',
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors).toBeDefined();
+    expect(result.errors!.length).toBeGreaterThan(0);
+  });
+
+  it('happy path — validates apply_late_fee payload (integer cents)', () => {
+    const result = validateProposalPayload('apply_late_fee', {
+      invoiceId: uuidv4(),
+      feeCents: 2500,
+      stepKey: 'initial',
+    });
+    expect(result.valid).toBe(true);
+  });
+
+  it('validation — rejects apply_late_fee with non-positive or fractional fee (money discipline)', () => {
+    const zero = validateProposalPayload('apply_late_fee', {
+      invoiceId: uuidv4(),
+      feeCents: 0,
+      stepKey: 'initial',
+    });
+    expect(zero.valid).toBe(false);
+
+    const fractional = validateProposalPayload('apply_late_fee', {
+      invoiceId: uuidv4(),
+      feeCents: 25.5,
+      stepKey: 'initial',
+    });
+    expect(fractional.valid).toBe(false);
+  });
+
   it('malformed AI output handled gracefully — assertValidProposalPayload throws ValidationError with structured Zod paths', () => {
     // Simulates the LLM emitting a `create_customer` proposal with an
     // empty name and a bogus email. The AI-safety gate that production

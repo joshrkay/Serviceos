@@ -9,6 +9,9 @@ import { InvoiceRepository, Invoice } from '../invoices/invoice';
 import { PaymentRepository } from '../invoices/payment';
 import { buildTaxExportCsv, TaxExportRow } from '../reports/tax-export';
 import { TimeGivenBackReporter } from '../reports/time-given-back';
+import { ProposalRepository } from '../proposals/proposal';
+import { AuditRepository } from '../audit/audit';
+import { computeHfcrForTenant } from '../metrics/hfcr';
 
 /**
  * Tenant-scoped reporting endpoints. Add new reports here rather than
@@ -26,6 +29,9 @@ export interface ReportsRouterDeps {
   paymentRepo?: PaymentRepository;
   /** §9 — backs GET /time-given-back. 503 when absent. */
   timeGivenBackReporter?: TimeGivenBackReporter;
+  /** HFCR hero metric — backs GET /hfcr. All three required; 503 when any absent. */
+  proposalRepo?: ProposalRepository;
+  auditRepo?: AuditRepository;
   /**
    * Returns the tenant's IANA timezone string (e.g. `America/Los_Angeles`).
    * Used to bucket the money dashboard by tenant-local month boundaries —
@@ -224,6 +230,42 @@ export function createReportsRouter(deps: ReportsRouterDeps): Router {
           `attachment; filename="tax-export-${fromRaw}-to-${toRaw}.csv"`,
         );
         res.send(csv);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  router.get(
+    '/hfcr',
+    requireAuth,
+    requireTenant,
+    requirePermission('invoices:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!deps.paymentRepo || !deps.proposalRepo || !deps.auditRepo) {
+          res.status(503).json({ error: 'NOT_CONFIGURED', message: 'HFCR unavailable' });
+          return;
+        }
+        const month = (req.query.month as string | undefined) || currentMonth();
+        if (!/^\d{4}-\d{2}$/.test(month)) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: "`month` must be 'YYYY-MM'" });
+          return;
+        }
+        const [year, mon] = month.split('-').map(Number);
+        // UTC calendar-month window. A hero number tolerates UTC bucketing;
+        // tenant-tz boundaries (as on /money-dashboard) are a later refinement.
+        const period = {
+          from: new Date(Date.UTC(year, mon - 1, 1)),
+          to: new Date(Date.UTC(year, mon, 1)),
+        };
+        const result = await computeHfcrForTenant(req.auth!.tenantId, period, {
+          paymentRepo: deps.paymentRepo,
+          proposalRepo: deps.proposalRepo,
+          auditRepo: deps.auditRepo,
+        });
+        res.json({ data: { month, ...result } });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

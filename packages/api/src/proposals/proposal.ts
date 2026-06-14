@@ -70,6 +70,8 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'onboarding_team_member',
   'onboarding_schedule',
   'review_response_proposal',
+  'send_payment_reminder',
+  'apply_late_fee',
 ];
 
 export interface Proposal {
@@ -331,6 +333,19 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     // regardless of confidence / trust tier. The MCP money_server
     // provides a second gate at the tool layer.
     case 'record_payment':
+      return 'money';
+    // A dunning payment reminder is an outbound customer-facing message
+    // (the overdue-invoice sweep raises one per due cadence step). Comms-
+    // class so it never auto-approves regardless of trust tier — the owner
+    // approves before the customer is contacted, exactly like the other
+    // outbound sends above.
+    case 'send_payment_reminder':
+      return 'comms';
+    // Applying a late fee appends a charge to an issued invoice — it moves
+    // money (raises amount due), so it is money-class and never auto-applies
+    // regardless of confidence / trust tier. The owner approves deliberately
+    // before any fee is charged.
+    case 'apply_late_fee':
       return 'money';
   }
 }

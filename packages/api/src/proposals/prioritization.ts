@@ -73,6 +73,11 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // critical, since they typically have ~24h relevance windows
   // (longer than appointment-related work).
   review_response_proposal: 1,
+  // Collections work surfaces high — overdue reminders and late fees are
+  // time-sensitive, customer-facing money/comms that require screen-tap.
+  // Same tier as record_payment / send_invoice.
+  send_payment_reminder: 1,
+  apply_late_fee: 1,
 };
 
 export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['urgency']; reason: string } {
