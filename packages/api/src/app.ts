@@ -389,6 +389,7 @@ import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import { registerKeywordHandler } from './sms/inbound-dispatch';
 import { buildProposalApprovalKeywordHandler } from './sms/proposal-approval';
+import { buildJobPhotoIngest } from './sms/job-photo/handler';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -1189,6 +1190,23 @@ export function createApp(): express.Express {
     : undefined;
   if (transactionalComms) {
     webhookRouterDeps.paymentReceiptNotifier = transactionalComms;
+  }
+  // JTBD #4 — inbound MMS job photos. Wired lazily (like paymentReceiptNotifier):
+  // the route reads deps.mmsPhotoIngest at request time, so assigning it after
+  // the router is created is fine, and lets it reference repos/providers built
+  // below the webhook-router construction. Only when a delivery provider exists
+  // (so we can text the tech a confirmation).
+  if (messageDelivery) {
+    webhookRouterDeps.mmsPhotoIngest = buildJobPhotoIngest({
+      userRepo,
+      jobRepo,
+      jobPhotoRepo,
+      fileRepo,
+      storage: storageProvider,
+      bucket: storageBucket,
+      messageDelivery,
+      auditRepo,
+    });
   }
   const feasibilityDeps: FeasibilityDependencies = {
     assignmentRepo,

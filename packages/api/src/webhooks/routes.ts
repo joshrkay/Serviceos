@@ -35,6 +35,8 @@ import { createAuditEvent, AuditRepository } from '../audit/audit';
 import { EstimateRepository } from '../estimates/estimate';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
 import { dispatchInboundSms } from '../sms/inbound-dispatch';
+import { parseInboundMedia } from '../integrations/twilio/media';
+import type { InboundMmsContext, MmsIngestResult } from '../sms/job-photo/handler';
 import { lookupDroppedCallSession } from '../telephony/dropped-call-session-bridge';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
@@ -173,6 +175,13 @@ export interface WebhookRouterDeps {
    * production when this is absent.
    */
   webhookRepo?: WebhookRepository;
+  /**
+   * JTBD #4 — inbound MMS job photos. When wired, an inbound SMS carrying
+   * media (NumMedia > 0) from a verified tenant user is ingested as a
+   * JobPhoto (secure download + store + attach). Optional — absent means
+   * MMS media is ignored (keyword dispatch still runs on the caption).
+   */
+  mmsPhotoIngest?: (ctx: InboundMmsContext) => Promise<MmsIngestResult>;
 }
 
 export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
@@ -1881,6 +1890,38 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     if (kind === 'sms') {
       const fromE164 = (req.body?.From as string | undefined) ?? '';
       const body = (req.body?.Body as string | undefined) ?? '';
+
+      // JTBD #4 — inbound MMS job photos. An MMS (NumMedia > 0) is a photo,
+      // not a keyword command, so when media is present and the ingest hook
+      // is wired we route to it INSTEAD of the keyword dispatcher. The
+      // tenant's own Twilio creds (subaccount SID + primary auth token,
+      // already resolved + signature-validated above) authenticate the
+      // media fetch. Never throws — the handler swallows its own errors.
+      const media = parseInboundMedia((req.body ?? {}) as Record<string, unknown>);
+      if (media.length > 0 && deps.mmsPhotoIngest) {
+        try {
+          const result = await deps.mmsPhotoIngest({
+            tenantId,
+            fromE164,
+            body,
+            messageSid: eventId,
+            media,
+            accountSid: integration.subaccountSid ?? '',
+            authToken: integration.authTokenPrimary ?? '',
+          });
+          return res
+            .status(200)
+            .json({ received: true, mms: true, attached: result.attached, reason: result.reason });
+        } catch (err) {
+          logger.error('Inbound MMS photo ingest failed unexpectedly', {
+            tenantId,
+            messageSid: eventId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return res.status(200).json({ received: true, mms: true, error: 'ingest_failed' });
+        }
+      }
+
       let dispatchResult: { handled: boolean; handler?: string; reason?: string };
       try {
         dispatchResult = await dispatchInboundSms({

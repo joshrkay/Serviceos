@@ -190,3 +190,66 @@ describe('P2-034 — Twilio SMS webhook → keyword dispatcher integration', () 
     expect(handleSpy).not.toHaveBeenCalled();
   });
 });
+
+describe('JTBD #4 — Twilio MMS webhook → job-photo ingest', () => {
+  function buildMmsApp(mmsPhotoIngest: ReturnType<typeof vi.fn>) {
+    const app = express();
+    app.use(express.urlencoded({ extended: false }));
+    app.use(express.json());
+    app.use(
+      '/webhooks',
+      createWebhookRouter(cfg, {
+        integrationResolver: async () => ({
+          tenantId: TENANT_ID,
+          provider: 'twilio',
+          subaccountSid: 'AC-real',
+          authTokenPrimary: 'token',
+        }),
+        webhookEventRepo: eventRepoOk() as any,
+        mmsPhotoIngest: mmsPhotoIngest as any,
+      }),
+    );
+    return app;
+  }
+
+  it('routes an inbound MMS to mmsPhotoIngest (with creds + media) instead of the keyword dispatcher', async () => {
+    const keywordSpy = vi.fn(async () => ({ handled: true }));
+    registerKeywordHandler({ keywords: ['HENDERSON'], handle: keywordSpy });
+    const ingest = vi.fn(async () => ({ handled: true, attached: 1, reason: 'attached' }));
+
+    const app = buildMmsApp(ingest);
+    const res = await request(app)
+      .post(`/webhooks/twilio/sms/${TENANT_ID}`)
+      .set('x-twilio-signature', 'ok')
+      .send(
+        'AccountSid=AC-real&MessageSid=MM-1&From=%2B15551230001&Body=Henderson%20before' +
+          '&NumMedia=1&MediaUrl0=https%3A%2F%2Fmedia.twiliocdn.com%2Fa&MediaContentType0=image%2Fjpeg',
+      );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ mms: true, attached: 1 });
+    expect(ingest).toHaveBeenCalledTimes(1);
+    const ctx = ingest.mock.calls[0][0] as Record<string, unknown>;
+    expect(ctx.accountSid).toBe('AC-real');
+    expect(ctx.authToken).toBe('token');
+    expect(ctx.media).toEqual([{ url: 'https://media.twiliocdn.com/a', contentType: 'image/jpeg' }]);
+    // The MMS short-circuits the keyword dispatcher.
+    expect(keywordSpy).not.toHaveBeenCalled();
+  });
+
+  it('a plain SMS (no media) still goes to the keyword dispatcher, not the ingest hook', async () => {
+    const keywordSpy = vi.fn(async () => ({ handled: true }));
+    registerKeywordHandler({ keywords: ['OUT'], handle: keywordSpy });
+    const ingest = vi.fn(async () => ({ handled: true, attached: 0 }));
+
+    const app = buildMmsApp(ingest);
+    const res = await request(app)
+      .post(`/webhooks/twilio/sms/${TENANT_ID}`)
+      .set('x-twilio-signature', 'ok')
+      .send('AccountSid=AC-real&MessageSid=SM-9&From=%2B15551230001&Body=OUT&NumMedia=0');
+
+    expect(res.status).toBe(200);
+    expect(ingest).not.toHaveBeenCalled();
+    expect(keywordSpy).toHaveBeenCalledTimes(1);
+  });
+});
