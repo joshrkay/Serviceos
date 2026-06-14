@@ -29,6 +29,11 @@ export function AgreementCreate({
     new Date().toISOString().slice(0, 10),
   );
   const [endsOn, setEndsOn] = useState('');
+  const [autoRenew, setAutoRenew] = useState(false);
+  const [renewalTermMonths, setRenewalTermMonths] = useState('12');
+  const [memberDiscountPct, setMemberDiscountPct] = useState('0');
+  const [priorityBooking, setPriorityBooking] = useState(false);
+  const [autoCollectDues, setAutoCollectDues] = useState(false);
   const [recurrence, setRecurrence] = useState<RecurrenceBuilderValue>({
     frequency: 'quarterly',
     interval: 1,
@@ -46,6 +51,24 @@ export function AgreementCreate({
       if (!Number.isFinite(priceCents) || priceCents < 0) {
         throw new Error('Price must be a non-negative number');
       }
+      // Mirror the server invariant so the owner gets immediate guidance: a
+      // membership that auto-renews needs a term end to renew from and a
+      // positive renewal length.
+      let renewalTerm: number | undefined;
+      if (autoRenew) {
+        if (!endsOn) {
+          throw new Error('Auto-renew needs an end date to renew from');
+        }
+        renewalTerm = parseInt(renewalTermMonths, 10);
+        if (!Number.isInteger(renewalTerm) || renewalTerm < 1) {
+          throw new Error('Renewal term must be a whole number of months (at least 1)');
+        }
+      }
+      // Owners enter a whole/decimal percentage; store as basis points.
+      const memberDiscountBps = Math.round(parseFloat(memberDiscountPct || '0') * 100);
+      if (!Number.isFinite(memberDiscountBps) || memberDiscountBps < 0 || memberDiscountBps > 10000) {
+        throw new Error('Member discount must be between 0 and 100%');
+      }
       const created = await agreementsApi.create(apiFetch, {
         customerId,
         name,
@@ -53,6 +76,11 @@ export function AgreementCreate({
         priceCents,
         startsOn,
         endsOn: endsOn || undefined,
+        autoRenew,
+        renewalTermMonths: renewalTerm,
+        memberDiscountBps,
+        priorityBooking,
+        autoCollectDues,
       });
       onCreated?.(created.id);
     } catch (err) {
@@ -113,7 +141,7 @@ export function AgreementCreate({
         />
       </label>
       <label className="flex flex-col text-sm">
-        Ends on (optional)
+        Ends on {autoRenew ? '(required for auto-renew)' : '(optional)'}
         <input
           type="date"
           aria-label="Ends on"
@@ -121,6 +149,64 @@ export function AgreementCreate({
           value={endsOn}
           onChange={(e) => setEndsOn(e.target.value)}
         />
+      </label>
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          aria-label="Auto-renew membership"
+          checked={autoRenew}
+          onChange={(e) => setAutoRenew(e.target.checked)}
+        />
+        Auto-renew this membership when the term ends
+      </label>
+      {autoRenew && (
+        <label className="flex flex-col text-sm">
+          Renewal term (months)
+          <input
+            type="number"
+            min="1"
+            max="120"
+            step="1"
+            aria-label="Renewal term months"
+            className="border rounded px-2 py-1"
+            value={renewalTermMonths}
+            onChange={(e) => setRenewalTermMonths(e.target.value)}
+          />
+        </label>
+      )}
+      <label className="flex flex-col text-sm">
+        Member discount (%)
+        <input
+          type="number"
+          min="0"
+          max="100"
+          step="0.5"
+          aria-label="Member discount percent"
+          className="border rounded px-2 py-1"
+          value={memberDiscountPct}
+          onChange={(e) => setMemberDiscountPct(e.target.value)}
+        />
+        <span className="text-xs text-gray-500 mt-0.5">
+          Applied automatically to this member&apos;s estimates.
+        </span>
+      </label>
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          aria-label="Priority booking"
+          checked={priorityBooking}
+          onChange={(e) => setPriorityBooking(e.target.checked)}
+        />
+        Priority booking — member can self-schedule further out
+      </label>
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          aria-label="Auto-collect dues"
+          checked={autoCollectDues}
+          onChange={(e) => setAutoCollectDues(e.target.checked)}
+        />
+        Auto-collect dues — charge the member&apos;s saved card each cycle
       </label>
       <button
         type="submit"

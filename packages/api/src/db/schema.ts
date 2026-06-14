@@ -4030,6 +4030,194 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_job_checklists ON job_checklists
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // RV-132 — per-tenant recording retention. recording_retention_days drives
+  // the retention worker's purge horizon; legal_hold exempts a recording from
+  // any purge regardless of age; purged_at is the tombstone the worker stamps
+  // after deleting the S3 object (the row is kept for audit — the 007 status
+  // CHECK has no 'deleted' value, so a dedicated nullable marker is the
+  // non-destructive tombstone). Idempotent.
+  '169_recording_retention': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS recording_retention_days INT NOT NULL DEFAULT 365;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS chk_recording_retention_days_positive;
+    ALTER TABLE tenant_settings
+      ADD CONSTRAINT chk_recording_retention_days_positive
+        CHECK (recording_retention_days > 0);
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS legal_hold BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS purged_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_retention
+      ON voice_recordings (created_at)
+      WHERE purged_at IS NULL AND legal_hold = false;
+  `,
+  // NOTE: recording_retention_days is not currently exposed at any settings
+  // write surface (no API endpoint, no settings contract field). If a write
+  // route is added in the future, validate retention_days > 0 there too.
+
+  // RV-115 — state-aware dropped-call recovery. The scheduler snapshots
+  // {state, intent, entitiesResolved, proposalIds} from the FSM at the moment
+  // the call terminated without reaching 'closing'; the recovery SMS handler
+  // composes a state-aware cue from it and the inbound resume handler
+  // (RV-116) uses it to confirm a pending booking / schedule a callback.
+  // JSONB NULL — rows scheduled before this migration simply have no context.
+  '170_dropped_call_recovery_context': `
+    ALTER TABLE dropped_call_recoveries
+      ADD COLUMN IF NOT EXISTS context JSONB;
+  `,
+  // Track E (RV-225 audit fix): widen the proposal_sms_events kind CHECK
+  // from 165 to allow 'voice_reapproval' — recorded when a VOICE edit is
+  // applied and the updated values were read back by voice only (no SMS
+  // re-render deps wired at the call site). It clears
+  // hasUnappliedEditRequest like reapproval_rendered, but is EXCLUDED from
+  // findRecentOutbound: no text was sent for it, so it must never become
+  // the owner's Y/N reply anchor. Mirrors the CHECK-widening style of
+  // 165_proposal_sms_events_review_required_kind.
+  '171_proposal_sms_events_voice_reapproval_kind': `
+    ALTER TABLE proposal_sms_events
+      DROP CONSTRAINT IF EXISTS proposal_sms_events_kind_check;
+    ALTER TABLE proposal_sms_events
+      ADD CONSTRAINT proposal_sms_events_kind_check
+        CHECK (kind IN (
+          'proposal_rendered','reapproval_rendered','clarification_sent',
+          'reply_approve','reply_reject','edit_session_opened','edit_request',
+          'review_required_rendered','voice_reapproval'
+        ));
+  `,
+
+  // F17 / P15-001 — per-tenant QuickBooks (Xero enum reserved) accounting sync.
+  '172_create_accounting_integrations': `
+    CREATE TABLE IF NOT EXISTS accounting_integrations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL UNIQUE REFERENCES tenants(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL CHECK (provider IN ('quickbooks', 'xero')),
+      access_token_encrypted TEXT NOT NULL,
+      refresh_token_encrypted TEXT NOT NULL,
+      realm_id TEXT NOT NULL,
+      connected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_synced_at TIMESTAMPTZ,
+      status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'expired', 'disconnected', 'error')),
+      error_message TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE accounting_integrations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE accounting_integrations FORCE ROW LEVEL SECURITY;
+    CREATE POLICY accounting_integrations_tenant ON accounting_integrations
+      USING (
+        tenant_id = current_setting('app.current_tenant_id', true)::uuid
+        OR current_setting('app.system_lookup', true) = 'true'
+      );
+
+    CREATE TABLE IF NOT EXISTS accounting_sync_log (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      integration_id UUID NOT NULL REFERENCES accounting_integrations(id) ON DELETE CASCADE,
+      entity_type TEXT NOT NULL CHECK (entity_type IN ('invoice', 'customer', 'payment')),
+      entity_id UUID NOT NULL,
+      external_id TEXT,
+      action TEXT NOT NULL CHECK (action IN ('push', 'pull', 'conflict')),
+      status TEXT NOT NULL CHECK (status IN ('success', 'failed')),
+      payload_hash TEXT NOT NULL,
+      error_message TEXT,
+      synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE accounting_sync_log ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE accounting_sync_log FORCE ROW LEVEL SECURITY;
+    CREATE POLICY accounting_sync_log_tenant ON accounting_sync_log
+      USING (
+        tenant_id = current_setting('app.current_tenant_id', true)::uuid
+        OR current_setting('app.system_lookup', true) = 'true'
+      );
+    CREATE INDEX IF NOT EXISTS accounting_sync_log_tenant_integration_synced_idx
+      ON accounting_sync_log (tenant_id, integration_id, synced_at DESC);
+
+    ALTER TABLE oauth_states DROP CONSTRAINT IF EXISTS oauth_states_provider_check;
+    ALTER TABLE oauth_states ADD CONSTRAINT oauth_states_provider_check
+      CHECK (provider IN ('google', 'quickbooks', 'xero'));
+  `,
+
+  // Membership engine (#6) — auto-renew on service_agreements. Additive ALTERs
+  // only: the runner re-executes every migration on every boot, so each
+  // statement is idempotent (ADD COLUMN IF NOT EXISTS, DROP+ADD the CHECK).
+  // renewal_term_months is the stable membership term the renewal sweep rolls
+  // ends_on forward by (positivity guarded here and in the Zod/service layer);
+  // renewal_count is an audit counter. The partial index backs findRenewable.
+  '173_service_agreements_auto_renew': `
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS auto_renew BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS renewal_term_months INTEGER;
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS renewal_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE service_agreements
+      DROP CONSTRAINT IF EXISTS chk_agreement_renewal_term_positive;
+    ALTER TABLE service_agreements
+      ADD CONSTRAINT chk_agreement_renewal_term_positive
+        CHECK (renewal_term_months IS NULL OR renewal_term_months > 0);
+    CREATE INDEX IF NOT EXISTS idx_agreements_auto_renew
+      ON service_agreements (tenant_id, ends_on)
+      WHERE auto_renew = TRUE AND status = 'active';
+  `,
+
+  // Membership engine (#6 phase 2) — member pricing. A membership with
+  // member_discount_bps > 0 confers that percentage discount on the customer's
+  // estimates/invoices. Additive ALTER + re-run-safe DROP/ADD CHECK (0..10000
+  // bps = 0..100%). Resolution reuses the existing tenant+customer index.
+  '174_service_agreements_member_discount': `
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS member_discount_bps INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE service_agreements
+      DROP CONSTRAINT IF EXISTS chk_agreement_member_discount_bps;
+    ALTER TABLE service_agreements
+      ADD CONSTRAINT chk_agreement_member_discount_bps
+        CHECK (member_discount_bps >= 0 AND member_discount_bps <= 10000);
+  `,
+
+  // Membership engine (#6 phase 3) — priority booking. A membership with
+  // priority_booking lets the customer book further into the future (extended
+  // horizon) than a non-member in the self-service portal. Additive boolean.
+  '175_service_agreements_priority_booking': `
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS priority_booking BOOLEAN NOT NULL DEFAULT FALSE;
+  `,
+
+  // Membership engine (#6 phase 4) — saved cards for off-session dues billing.
+  // Stores ONLY Stripe ids + non-sensitive display metadata (brand/last4/exp);
+  // raw card data never reaches our server (browser -> Stripe via SetupIntent).
+  // The Stripe customer + payment method are scoped to the tenant's connected
+  // account (where dues are charged). auto_collect_dues opts a membership into
+  // automatic charging.
+  '176_customer_payment_methods': `
+    CREATE TABLE IF NOT EXISTS customer_payment_methods (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      stripe_customer_id TEXT NOT NULL,
+      stripe_payment_method_id TEXT NOT NULL,
+      brand TEXT,
+      last4 TEXT,
+      exp_month INT,
+      exp_year INT,
+      is_default BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, stripe_payment_method_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cpm_tenant_customer
+      ON customer_payment_methods (tenant_id, customer_id);
+    ALTER TABLE customer_payment_methods ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_payment_methods FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_payment_methods ON customer_payment_methods;
+    CREATE POLICY tenant_isolation_customer_payment_methods ON customer_payment_methods
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS auto_collect_dues BOOLEAN NOT NULL DEFAULT FALSE;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

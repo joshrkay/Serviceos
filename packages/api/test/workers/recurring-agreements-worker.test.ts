@@ -68,6 +68,42 @@ describe('P9-003 recurring-agreements-worker', () => {
       },
       logger: createLogger({ service: 'test', environment: 'test' }),
     });
-    expect(result).toEqual({ tenants: 0, generated: 0, skipped: 0, failed: 0 });
+    expect(result).toEqual({ tenants: 0, renewed: 0, generated: 0, skipped: 0, failed: 0 });
+  });
+
+  it('renews lapsed auto-renew memberships during the sweep', async () => {
+    const agreementRepo = new InMemoryAgreementRepository();
+    const runRepo = new InMemoryAgreementRunRepository();
+    const t = '33333333-3333-3333-3333-333333333333';
+    const membership = await createAgreement(
+      {
+        tenantId: t,
+        customerId: '00000000-0000-0000-0000-000000000001',
+        name: 'Gold membership',
+        recurrenceRule: 'FREQ=MONTHLY;BYMONTHDAY=1',
+        priceCents: 1500,
+        startsOn: '2025-01-01',
+        endsOn: '2026-01-01',
+        autoRenew: true,
+        renewalTermMonths: 12,
+        createdBy: 'u',
+      },
+      agreementRepo,
+    );
+
+    const result = await runRecurringAgreementsSweep({
+      agreementRepo,
+      runRepo,
+      jobsService: { async createJob() { return { id: 'x' }; } },
+      invoicesService: { async createDraftInvoice() { return { id: 'x' }; } },
+      listTenantIds: async () => [t],
+      logger: createLogger({ service: 'test', environment: 'test' }),
+    });
+
+    expect(result.renewed).toBe(1);
+    const updated = await agreementRepo.findById(t, membership.id);
+    // ends_on rolled forward past "now" (the sweep uses the real clock).
+    expect(new Date(`${updated?.endsOn}T00:00:00Z`).getTime()).toBeGreaterThan(Date.now());
+    expect(updated?.renewalCount).toBeGreaterThanOrEqual(1);
   });
 });
