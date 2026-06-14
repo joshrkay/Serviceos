@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router';
+import { useUser } from '@clerk/clerk-react';
 import {
   ArrowLeft, Phone, MessageSquare, Navigation,
   MapPin, AlertCircle, AlertTriangle, Package,
@@ -17,6 +18,7 @@ import { useApiClient } from '../../lib/apiClient';
 import { useWorkerTerm } from '../../hooks/useWorkerTerm';
 import { normalizeJobStatus } from '../../utils/statusNormalize';
 import { apiFetch } from '../../utils/api-fetch';
+import { firstNameFromUser } from '../../utils/greeting';
 
 function buildJobCompat(api: JobDetailResponse): Job {
   const techName = api.technician
@@ -941,6 +943,8 @@ export function JobDetailView({ id }: { id: string }) {
   const navigate = useNavigate();
   const apiFetch = useApiClient();
   const workerTerm = useWorkerTerm();
+  const { user } = useUser();
+  const ownerLabel = `${firstNameFromUser(user?.fullName, user?.primaryEmailAddress?.emailAddress)} (owner)`;
 
   const { data: apiJob, isLoading, error, refetch: refetchJob } = useDetailQuery<JobDetailResponse>('/api/jobs', id);
   const { mutate: transitionJob } = useMutation<{ status: string }, JobDetailResponse>('POST', `/api/jobs/${id}/transition`);
@@ -1453,8 +1457,8 @@ export function JobDetailView({ id }: { id: string }) {
       )}
       {modal === 'addEntry' && (
         <AddEntrySheet
-          author={tech?.name ?? 'Mike (owner)'}
-          authorInitials={tech?.initials ?? 'MO'}
+          author={tech?.name ?? ownerLabel}
+          authorInitials={tech?.initials ?? [ownerLabel[0], ownerLabel.split(' ')[1]?.[0]].filter(Boolean).join('').toUpperCase()}
           authorColor={tech?.color ?? '#475569'}
           onClose={() => setModal(null)}
           onSubmit={entry => { void addActivity(entry); setModal(null); }}

@@ -213,7 +213,7 @@ export const MATRIX: MatrixRow[] = [
     module: 'ISO',
     feature: 'Cross-tenant isolation across core entities + RLS',
     passCriteria:
-      "Tenant B token reading Tenant A's customer/job/estimate/invoice returns 403/404; cross-tenant note write blocked; DB without tenant GUC returns 0 rows",
+      "Tenant B cannot read Tenant A customer/job/estimate/invoice/conversation/attachments/recording; cross-tenant note write blocked; audit_events hidden under B GUC; no-GUC RLS probe returns 0 rows",
     expected: 'pass',
   },
 

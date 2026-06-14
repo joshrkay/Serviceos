@@ -236,7 +236,7 @@ export function BookingPage() {
                           key={s.start}
                           data-testid={`booking-slot-${s.start}`}
                           onClick={() => setSelected(s)}
-                          className={`rounded-xl border-2 px-2 py-2.5 text-sm transition-all ${
+                          className={`flex min-h-11 items-center justify-center rounded-xl border-2 px-2 py-2.5 text-sm transition-all ${
                             isSel
                               ? 'border-slate-900 bg-slate-900 text-white'
                               : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
@@ -258,7 +258,7 @@ export function BookingPage() {
           <div className="flex flex-col gap-5 flex-1">
             <button
               onClick={() => setStep('slot')}
-              className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-600 self-start"
+              className="flex min-h-11 items-center gap-1 text-xs text-slate-400 hover:text-slate-600 self-start"
             >
               <ArrowLeft size={12} /> Back to times
             </button>
@@ -296,7 +296,7 @@ export function BookingPage() {
                   onChange={(e) => update({ [key]: e.target.value })}
                   placeholder={placeholder}
                   type={type}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 placeholder-slate-400 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 transition-all"
+                  className="w-full min-h-11 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 placeholder-slate-400 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 transition-all"
                 />
               </div>
             ))}
@@ -332,7 +332,7 @@ export function BookingPage() {
             {tenantInfo?.businessPhone && (
               <a
                 href={`tel:${tenantInfo.businessPhone.replace(/\s/g, '')}`}
-                className="flex items-center gap-4 rounded-xl bg-white border border-slate-200 px-4 py-3.5 w-full hover:border-blue-300"
+                className="flex min-h-11 items-center gap-4 rounded-xl bg-white border border-slate-200 px-4 py-3.5 w-full hover:border-blue-300"
               >
                 <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-slate-100">
                   <Phone size={15} className="text-slate-500" />
@@ -363,7 +363,7 @@ export function BookingPage() {
                 (step === 'slot' && !selected) ||
                 (step === 'details' && (!canSubmit || submitting))
               }
-              className="w-full flex items-center justify-center gap-2 rounded-xl bg-slate-900 py-4 text-sm text-white hover:bg-slate-800 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              className="w-full flex min-h-11 items-center justify-center gap-2 rounded-xl bg-slate-900 py-4 text-sm text-white hover:bg-slate-800 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {submitting ? (
                 <span className="animate-spin size-4 border-2 border-white/30 border-t-white rounded-full" />

@@ -38,6 +38,16 @@ const __defaultClerkSignOut = async () => {};
 const __defaultUseClerkResult = {
   signOut: __defaultClerkSignOut,
 };
+const __defaultUseUserResult = {
+  isLoaded: true,
+  user: {
+    id: 'user-test-default',
+    fullName: 'Ada Lovelace',
+    firstName: 'Ada',
+    lastName: 'Lovelace',
+    primaryEmailAddress: { emailAddress: 'ada@example.com' },
+  },
+};
 
 vi.mock('@clerk/clerk-react', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@clerk/clerk-react')>();
@@ -45,6 +55,7 @@ vi.mock('@clerk/clerk-react', async (importOriginal) => {
     ...actual,
     useAuth: () => __defaultUseAuthResult,
     useClerk: () => __defaultUseClerkResult,
+    useUser: () => __defaultUseUserResult,
   };
 });
 
