@@ -33,6 +33,12 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
     private readonly auditRepo?: AuditRepository
   ) {}
 
+  // Degrades to a synthetic-id passthrough (saves nothing) without both
+  // the invoice repo and the settings repo — see execute().
+  isFullyWired(): boolean {
+    return Boolean(this.invoiceRepo) && Boolean(this.settingsRepo);
+  }
+
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
 

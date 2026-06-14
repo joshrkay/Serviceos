@@ -97,6 +97,15 @@ export interface ExecutionResult {
 export interface ExecutionHandler {
   proposalType: ProposalType;
   execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult>;
+  /**
+   * Optional capability signal for the boot-time wiring guard
+   * (proposals/execution/wiring-assertions.ts). Returns false when the
+   * handler is missing a dependency it needs to PERSIST — i.e. it would
+   * fall back to a synthetic-id passthrough that returns success without
+   * saving anything. Handlers that always persist (or have no degraded
+   * path) omit this; the guard treats absence as "fully wired".
+   */
+  isFullyWired?(): boolean;
 }
 
 /**
@@ -174,6 +183,12 @@ export class CreateJobExecutionHandler implements ExecutionHandler {
     // audit event. createJob already forwards it to the audit repo.
     private readonly auditRepo?: AuditRepository,
   ) {}
+
+  // Degrades to a synthetic-id passthrough (saves nothing) without both
+  // the job repo and the location repo — see execute().
+  isFullyWired(): boolean {
+    return Boolean(this.jobRepo) && Boolean(this.locationRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
@@ -261,6 +276,12 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     // (tenant-scoped) before attaching the appointment to it.
     private readonly jobRepo?: JobRepository,
   ) {}
+
+  // Degrades to a synthetic-id passthrough (saves nothing) without the
+  // appointment repo — see execute().
+  isFullyWired(): boolean {
+    return Boolean(this.appointmentRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
