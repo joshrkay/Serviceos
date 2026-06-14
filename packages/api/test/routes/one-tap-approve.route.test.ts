@@ -354,6 +354,124 @@ describe('GET /public/proposals/one-tap-approve', () => {
   });
 });
 
+describe('one-tap money-gating (Track-E redeem-side defense-in-depth)', () => {
+  async function makeAppWithProposal(
+    proposalType: 'issue_invoice' | 'send_invoice' | 'cancel_appointment',
+    payload: Record<string, unknown>,
+  ) {
+    const proposalRepo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const base = createProposal({
+      tenantId: TENANT,
+      proposalType,
+      payload,
+      summary: `${proposalType} action`,
+      confidenceScore: 0.97,
+      createdBy: 'voice',
+    });
+    const proposal = await proposalRepo.create({ ...base, status: 'ready_for_review' });
+    const app = express();
+    app.use(express.json());
+    app.use(
+      '/public/proposals',
+      createOneTapApproveRouter({
+        proposalRepo,
+        auditRepo,
+        secret: SECRET,
+        consumeNonce: createInMemoryNonceStore(),
+      }),
+    );
+    return { app, proposalRepo, auditRepo, proposal };
+  }
+
+  it('refuses a plain one-tap token for a money proposal and does not approve it', async () => {
+    const { app, proposalRepo, auditRepo, proposal } = await makeAppWithProposal(
+      'issue_invoice',
+      { invoiceId: 'inv-1', amountCents: 12000 },
+    );
+    const { token } = createOneTapApproveToken({
+      proposalId: proposal.id,
+      tenantId: TENANT,
+      secret: SECRET,
+    });
+
+    const res = await request(app).get('/public/proposals/one-tap-approve').query({ token });
+
+    expect(res.status).toBe(403);
+    expect((await proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+    const types = (await auditRepo.findByEntity(TENANT, 'proposal', proposal.id)).map(
+      (e) => e.eventType,
+    );
+    expect(types).toContain('proposal.one_tap_blocked_action_class');
+    expect(types).not.toContain('proposal.approved');
+  });
+
+  it('refuses a plain one-tap token for a comms proposal (send_invoice)', async () => {
+    const { app, proposalRepo, proposal } = await makeAppWithProposal('send_invoice', {
+      invoiceId: 'inv-2',
+    });
+    const { token } = createOneTapApproveToken({
+      proposalId: proposal.id,
+      tenantId: TENANT,
+      secret: SECRET,
+    });
+
+    const res = await request(app).get('/public/proposals/one-tap-approve').query({ token });
+
+    expect(res.status).toBe(403);
+    expect((await proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+  });
+
+  it('refuses a plain one-tap token for an irreversible proposal (cancel_appointment)', async () => {
+    const { app, proposalRepo, proposal } = await makeAppWithProposal('cancel_appointment', {
+      appointmentId: 'appt-1',
+    });
+    const { token } = createOneTapApproveToken({
+      proposalId: proposal.id,
+      tenantId: TENANT,
+      secret: SECRET,
+    });
+
+    const res = await request(app).get('/public/proposals/one-tap-approve').query({ token });
+
+    expect(res.status).toBe(403);
+    expect((await proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+  });
+
+  it('does NOT burn the single-use nonce when refusing (pre-consume gate)', async () => {
+    const { app, proposal } = await makeAppWithProposal('issue_invoice', { invoiceId: 'inv-3' });
+    const { token } = createOneTapApproveToken({
+      proposalId: proposal.id,
+      tenantId: TENANT,
+      secret: SECRET,
+    });
+
+    await request(app).get('/public/proposals/one-tap-approve').query({ token }).expect(403);
+    // A burned nonce would 410 "already used"; the refusal must be pre-consume.
+    const second = await request(app).get('/public/proposals/one-tap-approve').query({ token });
+    expect(second.status).toBe(403);
+    expect(second.text).not.toContain('already used');
+  });
+
+  it('approves a money proposal via a CONFIRM-flagged token (sanctioned voice-fallback path)', async () => {
+    const { app, proposalRepo, proposal } = await makeAppWithProposal('issue_invoice', {
+      invoiceId: 'inv-4',
+      amountCents: 9900,
+    });
+    const { token } = createOneTapApproveToken({
+      proposalId: proposal.id,
+      tenantId: TENANT,
+      secret: SECRET,
+      confirm: true,
+    });
+
+    const res = await request(app).get('/public/proposals/one-tap-approve').query({ token });
+
+    expect(res.status).toBe(200);
+    expect((await proposalRepo.findById(TENANT, proposal.id))?.status).toBe('approved');
+  });
+});
+
 describe('approve-success HTML escaping', () => {
   it('escapes a <script> tag in proposal summary — no raw HTML in the success page', async () => {
     const proposalRepo = new InMemoryProposalRepository();
