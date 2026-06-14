@@ -3781,6 +3781,7 @@ export function createApp(): express.Express {
           proposalRepo,
           customerRepo,
           settingsRepo,
+          feedbackResponseRepo,
         },
         listTenantIds: async () => {
           if (!pool) return [];
