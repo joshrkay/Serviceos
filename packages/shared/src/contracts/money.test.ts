@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { LineItemCategory } from '../enums.js';
-import { lineItemSchema, documentTotalsSchema, lineItemCategorySchema } from './money.js';
+import { lineItemSchema, documentTotalsSchema, lineItemCategorySchema, formatUsdCents } from './money.js';
 import { resolveDbCheckSet } from './db-check.js';
 
 const schemaSource = readFileSync(
@@ -73,5 +73,24 @@ describe('documentTotalsSchema', () => {
         totalCents: 19575,
       }).success,
     ).toBe(false);
+  });
+});
+
+describe('formatUsdCents', () => {
+  it('formats whole dollars without cents, with thousands separators', () => {
+    expect(formatUsdCents(0)).toBe('$0');
+    expect(formatUsdCents(2500)).toBe('$25');
+    expect(formatUsdCents(250000)).toBe('$2,500');
+    expect(formatUsdCents(123456700)).toBe('$1,234,567');
+  });
+
+  it('formats partial dollars with two-digit cents', () => {
+    expect(formatUsdCents(2550)).toBe('$25.50');
+    expect(formatUsdCents(2505)).toBe('$25.05');
+    expect(formatUsdCents(125050)).toBe('$1,250.50');
+  });
+
+  it('handles negatives without float drift', () => {
+    expect(formatUsdCents(-2550)).toBe('-$25.50');
   });
 });

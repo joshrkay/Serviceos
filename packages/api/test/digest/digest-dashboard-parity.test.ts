@@ -17,6 +17,7 @@ import type { AppointmentRepository } from '../../src/appointments/appointment';
 import type { ProposalRepository } from '../../src/proposals/proposal';
 import type { CustomerRepository } from '../../src/customers/customer';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
+import type { FeedbackResponseRepository } from '../../src/feedback/feedback-response';
 
 const TENANT = 'tenant-parity';
 const TZ = 'America/Los_Angeles';
@@ -109,6 +110,9 @@ function deps(): DigestComputeDeps {
     settingsRepo: {
       findByTenant: async () => ({ timezone: TZ } as TenantSettings),
     } as unknown as SettingsRepository,
+    feedbackResponseRepo: {
+      countByRatingInRange: async () => ({ 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }),
+    } as unknown as FeedbackResponseRepository,
     now: () => NOW,
   };
 }

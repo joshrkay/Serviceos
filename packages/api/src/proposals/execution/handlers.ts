@@ -350,7 +350,18 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
         ? { arrivalWindowStart, arrivalWindowEnd }
         : {}),
       timezone,
-      notes: typeof payload.notes === 'string' ? payload.notes : undefined,
+      // Reason-for-visit persistence: voice proposals carry the spoken work
+      // description in `summary` (the LLM-extracted "one-line description of
+      // the work requested"), while programmatic callers set `notes`. Persist
+      // whichever is present — `notes` wins when both exist — so an inbound
+      // cold-call create_appointment (no jobId → skips the held-slot path that
+      // already maps summary→notes) never drops the caller's reason.
+      notes:
+        typeof payload.notes === 'string'
+          ? payload.notes
+          : typeof payload.summary === 'string'
+            ? payload.summary
+            : undefined,
       createdBy: context.executedBy,
     }, this.appointmentRepo);
 
@@ -793,14 +804,17 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.reviewPrivateMessageSender,
       deps?.auditRepo,
     ),
-    // RV-141 — emergency_dispatch: urgent job + owner SMS page. The
-    // appointment-hold deviation is documented in the handler header.
+    // RV-141 — emergency_dispatch: urgent job + tentative appointment hold on
+    // the soonest feasible slot + owner SMS page. appointmentRepo/assignmentRepo
+    // drive the hold; absent → the handler skips the hold and still pages.
     new EmergencyDispatchExecutionHandler(
       deps?.jobRepo,
       deps?.locationRepo,
       deps?.settingsRepo,
       deps?.emergencySmsSender,
       deps?.auditRepo,
+      deps?.appointmentRepo,
+      deps?.assignmentRepo,
     ),
     // Collections cadence — send_payment_reminder. Comms-class: only runs
     // after owner approval. Sends through the Layer-A transactional-comms
