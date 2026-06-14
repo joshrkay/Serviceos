@@ -29,6 +29,8 @@ export function AgreementCreate({
     new Date().toISOString().slice(0, 10),
   );
   const [endsOn, setEndsOn] = useState('');
+  const [autoRenew, setAutoRenew] = useState(false);
+  const [renewalTermMonths, setRenewalTermMonths] = useState('12');
   const [recurrence, setRecurrence] = useState<RecurrenceBuilderValue>({
     frequency: 'quarterly',
     interval: 1,
@@ -46,6 +48,19 @@ export function AgreementCreate({
       if (!Number.isFinite(priceCents) || priceCents < 0) {
         throw new Error('Price must be a non-negative number');
       }
+      // Mirror the server invariant so the owner gets immediate guidance: a
+      // membership that auto-renews needs a term end to renew from and a
+      // positive renewal length.
+      let renewalTerm: number | undefined;
+      if (autoRenew) {
+        if (!endsOn) {
+          throw new Error('Auto-renew needs an end date to renew from');
+        }
+        renewalTerm = parseInt(renewalTermMonths, 10);
+        if (!Number.isInteger(renewalTerm) || renewalTerm < 1) {
+          throw new Error('Renewal term must be a whole number of months (at least 1)');
+        }
+      }
       const created = await agreementsApi.create(apiFetch, {
         customerId,
         name,
@@ -53,6 +68,8 @@ export function AgreementCreate({
         priceCents,
         startsOn,
         endsOn: endsOn || undefined,
+        autoRenew,
+        renewalTermMonths: renewalTerm,
       });
       onCreated?.(created.id);
     } catch (err) {
@@ -113,7 +130,7 @@ export function AgreementCreate({
         />
       </label>
       <label className="flex flex-col text-sm">
-        Ends on (optional)
+        Ends on {autoRenew ? '(required for auto-renew)' : '(optional)'}
         <input
           type="date"
           aria-label="Ends on"
@@ -122,6 +139,30 @@ export function AgreementCreate({
           onChange={(e) => setEndsOn(e.target.value)}
         />
       </label>
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          aria-label="Auto-renew membership"
+          checked={autoRenew}
+          onChange={(e) => setAutoRenew(e.target.checked)}
+        />
+        Auto-renew this membership when the term ends
+      </label>
+      {autoRenew && (
+        <label className="flex flex-col text-sm">
+          Renewal term (months)
+          <input
+            type="number"
+            min="1"
+            max="120"
+            step="1"
+            aria-label="Renewal term months"
+            className="border rounded px-2 py-1"
+            value={renewalTermMonths}
+            onChange={(e) => setRenewalTermMonths(e.target.value)}
+          />
+        </label>
+      )}
       <button
         type="submit"
         disabled={submitting}

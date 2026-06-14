@@ -130,6 +130,21 @@ export function AgreementDetail({
 
       {error && <div className="text-red-600 text-sm">{error}</div>}
 
+      <section className="text-sm text-gray-700 space-y-1">
+        <p>
+          <span className="font-medium">Term:</span> {data.startsOn}
+          {data.endsOn ? ` → ${data.endsOn}` : ' (no end date)'}
+        </p>
+        <p data-testid="auto-renew-status">
+          <span className="font-medium">Auto-renew:</span>{' '}
+          {data.autoRenew
+            ? `every ${data.renewalTermMonths} months${
+                data.renewalCount ? ` · renewed ${data.renewalCount}×` : ''
+              }`
+            : 'off'}
+        </p>
+      </section>
+
       <section>
         <h2 className="text-lg font-medium mb-2">Recent runs</h2>
         <AgreementRunsList runs={data.recentRuns} />

@@ -26,6 +26,12 @@ export interface Agreement {
   status: AgreementStatus;
   startsOn: string;
   endsOn?: string;
+  /** Membership auto-renew: the term rolls forward instead of lapsing. */
+  autoRenew?: boolean;
+  /** Whole months the term extends by on each renewal. */
+  renewalTermMonths?: number;
+  /** How many times the term has auto-renewed. */
+  renewalCount?: number;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -58,6 +64,9 @@ export interface CreateAgreementBody {
   autoGenerateJob?: boolean;
   startsOn: string;
   endsOn?: string;
+  /** Auto-renew requires endsOn + renewalTermMonths (server-validated). */
+  autoRenew?: boolean;
+  renewalTermMonths?: number;
 }
 
 export type UpdateAgreementBody = Partial<
@@ -70,6 +79,8 @@ export type UpdateAgreementBody = Partial<
     | 'autoGenerateInvoice'
     | 'autoGenerateJob'
     | 'endsOn'
+    | 'autoRenew'
+    | 'renewalTermMonths'
   >
 >;
 
