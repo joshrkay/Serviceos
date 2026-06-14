@@ -125,7 +125,37 @@ bad-day failure modes + the 14 locked product decisions),
 `docs/strategy/roadmap-audit.md` (full mapping of v1 phases to v2 waves
 with cut / defer / pull-forward rationale).
 
-### D-012: [Template — copy for new decisions]
+### D-012: V2 negotiation discount-policy + catalog-grounded floor engine
+**Date:** 2026-06-14
+**Decision:** Build a per-tenant discount-policy + catalog-grounded price-floor
+engine on top of the shipped V1 negotiation guardrail (P2-036). A pure evaluator
+classifies a haggling ask into ALLOW / NEEDS_APPROVAL / CLARIFY /
+REJECT_WITH_COUNTER; even ALLOW is confidence-capped to a human tap (never
+auto-executed). Policy lives on `tenant_settings` (deposit-rules-style columns)
+and defaults **fail-closed** (`maxDiscountBps = 0`) so behavior is identical to
+V1 until a tenant opts in.
+**Rationale:** P2-036 V1 intentionally "blocks discounts entirely" and deferred
+price-floor configuration + negotiation playbooks to V2 (the story's own
+non-goals). This decision explicitly **lifts those V1 non-goals** as a separate,
+reviewable story so the scope change is on the record. Fail-closed defaults make
+the rollout behavior-neutral; the AI-never-concedes invariant holds because ALLOW
+only changes whether an in-policy discount may be *proposed* (one tap, over the
+existing approval transport), never applied silently.
+**Story:** P2-036 V2 —
+`docs/plans/2026-06-14-002-feat-negotiation-discount-policy-engine-plan.md`
+(depends on the V1 closure, `…-001-…`).
+**Alternatives rejected:**
+- Keep V1's "always route to owner callback" (no policy). Rejected: tenants who
+  want bounded self-service get all-or-nothing.
+- Embed discount math in the proposal engine's `decideInitialStatus`. Rejected:
+  couples a domain rule to the universal status gate; the evaluator is a pure
+  module the handlers call.
+- Store policy in the `escalation_settings` JSONB grab-bag or a new table.
+  Rejected: JSONB loses the DB-level money CHECK guards; a table is over-built
+  for 1:1 cardinality. `tenant_settings` columns mirror the deposit-rules
+  precedent.
+
+### D-013: [Template — copy for new decisions]
 **Date:** YYYY-MM-DD
 **Decision:** [What was decided]
 **Rationale:** [Why this choice over alternatives]
