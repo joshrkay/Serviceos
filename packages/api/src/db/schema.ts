@@ -4239,6 +4239,37 @@ export const MIGRATIONS = {
     ALTER TABLE service_agreements
       ADD COLUMN IF NOT EXISTS auto_collect_dues BOOLEAN NOT NULL DEFAULT FALSE;
   `,
+
+  // RV-116 fix — RLS-safe cross-tenant drain for the dropped-call recovery
+  // sweep. `dropped_call_recoveries` is FORCE ROW LEVEL SECURITY, and the
+  // sweep is a SYSTEM process with no tenant in context, so a plain
+  // cross-tenant SELECT under a non-bypassing runtime role returns nothing
+  // (the policy reads current_setting('app.current_tenant_id'), which is
+  // unset). This SECURITY DEFINER function runs as its owner — on
+  // Railway/Supabase a privileged role (superuser / BYPASSRLS), the same
+  // assumption migration 119's view-token lookups rely on — so it can read
+  // due rows across tenants; the per-row tenant_id then drives the
+  // subsequent tenant-scoped send/stamp. Conditional create (not CREATE OR
+  // REPLACE) so we never overwrite a definition that already exists
+  // out-of-band. PROD-PARITY: confirm the deploy/migrate role can bypass RLS.
+  '177_dropped_call_recoveries_due_fn': `
+    DO $do$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'find_due_dropped_call_recoveries') THEN
+        CREATE FUNCTION find_due_dropped_call_recoveries(p_now TIMESTAMPTZ, p_limit INT)
+        RETURNS SETOF dropped_call_recoveries
+        LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+        AS $fn$
+          SELECT *
+            FROM dropped_call_recoveries
+           WHERE sent_at IS NULL
+             AND suppressed_reason IS NULL
+             AND scheduled_for <= p_now
+           ORDER BY scheduled_for ASC
+           LIMIT p_limit
+        $fn$;
+      END IF;
+    END $do$;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

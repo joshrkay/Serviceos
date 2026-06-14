@@ -392,20 +392,18 @@ export class PgDroppedCallRecoveryRepository
   }
 
   async findDue(now: Date, limit: number): Promise<DroppedCallRecoveryRow[]> {
-    // Cross-tenant drain: the worker is a system process, so we read across
-    // tenants via withClient and rely on the per-row tenant_id for the
-    // subsequent tenant-scoped send/stamp. Documented use of withClient.
+    // Cross-tenant drain: the worker is a system process with no tenant in
+    // context. `dropped_call_recoveries` is FORCE ROW LEVEL SECURITY, so a
+    // plain SELECT here under a non-bypassing runtime role would return
+    // nothing. Go through the SECURITY DEFINER `find_due_dropped_call_recoveries`
+    // function (migration 177), which reads across tenants; the per-row
+    // tenant_id then scopes the subsequent send/stamp via withTenant.
     return this.withClient(async (client) => {
       const { rows } = await client.query(
         `SELECT id, tenant_id, voice_session_id, caller_e164,
                 scheduled_for, sent_at, suppressed_reason,
                 sms_message_sid, context, created_at
-           FROM dropped_call_recoveries
-          WHERE sent_at IS NULL
-            AND suppressed_reason IS NULL
-            AND scheduled_for <= $1
-          ORDER BY scheduled_for ASC
-          LIMIT $2`,
+           FROM find_due_dropped_call_recoveries($1, $2)`,
         [now, limit],
       );
       return rows.map(mapRow);
