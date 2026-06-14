@@ -16,6 +16,7 @@
 import {
   formatUsdCents,
   negotiationCallbackPayloadSchema,
+  type DiscountDecision,
   type NegotiationAskType,
   type NegotiationCustomerContext as NegotiationCustomerContextPayload,
 } from '@ai-service-os/shared';
@@ -23,6 +24,13 @@ import {
   formatRecencyLabel,
   type CustomerNegotiationContext,
 } from '../../customers/customer-negotiation-context';
+import { resolveDiscountPolicy, type SettingsRepository } from '../../settings/settings';
+import {
+  type CurrentQuote,
+  type CurrentQuoteResolver,
+} from '../../conversations/negotiation/current-quote-resolver';
+import { parseDiscountTarget } from '../../conversations/negotiation/target-price-parser';
+import { evaluateDiscountAsk } from './discount-evaluator';
 
 // NegotiationAskType is owned by the shared contract (single source of truth);
 // re-exported so the api consumers keep importing it from the guardrail.
@@ -30,6 +38,65 @@ export type { NegotiationAskType };
 
 /** Marker reason stamped on the owner proposal's `_meta` so review surfaces flag it. */
 export const NEGOTIATION_GUARDRAIL_MARKER_REASON = 'negotiation_guardrail';
+
+/**
+ * U5b (P2-036 V2) — shared discount-evaluation step composed by every
+ * negotiation surface (voice-action-router task, inbound-SMS, live-call
+ * voice-turn). It threads the four committed building blocks — settings →
+ * `resolveDiscountPolicy`, the current-quote resolver, the U4 target-price
+ * parser, and the pure U3 `evaluateDiscountAsk` — into one decision.
+ *
+ * FAIL-CLOSED = V1. The function returns `null` (no decision; caller stays on
+ * the V1 owner-callback path) whenever:
+ *   - the tenant has not opted in (`maxDiscountBps === 0`, the unconfigured
+ *     default) — we don't even resolve a quote, so an unconfigured tenant is
+ *     100% byte-identical to V1;
+ *   - no current quote can be resolved (the customer isn't looking at a live
+ *     price to discount against); or
+ *   - anything throws (best-effort: a repo hiccup degrades to V1, never a
+ *     crash on the negotiation path).
+ * A non-null result is purely ADDITIVE behind the policy gate.
+ */
+export interface EvaluateNegotiationDiscountArgs {
+  tenantId: string;
+  customerId: string;
+  /** The customer's verbatim ask, parsed for a concrete number. */
+  askText: string;
+  settingsRepo: Pick<SettingsRepository, 'findByTenant'>;
+  quoteResolver: CurrentQuoteResolver;
+  /** Discount already baked into the quoted price (audit + sanity guard). Default 0. */
+  memberDiscountBps?: number;
+}
+
+export async function evaluateNegotiationDiscount(
+  args: EvaluateNegotiationDiscountArgs,
+): Promise<{ decision: DiscountDecision; quote: CurrentQuote } | null> {
+  try {
+    const settings = await args.settingsRepo.findByTenant(args.tenantId);
+    const policy = resolveDiscountPolicy(settings);
+    // Fail-closed: an unconfigured tenant (maxDiscountBps 0) stays entirely on
+    // the V1 path — no quote resolution, no evaluation, nothing additive.
+    if (policy.maxDiscountBps === 0) return null;
+
+    const quote = await args.quoteResolver.resolve(args.tenantId, args.customerId);
+    if (!quote) return null;
+
+    const parsed = parseDiscountTarget(args.askText);
+    const decision = evaluateDiscountAsk({
+      currentQuotedCents: quote.quotedCents,
+      parsed,
+      policy,
+      catalogGrounded: quote.catalogGrounded,
+      ...(args.memberDiscountBps !== undefined
+        ? { memberDiscountBps: args.memberDiscountBps }
+        : {}),
+    });
+    return { decision, quote };
+  } catch {
+    // Best-effort: any failure degrades to the V1 owner-callback path.
+    return null;
+  }
+}
 
 /**
  * Priority-ordered detectors. Order matters: "refund or I'll leave a 1-star
@@ -209,6 +276,52 @@ export interface BuildNegotiationCallbackInput {
   conversationId?: string;
   /** Resolved customer history (LTV + recency). Null/omitted for an unknown caller. */
   customerContext?: CustomerNegotiationContext | null;
+  /**
+   * U5b (P2-036 V2) — OPTIONAL evaluated discount decision + the quote it was
+   * judged against. When present (a NEEDS_APPROVAL / REJECT_WITH_COUNTER from
+   * `evaluateNegotiationDiscount`) the owner recommendation is enriched with
+   * the concrete figures ("$X vs your $Y quote", "below your floor — counter at
+   * $Z"). When ABSENT the callback is byte-identical to V1. This carries a
+   * RECOMMENDATION only — never a committed discount in the payload.
+   */
+  decision?: DiscountDecision;
+  quote?: CurrentQuote;
+}
+
+/**
+ * U5b — enrichment sentence appended to the owner recommendation when a V2
+ * discount decision is present. Returns '' for ALLOW / CLARIFY (those branches
+ * are handled by their own proposal types upstream, not this owner callback)
+ * and for the no-quote case, so the V1 recommendation is preserved verbatim.
+ * Money strings go through the shared `formatUsdCents`.
+ */
+function discountDecisionFraming(
+  decision: DiscountDecision | undefined,
+  quote: CurrentQuote | undefined,
+): string {
+  if (!decision || !quote) return '';
+  switch (decision.kind) {
+    case 'NEEDS_APPROVAL': {
+      const wants =
+        decision.requestedTargetCents != null
+          ? formatUsdCents(decision.requestedTargetCents)
+          : null;
+      const quoted = formatUsdCents(quote.quotedCents);
+      return wants
+        ? `Customer wants ${wants} vs your ${quoted} quote (estimate ${quote.estimateId}) — exceeds your auto-approve policy, so it needs your sign-off.`
+        : `This ask exceeds your auto-approve policy on your ${quoted} quote (estimate ${quote.estimateId}) — needs your sign-off.`;
+    }
+    case 'REJECT_WITH_COUNTER': {
+      const floor = formatUsdCents(decision.floorCents);
+      const quoted = formatUsdCents(quote.quotedCents);
+      return `Their ask lands below your floor of ${floor} on your ${quoted} quote (estimate ${quote.estimateId}) — don't go there; counter at ${formatUsdCents(decision.counterCents)}.`;
+    }
+    // ALLOW / CLARIFY never reach this owner callback (the caller emits a
+    // confidence-capped callback / a voice_clarification instead). Preserve V1.
+    case 'ALLOW':
+    case 'CLARIFY':
+      return '';
+  }
 }
 
 function capitalize(s: string): string {
@@ -231,11 +344,19 @@ export function buildNegotiationCallbackContent(
         jobsCompletedCount: ctx.jobsCompletedCount,
       }
     : null;
+  // V1 recommendation, optionally enriched with the V2 decision framing. When
+  // no decision is supplied the suffix is '' so the string is byte-identical
+  // to V1. Never a committed discount — recommendation text only.
+  const baseRecommendation = recommendNegotiationResponse(askType, ctx);
+  const decisionFraming = discountDecisionFraming(input.decision, input.quote);
+  const recommendation = decisionFraming
+    ? `${baseRecommendation} ${decisionFraming}`
+    : baseRecommendation;
   const payload: Record<string, unknown> = {
     reason: 'customer_negotiation_followup',
     negotiationAskType: askType ?? 'general',
     askText,
-    recommendation: recommendNegotiationResponse(askType, ctx),
+    recommendation,
     customerContext,
     ...(input.transcript ? { transcript: input.transcript } : {}),
     ...(input.conversationId ? { conversationId: input.conversationId } : {}),
