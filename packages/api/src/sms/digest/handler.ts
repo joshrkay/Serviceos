@@ -1,10 +1,20 @@
 import { InboundSmsContext, HandlerResult } from '../inbound-dispatch';
-import type { DigestEntryRepository } from '../../digest/repository';
 import { UserRepository } from '../../users/user';
 import type { SettingsRepository } from '../../settings/settings';
+import {
+  DigestEntryRepository,
+  handleOwnerReply,
+} from '../../workers/digest-worker';
 
 /**
  * P5-020 — digest acknowledgement via SMS ("LOOKS GOOD").
+ *
+ * This is the SMS transport for the digest owner-reply: it verifies the sender
+ * is the tenant owner, recognizes the ack phrase, then delegates to main's
+ * `handleOwnerReply`, which marks the tenant's digest for its local date
+ * `acked` and records the reply. The tenant timezone is resolved here (from
+ * settings) so the ack lands on the digest the sweep wrote for the tenant's
+ * local date rather than a hardcoded zone.
  */
 export interface DigestAckHandlerDeps {
   userRepo: UserRepository;
@@ -26,23 +36,9 @@ export async function handleDigestAckSms(
     return { handled: false, handler: 'digest-ack', reason: 'unrecognized' };
   }
 
-  // The sweep writes `digest_entries` keyed by the tenant's local date in
-  // their configured timezone (digest/worker.ts). Resolve the SAME timezone
-  // here — a hardcoded zone would look up the wrong date for any tenant
-  // outside it and silently miss the digest it just sent.
   const settings = await deps.settingsRepo.findByTenant(ctx.tenantId);
   const tz = settings?.timezone ?? 'America/New_York';
-  const localDate = new Intl.DateTimeFormat('en-CA', {
-    timeZone: tz,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date());
-
-  const entry = await deps.digestRepo.findByTenantDate(ctx.tenantId, localDate);
-  if (entry) {
-    await deps.digestRepo.markAcked(ctx.tenantId, entry.id);
-  }
+  await handleOwnerReply(ctx.tenantId, ctx.body.trim(), deps.digestRepo, tz);
 
   return { handled: true, handler: 'digest-ack', reason: 'acked' };
 }

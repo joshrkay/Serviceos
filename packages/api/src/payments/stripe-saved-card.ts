@@ -212,7 +212,15 @@ export async function chargeOffSession(
     headers: buildHeaders(config, input.idempotencyKey),
     body: new URLSearchParams(params).toString(),
   });
-  const data = (await res.json().catch(() => ({}))) as StripePaymentIntentResponse;
+  // Read the body once as text, then parse — so a non-JSON error body (gateway
+  // 502, proxy HTML) is preserved for diagnostics instead of collapsing to {}.
+  const rawText = await res.text().catch(() => '');
+  let data: StripePaymentIntentResponse = {};
+  try {
+    if (rawText) data = JSON.parse(rawText) as StripePaymentIntentResponse;
+  } catch {
+    // Non-JSON body — keep rawText for the error message below.
+  }
 
   if (!res.ok) {
     // Card declined or off-session authentication required. Stripe returns the
@@ -222,7 +230,7 @@ export async function chargeOffSession(
       status: err?.payment_intent?.status === 'requires_action' ? 'requires_action' : 'failed',
       paymentIntentId: err?.payment_intent?.id,
       declineCode: err?.decline_code ?? err?.code,
-      errorMessage: err?.message,
+      errorMessage: err?.message ?? (rawText ? `Stripe HTTP ${res.status}: ${rawText.slice(0, 200)}` : undefined),
     };
   }
 

@@ -316,6 +316,7 @@ import { createOneTapApproveRouter } from './routes/one-tap-approve';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
 import { runDailyDigestSweep, DIGEST_SWEEP_INTERVAL_MS } from './workers/daily-digest-worker';
+import { runDigestSweep, PgDigestEntryRepository } from './workers/digest-worker';
 import { PgDailyDigestRepository } from './digest/pg-daily-digest';
 import { InMemoryDailyDigestRepository, type DailyDigestPayload } from './digest/digest-service';
 import { composeBrandVoiceMessage } from './ai/brand-voice/composer';
@@ -497,8 +498,6 @@ import {
 } from './sms/tech-status';
 import { createMmsIngestWorker } from './workers/mms-ingest-worker';
 import { PgUnavailableBlockRepository } from './availability/pg-unavailable-block';
-import { InMemoryDigestEntryRepository, PgDigestEntryRepository } from './digest/repository';
-import { runDigestSweep } from './digest/worker';
 import { handleDigestAckSms } from './sms/digest/handler';
 import {
   DroppedCallScheduler,
@@ -1646,15 +1645,17 @@ export function createApp(): express.Express {
     googleReviews: 590006,
     batchInvoice: 590007,
     callMeBack: 590008,
-    digest: 590009,
-    droppedCall: 590010,
     dailyDigest: 590009,
+    droppedCall: 590010,
     // RV-132 — recording retention purge. 590010 is reserved by a parallel
     // track; this sweep owns 590011.
     recordingRetention: 590011,
     supervisorAnnotate: 590012,
     accountingSync: 590013,
     hfcrWeeklySend: 590014,
+    // P5-020 end-of-day digest sweep — distinct id (merge collided it with
+    // dailyDigest/hfcrWeeklySend; advisory-lock ids must be unique per sweep).
+    digest: 590015,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -1735,16 +1736,20 @@ export function createApp(): express.Express {
     { overwrite: true },
   );
 
-  const digestRepo = pool
-    ? new PgDigestEntryRepository(pool)
-    : new InMemoryDigestEntryRepository();
-  registerKeywordHandler(
-    {
-      keywords: ['looks', 'good', 'looks good'],
-      handle: (ctx) => handleDigestAckSms(ctx, { userRepo, digestRepo, settingsRepo }),
-    },
-    { overwrite: true },
-  );
+  // P5-020 — main's digest entry repo (status / source_data / owner_reply
+  // model), shared by the SMS "LOOKS GOOD" ack handler and the hourly digest
+  // sweep below. Pg-only; the SMS ack and the sweep both no-op without a pool.
+  const digestEntryRepo = pool ? new PgDigestEntryRepository(pool) : null;
+  if (digestEntryRepo) {
+    registerKeywordHandler(
+      {
+        keywords: ['looks', 'good', 'looks good'],
+        handle: (ctx) =>
+          handleDigestAckSms(ctx, { userRepo, digestRepo: digestEntryRepo, settingsRepo }),
+      },
+      { overwrite: true },
+    );
+  }
 
   const techStatusTodayRepo = pool
     ? new PgTechStatusTodayRepository(pool)
@@ -3719,7 +3724,8 @@ export function createApp(): express.Express {
           customerPaymentMethodRepo,
           stripeConfig: { apiKey: process.env.STRIPE_SECRET_KEY },
           invoiceOps: duesInvoiceOps,
-          connectAccountResolver,
+          // No connect resolver: charges target the account stored on the card
+          // (set at save time from the webhook's event.account).
         })
       : undefined;
   registerInterval(setInterval(() => {
@@ -4051,34 +4057,6 @@ export function createApp(): express.Express {
     service: 'estimate-reminder-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  const digestLogger = createLogger({
-    service: 'digest-worker',
-    environment: process.env.NODE_ENV || 'development',
-  });
-  if (oneTapSmsSender) {
-    registerInterval(setInterval(() => {
-      void runAsLeader(SWEEP_LOCK.digest, async () => {
-        await runDigestSweep({
-          settingsRepo,
-          proposalRepo,
-          digestRepo,
-          listTenantIds: async () => {
-            if (!pool) return [];
-            const r = await pool.query('SELECT id FROM tenants');
-            return r.rows.map((row: { id: string }) => row.id);
-          },
-          sendSms: oneTapSmsSender,
-          resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
-          logger: digestLogger,
-        });
-      }).catch((err) => {
-        digestLogger.error('Digest sweep failed', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
-    }, 60 * 60_000));
-  }
-
   if (droppedCallRecoveryRepo && droppedCallHandlerDeps) {
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.droppedCall, async () => {
@@ -4219,6 +4197,41 @@ export function createApp(): express.Express {
       });
     });
   }, 15 * 60_000));
+
+  // P5-020 — end-of-day digest sweep. Runs hourly; tenants in the 6–9pm
+  // local delivery window get their digest built and sent via SMS.
+  // Idempotency: UNIQUE(tenant_id, date) on digest_entries; up to 3 retries.
+  const digestSweepLogger = createLogger({
+    service: 'digest-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  // digestEntryRepo is constructed once near the SMS digest-ack registration.
+  registerInterval(setInterval(() => {
+    if (!digestEntryRepo) return;
+    void runAsLeader(SWEEP_LOCK.digest, async () => {
+      await runDigestSweep({
+        digestEntryRepo,
+        settingsRepo,
+        pool,
+        ...(messageDelivery
+          ? {
+              sendSms: (args: { to: string; body: string }) =>
+                messageDelivery.sendSms({ to: args.to, body: args.body }),
+            }
+          : {}),
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        logger: digestSweepLogger,
+      });
+    }).catch((err) => {
+      digestSweepLogger.error('Digest sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 60 * 60_000));
 
   // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
   // unified TTS provider, and the existing proposal/audit/oncall repos.

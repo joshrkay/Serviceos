@@ -34,21 +34,36 @@ export const PRIORITY_BOOKING_HORIZON_DAYS = 60;
 
 /**
  * Clamp a requested [from, to] booking window (YYYY-MM-DD) to a horizon of
- * `horizonDays` from `now`. Returns the effective window, or null when `from`
- * is already beyond the horizon (nothing is bookable). Calendar-date math in
- * UTC — the horizon is a soft cap, so sub-day timezone drift is irrelevant.
+ * `horizonDays` from today in the tenant timezone. Returns the effective
+ * window, or null when `from` is already beyond the horizon (nothing is
+ * bookable). Computed in the tenant tz so a near-midnight "now" can't shift the
+ * cutoff by a day (an invalid tz falls back to UTC).
  */
 export function clampBookingHorizon(
   from: string,
   to: string,
   horizonDays: number,
   now: Date,
+  timezone: string,
 ): { from: string; to: string } | null {
-  const maxDate = new Date(now.getTime() + horizonDays * 24 * 60 * 60 * 1000)
-    .toISOString()
-    .slice(0, 10);
+  const maxDate = maxBookableYmd(now, horizonDays, timezone);
   if (from > maxDate) return null;
   return { from, to: to > maxDate ? maxDate : to };
+}
+
+/** Latest bookable calendar date (YYYY-MM-DD) = today-in-tz + horizonDays. */
+function maxBookableYmd(now: Date, horizonDays: number, timezone: string): string {
+  const tz = isValidTimezone(timezone) ? timezone : 'UTC';
+  const [y, mo, d] = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  })
+    .format(now)
+    .split('-')
+    .map(Number);
+  return new Date(Date.UTC(y, mo - 1, d + horizonDays)).toISOString().slice(0, 10);
 }
 const HOUR_MS = 60 * 60 * 1000;
 /** Booking cadence — slots are offered on a 30-minute grid from business open. */

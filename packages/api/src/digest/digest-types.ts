@@ -1,5 +1,8 @@
 /**
- * P5-020 — End-of-day digest: shared types.
+ * P5-020 — End-of-day digest: types (api-local copy).
+ *
+ * These mirror packages/shared/src/contracts/digest.ts; kept local to
+ * avoid crossing the packages/api rootDir boundary in tsconfig.build.json.
  */
 export type DigestStatus = 'pending' | 'delivered' | 'failed' | 'acked';
 

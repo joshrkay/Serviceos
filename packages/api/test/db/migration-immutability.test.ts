@@ -211,7 +211,6 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['155_tenant_integrations_google_business', 'd626700ea571d2691927cf6adf43704b3bc44aecde7071f3895c1cf801cf2a7f'],
   ['156_estimate_entity_trgm_index', '5c35bf46e89c5bd9659d8e4dc1c51c8735e5e8c5d956d838ba5f055e64412d39'],
   ['157_proposal_sms_events', '3855ad353820b6b2c1014d7b3f97b913303247436817023f453e773f15917b95'],
-  ['158_digest_entries', '5e3960d01d38b0b5a078f128c0a64d0fea10b66ab83032aa52a442c8caecf581'],
   ['159_invoice_photos_and_client_visible', 'b26ce21cdbf46812a6d961693c0e21f45048c46c61ebf51db20a914533bb579b'],
   ['160_job_checklists', '85e7ebb0f66d2b8356b72241acdc586acb0f3e1dabb1cf5f6a62c6d1888ef8b0'],
   ['169_recording_retention', 'aac50e6e535fc4347f0c9f3dc45f27ac8016902bc0fbbceb2b9ba9cd0d033afa'],
@@ -223,8 +222,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['174_service_agreements_member_discount', '06383ea2c1d89c9e3ac39411a2c2469b4146255d18106f27d949a788dd7e83bf'],
   ['175_service_agreements_priority_booking', '60fee2029f69335f9adafb133c3ae61b71cb11868e523c426fffd43845f6b9da'],
   ['176_customer_payment_methods', '6fe12975c7999002a67de1722a402a6bd017d0e8db4c84fd70d2d85dad439890'],
-  ['177_dropped_call_recoveries_due_fn', '1115a83b60eb95298aa4abc9f05e60db306cbade882dd3c4018c784fa6491b7c'],
-  ['178_force_rls_pr557_tables', '2b3a664ffc00e59e66453567457bab59dbcff46bec6de9fbd7afbfdf34670caf'],
+  ['177_digest_entries', '8ebc2dc5b5c449bf7b94f2c6a11a17af2c91092e0fff24bdf6e824f0f1af21ac'],
+  ['177_customer_payment_methods_stripe_account', '4aac0f8afc6b5e3fb72ec4e866233905e9e7e4ea95699e61705c8da10878ab12'],
+  ['178_dropped_call_recoveries_due_fn', '1115a83b60eb95298aa4abc9f05e60db306cbade882dd3c4018c784fa6491b7c'],
+  ['179_force_rls_pr557_tables', 'ac9d0684f7028fa8abdc3625edfb05b95f25b9eb433742ce0e98f74cdca89f07'],
 ];
 
 function hashMigration(value: string): string {

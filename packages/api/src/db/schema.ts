@@ -3969,25 +3969,6 @@ export const MIGRATIONS = {
   `,
 
   // P5-020 — end-of-day digest entries (one per tenant per local date).
-  '158_digest_entries': `
-    CREATE TABLE IF NOT EXISTS digest_entries (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      tenant_id UUID NOT NULL REFERENCES tenants(id),
-      local_date DATE NOT NULL,
-      rendered_text TEXT NOT NULL,
-      sections JSONB NOT NULL DEFAULT '{}',
-      delivery_status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (delivery_status IN ('pending', 'sent', 'failed', 'acked')),
-      delivery_attempts INT NOT NULL DEFAULT 0,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      UNIQUE (tenant_id, local_date)
-    );
-    ALTER TABLE digest_entries ENABLE ROW LEVEL SECURITY;
-    DROP POLICY IF EXISTS tenant_isolation_digest_entries ON digest_entries;
-    CREATE POLICY tenant_isolation_digest_entries ON digest_entries
-      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
-  `,
-
   // PHOTO-INVOICE + client_visible on job photos for Client Hub.
   '159_invoice_photos_and_client_visible': `
     ALTER TABLE job_photos
@@ -4240,19 +4221,44 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS auto_collect_dues BOOLEAN NOT NULL DEFAULT FALSE;
   `,
 
-  // RV-116 fix — RLS-safe cross-tenant drain for the dropped-call recovery
-  // sweep. `dropped_call_recoveries` is FORCE ROW LEVEL SECURITY, and the
-  // sweep is a SYSTEM process with no tenant in context, so a plain
-  // cross-tenant SELECT under a non-bypassing runtime role returns nothing
-  // (the policy reads current_setting('app.current_tenant_id'), which is
-  // unset). This SECURITY DEFINER function runs as its owner — on
-  // Railway/Supabase a privileged role (superuser / BYPASSRLS), the same
-  // assumption migration 119's view-token lookups rely on — so it can read
-  // due rows across tenants; the per-row tenant_id then drives the
-  // subsequent tenant-scoped send/stamp. Conditional create (not CREATE OR
-  // REPLACE) so we never overwrite a definition that already exists
-  // out-of-band. PROD-PARITY: confirm the deploy/migrate role can bypass RLS.
-  '177_dropped_call_recoveries_due_fn': `
+  // P5-020 — end-of-day digest entries (main's #566 model: status / source_data
+  // / owner_reply). #557's earlier 158_digest_entries (local_date / sections /
+  // delivery_status) was dropped in the main merge; the branch adopts this shape.
+  '177_digest_entries': `
+    CREATE TABLE IF NOT EXISTS digest_entries (
+      id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id     UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      date          DATE NOT NULL,
+      status        TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending','delivered','failed','acked')),
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      rendered_text TEXT NOT NULL,
+      source_data   JSONB NOT NULL DEFAULT '{}',
+      delivered_at  TIMESTAMPTZ,
+      owner_reply   TEXT,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, date)
+    );
+    ALTER TABLE digest_entries ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE digest_entries FORCE ROW LEVEL SECURITY;
+    CREATE POLICY digest_entries_tenant_isolation ON digest_entries
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // Membership engine (#6 phase 4 review) — pin a saved card to the Stripe
+  // account it was created on. Nullable, additive.
+  '177_customer_payment_methods_stripe_account': `
+    ALTER TABLE customer_payment_methods
+      ADD COLUMN IF NOT EXISTS stripe_account_id TEXT;
+  `,
+
+  // RV-116 fix — RLS-safe cross-tenant drain for the dropped-call recovery sweep
+  // (FORCE RLS table, system process with no tenant in context). SECURITY DEFINER
+  // fn runs as its privileged owner so it reads due rows across tenants; the
+  // per-row tenant_id then scopes the send/stamp. Same pattern as migration 119's
+  // view-token lookups. PROD-PARITY: confirm the deploy/migrate role bypasses RLS.
+  '178_dropped_call_recoveries_due_fn': `
     DO $do$ BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'find_due_dropped_call_recoveries') THEN
         CREATE FUNCTION find_due_dropped_call_recoveries(p_now TIMESTAMPTZ, p_limit INT)
@@ -4271,16 +4277,11 @@ export const MIGRATIONS = {
     END $do$;
   `,
 
-  // Several PR #557 tables shipped with ENABLE ROW LEVEL SECURITY + a
-  // tenant_isolation policy but WITHOUT FORCE — so the table owner (and any
-  // BYPASSRLS-adjacent role) would skip the policy, weakening the tenant
-  // backstop the schema invariant (test/db/schema.test.ts) requires. Force it
-  // on all of them. Idempotent; additive (the original migration blocks are
-  // immutable once shipped, so this lands as a follow-up rather than an edit).
-  '178_force_rls_pr557_tables': `
+  // FORCE RLS on the remaining PR #557 tables that shipped ENABLE + policy but
+  // no FORCE (digest_entries is handled by 177_digest_entries above).
+  '179_force_rls_pr557_tables': `
     ALTER TABLE proposal_sms_events FORCE ROW LEVEL SECURITY;
     ALTER TABLE proposal_sms_edit_sessions FORCE ROW LEVEL SECURITY;
-    ALTER TABLE digest_entries FORCE ROW LEVEL SECURITY;
     ALTER TABLE invoice_photos FORCE ROW LEVEL SECURITY;
     ALTER TABLE job_checklists FORCE ROW LEVEL SECURITY;
   `,
