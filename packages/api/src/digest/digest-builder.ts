@@ -7,7 +7,6 @@
  * the caller provides them pre-computed via luxon.
  */
 import type { Pool } from 'pg';
-import type { Pool } from 'pg';
 import { setTenantContext } from '../db/schema';
 import type { DigestSection, DigestSourceData } from './digest-types';
 
