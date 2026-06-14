@@ -106,7 +106,9 @@ export interface LLMGatewayLogger {
 /** Sentinel tenant ID used when a request carries no tenantId. */
 export const SYSTEM_TENANT_ID = 'system';
 
-const DATA_URL_IMAGE_RE = /^data:image\/[a-zA-Z0-9.+-]+;base64,/;
+// Accepts an image data URL with optional RFC-2397 params before ;base64,
+// e.g. "data:image/png;base64," and "data:image/png;name=x.png;base64,".
+const DATA_URL_IMAGE_RE = /^data:image\/[a-zA-Z0-9.+-]+(?:;[a-zA-Z0-9.+=-]+)*;base64,/i;
 
 /** True for an http(s) URL or a base64 image data URL. */
 function isValidImageUrl(url: unknown): boolean {
@@ -122,7 +124,13 @@ function validateContentParts(message: LLMMessage, index: number): string[] {
     errors.push(`messages[${index}].parts must be a non-empty array when present`);
     return errors;
   }
-  parts.forEach((part, p) => {
+  parts.forEach((rawPart, p) => {
+    const u: unknown = rawPart;
+    if (u === null || typeof u !== 'object') {
+      errors.push(`messages[${index}].parts[${p}]: must be a content part object`);
+      return;
+    }
+    const part = u as { type?: unknown; text?: unknown; url?: unknown };
     if (part.type === 'text') {
       if (typeof part.text !== 'string' || part.text.length === 0) {
         errors.push(`messages[${index}].parts[${p}]: text part requires non-empty text`);
@@ -138,9 +146,7 @@ function validateContentParts(message: LLMMessage, index: number): string[] {
       }
       return;
     }
-    errors.push(
-      `messages[${index}].parts[${p}]: unknown content part type "${String((part as { type?: unknown }).type)}"`,
-    );
+    errors.push(`messages[${index}].parts[${p}]: unknown content part type "${String(part.type)}"`);
   });
   return errors;
 }
@@ -182,16 +188,22 @@ export interface RedactedImagePart {
 function parseDataUrl(url: string): { mimeType?: string; bytes: number; sha256: string } | null {
   const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(url);
   if (!match) return null;
-  const isBase64 = Boolean(match[2]);
-  const data = match[3] ?? '';
-  const buf = isBase64
-    ? Buffer.from(data, 'base64')
-    : Buffer.from(decodeURIComponent(data), 'utf8');
-  return {
-    mimeType: match[1] || undefined,
-    bytes: buf.length,
-    sha256: createHash('sha256').update(buf).digest('hex'),
-  };
+  try {
+    const isBase64 = Boolean(match[2]);
+    const data = match[3] ?? '';
+    // decodeURIComponent can throw URIError on malformed percent-encoding;
+    // a null return makes redactImagePart fall back to hashing the raw URL.
+    const buf = isBase64
+      ? Buffer.from(data, 'base64')
+      : Buffer.from(decodeURIComponent(data), 'utf8');
+    return {
+      mimeType: match[1] || undefined,
+      bytes: buf.length,
+      sha256: createHash('sha256').update(buf).digest('hex'),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function redactImagePart(part: { url: string; mimeType?: string }): RedactedImagePart {
@@ -234,9 +246,15 @@ export function redactMessagesForSnapshot(messages: LLMMessage[]): Array<Record<
   });
 }
 
-/** True when any message carries an image content part. */
+/**
+ * True when any message carries an image content part. Tolerant of malformed
+ * input (non-array `parts`, null elements) so it can run on unvalidated
+ * requests — e.g. the cache wrapper checks it before validateLLMRequest.
+ */
 export function messagesContainImage(messages: LLMMessage[]): boolean {
-  return messages.some((m) => m.parts?.some((p) => p.type === 'image') ?? false);
+  return messages.some(
+    (m) => Array.isArray(m.parts) && m.parts.some((p) => (p as { type?: unknown })?.type === 'image'),
+  );
 }
 
 export class LLMGateway {

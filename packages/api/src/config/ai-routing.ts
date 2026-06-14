@@ -69,11 +69,18 @@ function visionCapableModelSet(): string[] {
 }
 
 /**
- * Whether the resolved model can accept image inputs. Matches by exact id or
- * by namespaced suffix so "openai/gpt-4o" resolves true against "gpt-4o".
+ * Whether the resolved model can accept image inputs. Compares on the last
+ * path segment so a provider namespace is ignored ("openai/gpt-4o" → "gpt-4o"),
+ * and treats a dated/versioned snapshot as the base family
+ * ("gpt-4o-2024-08-06", "gpt-4o-mini-2024-07-18" → capable). Matching a base
+ * family (e.g. "gpt-4o") therefore also covers its dated variants.
  */
 export function isVisionCapableModel(model: string): boolean {
   if (!model) return false;
-  const m = model.toLowerCase();
-  return visionCapableModelSet().some((cap) => m === cap || m.endsWith(`/${cap}`));
+  const lastSegment = (id: string): string => id.toLowerCase().split('/').pop() ?? '';
+  const m = lastSegment(model);
+  return visionCapableModelSet().some((cap) => {
+    const c = lastSegment(cap);
+    return m === c || m.startsWith(`${c}-`);
+  });
 }

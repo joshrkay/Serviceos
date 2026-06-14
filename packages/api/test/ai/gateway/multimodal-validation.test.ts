@@ -5,11 +5,16 @@
  * user messages with a valid http(s) or data:image base64 URL.
  */
 import { describe, it, expect } from 'vitest';
-import { validateLLMRequest } from '../../../src/ai/gateway/gateway';
+import { validateLLMRequest, messagesContainImage } from '../../../src/ai/gateway/gateway';
 import type { LLMRequest, LLMMessage } from '../../../src/ai/gateway/gateway';
 
 function req(messages: LLMMessage[]): LLMRequest {
   return { taskType: 'draft_estimate', messages };
+}
+
+// Build a structurally-invalid message to exercise untrusted-input handling.
+function badMsg(parts: unknown): LLMMessage {
+  return { role: 'user', content: 'x', parts } as unknown as LLMMessage;
 }
 
 describe('validateLLMRequest — multimodal parts', () => {
@@ -91,5 +96,42 @@ describe('validateLLMRequest — multimodal parts', () => {
       ]),
     );
     expect(errors.some((e) => e.includes('unknown content part type'))).toBe(true);
+  });
+
+  it('accepts a data: URL that carries params before ;base64', () => {
+    const errors = validateLLMRequest(
+      req([
+        {
+          role: 'user',
+          content: 'c',
+          parts: [{ type: 'image', url: 'data:image/png;name=photo.png;base64,iVBORw0KGgo=' }],
+        },
+      ]),
+    );
+    expect(errors).toEqual([]);
+  });
+
+  it('returns validation errors (never throws) on malformed parts', () => {
+    const nonArray = validateLLMRequest(req([badMsg({})]));
+    expect(nonArray.some((e) => e.includes('non-empty array'))).toBe(true);
+
+    const nullElement = validateLLMRequest(req([badMsg([null])]));
+    expect(nullElement.some((e) => e.includes('must be a content part object'))).toBe(true);
+  });
+});
+
+describe('messagesContainImage — robustness', () => {
+  it('is false (never throws) for malformed or absent parts', () => {
+    expect(messagesContainImage([badMsg({})])).toBe(false);
+    expect(messagesContainImage([badMsg([null])])).toBe(false);
+    expect(messagesContainImage([{ role: 'user', content: 'x' }])).toBe(false);
+  });
+
+  it('is true when an image part is present', () => {
+    expect(
+      messagesContainImage([
+        { role: 'user', content: 'x', parts: [{ type: 'image', url: 'https://x/y.jpg' }] },
+      ]),
+    ).toBe(true);
   });
 });
