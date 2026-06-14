@@ -30,6 +30,7 @@ export type IntentType =
   | 'send_invoice'
   | 'send_estimate'
   | 'send_estimate_nudge'
+  | 'send_payment_reminder'
   | 'record_payment'
   | 'emergency_dispatch'
   // Phase: full-app voice coverage. update_customer / log_expense reuse
@@ -134,6 +135,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'send_invoice',
   'send_estimate',
   'send_estimate_nudge',
+  'send_payment_reminder',
   'record_payment',
   'emergency_dispatch',
   'update_customer',
@@ -570,6 +572,14 @@ Supported intents (return exactly ONE):
                            Examples: "Nudge the Khan estimate again"
                                      "Follow up on the Jones quote"
                                      "Remind Sarah about her estimate"
+- "send_payment_reminder" — user wants to send an overdue-payment REMINDER to a
+                           customer about an unpaid/overdue invoice (on demand,
+                           separate from the automatic dunning cadence).
+                           Customer comms — never auto-execute. Extract the
+                           invoice reference.
+                           Examples: "Send a payment reminder on the Smith invoice"
+                                     "Remind the Jones customer their invoice is overdue"
+                                     "Chase the unpaid Acme invoice"
 - "record_payment"      — user wants to log a PAYMENT received against an
                            invoice. This is money-moving — never
                            auto-execute, always require a screen-tap

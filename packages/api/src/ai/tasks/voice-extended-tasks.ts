@@ -479,6 +479,36 @@ export class SendEstimateNudgeTaskHandler implements TaskHandler {
   }
 }
 
+// ───────────── send_payment_reminder ─────────────
+//
+// Comms class — never auto-approves. An ad-hoc voice reminder ("chase the
+// Smith invoice") delivers the same overdue notice the dunning sweep sends,
+// but on demand. The execution handler only acts on invoiceId; the cadence
+// fields (stepKey / offsetDays / channel) are audit-only metadata, so we stamp
+// manual defaults and flag invoiceId missing for the review UI to resolve.
+export class SendPaymentReminderTaskHandler implements TaskHandler {
+  readonly taskType = 'send_payment_reminder' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {
+      stepKey: 'manual',
+      offsetDays: 0,
+      channel: ee.sendChannel ?? 'sms',
+    };
+    const missing: string[] = [];
+
+    if (ee.jobReference) payload.invoiceReference = ee.jobReference;
+    else if (ee.customerName) payload.invoiceReference = ee.customerName;
+    else missing.push('invoiceId');
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
 // ───────────── record_payment ─────────────
 //
 // Money class — never auto-approves under any confidence.
