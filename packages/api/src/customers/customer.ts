@@ -56,12 +56,20 @@ export interface Customer {
    */
   dateOfBirth?: Date;
   /**
-   * P8-016 — account classification (additive, migration 113). 'b2b' marks a
-   * business account (e.g. a property manager reporting on residents); the
-   * property-type vulnerability detector only fires for 'b2b' accounts AND
+   * P8-016 — account classification (additive, migration 113; extended in
+   * migration 178 with 'property_manager'). 'b2b' / 'property_manager' mark
+   * business accounts (e.g. a property manager reporting on residents); the
+   * property-type vulnerability detector fires for these accounts AND
    * explicit currently-occupied intent. Optional — unset means unclassified.
    */
-  accountType?: 'residential' | 'b2b';
+  accountType?: 'residential' | 'b2b' | 'property_manager';
+  /**
+   * B2B sub-account hierarchy (migration 178). When set, this customer is a
+   * sub-account (e.g. a managed property) of the referenced parent customer
+   * (e.g. the property-management company). Self-references and cycles are
+   * rejected at the repository write boundary.
+   */
+  parentAccountId?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;

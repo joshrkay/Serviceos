@@ -4467,6 +4467,18 @@ export const MIGRATIONS = {
     ALTER TABLE customer_payment_methods
       ADD COLUMN IF NOT EXISTS stripe_account_id TEXT;
   `,
+  // B2B account hierarchy (R2): add 'property_manager' to the account_type
+  // CHECK (re-adds the same-named constraint; getMigrationSQL auto-prepends
+  // DROP CONSTRAINT IF EXISTS so the old inline check from migration 113 is
+  // replaced) and a self-referential parent_account_id for sub-accounts.
+  '178_customer_b2b_hierarchy': `
+    ALTER TABLE customers
+      ADD CONSTRAINT customers_account_type_check
+      CHECK (account_type IS NULL OR account_type IN ('residential', 'b2b', 'property_manager'));
+    ALTER TABLE customers ADD COLUMN IF NOT EXISTS parent_account_id UUID REFERENCES customers(id);
+    CREATE INDEX IF NOT EXISTS idx_customers_parent_account
+      ON customers(tenant_id, parent_account_id) WHERE parent_account_id IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

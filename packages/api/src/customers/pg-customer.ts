@@ -9,6 +9,7 @@ import {
   MAX_LIST_LIMIT,
 } from './customer';
 import { normalizeEmail, normalizePhone } from './dedup';
+import { ValidationError } from '../shared/errors';
 
 function mapRow(row: Record<string, unknown>): Customer {
   return {
@@ -32,7 +33,10 @@ function mapRow(row: Record<string, unknown>): Customer {
     // P8-016 — additive vulnerability fields (migration 113).
     dateOfBirth: row.date_of_birth ? new Date(row.date_of_birth as string) : undefined,
     accountType:
-      (row.account_type as 'residential' | 'b2b' | null | undefined) ?? undefined,
+      (row.account_type as 'residential' | 'b2b' | 'property_manager' | null | undefined) ??
+      undefined,
+    // B2B sub-account hierarchy (migration 178).
+    parentAccountId: (row.parent_account_id as string) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -44,17 +48,66 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
     super(pool);
   }
 
+  /**
+   * Reject a parentAccountId that would create an invalid B2B hierarchy:
+   * a self-reference, a dangling parent, or a cycle (A→B→A). Walks up from
+   * the proposed parent; if the walk reaches `customerId`, the link cycles.
+   * Bounded by the existing chain depth. (Migration 178.)
+   */
+  private async assertNoParentCycle(
+    client: PoolClient,
+    tenantId: string,
+    customerId: string,
+    parentAccountId: string,
+  ): Promise<void> {
+    if (parentAccountId === customerId) {
+      throw new ValidationError('A customer cannot be its own parent account');
+    }
+    const seen = new Set<string>([customerId]);
+    let cursor: string | null = parentAccountId;
+    while (cursor) {
+      // Narrow to a plain string for the query input so the loop variable
+      // (which is reassigned from the result below) never feeds the query's
+      // own type inference — avoids a circular-initializer error.
+      const currentId: string = cursor;
+      if (seen.has(currentId)) {
+        throw new ValidationError('parentAccountId would create an account hierarchy cycle');
+      }
+      seen.add(currentId);
+      const result = await client.query(
+        'SELECT parent_account_id FROM customers WHERE tenant_id = $1 AND id = $2',
+        [tenantId, currentId],
+      );
+      const rows = result.rows as Array<{ parent_account_id: string | null }>;
+      if (rows.length === 0) {
+        if (currentId === parentAccountId) {
+          throw new ValidationError('parentAccountId references a customer that does not exist');
+        }
+        return;
+      }
+      cursor = rows[0].parent_account_id ?? null;
+    }
+  }
+
   async create(customer: Customer): Promise<Customer> {
     return this.withTenant(customer.tenantId, async (client) => {
+      if (customer.parentAccountId) {
+        await this.assertNoParentCycle(
+          client,
+          customer.tenantId,
+          customer.id,
+          customer.parentAccountId,
+        );
+      }
       const result = await client.query(
         `INSERT INTO customers (
           id, tenant_id, first_name, last_name, display_name, company_name,
           primary_phone, secondary_phone, email, preferred_channel, sms_consent,
           communication_notes, is_archived, archived_at, originating_lead_id,
-          date_of_birth, account_type, preferred_language,
+          date_of_birth, account_type, parent_account_id, preferred_language,
           created_by, created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                  $15, $16, $17, $18, $19, $20, $21)
+                  $15, $16, $17, $18, $19, $20, $21, $22)
         RETURNING *`,
         [
           customer.id,
@@ -74,6 +127,7 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
           customer.originatingLeadId ?? null,
           customer.dateOfBirth ?? null,
           customer.accountType ?? null,
+          customer.parentAccountId ?? null,
           customer.preferredLanguage ?? null,
           customer.createdBy,
           customer.createdAt,
@@ -169,6 +223,9 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
 
   async update(tenantId: string, id: string, updates: Partial<Customer>): Promise<Customer | null> {
     return this.withTenant(tenantId, async (client) => {
+      if (typeof updates.parentAccountId === 'string') {
+        await this.assertNoParentCycle(client, tenantId, id, updates.parentAccountId);
+      }
       const fieldMap: Record<string, string> = {
         firstName: 'first_name',
         lastName: 'last_name',
@@ -186,6 +243,7 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
         preferredLanguage: 'preferred_language',
         dateOfBirth: 'date_of_birth',
         accountType: 'account_type',
+        parentAccountId: 'parent_account_id',
         updatedAt: 'updated_at',
       };
 
