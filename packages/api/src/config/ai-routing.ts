@@ -45,3 +45,35 @@ export const DEFAULT_AI_ROUTING_CONFIG: AIRoutingConfig = {
     'multi_entity_proposal': 'complex',
   },
 };
+
+/**
+ * Models known to accept image content parts. Env-overridable so ops can
+ * update the set without a deploy: AI_VISION_CAPABLE_MODELS is a
+ * comma-separated list merged with these defaults. Matching is
+ * case-insensitive and also matches a provider-namespaced id (e.g.
+ * "openai/gpt-4o" or "openrouter/openai/gpt-4o" → "gpt-4o").
+ */
+const DEFAULT_VISION_CAPABLE_MODELS: readonly string[] = [
+  'claude-sonnet-4-6',
+  'claude-haiku-4-5-20251001',
+  'gpt-4o',
+  'gpt-4o-mini',
+];
+
+function visionCapableModelSet(): string[] {
+  const fromEnv = (process.env.AI_VISION_CAPABLE_MODELS ?? '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return [...DEFAULT_VISION_CAPABLE_MODELS.map((m) => m.toLowerCase()), ...fromEnv];
+}
+
+/**
+ * Whether the resolved model can accept image inputs. Matches by exact id or
+ * by namespaced suffix so "openai/gpt-4o" resolves true against "gpt-4o".
+ */
+export function isVisionCapableModel(model: string): boolean {
+  if (!model) return false;
+  const m = model.toLowerCase();
+  return visionCapableModelSet().some((cap) => m === cap || m.endsWith(`/${cap}`));
+}

@@ -12,7 +12,7 @@ import {
   failAiRun,
   AiRun,
 } from '../ai-run';
-import { AIRoutingConfig } from '../../config/ai-routing';
+import { AIRoutingConfig, isVisionCapableModel } from '../../config/ai-routing';
 import {
   resolveRouting,
   shouldWarnForUnmappedTaskType,
@@ -234,6 +234,11 @@ export function redactMessagesForSnapshot(messages: LLMMessage[]): Array<Record<
   });
 }
 
+/** True when any message carries an image content part. */
+export function messagesContainImage(messages: LLMMessage[]): boolean {
+  return messages.some((m) => m.parts?.some((p) => p.type === 'image') ?? false);
+}
+
 export class LLMGateway {
   private readonly config: LLMGatewayConfig;
   private readonly providers: Map<string, LLMProvider>;
@@ -279,6 +284,16 @@ export class LLMGateway {
       maxTokens: routingDecision.maxTokens,
       temperature: routingDecision.temperature,
     };
+
+    // Fail fast: an image-bearing request must resolve to a vision-capable
+    // model. Throwing here (before the ai_run row and provider dispatch)
+    // avoids an opaque provider 400 and leaves no orphaned state.
+    if (messagesContainImage(request.messages) && !isVisionCapableModel(resolvedModel)) {
+      throw new ValidationError(
+        'LLM request includes image content but the resolved model is not vision-capable',
+        { taskType: request.taskType, resolvedModel },
+      );
+    }
 
     // Warn once per process when taskType is not in the active tier mapping
     if (routingDecision.wasUnmapped && shouldWarnForUnmappedTaskType(request.taskType)) {

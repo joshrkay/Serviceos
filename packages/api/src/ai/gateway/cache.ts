@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import type { LLMRequest, LLMResponse, LLMGateway } from './gateway';
-import { redactMessagesForSnapshot } from './gateway';
+import { redactMessagesForSnapshot, messagesContainImage } from './gateway';
 import type { AiRunRepository } from '../ai-run';
 import { createAiRun } from '../ai-run';
 import {
@@ -88,6 +88,9 @@ export class CachingGatewayWrapper {
 
   async complete(request: LLMRequest): Promise<LLMResponse> {
     const isDeterministic = this.config.enabled &&
+      // Image-bearing requests are never deterministic-cacheable: the inputs
+      // aren't reusable and their keys would bloat the store.
+      !messagesContainImage(request.messages) &&
       this.config.deterministicTaskTypes.includes(request.taskType);
 
     if (!isDeterministic) {
