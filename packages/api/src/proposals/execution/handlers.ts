@@ -170,6 +170,9 @@ export class CreateJobExecutionHandler implements ExecutionHandler {
   constructor(
     private readonly jobRepo?: JobRepository,
     private readonly locationRepo?: LocationRepository,
+    // Without this the executed job persists but emits no job.created
+    // audit event. createJob already forwards it to the audit repo.
+    private readonly auditRepo?: AuditRepository,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -234,6 +237,7 @@ export class CreateJobExecutionHandler implements ExecutionHandler {
           createdBy: context.executedBy,
         },
         this.jobRepo,
+        this.auditRepo,
       );
       return { success: true, resultEntityId: job.id };
     } catch (err) {
@@ -723,11 +727,11 @@ export function createExecutionHandlerRegistry(deps?: {
   const handlers: ExecutionHandler[] = [
     new CreateCustomerVoiceExecutionHandler(deps?.customerRepo, deps?.auditRepo),
     new UpdateCustomerExecutionHandler(deps?.customerRepo),
-    new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo),
+    new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo, deps?.auditRepo),
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier, deps?.auditRepo, deps?.jobRepo),
     new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
     new DraftEstimateExecutionHandler(deps?.estimateRepo, deps?.settingsRepo),
-    new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
+    new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo, deps?.auditRepo),
     new CreateInvoiceScheduleExecutionHandler(deps?.scheduleRepo, deps?.invoiceRepo, deps?.settingsRepo, deps?.estimateRepo),
     new BatchInvoiceExecutionHandler(deps?.proposalRepo),
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps, deps?.auditRepo),

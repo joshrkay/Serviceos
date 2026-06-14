@@ -8,6 +8,7 @@ import {
 } from '../../invoices/invoice';
 import { LineItem } from '../../shared/billing-engine';
 import { SettingsRepository } from '../../settings/settings';
+import { AuditRepository } from '../../audit/audit';
 
 /**
  * P5-005 — Deterministic execution for draft_invoice proposals.
@@ -25,7 +26,11 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
 
   constructor(
     private readonly invoiceRepo?: InvoiceRepository,
-    private readonly settingsRepo?: SettingsRepository
+    private readonly settingsRepo?: SettingsRepository,
+    // Without this the executed invoice persists but emits no
+    // invoice.created audit event (the "every mutation emits audit"
+    // invariant). The domain function already forwards it.
+    private readonly auditRepo?: AuditRepository
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -70,7 +75,8 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
       const invoice = await createInvoiceWithNextNumber(
         input,
         this.invoiceRepo,
-        this.settingsRepo
+        this.settingsRepo,
+        this.auditRepo
       );
       return { success: true, resultEntityId: invoice.id };
     } catch (err) {
