@@ -27,7 +27,19 @@ export interface PaymentReceiptNotifier {
   ): Promise<void>;
 }
 
-export type PaymentStatus = 'pending' | 'completed' | 'failed' | 'refunded';
+/**
+ * U5 (ACH async lifecycle) — `'processing'` is a durable IN-FLIGHT state for
+ * bank-debit (ACH / us_bank_account) payments. Stripe fires
+ * `payment_intent.processing` when the debit is initiated but funds have not
+ * yet cleared (settlement takes days). We record the payment as 'processing'
+ * and credit the invoice balance as in-flight so the owner / AR / digest see
+ * the money is on its way; `payment_intent.succeeded` later flips it
+ * 'processing' -> 'completed' (no second credit), and an ACH return /
+ * `payment_intent.payment_failed` reverses the in-flight credit and reopens
+ * the invoice. A 'processing' row is excluded from gross-revenue math (which
+ * filters `status === 'completed'`) — it is visible-but-not-yet-earned.
+ */
+export type PaymentStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'refunded';
 export type PaymentMethod = 'cash' | 'check' | 'credit_card' | 'bank_transfer' | 'other';
 
 export interface Payment {
@@ -177,6 +189,38 @@ export interface PaymentRepository {
    * invoice-balance decrement.
    */
   reversePaymentAtomic(
+    tenantId: string,
+    id: string,
+    opts: ReversePaymentOptions,
+  ): Promise<Payment | null>;
+  /**
+   * U5 (ACH async lifecycle) — atomically flip an IN-FLIGHT payment
+   * 'processing' -> 'completed' when the bank debit settles
+   * (`payment_intent.succeeded`). Guarded on `status = 'processing'` so a
+   * duplicate `succeeded` delivery (or a `succeeded` that races the
+   * already-completed card path) is a clean no-op. The invoice balance is
+   * NOT touched here — it was already credited in-flight at
+   * `payment_intent.processing`. Returns the updated payment, or `null`
+   * when the row does not exist OR is not in 'processing' status.
+   */
+  settleProcessingPaymentAtomic(
+    tenantId: string,
+    id: string,
+  ): Promise<Payment | null>;
+  /**
+   * U5 (ACH async lifecycle) — atomically flip an IN-FLIGHT payment
+   * 'processing' -> 'failed', stamping `reversedAt`/`reversalReason`, when
+   * the bank debit is RETURNED before it ever settled
+   * (`payment_intent.payment_failed` on an ACH that was still processing).
+   * Guarded on `status = 'processing' AND reversed_at IS NULL` so a
+   * duplicate delivery is a no-op. The caller (`reversePayment`) then backs
+   * out the in-flight invoice credit. Distinct from `reversePaymentAtomic`,
+   * which only reverses an already-SETTLED ('completed') payment (NSF after
+   * settlement); keeping them separate preserves that path's `completed`
+   * guard. Returns the updated payment, or `null` when the row does not
+   * exist OR is not in 'processing' status.
+   */
+  reverseInFlightPaymentAtomic(
     tenantId: string,
     id: string,
     opts: ReversePaymentOptions,
@@ -443,6 +487,51 @@ export class InMemoryPaymentRepository implements PaymentRepository {
     // `!= null` (loose) treats both null and a legacy `undefined` as
     // "not yet reversed"; a Date blocks the second reversal.
     if (p.status !== 'completed' || p.reversedAt != null) return null;
+    const updated: Payment = {
+      ...p,
+      status: 'failed',
+      reversedAt: opts.reversedAt,
+      reversalReason: opts.reason,
+      updatedAt: new Date(),
+    };
+    this.payments.set(id, updated);
+    return { ...updated };
+  }
+
+  /**
+   * U5 — mirror of the pg compare-and-swap settle. Yields once so two
+   * concurrent `succeeded` deliveries interleave. The guard — only flip
+   * when `status === 'processing'` — makes a second call (or a race with
+   * the already-completed card path) a no-op.
+   */
+  async settleProcessingPaymentAtomic(
+    tenantId: string,
+    id: string,
+  ): Promise<Payment | null> {
+    await Promise.resolve();
+    const p = this.payments.get(id);
+    if (!p || p.tenantId !== tenantId) return null;
+    if (p.status !== 'processing') return null;
+    const updated: Payment = { ...p, status: 'completed', updatedAt: new Date() };
+    this.payments.set(id, updated);
+    return { ...updated };
+  }
+
+  /**
+   * U5 — mirror of the pg compare-and-swap in-flight reversal. Yields once
+   * so two concurrent deliveries interleave. The guard — only flip when
+   * `status === 'processing'` and not yet reversed — makes a duplicate
+   * ACH-return delivery a no-op.
+   */
+  async reverseInFlightPaymentAtomic(
+    tenantId: string,
+    id: string,
+    opts: ReversePaymentOptions,
+  ): Promise<Payment | null> {
+    await Promise.resolve();
+    const p = this.payments.get(id);
+    if (!p || p.tenantId !== tenantId) return null;
+    if (p.status !== 'processing' || p.reversedAt != null) return null;
     const updated: Payment = {
       ...p,
       status: 'failed',

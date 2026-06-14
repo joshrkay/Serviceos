@@ -18,29 +18,48 @@ import {
   shouldWarnForUnmappedTaskType,
 } from './router';
 
-/** Image fidelity hint passed to vision models (OpenAI "detail" semantics). */
+/** Image detail hint passed through to vision-capable providers. */
 export type LLMImageDetail = 'low' | 'high' | 'auto';
 
+/** A text part of a multimodal message. */
+export interface LLMTextPart {
+  type: 'text';
+  text: string;
+}
+
 /**
- * A single piece of multimodal message content. Text parts carry inline
- * text; image parts carry an image URL (an `https://…` link or a
- * `data:image/…;base64,…` data URL). This is the gateway's provider-neutral
- * shape; the OpenAI-compatible adapter maps `image` → `image_url`.
+ * An image part of a multimodal message. `url` may be an https URL or a
+ * `data:image/...;base64,` URI. Image URLs/bytes are redacted from ai_run
+ * snapshots (see `redactMessagesForSnapshot`) to avoid PII at rest.
  */
-export type LLMContentPart =
-  | { type: 'text'; text: string }
-  | { type: 'image'; url: string; detail?: LLMImageDetail; mimeType?: string };
+export interface LLMImagePart {
+  type: 'image';
+  url: string;
+  detail?: LLMImageDetail;
+}
+
+export type LLMContentPart = LLMTextPart | LLMImagePart;
 
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant';
+  /** Plain text content. */
   content: string;
   /**
-   * Optional multimodal parts (e.g. images). When present, the provider
-   * adapter sends `content` as the leading text part followed by these
-   * parts. Image parts are only permitted on `role: 'user'` messages.
-   * Text-only requests omit this field and the text path is unchanged.
+   * Optional ordered multimodal parts (text / image) for vision requests.
+   * Only `user` messages may carry image parts. The provider sends `content`
+   * (when non-empty) followed by these parts.
    */
   parts?: LLMContentPart[];
+}
+
+/**
+ * True when any message carries an image part (drives vision-model routing).
+ * Robust to malformed `parts` (non-array / null elements) — never throws.
+ */
+export function messagesContainImage(messages: LLMMessage[]): boolean {
+  return messages.some(
+    (m) => Array.isArray(m.parts) && m.parts.some((p) => p != null && p.type === 'image'),
+  );
 }
 
 export interface LLMRequest {
@@ -176,85 +195,52 @@ export function validateLLMRequest(request: LLMRequest): string[] {
   return errors;
 }
 
-/** Audit-safe stand-in for an image part — never carries the image bytes/URL. */
-export interface RedactedImagePart {
-  type: 'image';
-  redacted: true;
-  mimeType?: string;
-  bytes: number;
-  sha256: string;
-}
-
-function parseDataUrl(url: string): { mimeType?: string; bytes: number; sha256: string } | null {
-  const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(url);
-  if (!match) return null;
-  try {
-    const isBase64 = Boolean(match[2]);
-    const data = match[3] ?? '';
-    // decodeURIComponent can throw URIError on malformed percent-encoding;
-    // a null return makes redactImagePart fall back to hashing the raw URL.
-    const buf = isBase64
-      ? Buffer.from(data, 'base64')
-      : Buffer.from(decodeURIComponent(data), 'utf8');
-    return {
-      mimeType: match[1] || undefined,
-      bytes: buf.length,
-      sha256: createHash('sha256').update(buf).digest('hex'),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function redactImagePart(part: { url: string; mimeType?: string }): RedactedImagePart {
-  const fromData = part.url.startsWith('data:') ? parseDataUrl(part.url) : null;
-  if (fromData) {
+/**
+ * Redact image payloads (URLs / data URIs) from messages before they are
+ * written to an ai_runs input snapshot. Text is preserved for debugging;
+ * image content is replaced with a placeholder to avoid PII at rest.
+ */
+/**
+ * Redact one image part for the ai_run snapshot — never store the raw URL or
+ * bytes. For a base64 data: URL we keep mimeType + byte count; for any URL we
+ * keep a sha256 reference so identical images stay correlatable in the audit.
+ */
+function redactImagePart(part: LLMImagePart): Record<string, unknown> {
+  const dataUrl = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/i.exec(part.url);
+  if (dataUrl) {
+    const bytes = Buffer.from(dataUrl[2], 'base64');
     return {
       type: 'image',
       redacted: true,
-      mimeType: part.mimeType ?? fromData.mimeType,
-      bytes: fromData.bytes,
-      sha256: fromData.sha256,
+      mimeType: dataUrl[1],
+      bytes: bytes.length,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      ...(part.detail ? { detail: part.detail } : {}),
     };
   }
-  // http(s) or other reference: hash the URL (it may be a signed/tokenized
-  // link) and store no inline bytes.
   return {
     type: 'image',
     redacted: true,
-    mimeType: part.mimeType,
-    bytes: 0,
     sha256: createHash('sha256').update(part.url).digest('hex'),
+    ...(part.detail ? { detail: part.detail } : {}),
   };
 }
 
-/**
- * Produce an audit-safe copy of messages for the ai_runs inputSnapshot.
- * Image parts are replaced with a redacted reference (mime + byte count +
- * sha256) so customer photos never persist to the database. Text content is
- * preserved; text-only messages are byte-identical to the previous snapshot.
- */
-export function redactMessagesForSnapshot(messages: LLMMessage[]): Array<Record<string, unknown>> {
-  return messages.map((message) => {
-    const redacted: Record<string, unknown> = { role: message.role, content: message.content };
-    if (message.parts && message.parts.length > 0) {
-      redacted.parts = message.parts.map((part) =>
-        part.type === 'image' ? redactImagePart(part) : { type: 'text', text: part.text },
-      );
+export function redactMessagesForSnapshot(
+  messages: LLMMessage[],
+): Array<Record<string, unknown>> {
+  return messages.map((m): Record<string, unknown> => {
+    if (!m.parts || m.parts.length === 0) {
+      return { role: m.role, content: m.content };
     }
-    return redacted;
+    return {
+      role: m.role,
+      content: m.content,
+      parts: m.parts.map((p) =>
+        p.type === 'image' ? redactImagePart(p) : { type: 'text', text: p.text },
+      ),
+    };
   });
-}
-
-/**
- * True when any message carries an image content part. Tolerant of malformed
- * input (non-array `parts`, null elements) so it can run on unvalidated
- * requests — e.g. the cache wrapper checks it before validateLLMRequest.
- */
-export function messagesContainImage(messages: LLMMessage[]): boolean {
-  return messages.some(
-    (m) => Array.isArray(m.parts) && m.parts.some((p) => (p as { type?: unknown })?.type === 'image'),
-  );
 }
 
 export class LLMGateway {

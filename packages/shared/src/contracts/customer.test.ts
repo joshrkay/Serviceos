@@ -60,7 +60,11 @@ describe('customerSchema', () => {
     expect(customerSchema.safeParse({ ...baseCustomer, preferredChannel: 'none' }).success).toBe(true);
     expect(customerSchema.safeParse({ ...baseCustomer, preferredChannel: 'carrier_pigeon' }).success).toBe(false);
     expect(customerSchema.safeParse({ ...baseCustomer, accountType: 'b2b' }).success).toBe(true);
+    expect(customerSchema.safeParse({ ...baseCustomer, accountType: 'property_manager' }).success).toBe(true);
     expect(customerSchema.safeParse({ ...baseCustomer, accountType: 'enterprise' }).success).toBe(false);
+    expect(
+      customerSchema.safeParse({ ...baseCustomer, parentAccountId: '44444444-4444-4444-4444-444444444444' }).success,
+    ).toBe(true);
   });
 
   it('preferredChannelSchema matches the PreferredChannel enum and the DB CHECK', () => {

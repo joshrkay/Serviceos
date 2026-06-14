@@ -113,6 +113,9 @@ export class PgTimeEntryRepository extends PgBaseRepository implements TimeEntry
     // acquire a pooled connection before failing.
     if (!isValidTenantId(tenantId)) throw new Error('Invalid tenant ID format');
     if (!isValidTenantId(jobId)) throw new Error('Invalid job ID format');
+    // Served by idx_time_entries_tenant_job (tenant_id, job_id). tenant_id is
+    // the first predicate as defense-in-depth alongside RLS. Consumed by per-job
+    // profit (jobs/job-profit.ts, P22-005/U7).
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
         `SELECT * FROM time_entries

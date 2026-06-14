@@ -89,6 +89,11 @@ export type IntentType =
   // recommendation — the AI never negotiates. extractedEntities.negotiationAsk
   // carries the verbatim ask.
   | 'negotiation'
+  // P22-005 (U7) — owner asks whether a specific job made money ("did I make
+  // money on the Miller job?"). Owner/tenant-scoped, read-only — routed to the
+  // lookup_job_profit skill, which speaks a per-job P&L. The job is referenced
+  // free-text in extractedEntities.jobReference and resolved downstream.
+  | 'lookup_job_profit'
   // P11-002: caller asks to switch the call language ("english please" /
   // "hablo español"). The adapter consumes this as a signal to flip the
   // session language — it is NOT a proposal-driving intent.
@@ -156,6 +161,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'lookup_pending_items',
   'complaint',
   'negotiation',
+  'lookup_job_profit',
   'language_switch',
   'operator_request',
   'confirm',
@@ -751,6 +757,17 @@ Supported intents (return exactly ONE):
                            Examples: "What services do we offer?"
                                      "What's in our catalog?"
                                      "Do we have a catalog item for a water heater?"
+- "lookup_job_profit"   — owner is ASKING whether a SPECIFIC job made money:
+                           its profit / margin / "did I come out ahead". Always
+                           tied to ONE job — put the job reference (customer
+                           name, "the Miller job", a JOB- number) in
+                           jobReference. Distinct from lookup_revenue, which is
+                           the whole month's business-wide revenue. Read-only.
+                           Examples: "Did I make money on the Miller job?"
+                                     "What's my margin on the Johnson install?"
+                                     "How'd we do on the Smith water heater?"
+                                     "Did the Davis job turn a profit?"
+                                     "What did I clear on JOB-0042?"
 - "unknown"             — anything else: ambiguous transcripts, or edit
                            commands without a clear reference.
 

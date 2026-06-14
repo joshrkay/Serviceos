@@ -134,6 +134,8 @@ export class OpenAICompatibleProvider implements LLMProvider, EmbeddingProvider 
     const completion = await this.client.chat.completions.create(
       {
         model,
+        // Translate gateway messages (text + optional multimodal parts) to the
+        // OpenAI chat format via the shared pure helper.
         messages: buildChatMessages(request.messages),
         temperature: request.temperature ?? 0.2,
         max_tokens: request.maxTokens,

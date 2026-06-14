@@ -162,6 +162,15 @@ export interface VoiceSession {
   /** Set when `identifyCaller` matched an existing customer. */
   customerId?: string;
   /**
+   * U4 — B2B priority routing context, assembled at caller identification when
+   * the matched customer is a business / property-manager account (parent +
+   * sub-accounts + priority + occupied-property awareness). Adapter-side state
+   * like `leadId`: the FSM never reads it. Consumed by triage / booking and
+   * the live-call prompt assembly. Absent for residential callers and unknown
+   * callers.
+   */
+  b2bAccountContext?: import('./b2b-account-context').B2bAccountContext;
+  /**
    * P11-002 — resolved spoken language for this call ('en' | 'es').
    * Set by the inbound adapter from the tenant default (and customer
    * preference when known). Drives the greeting copy, `<Say>` Polly
