@@ -113,6 +113,21 @@ describe('chargeOffSession', () => {
     expect(r.paymentIntentId).toBe('pi_3');
   });
 
+  it('preserves a non-JSON error body in the message (gateway/proxy failures)', async () => {
+    const fetcher: StripeFetch = async () => ({
+      ok: false,
+      status: 502,
+      text: async () => '<html>Bad Gateway</html>',
+      json: async () => {
+        throw new Error('not json');
+      },
+    });
+    const r = await chargeOffSession({ apiKey: 'sk' }, base, fetcher);
+    expect(r.status).toBe('failed');
+    expect(r.errorMessage).toContain('502');
+    expect(r.errorMessage).toContain('Bad Gateway');
+  });
+
   it('sends the idempotency key + connect header', async () => {
     let captured: Record<string, string> = {};
     const fetcher: StripeFetch = async (_url, init) => {

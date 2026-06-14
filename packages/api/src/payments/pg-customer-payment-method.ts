@@ -16,6 +16,7 @@ function mapRow(row: Record<string, unknown>): CustomerPaymentMethod {
     customerId: row.customer_id as string,
     stripeCustomerId: row.stripe_customer_id as string,
     stripePaymentMethodId: row.stripe_payment_method_id as string,
+    stripeAccountId: (row.stripe_account_id as string) ?? undefined,
     brand: (row.brand as string) ?? undefined,
     last4: (row.last4 as string) ?? undefined,
     expMonth: row.exp_month != null ? Number(row.exp_month) : undefined,
@@ -43,8 +44,9 @@ export class PgCustomerPaymentMethodRepository
       const result = await client.query(
         `INSERT INTO customer_payment_methods (
            id, tenant_id, customer_id, stripe_customer_id, stripe_payment_method_id,
-           brand, last4, exp_month, exp_year, is_default, created_at, updated_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           stripe_account_id, brand, last4, exp_month, exp_year, is_default,
+           created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          ON CONFLICT (tenant_id, stripe_payment_method_id) DO NOTHING
          RETURNING *`,
         [
@@ -53,6 +55,7 @@ export class PgCustomerPaymentMethodRepository
           pm.customerId,
           pm.stripeCustomerId,
           pm.stripePaymentMethodId,
+          pm.stripeAccountId ?? null,
           pm.brand ?? null,
           pm.last4 ?? null,
           pm.expMonth ?? null,

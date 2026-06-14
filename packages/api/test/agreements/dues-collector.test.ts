@@ -18,13 +18,14 @@ function makeInvoiceOps(amountDue = 5000) {
   } satisfies DuesInvoiceOps;
 }
 
-async function seedCard(repo: InMemoryCustomerPaymentMethodRepository) {
+async function seedCard(repo: InMemoryCustomerPaymentMethodRepository, stripeAccountId?: string) {
   await repo.create({
     id: uuidv4(),
     tenantId: TENANT,
     customerId: CUSTOMER,
     stripeCustomerId: 'cus_1',
     stripePaymentMethodId: 'pm_1',
+    stripeAccountId,
     isDefault: true,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -79,6 +80,45 @@ describe('StripeDuesCollector', () => {
     expect(invoiceOps.recordPayment).toHaveBeenCalledWith(
       expect.objectContaining({ invoiceId: 'inv_1', amountCents: 7777, providerReference: 'pi_ok' }),
     );
+  });
+
+  it('charges on the exact Stripe account the card was saved on', async () => {
+    const repo = new InMemoryCustomerPaymentMethodRepository();
+    await seedCard(repo, 'acct_connected'); // card lives on the connected account
+    const invoiceOps = makeInvoiceOps(5000);
+    let headers: Record<string, string> = {};
+    const stripeFetch: StripeFetch = async (_url, init) => {
+      headers = init.headers;
+      return jsonRes(true, 200, { id: 'pi_ok', status: 'succeeded' });
+    };
+    const collector = new StripeDuesCollector({
+      customerPaymentMethodRepo: repo,
+      stripeConfig: { apiKey: 'sk' },
+      invoiceOps,
+      stripeFetch,
+    });
+    const r = await collector.collect(input);
+    expect(r.status).toBe('collected');
+    expect(headers['Stripe-Account']).toBe('acct_connected');
+  });
+
+  it('omits the connect header for a platform card (no stored account)', async () => {
+    const repo = new InMemoryCustomerPaymentMethodRepository();
+    await seedCard(repo); // no stripeAccountId → platform
+    const invoiceOps = makeInvoiceOps(5000);
+    let headers: Record<string, string> = {};
+    const stripeFetch: StripeFetch = async (_url, init) => {
+      headers = init.headers;
+      return jsonRes(true, 200, { id: 'pi_ok', status: 'succeeded' });
+    };
+    const collector = new StripeDuesCollector({
+      customerPaymentMethodRepo: repo,
+      stripeConfig: { apiKey: 'sk' },
+      invoiceOps,
+      stripeFetch,
+    });
+    await collector.collect(input);
+    expect(headers['Stripe-Account']).toBeUndefined();
   });
 
   it('does not charge when the issued invoice owes nothing', async () => {

@@ -77,6 +77,8 @@ describe('webhook: setup_intent.succeeded', () => {
     expect(saved).toHaveLength(1);
     expect(saved[0].stripePaymentMethodId).toBe('pm_123');
     expect(saved[0].stripeCustomerId).toBe('cus_123');
+    // The account the SetupIntent ran on (event.account) is pinned to the card.
+    expect(saved[0].stripeAccountId).toBe('acct_tenant');
     expect(saved[0].brand).toBe('visa');
     expect(saved[0].last4).toBe('4242');
     expect(saved[0].isDefault).toBe(true);
