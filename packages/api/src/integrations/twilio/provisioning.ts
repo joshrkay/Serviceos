@@ -120,6 +120,36 @@ export async function createMessagingService(
   return result.sid;
 }
 
+export interface AvailableNumber {
+  phoneNumber: string; // E.164, e.g. "+15125551234"
+  locality?: string;
+  region?: string;
+}
+
+// Searches Twilio for purchasable US local numbers (voice + SMS capable).
+// Works with either the MASTER account (the onboarding picker, before a
+// subaccount exists) or a subaccount (the provisioning worker) — available
+// numbers are global to the country, so the account only affects auth, not
+// the candidate set. `limit` is clamped to a picker-friendly page size.
+export async function searchAvailableNumbers(
+  accountSid: string,
+  authToken: string,
+  opts: { areaCode?: string; contains?: string; limit?: number } = {}
+): Promise<AvailableNumber[]> {
+  const limit = Math.min(Math.max(opts.limit ?? 10, 1), 30);
+  const params = new URLSearchParams({ VoiceEnabled: 'true', SmsEnabled: 'true' });
+  if (opts.areaCode) params.set('AreaCode', opts.areaCode);
+  if (opts.contains) params.set('Contains', opts.contains);
+  params.set('PageSize', String(limit));
+  const url = `${TWILIO_BASE}/Accounts/${accountSid}/AvailablePhoneNumbers/US/Local.json?${params}`;
+  const result = await twilioGet<{
+    available_phone_numbers: Array<{ phone_number: string; locality?: string; region?: string }>;
+  }>(url, accountSid, authToken);
+  return (result.available_phone_numbers ?? [])
+    .slice(0, limit)
+    .map((n) => ({ phoneNumber: n.phone_number, locality: n.locality, region: n.region }));
+}
+
 export interface PurchasedNumber {
   sid: string;
   phoneNumber: string;
@@ -130,27 +160,30 @@ export async function purchasePhoneNumber(
   authToken: string,
   region: string | null,
   voiceUrl: string,
-  statusCallbackUrl: string
+  statusCallbackUrl: string,
+  // When the tradesperson picked a specific number, order exactly that one
+  // and skip the search. Twilio rejects the purchase (throws) if the number
+  // was taken between the picker listing it and this call.
+  preferredNumber?: string
 ): Promise<PurchasedNumber> {
-  const areaCode = region ? STATE_AREA_CODE[region.toUpperCase()] : null;
+  let phoneToOrder: string | null = preferredNumber ?? null;
 
-  const searchWithAreaCode = async (ac?: string): Promise<string | null> => {
-    const params = new URLSearchParams({ VoiceEnabled: 'true', SmsEnabled: 'true' });
-    if (ac) params.set('AreaCode', ac);
-    const url = `${TWILIO_BASE}/Accounts/${subaccountSid}/AvailablePhoneNumbers/US/Local.json?${params}`;
-    const result = await twilioGet<{ available_phone_numbers: Array<{ phone_number: string }> }>(
-      url,
-      subaccountSid,
-      authToken
-    );
-    return result.available_phone_numbers[0]?.phone_number ?? null;
-  };
-
-  let phoneToOrder = areaCode ? await searchWithAreaCode(areaCode) : null;
-  // Fallback: any available US number
-  if (!phoneToOrder) phoneToOrder = await searchWithAreaCode();
   if (!phoneToOrder) {
-    throw new Error(`No available US phone numbers found for region ${region ?? 'any'}`);
+    const areaCode = region ? STATE_AREA_CODE[region.toUpperCase()] : null;
+    const firstAvailable = async (ac?: string): Promise<string | null> => {
+      const found = await searchAvailableNumbers(subaccountSid, authToken, {
+        ...(ac ? { areaCode: ac } : {}),
+        limit: 1,
+      });
+      return found[0]?.phoneNumber ?? null;
+    };
+
+    phoneToOrder = areaCode ? await firstAvailable(areaCode) : null;
+    // Fallback: any available US number
+    if (!phoneToOrder) phoneToOrder = await firstAvailable();
+    if (!phoneToOrder) {
+      throw new Error(`No available US phone numbers found for region ${region ?? 'any'}`);
+    }
   }
 
   const purchased = await twilioPost<{ sid: string; phone_number: string }>(
