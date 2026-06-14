@@ -3599,7 +3599,8 @@ export function createApp(): express.Express {
           customerPaymentMethodRepo,
           stripeConfig: { apiKey: process.env.STRIPE_SECRET_KEY },
           invoiceOps: duesInvoiceOps,
-          connectAccountResolver,
+          // No connect resolver: charges target the account stored on the card
+          // (set at save time from the webhook's event.account).
         })
       : undefined;
   registerInterval(setInterval(() => {

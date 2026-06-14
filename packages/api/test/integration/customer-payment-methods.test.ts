@@ -32,6 +32,7 @@ function makePm(
     customerId,
     stripeCustomerId: 'cus_x',
     stripePaymentMethodId: `pm_${crypto.randomUUID()}`,
+    stripeAccountId: 'acct_connected',
     brand: 'visa',
     last4: '4242',
     expMonth: 12,
@@ -66,6 +67,7 @@ describe('Postgres integration — customer payment methods', () => {
     const created = await repo.create(makePm(tenant.tenantId, customerId, { isDefault: true }));
     const def = await repo.findDefaultForCustomer(tenant.tenantId, customerId);
     expect(def?.stripePaymentMethodId).toBe(created.stripePaymentMethodId);
+    expect(def?.stripeAccountId).toBe('acct_connected');
     expect(def?.brand).toBe('visa');
     expect(def?.last4).toBe('4242');
     expect(def?.expMonth).toBe(12);
