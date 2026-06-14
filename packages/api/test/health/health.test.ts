@@ -72,6 +72,18 @@ describe('P0-005 — Health endpoint', () => {
     expect(res.body.status).toBe('down');
   });
 
+  it('readiness — /ready stays 200 when a check is degraded (non-critical)', async () => {
+    const app = express();
+    const router = createHealthRouter('1.0.0', 'test', [
+      { name: 'cache', check: async () => ({ status: 'degraded', message: 'Slow' }) },
+    ]);
+    app.use(router);
+
+    const res = await request(app, '/ready');
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('ready');
+  });
+
   it('readiness — /ready returns 503 when a check is down', async () => {
     const app = express();
     const router = createHealthRouter('1.0.0', 'test', [

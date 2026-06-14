@@ -39,6 +39,23 @@ import {
   createCalendarOAuthCallbackRouter,
 } from './routes/calendar-integrations';
 import {
+  createIntegrationsRouter,
+  createIntegrationsOAuthCallbackRouter,
+} from './routes/integrations';
+import {
+  PgAccountingIntegrationRepository,
+  PgAccountingSyncLogRepository,
+  PgAccountingOAuthStateRepository,
+  InMemoryAccountingIntegrationRepository,
+  InMemoryAccountingSyncLogRepository,
+  InMemoryAccountingOAuthStateRepository,
+} from './integrations/accounting/repository';
+import { resolveQuickBooksOAuthConfig } from './integrations/accounting/quickbooks-oauth';
+import {
+  runAccountingSyncSweep,
+  ACCOUNTING_SYNC_INTERVAL_MS,
+} from './workers/accounting-sync-worker';
+import {
   PgCalendarIntegrationRepository,
   PgOAuthStateRepository,
   InMemoryCalendarIntegrationRepository,
@@ -609,7 +626,9 @@ export function createApp(): express.Express {
           await pool.query('SELECT 1');
           return { status: 'ok' };
         } catch {
-          return { status: 'degraded', message: 'Database connection failed' };
+          // Report `down` so /ready returns 503 and stops taking traffic during
+          // a genuine DB outage. /health stays 200 (liveness) per railway.toml.
+          return { status: 'down', message: 'Database connection failed' };
         }
       },
     });
@@ -1556,6 +1575,7 @@ export function createApp(): express.Express {
     // track; this sweep owns 590011.
     recordingRetention: 590011,
     supervisorAnnotate: 590012,
+    accountingSync: 590013,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -2009,6 +2029,37 @@ export function createApp(): express.Express {
   app.use(
     '/api/calendar-integrations',
     createCalendarOAuthCallbackRouter(calendarRouterDeps),
+  );
+
+  // F17 / P15-001 — QuickBooks accounting OAuth callback (unauthenticated).
+  const accountingIntegrationRepo = pool
+    ? new PgAccountingIntegrationRepository(pool)
+    : new InMemoryAccountingIntegrationRepository();
+  const accountingSyncLogRepo = pool
+    ? new PgAccountingSyncLogRepository(pool)
+    : new InMemoryAccountingSyncLogRepository();
+  const accountingOAuthStateRepo = pool
+    ? new PgAccountingOAuthStateRepository(pool)
+    : new InMemoryAccountingOAuthStateRepository();
+  const qboConfig = resolveQuickBooksOAuthConfig(googleApiUrl);
+  const integrationsRouterDeps = {
+    integrationRepo: accountingIntegrationRepo,
+    syncLogRepo: accountingSyncLogRepo,
+    oauthStateRepo: accountingOAuthStateRepo,
+    invoiceRepo,
+    customerRepo,
+    jobRepo,
+    qboConfig,
+    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+    auditRepo,
+    logger: createLogger({
+      service: 'accounting-integrations',
+      environment: process.env.NODE_ENV ?? 'development',
+    }),
+  };
+  app.use(
+    '/api/integrations',
+    createIntegrationsOAuthCallbackRouter(integrationsRouterDeps),
   );
 
   // ── Twilio telephony webhooks (P8-011) ────────────────────────────────────
@@ -3135,6 +3186,11 @@ export function createApp(): express.Express {
     createCalendarIntegrationsRouter(calendarRouterDeps),
   );
 
+  app.use(
+    '/api/integrations',
+    createIntegrationsRouter(integrationsRouterDeps),
+  );
+
   // billingService is hoisted earlier so the Stripe webhook can use
   // the same instance.
   app.use('/api/billing', createBillingRouter({ billingService, connectService, auditRepo }));
@@ -3703,6 +3759,31 @@ export function createApp(): express.Express {
   }, Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) > 0 ? Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) : 60 * 60_000));
   // QA-2026-06-05: interval is env-tunable (OVERDUE_SWEEP_INTERVAL_MS) so dev/QA
   // can observe the sweep inside a test window; default stays hourly.
+
+  // F17 — push paid invoices + customers to QuickBooks every 5 minutes.
+  if (qboConfig) {
+    const accountingSyncLogger = createLogger({
+      service: 'accounting-sync-worker',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.accountingSync, async () => {
+        await runAccountingSyncSweep({
+          integrationRepo: accountingIntegrationRepo,
+          syncLogRepo: accountingSyncLogRepo,
+          invoiceRepo,
+          customerRepo,
+          jobRepo,
+          qboConfig,
+          logger: accountingSyncLogger,
+        });
+      }).catch((err) => {
+        accountingSyncLogger.error('Accounting sync sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, ACCOUNTING_SYNC_INTERVAL_MS));
+  }
 
   const appointmentReminderLogger = createLogger({
     service: 'appointment-reminder-worker',

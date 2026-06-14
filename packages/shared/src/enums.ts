@@ -183,6 +183,7 @@ export enum ProposalType {
   ADD_NOTE = 'add_note',
   SEND_INVOICE = 'send_invoice',
   SEND_ESTIMATE = 'send_estimate',
+  SEND_ESTIMATE_NUDGE = 'send_estimate_nudge',
   RECORD_PAYMENT = 'record_payment',
   LOG_EXPENSE = 'log_expense',
   CONVERT_LEAD = 'convert_lead',
