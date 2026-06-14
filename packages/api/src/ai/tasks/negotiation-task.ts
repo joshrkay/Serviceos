@@ -18,16 +18,7 @@ import { createProposal } from '../../proposals/proposal';
 import type { ProposalType } from '../../proposals/proposal';
 import type { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import type { ExtractedEntities } from '../orchestration/intent-classifier';
-import {
-  detectNegotiationAskType,
-  negotiationAskLabel,
-  recommendNegotiationResponse,
-  NEGOTIATION_GUARDRAIL_MARKER_REASON,
-} from '../../proposals/guardrails/negotiation-guardrail';
-
-function capitalize(s: string): string {
-  return s.length === 0 ? s : `${s.charAt(0).toUpperCase()}${s.slice(1)}`;
-}
+import { buildNegotiationCallbackContent } from '../../proposals/guardrails/negotiation-guardrail';
 
 export class NegotiationGuardrailTaskHandler implements TaskHandler {
   // Reuses the capture-class `callback` proposal type. processSegment resolves
@@ -40,11 +31,13 @@ export class NegotiationGuardrailTaskHandler implements TaskHandler {
       customerId?: string;
       negotiationAsk?: string;
     };
-    const askText = (ee.negotiationAsk ?? context.message).trim();
-    const askType = detectNegotiationAskType(`${context.message} ${askText}`);
-    const label = negotiationAskLabel(askType);
-    const recommendation = recommendNegotiationResponse(askType);
-    const who = ee.customerName ?? 'the customer';
+    const content = buildNegotiationCallbackContent({
+      detectText: context.message,
+      askText: ee.negotiationAsk ?? context.message,
+      ...(ee.customerName ? { customerName: ee.customerName } : {}),
+      transcript: context.message,
+      ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+    });
 
     // Deterministic dedup so at-least-once redelivery of the same recording
     // never double-creates the callback (parity with complaint-task).
@@ -55,24 +48,9 @@ export class NegotiationGuardrailTaskHandler implements TaskHandler {
     const proposal = createProposal({
       tenantId: context.tenantId,
       proposalType: 'callback',
-      payload: {
-        reason: 'customer_negotiation_followup',
-        negotiationAskType: askType ?? 'general',
-        askText,
-        recommendation,
-        transcript: context.message,
-        ...(context.conversationId ? { conversationId: context.conversationId } : {}),
-        _meta: {
-          // 'medium' is neutral (only low/very_low gate auto-approval); the
-          // marker is the payload — it makes every review surface (cards, SMS
-          // render, digest) flag that the guardrail fired.
-          overallConfidence: 'medium',
-          markers: [{ path: 'recommendation', reason: NEGOTIATION_GUARDRAIL_MARKER_REASON }],
-        },
-      },
-      summary: `${capitalize(label)} from ${who} — AI didn't negotiate; call back`,
-      explanation:
-        'The AI detected price/scope/terms pushback, declined to negotiate, and indicated it would check with you. Decide on your terms and follow up.',
+      payload: content.payload,
+      summary: content.summary,
+      explanation: content.explanation,
       sourceContext: {
         source: 'voice',
         ...(context.conversationId ? { conversationId: context.conversationId } : {}),

@@ -122,6 +122,65 @@ export function recommendNegotiationResponse(askType: NegotiationAskType | null)
   return RECOMMENDATIONS[askType];
 }
 
+/**
+ * Shared owner-callback content for a detected negotiation, used by every
+ * surface that routes a negotiation to the owner: the voice-action-router task
+ * handler, the inbound-SMS handler, and the live-call voice-turn processor. A
+ * single builder keeps the proposal payload, summary, and review marker
+ * byte-identical across channels.
+ */
+export interface NegotiationCallbackContent {
+  /** `callback` proposal payload (capture-class; never auto-executes). */
+  payload: Record<string, unknown>;
+  summary: string;
+  explanation: string;
+  askType: NegotiationAskType | null;
+}
+
+export interface BuildNegotiationCallbackInput {
+  /** Text used for deterministic ask-type detection (the customer's words). */
+  detectText: string;
+  /** The verbatim ask stored on the proposal (defaults to detectText). */
+  askText?: string;
+  customerName?: string;
+  /** Full transcript / message body for the owner to read. */
+  transcript?: string;
+  conversationId?: string;
+}
+
+function capitalize(s: string): string {
+  return s.length === 0 ? s : `${s.charAt(0).toUpperCase()}${s.slice(1)}`;
+}
+
+export function buildNegotiationCallbackContent(
+  input: BuildNegotiationCallbackInput,
+): NegotiationCallbackContent {
+  const askText = (input.askText ?? input.detectText).trim();
+  const askType = detectNegotiationAskType(`${input.detectText} ${askText}`);
+  const who = input.customerName ?? 'the customer';
+  const payload: Record<string, unknown> = {
+    reason: 'customer_negotiation_followup',
+    negotiationAskType: askType ?? 'general',
+    askText,
+    recommendation: recommendNegotiationResponse(askType),
+    ...(input.transcript ? { transcript: input.transcript } : {}),
+    ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+    _meta: {
+      // 'medium' is neutral (only low/very_low gate auto-approval); the marker
+      // is the payload — it makes every review surface flag the guardrail.
+      overallConfidence: 'medium',
+      markers: [{ path: 'recommendation', reason: NEGOTIATION_GUARDRAIL_MARKER_REASON }],
+    },
+  };
+  return {
+    payload,
+    summary: `${capitalize(negotiationAskLabel(askType))} from ${who} — AI didn't negotiate; call back`,
+    explanation:
+      'The AI detected price/scope/terms pushback, declined to negotiate, and indicated it would check with you. Decide on your terms and follow up.',
+    askType,
+  };
+}
+
 /** Short human label for proposal summaries. */
 export function negotiationAskLabel(askType: NegotiationAskType | null): string {
   switch (askType) {
