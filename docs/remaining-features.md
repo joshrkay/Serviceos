@@ -147,25 +147,36 @@ via `callerPlanResolver` on both channels.
 
 These require the calling agent to be live first.
 
-### 4A — Live customer context in every call
+> **Status (2026-06-14):** still remaining, but partially built — verified
+> against the source (technique:
+> `docs/solutions/workflow-issues/verify-spec-gaps-against-shipped-code.md`).
+> Per-item status annotated below.
+
+### 4A — Live customer context in every call  🟡 PARTIAL
 
 When `identify_caller` (P8-006) resolves a phone number, extend the pre-load to include: last job date + outcome, open estimates, open invoices, next scheduled appointment. Greeting becomes: *"Hi Sarah, are you calling about Thursday's HVAC service, or is there something else?"*
 
-**File:** `packages/api/src/ai/orchestration/context-builder.ts` — add `buildCallerContext(tenantId, customerId)` pulling customer + recent job + open invoice in one query.
+- **Already shipped:** phone→customer identification (`ai/skills/identify-caller.ts`, wired via `telephony/twilio-adapter.ts` + `ai/agents/customer-calling/inapp-adapter.ts`) and membership/plan awareness in the prompt (`ai/orchestration/caller-plan-context.ts` via `callerPlanResolver`; see §3C).
+- **Still to build:** the rich preload (last job + outcome, open estimates, open invoices, next appointment) and the personalized greeting that uses it.
+
+**File:** `packages/api/src/ai/orchestration/context-builder.ts` — add `buildCallerContext(tenantId, customerId)` pulling customer + recent job + open invoice in one query. *(Not built — `context-builder.ts` has no `buildCallerContext`; only `buildSourceContext` exists today.)*
 
 **Competitive edge:** Avoca must call the ServiceTitan API for this data. ServiceOS reads its own DB in < 50 ms.
 
-### 4B — CSR coaching / call quality scoring
+### 4B — CSR coaching / call quality scoring  🔴 NOT BUILT
 
 After each call, a background worker runs an LLM evaluation against the transcript. Scores: booking conversion, handling unclear requests, resolution, tone. Output goes to `call_quality_scores` table; surfaces in a dispatcher dashboard tab.
 
 Closes the gap with Avoca Coach.
 
-| File | Change |
-|---|---|
-| `packages/api/src/workers/call-quality-worker.ts` | New worker, reuses evaluation pattern from `packages/api/src/ai/evaluation/conversation-evaluation.ts` |
-| `packages/api/src/routes/call-quality.ts` | New route for dashboard reads |
-| Frontend | New panel in dispatcher settings page |
+**Existing building block:** P8-010 `summarize_session` (`ai/skills/summarize-session.ts`) already computes a single deterministic `quality_score` and persists it to the `call_summaries` table (`db/schema.ts`) — `schema.ts` even notes a future score is "backfillable from call_summaries.quality_score". 4B is the multi-dimensional LLM coaching layer (worker + dedicated table + dashboard) on top; none of it exists yet.
+
+| File | Change | Status |
+|---|---|---|
+| `packages/api/src/workers/call-quality-worker.ts` | New worker, reuses evaluation pattern from `packages/api/src/ai/evaluation/conversation-evaluation.ts` | not built |
+| `packages/api/src/routes/call-quality.ts` | New route for dashboard reads | not built |
+| `call_quality_scores` table | New table (today only `call_summaries.quality_score` exists) | not built |
+| Frontend | New panel in dispatcher settings page | not built |
 
 ---
 
