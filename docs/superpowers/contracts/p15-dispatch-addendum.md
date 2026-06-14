@@ -12,7 +12,7 @@
 
 ## Migration ledger
 
-- 071: P15-001 `accounting_integrations` + `accounting_sync_log`
+- 158: P15-001 `accounting_integrations` + `accounting_sync_log`
 - 072: P15-002 `calendar_integrations` + `calendar_sync_log`
 - 073: P15-003 `refund_events` + `customer_credits`
 - 074: P15-004 `sms_auto_reply_rules`
@@ -23,7 +23,7 @@
 ## P15-001 — QuickBooks Online integration
 
 **Wave:** 15A
-**Migration number reserved:** 071
+**Migration number reserved:** 158
 **Forbidden files:**
 - `packages/api/src/db/pg-base.ts`
 - `packages/shared/**`
@@ -43,7 +43,7 @@ cd /home/user/Serviceos && \
 ```
 
 **Risk note:**
-- **Token encryption**: AES-256-GCM with `process.env.ENCRYPTION_KEY`. If env var unset in dev, fall back to dev-only marker (NEVER plaintext storage).
+- **Token encryption**: reuse the existing `packages/api/src/integrations/crypto.ts` util (AES-256-GCM, key `process.env.TENANT_ENCRYPTION_KEY`) — do NOT invent a new key/env var. If env var unset in dev, fall back to dev-only marker (NEVER plaintext storage).
 - **OAuth callback URL**: must be HTTPS for prod; allow http://localhost in dev.
 - **Refresh token rotation**: QBO's refresh tokens have a 100-day max lifetime; surface this in status UI.
 - **Rate limiting**: QBO allows ~500 req/min; worker uses simple backoff on 429.

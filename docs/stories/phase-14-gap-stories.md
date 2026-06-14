@@ -32,9 +32,9 @@ Tech opens a job, adds 3 parts from truck stock, completes job. Truck stock auto
 
 **Dependencies:** none
 
-**Allowed files:** `packages/api/src/inventory/**, packages/api/src/routes/inventory.ts, packages/api/src/db/schema.ts (migration 070 only), packages/api/src/app.ts (wiring only), packages/api/src/inventory/__tests__/**, packages/api/test/inventory/**, packages/web/src/pages/inventory/**, packages/web/src/components/inventory/**, packages/web/src/api/inventory.ts, packages/web/src/pages/settings/InventorySettings.tsx, packages/api/src/workers/low-stock-alert-worker.ts, packages/api/test/workers/low-stock-alert-worker.test.ts`
+**Allowed files:** `packages/api/src/inventory/**, packages/api/src/routes/inventory.ts, packages/api/src/db/schema.ts (migration 156 only), packages/api/src/app.ts (wiring only), packages/api/src/inventory/__tests__/**, packages/api/test/inventory/**, packages/web/src/pages/inventory/**, packages/web/src/components/inventory/**, packages/web/src/api/inventory.ts, packages/web/src/pages/settings/InventorySettings.tsx, packages/api/src/workers/low-stock-alert-worker.ts, packages/api/test/workers/low-stock-alert-worker.test.ts`
 
-**Build prompt:** (1) Migration `070_create_inventory`: THREE tables.
+**Build prompt:** (1) Migration `156_create_inventory`: THREE tables.
 
 `inventory_items`: `id, tenant_id, catalog_item_id (FK to catalog_items, nullable for ad-hoc), sku, name, unit (each|ft|gal|lb), low_stock_threshold INT NOT NULL DEFAULT 0, restock_target INT NOT NULL DEFAULT 0, is_active BOOL DEFAULT true, created_at, updated_at`. RLS. UNIQUE (tenant_id, sku) WHERE is_active = true.
 

@@ -9,8 +9,8 @@
 
 ## Migration ledger
 
-- 070: P14-001 `inventory_items` + `inventory_locations` + `inventory_transactions`
-- 071: P14-002 `job_parts` (new migration; P14-002 reserves at dispatch time)
+- 156: P14-001 `inventory_items` + `inventory_locations` + `inventory_transactions`
+- 159: P14-002 `job_parts` (new migration; P14-002 reserves at dispatch time)
 - P14-003: no migration
 
 ---
@@ -18,7 +18,7 @@
 ## P14-001 — Inventory ledger
 
 **Wave:** 14A
-**Migration number reserved:** 070
+**Migration number reserved:** 156
 **Forbidden files:**
 - `packages/api/src/db/pg-base.ts`
 - `packages/shared/**`
@@ -50,7 +50,7 @@ cd /home/user/Serviceos && \
 ## P14-002 — Parts-used-per-job
 
 **Wave:** 14B
-**Migration number reserved:** 071 (verify free at dispatch time)
+**Migration number reserved:** 159 (verify free at dispatch time)
 **Forbidden files:**
 - `packages/api/src/db/pg-base.ts`
 - `packages/shared/**`

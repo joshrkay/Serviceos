@@ -30,9 +30,9 @@ Owner connects QuickBooks → paid invoices appear in QBO Sales Receipts within 
 
 **Dependencies:** none
 
-**Allowed files:** `packages/api/src/integrations/quickbooks/**, packages/api/src/routes/integrations.ts, packages/api/src/db/schema.ts (migration 071 only), packages/api/src/app.ts (wiring only), packages/api/src/workers/qbo-sync-worker.ts, packages/api/test/integrations/quickbooks/**, packages/api/test/workers/qbo-sync-worker.test.ts, packages/web/src/pages/settings/IntegrationsSettings.tsx, packages/web/src/components/integrations/QuickBooksConnect.tsx, packages/web/src/components/integrations/QuickBooksSyncStatus.tsx, packages/web/src/components/integrations/__tests__/**, packages/web/src/api/integrations.ts`
+**Allowed files:** `packages/api/src/integrations/quickbooks/**, packages/api/src/routes/integrations.ts, packages/api/src/db/schema.ts (migration 158 only), packages/api/src/app.ts (wiring only), packages/api/src/workers/qbo-sync-worker.ts, packages/api/test/integrations/quickbooks/**, packages/api/test/workers/qbo-sync-worker.test.ts, packages/web/src/pages/settings/IntegrationsSettings.tsx, packages/web/src/components/integrations/QuickBooksConnect.tsx, packages/web/src/components/integrations/QuickBooksSyncStatus.tsx, packages/web/src/components/integrations/__tests__/**, packages/web/src/api/integrations.ts`
 
-**Build prompt:** (1) Migration `071_create_accounting_integrations`: TWO tables.
+**Build prompt:** (1) Migration `158_create_accounting_integrations`: TWO tables.
 
 `accounting_integrations`: `id, tenant_id (UNIQUE), provider (enum: quickbooks, xero — only quickbooks for v1), access_token_encrypted (TEXT), refresh_token_encrypted (TEXT), realm_id (TEXT — QBO's company id), connected_at, last_synced_at, status (enum: active, expired, disconnected, error), error_message`. RLS.
 

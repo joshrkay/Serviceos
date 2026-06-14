@@ -12,7 +12,7 @@ P13-001 ships first because it modifies `Customer` interface (adds `contactsCoun
 ## Migration ledger
 
 - 067: P13-001 `customer_contacts`
-- 068: P13-002 `equipment` + `equipment_service_log`
+- 157: P13-002 `equipment` + `equipment_service_log`
 - 069: P13-003 `tags` + `entity_tags` + `tenant_custom_field_definitions` + ALTERs
 
 ---
@@ -53,7 +53,7 @@ cd /home/user/Serviceos && \
 ## P13-002 — Equipment / asset registry
 
 **Wave:** 13B
-**Migration number reserved:** 068
+**Migration number reserved:** 157
 **Forbidden files:**
 - `packages/api/src/db/pg-base.ts`
 - `packages/shared/**`
