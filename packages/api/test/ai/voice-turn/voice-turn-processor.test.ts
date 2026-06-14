@@ -531,3 +531,49 @@ describe('createVoiceTurnProcessor — terminal hook + persist (Codex P1 r5)', (
     );
   });
 });
+
+// ─── N-003 — negotiation guardrail (live FSM) ───────────────────────────────
+
+describe('createVoiceTurnProcessor — negotiation guardrail (N-003)', () => {
+  it('deflects a negotiation turn: drafts an owner callback, speaks a holding line, stays in intent_capture', async () => {
+    const gateway = makeGatewayReturning(
+      JSON.stringify({
+        intentType: 'negotiation',
+        confidence: 0.95,
+        reasoning: 'caller pushing on price',
+        extractedEntities: {
+          negotiationAsk: 'can you knock fifty bucks off?',
+          customerName: 'Acme',
+        },
+      }),
+    );
+    const { processor, session, proposalRepo } = makeCtx({ gateway, withRepos: true });
+
+    const sideEffects = await processor.speechTurn({
+      session,
+      speechResult: 'can you knock fifty bucks off?',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+    // Owner callback created — the rich guardrail payload, not a generic
+    // "Voice intent: negotiation".
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    const cb = proposals.find((p) => p.proposalType === 'callback');
+    expect(cb).toBeDefined();
+    expect(cb!.payload.reason).toBe('customer_negotiation_followup');
+    expect(cb!.payload.negotiationAskType).toBe('discount');
+    expect(cb!.status).toBe('draft');
+
+    // The agent deflected: spoke the holding line and did NOT advance the
+    // funnel to intent_confirm or escalate.
+    expect(
+      sideEffects.some(
+        (fx) =>
+          fx.type === 'tts_play' &&
+          /check with the owner/i.test((fx.payload as { text: string }).text),
+      ),
+    ).toBe(true);
+    expect(session.machine.currentState).toBe('intent_capture');
+  });
+});
