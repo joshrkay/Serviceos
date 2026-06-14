@@ -147,7 +147,7 @@ import { InMemoryAppointmentRepository } from './appointments/appointment';
 import { InMemoryAssignmentRepository } from './appointments/assignment';
 import { InMemoryEstimateRepository } from './estimates/estimate';
 import { InMemoryInvoiceRepository } from './invoices/invoice';
-import { InMemoryDunningConfigRepository } from './invoices/dunning-config';
+import { InMemoryDunningConfigRepository, InMemoryDunningEventRepository } from './invoices/dunning-config';
 import { InMemoryInvoiceScheduleRepository } from './invoices/invoice-schedule';
 import { PgInvoiceScheduleRepository } from './invoices/pg-invoice-schedule';
 import { InMemoryBatchInvoiceRunRepository } from './invoices/batch-invoice-run';
@@ -235,7 +235,7 @@ import { PgJobTimelineRepository } from './jobs/pg-job-lifecycle';
 import { PgAppointmentRepository } from './appointments/pg-appointment';
 import { PgEstimateRepository } from './estimates/pg-estimate';
 import { PgInvoiceRepository } from './invoices/pg-invoice';
-import { PgDunningConfigRepository } from './invoices/pg-dunning-config';
+import { PgDunningConfigRepository, PgDunningEventRepository } from './invoices/pg-dunning-config';
 import { PgPaymentRepository } from './invoices/pg-payment';
 import { InMemoryExpenseRepository } from './expenses/expense';
 import { PgExpenseRepository } from './expenses/pg-expense';
@@ -828,6 +828,7 @@ export function createApp(): express.Express {
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
   const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
   const dunningConfigRepo  = pool ? new PgDunningConfigRepository(pool)  : new InMemoryDunningConfigRepository();
+  const dunningEventRepo   = pool ? new PgDunningEventRepository(pool)   : new InMemoryDunningEventRepository();
   const invoiceScheduleRepo = pool ? new PgInvoiceScheduleRepository(pool) : new InMemoryInvoiceScheduleRepository();
   const batchInvoiceRunRepo = pool ? new PgBatchInvoiceRunRepository(pool) : new InMemoryBatchInvoiceRunRepository();
   const batchInvoiceTxRunner = pool ? new PgTenantTransactionRunner(pool) : new InMemoryTransactionRunner();
@@ -3743,7 +3744,12 @@ export function createApp(): express.Express {
         estimateRepo,
         invoiceRepo,
         auditRepo,
-        transactionalComms,
+        // §7 Collections cadence — raise owner-approved dunning proposals
+        // (send_payment_reminder / apply_late_fee) per the tenant's dunning
+        // policy, gated for idempotency by the dunning event ledger.
+        proposalRepo,
+        dunningConfigRepo,
+        dunningEventRepo,
         listTenantIds: async () => {
           if (!pool) return [];
           const r = await pool.query('SELECT id FROM tenants');
