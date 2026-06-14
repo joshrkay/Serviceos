@@ -26,7 +26,7 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee';
 
 export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -68,6 +68,8 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'onboarding_team_member',
   'onboarding_schedule',
   'review_response_proposal',
+  'send_payment_reminder',
+  'apply_late_fee',
 ];
 
 export interface Proposal {
@@ -327,6 +329,19 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     // regardless of confidence / trust tier. The MCP money_server
     // provides a second gate at the tool layer.
     case 'record_payment':
+      return 'money';
+    // A dunning payment reminder is an outbound customer-facing message
+    // (the overdue-invoice sweep raises one per due cadence step). Comms-
+    // class so it never auto-approves regardless of trust tier — the owner
+    // approves before the customer is contacted, exactly like the other
+    // outbound sends above.
+    case 'send_payment_reminder':
+      return 'comms';
+    // Applying a late fee appends a charge to an issued invoice — it moves
+    // money (raises amount due), so it is money-class and never auto-applies
+    // regardless of confidence / trust tier. The owner approves deliberately
+    // before any fee is charged.
+    case 'apply_late_fee':
       return 'money';
   }
 }

@@ -483,7 +483,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       const horizonDays = priorityBooking
         ? PRIORITY_BOOKING_HORIZON_DAYS
         : STANDARD_BOOKING_HORIZON_DAYS;
-      const window = clampBookingHorizon(parsed.from, parsed.to, horizonDays, new Date());
+      const window = clampBookingHorizon(parsed.from, parsed.to, horizonDays, new Date(), timezone);
 
       const slots = window
         ? await findBookableSlots(
@@ -549,12 +549,13 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       // Defense in depth: the availability GET already clamps the horizon, but
       // a client can POST any slot — re-check it against the customer's horizon
       // (priority members get the extended one) so it can't be bypassed.
+      const timezone = await resolveTenantTimezone(deps, tenantId);
       const priorityBooking = await customerHasPriorityBooking(tenantId, customerId, deps.agreementRepo);
       const horizonDays = priorityBooking
         ? PRIORITY_BOOKING_HORIZON_DAYS
         : STANDARD_BOOKING_HORIZON_DAYS;
       const slotDate = slotStart.toISOString().slice(0, 10);
-      if (!clampBookingHorizon(slotDate, slotDate, horizonDays, new Date())) {
+      if (!clampBookingHorizon(slotDate, slotDate, horizonDays, new Date(), timezone)) {
         res.status(400).json({
           error: 'VALIDATION_ERROR',
           message: 'Selected time is beyond your bookable window',
@@ -578,7 +579,6 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         return;
       }
 
-      const timezone = await resolveTenantTimezone(deps, tenantId);
       const finderDeps = {
         appointmentRepo: deps.appointmentRepo,
         assignmentRepo: deps.assignmentRepo,

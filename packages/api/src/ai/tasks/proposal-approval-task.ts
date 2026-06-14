@@ -435,6 +435,11 @@ async function sendOneTapFallback(
         // the SMS regardless of the tenant's unsupervised routing setting.
         routing: 'queue_and_sms',
         channel: 'voice_inbound',
+        // Track-E — sanctioned non-capture approval: this fallback only fires
+        // for a refused money/irreversible voice approval the owner explicitly
+        // requested, so the minted one-tap link is flagged to clear the
+        // redeem-side class gate. An ordinary digest/queue link is not.
+        confirmNonCapture: true,
         ...(ownerPhone ? { ownerPhone } : {}),
         summaryText: proposal.summary,
         renderSmsBody: (approveUrl: string) =>

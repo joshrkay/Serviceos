@@ -4334,6 +4334,27 @@ export const MIGRATIONS = {
       CHECK (provider IN ('google', 'quickbooks', 'xero'));
   `,
 
+  '173_create_hfcr_weekly_sends': `
+    CREATE TABLE IF NOT EXISTS hfcr_weekly_sends (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      -- Stable per-week idempotency key: the Monday (UTC) the summarized week
+      -- started. UNIQUE (tenant_id, week_starting_date) makes the weekly sweep
+      -- send exactly one owner HFCR summary per tenant per week.
+      week_starting_date DATE NOT NULL,
+      hfcr_cents BIGINT NOT NULL DEFAULT 0,
+      recovered_call_count INTEGER NOT NULL DEFAULT 0,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, week_starting_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_hfcr_weekly_sends_tenant ON hfcr_weekly_sends(tenant_id);
+    ALTER TABLE hfcr_weekly_sends ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE hfcr_weekly_sends FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_hfcr_weekly_sends ON hfcr_weekly_sends;
+    CREATE POLICY tenant_isolation_hfcr_weekly_sends ON hfcr_weekly_sends
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
   // Membership engine (#6) — auto-renew on service_agreements. Additive ALTERs
   // only: the runner re-executes every migration on every boot, so each
   // statement is idempotent (ADD COLUMN IF NOT EXISTS, DROP+ADD the CHECK).
@@ -4411,6 +4432,40 @@ export const MIGRATIONS = {
 
     ALTER TABLE service_agreements
       ADD COLUMN IF NOT EXISTS auto_collect_dues BOOLEAN NOT NULL DEFAULT FALSE;
+  `,
+
+  // P5-020: end-of-day digest entries with delivery tracking and owner reply.
+  '177_digest_entries': `
+    CREATE TABLE IF NOT EXISTS digest_entries (
+      id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id     UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      date          DATE NOT NULL,
+      status        TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending','delivered','failed','acked')),
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      rendered_text TEXT NOT NULL,
+      source_data   JSONB NOT NULL DEFAULT '{}',
+      delivered_at  TIMESTAMPTZ,
+      owner_reply   TEXT,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, date)
+    );
+    ALTER TABLE digest_entries ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE digest_entries FORCE ROW LEVEL SECURITY;
+    CREATE POLICY digest_entries_tenant_isolation ON digest_entries
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // Membership engine (#6 phase 4 review) — pin a saved card to the Stripe
+  // account it was created on. A PaymentMethod/Customer is scoped to one
+  // account (the tenant's connected account, or the platform when NULL); the
+  // off-session dues charge must target that exact account, NOT whatever the
+  // Connect resolver returns at charge time (which can drift if the tenant's
+  // Connect status changes). Nullable, additive.
+  '177_customer_payment_methods_stripe_account': `
+    ALTER TABLE customer_payment_methods
+      ADD COLUMN IF NOT EXISTS stripe_account_id TEXT;
   `,
 };
 
