@@ -62,6 +62,10 @@ import type {
   CustomerNegotiationContext,
   CustomerNegotiationContextProvider,
 } from '../../customers/customer-negotiation-context';
+import {
+  brandVoiceNegotiationTts,
+  NEGOTIATION_HOLDING_TTS_SOURCE,
+} from '../../conversations/negotiation/acknowledgment';
 import type { ProposalSmsEventRepository } from '../../proposals/sms/sms-event';
 import { confirmIntent } from '../skills/confirm-intent';
 import { summarizeSession } from '../skills/summarize-session';
@@ -896,6 +900,25 @@ export function createVoiceTurnProcessor(
   ): Promise<void> {
     if (sideEffects.length > 0) {
       deps.store.touch(session.id);
+    }
+    // N-003 (P2-036) — brand-voice the FSM's fixed negotiation holding line at
+    // this settings-aware layer so the live call matches the SMS channel. The
+    // guard keeps this a no-op (no settings read) on non-negotiation turns.
+    if (
+      deps.settingsRepo &&
+      sideEffects.some(
+        (s) => s.type === 'tts_play' && s.payload?.source === NEGOTIATION_HOLDING_TTS_SOURCE,
+      )
+    ) {
+      try {
+        const settings = await deps.settingsRepo.findByTenant(tenantId);
+        brandVoiceNegotiationTts(sideEffects, {
+          brandVoice: settings?.brandVoice ?? null,
+          businessName: settings?.businessName ?? null,
+        });
+      } catch {
+        // Keep the FSM's fixed holding line if settings can't be loaded.
+      }
     }
     for (const fx of sideEffects) {
       if (fx.type === 'audit_log') {

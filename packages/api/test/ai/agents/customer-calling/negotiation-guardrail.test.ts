@@ -46,6 +46,9 @@ describe('negotiation guardrail global guard', () => {
     // Stays in the current state — does NOT escalate or advance the funnel.
     expect(result.nextState).toBe('intent_capture');
     expect(ttsTexts(result.sideEffects)).toContain(NEGOTIATION_HOLDING_LINE);
+    // Tagged so the settings-aware processor can brand-voice the line.
+    const tts = result.sideEffects.find((f) => f.type === 'tts_play');
+    expect((tts?.payload as { source?: string }).source).toBe('negotiation_holding');
 
     const cp = creates(result.sideEffects);
     expect(cp).toHaveLength(1);
