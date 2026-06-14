@@ -13,6 +13,7 @@ import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
 import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
 import { InMemoryJobRepository } from '../../src/jobs/job';
 import { InMemoryAgreementRepository } from '../../src/agreements/agreement';
+import { createAgreement } from '../../src/agreements/agreement-service';
 import { InMemoryAppointmentRepository, createAppointment } from '../../src/appointments/appointment';
 import { InMemoryAssignmentRepository } from '../../src/appointments/assignment';
 import { InMemoryLocationRepository, createLocation } from '../../src/locations/location';
@@ -22,7 +23,13 @@ import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemorySettingsRepository, createSettings } from '../../src/settings/settings';
 import { createPortalRouter } from '../../src/routes/portal';
 import { createPublicPortalRouter } from '../../src/routes/public-portal';
-import { findBookableSlots, isSlotFree } from '../../src/scheduling/booking-availability';
+import {
+  findBookableSlots,
+  isSlotFree,
+  clampBookingHorizon,
+  STANDARD_BOOKING_HORIZON_DAYS,
+  PRIORITY_BOOKING_HORIZON_DAYS,
+} from '../../src/scheduling/booking-availability';
 import { getDispatchBoardEventBus, DispatchBoardEvent } from '../../src/dispatch/board-event-bus';
 
 const TENANT = uuidv4();
@@ -42,6 +49,7 @@ async function build() {
   const auditRepo = new InMemoryAuditRepository();
   const proposalRepo = new InMemoryProposalRepository();
   const settingsRepo = new InMemorySettingsRepository();
+  const agreementRepo = new InMemoryAgreementRepository();
 
   await createSettings({ tenantId: TENANT, businessName: 'Acme', timezone: 'America/New_York' }, settingsRepo);
 
@@ -82,7 +90,7 @@ async function build() {
       estimateRepo: new InMemoryEstimateRepository(),
       invoiceRepo: new InMemoryInvoiceRepository(),
       jobRepo,
-      agreementRepo: new InMemoryAgreementRepository(),
+      agreementRepo,
       appointmentRepo,
       leadRepo,
       auditRepo,
@@ -104,7 +112,7 @@ async function build() {
   });
   app.use('/api/portal-sessions', createPortalRouter({ portalRepo, customerRepo }));
 
-  return { app, customer, location, customerRepo, jobRepo, appointmentRepo, proposalRepo, auditRepo };
+  return { app, customer, location, customerRepo, jobRepo, appointmentRepo, proposalRepo, auditRepo, agreementRepo };
 }
 
 function captureBoardEvents(date: string): { events: DispatchBoardEvent[]; stop: () => void } {
@@ -119,9 +127,40 @@ async function mintToken(app: express.Express, customerId: string): Promise<stri
   return res.body.token as string;
 }
 
-// Far-future fixed weekday window so "now" never invalidates the slots.
+// Far-future fixed weekday window so "now" never invalidates the slots. Used
+// by the direct findBookableSlots tests, which bypass the route's horizon cap.
 const FROM = '2030-06-03'; // Monday
 const TO = '2030-06-03';
+
+// Route tests go through the booking-horizon cap (#6 phase 3), so they book
+// within the standard 14-day window. NEAR is comfortably inside it; BEYOND is
+// past the standard horizon but inside the 60-day priority horizon.
+function daysFromNow(n: number): string {
+  return new Date(Date.now() + n * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+const NEAR = daysFromNow(5);
+const NEAR_SLOT_START = `${NEAR}T15:00:00Z`;
+const NEAR_SLOT_END = `${NEAR}T16:00:00Z`;
+const BEYOND_STANDARD = daysFromNow(30);
+
+async function seedPriorityMembership(
+  h: Awaited<ReturnType<typeof build>>,
+  customerId: string,
+): Promise<void> {
+  await createAgreement(
+    {
+      tenantId: TENANT,
+      customerId,
+      name: 'Priority membership',
+      recurrenceRule: 'FREQ=MONTHLY;BYMONTHDAY=1',
+      priceCents: 1500,
+      startsOn: '2020-01-01',
+      priorityBooking: true,
+      createdBy: ACTOR,
+    },
+    h.agreementRepo,
+  );
+}
 
 describe('booking-availability service', () => {
   it('returns business-hours slots and excludes busy windows', async () => {
@@ -226,24 +265,79 @@ describe('booking-availability service', () => {
   });
 });
 
+describe('clampBookingHorizon', () => {
+  const now = new Date('2026-06-14T12:00:00Z'); // horizon 14 → max 2026-06-28
+
+  it('returns the window unchanged when it is within the horizon', () => {
+    expect(clampBookingHorizon('2026-06-15', '2026-06-20', 14, now)).toEqual({
+      from: '2026-06-15',
+      to: '2026-06-20',
+    });
+  });
+
+  it('clamps `to` down to the horizon', () => {
+    expect(clampBookingHorizon('2026-06-15', '2026-07-30', 14, now)).toEqual({
+      from: '2026-06-15',
+      to: '2026-06-28',
+    });
+  });
+
+  it('returns null when `from` is already beyond the horizon', () => {
+    expect(clampBookingHorizon('2026-07-30', '2026-08-01', 14, now)).toBeNull();
+  });
+
+  it('a larger (priority) horizon admits a window the standard one rejects', () => {
+    expect(clampBookingHorizon('2026-07-30', '2026-07-30', 14, now)).toBeNull();
+    expect(clampBookingHorizon('2026-07-30', '2026-07-30', 60, now)).toEqual({
+      from: '2026-07-30',
+      to: '2026-07-30',
+    });
+  });
+});
+
 describe('GET /:token/availability', () => {
-  it('returns slots in the tenant timezone', async () => {
+  it('returns slots within the standard horizon for a non-member', async () => {
     const h = await build();
     const token = await mintToken(h.app, h.customer.id);
     const res = await request(h.app).get(
-      `/api/public/portal/${token}/availability?from=${FROM}&to=${TO}&durationMin=60`,
+      `/api/public/portal/${token}/availability?from=${NEAR}&to=${NEAR}&durationMin=60`,
     );
     expect(res.status).toBe(200);
     expect(res.body.timezone).toBe('America/New_York');
-    expect(Array.isArray(res.body.slots)).toBe(true);
+    expect(res.body.priorityBooking).toBe(false);
+    expect(res.body.horizonDays).toBe(STANDARD_BOOKING_HORIZON_DAYS);
     expect(res.body.slots.length).toBeGreaterThan(0);
   });
 
   it('rejects a malformed date', async () => {
     const h = await build();
     const token = await mintToken(h.app, h.customer.id);
-    const res = await request(h.app).get(`/api/public/portal/${token}/availability?from=nope&to=${TO}`);
+    const res = await request(h.app).get(`/api/public/portal/${token}/availability?from=nope&to=${NEAR}`);
     expect(res.status).toBe(400);
+  });
+
+  it('clamps a non-member request past the standard horizon to no slots', async () => {
+    const h = await build();
+    const token = await mintToken(h.app, h.customer.id);
+    const res = await request(h.app).get(
+      `/api/public/portal/${token}/availability?from=${BEYOND_STANDARD}&to=${BEYOND_STANDARD}&durationMin=60`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.priorityBooking).toBe(false);
+    expect(res.body.slots).toEqual([]);
+  });
+
+  it('lets a priority member book past the standard horizon', async () => {
+    const h = await build();
+    await seedPriorityMembership(h, h.customer.id);
+    const token = await mintToken(h.app, h.customer.id);
+    const res = await request(h.app).get(
+      `/api/public/portal/${token}/availability?from=${BEYOND_STANDARD}&to=${BEYOND_STANDARD}&durationMin=60`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.priorityBooking).toBe(true);
+    expect(res.body.horizonDays).toBe(PRIORITY_BOOKING_HORIZON_DAYS);
+    expect(res.body.slots.length).toBeGreaterThan(0);
   });
 });
 
@@ -254,11 +348,7 @@ describe('POST /:token/book', () => {
 
     const res = await request(h.app)
       .post(`/api/public/portal/${token}/book`)
-      .send({
-        slotStart: '2030-06-03T15:00:00Z',
-        slotEnd: '2030-06-03T16:00:00Z',
-        summary: 'Leaky faucet',
-      });
+      .send({ slotStart: NEAR_SLOT_START, slotEnd: NEAR_SLOT_END, summary: 'Leaky faucet' });
 
     expect(res.status).toBe(201);
     expect(res.body.status).toBe('pending_confirmation');
@@ -277,14 +367,14 @@ describe('POST /:token/book', () => {
   it('publishes a dispatch-board update so the held slot appears live', async () => {
     const h = await build();
     const token = await mintToken(h.app, h.customer.id);
-    const capture = captureBoardEvents('2030-06-03');
+    const capture = captureBoardEvents(NEAR);
 
     const res = await request(h.app)
       .post(`/api/public/portal/${token}/book`)
-      .send({ slotStart: '2030-06-03T15:00:00Z', slotEnd: '2030-06-03T16:00:00Z', summary: 'Leaky faucet' });
+      .send({ slotStart: NEAR_SLOT_START, slotEnd: NEAR_SLOT_END, summary: 'Leaky faucet' });
 
     expect(res.status).toBe(201);
-    expect(capture.events.some((e) => e.type === 'board_updated' && e.date === '2030-06-03')).toBe(true);
+    expect(capture.events.some((e) => e.type === 'board_updated' && e.date === NEAR)).toBe(true);
     capture.stop();
   });
 
@@ -306,7 +396,7 @@ describe('POST /:token/book', () => {
     const token = await mintToken(h.app, noLocCustomer.id);
     const res = await request(h.app)
       .post(`/api/public/portal/${token}/book`)
-      .send({ slotStart: '2030-06-03T15:00:00Z', slotEnd: '2030-06-03T16:00:00Z', summary: 'x' });
+      .send({ slotStart: NEAR_SLOT_START, slotEnd: NEAR_SLOT_END, summary: 'x' });
     expect(res.status).toBe(422);
     expect(res.body.error).toBe('NO_LOCATION');
   });
@@ -320,8 +410,8 @@ describe('POST /:token/book', () => {
       {
         tenantId: TENANT,
         jobId: uuidv4(),
-        scheduledStart: new Date('2030-06-03T15:00:00Z'),
-        scheduledEnd: new Date('2030-06-03T16:00:00Z'),
+        scheduledStart: new Date(NEAR_SLOT_START),
+        scheduledEnd: new Date(NEAR_SLOT_END),
         timezone: 'UTC',
         createdBy: ACTOR,
       },
@@ -330,7 +420,7 @@ describe('POST /:token/book', () => {
 
     const res = await request(h.app)
       .post(`/api/public/portal/${token}/book`)
-      .send({ slotStart: '2030-06-03T15:00:00Z', slotEnd: '2030-06-03T16:00:00Z', summary: 'Leaky faucet' });
+      .send({ slotStart: NEAR_SLOT_START, slotEnd: NEAR_SLOT_END, summary: 'Leaky faucet' });
 
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('SLOT_TAKEN');
@@ -344,6 +434,27 @@ describe('POST /:token/book', () => {
       .post(`/api/public/portal/${token}/book`)
       .send({ slotStart: '2020-01-01T15:00:00Z', slotEnd: '2020-01-01T16:00:00Z', summary: 'x' });
     expect(res.status).toBe(400);
+  });
+
+  it('rejects a non-member slot beyond the standard horizon', async () => {
+    const h = await build();
+    const token = await mintToken(h.app, h.customer.id);
+    const res = await request(h.app)
+      .post(`/api/public/portal/${token}/book`)
+      .send({ slotStart: `${BEYOND_STANDARD}T15:00:00Z`, slotEnd: `${BEYOND_STANDARD}T16:00:00Z`, summary: 'x' });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/bookable window/i);
+  });
+
+  it('lets a priority member book beyond the standard horizon', async () => {
+    const h = await build();
+    await seedPriorityMembership(h, h.customer.id);
+    const token = await mintToken(h.app, h.customer.id);
+    const res = await request(h.app)
+      .post(`/api/public/portal/${token}/book`)
+      .send({ slotStart: `${BEYOND_STANDARD}T15:00:00Z`, slotEnd: `${BEYOND_STANDARD}T16:00:00Z`, summary: 'AC' });
+    expect(res.status).toBe(201);
+    expect(res.body.status).toBe('pending_confirmation');
   });
 });
 

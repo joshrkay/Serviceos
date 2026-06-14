@@ -23,6 +23,33 @@ export interface BusinessHours {
 }
 
 export const DEFAULT_BUSINESS_HOURS: BusinessHours = { openHour: 8, closeHour: 17 };
+
+/**
+ * Self-service booking horizons — how many days ahead a customer may book.
+ * Priority-booking members (a membership perk, #6) get the extended horizon;
+ * everyone else is capped at the standard one.
+ */
+export const STANDARD_BOOKING_HORIZON_DAYS = 14;
+export const PRIORITY_BOOKING_HORIZON_DAYS = 60;
+
+/**
+ * Clamp a requested [from, to] booking window (YYYY-MM-DD) to a horizon of
+ * `horizonDays` from `now`. Returns the effective window, or null when `from`
+ * is already beyond the horizon (nothing is bookable). Calendar-date math in
+ * UTC — the horizon is a soft cap, so sub-day timezone drift is irrelevant.
+ */
+export function clampBookingHorizon(
+  from: string,
+  to: string,
+  horizonDays: number,
+  now: Date,
+): { from: string; to: string } | null {
+  const maxDate = new Date(now.getTime() + horizonDays * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+  if (from > maxDate) return null;
+  return { from, to: to > maxDate ? maxDate : to };
+}
 const HOUR_MS = 60 * 60 * 1000;
 /** Booking cadence — slots are offered on a 30-minute grid from business open. */
 const GRANULARITY_MS = 30 * 60 * 1000;

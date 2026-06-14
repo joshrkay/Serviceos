@@ -33,7 +33,18 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { SettingsRepository } from '../settings/settings';
 import { ProposalRepository, createProposal } from '../proposals/proposal';
 import { createLead } from '../leads/lead-service';
-import { findBookableSlots, isSlotFree } from '../scheduling/booking-availability';
+import {
+  findBookableSlots,
+  isSlotFree,
+  clampBookingHorizon,
+  STANDARD_BOOKING_HORIZON_DAYS,
+  PRIORITY_BOOKING_HORIZON_DAYS,
+} from '../scheduling/booking-availability';
+import { customerHasPriorityBooking } from '../agreements/member-pricing';
+import { CustomerPaymentMethodRepository } from '../payments/customer-payment-method';
+import { createSetupIntent } from '../payments/stripe-saved-card';
+import { StripeFetch } from '../payments/stripe-payment-intent';
+import { ConnectAccountResolver } from '../invoices/public-invoice-service';
 import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
 import {
   TenantTransactionRunner,
@@ -71,6 +82,13 @@ export interface PublicPortalDeps {
   paymentLinkProvider?: PaymentLinkProvider;
   /** Default currency for payment-link generation. Defaults to 'usd'. */
   paymentCurrency?: string;
+  /** #6 phase 4 — saved cards. When wired, the customer can put a card on
+   * file (SetupIntent) for membership auto-billing. */
+  customerPaymentMethodRepo?: CustomerPaymentMethodRepository;
+  stripeConfig?: { apiKey: string };
+  connectAccountResolver?: ConnectAccountResolver;
+  /** Test override for the Stripe fetch impl. */
+  stripeFetch?: StripeFetch;
   /** Test override for the token middleware (rate limit / clock). */
   middlewareOptions?: PortalTokenMiddlewareOptions;
 }
@@ -450,24 +468,41 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
   router.get('/:token/availability', async (req: PortalRequest, res: Response) => {
     if (!ensurePortal(req, res)) return;
     try {
-      const { tenantId } = req.portal!;
+      const { tenantId, customerId } = req.portal!;
       const parsed = availabilityQuerySchema.parse(req.query);
       const timezone = await resolveTenantTimezone(deps, tenantId);
 
-      const slots = await findBookableSlots(
-        { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo },
-        {
-          tenantId,
-          fromDate: parsed.from,
-          toDate: parsed.to,
-          timezone,
-          durationMin: parsed.durationMin,
-        },
+      // Priority-booking members (#6) can book further out; everyone else is
+      // capped at the standard horizon. Clamp the requested window so the
+      // finder never offers a slot past the customer's horizon.
+      const priorityBooking = await customerHasPriorityBooking(
+        tenantId,
+        customerId,
+        deps.agreementRepo,
       );
+      const horizonDays = priorityBooking
+        ? PRIORITY_BOOKING_HORIZON_DAYS
+        : STANDARD_BOOKING_HORIZON_DAYS;
+      const window = clampBookingHorizon(parsed.from, parsed.to, horizonDays, new Date());
+
+      const slots = window
+        ? await findBookableSlots(
+            { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo },
+            {
+              tenantId,
+              fromDate: window.from,
+              toDate: window.to,
+              timezone,
+              durationMin: parsed.durationMin,
+            },
+          )
+        : [];
 
       res.json({
         timezone,
         durationMin: parsed.durationMin,
+        priorityBooking,
+        horizonDays,
         slots: slots.map((s) => ({
           start: s.start.toISOString(),
           end: s.end.toISOString(),
@@ -508,6 +543,22 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       }
       if (slotStart.getTime() < Date.now()) {
         res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Cannot book a slot in the past' });
+        return;
+      }
+
+      // Defense in depth: the availability GET already clamps the horizon, but
+      // a client can POST any slot — re-check it against the customer's horizon
+      // (priority members get the extended one) so it can't be bypassed.
+      const priorityBooking = await customerHasPriorityBooking(tenantId, customerId, deps.agreementRepo);
+      const horizonDays = priorityBooking
+        ? PRIORITY_BOOKING_HORIZON_DAYS
+        : STANDARD_BOOKING_HORIZON_DAYS;
+      const slotDate = slotStart.toISOString().slice(0, 10);
+      if (!clampBookingHorizon(slotDate, slotDate, horizonDays, new Date())) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'Selected time is beyond your bookable window',
+        });
         return;
       }
 
@@ -773,6 +824,80 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         status: 'pending_confirmation',
         proposalId: persisted.id,
         message: "We've received your reschedule request and will confirm shortly.",
+      });
+    } catch (err) {
+      const { statusCode, body } = toErrorResponse(err);
+      res.status(statusCode).json(body);
+    }
+  });
+
+  /**
+   * POST /:token/payment-methods/setup — begin putting a card on file.
+   *
+   * Returns a SetupIntent client_secret the browser confirms with Stripe
+   * Elements; card data never touches our server. The resulting PaymentMethod
+   * is persisted by the `setup_intent.succeeded` webhook. The SetupIntent (and
+   * the reused/created Stripe customer) live on the tenant's connected account
+   * so the card can later be charged off-session there.
+   */
+  router.post('/:token/payment-methods/setup', async (req: PortalRequest, res: Response) => {
+    if (!ensurePortal(req, res)) return;
+    try {
+      const { tenantId, customerId } = req.portal!;
+      if (!deps.customerPaymentMethodRepo || !deps.stripeConfig) {
+        res.status(503).json({ error: 'UNAVAILABLE', message: 'Card-on-file is not configured' });
+        return;
+      }
+      const stripeCustomerId =
+        (await deps.customerPaymentMethodRepo.findStripeCustomerId(tenantId, customerId)) ?? undefined;
+      const customer = await deps.customerRepo.findById(tenantId, customerId);
+      const connect = deps.connectAccountResolver
+        ? await deps.connectAccountResolver.resolveTenantConnectAccount(tenantId).catch(() => null)
+        : null;
+      const result = await createSetupIntent(
+        {
+          apiKey: deps.stripeConfig.apiKey,
+          stripeAccountId: connect && connect.chargesEnabled ? connect.accountId : undefined,
+        },
+        {
+          tenantId,
+          customerId,
+          stripeCustomerId,
+          email: customer?.email,
+          name: customer?.displayName,
+        },
+        deps.stripeFetch,
+      );
+      res.status(200).json({ clientSecret: result.clientSecret, setupIntentId: result.setupIntentId });
+    } catch (err) {
+      const { statusCode, body } = toErrorResponse(err);
+      res.status(statusCode).json(body);
+    }
+  });
+
+  /**
+   * GET /:token/payment-methods — list the customer's cards on file. Returns
+   * only display metadata (brand/last4/expiry) + the default flag; never the
+   * internal Stripe ids.
+   */
+  router.get('/:token/payment-methods', async (req: PortalRequest, res: Response) => {
+    if (!ensurePortal(req, res)) return;
+    try {
+      const { tenantId, customerId } = req.portal!;
+      if (!deps.customerPaymentMethodRepo) {
+        res.json({ paymentMethods: [] });
+        return;
+      }
+      const pms = await deps.customerPaymentMethodRepo.findByCustomer(tenantId, customerId);
+      res.json({
+        paymentMethods: pms.map((p) => ({
+          id: p.id,
+          brand: p.brand,
+          last4: p.last4,
+          expMonth: p.expMonth,
+          expYear: p.expYear,
+          isDefault: p.isDefault,
+        })),
       });
     } catch (err) {
       const { statusCode, body } = toErrorResponse(err);

@@ -253,6 +253,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // block, never a reply anchor)
   ['171_proposal_sms_events_voice_reapproval_kind', '84e29ec755102c0b5f00bddc21544610d2c6d6e05ad9e20fafad6f0e700b99fe'],
   ['172_create_accounting_integrations', '70acc51d76a63c01b9047b15198502d8ae013bcf0985f457d67a03a405097d33'],
+  ['173_service_agreements_auto_renew', 'bbb2f2cdd6b753ae227e5ae3490e17989da183d52a1a994dc1a7d55fa6d9160a'],
+  ['174_service_agreements_member_discount', '06383ea2c1d89c9e3ac39411a2c2469b4146255d18106f27d949a788dd7e83bf'],
+  ['175_service_agreements_priority_booking', '60fee2029f69335f9adafb133c3ae61b71cb11868e523c426fffd43845f6b9da'],
+  ['176_customer_payment_methods', '6fe12975c7999002a67de1722a402a6bd017d0e8db4c84fd70d2d85dad439890'],
 ];
 
 function hashMigration(value: string): string {

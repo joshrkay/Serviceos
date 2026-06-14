@@ -26,6 +26,18 @@ export interface Agreement {
   status: AgreementStatus;
   startsOn: string;
   endsOn?: string;
+  /** Membership auto-renew: the term rolls forward instead of lapsing. */
+  autoRenew?: boolean;
+  /** Whole months the term extends by on each renewal. */
+  renewalTermMonths?: number;
+  /** How many times the term has auto-renewed. */
+  renewalCount?: number;
+  /** Member-pricing discount this membership confers, in basis points. */
+  memberDiscountBps?: number;
+  /** Priority booking: member can book further into the future. */
+  priorityBooking?: boolean;
+  /** Auto-collect dues: charge each cycle against the saved card on file. */
+  autoCollectDues?: boolean;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -58,6 +70,15 @@ export interface CreateAgreementBody {
   autoGenerateJob?: boolean;
   startsOn: string;
   endsOn?: string;
+  /** Auto-renew requires endsOn + renewalTermMonths (server-validated). */
+  autoRenew?: boolean;
+  renewalTermMonths?: number;
+  /** Member-pricing discount, in basis points (0..10000). */
+  memberDiscountBps?: number;
+  /** Priority booking: member can book further into the future. */
+  priorityBooking?: boolean;
+  /** Auto-collect dues: charge each cycle against the saved card on file. */
+  autoCollectDues?: boolean;
 }
 
 export type UpdateAgreementBody = Partial<
@@ -70,6 +91,11 @@ export type UpdateAgreementBody = Partial<
     | 'autoGenerateInvoice'
     | 'autoGenerateJob'
     | 'endsOn'
+    | 'autoRenew'
+    | 'renewalTermMonths'
+    | 'memberDiscountBps'
+    | 'priorityBooking'
+    | 'autoCollectDues'
   >
 >;
 
