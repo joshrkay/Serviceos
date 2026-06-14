@@ -118,9 +118,25 @@ async function pollRecordingUntilDone(recordingId: string) {
 
 interface VoiceBarProps {
   variant?: 'mobile' | 'desktop';
+  /**
+   * Context-aware dispatch seam. When provided, a confirmed transcript is
+   * handed to `onSubmit` INSTEAD of the default navigate-to-assistant /
+   * voice-command routing. Onboarding wires this to POST the transcript to
+   * /api/onboarding/voice; the global app surface leaves it undefined and
+   * keeps the assistant behavior. May be async — the bar shows the 'sending'
+   * state until it resolves.
+   */
+  onSubmit?: (transcript: string) => void | Promise<void>;
+  /** Idle-state prompt label (defaults to the assistant ask). */
+  idlePrompt?: string;
+  /** Idle-state right-aligned hint (defaults to "tap to speak"). */
+  idleHint?: string;
 }
 
-export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function VoiceBar({ variant = 'mobile' }, ref) {
+export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function VoiceBar(
+  { variant = 'mobile', onSubmit, idlePrompt, idleHint }: VoiceBarProps,
+  ref,
+) {
   const navigate = useNavigate();
   const [phase, setPhase] = useState<BarPhase>('idle');
   const [transcript, setTranscript] = useState('');
@@ -290,6 +306,25 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   function handleSend() {
     if (!transcript.trim()) return;
 
+    // Context-aware dispatch: when a parent supplies onSubmit (e.g. the
+    // onboarding voice intake), hand off the transcript instead of routing to
+    // the assistant. The bar stays in 'sending' until the handler resolves.
+    if (onSubmit) {
+      const text = transcript.trim();
+      setPhase('sending');
+      Promise.resolve(onSubmit(text))
+        .catch(() => {
+          // The parent owns user-facing error messaging; just release the bar.
+        })
+        .finally(() => {
+          setPhase('idle');
+          setTranscript('');
+          setError(null);
+          setCanRetry(false);
+        });
+      return;
+    }
+
     // Check for voice navigation commands first
     const command = matchVoiceCommand(transcript.trim());
     if (command) {
@@ -352,7 +387,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
           onClick={startListening}
           className={`
             flex items-center gap-3 w-full text-left transition-all
-            rounded-2xl border border-slate-200 bg-slate-50 px-4
+            rounded-2xl border border-slate-200 bg-slate-50 px-4 min-h-11
             hover:border-blue-300 hover:bg-blue-50/40 active:scale-[0.99]
             group
             ${isDesktop ? 'py-2.5' : 'py-3'}
@@ -361,8 +396,8 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
           <span className="flex shrink-0 size-7 items-center justify-center rounded-full bg-blue-600 shadow-sm group-hover:bg-blue-700 transition-colors">
             <Mic size={14} className="text-white" />
           </span>
-          <span className="text-sm text-slate-400 flex-1">Ask Rivet AI anything…</span>
-          <span className="text-xs text-slate-300">tap to speak</span>
+          <span className="text-sm text-slate-400 flex-1">{idlePrompt ?? 'Ask Rivet AI anything…'}</span>
+          <span className="text-xs text-slate-300">{idleHint ?? 'tap to speak'}</span>
         </button>
       )}
 

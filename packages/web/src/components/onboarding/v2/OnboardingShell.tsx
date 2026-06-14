@@ -9,6 +9,7 @@ import { track, trackFunnel, type AnalyticsEvent } from '../../../lib/analytics'
 import { Button, Spinner } from '../../ui';
 import { Sidebar } from './Sidebar';
 import { MobileProgress } from './MobileProgress';
+import { OnboardingVoiceIntake } from './OnboardingVoiceIntake';
 import { IdentityStep } from './steps/IdentityStep';
 import { PackStep } from './steps/PackStep';
 import { PhoneStep } from './steps/PhoneStep';
@@ -211,6 +212,11 @@ export function OnboardingShell() {
       <main className="flex-1">
         <MobileProgress status={data} activeId={activeId} />
         <div className="p-6 md:p-8 max-w-3xl">
+          {/* Voice-first: on the data-entry steps the operator can speak their
+              business instead of typing — the forms below stay as fallback. */}
+          {(activeId === 'identity' || activeId === 'pack') && (
+            <OnboardingVoiceIntake onProposalsCreated={() => void refetch()} />
+          )}
           {activeId === 'identity' && <IdentityStep onSaved={() => void refetch()} />}
           {activeId === 'pack' && <PackStep onSaved={() => void refetch()} />}
           {activeId === 'phone' && (
