@@ -28,7 +28,7 @@ import {
   formatChainSetApprovalMessage,
   summarizeChainSetResult,
 } from '../proposals/actions';
-import type { ProposalRepository } from '../proposals/proposal';
+import { actionClassForProposalType, type ProposalRepository } from '../proposals/proposal';
 import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
 import {
   mintDraftInvoiceProposalForJob,
@@ -176,6 +176,45 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
         .type('html')
         .send(mintConfirmPage(jobLabel, token, `${req.baseUrl}${req.path}`));
       return;
+    }
+
+    // Track-E money-gating (pre-consume, defense-in-depth): a one-tap link
+    // approves with a SINGLE tap and no second factor. Capture-class proposals
+    // are safe to approve this way; money / comms / irreversible require a
+    // deliberate confirm. The token's `confirm` flag is set ONLY by sanctioned
+    // non-capture mints (the voice-approval fallback), so a non-capture token
+    // WITHOUT it — e.g. a future mint site that forgets to class-gate — is
+    // refused here even though every current mint site is class-gated. Checked
+    // on the NON-consuming peek so a refused link never burns its single-use
+    // nonce.
+    if (peeked.ok && peeked.action === 'approve' && peeked.confirm !== true) {
+      const target = await deps.proposalRepo.findById(peeked.tenantId, peeked.proposalId);
+      if (target && actionClassForProposalType(target.proposalType) !== 'capture') {
+        await deps.auditRepo.create(
+          createAuditEvent({
+            tenantId: peeked.tenantId,
+            actorId: ONE_TAP_ACTOR_ID,
+            actorRole: 'system',
+            eventType: 'proposal.one_tap_blocked_action_class',
+            entityType: 'proposal',
+            entityId: peeked.proposalId,
+            metadata: {
+              channel: 'sms_one_tap',
+              actionClass: actionClassForProposalType(target.proposalType),
+            },
+          }),
+        );
+        res
+          .status(403)
+          .type('html')
+          .send(
+            page(
+              'Approve in the app',
+              'This one needs the app or its own approval link — a one-tap link can’t approve it on its own. It’s waiting in your review queue.',
+            ),
+          );
+        return;
+      }
     }
 
     const verified = peeked.ok
