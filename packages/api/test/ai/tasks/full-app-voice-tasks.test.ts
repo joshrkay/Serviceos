@@ -25,7 +25,13 @@ import type { AppointmentRepository } from '../../../src/appointments/appointmen
 import type { JobRepository } from '../../../src/jobs/job';
 import { TaskContext } from '../../../src/ai/tasks/task-handlers';
 import { ConvertLeadExecutionHandler } from '../../../src/proposals/execution/convert-lead-handler';
-import { NotifyDelayExecutionHandler } from '../../../src/proposals/execution/full-app-voice-handlers';
+import {
+  NotifyDelayExecutionHandler,
+  OnMyWayExecutionHandler,
+} from '../../../src/proposals/execution/full-app-voice-handlers';
+import { OnMyWayTaskHandler } from '../../../src/ai/tasks/voice-extended-tasks';
+import { InMemoryAppointmentRepository } from '../../../src/appointments/in-memory-appointment';
+import { InMemoryJobRepository } from '../../../src/jobs/job';
 import { Proposal, ProposalType, missingFieldsFor } from '../../../src/proposals/proposal';
 import { InMemoryLeadRepository } from '../../../src/leads/lead';
 import { InMemoryCustomerRepository } from '../../../src/customers/customer';
@@ -230,6 +236,149 @@ describe('NotifyDelayExecutionHandler', () => {
       { tenantId: 't-1', executedBy: 'u-1' },
     );
     expect(res.success).toBe(true);
+  });
+});
+
+describe('OnMyWayExecutionHandler', () => {
+  function customerRepo(overrides: Record<string, unknown> = {}) {
+    return {
+      findById: async () => ({
+        id: 'cust-1',
+        displayName: 'Jane Smith',
+        preferredChannel: 'sms',
+        smsConsent: true,
+        primaryPhone: '+15555550143',
+        ...overrides,
+      }),
+    } as unknown as import('../../../src/customers/customer').CustomerRepository;
+  }
+  const apptRepo = {
+    findById: async () => ({ id: 'appt-1', jobId: 'job-1' }),
+  } as unknown as AppointmentRepository;
+  const jobRepo = {
+    findById: async () => ({ id: 'job-1', customerId: 'cust-1' }),
+  } as unknown as JobRepository;
+
+  it('texts the customer an en-route notice with the relative ETA', async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const delayService = {
+      sendDelayNotice: async (req: Record<string, unknown>) => {
+        sent.push(req);
+        return { providerMessageId: 'msg-1' };
+      },
+    } as unknown as import('../../../src/notifications/delay-notifications').DelayNotificationService;
+
+    const handler = new OnMyWayExecutionHandler(delayService, apptRepo, jobRepo, customerRepo());
+    const res = await handler.execute(
+      approved('on_my_way', { appointmentId: 'appt-1', etaMinutes: 15 }),
+      { tenantId: 't-1', executedBy: 'u-1' },
+    );
+
+    expect(res.success).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].channel).toBe('sms');
+    expect(sent[0].destination).toBe('+15555550143');
+    expect(sent[0].message).toContain('on the way');
+    expect(sent[0].message).toContain('about 15 minutes');
+  });
+
+  it('is a no-op success for a customer with no consented channel (never texts without consent)', async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const delayService = {
+      sendDelayNotice: async (req: Record<string, unknown>) => {
+        sent.push(req);
+        return { providerMessageId: 'm' };
+      },
+    } as unknown as import('../../../src/notifications/delay-notifications').DelayNotificationService;
+    const handler = new OnMyWayExecutionHandler(
+      delayService,
+      apptRepo,
+      jobRepo,
+      customerRepo({ smsConsent: false, preferredChannel: 'sms' }),
+    );
+
+    const res = await handler.execute(approved('on_my_way', { appointmentId: 'appt-1' }), {
+      tenantId: 't-1',
+      executedBy: 'u-1',
+    });
+    expect(res.success).toBe(true);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('fails when appointmentId is unresolved', async () => {
+    const res = await new OnMyWayExecutionHandler().execute(
+      approved('on_my_way', { appointmentReference: 'Miller' }),
+      { tenantId: 't-1', executedBy: 'u-1' },
+    );
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/appointmentId/);
+  });
+
+  it('degrades to passthrough success when deps are absent', async () => {
+    const res = await new OnMyWayExecutionHandler().execute(
+      approved('on_my_way', { appointmentId: 'appt-1' }),
+      { tenantId: 't-1', executedBy: 'u-1' },
+    );
+    expect(res.success).toBe(true);
+  });
+});
+
+describe('OnMyWayTaskHandler', () => {
+  it('resolves the caller\'s appointment, carries ETA, and builds an approvable proposal', async () => {
+    const apptRepo = new InMemoryAppointmentRepository();
+    await apptRepo.create({
+      id: 'appt-1',
+      tenantId: 't-1',
+      jobId: 'job-1',
+      scheduledStart: new Date(Date.now() + 3_600_000),
+      scheduledEnd: new Date(Date.now() + 7_200_000),
+      timezone: 'America/New_York',
+      status: 'scheduled',
+      holdPendingApproval: false,
+      createdBy: 'u-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const jobRepo = new InMemoryJobRepository();
+    await jobRepo.create({
+      id: 'job-1',
+      tenantId: 't-1',
+      customerId: 'cust-1',
+      locationId: 'loc-1',
+      jobNumber: 'JOB-1',
+      summary: 'Miller install',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: 'u-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const handler = new OnMyWayTaskHandler(apptRepo, jobRepo);
+    const ctx: TaskContext = {
+      tenantId: 't-1',
+      userId: 'tech-1',
+      customerId: 'cust-1',
+      message: 'on my way to the Miller job, there in 15',
+      existingEntities: { appointmentReference: 'Miller', etaMinutes: 15 },
+    };
+
+    const { proposal } = await handler.handle(ctx);
+    expect(proposal.proposalType).toBe('on_my_way');
+    expect(proposal.payload).toMatchObject({ appointmentId: 'appt-1', etaMinutes: 15 });
+    expect(missingFieldsFor(proposal)).toEqual([]);
+  });
+
+  it('holds for review when the appointment is unresolved (never texts a guess)', async () => {
+    const handler = new OnMyWayTaskHandler();
+    const { proposal } = await handler.handle({
+      tenantId: 't-1',
+      userId: 'tech-1',
+      message: 'on my way',
+      existingEntities: { appointmentReference: 'Miller' },
+    });
+    expect(proposal.status).toBe('draft');
+    expect(missingFieldsFor(proposal)).toContain('appointmentId');
   });
 });
 

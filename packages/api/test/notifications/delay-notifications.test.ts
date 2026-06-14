@@ -297,6 +297,23 @@ describe('en-route notification flow', () => {
     expect(message).not.toContain('behind');
   });
 
+  it('renders a relative ETA from etaMinutes (spoken "there in 15")', () => {
+    const message = renderEnRouteTemplate({ customerName: 'Alex', etaMinutes: 15 });
+    expect(message).toContain('on the way');
+    expect(message).toContain('Arriving in about 15 minutes');
+    expect(message).not.toContain('late');
+  });
+
+  it('prefers the spoken relative ETA over an ETA window when both are given', () => {
+    const message = renderEnRouteTemplate({
+      customerName: 'Alex',
+      etaMinutes: 10,
+      etaWindow: { start: new Date('2026-04-20T18:00:00Z'), end: new Date('2026-04-20T18:30:00Z'), timezone: 'UTC' },
+    });
+    expect(message).toContain('Arriving in about 10 minutes');
+    expect(message).not.toContain('Updated ETA window');
+  });
+
   it('targets the current appointment customer and enqueues an en_route notice', async () => {
     const appointmentRepo = new InMemoryAppointmentRepository();
     const assignmentRepo = new InMemoryAssignmentRepository();

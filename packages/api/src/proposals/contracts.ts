@@ -257,6 +257,19 @@ export const logTimeEntryPayloadSchema = z.object({
   notes: z.string().optional(),
 });
 
+// on_my_way: a field tech tells the customer they're en route ("on my way
+// to the Miller job", "heading to Henderson, there in 15"). Resolves to
+// the tech's own appointment; etaMinutes is an optional relative ETA.
+export const onMyWayPayloadSchema = z
+  .object({
+    appointmentId: z.string().uuid().optional(),
+    appointmentReference: z.string().min(1).optional(),
+    etaMinutes: z.number().int().positive().optional(),
+  })
+  .refine((v) => Boolean(v.appointmentId || v.appointmentReference), {
+    message: 'appointmentId or appointmentReference is required',
+  });
+
 // clock_out: a field tech ends their current shift by voice ("clock me
 // out", "I'm done for the day"). No fields required — the execution
 // handler closes the speaker's single active time entry, resolved by
@@ -395,6 +408,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   add_service_location: addServiceLocationPayloadSchema,
   log_time_entry: logTimeEntryPayloadSchema,
   notify_delay: notifyDelayPayloadSchema,
+  on_my_way: onMyWayPayloadSchema,
   request_feedback: requestFeedbackPayloadSchema,
   emergency_dispatch: z.object({
     callerPhone: z.string().optional(),

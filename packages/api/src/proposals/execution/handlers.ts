@@ -69,6 +69,7 @@ import {
   LogTimeEntryExecutionHandler,
   ClockOutExecutionHandler,
   NotifyDelayExecutionHandler,
+  OnMyWayExecutionHandler,
   RequestFeedbackExecutionHandler,
 } from './full-app-voice-handlers';
 import { TimeEntryService } from '../../time-tracking/time-entry-service';
@@ -625,6 +626,12 @@ export function createExecutionHandlerRegistry(deps?: {
     new LogTimeEntryExecutionHandler(deps?.timeEntryService),
     new ClockOutExecutionHandler(deps?.timeEntryService),
     new NotifyDelayExecutionHandler(
+      deps?.delayNotificationService,
+      deps?.appointmentRepo,
+      deps?.jobRepo,
+      deps?.customerRepo,
+    ),
+    new OnMyWayExecutionHandler(
       deps?.delayNotificationService,
       deps?.appointmentRepo,
       deps?.jobRepo,

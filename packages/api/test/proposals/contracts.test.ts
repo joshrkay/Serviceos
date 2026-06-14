@@ -169,6 +169,19 @@ describe('P2-002 — Typed proposal contracts', () => {
     ).not.toThrow();
   });
 
+  // on_my_way (voice ETA notice)
+  describe('on_my_way payload', () => {
+    it('accepts a resolved appointmentId + etaMinutes', () => {
+      expect(validateProposalPayload('on_my_way', { appointmentId: validJobId, etaMinutes: 15 }).valid).toBe(true);
+    });
+    it('accepts a free-text appointmentReference (pre-resolution)', () => {
+      expect(validateProposalPayload('on_my_way', { appointmentReference: 'Miller' }).valid).toBe(true);
+    });
+    it('rejects neither appointmentId nor appointmentReference', () => {
+      expect(validateProposalPayload('on_my_way', { etaMinutes: 15 }).valid).toBe(false);
+    });
+  });
+
   // clock_out (voice time tracking)
   describe('clock_out payload', () => {
     it('accepts an empty payload (active entry resolved at execution by userId)', () => {

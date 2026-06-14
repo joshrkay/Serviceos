@@ -69,6 +69,7 @@ import {
   RequestFeedbackTaskHandler,
   UpdateJobStatusTaskHandler,
   ClockOutTaskHandler,
+  OnMyWayTaskHandler,
 } from '../ai/tasks/voice-extended-tasks';
 import { instrument } from '../monitoring/instrumentation';
 
@@ -273,6 +274,7 @@ const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, Pr
   add_service_location: 'add_service_location',
   log_time_entry: 'log_time_entry',
   notify_delay: 'notify_delay',
+  on_my_way: 'on_my_way',
   request_feedback: 'request_feedback',
 };
 
@@ -392,6 +394,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('add_service_location', new AddServiceLocationTaskHandler());
   handlers.set('log_time_entry', new LogTimeEntryTaskHandler());
   handlers.set('notify_delay', new NotifyDelayTaskHandler(deps.appointmentRepo, deps.jobRepo));
+  handlers.set('on_my_way', new OnMyWayTaskHandler(deps.appointmentRepo, deps.jobRepo));
   handlers.set('request_feedback', new RequestFeedbackTaskHandler());
   return handlers;
 }

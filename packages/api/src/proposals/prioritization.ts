@@ -53,6 +53,8 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // facing work — surface high alongside scheduling changes.
   confirm_appointment: 1,
   notify_delay: 1,
+  // "On my way" is time-sensitive customer comms — same high tier.
+  on_my_way: 1,
   // Lead loss, service-location adds, time entries, and feedback requests
   // are CRM/back-office follow-up — same low tier as notes.
   mark_lead_lost: 4,

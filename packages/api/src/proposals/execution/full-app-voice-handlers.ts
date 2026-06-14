@@ -30,6 +30,7 @@ import {
   DelayNotificationService,
   resolveCustomerChannel,
   renderDelayTemplateVariants,
+  renderEnRouteTemplate,
   selectDelayTemplate,
 } from '../../notifications/delay-notifications';
 
@@ -259,6 +260,76 @@ export class NotifyDelayExecutionHandler implements ExecutionHandler {
         delayMinutes,
       });
       const message = selectDelayTemplate(variants, delayMinutes);
+
+      await this.delayService.sendDelayNotice({
+        tenantId: context.tenantId,
+        customerId: customer.id,
+        channel,
+        destination,
+        message,
+        idempotencyKey: proposal.id,
+      });
+      return { success: true, resultEntityId: appointmentId };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+}
+
+/**
+ * on_my_way — text the customer that the tech is en route. Same
+ * appointment→job→customer resolution + consent-gated channel as
+ * notify_delay, but renders the neutral en-route template (with an
+ * optional relative ETA) instead of a delay notice. Reuses the generic
+ * customer-notice sender. Degrades to a validated passthrough when the
+ * send path isn't wired; in_app / no-consent customers are a no-op
+ * success (nothing to send, not a failure).
+ */
+export class OnMyWayExecutionHandler implements ExecutionHandler {
+  proposalType: ProposalType = 'on_my_way';
+
+  constructor(
+    private readonly delayService?: DelayNotificationService,
+    private readonly appointmentRepo?: AppointmentRepository,
+    private readonly jobRepo?: JobRepository,
+    private readonly customerRepo?: CustomerRepository,
+  ) {}
+
+  async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
+    const payload = proposal.payload as Record<string, unknown>;
+    const appointmentId = typeof payload.appointmentId === 'string' ? payload.appointmentId : undefined;
+    const etaMinutes = typeof payload.etaMinutes === 'number' ? payload.etaMinutes : undefined;
+    if (!appointmentId) {
+      return { success: false, error: 'on_my_way requires a resolved appointmentId' };
+    }
+
+    if (!this.delayService || !this.appointmentRepo || !this.jobRepo || !this.customerRepo) {
+      return { success: true, resultEntityId: appointmentId };
+    }
+
+    try {
+      const appointment = await this.appointmentRepo.findById(context.tenantId, appointmentId);
+      if (!appointment) {
+        return { success: false, error: `Appointment ${appointmentId} not found` };
+      }
+      const job = await this.jobRepo.findById(context.tenantId, appointment.jobId);
+      if (!job) {
+        return { success: false, error: `Job for appointment ${appointmentId} not found` };
+      }
+      const customer = await this.customerRepo.findById(context.tenantId, job.customerId);
+      if (!customer) {
+        return { success: false, error: `Customer for appointment ${appointmentId} not found` };
+      }
+
+      const { channel, destination } = resolveCustomerChannel(customer);
+      if (channel === 'in_app' || !destination) {
+        return { success: true, resultEntityId: appointmentId };
+      }
+
+      const message = renderEnRouteTemplate({
+        customerName: customer.displayName,
+        ...(etaMinutes ? { etaMinutes } : {}),
+      });
 
       await this.delayService.sendDelayNotice({
         tenantId: context.tenantId,

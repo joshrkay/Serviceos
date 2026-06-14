@@ -707,6 +707,53 @@ export class UpdateJobStatusTaskHandler implements TaskHandler {
   }
 }
 
+// ───────────── on_my_way ─────────────
+//
+// A tech notifies the customer they're en route. Mirrors notify_delay's
+// caller-scoped appointment resolution (texting a DIFFERENT customer's
+// appointment would message the wrong person), but it's capture +
+// autonomous: a clear "on my way" sends one-tap/auto (the tech's voice IS
+// the approval; the message is a fixed template, consent-checked at send).
+// Ambiguity → missingFields → holds for review, never texts a guess.
+export class OnMyWayTaskHandler implements TaskHandler {
+  readonly taskType = 'on_my_way' as const;
+
+  constructor(
+    private readonly appointmentRepo?: AppointmentRepository,
+    private readonly jobRepo?: JobRepository,
+  ) {}
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+
+    const resolvedId = await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId, {
+      customerId: context.customerId,
+      jobRepo: this.jobRepo,
+    });
+    if (resolvedId) {
+      payload.appointmentId = resolvedId;
+    } else if (ee.appointmentReference) {
+      payload.appointmentReference = ee.appointmentReference;
+      missing.push('appointmentId');
+    } else {
+      missing.push('appointmentId');
+    }
+
+    if (typeof ee.etaMinutes === 'number' && ee.etaMinutes > 0) {
+      payload.etaMinutes = ee.etaMinutes;
+    }
+
+    return {
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, missing, { trust: 'autonomous' }),
+      ),
+      taskType: this.taskType,
+    };
+  }
+}
+
 // ───────────── clock_out ─────────────
 //
 // The inverse of log_time_entry: ends the tech's current shift. No

@@ -1369,4 +1369,23 @@ describe('voice-action-router update_job_status (JTBD #4)', () => {
     expect(proposals).toHaveLength(1);
     expect(proposals[0].proposalType).toBe('clock_out');
   });
+
+  it('routes an "on my way" transcript to an on_my_way proposal', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'on_my_way',
+        confidence: 0.95,
+        extractedEntities: { appointmentReference: 'Miller', etaMinutes: 15 },
+      } satisfies IntentClassification),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'tech-1', transcript: 'On my way to the Miller job, there in 15' }),
+      silentLogger(),
+    );
+    const proposals = await proposalRepo.findByTenant('t-1');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposalType).toBe('on_my_way');
+    expect(proposals[0].payload).toMatchObject({ appointmentReference: 'Miller', etaMinutes: 15 });
+  });
 });

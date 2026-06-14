@@ -43,6 +43,7 @@ export type IntentType =
   | 'add_service_location'
   | 'log_time_entry'
   | 'notify_delay'
+  | 'on_my_way'
   | 'request_feedback'
   // P11-001: voice lookup-skill family. Read-only intents — the
   // adapter routes these straight to the `lookup_*` skill instead
@@ -100,6 +101,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'add_service_location',
   'log_time_entry',
   'notify_delay',
+  'on_my_way',
   'request_feedback',
   'lookup_appointments',
   'lookup_invoices',
@@ -202,6 +204,8 @@ export interface ExtractedEntities {
   timeEntryType?: 'job' | 'drive' | 'break' | 'admin';
   // notify_delay: how many minutes late the crew is running.
   delayMinutes?: number;
+  // on_my_way: relative ETA the tech spoke ("there in 15").
+  etaMinutes?: number;
 }
 
 /**
@@ -532,12 +536,25 @@ Supported intents (return exactly ONE):
                                      "End my shift"
                                      "Stop my time"
 - "notify_delay"        — user wants to tell a customer the crew is
-                           running late. Customer-facing comms — never
-                           auto-execute. Extract appointmentReference and
+                           running LATE / behind schedule. Customer-facing
+                           comms. Extract appointmentReference and
                            delayMinutes when stated.
                            Examples: "Let the 10am know we're running 30 minutes behind"
                                      "Tell the Miller job we're delayed about an hour"
                                      "Text the customer that we'll be 20 minutes late"
+- "on_my_way"           — a tech is EN ROUTE / departing for the
+                           appointment and wants to notify the customer
+                           they're on the way (a positive arrival notice,
+                           NOT a delay). Extract appointmentReference (which
+                           job/customer) and etaMinutes when a relative ETA
+                           is stated. Distinguish from notify_delay (running
+                           late) — "on my way" / "heading over" is arrival,
+                           not lateness.
+                           Examples: "I'm on my way to the Miller job" →
+                                       appointmentReference="Miller"
+                                     "Heading to Henderson now, there in 15" →
+                                       appointmentReference="Henderson", etaMinutes=15
+                                     "Tell the customer I'm en route"
 - "request_feedback"    — user wants to send a post-job feedback / review
                            request to a customer. Customer-facing comms —
                            never auto-execute. Extract the jobReference or
@@ -727,7 +744,8 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "lostReason": "<string, optional — why the lead was lost on mark_lead_lost>",
     "serviceAddress": "<string, optional — full address on add_service_location>",
     "timeEntryType": "<job|drive|break|admin, optional — on log_time_entry>",
-    "delayMinutes": <integer minutes, optional — on notify_delay>
+    "delayMinutes": <integer minutes, optional — on notify_delay>,
+    "etaMinutes": <integer minutes, optional — relative ETA on on_my_way>
   }
 }
 
@@ -889,6 +907,7 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (timeEntryType) extracted.timeEntryType = timeEntryType;
     // notify_delay fields
     if (typeof ee.delayMinutes === 'number') extracted.delayMinutes = ee.delayMinutes;
+    if (typeof ee.etaMinutes === 'number') extracted.etaMinutes = ee.etaMinutes;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

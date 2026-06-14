@@ -128,6 +128,12 @@ export interface EnRouteTemplateRenderInput {
   customerName: string;
   technicianName?: string;
   etaWindow?: { start: Date; end: Date; timezone?: string };
+  /**
+   * Relative ETA the tech spoke ("there in 15"). Rendered as "Arriving in
+   * about N minutes." and preferred over `etaWindow` when present — a
+   * spoken relative ETA needs no timezone/clock math.
+   */
+  etaMinutes?: number;
 }
 
 /**
@@ -137,7 +143,10 @@ export interface EnRouteTemplateRenderInput {
 export function renderEnRouteTemplate(input: EnRouteTemplateRenderInput): string {
   const greeting = input.customerName ? `Hi ${input.customerName}, ` : 'Hi, ';
   const tech = input.technicianName ? `${input.technicianName} is` : 'our technician is';
-  const etaText = formatEtaWindow(input.etaWindow);
+  const etaText =
+    typeof input.etaMinutes === 'number' && input.etaMinutes > 0
+      ? ` Arriving in about ${input.etaMinutes} minutes.`
+      : formatEtaWindow(input.etaWindow);
   return `${greeting}${tech} on the way to your appointment.${etaText}`;
 }
 
