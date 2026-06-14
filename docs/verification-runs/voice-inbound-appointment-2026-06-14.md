@@ -125,16 +125,20 @@ Number provisioning + webhook wiring (buy DID, set `VoiceUrl`) is covered by
 
 ## Flagged gaps (follow-up, out of this verification's scope)
 
-1. **A technician cannot select/assign their *own* phone number.** Today every
-   on-call dispatcher rings the same `tenant_settings.business_phone`
+1. **A technician's own number is not used for escalation routing.** Today
+   every on-call dispatcher rings the same `tenant_settings.business_phone`
    (`packages/api/src/telephony/dispatcher-phone-resolver.ts` —
-   `createBusinessPhoneDispatcherResolver`, explicitly "v1 … until per-user
-   mobile numbers land"). There is no `users.phone` column and no
-   technician-facing UI to pick/verify a number; the onboarding number is
-   auto-assigned and read-only (`web/.../onboarding/v2/steps/PhoneStep.tsx`).
-   To build it: add a `users.phone` migration (tenant_id + RLS), a technician
-   settings sheet + `PUT` endpoint, and refactor the dispatcher-phone-resolver
-   to read per-user numbers.
+   `createBusinessPhoneDispatcherResolver` ignores its `userId` arg, explicitly
+   "v1 … until per-user mobile numbers land"). Note: a per-user
+   `users.mobile_number` column **already exists** (migration
+   `109_users_mobile_number`) with `UserRepository.setMobileNumber` /
+   `findByMobileNumber` support — it's used for P1-022 (tech SMS-reply binding,
+   emergency owner paging) but **not** consulted by the escalation
+   dial path, and there is no technician-facing UI to set it. To finish it:
+   refactor the dispatcher-phone-resolver to prefer `user.mobileNumber` with a
+   `business_phone` fallback, add a self-service `PUT` endpoint + a technician
+   settings sheet. (The onboarding *business* number is separately
+   auto-assigned and read-only — `web/.../onboarding/v2/steps/PhoneStep.tsx`.)
 
 2. **Media Streams canned-audio smoke is still a `.todo()`.** The Gather-mode
    inbound booking is now proven (above). The raw-audio Media Streams variant
