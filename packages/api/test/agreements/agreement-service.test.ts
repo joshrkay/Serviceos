@@ -1,13 +1,17 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import { InMemoryAgreementRepository } from '../../src/agreements/agreement';
 import { InMemoryAgreementRunRepository } from '../../src/agreements/agreement-run';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { DuesCollectionResult } from '../../src/agreements/dues-collector';
 import {
   createAgreement,
+  updateAgreement,
   pauseAgreement,
   resumeAgreement,
   cancelAgreement,
   runDueAgreements,
+  renewExpiringAgreements,
   JobsServicePort,
   InvoicesServicePort,
 } from '../../src/agreements/agreement-service';
@@ -313,5 +317,440 @@ describe('P9-003 agreement-service: runDueAgreements idempotency + tenant isolat
     const runs = await runRepo.findByAgreement(t, a.id);
     expect(runs[0].status).toBe('failed');
     expect(runs[0].errorMessage).toMatch(/boom/);
+  });
+});
+
+describe('membership auto-renew: validation', () => {
+  it('createAgreement rejects auto-renew without endsOn (no term to renew)', async () => {
+    const repo = new InMemoryAgreementRepository();
+    await expect(
+      createAgreement(
+        {
+          tenantId: tenantId(),
+          customerId: uuidv4(),
+          name: 'Gold membership',
+          recurrenceRule: 'FREQ=MONTHLY;BYMONTHDAY=1',
+          priceCents: 1500,
+          startsOn: '2026-01-01',
+          autoRenew: true,
+          renewalTermMonths: 12,
+          createdBy: 'u',
+        },
+        repo,
+      ),
+    ).rejects.toThrow(/endsOn/);
+  });
+
+  it('createAgreement rejects auto-renew without renewalTermMonths', async () => {
+    const repo = new InMemoryAgreementRepository();
+    await expect(
+      createAgreement(
+        {
+          tenantId: tenantId(),
+          customerId: uuidv4(),
+          name: 'Gold membership',
+          recurrenceRule: 'FREQ=MONTHLY;BYMONTHDAY=1',
+          priceCents: 1500,
+          startsOn: '2026-01-01',
+          endsOn: '2027-01-01',
+          autoRenew: true,
+          createdBy: 'u',
+        },
+        repo,
+      ),
+    ).rejects.toThrow(/renewalTermMonths/);
+  });
+
+  it('createAgreement persists auto-renew fields when valid', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const a = await createAgreement(
+      {
+        tenantId: tenantId(),
+        customerId: uuidv4(),
+        name: 'Gold membership',
+        recurrenceRule: 'FREQ=MONTHLY;BYMONTHDAY=1',
+        priceCents: 1500,
+        startsOn: '2026-01-01',
+        endsOn: '2027-01-01',
+        autoRenew: true,
+        renewalTermMonths: 12,
+        createdBy: 'u',
+      },
+      repo,
+    );
+    expect(a.autoRenew).toBe(true);
+    expect(a.renewalTermMonths).toBe(12);
+    expect(a.renewalCount).toBe(0);
+  });
+
+  it('non-membership agreements default to autoRenew=false with no term', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const a = await createAgreement(
+      {
+        tenantId: tenantId(),
+        customerId: uuidv4(),
+        name: 'one-off recurring',
+        recurrenceRule: 'FREQ=MONTHLY;BYMONTHDAY=1',
+        priceCents: 1500,
+        startsOn: '2026-01-01',
+        createdBy: 'u',
+      },
+      repo,
+    );
+    expect(a.autoRenew).toBe(false);
+    expect(a.renewalTermMonths).toBeUndefined();
+  });
+
+  it('updateAgreement rejects clearing endsOn while auto-renew stays on', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const t = tenantId();
+    const a = await createAgreement(
+      {
+        tenantId: t,
+        customerId: uuidv4(),
+        name: 'Gold',
+        recurrenceRule: 'FREQ=MONTHLY;BYMONTHDAY=1',
+        priceCents: 1500,
+        startsOn: '2026-01-01',
+        endsOn: '2027-01-01',
+        autoRenew: true,
+        renewalTermMonths: 12,
+        createdBy: 'u',
+      },
+      repo,
+    );
+    await expect(updateAgreement(t, a.id, { endsOn: null }, repo)).rejects.toThrow(/endsOn/);
+  });
+
+  it('updateAgreement rejects turning auto-renew on without a term', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const t = tenantId();
+    const a = await createAgreement(
+      {
+        tenantId: t,
+        customerId: uuidv4(),
+        name: 'Standard',
+        recurrenceRule: 'FREQ=MONTHLY;BYMONTHDAY=1',
+        priceCents: 1500,
+        startsOn: '2026-01-01',
+        endsOn: '2027-01-01',
+        createdBy: 'u',
+      },
+      repo,
+    );
+    await expect(updateAgreement(t, a.id, { autoRenew: true }, repo)).rejects.toThrow(
+      /renewalTermMonths/,
+    );
+  });
+});
+
+describe('membership auto-renew: renewExpiringAgreements', () => {
+  async function makeMembership(
+    repo: InMemoryAgreementRepository,
+    t: string,
+    opts: { startsOn: string; endsOn: string; term: number; autoRenew?: boolean },
+  ) {
+    return createAgreement(
+      {
+        tenantId: t,
+        customerId: uuidv4(),
+        name: 'membership',
+        recurrenceRule: 'FREQ=MONTHLY;BYMONTHDAY=1',
+        priceCents: 1500,
+        startsOn: opts.startsOn,
+        endsOn: opts.endsOn,
+        autoRenew: opts.autoRenew ?? true,
+        renewalTermMonths: opts.term,
+        createdBy: 'u',
+      },
+      repo,
+    );
+  }
+
+  it('rolls a lapsed term forward by one term and bumps renewalCount', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const t = tenantId();
+    const a = await makeMembership(repo, t, { startsOn: '2025-01-01', endsOn: '2026-01-01', term: 12 });
+    const now = new Date(Date.UTC(2026, 1, 1)); // 2026-02-01, just past term end
+    const result = await renewExpiringAgreements(t, { agreementRepo: repo, now });
+    expect(result.renewedAgreementIds).toEqual([a.id]);
+    const updated = await repo.findById(t, a.id);
+    expect(updated?.endsOn).toBe('2027-01-01');
+    expect(updated?.renewalCount).toBe(1);
+  });
+
+  it('catches up multiple missed terms in a single pass', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const t = tenantId();
+    const a = await makeMembership(repo, t, { startsOn: '2023-01-01', endsOn: '2024-01-01', term: 12 });
+    const now = new Date(Date.UTC(2026, 1, 1)); // 2026-02-01 — two full terms skipped
+    await renewExpiringAgreements(t, { agreementRepo: repo, now });
+    const updated = await repo.findById(t, a.id);
+    expect(updated?.endsOn).toBe('2027-01-01'); // 2024→2025→2026→2027
+    expect(updated?.renewalCount).toBe(3);
+  });
+
+  it('does not renew an agreement still inside its term', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const t = tenantId();
+    await makeMembership(repo, t, { startsOn: '2026-01-01', endsOn: '2027-01-01', term: 12 });
+    const now = new Date(Date.UTC(2026, 5, 1));
+    const result = await renewExpiringAgreements(t, { agreementRepo: repo, now });
+    expect(result.renewedAgreementIds).toEqual([]);
+  });
+
+  it('does not renew when auto-renew is off, even past term end', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const t = tenantId();
+    await makeMembership(repo, t, {
+      startsOn: '2025-01-01',
+      endsOn: '2026-01-01',
+      term: 12,
+      autoRenew: false,
+    });
+    const now = new Date(Date.UTC(2026, 5, 1));
+    const result = await renewExpiringAgreements(t, { agreementRepo: repo, now });
+    expect(result.renewedAgreementIds).toEqual([]);
+  });
+
+  it('clamps the renewal day for short target months (Jan 31 + 1mo → Feb 28)', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const t = tenantId();
+    const a = await makeMembership(repo, t, { startsOn: '2025-12-31', endsOn: '2026-01-31', term: 1 });
+    const now = new Date(Date.UTC(2026, 1, 1)); // 2026-02-01
+    await renewExpiringAgreements(t, { agreementRepo: repo, now });
+    const updated = await repo.findById(t, a.id);
+    expect(updated?.endsOn).toBe('2026-02-28');
+  });
+
+  it('a renewed membership is runnable again in the same sweep', async () => {
+    // Renewal runs before runDueAgreements, so an agreement whose next run is
+    // already due generates this cycle instead of waiting for the next sweep.
+    const repo = new InMemoryAgreementRepository();
+    const runRepo = new InMemoryAgreementRunRepository();
+    const { jobsService, invoicesService } = makeMocks();
+    const t = tenantId();
+    const a = await makeMembership(repo, t, { startsOn: '2025-01-01', endsOn: '2026-01-01', term: 12 });
+    // Term has lapsed; before renewal the agreement is not due (past ends_on).
+    const now = new Date(Date.UTC(2026, 1, 2)); // 2026-02-02
+    const before = await runDueAgreements(t, { agreementRepo: repo, runRepo, jobsService, invoicesService, now });
+    expect(before.generatedRunIds.length).toBe(0);
+    await renewExpiringAgreements(t, { agreementRepo: repo, now });
+    const after = await runDueAgreements(t, { agreementRepo: repo, runRepo, jobsService, invoicesService, now });
+    expect(after.generatedRunIds.length).toBe(1);
+    void a;
+  });
+});
+
+describe('membership member pricing: createAgreement / updateAgreement', () => {
+  it('defaults memberDiscountBps to 0 and accepts a configured value', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const t = tenantId();
+    const plain = await createAgreement(
+      {
+        tenantId: t,
+        customerId: uuidv4(),
+        name: 'plain',
+        recurrenceRule: 'FREQ=MONTHLY',
+        priceCents: 1000,
+        startsOn: '2026-01-01',
+        createdBy: 'u',
+      },
+      repo,
+    );
+    expect(plain.memberDiscountBps).toBe(0);
+    expect(plain.priorityBooking).toBe(false);
+    expect(plain.autoCollectDues).toBe(false);
+
+    const member = await createAgreement(
+      {
+        tenantId: t,
+        customerId: uuidv4(),
+        name: 'Gold',
+        recurrenceRule: 'FREQ=MONTHLY',
+        priceCents: 1000,
+        startsOn: '2026-01-01',
+        memberDiscountBps: 1500,
+        priorityBooking: true,
+        autoCollectDues: true,
+        createdBy: 'u',
+      },
+      repo,
+    );
+    expect(member.memberDiscountBps).toBe(1500);
+    expect(member.priorityBooking).toBe(true);
+    expect(member.autoCollectDues).toBe(true);
+  });
+
+  it('updateAgreement changes memberDiscountBps', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const t = tenantId();
+    const a = await createAgreement(
+      {
+        tenantId: t,
+        customerId: uuidv4(),
+        name: 'x',
+        recurrenceRule: 'FREQ=MONTHLY',
+        priceCents: 1000,
+        startsOn: '2026-01-01',
+        createdBy: 'u',
+      },
+      repo,
+    );
+    const updated = await updateAgreement(t, a.id, { memberDiscountBps: 2000 }, repo);
+    expect(updated?.memberDiscountBps).toBe(2000);
+  });
+});
+
+describe('runDueAgreements: auto-collect dues', () => {
+  function makeCollector(result: DuesCollectionResult) {
+    return { collect: vi.fn().mockResolvedValue(result) };
+  }
+
+  async function seedDueMembership(
+    repo: InMemoryAgreementRepository,
+    t: string,
+    autoCollectDues: boolean,
+  ) {
+    return createAgreement(
+      {
+        tenantId: t,
+        customerId: uuidv4(),
+        name: 'membership',
+        recurrenceRule: 'FREQ=MONTHLY;BYMONTHDAY=1',
+        priceCents: 5000,
+        startsOn: '2026-06-01',
+        autoCollectDues,
+        createdBy: 'u',
+      },
+      repo,
+    );
+  }
+
+  const now = new Date(Date.UTC(2026, 5, 1));
+
+  it('collects dues for an auto-collect membership and audits dues_collected', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const runRepo = new InMemoryAgreementRunRepository();
+    const { jobsService, invoicesService } = makeMocks();
+    const auditRepo = new InMemoryAuditRepository();
+    const t = tenantId();
+    const a = await seedDueMembership(repo, t, true);
+    const duesCollector = makeCollector({ status: 'collected', paymentIntentId: 'pi_1' });
+
+    await runDueAgreements(t, {
+      agreementRepo: repo,
+      runRepo,
+      jobsService,
+      invoicesService,
+      auditRepo,
+      duesCollector,
+      now,
+    });
+
+    expect(duesCollector.collect).toHaveBeenCalledTimes(1);
+    expect(duesCollector.collect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agreementId: a.id,
+        customerId: a.customerId,
+        invoiceId: expect.any(String),
+      }),
+    );
+    const events = await auditRepo.findByEntity(t, 'service_agreement', a.id);
+    expect(events.some((e) => e.eventType === 'service_agreement.dues_collected')).toBe(true);
+  });
+
+  it('audits a charged-but-unrecorded collection distinctly (with the PI id)', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const runRepo = new InMemoryAgreementRunRepository();
+    const { jobsService, invoicesService } = makeMocks();
+    const auditRepo = new InMemoryAuditRepository();
+    const t = tenantId();
+    const a = await seedDueMembership(repo, t, true);
+    const duesCollector = makeCollector({
+      status: 'collected_unrecorded',
+      paymentIntentId: 'pi_charged',
+      recordError: 'db down',
+    });
+
+    await runDueAgreements(t, {
+      agreementRepo: repo,
+      runRepo,
+      jobsService,
+      invoicesService,
+      auditRepo,
+      duesCollector,
+      now,
+    });
+
+    const events = await auditRepo.findByEntity(t, 'service_agreement', a.id);
+    const ev = events.find((e) => e.eventType === 'service_agreement.dues_collected_unrecorded');
+    expect(ev).toBeDefined();
+    // The PaymentIntent id must be captured so the charge can be reconciled.
+    expect(ev?.metadata).toMatchObject({ paymentIntentId: 'pi_charged' });
+    // It must NOT be reported as a plain failure.
+    expect(events.some((e) => e.eventType === 'service_agreement.auto_collect_failed')).toBe(false);
+  });
+
+  it('audits auto_collect_failed on a decline (run still generated)', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const runRepo = new InMemoryAgreementRunRepository();
+    const { jobsService, invoicesService } = makeMocks();
+    const auditRepo = new InMemoryAuditRepository();
+    const t = tenantId();
+    const a = await seedDueMembership(repo, t, true);
+    const duesCollector = makeCollector({ status: 'failed', declineCode: 'insufficient_funds' });
+
+    const result = await runDueAgreements(t, {
+      agreementRepo: repo,
+      runRepo,
+      jobsService,
+      invoicesService,
+      auditRepo,
+      duesCollector,
+      now,
+    });
+
+    expect(result.generatedRunIds.length).toBe(1); // the run/invoice still generated
+    const events = await auditRepo.findByEntity(t, 'service_agreement', a.id);
+    expect(events.some((e) => e.eventType === 'service_agreement.auto_collect_failed')).toBe(true);
+  });
+
+  it('does not collect for a non-auto-collect agreement', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const runRepo = new InMemoryAgreementRunRepository();
+    const { jobsService, invoicesService } = makeMocks();
+    const t = tenantId();
+    await seedDueMembership(repo, t, false);
+    const duesCollector = makeCollector({ status: 'collected' });
+
+    await runDueAgreements(t, {
+      agreementRepo: repo,
+      runRepo,
+      jobsService,
+      invoicesService,
+      duesCollector,
+      now,
+    });
+
+    expect(duesCollector.collect).not.toHaveBeenCalled();
+  });
+
+  it('runs normally when no collector is wired', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const runRepo = new InMemoryAgreementRunRepository();
+    const { jobsService, invoicesService } = makeMocks();
+    const t = tenantId();
+    await seedDueMembership(repo, t, true);
+
+    const result = await runDueAgreements(t, {
+      agreementRepo: repo,
+      runRepo,
+      jobsService,
+      invoicesService,
+      now,
+    });
+
+    expect(result.generatedRunIds.length).toBe(1);
   });
 });

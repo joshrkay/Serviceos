@@ -153,4 +153,173 @@ describe('Postgres integration — service agreements', () => {
       expect(await repo.update(tenant.tenantId, crypto.randomUUID(), { status: 'cancelled' })).toBeNull();
     });
   });
+
+  // Membership engine (#6) — migration 173 columns + the findRenewable query.
+  // Pins the REAL column names/types and the CHECK constraint, since the
+  // in-memory repo can't prove the SQL matches the schema.
+  describe('auto-renew columns + findRenewable', () => {
+    let t: { tenantId: string; userId: string };
+    let cust: string;
+    const asOf = new Date('2026-06-01T00:00:00Z');
+
+    beforeAll(async () => {
+      t = await createTestTenant(pool);
+      cust = await createCustomer(pool, t.tenantId, t.userId);
+    });
+
+    it('round-trips auto_renew / renewal_term_months / renewal_count', async () => {
+      const created = await repo.create(
+        makeAgreement(t.tenantId, cust, t.userId, {
+          autoRenew: true,
+          renewalTermMonths: 12,
+          renewalCount: 0,
+          endsOn: '2027-01-01',
+        }),
+      );
+      const found = await repo.findById(t.tenantId, created.id);
+      expect(found!.autoRenew).toBe(true);
+      expect(found!.renewalTermMonths).toBe(12);
+      expect(typeof found!.renewalTermMonths).toBe('number');
+      expect(found!.renewalCount).toBe(0);
+    });
+
+    it('defaults the new columns for a plain agreement', async () => {
+      const created = await repo.create(makeAgreement(t.tenantId, cust, t.userId));
+      const found = await repo.findById(t.tenantId, created.id);
+      expect(found!.autoRenew).toBe(false);
+      expect(found!.renewalTermMonths).toBeUndefined();
+      expect(found!.renewalCount).toBe(0);
+    });
+
+    it('enforces the renewal_term_months > 0 CHECK constraint', async () => {
+      await expect(
+        repo.create(
+          makeAgreement(t.tenantId, cust, t.userId, {
+            autoRenew: true,
+            renewalTermMonths: 0,
+            endsOn: '2027-01-01',
+          }),
+        ),
+      ).rejects.toThrow();
+    });
+
+    it('findRenewable returns only active, auto-renew, lapsed-term agreements', async () => {
+      const rt = await createTestTenant(pool);
+      const rcust = await createCustomer(pool, rt.tenantId, rt.userId);
+      // Renewable: auto-renew, active, ends_on on/before asOf.
+      const renewable = await repo.create(
+        makeAgreement(rt.tenantId, rcust, rt.userId, {
+          autoRenew: true,
+          renewalTermMonths: 12,
+          endsOn: '2026-01-01',
+        }),
+      );
+      // Not renewable: term still in the future.
+      await repo.create(
+        makeAgreement(rt.tenantId, rcust, rt.userId, {
+          autoRenew: true,
+          renewalTermMonths: 12,
+          endsOn: '2027-01-01',
+        }),
+      );
+      // Not renewable: auto-renew off.
+      await repo.create(
+        makeAgreement(rt.tenantId, rcust, rt.userId, { autoRenew: false, endsOn: '2026-01-01' }),
+      );
+      // Not renewable: paused.
+      await repo.create(
+        makeAgreement(rt.tenantId, rcust, rt.userId, {
+          autoRenew: true,
+          renewalTermMonths: 12,
+          endsOn: '2026-01-01',
+          status: 'paused',
+        }),
+      );
+
+      const result = await repo.findRenewable(rt.tenantId, asOf);
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe(renewable.id);
+    });
+
+    it('persists a renewal update (ends_on advanced + renewal_count bumped)', async () => {
+      const created = await repo.create(
+        makeAgreement(t.tenantId, cust, t.userId, {
+          autoRenew: true,
+          renewalTermMonths: 12,
+          endsOn: '2026-01-01',
+          renewalCount: 0,
+        }),
+      );
+      const updated = await repo.update(t.tenantId, created.id, {
+        endsOn: '2027-01-01',
+        renewalCount: 1,
+      });
+      expect(updated!.endsOn).toBe('2027-01-01');
+      expect(updated!.renewalCount).toBe(1);
+      expect(updated!.autoRenew).toBe(true);
+    });
+  });
+
+  // Membership engine (#6 phase 2) — migration 174 member_discount_bps column
+  // + its CHECK. Pins the real column/type the resolver depends on.
+  describe('member_discount_bps', () => {
+    let t: { tenantId: string; userId: string };
+    let cust: string;
+
+    beforeAll(async () => {
+      t = await createTestTenant(pool);
+      cust = await createCustomer(pool, t.tenantId, t.userId);
+    });
+
+    it('round-trips member_discount_bps and defaults to 0', async () => {
+      const plain = await repo.create(makeAgreement(t.tenantId, cust, t.userId));
+      expect((await repo.findById(t.tenantId, plain.id))!.memberDiscountBps).toBe(0);
+
+      const member = await repo.create(
+        makeAgreement(t.tenantId, cust, t.userId, { memberDiscountBps: 1500 }),
+      );
+      const found = await repo.findById(t.tenantId, member.id);
+      expect(found!.memberDiscountBps).toBe(1500);
+      expect(typeof found!.memberDiscountBps).toBe('number');
+    });
+
+    it('enforces the 0..10000 bps CHECK constraint', async () => {
+      await expect(
+        repo.create(makeAgreement(t.tenantId, cust, t.userId, { memberDiscountBps: 10_001 })),
+      ).rejects.toThrow();
+    });
+
+    it('persists a member_discount_bps update', async () => {
+      const created = await repo.create(
+        makeAgreement(t.tenantId, cust, t.userId, { memberDiscountBps: 500 }),
+      );
+      const updated = await repo.update(t.tenantId, created.id, { memberDiscountBps: 2500 });
+      expect(updated!.memberDiscountBps).toBe(2500);
+    });
+
+    // #6 phase 3 — migration 175 priority_booking column.
+    it('round-trips priority_booking and defaults to false', async () => {
+      const plain = await repo.create(makeAgreement(t.tenantId, cust, t.userId));
+      expect((await repo.findById(t.tenantId, plain.id))!.priorityBooking).toBe(false);
+
+      const priority = await repo.create(
+        makeAgreement(t.tenantId, cust, t.userId, { priorityBooking: true }),
+      );
+      expect((await repo.findById(t.tenantId, priority.id))!.priorityBooking).toBe(true);
+
+      const toggled = await repo.update(t.tenantId, plain.id, { priorityBooking: true });
+      expect(toggled!.priorityBooking).toBe(true);
+    });
+
+    // #6 phase 4 — migration 176 auto_collect_dues column.
+    it('round-trips auto_collect_dues and defaults to false', async () => {
+      const plain = await repo.create(makeAgreement(t.tenantId, cust, t.userId));
+      expect((await repo.findById(t.tenantId, plain.id))!.autoCollectDues).toBe(false);
+
+      const collecting = await repo.create(
+        makeAgreement(t.tenantId, cust, t.userId, { autoCollectDues: true }),
+      );
+      expect((await repo.findById(t.tenantId, collecting.id))!.autoCollectDues).toBe(true);
+    });
+  });
 });

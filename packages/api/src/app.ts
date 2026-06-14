@@ -322,6 +322,11 @@ import { PgCustomerLoader } from './reputation/match-customer';
 import { createCredentialResolver } from './integrations/credentials';
 import { InMemoryAgreementRepository } from './agreements/agreement';
 import { PgAgreementRepository } from './agreements/pg-agreement';
+import { InMemoryCustomerPaymentMethodRepository } from './payments/customer-payment-method';
+import { PgCustomerPaymentMethodRepository } from './payments/pg-customer-payment-method';
+import { StripeDuesCollector, DuesInvoiceOps } from './agreements/dues-collector';
+import { issueInvoice } from './invoices/invoice';
+import { recordPayment } from './invoices/payment';
 import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
 import { PgAgreementRunRepository } from './agreements/pg-agreement-run';
 import { createAgreementsRouter } from './routes/agreements';
@@ -793,6 +798,11 @@ export function createApp(): express.Express {
     webhookEventRepo,
     webhookRepo,
     integrationResolver,
+    // #6 phase 4 — persist saved cards on setup_intent.succeeded.
+    // customerPaymentMethodRepo is wired in after its instantiation below.
+    stripeConfig: process.env.STRIPE_SECRET_KEY
+      ? { apiKey: process.env.STRIPE_SECRET_KEY }
+      : undefined,
   };
   app.use('/webhooks', createWebhookRouter(config, webhookRouterDeps));
 
@@ -882,6 +892,13 @@ export function createApp(): express.Express {
   // etc.) still happens further below — this declaration is purely so
   // the read-only lookup branch has access.
   const agreementRepo      = pool ? new PgAgreementRepository(pool)      : new InMemoryAgreementRepository();
+  // #6 phase 4 — saved cards for off-session dues billing.
+  const customerPaymentMethodRepo = pool
+    ? new PgCustomerPaymentMethodRepository(pool)
+    : new InMemoryCustomerPaymentMethodRepository();
+  // Wire into the webhook deps (assembled above, before this repo existed) so
+  // setup_intent.succeeded can persist the card — mirrors paymentReceiptNotifier.
+  webhookRouterDeps.customerPaymentMethodRepo = customerPaymentMethodRepo;
   const templateRepo       = pool ? new PgEstimateTemplateRepository(pool) : new InMemoryEstimateTemplateRepository();
   const bundleRepo         = pool ? new PgServiceBundleRepository(pool)  : new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = pool ? new PgQualityMetricsRepository(pool) : new InMemoryQualityMetricsRepository();
@@ -1865,7 +1882,21 @@ export function createApp(): express.Express {
   // wired AND the tenant has an active Connect account with charges
   // enabled, payments route directly to the tenant's account via
   // the Stripe-Account header. Without it, payments stay on the
-  // legacy platform path.
+  // legacy platform path. Shared by the invoice service and the portal
+  // save-card flow (#6 phase 4) — both must scope Stripe calls to the
+  // same connected account.
+  const connectAccountResolver = connectService
+    ? {
+        resolveTenantConnectAccount: async (tenantId: string) => {
+          const view = await connectService.getAccount(tenantId);
+          if (!view.accountId) return null;
+          return {
+            accountId: view.accountId,
+            chargesEnabled: view.chargesEnabled,
+          };
+        },
+      }
+    : undefined;
   const publicInvoiceService = new PublicInvoiceService({
     paymentLinkProvider,
     invoiceRepo,
@@ -1879,18 +1910,7 @@ export function createApp(): express.Express {
     // D2-1d: emit public_invoice.checkout_created on first link mint.
     // Subsequent idempotent calls (cached URL) DO NOT re-emit.
     auditRepo,
-    connectAccountResolver: connectService
-      ? {
-          resolveTenantConnectAccount: async (tenantId: string) => {
-            const view = await connectService.getAccount(tenantId);
-            if (!view.accountId) return null;
-            return {
-              accountId: view.accountId,
-              chargesEnabled: view.chargesEnabled,
-            };
-          },
-        }
-      : undefined,
+    connectAccountResolver,
   });
   app.use('/public/invoices', createPublicInvoicesRouter(publicInvoiceService));
 
@@ -1919,6 +1939,12 @@ export function createApp(): express.Express {
         ? new PgTenantTransactionRunner(pool)
         : new InMemoryTransactionRunner(),
       paymentLinkProvider,
+      // #6 phase 4 — card-on-file for membership auto-billing.
+      customerPaymentMethodRepo,
+      stripeConfig: process.env.STRIPE_SECRET_KEY
+        ? { apiKey: process.env.STRIPE_SECRET_KEY }
+        : undefined,
+      connectAccountResolver,
     }),
   );
 
@@ -3138,6 +3164,7 @@ export function createApp(): express.Express {
       { jobRepo, invoiceRepo },
       { docRevisionRepo: documentRevisionRepo, editDeltaRepo: deltaRepo },
       paymentRepo,
+      agreementRepo,
     ),
   );
   app.use(
@@ -3152,6 +3179,7 @@ export function createApp(): express.Express {
       jobRepo,
       estimateRepo,
       paymentLinkProvider,
+      agreementRepo,
     ),
   );
 
@@ -3535,6 +3563,45 @@ export function createApp(): express.Express {
     service: 'recurring-agreements-worker',
     environment: process.env.NODE_ENV || 'development',
   });
+  // #6 phase 4 — off-session dues collection. Gated on pool + Stripe key; the
+  // sweep skips collection when either is absent. The invoice is issued before
+  // charging so a decline leaves a payable invoice (dunning), never a draft.
+  const duesInvoiceOps: DuesInvoiceOps = {
+    ensureIssuedAmountDue: async (tenantId, invoiceId) => {
+      let inv = await invoiceRepo.findById(tenantId, invoiceId);
+      if (inv && inv.status === 'draft') {
+        inv = (await issueInvoice(tenantId, invoiceId, 30, invoiceRepo)) ?? inv;
+      }
+      return inv?.amountDueCents ?? 0;
+    },
+    recordPayment: async ({ tenantId, invoiceId, amountCents, providerReference, createdBy }) => {
+      await recordPayment(
+        {
+          tenantId,
+          invoiceId,
+          amountCents,
+          method: 'credit_card',
+          providerReference,
+          processedBy: createdBy,
+          note: 'Membership dues (auto-collected)',
+        },
+        invoiceRepo,
+        paymentRepo,
+        undefined,
+        undefined,
+        auditRepo,
+      );
+    },
+  };
+  const duesCollector =
+    pool && process.env.STRIPE_SECRET_KEY
+      ? new StripeDuesCollector({
+          customerPaymentMethodRepo,
+          stripeConfig: { apiKey: process.env.STRIPE_SECRET_KEY },
+          invoiceOps: duesInvoiceOps,
+          connectAccountResolver,
+        })
+      : undefined;
   registerInterval(setInterval(() => {
     void runAsLeader(SWEEP_LOCK.recurringAgreements, async () => {
       await runRecurringAgreementsSweep({
@@ -3548,6 +3615,7 @@ export function createApp(): express.Express {
           return r.rows.map((row: { id: string }) => row.id);
         },
         auditRepo,
+        duesCollector,
         logger: agreementsLogger,
       });
     }).catch((err) => {

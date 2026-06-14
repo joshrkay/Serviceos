@@ -4333,6 +4333,85 @@ export const MIGRATIONS = {
     ALTER TABLE oauth_states ADD CONSTRAINT oauth_states_provider_check
       CHECK (provider IN ('google', 'quickbooks', 'xero'));
   `,
+
+  // Membership engine (#6) — auto-renew on service_agreements. Additive ALTERs
+  // only: the runner re-executes every migration on every boot, so each
+  // statement is idempotent (ADD COLUMN IF NOT EXISTS, DROP+ADD the CHECK).
+  // renewal_term_months is the stable membership term the renewal sweep rolls
+  // ends_on forward by (positivity guarded here and in the Zod/service layer);
+  // renewal_count is an audit counter. The partial index backs findRenewable.
+  '173_service_agreements_auto_renew': `
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS auto_renew BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS renewal_term_months INTEGER;
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS renewal_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE service_agreements
+      DROP CONSTRAINT IF EXISTS chk_agreement_renewal_term_positive;
+    ALTER TABLE service_agreements
+      ADD CONSTRAINT chk_agreement_renewal_term_positive
+        CHECK (renewal_term_months IS NULL OR renewal_term_months > 0);
+    CREATE INDEX IF NOT EXISTS idx_agreements_auto_renew
+      ON service_agreements (tenant_id, ends_on)
+      WHERE auto_renew = TRUE AND status = 'active';
+  `,
+
+  // Membership engine (#6 phase 2) — member pricing. A membership with
+  // member_discount_bps > 0 confers that percentage discount on the customer's
+  // estimates/invoices. Additive ALTER + re-run-safe DROP/ADD CHECK (0..10000
+  // bps = 0..100%). Resolution reuses the existing tenant+customer index.
+  '174_service_agreements_member_discount': `
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS member_discount_bps INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE service_agreements
+      DROP CONSTRAINT IF EXISTS chk_agreement_member_discount_bps;
+    ALTER TABLE service_agreements
+      ADD CONSTRAINT chk_agreement_member_discount_bps
+        CHECK (member_discount_bps >= 0 AND member_discount_bps <= 10000);
+  `,
+
+  // Membership engine (#6 phase 3) — priority booking. A membership with
+  // priority_booking lets the customer book further into the future (extended
+  // horizon) than a non-member in the self-service portal. Additive boolean.
+  '175_service_agreements_priority_booking': `
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS priority_booking BOOLEAN NOT NULL DEFAULT FALSE;
+  `,
+
+  // Membership engine (#6 phase 4) — saved cards for off-session dues billing.
+  // Stores ONLY Stripe ids + non-sensitive display metadata (brand/last4/exp);
+  // raw card data never reaches our server (browser -> Stripe via SetupIntent).
+  // The Stripe customer + payment method are scoped to the tenant's connected
+  // account (where dues are charged). auto_collect_dues opts a membership into
+  // automatic charging.
+  '176_customer_payment_methods': `
+    CREATE TABLE IF NOT EXISTS customer_payment_methods (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      stripe_customer_id TEXT NOT NULL,
+      stripe_payment_method_id TEXT NOT NULL,
+      brand TEXT,
+      last4 TEXT,
+      exp_month INT,
+      exp_year INT,
+      is_default BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, stripe_payment_method_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cpm_tenant_customer
+      ON customer_payment_methods (tenant_id, customer_id);
+    ALTER TABLE customer_payment_methods ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_payment_methods FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_payment_methods ON customer_payment_methods;
+    CREATE POLICY tenant_isolation_customer_payment_methods ON customer_payment_methods
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS auto_collect_dues BOOLEAN NOT NULL DEFAULT FALSE;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
