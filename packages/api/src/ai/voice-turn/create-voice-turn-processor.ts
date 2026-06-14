@@ -58,6 +58,10 @@ import {
   type VoiceApprovalTurnResult,
 } from '../tasks/proposal-approval-task';
 import { createLlmEditInterpreter } from '../../proposals/edit-interpreter';
+import type {
+  CustomerNegotiationContext,
+  CustomerNegotiationContextProvider,
+} from '../../customers/customer-negotiation-context';
 import type { ProposalSmsEventRepository } from '../../proposals/sms/sms-event';
 import { confirmIntent } from '../skills/confirm-intent';
 import { summarizeSession } from '../skills/summarize-session';
@@ -211,6 +215,11 @@ export interface VoiceTurnProcessorDeps {
   proposalRepo?: ProposalRepository;
   onCallRepo?: OnCallRepository;
   leadRepo?: LeadRepository;
+  /**
+   * N-003 (P2-036) — when wired, a live-call negotiation guardrail callback is
+   * enriched with the caller's LTV/recency (resolved via the session customerId).
+   */
+  customerNegotiationContextProvider?: CustomerNegotiationContextProvider;
   systemActorId?: string;
   businessName: string;
   publicBaseUrl?: string;
@@ -539,11 +548,26 @@ export function createVoiceTurnProcessor(
           typeof entities.customerName === 'string' ? entities.customerName : undefined;
         const conversationId =
           typeof fx.payload.conversationId === 'string' ? fx.payload.conversationId : undefined;
+        const negotiationCustomerId =
+          typeof fx.payload.customerId === 'string' ? fx.payload.customerId : undefined;
+        // Best-effort LTV/recency enrichment — a read failure never blocks the callback.
+        let customerContext: CustomerNegotiationContext | null = null;
+        if (negotiationCustomerId && deps.customerNegotiationContextProvider) {
+          try {
+            customerContext = await deps.customerNegotiationContextProvider.getContext(
+              tenantId,
+              negotiationCustomerId,
+            );
+          } catch {
+            customerContext = null;
+          }
+        }
         const content = buildNegotiationCallbackContent({
           detectText,
           ...(askText ? { askText } : {}),
           ...(customerName ? { customerName } : {}),
           ...(conversationId ? { conversationId } : {}),
+          customerContext,
         });
         const negotiationProposal = buildProposal({
           tenantId,
