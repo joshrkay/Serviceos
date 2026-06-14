@@ -104,6 +104,13 @@ const registry = new Map<string, RegistryEntry>();
 let fallback: FallbackHandler | undefined;
 let recoveryResume: RecoveryResumeHandler | undefined;
 let mediaHandler: MediaHandler | undefined;
+/**
+ * N-003 (P2-036) — content-based negotiation guardrail. Runs LAST (after
+ * keyword routing, the owner-edit fallback, and dropped-call recovery all
+ * decline), so it only ever inspects genuinely unclaimed customer free-text.
+ * Same single-slot `FallbackHandler` shape (name + handle).
+ */
+let negotiationHandler: FallbackHandler | undefined;
 
 function normalize(keyword: string): string {
   return keyword.trim().toLowerCase();
@@ -179,6 +186,34 @@ async function runRecoveryResume(
   }
 }
 
+/** N-003 — register the (single) content-based negotiation guardrail. */
+export function registerNegotiationHandler(
+  handler: FallbackHandler,
+  options: RegisterKeywordHandlerOptions = {},
+): void {
+  if (negotiationHandler && !options.overwrite) {
+    throw new Error(
+      `duplicate negotiation-handler registration: '${negotiationHandler.name}' is already registered`,
+    );
+  }
+  negotiationHandler = handler;
+}
+
+async function runNegotiation(ctx: InboundSmsContext): Promise<HandlerResult | null> {
+  if (!negotiationHandler) return null;
+  try {
+    return await negotiationHandler.handle({ ...ctx });
+  } catch (err) {
+    logger.error('Inbound SMS negotiation handler threw', {
+      tenantId: ctx.tenantId,
+      messageSid: ctx.messageSid,
+      handler: negotiationHandler.name,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { handled: false, handler: negotiationHandler.name, reason: 'handler_error' };
+  }
+}
+
 /** RV-050 — register the (single) inbound-media handler. */
 export function registerMediaHandler(
   handler: MediaHandler,
@@ -251,6 +286,9 @@ export async function dispatchInboundSms(
     // RV-116 — last chance: a reply on a dropped-call recovery thread.
     const viaResume = await runRecoveryResume(ctx);
     if (viaResume?.handled) return viaResume;
+    // N-003 — last resort: a customer negotiation ask on an unclaimed message.
+    const viaNegotiation = await runNegotiation(ctx);
+    if (viaNegotiation?.handled) return viaNegotiation;
     return { handled: false, reason: 'no_matching_handler' };
   }
 
@@ -282,6 +320,9 @@ export async function dispatchInboundSms(
   // handler declined a non-matching phone).
   const viaResume = await runRecoveryResume(ctx);
   if (viaResume?.handled) return viaResume;
+  // N-003 — last resort: a customer negotiation ask the keyword handler declined.
+  const viaNegotiation = await runNegotiation(ctx);
+  if (viaNegotiation?.handled) return viaNegotiation;
   return keywordResult;
 }
 
@@ -294,4 +335,5 @@ export function __resetKeywordRegistryForTests(): void {
   fallback = undefined;
   recoveryResume = undefined;
   mediaHandler = undefined;
+  negotiationHandler = undefined;
 }

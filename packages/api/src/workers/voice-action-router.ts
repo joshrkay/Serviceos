@@ -80,6 +80,7 @@ import {
   complaintSeverity,
   COMPLAINT_HIGH_SEVERITY_REASON,
 } from '../ai/tasks/complaint-task';
+import { NegotiationGuardrailTaskHandler } from '../ai/tasks/negotiation-task';
 
 // Re-export for callers that import these from this module (e.g. router tests).
 export { complaintSeverity, COMPLAINT_HIGH_SEVERITY_REASON };
@@ -440,6 +441,12 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   // add_note handler above. processSegment resolves it by intent name,
   // not by proposal type, so the key here is just a stable map slot.
   handlers.set('_complaint' as ProposalType, new ComplaintTaskHandler(deps.proposalRepo));
+  // N-003 (P2-036) — negotiation reuses the capture-class 'callback' proposal
+  // type but needs its own handler (declines to negotiate; emits an owner
+  // callback with a recommendation). Registered under a synthetic
+  // '_negotiation' key so it doesn't collide with any plain callback handler;
+  // processSegment resolves it by intent name, like '_complaint'.
+  handlers.set('_negotiation' as ProposalType, new NegotiationGuardrailTaskHandler());
   return handlers;
 }
 
@@ -1015,9 +1022,14 @@ async function processSegment(
   const handler =
     classification.intentType === 'complaint'
       ? handlers.get('_complaint' as ProposalType)
-      : proposalType
-        ? handlers.get(proposalType)
-        : undefined;
+      : // N-003 (P2-036) — negotiation routes to its dedicated guardrail handler
+        // (synthetic '_negotiation' key), like complaint, since it reuses the
+        // shared 'callback' proposal type and lives outside INTENT_TO_PROPOSAL_TYPE.
+        classification.intentType === 'negotiation'
+        ? handlers.get('_negotiation' as ProposalType)
+        : proposalType
+          ? handlers.get(proposalType)
+          : undefined;
   if (!handler) {
     log.warn('voice-action-router: no handler for intent', {
       intent: classification.intentType,

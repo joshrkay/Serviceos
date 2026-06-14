@@ -477,10 +477,17 @@ import { PgConsentEventRepository, InMemoryConsentEventRepository } from './comp
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import { registerKeywordHandler, registerRecoveryResumeHandler } from './sms/inbound-dispatch';
 import {
-  registerProposalApprovalKeywords,
-  InMemoryProposalSmsEventRepository as InMemoryLegacyProposalSmsEventRepository,
-  PgProposalSmsEventRepository as PgLegacyProposalSmsEventRepository,
-} from './sms/proposal-approval';
+  registerKeywordHandler,
+  registerRecoveryResumeHandler,
+  registerNegotiationHandler,
+} from './sms/inbound-dispatch';
+import { createInboundNegotiationHandler } from './sms/negotiation/inbound-negotiation-handler';
+import {
+  DroppedCallScheduler,
+  PgDroppedCallRecoveryRepository,
+  InMemoryDroppedCallRecoveryRepository,
+} from './sms/recovery/scheduler';
+import { createDroppedCallResumeHandler } from './sms/recovery/resume-handler';
 import {
   registerProposalReplySms,
   createLlmEditInterpreter,
@@ -2294,6 +2301,26 @@ export function createApp(): express.Express {
           messageDelivery.sendSms({ to: args.to, body: args.body }),
         auditRepo,
         businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
+      }),
+      { overwrite: true },
+    );
+    // N-003 (P2-036) — inbound-SMS negotiation guardrail. Runs last; only
+    // fires on a customer negotiation ask no other handler claimed. Declines
+    // to negotiate: drafts an owner callback + replies with a brand-voiced
+    // holding line.
+    registerNegotiationHandler(
+      createInboundNegotiationHandler({
+        proposalRepo,
+        sendSms: (args: { to: string; body: string }) =>
+          messageDelivery.sendSms({ to: args.to, body: args.body }),
+        auditRepo,
+        resolveBrandContext: async (tenantId: string) => {
+          const settings = await settingsRepo.findByTenant(tenantId);
+          return {
+            ...(settings?.brandVoice ? { brandVoice: settings.brandVoice } : {}),
+            ...(settings?.businessName ? { businessName: settings.businessName } : {}),
+          };
+        },
       }),
       { overwrite: true },
     );
