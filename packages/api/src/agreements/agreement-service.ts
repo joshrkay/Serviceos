@@ -53,6 +53,8 @@ export interface CreateAgreementInput {
   renewalTermMonths?: number;
   /** Member-pricing discount this membership confers, in basis points. */
   memberDiscountBps?: number;
+  /** Priority booking: extended self-service booking horizon for the member. */
+  priorityBooking?: boolean;
   createdBy: string;
   actorRole?: string;
 }
@@ -68,6 +70,7 @@ export interface UpdateAgreementInput {
   autoRenew?: boolean;
   renewalTermMonths?: number | null;
   memberDiscountBps?: number;
+  priorityBooking?: boolean;
 }
 
 /**
@@ -208,6 +211,7 @@ export async function createAgreement(
     renewalTermMonths: input.autoRenew ? input.renewalTermMonths : undefined,
     renewalCount: 0,
     memberDiscountBps: input.memberDiscountBps ?? 0,
+    priorityBooking: input.priorityBooking ?? false,
     createdBy: input.createdBy,
     createdAt: now,
     updatedAt: now,
@@ -270,6 +274,7 @@ export async function updateAgreement(
     updates.renewalTermMonths = input.renewalTermMonths ?? undefined;
   }
   if (input.memberDiscountBps !== undefined) updates.memberDiscountBps = input.memberDiscountBps;
+  if (input.priorityBooking !== undefined) updates.priorityBooking = input.priorityBooking;
 
   return agreementRepo.update(tenantId, id, updates);
 }

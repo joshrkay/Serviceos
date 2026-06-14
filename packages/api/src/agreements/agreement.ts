@@ -40,6 +40,12 @@ export interface Agreement {
    * Optional in the domain for the same default-column reason as above.
    */
   memberDiscountBps?: number;
+  /**
+   * Priority booking: when true, the customer can self-book further into the
+   * future (extended horizon) than a non-member. Optional for the same
+   * default-column reason as above.
+   */
+  priorityBooking?: boolean;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;

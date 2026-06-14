@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   resolveMemberDiscountBps,
   getCustomerMemberDiscountBps,
+  resolveHasPriorityBooking,
 } from '../../src/agreements/member-pricing';
 import { InMemoryAgreementRepository } from '../../src/agreements/agreement';
 import type { Agreement } from '../../src/agreements/agreement';
@@ -107,5 +108,27 @@ describe('getCustomerMemberDiscountBps', () => {
     const repo = new InMemoryAgreementRepository();
     const bps = await getCustomerMemberDiscountBps(uuidv4(), uuidv4(), repo, new Date());
     expect(bps).toBe(0);
+  });
+});
+
+describe('resolveHasPriorityBooking', () => {
+  const asOf = new Date('2026-06-01T00:00:00Z');
+
+  it('is true when an active, in-term membership grants priority booking', () => {
+    expect(resolveHasPriorityBooking([agreement({ priorityBooking: true })], asOf)).toBe(true);
+  });
+
+  it('is false with no granting membership', () => {
+    expect(resolveHasPriorityBooking([agreement({ priorityBooking: false })], asOf)).toBe(false);
+    expect(resolveHasPriorityBooking([], asOf)).toBe(false);
+  });
+
+  it('ignores a priority membership that is paused or out of term', () => {
+    expect(
+      resolveHasPriorityBooking([agreement({ priorityBooking: true, status: 'paused' })], asOf),
+    ).toBe(false);
+    expect(
+      resolveHasPriorityBooking([agreement({ priorityBooking: true, endsOn: '2026-05-01' })], asOf),
+    ).toBe(false);
   });
 });

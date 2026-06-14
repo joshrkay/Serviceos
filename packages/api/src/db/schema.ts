@@ -4370,6 +4370,14 @@ export const MIGRATIONS = {
       ADD CONSTRAINT chk_agreement_member_discount_bps
         CHECK (member_discount_bps >= 0 AND member_discount_bps <= 10000);
   `,
+
+  // Membership engine (#6 phase 3) — priority booking. A membership with
+  // priority_booking lets the customer book further into the future (extended
+  // horizon) than a non-member in the self-service portal. Additive boolean.
+  '175_service_agreements_priority_booking': `
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS priority_booking BOOLEAN NOT NULL DEFAULT FALSE;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

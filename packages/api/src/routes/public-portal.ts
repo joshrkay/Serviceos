@@ -33,7 +33,14 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { SettingsRepository } from '../settings/settings';
 import { ProposalRepository, createProposal } from '../proposals/proposal';
 import { createLead } from '../leads/lead-service';
-import { findBookableSlots, isSlotFree } from '../scheduling/booking-availability';
+import {
+  findBookableSlots,
+  isSlotFree,
+  clampBookingHorizon,
+  STANDARD_BOOKING_HORIZON_DAYS,
+  PRIORITY_BOOKING_HORIZON_DAYS,
+} from '../scheduling/booking-availability';
+import { customerHasPriorityBooking } from '../agreements/member-pricing';
 import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
 import {
   TenantTransactionRunner,
@@ -450,24 +457,41 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
   router.get('/:token/availability', async (req: PortalRequest, res: Response) => {
     if (!ensurePortal(req, res)) return;
     try {
-      const { tenantId } = req.portal!;
+      const { tenantId, customerId } = req.portal!;
       const parsed = availabilityQuerySchema.parse(req.query);
       const timezone = await resolveTenantTimezone(deps, tenantId);
 
-      const slots = await findBookableSlots(
-        { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo },
-        {
-          tenantId,
-          fromDate: parsed.from,
-          toDate: parsed.to,
-          timezone,
-          durationMin: parsed.durationMin,
-        },
+      // Priority-booking members (#6) can book further out; everyone else is
+      // capped at the standard horizon. Clamp the requested window so the
+      // finder never offers a slot past the customer's horizon.
+      const priorityBooking = await customerHasPriorityBooking(
+        tenantId,
+        customerId,
+        deps.agreementRepo,
       );
+      const horizonDays = priorityBooking
+        ? PRIORITY_BOOKING_HORIZON_DAYS
+        : STANDARD_BOOKING_HORIZON_DAYS;
+      const window = clampBookingHorizon(parsed.from, parsed.to, horizonDays, new Date());
+
+      const slots = window
+        ? await findBookableSlots(
+            { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo },
+            {
+              tenantId,
+              fromDate: window.from,
+              toDate: window.to,
+              timezone,
+              durationMin: parsed.durationMin,
+            },
+          )
+        : [];
 
       res.json({
         timezone,
         durationMin: parsed.durationMin,
+        priorityBooking,
+        horizonDays,
         slots: slots.map((s) => ({
           start: s.start.toISOString(),
           end: s.end.toISOString(),
@@ -508,6 +532,22 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       }
       if (slotStart.getTime() < Date.now()) {
         res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Cannot book a slot in the past' });
+        return;
+      }
+
+      // Defense in depth: the availability GET already clamps the horizon, but
+      // a client can POST any slot — re-check it against the customer's horizon
+      // (priority members get the extended one) so it can't be bypassed.
+      const priorityBooking = await customerHasPriorityBooking(tenantId, customerId, deps.agreementRepo);
+      const horizonDays = priorityBooking
+        ? PRIORITY_BOOKING_HORIZON_DAYS
+        : STANDARD_BOOKING_HORIZON_DAYS;
+      const slotDate = slotStart.toISOString().slice(0, 10);
+      if (!clampBookingHorizon(slotDate, slotDate, horizonDays, new Date())) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'Selected time is beyond your bookable window',
+        });
         return;
       }
 

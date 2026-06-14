@@ -557,6 +557,7 @@ describe('membership member pricing: createAgreement / updateAgreement', () => {
       repo,
     );
     expect(plain.memberDiscountBps).toBe(0);
+    expect(plain.priorityBooking).toBe(false);
 
     const member = await createAgreement(
       {
@@ -567,11 +568,13 @@ describe('membership member pricing: createAgreement / updateAgreement', () => {
         priceCents: 1000,
         startsOn: '2026-01-01',
         memberDiscountBps: 1500,
+        priorityBooking: true,
         createdBy: 'u',
       },
       repo,
     );
     expect(member.memberDiscountBps).toBe(1500);
+    expect(member.priorityBooking).toBe(true);
   });
 
   it('updateAgreement changes memberDiscountBps', async () => {

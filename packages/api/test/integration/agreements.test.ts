@@ -296,5 +296,19 @@ describe('Postgres integration — service agreements', () => {
       const updated = await repo.update(t.tenantId, created.id, { memberDiscountBps: 2500 });
       expect(updated!.memberDiscountBps).toBe(2500);
     });
+
+    // #6 phase 3 — migration 175 priority_booking column.
+    it('round-trips priority_booking and defaults to false', async () => {
+      const plain = await repo.create(makeAgreement(t.tenantId, cust, t.userId));
+      expect((await repo.findById(t.tenantId, plain.id))!.priorityBooking).toBe(false);
+
+      const priority = await repo.create(
+        makeAgreement(t.tenantId, cust, t.userId, { priorityBooking: true }),
+      );
+      expect((await repo.findById(t.tenantId, priority.id))!.priorityBooking).toBe(true);
+
+      const toggled = await repo.update(t.tenantId, plain.id, { priorityBooking: true });
+      expect(toggled!.priorityBooking).toBe(true);
+    });
   });
 });
