@@ -32,6 +32,8 @@ export interface Agreement {
   renewalTermMonths?: number;
   /** How many times the term has auto-renewed. */
   renewalCount?: number;
+  /** Member-pricing discount this membership confers, in basis points. */
+  memberDiscountBps?: number;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -67,6 +69,8 @@ export interface CreateAgreementBody {
   /** Auto-renew requires endsOn + renewalTermMonths (server-validated). */
   autoRenew?: boolean;
   renewalTermMonths?: number;
+  /** Member-pricing discount, in basis points (0..10000). */
+  memberDiscountBps?: number;
 }
 
 export type UpdateAgreementBody = Partial<
@@ -81,6 +85,7 @@ export type UpdateAgreementBody = Partial<
     | 'endsOn'
     | 'autoRenew'
     | 'renewalTermMonths'
+    | 'memberDiscountBps'
   >
 >;
 

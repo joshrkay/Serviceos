@@ -101,6 +101,7 @@ describe('P9-003 AgreementDetail', () => {
       autoRenew: true,
       renewalTermMonths: 12,
       renewalCount: 2,
+      memberDiscountBps: 1000,
       createdBy: 'u',
       createdAt: '',
       updatedAt: '',
@@ -110,5 +111,12 @@ describe('P9-003 AgreementDetail', () => {
     const status = await screen.findByTestId('auto-renew-status');
     expect(status).toHaveTextContent('every 12 months');
     expect(status).toHaveTextContent('renewed 2');
+    expect(screen.getByTestId('member-discount')).toHaveTextContent('10% off');
+  });
+
+  it('hides the member-discount line when there is no discount', async () => {
+    render(<AgreementDetail agreementId="a1" role="dispatcher" />);
+    await screen.findByTestId('auto-renew-status');
+    expect(screen.queryByTestId('member-discount')).toBeNull();
   });
 });

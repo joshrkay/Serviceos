@@ -143,6 +143,12 @@ export function AgreementDetail({
               }`
             : 'off'}
         </p>
+        {data.memberDiscountBps ? (
+          <p data-testid="member-discount">
+            <span className="font-medium">Member discount:</span>{' '}
+            {data.memberDiscountBps / 100}% off this member&apos;s estimates
+          </p>
+        ) : null}
       </section>
 
       <section>

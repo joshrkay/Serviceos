@@ -31,6 +31,7 @@ export function AgreementCreate({
   const [endsOn, setEndsOn] = useState('');
   const [autoRenew, setAutoRenew] = useState(false);
   const [renewalTermMonths, setRenewalTermMonths] = useState('12');
+  const [memberDiscountPct, setMemberDiscountPct] = useState('0');
   const [recurrence, setRecurrence] = useState<RecurrenceBuilderValue>({
     frequency: 'quarterly',
     interval: 1,
@@ -61,6 +62,11 @@ export function AgreementCreate({
           throw new Error('Renewal term must be a whole number of months (at least 1)');
         }
       }
+      // Owners enter a whole/decimal percentage; store as basis points.
+      const memberDiscountBps = Math.round(parseFloat(memberDiscountPct || '0') * 100);
+      if (!Number.isFinite(memberDiscountBps) || memberDiscountBps < 0 || memberDiscountBps > 10000) {
+        throw new Error('Member discount must be between 0 and 100%');
+      }
       const created = await agreementsApi.create(apiFetch, {
         customerId,
         name,
@@ -70,6 +76,7 @@ export function AgreementCreate({
         endsOn: endsOn || undefined,
         autoRenew,
         renewalTermMonths: renewalTerm,
+        memberDiscountBps,
       });
       onCreated?.(created.id);
     } catch (err) {
@@ -163,6 +170,22 @@ export function AgreementCreate({
           />
         </label>
       )}
+      <label className="flex flex-col text-sm">
+        Member discount (%)
+        <input
+          type="number"
+          min="0"
+          max="100"
+          step="0.5"
+          aria-label="Member discount percent"
+          className="border rounded px-2 py-1"
+          value={memberDiscountPct}
+          onChange={(e) => setMemberDiscountPct(e.target.value)}
+        />
+        <span className="text-xs text-gray-500 mt-0.5">
+          Applied automatically to this member&apos;s estimates.
+        </span>
+      </label>
       <button
         type="submit"
         disabled={submitting}

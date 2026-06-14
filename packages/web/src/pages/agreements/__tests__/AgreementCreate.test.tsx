@@ -66,7 +66,7 @@ describe('AgreementCreate — membership auto-renew', () => {
     expect(mockCreate).not.toHaveBeenCalled();
   });
 
-  it('sends autoRenew=false for a plain (non-membership) agreement', async () => {
+  it('sends autoRenew=false and a 0 member discount for a plain agreement', async () => {
     render(<AgreementCreate />);
     fillBaseFields();
     fireEvent.click(screen.getByText('Create Agreement'));
@@ -74,7 +74,20 @@ describe('AgreementCreate — membership auto-renew', () => {
     await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
     expect(mockCreate).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ autoRenew: false }),
+      expect.objectContaining({ autoRenew: false, memberDiscountBps: 0 }),
+    );
+  });
+
+  it('converts the member discount percent to basis points', async () => {
+    render(<AgreementCreate />);
+    fillBaseFields();
+    fireEvent.change(screen.getByLabelText('Member discount percent'), { target: { value: '10' } });
+    fireEvent.click(screen.getByText('Create Agreement'));
+
+    await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
+    expect(mockCreate).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ memberDiscountBps: 1000 }),
     );
   });
 });
