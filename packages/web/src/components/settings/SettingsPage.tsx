@@ -18,6 +18,7 @@ import { BusinessProfileSheet } from './BusinessProfileSheet';
 import { TerminologySheet } from './TerminologySheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
+import { DiscountPolicySheet } from './DiscountPolicySheet';
 import { TeamMembersSheet } from './TeamMembersSheet';
 import { CalendarSyncSheet } from './CalendarSyncSheet';
 import { PaymentMethodsSheet } from './PaymentMethodsSheet';
@@ -165,6 +166,7 @@ export function SettingsPage() {
   const [terminologyOpen, setTerminologyOpen] = useState(false);
   const [aiRulesOpen, setAiRulesOpen] = useState(false);
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
+  const [discountPolicyOpen, setDiscountPolicyOpen] = useState(false);
   const [teamMembersOpen, setTeamMembersOpen] = useState(false);
   const [calendarSyncOpen, setCalendarSyncOpen] = useState(false);
   const [paymentMethodsOpen, setPaymentMethodsOpen] = useState(false);
@@ -399,6 +401,7 @@ export function SettingsPage() {
       items: [
         { icon: CreditCard, label: 'Payment methods',        description: 'Connect Stripe to accept card + ACH', action: () => setPaymentMethodsOpen(true) },
         { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => setDepositRulesOpen(true) },
+        { icon: FileText,   label: 'Discount policy',        description: 'Bounds for AI-proposed discounts', action: () => setDiscountPolicyOpen(true) },
         { icon: CreditCard, label: 'Rivet subscription',   description: 'Manage card, plan, invoices', action: () => openBillingPortal() },
       ],
     },
@@ -828,6 +831,11 @@ export function SettingsPage() {
       {/* AI approval rules sheet — per-mode auto-approve threshold overrides. */}
       {aiRulesOpen && (
         <AIApprovalRulesSheet onClose={() => setAiRulesOpen(false)} />
+      )}
+
+      {/* Discount policy sheet — AI auto-propose cap + floor + catalog grounding. */}
+      {discountPolicyOpen && (
+        <DiscountPolicySheet onClose={() => setDiscountPolicyOpen(false)} />
       )}
 
       {/* Deposit rules sheet — strategy + amount + optional threshold. */}
