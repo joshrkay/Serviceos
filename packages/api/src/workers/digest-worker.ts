@@ -11,6 +11,7 @@
  */
 import { DateTime } from 'luxon';
 import type { Pool } from 'pg';
+import { isValidTenantId } from '../db/schema';
 import { PgBaseRepository } from '../db/pg-base';
 import { buildDigestData } from '../digest/digest-builder';
 import { renderDigest } from '../digest/digest-renderer';
@@ -362,6 +363,7 @@ export async function handleOwnerReply(
   timezone: string,
   now: Date = new Date(),
 ): Promise<void> {
+  if (!isValidTenantId(tenantId)) return;
   const localDate = DateTime.fromJSDate(now, { zone: timezone }).toISODate();
   if (!localDate) return;
 

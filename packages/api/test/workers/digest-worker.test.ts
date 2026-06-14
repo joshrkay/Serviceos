@@ -13,6 +13,7 @@ import type { DigestEntry, DigestSourceData } from '../../src/digest/digest-type
 const IN_WINDOW_UTC = '2026-01-16T02:00:00Z'; // 7pm Phoenix, local date = 2026-01-15
 const OUT_OF_WINDOW_UTC = '2026-01-15T15:00:00Z'; // 8am Phoenix, local date = 2026-01-15
 const LOCAL_DATE = '2026-01-15';
+const TENANT_ID = '00000000-0000-0000-0000-000000000001';
 
 function makeSourceData(): DigestSourceData {
   return {
@@ -29,7 +30,7 @@ function makeEntry(overrides: Partial<DigestEntry> = {}): DigestEntry {
   const ts = new Date(IN_WINDOW_UTC);
   return {
     id: 'entry-1',
-    tenantId: 'tenant-1',
+    tenantId: TENANT_ID,
     date: LOCAL_DATE,
     status: 'pending',
     attemptCount: 0,
@@ -86,9 +87,13 @@ function makeSettings(timezone = 'America/Phoenix', ownerPhone = '+16025550001')
 }
 
 function makeMockPool() {
+  const queryMock = vi.fn(async () => ({ rows: [] }));
   return {
-    query: vi.fn(async () => ({ rows: [] })),
-    connect: vi.fn(),
+    query: queryMock,
+    connect: vi.fn(async () => ({
+      query: queryMock,
+      release: vi.fn(),
+    })),
   } as any;
 }
 
@@ -109,7 +114,7 @@ describe('DigestWorker — runDigestSweep', () => {
       digestEntryRepo,
       settingsRepo: makeSettings() as any,
       pool: makeMockPool(),
-      listTenantIds: async () => ['tenant-1'],
+      listTenantIds: async () => [TENANT_ID],
       sendSms,
       logger: makeLogger(),
       now: () => now,
@@ -129,7 +134,7 @@ describe('DigestWorker — runDigestSweep', () => {
       digestEntryRepo,
       settingsRepo: makeSettings() as any,
       pool: makeMockPool(),
-      listTenantIds: async () => ['tenant-1'],
+      listTenantIds: async () => [TENANT_ID],
       sendSms,
       logger: makeLogger(),
       now: () => now,
@@ -155,7 +160,7 @@ describe('DigestWorker — runDigestSweep', () => {
       digestEntryRepo,
       settingsRepo: makeSettings() as any,
       pool: makeMockPool(),
-      listTenantIds: async () => ['tenant-1'],
+      listTenantIds: async () => [TENANT_ID],
       sendSms,
       logger,
       now: () => now,
@@ -166,7 +171,7 @@ describe('DigestWorker — runDigestSweep', () => {
       digestEntryRepo,
       settingsRepo: makeSettings() as any,
       pool: makeMockPool(),
-      listTenantIds: async () => ['tenant-1'],
+      listTenantIds: async () => [TENANT_ID],
       sendSms,
       logger,
       now: () => now,
@@ -177,7 +182,7 @@ describe('DigestWorker — runDigestSweep', () => {
       digestEntryRepo,
       settingsRepo: makeSettings() as any,
       pool: makeMockPool(),
-      listTenantIds: async () => ['tenant-1'],
+      listTenantIds: async () => [TENANT_ID],
       sendSms,
       logger,
       now: () => now,
@@ -193,14 +198,14 @@ describe('DigestWorker — runDigestSweep', () => {
     const digestEntryRepo = makeInMemoryDigestRepo();
 
     // Pre-populate a delivered entry for the same local date the worker will compute
-    await digestEntryRepo.insert('tenant-1', LOCAL_DATE, 'msg', makeSourceData());
-    await digestEntryRepo.update('tenant-1', LOCAL_DATE, { status: 'delivered' });
+    await digestEntryRepo.insert(TENANT_ID, LOCAL_DATE, 'msg', makeSourceData());
+    await digestEntryRepo.update(TENANT_ID, LOCAL_DATE, { status: 'delivered' });
 
     const result = await runDigestSweep({
       digestEntryRepo,
       settingsRepo: makeSettings() as any,
       pool: makeMockPool(),
-      listTenantIds: async () => ['tenant-1'],
+      listTenantIds: async () => [TENANT_ID],
       sendSms,
       logger: makeLogger(),
       now: () => now,
@@ -218,12 +223,12 @@ describe('handleOwnerReply', () => {
     const now = new Date(IN_WINDOW_UTC);
 
     // Insert and deliver for the correct local date
-    await digestEntryRepo.insert('tenant-1', LOCAL_DATE, 'msg', makeSourceData());
-    await digestEntryRepo.update('tenant-1', LOCAL_DATE, { status: 'delivered' });
+    await digestEntryRepo.insert(TENANT_ID, LOCAL_DATE, 'msg', makeSourceData());
+    await digestEntryRepo.update(TENANT_ID, LOCAL_DATE, { status: 'delivered' });
 
-    await handleOwnerReply('tenant-1', 'LOOKS GOOD', digestEntryRepo, 'America/Phoenix', now);
+    await handleOwnerReply(TENANT_ID, 'LOOKS GOOD', digestEntryRepo, 'America/Phoenix', now);
 
-    const entry = await digestEntryRepo.findByTenantAndDate('tenant-1', LOCAL_DATE);
+    const entry = await digestEntryRepo.findByTenantAndDate(TENANT_ID, LOCAL_DATE);
     expect(entry?.status).toBe('acked');
     expect(entry?.ownerReply).toBe('LOOKS GOOD');
   });
@@ -232,13 +237,13 @@ describe('handleOwnerReply', () => {
     const digestEntryRepo = makeInMemoryDigestRepo();
     const now = new Date(IN_WINDOW_UTC);
 
-    await digestEntryRepo.insert('tenant-1', LOCAL_DATE, 'msg', makeSourceData());
-    await digestEntryRepo.update('tenant-1', LOCAL_DATE, { status: 'delivered' });
+    await digestEntryRepo.insert(TENANT_ID, LOCAL_DATE, 'msg', makeSourceData());
+    await digestEntryRepo.update(TENANT_ID, LOCAL_DATE, { status: 'delivered' });
 
     const reply = 'The job count was wrong, we completed 5 not 3';
-    await handleOwnerReply('tenant-1', reply, digestEntryRepo, 'America/Phoenix', now);
+    await handleOwnerReply(TENANT_ID, reply, digestEntryRepo, 'America/Phoenix', now);
 
-    const entry = await digestEntryRepo.findByTenantAndDate('tenant-1', LOCAL_DATE);
+    const entry = await digestEntryRepo.findByTenantAndDate(TENANT_ID, LOCAL_DATE);
     expect(entry?.status).toBe('acked');
     expect(entry?.ownerReply).toBe(reply);
   });

@@ -6,14 +6,18 @@ import { buildDigestData } from '../../src/digest/digest-builder';
 
 // Helper to build a mock pg Pool
 function makeMockPool(queryResults: Record<string, { rows: Record<string, unknown>[] }>) {
+  const queryMock = vi.fn(async (sql: string, _params?: unknown[]) => {
+    for (const [key, result] of Object.entries(queryResults)) {
+      if (sql.includes(key)) return { rows: result.rows };
+    }
+    return { rows: [] };
+  });
   return {
-    query: vi.fn(async (sql: string, params: unknown[]) => {
-      // Match by keyword in the SQL
-      for (const [key, result] of Object.entries(queryResults)) {
-        if (sql.includes(key)) return { rows: result.rows };
-      }
-      return { rows: [] };
-    }),
+    query: queryMock,
+    connect: vi.fn(async () => ({
+      query: queryMock,
+      release: vi.fn(),
+    })),
   };
 }
 

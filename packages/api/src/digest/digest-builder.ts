@@ -7,6 +7,7 @@
  * the caller provides them pre-computed via luxon.
  */
 import type { Pool } from 'pg';
+import { setTenantContext } from '../db/schema';
 import type { DigestSection, DigestSourceData } from './digest-types';
 
 export interface BuildDigestDataResult {
@@ -35,25 +36,27 @@ export async function buildDigestData(
   utcTomorrowEnd: Date,
   timezone: string,
 ): Promise<BuildDigestDataResult> {
+  const client = await pool.connect();
+  try {
+    await client.query(setTenantContext(tenantId));
+
   // Section 1: Completed jobs
-  const completedJobsResult = await pool.query<{ id: string }>(
+  const completedJobsResult = await client.query<{ id: string }>(
     `SELECT id FROM jobs
-     WHERE tenant_id = $1
-       AND status = 'completed'
-       AND updated_at >= $2
-       AND updated_at < $3`,
-    [tenantId, utcDayStart, utcDayEnd],
+     WHERE status = 'completed'
+       AND updated_at >= $1
+       AND updated_at < $2`,
+    [utcDayStart, utcDayEnd],
   );
   const completedJobIds = completedJobsResult.rows.map((r) => r.id);
 
   // Section 2: Estimates sent today
-  const sentEstimatesResult = await pool.query<{ id: string; total_cents: number }>(
+  const sentEstimatesResult = await client.query<{ id: string; total_cents: number }>(
     `SELECT id, total_cents FROM estimates
-     WHERE tenant_id = $1
-       AND status = 'sent'
-       AND sent_at >= $2
-       AND sent_at < $3`,
-    [tenantId, utcDayStart, utcDayEnd],
+     WHERE status = 'sent'
+       AND sent_at >= $1
+       AND sent_at < $2`,
+    [utcDayStart, utcDayEnd],
   );
   const sentEstimateIds = sentEstimatesResult.rows.map((r) => r.id);
   const sentEstimatesTotalCents = sentEstimatesResult.rows.reduce(
@@ -62,51 +65,46 @@ export async function buildDigestData(
   );
 
   // Section 3: Invoices needing follow-up (open/partially_paid sent today)
-  const followUpInvoicesResult = await pool.query<{
+  const followUpInvoicesResult = await client.query<{
     id: string;
     total_cents: number;
     amount_paid_cents: number;
   }>(
     `SELECT id, total_cents, amount_paid_cents FROM invoices
-     WHERE tenant_id = $1
-       AND status IN ('open', 'partially_paid')
-       AND sent_at >= $2
-       AND sent_at < $3`,
-    [tenantId, utcDayStart, utcDayEnd],
+     WHERE status IN ('open', 'partially_paid')
+       AND sent_at >= $1
+       AND sent_at < $2`,
+    [utcDayStart, utcDayEnd],
   );
   const followUpInvoiceIds = followUpInvoicesResult.rows.map((r) => r.id);
 
   // Section 4: Appointments tomorrow
-  const tomorrowAppointmentsResult = await pool.query<{ id: string }>(
+  const tomorrowAppointmentsResult = await client.query<{ id: string }>(
     `SELECT id FROM appointments
-     WHERE tenant_id = $1
-       AND scheduled_start >= $2
-       AND scheduled_start < $3
+     WHERE scheduled_start >= $1
+       AND scheduled_start < $2
        AND status != 'canceled'`,
-    [tenantId, utcTomorrowStart, utcTomorrowEnd],
+    [utcTomorrowStart, utcTomorrowEnd],
   );
   const tomorrowAppointmentIds = tomorrowAppointmentsResult.rows.map((r) => r.id);
 
   // Section 5: Proposals with uncertain (low/very_low) confidence
-  const uncertainProposalsResult = await pool.query<{ id: string }>(
+  const uncertainProposalsResult = await client.query<{ id: string }>(
     `SELECT id FROM proposals
-     WHERE tenant_id = $1
-       AND status IN ('ready_for_review', 'draft')
+     WHERE status IN ('ready_for_review', 'draft')
        AND (
          payload->'_meta'->>'overallConfidence' IN ('low', 'very_low')
        )`,
-    [tenantId],
   );
   const uncertainProposalIds = uncertainProposalsResult.rows.map((r) => r.id);
 
   // Section 6: Proposal correction knowledge chunks from today
-  const correctionChunksResult = await pool.query<{ id: string; content: string }>(
+  const correctionChunksResult = await client.query<{ id: string; content: string }>(
     `SELECT id, content FROM knowledge_chunks
-     WHERE tenant_id = $1
-       AND source_type = 'proposal_correction'
-       AND created_at >= $2
-       AND created_at < $3`,
-    [tenantId, utcDayStart, utcDayEnd],
+     WHERE source_type = 'proposal_correction'
+       AND created_at >= $1
+       AND created_at < $2`,
+    [utcDayStart, utcDayEnd],
   );
   const correctionChunkIds = correctionChunksResult.rows.map((r) => r.id);
 
@@ -195,6 +193,10 @@ export async function buildDigestData(
   };
 
   return { sections, sourceData };
+  } finally {
+    await client.query('RESET app.current_tenant_id').catch(() => {});
+    client.release();
+  }
 }
 
 /** $12 / $12.50 formatting for SMS — integer cents in, no float math. */
