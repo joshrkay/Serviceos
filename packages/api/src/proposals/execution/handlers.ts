@@ -356,7 +356,18 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
         ? { arrivalWindowStart, arrivalWindowEnd }
         : {}),
       timezone,
-      notes: typeof payload.notes === 'string' ? payload.notes : undefined,
+      // Reason-for-visit persistence: voice proposals carry the spoken work
+      // description in `summary` (the LLM-extracted "one-line description of
+      // the work requested"), while programmatic callers set `notes`. Persist
+      // whichever is present — `notes` wins when both exist — so an inbound
+      // cold-call create_appointment (no jobId → skips the held-slot path that
+      // already maps summary→notes) never drops the caller's reason.
+      notes:
+        typeof payload.notes === 'string'
+          ? payload.notes
+          : typeof payload.summary === 'string'
+            ? payload.summary
+            : undefined,
       createdBy: context.executedBy,
     }, this.appointmentRepo);
 

@@ -53,6 +53,9 @@ export interface ProvisionTwilioPayload {
   tenantId: string;
   region: string | null;
   baseUrl: string;
+  // Number picker: the specific E.164 the tradesperson claimed. When set, the
+  // worker orders exactly this number instead of auto-picking by region.
+  phoneNumber?: string;
 }
 
 export const PROVISION_TWILIO_JOB_TYPE = 'provision_twilio_subaccount';
@@ -68,7 +71,7 @@ export function createProvisionTwilioWorker(deps: {
     type: PROVISION_TWILIO_JOB_TYPE,
 
     async handle(message: QueueMessage<ProvisionTwilioPayload>, logger: Logger): Promise<void> {
-      const { tenantId, region, baseUrl } = message.payload;
+      const { tenantId, region, baseUrl, phoneNumber: preferredNumber } = message.payload;
       const { pool } = deps;
 
       const masterSid = process.env.TWILIO_ACCOUNT_SID;
@@ -196,18 +199,66 @@ export function createProvisionTwilioWorker(deps: {
               tenantId, phoneE164,
             });
           } else {
-            logger.info('Purchasing phone number', { tenantId, region });
-            const number = await purchasePhoneNumber(
-              subaccountSid,
-              authToken,
+            logger.info('Purchasing phone number', {
+              tenantId,
               region,
-              // VoiceUrl must return TwiML — point it at the existing
-              // /api/telephony/voice handler which resolves tenant from
-              // the inbound `to` number. The /webhooks/twilio/* routes only
-              // 200-ack and don't emit TwiML, so they'd break call handling.
-              `${baseUrl}/api/telephony/voice`,
-              `${baseUrl}/webhooks/twilio/status/${tenantId}`
-            );
+              preferred: preferredNumber ?? null,
+            });
+            let number;
+            try {
+              number = await purchasePhoneNumber(
+                subaccountSid,
+                authToken,
+                region,
+                // VoiceUrl must return TwiML — point it at the existing
+                // /api/telephony/voice handler which resolves tenant from
+                // the inbound `to` number. The /webhooks/twilio/* routes only
+                // 200-ack and don't emit TwiML, so they'd break call handling.
+                `${baseUrl}/api/telephony/voice`,
+                `${baseUrl}/webhooks/twilio/status/${tenantId}`,
+                preferredNumber
+              );
+            } catch (purchaseErr) {
+              const errMsg =
+                purchaseErr instanceof Error ? purchaseErr.message : String(purchaseErr);
+              // twilioPost embeds the HTTP status as "→ <status>:". For a
+              // CLAIMED number, a 4xx (other than 429) means the number itself
+              // is the problem — taken since the picker listed it, or otherwise
+              // unpurchasable — which retrying can't fix: record a re-pickable
+              // failure and stop (don't retry-loop). 429 / 5xx / network errors
+              // are transient and MUST rethrow so the queue retries, exactly
+              // like the auto-pick path; otherwise a momentary Twilio blip would
+              // wrongly tell the user their valid number is gone.
+              const statusMatch = errMsg.match(/→\s*(\d{3}):/);
+              const status = statusMatch ? Number(statusMatch[1]) : 0;
+              const permanentlyUnavailable =
+                !!preferredNumber && status >= 400 && status < 500 && status !== 429;
+              if (permanentlyUnavailable) {
+                const msg = `Selected number ${preferredNumber} is no longer available — please choose another`;
+                logger.warn('Preferred number unavailable at purchase', { tenantId, error: errMsg });
+                try {
+                  await tenantQuery(
+                    pool,
+                    tenantId,
+                    `UPDATE tenant_integrations
+                     SET status = 'failed', last_error = $1, updated_at = NOW()
+                     WHERE tenant_id = $2 AND provider = 'twilio'`,
+                    [msg, tenantId]
+                  );
+                } catch (dbErr) {
+                  // If we can't even record the failure, don't silently complete
+                  // the job and strand the tenant at 't0_requested' — rethrow so
+                  // the queue retries and the status eventually lands.
+                  logger.error('Failed to record preferred-number failure', {
+                    tenantId,
+                    error: dbErr instanceof Error ? dbErr.message : String(dbErr),
+                  });
+                  throw purchaseErr;
+                }
+                return;
+              }
+              throw purchaseErr;
+            }
             phoneNumberSid = number.sid;
             phoneE164 = number.phoneNumber;
             logger.info('Phone number purchased', { tenantId, phoneE164 });
