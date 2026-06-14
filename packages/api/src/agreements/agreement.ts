@@ -46,6 +46,12 @@ export interface Agreement {
    * default-column reason as above.
    */
   priorityBooking?: boolean;
+  /**
+   * Auto-collect dues: when true and the customer has a default saved card,
+   * the recurring sweep charges each cycle's dues off-session instead of
+   * leaving a draft invoice for manual payment.
+   */
+  autoCollectDues?: boolean;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;

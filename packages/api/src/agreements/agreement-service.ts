@@ -55,6 +55,8 @@ export interface CreateAgreementInput {
   memberDiscountBps?: number;
   /** Priority booking: extended self-service booking horizon for the member. */
   priorityBooking?: boolean;
+  /** Auto-collect dues: charge each cycle off-session against a saved card. */
+  autoCollectDues?: boolean;
   createdBy: string;
   actorRole?: string;
 }
@@ -71,6 +73,7 @@ export interface UpdateAgreementInput {
   renewalTermMonths?: number | null;
   memberDiscountBps?: number;
   priorityBooking?: boolean;
+  autoCollectDues?: boolean;
 }
 
 /**
@@ -212,6 +215,7 @@ export async function createAgreement(
     renewalCount: 0,
     memberDiscountBps: input.memberDiscountBps ?? 0,
     priorityBooking: input.priorityBooking ?? false,
+    autoCollectDues: input.autoCollectDues ?? false,
     createdBy: input.createdBy,
     createdAt: now,
     updatedAt: now,
@@ -275,6 +279,7 @@ export async function updateAgreement(
   }
   if (input.memberDiscountBps !== undefined) updates.memberDiscountBps = input.memberDiscountBps;
   if (input.priorityBooking !== undefined) updates.priorityBooking = input.priorityBooking;
+  if (input.autoCollectDues !== undefined) updates.autoCollectDues = input.autoCollectDues;
 
   return agreementRepo.update(tenantId, id, updates);
 }

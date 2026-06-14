@@ -4378,6 +4378,40 @@ export const MIGRATIONS = {
     ALTER TABLE service_agreements
       ADD COLUMN IF NOT EXISTS priority_booking BOOLEAN NOT NULL DEFAULT FALSE;
   `,
+
+  // Membership engine (#6 phase 4) — saved cards for off-session dues billing.
+  // Stores ONLY Stripe ids + non-sensitive display metadata (brand/last4/exp);
+  // raw card data never reaches our server (browser -> Stripe via SetupIntent).
+  // The Stripe customer + payment method are scoped to the tenant's connected
+  // account (where dues are charged). auto_collect_dues opts a membership into
+  // automatic charging.
+  '176_customer_payment_methods': `
+    CREATE TABLE IF NOT EXISTS customer_payment_methods (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      stripe_customer_id TEXT NOT NULL,
+      stripe_payment_method_id TEXT NOT NULL,
+      brand TEXT,
+      last4 TEXT,
+      exp_month INT,
+      exp_year INT,
+      is_default BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, stripe_payment_method_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cpm_tenant_customer
+      ON customer_payment_methods (tenant_id, customer_id);
+    ALTER TABLE customer_payment_methods ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_payment_methods FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_payment_methods ON customer_payment_methods;
+    CREATE POLICY tenant_isolation_customer_payment_methods ON customer_payment_methods
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS auto_collect_dues BOOLEAN NOT NULL DEFAULT FALSE;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

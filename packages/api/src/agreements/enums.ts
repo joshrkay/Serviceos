@@ -86,6 +86,7 @@ export const createAgreementSchema = z.object({
   renewalTermMonths: renewalTermMonthsSchema.optional(),
   memberDiscountBps: memberDiscountBpsSchema.optional(),
   priorityBooking: z.boolean().optional(),
+  autoCollectDues: z.boolean().optional(),
 });
 
 export const updateAgreementSchema = z.object({
@@ -100,4 +101,5 @@ export const updateAgreementSchema = z.object({
   renewalTermMonths: renewalTermMonthsSchema.nullable().optional(),
   memberDiscountBps: memberDiscountBpsSchema.optional(),
   priorityBooking: z.boolean().optional(),
+  autoCollectDues: z.boolean().optional(),
 });

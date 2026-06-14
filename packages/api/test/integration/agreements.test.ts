@@ -310,5 +310,16 @@ describe('Postgres integration — service agreements', () => {
       const toggled = await repo.update(t.tenantId, plain.id, { priorityBooking: true });
       expect(toggled!.priorityBooking).toBe(true);
     });
+
+    // #6 phase 4 — migration 176 auto_collect_dues column.
+    it('round-trips auto_collect_dues and defaults to false', async () => {
+      const plain = await repo.create(makeAgreement(t.tenantId, cust, t.userId));
+      expect((await repo.findById(t.tenantId, plain.id))!.autoCollectDues).toBe(false);
+
+      const collecting = await repo.create(
+        makeAgreement(t.tenantId, cust, t.userId, { autoCollectDues: true }),
+      );
+      expect((await repo.findById(t.tenantId, collecting.id))!.autoCollectDues).toBe(true);
+    });
   });
 });

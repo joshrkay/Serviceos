@@ -558,6 +558,7 @@ describe('membership member pricing: createAgreement / updateAgreement', () => {
     );
     expect(plain.memberDiscountBps).toBe(0);
     expect(plain.priorityBooking).toBe(false);
+    expect(plain.autoCollectDues).toBe(false);
 
     const member = await createAgreement(
       {
@@ -569,12 +570,14 @@ describe('membership member pricing: createAgreement / updateAgreement', () => {
         startsOn: '2026-01-01',
         memberDiscountBps: 1500,
         priorityBooking: true,
+        autoCollectDues: true,
         createdBy: 'u',
       },
       repo,
     );
     expect(member.memberDiscountBps).toBe(1500);
     expect(member.priorityBooking).toBe(true);
+    expect(member.autoCollectDues).toBe(true);
   });
 
   it('updateAgreement changes memberDiscountBps', async () => {
