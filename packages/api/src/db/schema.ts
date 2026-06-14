@@ -4549,6 +4549,20 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS labor_rate_cents_per_hour INT;
   `,
+  // Appointment-type taxonomy (U2): the typed *kind* of visit, distinct from
+  // the classifier intent and the free-text summary. Nullable + additive —
+  // inbound-caller DRAFTs and legacy rows carry NULL (a CHECK permits NULL).
+  // The named CHECK is made re-run-safe by getMigrationSQL's DROP-CONSTRAINT
+  // rewriter; the value set is kept in lockstep with `appointmentTypeSchema`
+  // (packages/shared/src/contracts/appointment-type.ts).
+  '182_appointment_type': `
+    ALTER TABLE appointments
+      ADD COLUMN IF NOT EXISTS appointment_type TEXT;
+    ALTER TABLE appointments
+      ADD CONSTRAINT appointments_appointment_type_check
+      CHECK (appointment_type IN ('estimate', 'repair', 'install', 'maintenance', 'diagnostic'));
+    CREATE INDEX IF NOT EXISTS idx_appointments_type ON appointments(tenant_id, appointment_type);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
