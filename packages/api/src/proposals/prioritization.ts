@@ -58,6 +58,8 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   mark_lead_lost: 4,
   add_service_location: 5,
   log_time_entry: 5,
+  // Clock-out is informational time capture — low priority, gates nothing.
+  clock_out: 5,
   request_feedback: 5,
   emergency_dispatch: 1,
   onboarding_tenant_settings: 6,

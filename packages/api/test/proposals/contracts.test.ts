@@ -169,6 +169,16 @@ describe('P2-002 — Typed proposal contracts', () => {
     ).not.toThrow();
   });
 
+  // clock_out (voice time tracking)
+  describe('clock_out payload', () => {
+    it('accepts an empty payload (active entry resolved at execution by userId)', () => {
+      expect(validateProposalPayload('clock_out', {}).valid).toBe(true);
+    });
+    it('accepts an optional note', () => {
+      expect(validateProposalPayload('clock_out', { notes: 'done early' }).valid).toBe(true);
+    });
+  });
+
   // Job execution by voice (update_job_status)
   describe('update_job_status payload (job execution by voice)', () => {
     it('accepts a resolved jobId + targetStatus', () => {

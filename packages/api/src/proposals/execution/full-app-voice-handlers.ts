@@ -178,6 +178,36 @@ export class LogTimeEntryExecutionHandler implements ExecutionHandler {
   }
 }
 
+/**
+ * clock_out — close the speaking tech's current open time entry. The
+ * active entry is resolved by userId (executedBy), so the payload needs
+ * nothing but an optional note. clockOut returns null when there is no
+ * open entry; that's an idempotent no-op (the desired end state — not on
+ * the clock — already holds), so we report success either way.
+ */
+export class ClockOutExecutionHandler implements ExecutionHandler {
+  proposalType: ProposalType = 'clock_out';
+
+  constructor(private readonly timeEntryService?: TimeEntryService) {}
+
+  async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
+    const payload = proposal.payload as Record<string, unknown>;
+    const notes = typeof payload.notes === 'string' ? payload.notes : undefined;
+
+    if (!this.timeEntryService) {
+      return { success: true };
+    }
+    try {
+      const closed = await this.timeEntryService.clockOut(context.tenantId, context.executedBy, {
+        ...(notes ? { notes } : {}),
+      });
+      return { success: true, ...(closed ? { resultEntityId: closed.id } : {}) };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+}
+
 export class NotifyDelayExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'notify_delay';
 

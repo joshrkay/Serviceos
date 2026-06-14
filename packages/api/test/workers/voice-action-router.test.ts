@@ -1349,4 +1349,24 @@ describe('voice-action-router update_job_status (JTBD #4)', () => {
       targetStatus: 'completed',
     });
   });
+
+  it('routes a "clock me out" transcript to a clock_out proposal', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'clock_out',
+        confidence: 0.96,
+        extractedEntities: {},
+      } satisfies IntentClassification),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'tech-1', transcript: "I'm done for the day, clock me out" }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant('t-1');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposalType).toBe('clock_out');
+  });
 });

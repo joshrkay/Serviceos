@@ -707,6 +707,26 @@ export class UpdateJobStatusTaskHandler implements TaskHandler {
   }
 }
 
+// ───────────── clock_out ─────────────
+//
+// The inverse of log_time_entry: ends the tech's current shift. No
+// reference resolution — the execution handler closes the speaker's
+// single active time entry (resolved by userId). Capture-class +
+// autonomous trust with no missing fields, so a clear "clock me out"
+// auto-approves (supervised) or one-tap SMS-approves (solo/unsupervised).
+export class ClockOutTaskHandler implements TaskHandler {
+  readonly taskType = 'clock_out' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    return {
+      proposal: createProposal(
+        inputFor(context, this.taskType, {}, [], { trust: 'autonomous' }),
+      ),
+      taskType: this.taskType,
+    };
+  }
+}
+
 // ───────────── mark_lead_lost ─────────────
 //
 // Closes out a lead. The classifier returns a free-text lead reference;

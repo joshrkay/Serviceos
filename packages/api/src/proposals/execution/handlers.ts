@@ -67,6 +67,7 @@ import {
   MarkLeadLostExecutionHandler,
   AddServiceLocationExecutionHandler,
   LogTimeEntryExecutionHandler,
+  ClockOutExecutionHandler,
   NotifyDelayExecutionHandler,
   RequestFeedbackExecutionHandler,
 } from './full-app-voice-handlers';
@@ -622,6 +623,7 @@ export function createExecutionHandlerRegistry(deps?: {
     new MarkLeadLostExecutionHandler(deps?.leadRepo, deps?.auditRepo),
     new AddServiceLocationExecutionHandler(deps?.locationRepo, deps?.auditRepo),
     new LogTimeEntryExecutionHandler(deps?.timeEntryService),
+    new ClockOutExecutionHandler(deps?.timeEntryService),
     new NotifyDelayExecutionHandler(
       deps?.delayNotificationService,
       deps?.appointmentRepo,

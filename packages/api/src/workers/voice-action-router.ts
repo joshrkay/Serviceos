@@ -68,6 +68,7 @@ import {
   NotifyDelayTaskHandler,
   RequestFeedbackTaskHandler,
   UpdateJobStatusTaskHandler,
+  ClockOutTaskHandler,
 } from '../ai/tasks/voice-extended-tasks';
 import { instrument } from '../monitoring/instrumentation';
 
@@ -255,6 +256,7 @@ const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, Pr
   create_customer: 'create_customer',
   create_job: 'create_job',
   update_job_status: 'update_job_status',
+  clock_out: 'clock_out',
   reschedule_appointment: 'reschedule_appointment',
   cancel_appointment: 'cancel_appointment',
   reassign_appointment: 'reassign_appointment',
@@ -367,6 +369,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('create_customer', new CreateCustomerTaskHandler());
   handlers.set('create_job', new CreateJobVoiceTaskHandler());
   handlers.set('update_job_status', new UpdateJobStatusTaskHandler(deps.jobRepo));
+  handlers.set('clock_out', new ClockOutTaskHandler());
   handlers.set(
     'reschedule_appointment',
     new RescheduleAppointmentTaskHandler(deps.gateway, deps.appointmentRepo, deps.jobRepo),

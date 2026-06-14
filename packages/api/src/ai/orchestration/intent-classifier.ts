@@ -22,6 +22,7 @@ export type IntentType =
   | 'create_customer'
   | 'create_job'
   | 'update_job_status'
+  | 'clock_out'
   | 'reschedule_appointment'
   | 'cancel_appointment'
   | 'reassign_appointment'
@@ -82,6 +83,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'create_customer',
   'create_job',
   'update_job_status',
+  'clock_out',
   'reschedule_appointment',
   'cancel_appointment',
   'reassign_appointment',
@@ -513,12 +515,22 @@ Supported intents (return exactly ONE):
                            Examples: "Add a service location for Sarah at 412 Oak Street"
                                      "New address for the Acme account: 88 Industrial Way, Denver CO"
                                      "Add a second property for Jordan — 12 Pine Lane"
-- "log_time_entry"      — technician wants to start tracking time (clock
+- "log_time_entry"      — technician wants to START tracking time (clock
                            in) on a job or task. Extract jobReference and
                            timeEntryType (job / drive / break / admin).
                            Examples: "Clock me in on the Miller job"
                                      "Start my drive time"
                                      "Log time on the Rodriguez install"
+- "clock_out"           — technician wants to STOP tracking time / end
+                           their shift (the inverse of log_time_entry).
+                           No entities needed — it closes their current
+                           open time entry. Do NOT confuse with marking a
+                           JOB complete (update_job_status); this is about
+                           the tech's own time clock.
+                           Examples: "Clock me out"
+                                     "I'm done for the day"
+                                     "End my shift"
+                                     "Stop my time"
 - "notify_delay"        — user wants to tell a customer the crew is
                            running late. Customer-facing comms — never
                            auto-execute. Extract appointmentReference and

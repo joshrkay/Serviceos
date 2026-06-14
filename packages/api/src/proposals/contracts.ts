@@ -257,6 +257,14 @@ export const logTimeEntryPayloadSchema = z.object({
   notes: z.string().optional(),
 });
 
+// clock_out: a field tech ends their current shift by voice ("clock me
+// out", "I'm done for the day"). No fields required — the execution
+// handler closes the speaker's single active time entry, resolved by
+// userId. An optional note rides along.
+export const clockOutPayloadSchema = z.object({
+  notes: z.string().optional(),
+});
+
 // update_job_status: a field tech moves a job along its lifecycle by
 // voice ("start the Miller job" → in_progress, "mark the Henderson job
 // done" → completed). targetStatus is restricted to the two tech-driven
@@ -349,6 +357,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   update_customer: updateCustomerPayloadSchema,
   create_job: createJobPayloadSchema,
   update_job_status: updateJobStatusPayloadSchema,
+  clock_out: clockOutPayloadSchema,
   create_appointment: createAppointmentPayloadSchema,
   create_booking: createBookingPayloadSchema,
   // A callback request captured when the agent cannot complete an action
