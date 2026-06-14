@@ -509,6 +509,40 @@ export class SendPaymentReminderTaskHandler implements TaskHandler {
   }
 }
 
+// ───────────── apply_late_fee ─────────────
+//
+// Money class — never auto-approves; the owner sees and approves the amount.
+// We surface what the owner stated ("add a $25 late fee") or flag feeCents
+// missing for the review card — we never invent a charge. stepKey 'manual'
+// distinguishes an on-demand fee from the dunning ledger's accrual steps and
+// makes the fee line idempotent (the execution handler keys on
+// `late-fee:<stepKey>`, so re-executing this proposal can't double-charge).
+// invoiceId is resolved from the reference by the review UI.
+export class ApplyLateFeeTaskHandler implements TaskHandler {
+  readonly taskType = 'apply_late_fee' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = { stepKey: 'manual' };
+    const missing: string[] = [];
+
+    if (ee.jobReference) payload.invoiceReference = ee.jobReference;
+    else if (ee.customerName) payload.invoiceReference = ee.customerName;
+    else missing.push('invoiceId');
+
+    if (typeof ee.amount === 'number' && ee.amount > 0) {
+      payload.feeCents = ee.amount;
+    } else {
+      missing.push('feeCents');
+    }
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
 // ───────────── record_payment ─────────────
 //
 // Money class — never auto-approves under any confidence.

@@ -31,6 +31,7 @@ export type IntentType =
   | 'send_estimate'
   | 'send_estimate_nudge'
   | 'send_payment_reminder'
+  | 'apply_late_fee'
   | 'record_payment'
   | 'emergency_dispatch'
   // Phase: full-app voice coverage. update_customer / log_expense reuse
@@ -136,6 +137,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'send_estimate',
   'send_estimate_nudge',
   'send_payment_reminder',
+  'apply_late_fee',
   'record_payment',
   'emergency_dispatch',
   'update_customer',
@@ -580,6 +582,13 @@ Supported intents (return exactly ONE):
                            Examples: "Send a payment reminder on the Smith invoice"
                                      "Remind the Jones customer their invoice is overdue"
                                      "Chase the unpaid Acme invoice"
+- "apply_late_fee"      — user wants to add a LATE FEE to an overdue invoice.
+                           Money action — never auto-execute; the owner approves
+                           the amount. Extract the invoice reference and, if the
+                           owner stated one, the fee amount (otherwise leave it
+                           for the review card — never invent a charge).
+                           Examples: "Add a $25 late fee to the Smith invoice"
+                                     "Charge a late fee on the overdue Jones invoice"
 - "record_payment"      — user wants to log a PAYMENT received against an
                            invoice. This is money-moving — never
                            auto-execute, always require a screen-tap

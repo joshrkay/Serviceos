@@ -51,6 +51,7 @@ catch schema drift or a missing dependency).
 | "Send the Khan estimate" | `send_estimate` | `send_estimate` | comms | unit |
 | "Nudge the Khan estimate again" | `send_estimate_nudge` | `send_estimate_nudge` | comms | handler-level |
 | "Chase the unpaid Smith invoice" | `send_payment_reminder` | `send_payment_reminder` | comms | handler-level |
+| "Add a $25 late fee to the Smith invoice" | `apply_late_fee` | `apply_late_fee` | money | handler-level |
 | "Mark the Smith invoice paid, $200 cash" | `record_payment` | `record_payment` | money | unit |
 | "Emergency, no heat at the Hayes place — page me" | `emergency_dispatch` | `emergency_dispatch` | irreversible | unit |
 | "Update Alvarez's phone number" | `update_customer` | `update_customer` | capture | unit |
@@ -84,7 +85,6 @@ migration).
 | Spoken example a tradesperson would expect to work | Proposal type | Class | Plan |
 |---|---|---|---|
 | "Invoice all my completed jobs from today" | `batch_invoice` | capture | deferred — needs DB job-enumeration + estimate→line-item resolution (sweep-oriented payload) |
-| "Add a late fee to the overdue Smith invoice" | `apply_late_fee` | money | deferred — payload needs computed feeCents + dunning stepKey (sweep-oriented) |
 | "Set up 50% deposit, 50% on completion for Garcia" | `create_invoice_schedule` | capture | deferred (complex payload) |
 | "Respond to that 1-star review" | `review_response_proposal` | comms | deferred (review-monitoring driven) |
 | "Book this caller for Thursday" | `create_booking` | capture | deferred (customer-call FSM path) |
@@ -136,6 +136,7 @@ approves by screen/SMS tap).
     { "intent": "send_estimate", "proposalType": "send_estimate", "actionClass": "comms" },
     { "intent": "send_estimate_nudge", "proposalType": "send_estimate_nudge", "actionClass": "comms" },
     { "intent": "send_payment_reminder", "proposalType": "send_payment_reminder", "actionClass": "comms" },
+    { "intent": "apply_late_fee", "proposalType": "apply_late_fee", "actionClass": "money" },
     { "intent": "record_payment", "proposalType": "record_payment", "actionClass": "money" },
     { "intent": "emergency_dispatch", "proposalType": "emergency_dispatch", "actionClass": "irreversible" },
     { "intent": "update_customer", "proposalType": "update_customer", "actionClass": "capture" },
@@ -151,7 +152,6 @@ approves by screen/SMS tap).
   "handlerNoOnramp": [
     "batch_invoice",
     "create_invoice_schedule",
-    "apply_late_fee",
     "review_response_proposal",
     "create_booking"
   ],
