@@ -14,6 +14,12 @@ export interface CustomerPaymentMethod {
   customerId: string;
   stripeCustomerId: string;
   stripePaymentMethodId: string;
+  /**
+   * The Stripe account the customer + payment method live on — the tenant's
+   * connected account, or undefined for the platform account. Off-session
+   * charges MUST target this exact account.
+   */
+  stripeAccountId?: string;
   brand?: string;
   last4?: string;
   expMonth?: number;

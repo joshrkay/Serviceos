@@ -4433,6 +4433,17 @@ export const MIGRATIONS = {
     ALTER TABLE service_agreements
       ADD COLUMN IF NOT EXISTS auto_collect_dues BOOLEAN NOT NULL DEFAULT FALSE;
   `,
+
+  // Membership engine (#6 phase 4 review) — pin a saved card to the Stripe
+  // account it was created on. A PaymentMethod/Customer is scoped to one
+  // account (the tenant's connected account, or the platform when NULL); the
+  // off-session dues charge must target that exact account, NOT whatever the
+  // Connect resolver returns at charge time (which can drift if the tenant's
+  // Connect status changes). Nullable, additive.
+  '177_customer_payment_methods_stripe_account': `
+    ALTER TABLE customer_payment_methods
+      ADD COLUMN IF NOT EXISTS stripe_account_id TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
