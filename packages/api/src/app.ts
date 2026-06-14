@@ -3319,6 +3319,13 @@ export function createApp(): express.Express {
       // their gating proposals' approval channels.
       proposalRepo,
       auditRepo,
+      // P22-005 (U7) — per-job profit (GET /api/reports/job-profit/:jobId).
+      // Aggregates the job's invoices + tracked labor + expenses against the
+      // tenant labor rate. No materialsResolver: the P14 job_parts table is not
+      // built, so materials default to 0 (job-profit.ts handles its absence).
+      jobRepo,
+      timeEntryRepo,
+      settingsRepo,
       // Look up the tenant tz so /money-dashboard buckets by local
       // month boundaries. Without this the dashboard would default
       // to America/New_York (matches tenant_settings.timezone's DB

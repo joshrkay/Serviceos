@@ -14,6 +14,7 @@ import {
   IntentType,
   CLASSIFIER_CONFIDENCE_THRESHOLD,
   parseClassifierJson,
+  isLookupIntent,
 } from '../../../src/ai/orchestration/intent-classifier';
 import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import { formatVerticalForCallerPrompt } from '../../../src/verticals/context-assembly';
@@ -693,7 +694,6 @@ describe('RV-071 — approve_proposal / reject_proposal intents', () => {
 import {
   EXTENDED_INTENTS_PROMPT_SECTION,
   EXTENDED_INTENT_TYPES,
-  isLookupIntent,
   matchExtendedIntentPhrase,
 } from '../../../src/ai/orchestration/intent-classifier';
 
@@ -879,5 +879,47 @@ describe('Phase-2 Track A — extended operator intents', () => {
     const result = await classifyIntent("What's my day look like?", { tenantId: 't1' }, gateway);
     expect(gateway.complete).toHaveBeenCalledTimes(1);
     expect(result.intentType).toBe('unknown');
+  });
+});
+
+describe('intent-classifier — lookup_job_profit (P22-005)', () => {
+  const tenantId = 'tenant-1';
+
+  it('parseClassifierJson accepts lookup_job_profit with a jobReference', () => {
+    const out = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'lookup_job_profit',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'the Miller job' },
+      }),
+    );
+    expect(out?.intentType).toBe('lookup_job_profit');
+    expect(out?.extractedEntities?.jobReference).toBe('the Miller job');
+  });
+
+  it('is recognized as a read-only lookup intent (routes to the skill family)', () => {
+    expect(isLookupIntent('lookup_job_profit')).toBe(true);
+  });
+
+  it('routes 5+ distinct profit phrasings to lookup_job_profit', async () => {
+    const phrasings = [
+      'Did I make money on the Miller job?',
+      "What's my margin on the Johnson install?",
+      "How'd we do on the Smith water heater?",
+      'Did the Davis job turn a profit?',
+      'What did I clear on JOB-0042?',
+    ];
+    for (const transcript of phrasings) {
+      const gateway = mockGateway(
+        JSON.stringify({
+          intentType: 'lookup_job_profit',
+          confidence: 0.9,
+          extractedEntities: { jobReference: transcript },
+        }),
+      );
+      const result = await classifyIntent(transcript, { tenantId }, gateway);
+      expect(result.intentType).toBe('lookup_job_profit');
+      expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    }
   });
 });

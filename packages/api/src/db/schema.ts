@@ -4536,6 +4536,19 @@ export const MIGRATIONS = {
     CREATE POLICY correction_lessons_tenant_isolation ON correction_lessons
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+  // P22-005 (U7) — tenant-level billable LABOR rate, integer cents per hour.
+  // Drives per-job profit (jobs/job-profit.ts): tracked job minutes × this
+  // rate = labor cost. Nullable: when unset, per-job profit reports
+  // minutes-only with a spoken caveat. Distinct from hourly_rate_cents
+  // (migration 098), which is the owner's value-of-time for Time-Given-Back.
+  // Per-tech rates are out of scope (single tenant-level rate). Idempotent.
+  // Renamed from 143 → 181 at integration (143/178/179 already taken; 180 is
+  // reserved for U8 correction-loop) and moved to the end of MIGRATIONS so the
+  // sequence stays monotonic.
+  '181_tenant_settings_labor_rate': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS labor_rate_cents_per_hour INT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
