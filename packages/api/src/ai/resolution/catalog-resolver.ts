@@ -63,8 +63,17 @@ const MAX_CANDIDATES = 3;
 export const UNCATALOGUED_CONFIDENCE_CAP = 0.85;
 
 // Filler words that carry no matching signal in spoken line items
-// ("two hours of labor", "a new filter for the unit").
-const STOPWORDS = new Set(['a', 'an', 'the', 'of', 'for', 'per', 'and', 'with']);
+// ("two hours of labor", "a new filter for the unit"). Includes
+// conversational fillers Whisper transcribes verbatim ("um", "please") —
+// these are NEVER catalog identity, and stripping is symmetric (applied
+// to query and catalog name alike) so it can't cause a false match.
+// NOTE: cardinal numbers are deliberately NOT stripped — size is identity
+// in the trades (2-ton vs 3-ton, 50-gallon), and quantity rides the line
+// item's own field.
+const STOPWORDS = new Set([
+  'a', 'an', 'the', 'of', 'for', 'per', 'and', 'with',
+  'um', 'uh', 'uhh', 'er', 'please', 'thanks', 'thank',
+]);
 
 // Tokens that end in 's' but are singular trade/common terms — naive
 // 's'-stripping would corrupt them ("gas" → "ga"). Endings-based rules
@@ -206,9 +215,37 @@ function isPrefix(queryTokens: string[], targetTokens: string[]): boolean {
   return queryTokens.every((t, i) => t === targetTokens[i]);
 }
 
+/** Minimum squashed length before a join/prefix match is trustworthy. */
+const SQUASH_MIN_LEN = 4;
+
+/**
+ * Whisper routinely joins or splits compounds ("water heater" →
+ * "waterheater", "tune up" → "tuneup") and spaces acronyms. Comparing the
+ * space-stripped forms collapses all of those to a match. Only used as a
+ * BOOST over token scoring, and the prefix direction is one-way
+ * (squashed query is a prefix of the squashed name — i.e. the spoken form
+ * abbreviates the catalog name). The reverse (query has EXTRA trailing
+ * words) stays weaker, so "drain cleaning job" against "Drain Cleaning"
+ * still surfaces for confirmation rather than auto-pricing.
+ */
+function squashedScore(
+  queryTokens: string[],
+  targetTokens: string[],
+): { score: number; matchType: CatalogMatchType } | null {
+  const sq = queryTokens.join('');
+  const sn = targetTokens.join('');
+  if (!sq || !sn) return null;
+  if (sq === sn) return { score: 1.0, matchType: 'exact' };
+  if (sq.length >= SQUASH_MIN_LEN && sn.startsWith(sq)) {
+    return { score: 0.9, matchType: 'prefix' };
+  }
+  return null;
+}
+
 function scoreAgainstTokens(
   queryTokens: string[],
   targetTokens: string[],
+  allowSquash: boolean,
 ): { score: number; matchType: CatalogMatchType } | null {
   if (targetTokens.length === 0) return null;
   if (queryTokens.join(' ') === targetTokens.join(' ')) {
@@ -218,8 +255,15 @@ function scoreAgainstTokens(
     return { score: 0.92, matchType: 'prefix' };
   }
   const overlap = tokenOverlapScore(queryTokens, targetTokens);
-  if (overlap.score <= 0) return null;
-  return { score: overlap.score, matchType: overlap.usedFuzzy ? 'fuzzy' : 'token_overlap' };
+  const tokenResult: { score: number; matchType: CatalogMatchType } | null =
+    overlap.score > 0
+      ? { score: overlap.score, matchType: overlap.usedFuzzy ? 'fuzzy' : 'token_overlap' }
+      : null;
+  // Squash boost (name only) — recovers Whisper joins/splits/spacing that
+  // token-vs-token matching misses entirely.
+  const squash = allowSquash ? squashedScore(queryTokens, targetTokens) : null;
+  if (squash && (!tokenResult || squash.score > tokenResult.score)) return squash;
+  return tokenResult;
 }
 
 /**
@@ -228,11 +272,13 @@ function scoreAgainstTokens(
  * null below TAU_FLOOR.
  */
 export function scoreCandidate(queryTokens: string[], item: CatalogItem): CatalogCandidate | null {
-  const nameResult = scoreAgainstTokens(queryTokens, normalizeForMatch(item.name)) as
+  const nameResult = scoreAgainstTokens(queryTokens, normalizeForMatch(item.name), true) as
     | { score: number; matchType: CatalogMatchType }
     | null;
   const descTokens = item.description ? normalizeForMatch(item.description) : [];
-  const descRaw = scoreAgainstTokens(queryTokens, descTokens) as
+  // Squash is name-only — a long free-text description squashed to one
+  // string would over-match.
+  const descRaw = scoreAgainstTokens(queryTokens, descTokens, false) as
     | { score: number; matchType: CatalogMatchType }
     | null;
   // Description evidence is secondary in BOTH dimensions: score is
