@@ -135,6 +135,13 @@ export interface BrandVoiceSettings {
   pronoun?: 'we' | 'i';
   vibe_words?: string[];
   business_name?: string;
+  /**
+   * N-009 / P2-038 — brand-voice negative prompt. Phrases the AI must never
+   * use in customer-facing copy. Grown by the correction loop when an owner
+   * edit removes a phrase (each addition is a reversible `banned_phrase`
+   * lesson); rendered as a non-overridable "never say" instruction.
+   */
+  banned_phrases?: string[];
 }
 
 /**
@@ -297,6 +304,16 @@ export interface TenantSettings {
   serviceAreaRadius?: number | null;
   businessHours?: Record<string, { open: string; close: string } | null> | null;
   jobBufferMinutes?: number | null;
+  /**
+   * P22-005 (U7) — the tenant's billable LABOR rate, integer cents per hour.
+   * Used by per-job profit (jobs/job-profit.ts) to cost tracked job minutes.
+   * Distinct from `hourlyRateCents` (the owner's value-of-time figure powering
+   * the Time-Given-Back surface): this is what an hour of field labor COSTS the
+   * business for P&L. Null/undefined = not set; per-job profit then reports
+   * minutes-only with an explicit caveat. Per-tech rates are out of scope —
+   * this is a single tenant-level rate. Migration 181.
+   */
+  laborRateCentsPerHour?: number | null;
   /**
    * B1 — Per-tenant voice persona. When set, the calling agent uses
    * this name in its greeting ("Hi, I'm {voiceAgentName}. How can I
@@ -462,6 +479,8 @@ export interface UpdateSettingsInput {
   depositTimingPolicy?: 'before_approval' | 'after_approval';
   /** §9 — owner's effective hourly rate (integer cents); null clears. */
   hourlyRateCents?: number | null;
+  /** P22-005 (U7) — billable labor rate (integer cents/hr); null clears. */
+  laborRateCentsPerHour?: number | null;
   /** B1 — voice persona name; null clears the field. */
   voiceAgentName?: string | null;
   /** B1 — custom greeting text; null clears the field. */
@@ -612,6 +631,14 @@ function validateCommonSettingsFields(
     !DIGEST_CHANNEL_VALUES.includes(input.digestChannel as DigestChannel)
   ) {
     errors.push(`digestChannel must be one of: ${DIGEST_CHANNEL_VALUES.join(', ')}`);
+  }
+  // P22-005 (U7) — labor rate. null = clear (allowed); a present number must be
+  // a non-negative integer of cents (money is always integer cents).
+  if (input.laborRateCentsPerHour !== undefined && input.laborRateCentsPerHour !== null) {
+    const rate = input.laborRateCentsPerHour;
+    if (!Number.isInteger(rate) || rate < 0) {
+      errors.push('laborRateCentsPerHour must be a non-negative integer of cents');
+    }
   }
   return errors;
 }

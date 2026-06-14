@@ -105,6 +105,9 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
       return raw;
     })(),
     jobBufferMinutes: (row.job_buffer_minutes as number | null) ?? undefined,
+    // P22-005 (U7) — migration 181. Billable labor rate (integer cents/hr).
+    laborRateCentsPerHour:
+      (row.labor_rate_cents_per_hour as number | null) ?? undefined,
     // B1 — migration 088. NULL from DB → undefined in TS (same
     // convention as all other nullable optional columns here).
     voiceAgentName: (row.voice_agent_name as string | null) ?? undefined,
@@ -305,6 +308,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         depositTimingPolicy: 'deposit_timing_policy',
         // §9 — migration 098.
         hourlyRateCents: 'hourly_rate_cents',
+        // P22-005 (U7) — migration 181.
+        laborRateCentsPerHour: 'labor_rate_cents_per_hour',
         // B1 — migration 088.
         voiceAgentName: 'voice_agent_name',
         voiceGreeting: 'voice_greeting',
