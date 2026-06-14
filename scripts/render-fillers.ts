@@ -11,9 +11,8 @@
  * The script is intentionally idempotent — re-running with the same
  * voice + library produces byte-identical files (given the same model).
  *
- * Output format: raw PCM 16-bit signed little-endian @ 16 kHz mono.
- * The runtime decoder (decode-filler.ts) is a pass-through — no runtime
- * conversion needed.
+ * Output format: raw PCM 16-bit signed little-endian @ 16 kHz mono — fed
+ * directly to the media stream at runtime with no conversion needed.
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs';
