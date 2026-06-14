@@ -330,6 +330,50 @@ export class ReassignAppointmentTaskHandler implements TaskHandler {
   }
 }
 
+// ───────────── add_crew_member / remove_crew_member ─────────────
+//
+// Crew add/remove attach or detach a NON-PRIMARY technician on an existing
+// appointment. The classifier returns a technician NAME and an appointment
+// REFERENCE, never UUIDs — so we always list appointmentId + technicianId as
+// missing and let the review UI resolve both before the mutation can run (the
+// same contract as reassign_appointment). Capture-class, but the always-missing
+// ids keep the proposal in draft until an operator resolves them.
+export class AddCrewMemberTaskHandler implements TaskHandler {
+  readonly taskType = 'add_crew_member' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = ['appointmentId', 'technicianId'];
+
+    if (ee.appointmentReference) payload.appointmentReference = ee.appointmentReference;
+    if (ee.targetTechnicianName) payload.targetTechnicianName = ee.targetTechnicianName;
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+export class RemoveCrewMemberTaskHandler implements TaskHandler {
+  readonly taskType = 'remove_crew_member' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = ['appointmentId', 'technicianId'];
+
+    if (ee.appointmentReference) payload.appointmentReference = ee.appointmentReference;
+    if (ee.targetTechnicianName) payload.targetTechnicianName = ee.targetTechnicianName;
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
 // ───────────── add_note ─────────────
 export class AddNoteTaskHandler implements TaskHandler {
   readonly taskType = 'add_note' as const;

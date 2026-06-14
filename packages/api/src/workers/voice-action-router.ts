@@ -57,6 +57,8 @@ import {
   RescheduleAppointmentTaskHandler,
   CancelAppointmentTaskHandler,
   ReassignAppointmentTaskHandler,
+  AddCrewMemberTaskHandler,
+  RemoveCrewMemberTaskHandler,
   AddNoteTaskHandler,
   SendInvoiceTaskHandler,
   SendEstimateTaskHandler,
@@ -303,6 +305,8 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   reschedule_appointment: 'reschedule_appointment',
   cancel_appointment: 'cancel_appointment',
   reassign_appointment: 'reassign_appointment',
+  add_crew_member: 'add_crew_member',
+  remove_crew_member: 'remove_crew_member',
   add_note: 'add_note',
   send_invoice: 'send_invoice',
   send_estimate: 'send_estimate',
@@ -420,6 +424,8 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
     new CancelAppointmentTaskHandler(deps.appointmentRepo, deps.jobRepo),
   );
   handlers.set('reassign_appointment', new ReassignAppointmentTaskHandler());
+  handlers.set('add_crew_member', new AddCrewMemberTaskHandler());
+  handlers.set('remove_crew_member', new RemoveCrewMemberTaskHandler());
   handlers.set('add_note', new AddNoteTaskHandler());
   handlers.set('send_invoice', new SendInvoiceTaskHandler());
   handlers.set('send_estimate', new SendEstimateTaskHandler());

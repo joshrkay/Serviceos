@@ -44,6 +44,8 @@ catch schema drift or a missing dependency).
 | "Move the Garcia job to Thursday 10" | `reschedule_appointment` | `reschedule_appointment` | capture | unit |
 | "Cancel Tuesday's Garcia appointment" | `cancel_appointment` | `cancel_appointment` | irreversible | unit |
 | "Put Carlos on the Garcia job instead of me" | `reassign_appointment` | `reassign_appointment` | capture | unit |
+| "Add Carlos to the Garcia appointment" | `add_crew_member` | `add_crew_member` | capture | handler-level |
+| "Take Carlos off Tuesday's job" | `remove_crew_member` | `remove_crew_member` | capture | handler-level |
 | "Note on the Patel job: wants morning visits" | `add_note` | `add_note` | capture | unit |
 | "Send the Johnson invoice" | `send_invoice` | `send_invoice` | comms | unit |
 | "Send the Khan estimate" | `send_estimate` | `send_estimate` | comms | unit |
@@ -79,8 +81,6 @@ migration).
 
 | Spoken example a tradesperson would expect to work | Proposal type | Class | Plan |
 |---|---|---|---|
-| "Add Carlos to the Garcia appointment" | `add_crew_member` | capture | U6 |
-| "Take Carlos off Tuesday's job" | `remove_crew_member` | capture | U6 |
 | "Invoice all my completed jobs from today" | `batch_invoice` | capture | U7 |
 | "Add a late fee to the overdue Smith invoice" | `apply_late_fee` | money | U8 |
 | "Send a payment reminder on the Smith invoice" | `send_payment_reminder` | comms | U8 |
@@ -129,6 +129,8 @@ approves by screen/SMS tap).
     { "intent": "reschedule_appointment", "proposalType": "reschedule_appointment", "actionClass": "capture" },
     { "intent": "cancel_appointment", "proposalType": "cancel_appointment", "actionClass": "irreversible" },
     { "intent": "reassign_appointment", "proposalType": "reassign_appointment", "actionClass": "capture" },
+    { "intent": "add_crew_member", "proposalType": "add_crew_member", "actionClass": "capture" },
+    { "intent": "remove_crew_member", "proposalType": "remove_crew_member", "actionClass": "capture" },
     { "intent": "add_note", "proposalType": "add_note", "actionClass": "capture" },
     { "intent": "send_invoice", "proposalType": "send_invoice", "actionClass": "comms" },
     { "intent": "send_estimate", "proposalType": "send_estimate", "actionClass": "comms" },
@@ -145,8 +147,6 @@ approves by screen/SMS tap).
     { "intent": "request_feedback", "proposalType": "request_feedback", "actionClass": "comms" }
   ],
   "handlerNoOnramp": [
-    "add_crew_member",
-    "remove_crew_member",
     "batch_invoice",
     "create_invoice_schedule",
     "apply_late_fee",

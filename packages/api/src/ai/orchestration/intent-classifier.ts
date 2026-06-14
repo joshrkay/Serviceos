@@ -24,6 +24,8 @@ export type IntentType =
   | 'reschedule_appointment'
   | 'cancel_appointment'
   | 'reassign_appointment'
+  | 'add_crew_member'
+  | 'remove_crew_member'
   | 'add_note'
   | 'send_invoice'
   | 'send_estimate'
@@ -125,6 +127,8 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'reschedule_appointment',
   'cancel_appointment',
   'reassign_appointment',
+  'add_crew_member',
+  'remove_crew_member',
   'add_note',
   'send_invoice',
   'send_estimate',
@@ -519,6 +523,16 @@ Supported intents (return exactly ONE):
                            and targetTechnicianName.
                            Examples: "Give Tuesday's Davis job to Mike"
                                      "Reassign the 2pm to Sarah"
+- "add_crew_member"     — user wants to ADD a second/helper technician to an
+                           EXISTING appointment (the primary tech stays on).
+                           Extract appointmentReference and targetTechnicianName.
+                           Examples: "Add Carlos to the Garcia appointment"
+                                     "Put Mike on Tuesday's Davis job too"
+- "remove_crew_member"  — user wants to REMOVE a helper/crew technician from an
+                           appointment (never the primary — that is a reassign).
+                           Extract appointmentReference and targetTechnicianName.
+                           Examples: "Take Carlos off Tuesday's job"
+                                     "Drop Mike from the Davis appointment"
 - "add_note"            — user wants to attach a note to an existing record.
                            Extract noteTargetKind (job / customer / invoice /
                            estimate / appointment) and noteBody.
