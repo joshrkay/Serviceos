@@ -453,6 +453,32 @@ export class SendEstimateTaskHandler implements TaskHandler {
   }
 }
 
+// ───────────── send_estimate_nudge ─────────────
+//
+// Comms class — never auto-approves. A nudge re-sends the link for an
+// ALREADY-sent estimate (the execution handler enforces a 48h cooldown and
+// requires the estimate to be in 'sent'). Mirrors SendEstimateTaskHandler:
+// carry estimateReference (free text) and flag estimateId missing so the
+// operator resolves it in the review card before approval.
+export class SendEstimateNudgeTaskHandler implements TaskHandler {
+  readonly taskType = 'send_estimate_nudge' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+
+    if (ee.jobReference) payload.estimateReference = ee.jobReference;
+    else if (ee.customerName) payload.estimateReference = ee.customerName;
+    else missing.push('estimateId');
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
 // ───────────── record_payment ─────────────
 //
 // Money class — never auto-approves under any confidence.

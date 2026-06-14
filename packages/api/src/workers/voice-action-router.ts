@@ -62,6 +62,7 @@ import {
   AddNoteTaskHandler,
   SendInvoiceTaskHandler,
   SendEstimateTaskHandler,
+  SendEstimateNudgeTaskHandler,
   RecordPaymentTaskHandler,
   CreateJobVoiceTaskHandler,
   EmergencyDispatchTaskHandler,
@@ -310,6 +311,7 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   add_note: 'add_note',
   send_invoice: 'send_invoice',
   send_estimate: 'send_estimate',
+  send_estimate_nudge: 'send_estimate_nudge',
   record_payment: 'record_payment',
   emergency_dispatch: 'emergency_dispatch',
   update_customer: 'update_customer',
@@ -429,6 +431,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('add_note', new AddNoteTaskHandler());
   handlers.set('send_invoice', new SendInvoiceTaskHandler());
   handlers.set('send_estimate', new SendEstimateTaskHandler());
+  handlers.set('send_estimate_nudge', new SendEstimateNudgeTaskHandler());
   handlers.set('record_payment', new RecordPaymentTaskHandler());
   handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
   handlers.set('update_customer', new UpdateCustomerTaskHandler());

@@ -29,6 +29,7 @@ export type IntentType =
   | 'add_note'
   | 'send_invoice'
   | 'send_estimate'
+  | 'send_estimate_nudge'
   | 'record_payment'
   | 'emergency_dispatch'
   // Phase: full-app voice coverage. update_customer / log_expense reuse
@@ -132,6 +133,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'add_note',
   'send_invoice',
   'send_estimate',
+  'send_estimate_nudge',
   'record_payment',
   'emergency_dispatch',
   'update_customer',
@@ -560,6 +562,14 @@ Supported intents (return exactly ONE):
                            Examples: "Send estimate EST-0042 to Sarah"
                                      "Email the Jones estimate"
                                      "Text the Miller estimate to them"
+- "send_estimate_nudge" — user wants to FOLLOW UP on / re-send an estimate
+                           ALREADY sent to a customer (a reminder, not a first
+                           send — prefer send_estimate for the first send).
+                           Customer comms — never auto-execute. Extract the
+                           estimate reference.
+                           Examples: "Nudge the Khan estimate again"
+                                     "Follow up on the Jones quote"
+                                     "Remind Sarah about her estimate"
 - "record_payment"      — user wants to log a PAYMENT received against an
                            invoice. This is money-moving — never
                            auto-execute, always require a screen-tap
