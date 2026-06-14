@@ -32,6 +32,7 @@ export function AgreementCreate({
   const [autoRenew, setAutoRenew] = useState(false);
   const [renewalTermMonths, setRenewalTermMonths] = useState('12');
   const [memberDiscountPct, setMemberDiscountPct] = useState('0');
+  const [priorityBooking, setPriorityBooking] = useState(false);
   const [recurrence, setRecurrence] = useState<RecurrenceBuilderValue>({
     frequency: 'quarterly',
     interval: 1,
@@ -77,6 +78,7 @@ export function AgreementCreate({
         autoRenew,
         renewalTermMonths: renewalTerm,
         memberDiscountBps,
+        priorityBooking,
       });
       onCreated?.(created.id);
     } catch (err) {
@@ -185,6 +187,15 @@ export function AgreementCreate({
         <span className="text-xs text-gray-500 mt-0.5">
           Applied automatically to this member&apos;s estimates.
         </span>
+      </label>
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          aria-label="Priority booking"
+          checked={priorityBooking}
+          onChange={(e) => setPriorityBooking(e.target.checked)}
+        />
+        Priority booking — member can self-schedule further out
       </label>
       <button
         type="submit"

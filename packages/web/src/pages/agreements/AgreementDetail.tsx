@@ -149,6 +149,11 @@ export function AgreementDetail({
             {data.memberDiscountBps / 100}% off this member&apos;s estimates
           </p>
         ) : null}
+        {data.priorityBooking ? (
+          <p data-testid="priority-booking">
+            <span className="font-medium">Priority booking:</span> can self-schedule further out
+          </p>
+        ) : null}
       </section>
 
       <section>

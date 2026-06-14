@@ -102,6 +102,7 @@ describe('P9-003 AgreementDetail', () => {
       renewalTermMonths: 12,
       renewalCount: 2,
       memberDiscountBps: 1000,
+      priorityBooking: true,
       createdBy: 'u',
       createdAt: '',
       updatedAt: '',
@@ -112,6 +113,7 @@ describe('P9-003 AgreementDetail', () => {
     expect(status).toHaveTextContent('every 12 months');
     expect(status).toHaveTextContent('renewed 2');
     expect(screen.getByTestId('member-discount')).toHaveTextContent('10% off');
+    expect(screen.getByTestId('priority-booking')).toBeInTheDocument();
   });
 
   it('hides the member-discount line when there is no discount', async () => {

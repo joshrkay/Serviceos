@@ -90,4 +90,17 @@ describe('AgreementCreate — membership auto-renew', () => {
       expect.objectContaining({ memberDiscountBps: 1000 }),
     );
   });
+
+  it('sends the priority-booking flag when checked', async () => {
+    render(<AgreementCreate />);
+    fillBaseFields();
+    fireEvent.click(screen.getByLabelText('Priority booking'));
+    fireEvent.click(screen.getByText('Create Agreement'));
+
+    await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
+    expect(mockCreate).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ priorityBooking: true }),
+    );
+  });
 });

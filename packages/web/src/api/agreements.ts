@@ -34,6 +34,8 @@ export interface Agreement {
   renewalCount?: number;
   /** Member-pricing discount this membership confers, in basis points. */
   memberDiscountBps?: number;
+  /** Priority booking: member can book further into the future. */
+  priorityBooking?: boolean;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -71,6 +73,8 @@ export interface CreateAgreementBody {
   renewalTermMonths?: number;
   /** Member-pricing discount, in basis points (0..10000). */
   memberDiscountBps?: number;
+  /** Priority booking: member can book further into the future. */
+  priorityBooking?: boolean;
 }
 
 export type UpdateAgreementBody = Partial<
@@ -86,6 +90,7 @@ export type UpdateAgreementBody = Partial<
     | 'autoRenew'
     | 'renewalTermMonths'
     | 'memberDiscountBps'
+    | 'priorityBooking'
   >
 >;
 
