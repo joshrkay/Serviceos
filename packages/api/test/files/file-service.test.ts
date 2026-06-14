@@ -42,6 +42,15 @@ describe('P0-010 — File upload and attachment storage', () => {
     expect(errors).toHaveLength(0);
   });
 
+  it('validation — accepts audio/mp4 (Safari/iOS MediaRecorder output)', () => {
+    const errors = validateUpload({
+      ...validRequest,
+      filename: 'voice.m4a',
+      contentType: 'audio/mp4',
+    });
+    expect(errors).toHaveLength(0);
+  });
+
   it('normalizeContentType — strips codec params and lowercases', () => {
     expect(normalizeContentType('audio/webm;codecs=opus')).toBe('audio/webm');
     expect(normalizeContentType('AUDIO/WEBM')).toBe('audio/webm');
