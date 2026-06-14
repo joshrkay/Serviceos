@@ -81,3 +81,54 @@ export const negotiationCallbackPayloadSchema = z.object({
   _meta: negotiationMetaSchema,
 });
 export type NegotiationCallbackPayload = z.infer<typeof negotiationCallbackPayloadSchema>;
+
+/**
+ * V2 — the deterministic outcome of evaluating a discount ask against tenant
+ * policy and the catalog-grounded floor. Produced by the discount evaluator
+ * (api side); discriminated on `kind` so producer and every consumer (voice
+ * readback, SMS render, review UI) branch exhaustively on the four outcomes.
+ *
+ * All money is integer cents; all discount rates are basis points (bps,
+ * 0–10000 where 10000 = 100%). The engine never trusts an LLM-emitted price —
+ * the floor is grounded in the tenant catalog upstream of this decision.
+ */
+export const DISCOUNT_DECISION_KINDS = [
+  'ALLOW',
+  'NEEDS_APPROVAL',
+  'CLARIFY',
+  'REJECT_WITH_COUNTER',
+] as const;
+export type DiscountDecisionKind = (typeof DISCOUNT_DECISION_KINDS)[number];
+
+/** Basis points: 0–10000 (10000 = 100%), integer. */
+const bps = z.number().int().min(0).max(10000);
+/** Integer cents, non-negative. */
+const cents = z.number().int().min(0);
+
+export const discountDecisionSchema = z.discriminatedUnion('kind', [
+  /** The ask is within policy and at/above the floor — apply it. */
+  z.object({
+    kind: z.literal('ALLOW'),
+    approvedDiscountBps: bps,
+    discountedPriceCents: cents,
+    floorCents: cents,
+  }),
+  /** The ask exceeds policy — route to the owner callback (the V1 path). */
+  z.object({
+    kind: z.literal('NEEDS_APPROVAL'),
+    requestedTargetCents: cents.nullable(),
+    requestedDiscountBps: bps.nullable(),
+  }),
+  /** The target price couldn't be parsed — emit a one-tap voice_clarification. */
+  z.object({
+    kind: z.literal('CLARIFY'),
+    reason: z.literal('ambiguous_discount_target'),
+  }),
+  /** The ask is below the floor — counter at the floor. */
+  z.object({
+    kind: z.literal('REJECT_WITH_COUNTER'),
+    counterCents: cents,
+    floorCents: cents,
+  }),
+]);
+export type DiscountDecision = z.infer<typeof discountDecisionSchema>;

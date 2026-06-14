@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   negotiationCallbackPayloadSchema,
   negotiationCustomerContextSchema,
+  discountDecisionSchema,
 } from './negotiation-event.js';
 
 const validContext = {
@@ -83,5 +84,125 @@ describe('negotiationCustomerContextSchema', () => {
     expect(() =>
       negotiationCustomerContextSchema.parse({ ...validContext, lastSeenAt: null }),
     ).not.toThrow();
+  });
+});
+
+describe('discountDecisionSchema', () => {
+  it('parses a well-formed ALLOW decision', () => {
+    const parsed = discountDecisionSchema.parse({
+      kind: 'ALLOW',
+      approvedDiscountBps: 1000,
+      discountedPriceCents: 18000,
+      floorCents: 15000,
+    });
+    expect(parsed.kind).toBe('ALLOW');
+    if (parsed.kind === 'ALLOW') {
+      expect(parsed.approvedDiscountBps).toBe(1000);
+    }
+  });
+
+  it('parses a well-formed NEEDS_APPROVAL decision (nullable fields)', () => {
+    expect(() =>
+      discountDecisionSchema.parse({
+        kind: 'NEEDS_APPROVAL',
+        requestedTargetCents: 12000,
+        requestedDiscountBps: 2500,
+      }),
+    ).not.toThrow();
+    // both nullable fields may be null
+    expect(() =>
+      discountDecisionSchema.parse({
+        kind: 'NEEDS_APPROVAL',
+        requestedTargetCents: null,
+        requestedDiscountBps: null,
+      }),
+    ).not.toThrow();
+  });
+
+  it('parses a well-formed CLARIFY decision', () => {
+    const parsed = discountDecisionSchema.parse({
+      kind: 'CLARIFY',
+      reason: 'ambiguous_discount_target',
+    });
+    expect(parsed.kind).toBe('CLARIFY');
+  });
+
+  it('parses a well-formed REJECT_WITH_COUNTER decision', () => {
+    const parsed = discountDecisionSchema.parse({
+      kind: 'REJECT_WITH_COUNTER',
+      counterCents: 15000,
+      floorCents: 15000,
+    });
+    expect(parsed.kind).toBe('REJECT_WITH_COUNTER');
+  });
+
+  it('rejects an unknown discriminator kind', () => {
+    expect(() =>
+      discountDecisionSchema.parse({
+        kind: 'MAYBE',
+        approvedDiscountBps: 1000,
+        discountedPriceCents: 18000,
+        floorCents: 15000,
+      }),
+    ).toThrow();
+  });
+
+  it('rejects a CLARIFY with a wrong reason literal', () => {
+    expect(() =>
+      discountDecisionSchema.parse({ kind: 'CLARIFY', reason: 'something_else' }),
+    ).toThrow();
+  });
+
+  it('rejects bps fields above 10000', () => {
+    expect(() =>
+      discountDecisionSchema.parse({
+        kind: 'ALLOW',
+        approvedDiscountBps: 10001,
+        discountedPriceCents: 18000,
+        floorCents: 15000,
+      }),
+    ).toThrow();
+  });
+
+  it('rejects negative bps fields', () => {
+    expect(() =>
+      discountDecisionSchema.parse({
+        kind: 'NEEDS_APPROVAL',
+        requestedTargetCents: 12000,
+        requestedDiscountBps: -1,
+      }),
+    ).toThrow();
+  });
+
+  it('rejects negative cents fields', () => {
+    expect(() =>
+      discountDecisionSchema.parse({
+        kind: 'REJECT_WITH_COUNTER',
+        counterCents: -1,
+        floorCents: 15000,
+      }),
+    ).toThrow();
+  });
+
+  it('rejects fractional cents fields', () => {
+    expect(() =>
+      discountDecisionSchema.parse({
+        kind: 'ALLOW',
+        approvedDiscountBps: 1000,
+        discountedPriceCents: 18000.5,
+        floorCents: 15000,
+      }),
+    ).toThrow();
+  });
+
+  it('rejects fractional bps fields', () => {
+    expect(() =>
+      discountDecisionSchema.parse({
+        kind: 'ALLOW',
+        approvedDiscountBps: 1000.5,
+        discountedPriceCents: 18000,
+        floorCents: 15000,
+      }),
+    ).toThrow();
   });
 });

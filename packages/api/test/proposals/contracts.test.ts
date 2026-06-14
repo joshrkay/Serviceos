@@ -391,6 +391,41 @@ describe('RV-007 — payload _meta confidence marker', () => {
   });
 });
 
+// ─── voice_clarification reasons ─────────────────────────────────────────────
+describe('voice_clarification reason enum', () => {
+  it('accepts each existing reason', () => {
+    for (const reason of [
+      'unknown_intent',
+      'low_confidence',
+      'parse_failed',
+      'missing_entities',
+      'ambiguous_entity',
+    ]) {
+      const result = validateProposalPayload('voice_clarification', {
+        transcript: 'I heard something',
+        reason,
+      });
+      expect(result.valid).toBe(true);
+    }
+  });
+
+  it('accepts the P2-036 V2 ambiguous_discount_target reason', () => {
+    const result = validateProposalPayload('voice_clarification', {
+      transcript: 'can you knock some off',
+      reason: 'ambiguous_discount_target',
+    });
+    expect(result.valid).toBe(true);
+  });
+
+  it('rejects an unknown reason', () => {
+    const result = validateProposalPayload('voice_clarification', {
+      transcript: 'hello',
+      reason: 'not_a_real_reason',
+    });
+    expect(result.valid).toBe(false);
+  });
+});
+
 // ─── ITEM 1: No schema in PROPOSAL_TYPE_SCHEMAS is strict-mode ────────────────
 // A future `.strict()` call on any per-type schema would silently break the
 // `_meta` passthrough envelope — unknown keys would be rejected before the
