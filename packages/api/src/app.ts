@@ -475,7 +475,6 @@ import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { PgConsentEventRepository, InMemoryConsentEventRepository } from './compliance/consent-events';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
-import { registerKeywordHandler, registerRecoveryResumeHandler } from './sms/inbound-dispatch';
 import {
   registerKeywordHandler,
   registerRecoveryResumeHandler,
@@ -497,6 +496,11 @@ import {
   type OutboundAnchorKind,
 } from './proposals/sms';
 import {
+  registerProposalApprovalKeywords,
+  InMemoryProposalSmsEventRepository as InMemoryLegacyProposalSmsEventRepository,
+  PgProposalSmsEventRepository as PgLegacyProposalSmsEventRepository,
+} from './sms/proposal-approval';
+import {
   registerTechStatusKeywords,
   PgTechStatusTodayRepository,
   InMemoryTechStatusTodayRepository,
@@ -506,12 +510,6 @@ import {
 import { createMmsIngestWorker } from './workers/mms-ingest-worker';
 import { PgUnavailableBlockRepository } from './availability/pg-unavailable-block';
 import { handleDigestAckSms } from './sms/digest/handler';
-import {
-  DroppedCallScheduler,
-  PgDroppedCallRecoveryRepository,
-  InMemoryDroppedCallRecoveryRepository,
-} from './sms/recovery/scheduler';
-import { createDroppedCallResumeHandler } from './sms/recovery/resume-handler';
 import { runDroppedCallRecoverySweep } from './workers/dropped-call-worker';
 
 // Auth middleware

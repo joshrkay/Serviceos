@@ -147,7 +147,7 @@ export class PgProposalSmsEventRepository
   async recordEvent(input: RecordProposalSmsEventInput): Promise<boolean> {
     return this.withTenant(input.tenantId, async (client) => {
       const result = await client.query<{ id: string }>(
-        `INSERT INTO proposal_sms_events (
+        `INSERT INTO proposal_approval_sms_events (
            tenant_id, proposal_id, direction, message_sid, owner_e164, body_preview, inbound_action
          ) VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (message_sid) DO NOTHING
@@ -170,7 +170,7 @@ export class PgProposalSmsEventRepository
     const result = await this.pool.query(
       `SELECT id, tenant_id, proposal_id, direction, message_sid, owner_e164,
               body_preview, inbound_action, created_at
-       FROM proposal_sms_events
+       FROM proposal_approval_sms_events
        WHERE message_sid = $1
        LIMIT 1`,
       [messageSid],
@@ -188,7 +188,7 @@ export class PgProposalSmsEventRepository
       const result = await client.query(
         `SELECT id, tenant_id, proposal_id, direction, message_sid, owner_e164,
                 body_preview, inbound_action, created_at
-         FROM proposal_sms_events
+         FROM proposal_approval_sms_events
          WHERE tenant_id = $1 AND owner_e164 = $2 AND direction = 'outbound'
          ORDER BY created_at DESC
          LIMIT 1`,

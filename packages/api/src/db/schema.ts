@@ -3925,90 +3925,303 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS credentials JSONB NOT NULL DEFAULT '{}';
   `,
 
-  // Estimate entity resolution — trigram index for PgEntityResolver (estimate kind).
-  '156_estimate_entity_trgm_index': `
-    CREATE INDEX IF NOT EXISTS idx_estimates_number_trgm
-      ON estimates USING GIN (estimate_number gin_trgm_ops);
-  `,
-
-  // P2-034 — SMS proposal approval transport audit + edit sessions.
-  '157_proposal_sms_events': `
+  '156_proposal_sms_events': `
+    -- P2-034: SMS approval transport. Append-only record of the SMS
+    -- conversation around a proposal (outbound renders, inbound
+    -- approve/reject replies, edit sessions, clarification nudges).
+    -- Read paths: latest outbound render (which proposal is the owner
+    -- replying to?) and open edit session (unconsumed, unexpired).
     CREATE TABLE IF NOT EXISTS proposal_sms_events (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      tenant_id UUID NOT NULL REFERENCES tenants(id),
-      proposal_id UUID REFERENCES proposals(id),
-      direction TEXT NOT NULL CHECK (direction IN ('outbound', 'inbound')),
-      message_sid TEXT NOT NULL,
-      owner_e164 TEXT NOT NULL,
-      body_preview TEXT NOT NULL,
-      inbound_action TEXT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      CONSTRAINT uq_proposal_sms_message_sid UNIQUE (message_sid)
-    );
-    CREATE INDEX IF NOT EXISTS idx_proposal_sms_tenant_proposal
-      ON proposal_sms_events (tenant_id, proposal_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_proposal_sms_tenant_phone
-      ON proposal_sms_events (tenant_id, owner_e164, created_at DESC);
-    ALTER TABLE proposal_sms_events ENABLE ROW LEVEL SECURITY;
-    DROP POLICY IF EXISTS tenant_isolation_proposal_sms_events ON proposal_sms_events;
-    CREATE POLICY tenant_isolation_proposal_sms_events ON proposal_sms_events
-      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
-
-    CREATE TABLE IF NOT EXISTS proposal_sms_edit_sessions (
+      id UUID PRIMARY KEY,
       tenant_id UUID NOT NULL REFERENCES tenants(id),
       proposal_id UUID NOT NULL REFERENCES proposals(id),
-      owner_user_id UUID NOT NULL REFERENCES users(id),
-      opened_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      expires_at TIMESTAMPTZ NOT NULL,
-      PRIMARY KEY (tenant_id, owner_user_id)
-    );
-    ALTER TABLE proposal_sms_edit_sessions ENABLE ROW LEVEL SECURITY;
-    DROP POLICY IF EXISTS tenant_isolation_proposal_sms_edit_sessions ON proposal_sms_edit_sessions;
-    CREATE POLICY tenant_isolation_proposal_sms_edit_sessions ON proposal_sms_edit_sessions
-      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
-  `,
-
-  // P5-020 — end-of-day digest entries (one per tenant per local date).
-  // PHOTO-INVOICE + client_visible on job photos for Client Hub.
-  '159_invoice_photos_and_client_visible': `
-    ALTER TABLE job_photos
-      ADD COLUMN IF NOT EXISTS client_visible BOOLEAN NOT NULL DEFAULT false;
-
-    CREATE TABLE IF NOT EXISTS invoice_photos (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      tenant_id UUID NOT NULL REFERENCES tenants(id),
-      invoice_id UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
-      uploaded_by_user_id TEXT NOT NULL,
-      file_id UUID NOT NULL REFERENCES files(id),
-      category TEXT NOT NULL DEFAULT 'other'
-        CHECK (category IN ('before','after','problem','completion','other')),
-      notes TEXT,
-      taken_at TIMESTAMPTZ,
-      client_visible BOOLEAN NOT NULL DEFAULT false,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS idx_invoice_photos_tenant_invoice
-      ON invoice_photos(tenant_id, invoice_id);
-    ALTER TABLE invoice_photos ENABLE ROW LEVEL SECURITY;
-    DROP POLICY IF EXISTS tenant_isolation_invoice_photos ON invoice_photos;
-    CREATE POLICY tenant_isolation_invoice_photos ON invoice_photos
-      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
-  `,
-
-  // P23 — job checklists + completion gating.
-  '160_job_checklists': `
-    CREATE TABLE IF NOT EXISTS job_checklists (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      tenant_id UUID NOT NULL REFERENCES tenants(id),
-      job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-      title TEXT NOT NULL,
-      items JSONB NOT NULL DEFAULT '[]',
-      completed_at TIMESTAMPTZ,
+      direction TEXT NOT NULL CHECK (direction IN ('outbound','inbound')),
+      kind TEXT NOT NULL CHECK (kind IN (
+        'proposal_rendered','reapproval_rendered','clarification_sent',
+        'reply_approve','reply_reject','edit_session_opened','edit_request'
+      )),
+      message_sid TEXT,
+      body TEXT NOT NULL,
+      expires_at TIMESTAMPTZ,
+      consumed_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
-    ALTER TABLE job_checklists ENABLE ROW LEVEL SECURITY;
-    DROP POLICY IF EXISTS tenant_isolation_job_checklists ON job_checklists;
-    CREATE POLICY tenant_isolation_job_checklists ON job_checklists
+    CREATE INDEX IF NOT EXISTS idx_proposal_sms_events_tenant_recent
+      ON proposal_sms_events (tenant_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_proposal_sms_events_proposal
+      ON proposal_sms_events (tenant_id, proposal_id);
+    ALTER TABLE proposal_sms_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE proposal_sms_events FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_proposal_sms_events ON proposal_sms_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '157_proposal_sms_events_from_phone': `
+    -- P2-034 review fix: edit sessions must be scoped to the sender.
+    -- Tenants can have two approvers (owner + backup supervisor); a
+    -- tenant-wide open session let approver B's Y/N be consumed as
+    -- approver A's edit instruction. Normalized sender digits, set on
+    -- inbound events; outbound rows stay NULL.
+    ALTER TABLE proposal_sms_events
+      ADD COLUMN IF NOT EXISTS from_phone TEXT;
+  `,
+
+  '158_proposal_sms_events_seq': `
+    -- P2-034 review fix: created_at has millisecond precision, so
+    -- back-to-back renders (multi-action chains) can tie and "the latest
+    -- outbound render" — which decides what a Y/N reply targets — becomes
+    -- nondeterministic. BIGSERIAL backfills existing rows in insertion
+    -- order and gives every new row a monotonic tiebreaker.
+    ALTER TABLE proposal_sms_events
+      ADD COLUMN IF NOT EXISTS seq BIGSERIAL;
+  `,
+
+  // RV-001: per-tenant feature flag overrides.
+  // Resolution order: tenant override → platform flag → false.
+  '159_create_tenant_feature_flags': `
+    CREATE TABLE IF NOT EXISTS tenant_feature_flags (
+      tenant_id  UUID      NOT NULL REFERENCES tenants(id),
+      flag_key   TEXT      NOT NULL,
+      enabled    BOOLEAN   NOT NULL,
+      updated_by UUID,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (tenant_id, flag_key)
+    );
+    ALTER TABLE tenant_feature_flags ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_feature_flags FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_tenant_feature_flags ON tenant_feature_flags
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // RV-005: generalized attachments foundation — photos & documents linked
+  // to any supported entity. `job_photos` stays untouched for back-compat;
+  // new surfaces (invoice/estimate photo UX, voice attach, portal galleries)
+  // read this table. `pair_group_id`/`pair_role` model before/after pairs;
+  // `archived_at` is a soft delete (the underlying files row + S3 object
+  // remain, mirroring the job-photos delete semantics).
+  '160_create_attachments': `
+    CREATE TABLE IF NOT EXISTS attachments (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      file_id UUID NOT NULL REFERENCES files(id),
+      entity_type TEXT NOT NULL CHECK (entity_type IN ('job','invoice','estimate','form_response','expense','agreement_run','customer')),
+      entity_id UUID NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('photo','document')),
+      caption TEXT,
+      category TEXT CHECK (category IN ('before','after','problem','completion','receipt','signature','other')),
+      pair_group_id UUID,
+      pair_role TEXT CHECK (pair_role IN ('before','after')),
+      portal_visible BOOLEAN NOT NULL DEFAULT false,
+      annotated_file_id UUID REFERENCES files(id),
+      uploaded_by TEXT,
+      source TEXT NOT NULL DEFAULT 'app' CHECK (source IN ('app','voice','portal','sms')),
+      sort_order INT NOT NULL DEFAULT 0,
+      archived_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_attachments_tenant_entity ON attachments(tenant_id, entity_type, entity_id);
+    CREATE INDEX IF NOT EXISTS idx_attachments_tenant_pair_group ON attachments(tenant_id, pair_group_id);
+    ALTER TABLE attachments ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE attachments FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_attachments ON attachments
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // RV-006: image post-process pipeline outputs. The async worker stamps
+  // dimensions (post EXIF-rotation), the 480px thumbnail key, whether EXIF
+  // was stripped (false = non-image or graceful-degraded unsupported
+  // format), and the SHA-256 of the final stored object. content_hash
+  // doubles as the worker's idempotency marker and powers the attach-time
+  // dedupe lookup, hence the (tenant_id, content_hash) index.
+  '161_files_image_pipeline_columns': `
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS width INT;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS height INT;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS thumbnail_s3_key TEXT;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS exif_stripped BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS content_hash TEXT;
+    CREATE INDEX IF NOT EXISTS idx_files_tenant_content_hash ON files(tenant_id, content_hash);
+  `,
+  // RV-060 (F-9): end-of-day digest snapshots. One row per tenant per
+  // tenant-local calendar day; `payload` is the computed snapshot (money in,
+  // jobs done, tomorrow's schedule, pending approvals, flags) so the web
+  // view and voice readback render exactly what was sent. `narrative` is the
+  // brand-voice text; `sms_dispatch_id` records the owner SMS send (NULL =
+  // stored but not yet sent — the worker's resend guard keys off it). The
+  // UNIQUE(tenant_id, digest_date) is the idempotency anchor: overlapping
+  // sweeps INSERT … ON CONFLICT DO NOTHING and only the winner sends.
+  // The message_dispatches CHECK is widened so the owner digest SMS can be
+  // recorded in the same dispatch audit trail as every other send.
+  '162_create_daily_digests': `
+    CREATE TABLE IF NOT EXISTS daily_digests (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      digest_date DATE NOT NULL,
+      payload JSONB NOT NULL,
+      narrative TEXT,
+      sms_dispatch_id UUID,
+      generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE(tenant_id, digest_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_daily_digests_tenant_date
+      ON daily_digests (tenant_id, digest_date);
+    ALTER TABLE daily_digests ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE daily_digests FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_daily_digests ON daily_digests
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // RV-063 (F-9): per-tenant digest delivery settings. Opt-in
+  // (digest_enabled defaults false); digest_time is a tenant-local
+  // wall-clock time (the worker buckets it in tenant tz); digest_channel
+  // 'none' keeps generating/storing the digest (web view) without SMS.
+  '163_tenant_settings_digest': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS digest_enabled BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS digest_time TIME NOT NULL DEFAULT '18:00';
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS digest_channel TEXT NOT NULL DEFAULT 'sms'
+        CHECK (digest_channel IN ('sms','none'));
+  `,
+
+  // RV-061 (F-9): widen message_dispatches entity_type CHECK to allow
+  // 'daily_digest' (owner end-of-day digest SMS, entity_id = daily_digests.id).
+  // Mirrors the prior widenings in 092_extend_dispatch_entity_types and
+  // 125_dispatch_entity_en_route — kept separate from 162_create_daily_digests
+  // so the table-creation and the constraint change are independently
+  // reviewable and reversible.
+  '164_dispatch_entity_daily_digest': `
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_entity_type_check
+        CHECK (entity_type IN (
+          'estimate', 'invoice', 'appointment_confirmation',
+          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
+          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
+          'daily_digest'
+        ));
+  `,
+
+  // RV-074 review fix: widen the proposal_sms_events kind CHECK from 156 to
+  // allow 'review_required_rendered' — the outbound anchor row recorded when
+  // a LOW/VERY_LOW-confidence proposal SMS ("needs review in app — reply N
+  // to reject") goes out. Without an anchor, the reply transport's
+  // findRecentOutbound targeted the previous (older) render, so the N the
+  // message itself solicits would reject the WRONG proposal. Mirrors the
+  // CHECK-widening style of 164_dispatch_entity_daily_digest.
+  '165_proposal_sms_events_review_required_kind': `
+    ALTER TABLE proposal_sms_events
+      DROP CONSTRAINT IF EXISTS proposal_sms_events_kind_check;
+    ALTER TABLE proposal_sms_events
+      ADD CONSTRAINT proposal_sms_events_kind_check
+        CHECK (kind IN (
+          'proposal_rendered','reapproval_rendered','clarification_sent',
+          'reply_approve','reply_reject','edit_session_opened','edit_request',
+          'review_required_rendered'
+        ));
+  `,
+
+  // RV-120 — per-call vulnerability triage outcomes. One row per
+  // `evaluateTriage` evaluation (turn-batch grader, RV-122) so post-incident
+  // review can audit the triage matrix per session without replaying audio.
+  // `signals` carries the NON-PII evidence strings (same discipline as
+  // migration 115's vulnerability_signals); `action_taken` records what the
+  // call actually did with the decision (patched owner, urgent booking,
+  // normal flow). voice_session_id is TEXT — in-memory session ids are not
+  // UUIDs on every channel. Idempotent (IF NOT EXISTS + DROP/CREATE POLICY).
+  '166_create_triage_events': `
+    CREATE TABLE IF NOT EXISTS triage_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      voice_session_id TEXT NOT NULL,
+      customer_id UUID,
+      score NUMERIC NOT NULL,
+      tier TEXT NOT NULL CHECK (tier IN ('none', 'low', 'elevated', 'critical')),
+      signals JSONB NOT NULL DEFAULT '[]'::jsonb,
+      action_taken TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_triage_events_tenant_created
+      ON triage_events (tenant_id, created_at);
+    ALTER TABLE triage_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE triage_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_triage_events ON triage_events;
+    CREATE POLICY tenant_isolation_triage_events ON triage_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+  // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy engine).
+  // Note: migrations 165 and 166 are reserved by parallel sibling tracks.
+  //
+  // supervisor_policies: versioned per-tenant rule sets. `rules` is the
+  // SupervisorRules JSONB (src/proposals/supervisor/policy.ts) — all keys
+  // optional, unset = permissive. Exactly one version per tenant SHOULD be
+  // active at a time (enforced by the repo's activate(), which deactivates
+  // siblings in the same transaction); UNIQUE(tenant_id, version) pins the
+  // version ledger. Indexed on (tenant_id, active) for the hot
+  // getActive() read on every proposal creation.
+  //
+  // tenant_budget_counters: fixed-window counters backing the budget caps
+  // (daily executed spend per UTC day, auto-approvals per UTC hour —
+  // window_start is the UTC truncation; v1 deliberately does NOT use
+  // tenant-local windows). Incremented via INSERT .. ON CONFLICT value =
+  // value + delta so concurrent writers never lose updates.
+  '167_create_supervisor_policies': `
+    CREATE TABLE IF NOT EXISTS supervisor_policies (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      version INT NOT NULL,
+      active BOOLEAN NOT NULL DEFAULT false,
+      rules JSONB NOT NULL,
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE(tenant_id, version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_supervisor_policies_tenant_active
+      ON supervisor_policies (tenant_id, active);
+    ALTER TABLE supervisor_policies ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE supervisor_policies FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_supervisor_policies ON supervisor_policies
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS tenant_budget_counters (
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      counter_key TEXT NOT NULL,
+      window_start TIMESTAMPTZ NOT NULL,
+      value BIGINT NOT NULL DEFAULT 0,
+      PRIMARY KEY (tenant_id, counter_key, window_start)
+    );
+    ALTER TABLE tenant_budget_counters ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_budget_counters FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_tenant_budget_counters ON tenant_budget_counters
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // RV-130 — append-only consent ledger. Every consent-relevant moment
+  // (implicit recording consent at disclosure, an explicit "stop recording"
+  // objection, an SMS opt-in/out, portal/manual grants) appends one event;
+  // rows are NEVER updated or deleted (the derived customers.consent_status
+  // from migration 132 is the mutable rollup). phone_normalized is the
+  // digits-only E.164 so lookups survive formatting drift. Idempotent.
+  '168_create_consent_events': `
+    CREATE TABLE IF NOT EXISTS consent_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID,
+      phone_normalized TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('recording', 'sms', 'marketing')),
+      state TEXT NOT NULL CHECK (state IN ('granted', 'revoked', 'implicit')),
+      source TEXT NOT NULL CHECK (source IN ('voice', 'sms', 'portal', 'manual')),
+      voice_session_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_consent_events_tenant_phone
+      ON consent_events (tenant_id, phone_normalized);
+    ALTER TABLE consent_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE consent_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_consent_events ON consent_events;
+    CREATE POLICY tenant_isolation_consent_events ON consent_events
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
@@ -4221,9 +4434,7 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS auto_collect_dues BOOLEAN NOT NULL DEFAULT FALSE;
   `,
 
-  // P5-020 — end-of-day digest entries (main's #566 model: status / source_data
-  // / owner_reply). #557's earlier 158_digest_entries (local_date / sections /
-  // delivery_status) was dropped in the main merge; the branch adopts this shape.
+  // P5-020: end-of-day digest entries with delivery tracking and owner reply.
   '177_digest_entries': `
     CREATE TABLE IF NOT EXISTS digest_entries (
       id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -4247,18 +4458,109 @@ export const MIGRATIONS = {
   `,
 
   // Membership engine (#6 phase 4 review) — pin a saved card to the Stripe
-  // account it was created on. Nullable, additive.
+  // account it was created on. A PaymentMethod/Customer is scoped to one
+  // account (the tenant's connected account, or the platform when NULL); the
+  // off-session dues charge must target that exact account, NOT whatever the
+  // Connect resolver returns at charge time (which can drift if the tenant's
+  // Connect status changes). Nullable, additive.
   '177_customer_payment_methods_stripe_account': `
     ALTER TABLE customer_payment_methods
       ADD COLUMN IF NOT EXISTS stripe_account_id TEXT;
   `,
 
-  // RV-116 fix — RLS-safe cross-tenant drain for the dropped-call recovery sweep
-  // (FORCE RLS table, system process with no tenant in context). SECURITY DEFINER
-  // fn runs as its privileged owner so it reads due rows across tenants; the
-  // per-row tenant_id then scopes the send/stamp. Same pattern as migration 119's
-  // view-token lookups. PROD-PARITY: confirm the deploy/migrate role bypasses RLS.
-  '178_dropped_call_recoveries_due_fn': `
+  // ===== PR #557 net-new migrations, layered after main's canonical 156-177 =====
+
+  // Estimate entity resolution — trigram index for PgEntityResolver (estimate kind).
+  '178_estimate_entity_trgm_index': `
+    CREATE INDEX IF NOT EXISTS idx_estimates_number_trgm
+      ON estimates USING GIN (estimate_number gin_trgm_ops);
+  `,
+
+  // P2-034 (PR #557 legacy transport) — direction/inbound_action SMS approval
+  // audit + edit sessions used by src/sms/proposal-approval. Table renamed to
+  // proposal_approval_sms_events to coexist with main's kind-based
+  // proposal_sms_events (migration 156).
+  '179_proposal_approval_sms_events': `
+    CREATE TABLE IF NOT EXISTS proposal_approval_sms_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID REFERENCES proposals(id),
+      direction TEXT NOT NULL CHECK (direction IN ('outbound', 'inbound')),
+      message_sid TEXT NOT NULL,
+      owner_e164 TEXT NOT NULL,
+      body_preview TEXT NOT NULL,
+      inbound_action TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT uq_proposal_approval_sms_message_sid UNIQUE (message_sid)
+    );
+    CREATE INDEX IF NOT EXISTS idx_proposal_approval_sms_tenant_proposal
+      ON proposal_approval_sms_events (tenant_id, proposal_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_proposal_approval_sms_tenant_phone
+      ON proposal_approval_sms_events (tenant_id, owner_e164, created_at DESC);
+    ALTER TABLE proposal_approval_sms_events ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_proposal_approval_sms_events ON proposal_approval_sms_events;
+    CREATE POLICY tenant_isolation_proposal_approval_sms_events ON proposal_approval_sms_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS proposal_sms_edit_sessions (
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID NOT NULL REFERENCES proposals(id),
+      owner_user_id UUID NOT NULL REFERENCES users(id),
+      opened_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      expires_at TIMESTAMPTZ NOT NULL,
+      PRIMARY KEY (tenant_id, owner_user_id)
+    );
+    ALTER TABLE proposal_sms_edit_sessions ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_proposal_sms_edit_sessions ON proposal_sms_edit_sessions;
+    CREATE POLICY tenant_isolation_proposal_sms_edit_sessions ON proposal_sms_edit_sessions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // PHOTO-INVOICE + client_visible on job photos for Client Hub.
+  '180_invoice_photos_and_client_visible': `
+    ALTER TABLE job_photos
+      ADD COLUMN IF NOT EXISTS client_visible BOOLEAN NOT NULL DEFAULT false;
+
+    CREATE TABLE IF NOT EXISTS invoice_photos (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      invoice_id UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+      uploaded_by_user_id TEXT NOT NULL,
+      file_id UUID NOT NULL REFERENCES files(id),
+      category TEXT NOT NULL DEFAULT 'other'
+        CHECK (category IN ('before','after','problem','completion','other')),
+      notes TEXT,
+      taken_at TIMESTAMPTZ,
+      client_visible BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_invoice_photos_tenant_invoice
+      ON invoice_photos(tenant_id, invoice_id);
+    ALTER TABLE invoice_photos ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_invoice_photos ON invoice_photos;
+    CREATE POLICY tenant_isolation_invoice_photos ON invoice_photos
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P23 — job checklists + completion gating.
+  '181_job_checklists': `
+    CREATE TABLE IF NOT EXISTS job_checklists (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      items JSONB NOT NULL DEFAULT '[]',
+      completed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    ALTER TABLE job_checklists ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_checklists ON job_checklists;
+    CREATE POLICY tenant_isolation_job_checklists ON job_checklists
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // RV-116 fix — RLS-safe cross-tenant drain for the dropped-call recovery sweep.
+  '182_dropped_call_recoveries_due_fn': `
     DO $do$ BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'find_due_dropped_call_recoveries') THEN
         CREATE FUNCTION find_due_dropped_call_recoveries(p_now TIMESTAMPTZ, p_limit INT)
@@ -4277,14 +4579,15 @@ export const MIGRATIONS = {
     END $do$;
   `,
 
-  // FORCE RLS on the remaining PR #557 tables that shipped ENABLE + policy but
-  // no FORCE (digest_entries is handled by 177_digest_entries above).
-  '179_force_rls_pr557_tables': `
-    ALTER TABLE proposal_sms_events FORCE ROW LEVEL SECURITY;
+  // FORCE RLS on the remaining PR #557 tables that shipped ENABLE + policy but no
+  // FORCE (digest_entries handled by main's 177_digest_entries above).
+  '183_force_rls_pr557_tables': `
+    ALTER TABLE proposal_approval_sms_events FORCE ROW LEVEL SECURITY;
     ALTER TABLE proposal_sms_edit_sessions FORCE ROW LEVEL SECURITY;
     ALTER TABLE invoice_photos FORCE ROW LEVEL SECURITY;
     ALTER TABLE job_checklists FORCE ROW LEVEL SECURITY;
   `,
+
 };
 
 function makePoliciesIdempotent(sql: string): string {
