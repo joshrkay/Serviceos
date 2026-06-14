@@ -53,6 +53,14 @@ export interface StorageProvider {
   generateDownloadUrl(bucket: string, key: string): Promise<string>;
   getObjectMetadata(bucket: string, key: string): Promise<ObjectMetadata | null>;
   deleteObject(bucket: string, key: string): Promise<void>;
+  /**
+   * Server-side upload of bytes we already hold (e.g. media we fetched
+   * from Twilio for inbound MMS photos), as opposed to handing the client
+   * a presigned PUT URL. Optional so existing providers/tests that never
+   * ingest server-side bytes don't have to implement it; callers that
+   * need it (storeFileBytes) check for its presence.
+   */
+  putObject?(bucket: string, key: string, body: Buffer, contentType: string): Promise<void>;
 }
 
 export const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
@@ -122,6 +130,46 @@ export function validateUpload(request: UploadRequest): string[] {
     errors.push('Uploader ID is required');
   }
   return errors;
+}
+
+/**
+ * Server-side ingest of bytes we already hold (inbound MMS media): validate,
+ * upload to storage, and persist the file row — returning the FileRecord.
+ * Throws on validation failure or when the storage provider can't accept
+ * server-side bytes. The size is taken from the buffer, so callers must
+ * enforce their own pre-download cap (see twilio/media MAX_MMS_MEDIA_BYTES).
+ */
+export async function storeFileBytes(
+  input: {
+    tenantId: string;
+    filename: string;
+    buffer: Buffer;
+    contentType: string;
+    uploadedBy: string;
+    entityType?: string;
+    entityId?: string;
+  },
+  deps: { fileRepo: FileRepository; storage: StorageProvider; bucket: string },
+): Promise<FileRecord> {
+  const request: UploadRequest = {
+    tenantId: input.tenantId,
+    filename: input.filename,
+    contentType: input.contentType,
+    sizeBytes: input.buffer.length,
+    uploadedBy: input.uploadedBy,
+    ...(input.entityType ? { entityType: input.entityType } : {}),
+    ...(input.entityId ? { entityId: input.entityId } : {}),
+  };
+  const errors = validateUpload(request);
+  if (errors.length > 0) {
+    throw new Error(`Invalid file upload: ${errors.join('; ')}`);
+  }
+  if (!deps.storage.putObject) {
+    throw new Error('Storage provider does not support server-side putObject');
+  }
+  const record = createFileRecord(request, deps.bucket);
+  await deps.storage.putObject(deps.bucket, record.storageKey, input.buffer, input.contentType);
+  return deps.fileRepo.create(record);
 }
 
 export function createFileRecord(request: UploadRequest, bucket: string): FileRecord {

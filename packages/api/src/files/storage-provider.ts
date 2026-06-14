@@ -184,6 +184,21 @@ export class S3StorageProvider implements StorageProvider {
     }
   }
 
+  async putObject(bucket: string, key: string, body: Buffer, contentType: string): Promise<void> {
+    // Presign a PUT bound to this content-type, then upload the bytes
+    // directly. The signature covers the Content-Type, so the header must
+    // match exactly.
+    const url = this.presign('PUT', bucket, key, 60, contentType);
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { 'content-type': contentType },
+      body,
+    });
+    if (!res.ok) {
+      throw new Error(`S3 put failed ${res.status}: ${await res.text().catch(() => '')}`);
+    }
+  }
+
   private presign(
     method: 'GET' | 'PUT' | 'DELETE' | 'HEAD',
     bucket: string,
@@ -230,6 +245,11 @@ export class DevStorageProvider implements StorageProvider {
   }
 
   async deleteObject(): Promise<void> {
+    return;
+  }
+
+  async putObject(): Promise<void> {
+    // Dev provider discards bytes — same as the upload path.
     return;
   }
 }
