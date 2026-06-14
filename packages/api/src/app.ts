@@ -3214,6 +3214,10 @@ export function createApp(): express.Express {
       invoiceRepo,
       paymentRepo,
       timeGivenBackReporter,
+      // HFCR hero metric (GET /api/reports/hfcr) — reads paid payments +
+      // their gating proposals' approval channels.
+      proposalRepo,
+      auditRepo,
       // Look up the tenant tz so /money-dashboard buckets by local
       // month boundaries. Without this the dashboard would default
       // to America/New_York (matches tenant_settings.timezone's DB
