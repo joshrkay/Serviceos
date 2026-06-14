@@ -80,9 +80,12 @@ export class PgCorrectionLessonRepository
 
   async findById(tenantId: string, id: string): Promise<CorrectionLesson | null> {
     return this.withTenant(tenantId, async (client) => {
+      // tenant_id is the FIRST predicate (defense-in-depth alongside RLS):
+      // test / superuser connections can bypass RLS, so isolation must not
+      // depend on the GUC policy alone — matches every other repo here.
       const result = await client.query(
-        `SELECT * FROM correction_lessons WHERE id = $1`,
-        [id],
+        `SELECT * FROM correction_lessons WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, id],
       );
       return result.rows[0] ? mapRow(result.rows[0]) : null;
     });
@@ -92,9 +95,9 @@ export class PgCorrectionLessonRepository
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
         `SELECT * FROM correction_lessons
-         WHERE status = 'applied' AND local_date = $1
+         WHERE tenant_id = $1 AND status = 'applied' AND local_date = $2
          ORDER BY created_at ASC`,
-        [localDate],
+        [tenantId, localDate],
       );
       return result.rows.map(mapRow);
     });
@@ -108,10 +111,10 @@ export class PgCorrectionLessonRepository
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
         `UPDATE correction_lessons
-         SET status = 'reverted', reverted_at = $2
-         WHERE id = $1
+         SET status = 'reverted', reverted_at = $3
+         WHERE tenant_id = $1 AND id = $2
          RETURNING *`,
-        [id, revertedAt],
+        [tenantId, id, revertedAt],
       );
       return result.rows[0] ? mapRow(result.rows[0]) : null;
     });
