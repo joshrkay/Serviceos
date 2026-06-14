@@ -260,6 +260,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['176_customer_payment_methods', '6fe12975c7999002a67de1722a402a6bd017d0e8db4c84fd70d2d85dad439890'],
   ['177_digest_entries', '8ebc2dc5b5c449bf7b94f2c6a11a17af2c91092e0fff24bdf6e824f0f1af21ac'],
   ['177_customer_payment_methods_stripe_account', '4aac0f8afc6b5e3fb72ec4e866233905e9e7e4ea95699e61705c8da10878ab12'],
+  // P2-036 V2 (U1): per-tenant discount policy columns (max bps / floor cents /
+  // never-below-catalog), all nullable; resolver fail-closes to V1 posture.
+  ['178_tenant_settings_discount_policy', '91f7884b3b81fbd78cbe0f2d16ac6b8d0d78234358ee788f555ff478204b0760'],
 ];
 
 function hashMigration(value: string): string {

@@ -4467,6 +4467,40 @@ export const MIGRATIONS = {
     ALTER TABLE customer_payment_methods
       ADD COLUMN IF NOT EXISTS stripe_account_id TEXT;
   `,
+
+  '178_tenant_settings_discount_policy': `
+    -- P2-036 V2 (Discount-policy engine — U1: data plane only) —
+    -- per-tenant policy bounding how far the AI may discount before it
+    -- must escalate to a full owner callback. The pure decision engine
+    -- (U3 evaluateDiscountAsk) and handler wiring (U5) land in later
+    -- units; this migration establishes the settings columns. Behavior
+    -- is unchanged until those units ship.
+    --
+    -- FAIL-CLOSED semantics: all three columns are NULLABLE with no
+    -- DEFAULT, so adding them is a no-op for every existing tenant and an
+    -- absent value reads as "policy not configured". The application
+    -- resolver (resolveDiscountPolicy) maps absence to the V1-identical
+    -- posture:
+    --   - discount_max_bps absent          -> maxDiscountBps 0
+    --     ("no auto-allow"; every ask routes to an owner callback,
+    --      exactly like V1 which blocks discounts entirely).
+    --   - discount_floor_cents absent       -> no absolute floor term
+    --     (the catalog list-minus-cap floor still applies in U3).
+    --   - discount_never_below_catalog absent -> treated as TRUE
+    --     (the stricter, safer default: never sell below the catalog).
+    --
+    -- discount_max_bps is basis points (0-10000 = 0%-100%), mirroring
+    -- deposit_percentage_bps. discount_floor_cents is integer cents
+    -- (>= 0), mirroring deposit_fixed_cents. The CHECKs guard shape only;
+    -- cross-field policy correlation lives in the application layer.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS discount_max_bps INTEGER
+        CHECK (discount_max_bps IS NULL
+               OR (discount_max_bps >= 0 AND discount_max_bps <= 10000)),
+      ADD COLUMN IF NOT EXISTS discount_floor_cents INTEGER
+        CHECK (discount_floor_cents IS NULL OR discount_floor_cents >= 0),
+      ADD COLUMN IF NOT EXISTS discount_never_below_catalog BOOLEAN;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
