@@ -18,6 +18,12 @@ export interface NegotiationAcknowledgmentInput {
   /** Owner's first name for the "let me check with X" line. */
   ownerFirstName?: string | null;
   brandVoice?: BrandVoiceSettings | null;
+  /**
+   * Tenant business name (from `tenant_settings.businessName`), used as the
+   * shop reference when no owner first name and no `brandVoice.business_name`
+   * is set — these are distinct settings fields.
+   */
+  businessName?: string | null;
   /** How soon we promise to follow up. Defaults to "within the hour". */
   callbackWindow?: string;
 }
@@ -29,7 +35,7 @@ export interface NegotiationAcknowledgmentInput {
 function resolvePerson(input: NegotiationAcknowledgmentInput): string {
   const who = (input.ownerFirstName ?? '').trim();
   if (who) return who;
-  const business = (input.brandVoice?.business_name ?? '').trim();
+  const business = (input.brandVoice?.business_name ?? input.businessName ?? '').trim();
   if (business) return `the team at ${business}`;
   return 'the owner';
 }

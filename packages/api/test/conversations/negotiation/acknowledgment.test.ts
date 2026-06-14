@@ -26,6 +26,21 @@ describe('composeNegotiationAcknowledgment', () => {
     expect(line).toContain('the team at M&R Mechanical');
   });
 
+  it('falls back to the tenant businessName when no owner name / brandVoice name is set', () => {
+    // settings.businessName is a distinct field from brandVoice.business_name.
+    const line = composeNegotiationAcknowledgment({ businessName: 'Rivera HVAC' });
+    expect(line).toContain('the team at Rivera HVAC');
+    expect(line).not.toContain('the owner');
+  });
+
+  it('prefers brandVoice.business_name over the tenant businessName', () => {
+    const line = composeNegotiationAcknowledgment({
+      brandVoice: { business_name: 'M&R Mechanical' },
+      businessName: 'Rivera HVAC',
+    });
+    expect(line).toContain('the team at M&R Mechanical');
+  });
+
   it('uses a professional register when the brand voice is professional', () => {
     const line = composeNegotiationAcknowledgment({
       ownerFirstName: 'Jenna',

@@ -127,6 +127,7 @@ export function createInboundNegotiationHandler(
       const body = composeNegotiationAcknowledgment({
         ownerFirstName: brand.ownerFirstName ?? null,
         brandVoice: brand.brandVoice ?? null,
+        businessName: brand.businessName ?? null,
       });
       await deps.sendSms({ to: ctx.fromE164, body });
 
