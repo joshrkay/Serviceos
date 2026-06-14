@@ -1,7 +1,8 @@
 import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import { createProposal, CreateProposalInput, Proposal } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
-import { assessConfidence } from '../guardrails/confidence';
+import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
+import type { ProposalConfidenceMeta } from '../../proposals/contracts';
 import { SlotConflictChecker, SlotConflictResult } from './slot-conflict-checker';
 import { AvailabilityFinder, OpenSlot } from './availability-finder';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
@@ -349,6 +350,14 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
     const confidenceInput = parsed ?? {};
     const confidence = assessConfidence(confidenceInput);
 
+    // RV-007 — Confidence Marker `_meta`: the task confidence score
+    // mapped onto the shared level vocabulary. This handler has no
+    // per-field certainty signal, so overall-only is correct.
+    const meta: ProposalConfidenceMeta = {
+      overallConfidence: getConfidenceLevel(confidence.score),
+    };
+    payload._meta = meta;
+
     // The dispatcher card / TTS read-back must show the RESOLVED time, not
     // the raw transcript, so the human approving it can catch a misparse.
     const arrival =
@@ -502,7 +511,9 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       const bookingInput: CreateProposalInput = {
         tenantId: context.tenantId,
         proposalType: 'create_booking',
-        payload: { appointmentId: held.id },
+        // Same confidence marker as the create_appointment payload — the
+        // booking proposal can auto-approve on the same score.
+        payload: { appointmentId: held.id, _meta: meta },
         summary,
         confidenceScore: confidence.score,
         confidenceFactors: confidence.factors,

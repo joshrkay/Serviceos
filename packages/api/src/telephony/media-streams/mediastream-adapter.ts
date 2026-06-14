@@ -140,6 +140,22 @@ export interface MediaStreamAdapterDeps {
     callSid: string;
     tenantId: string;
   }) => Promise<SideEffect[]>;
+  /**
+   * RV-140 (interim) — emergency-keyword scan over INTERIM transcripts so a
+   * caller saying "gas leak" escalates the moment the words are recognized,
+   * not seconds later when Deepgram finalizes the utterance. Keywords ONLY —
+   * the recording-objection scan stays finals-only (a half-formed interim
+   * must never pause a recording). Returns the executed escalation side
+   * effects (911 safety line first) or null when nothing matched / the FSM
+   * is already escalating. Wired in production to
+   * `TwilioGatherAdapter.scanInterimForEmergency`.
+   */
+  interimEmergencyScan?: (args: {
+    session: VoiceSession;
+    speechResult: string;
+    callSid: string;
+    tenantId: string;
+  }) => Promise<SideEffect[] | null>;
   /** Audio inactivity teardown (ms). Default 30 minutes. */
   audioIdleTimeoutMs?: number;
   /**
@@ -270,6 +286,20 @@ export interface MediaStreamAdapterDeps {
    * sentiment is disabled.
    */
   resolveEscalationSettings?: (tenantId: string) => Promise<EscalationSettings>;
+  /**
+   * RV-122 — per-turn vulnerability triage hook. Fired after each
+   * `speechTurn` exactly like the sentiment classifier (fire-and-forget,
+   * never blocks the audio path). The hook owns its own per-tenant flag
+   * gate (`voice_vulnerability_triage`), grading, triage persistence
+   * (RV-120) and the patch-owner action (RV-121) — the adapter only
+   * supplies the turn context.
+   */
+  vulnerabilityTriageHook?: (args: {
+    session: VoiceSession;
+    transcript: string;
+    priorTurns: ReadonlyArray<{ role: 'caller' | 'ai'; text: string }>;
+    tenantId: string;
+  }) => Promise<void>;
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
@@ -352,6 +382,17 @@ interface RuntimeState {
    * to `deps.escalationSettings` when null.
    */
   resolvedEscalationSettings: EscalationSettings | null;
+  /**
+   * RV-140 (interim) — debounce for the interim emergency scan. Set once an
+   * interim-detected emergency actually escalated, so the stream of
+   * progressively longer interims for the SAME utterance ("gas", "gas leak",
+   * "gas leak in the…") doesn't re-enter the scan on every frame. The FSM's
+   * own `emergency_detected` guard is the correctness backstop (already
+   * escalating → empty effects, so the final that follows an interim-fired
+   * emergency can't double-page) — this flag just skips redundant lock
+   * round-trips on subsequent interims.
+   */
+  interimEmergencyFired: boolean;
 }
 
 const TWILIO_QUEUE_MAX_MSGS = 200;
@@ -438,6 +479,7 @@ export class TwilioMediaStreamAdapter {
       fillerActive: false,
       pendingTransferTwiml: null,
       resolvedEscalationSettings: null,
+      interimEmergencyFired: false,
     };
   }
 
@@ -604,6 +646,17 @@ export class TwilioMediaStreamAdapter {
           error: err instanceof Error ? err.message : String(err),
           callSid,
         });
+        // DISCLOSURE_INIT_FAILED — the call continues but the caller was never
+        // given the recording-consent disclosure and the session is unledgered.
+        // This is a compliance gap that must be countable/alertable.
+        // TODO(follow-up): emit a voice.disclosure_init_failed audit/quality event
+        // once a session-scoped event type is added to VoiceSessionEvent so ops
+        // dashboards can count & alert on this failure mode without a log scrape.
+        logger.error('DISCLOSURE_INIT_FAILED', {
+          callSid,
+          tenantId: session.tenantId,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
   }
@@ -646,6 +699,9 @@ export class TwilioMediaStreamAdapter {
       if (this.state.agentSpeaking) {
         this.bargeIn();
       }
+      // RV-140 (interim) — emergency keywords escalate on interims; the
+      // 911 line should not wait for Deepgram to finalize the utterance.
+      await this.maybeRunInterimEmergencyScan(event.transcript);
       return;
     }
     // Final transcript: dispatch into the FSM under the per-session lock
@@ -714,6 +770,30 @@ export class TwilioMediaStreamAdapter {
       );
     }
 
+    // RV-122 — per-turn vulnerability triage, fire-and-forget behind the
+    // tenant flag (gated inside the hook). Same skip conditions as the
+    // sentiment classifier: an ending/escalated call is wasted LLM spend.
+    if (
+      !alreadyEnding &&
+      callState !== 'escalating' &&
+      callState !== 'terminated' &&
+      this.deps.vulnerabilityTriageHook
+    ) {
+      void this.deps
+        .vulnerabilityTriageHook({
+          session,
+          transcript: event.transcript,
+          priorTurns: this.extractPriorTurns(session, 4),
+          tenantId,
+        })
+        .catch((err) =>
+          logger.warn('vulnerability triage hook failed', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: session.id,
+          }),
+        );
+    }
+
     // FSM may have terminated this turn — close the call.
     if (sideEffects.some((fx) => fx.type === 'end_session')) {
       // B2: stash the dispatch's effects so the finalize hook can read
@@ -722,6 +802,47 @@ export class TwilioMediaStreamAdapter {
       this.state.pendingFinalizeEffects = sideEffects;
       this.handleClose('end_session');
     }
+  }
+
+  /**
+   * RV-140 (interim) — run the host's emergency-keyword scan on an interim
+   * transcript. Serialized under the per-session lock (same as speechTurn)
+   * so an escalating interim can't interleave with an in-flight final turn.
+   * On a match, the executed effects (911 line first) are rendered through
+   * the normal TTS path and `interimEmergencyFired` debounces every later
+   * interim/final for this connection — the FSM's idempotent
+   * `emergency_detected` guard already prevents a double-page, the flag
+   * just avoids redundant dispatches.
+   */
+  private async maybeRunInterimEmergencyScan(transcript: string): Promise<void> {
+    if (this.state.interimEmergencyFired) return;
+    const session = this.state.session;
+    const callSid = this.state.callSid;
+    const tenantId = this.state.tenantId;
+    if (!this.deps.interimEmergencyScan || !session || !callSid || !tenantId) return;
+    if (!transcript.trim()) return;
+
+    let effects: SideEffect[] | null = null;
+    try {
+      effects = await this.deps.store.withSessionLock(session.id, () =>
+        this.deps.interimEmergencyScan!({
+          session,
+          speechResult: transcript,
+          callSid,
+          tenantId,
+        }),
+      );
+    } catch (err) {
+      logger.warn('mediastream: interim emergency scan failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+      return;
+    }
+    if (!effects) return;
+
+    this.state.interimEmergencyFired = true;
+    await this.emitSideEffects(effects);
   }
 
   /**

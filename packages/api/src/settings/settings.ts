@@ -28,6 +28,19 @@ export interface EscalationSettings {
   llm_sentiment_threshold: number;
   /** B6 — inbound behavior when outside business hours. */
   after_hours_voice_mode?: 'voicemail' | 'ai_answering';
+  /**
+   * RV-071 — spoken challenge (e.g. a PIN like "4271") required before a
+   * money-class or irreversible-class proposal can be APPROVED BY VOICE on
+   * a recognized owner line (caller-ID match; see approver-identity.ts).
+   * When unset, money/irreversible voice approvals
+   * are politely refused and the owner gets a one-tap approve SMS instead.
+   *
+   * INTERIM HOME: rides the existing `tenant_settings.escalation_settings`
+   * JSONB so no new migration is needed (161-163 are owned by parallel
+   * tracks). A dedicated column is the planned permanent home; when it
+   * lands, read it first and fall back to this key.
+   */
+  voice_approval_challenge?: string;
 }
 
 export const DEFAULT_ESCALATION_SETTINGS: EscalationSettings = {
@@ -83,6 +96,18 @@ export interface BrandVoiceSettings {
   vibe_words?: string[];
   business_name?: string;
 }
+
+/**
+ * RV-063 (F-9) — end-of-day digest delivery channel. 'none' keeps
+ * generating + storing the digest (web view stays available) without an
+ * owner SMS; disabling the digest entirely is `digestEnabled: false`.
+ */
+export type DigestChannel = 'sms' | 'none';
+
+export const DIGEST_CHANNEL_VALUES: ReadonlyArray<DigestChannel> = ['sms', 'none'];
+
+/** Tenant-local wall-clock 'HH:MM' (24h). 'HH:MM:SS' from the TIME column is normalized on read. */
+export const DIGEST_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 export interface TenantSettings {
   id: string;
@@ -260,6 +285,19 @@ export interface TenantSettings {
   ttsVoiceEs?: string | null;
   spanishDispatcherUserIds?: string[];
   /**
+   * Voice-parity — opt-in language stack for the voice agent (migration 152).
+   * Defaults to ['en']; a tenant opts into Spanish with ['en', 'es']. The
+   * language detector only switches a call to 'es' when 'es' is present here,
+   * so legacy rows (or `?? ['en']` reads) stay English-only.
+   */
+  supportedLanguages?: Language[];
+  /**
+   * Voice-parity — E.164 number the inbound-CSR warm transfer dials
+   * (migration 152). When set it replaces the on-call rotation for the
+   * standard human handoff; null/undefined falls back to the rotation path.
+   */
+  transferNumber?: string | null;
+  /**
    * Per-tenant AI model override. Seeded on tenant creation from
    * `AI_DEFAULT_MODEL` so the onboarding "AI check" step finds an
    * `aiConfigPresent` row immediately and the verify_ai worker has a
@@ -269,6 +307,17 @@ export interface TenantSettings {
    * (`120_tenant_settings_ai_config`).
    */
   aiModel?: string | null;
+  /**
+   * RV-063 (F-9) — end-of-day digest. Opt-in (`digest_enabled` defaults
+   * false at the column level, migration 163); `digestTime` is the
+   * tenant-LOCAL wall-clock time ('HH:MM') the daily-digest worker
+   * targets; `digestChannel: 'none'` stores the digest without SMS.
+   * Optional on the type so pre-migration rows / legacy fixtures read
+   * as "digest off" via `?? false` / `?? '18:00'` / `?? 'sms'`.
+   */
+  digestEnabled?: boolean;
+  digestTime?: string;
+  digestChannel?: DigestChannel;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -368,8 +417,18 @@ export interface UpdateSettingsInput {
   ttsVoiceEn?: string | null;
   ttsVoiceEs?: string | null;
   spanishDispatcherUserIds?: string[];
+  /** Voice-parity — opt-in language stack; always includes 'en'. */
+  supportedLanguages?: Language[];
+  /** Voice-parity — E.164 warm-transfer line; null clears the field. */
+  transferNumber?: string | null;
   /** Per-tenant AI model override; null clears the field. */
   aiModel?: string | null;
+  /** RV-063 — opt into the end-of-day digest. */
+  digestEnabled?: boolean;
+  /** RV-063 — tenant-local 'HH:MM' the digest targets (column default 18:00). */
+  digestTime?: string;
+  /** RV-063 — 'sms' (owner SMS) or 'none' (store/web only). */
+  digestChannel?: DigestChannel;
 }
 
 export interface SettingsRepository {
@@ -443,6 +502,8 @@ function validateCommonSettingsFields(
     estimatePrefix?: string;
     invoicePrefix?: string;
     defaultPaymentTermDays?: number;
+    digestTime?: string;
+    digestChannel?: string;
   }
 ): string[] {
   const errors: string[] = [];
@@ -457,6 +518,16 @@ function validateCommonSettingsFields(
   }
   if (input.defaultPaymentTermDays !== undefined && input.defaultPaymentTermDays < 0) {
     errors.push('defaultPaymentTermDays must be non-negative');
+  }
+  // RV-063 — digest delivery fields.
+  if (input.digestTime !== undefined && !DIGEST_TIME_RE.test(input.digestTime)) {
+    errors.push("digestTime must be 'HH:MM' (24-hour)");
+  }
+  if (
+    input.digestChannel !== undefined &&
+    !DIGEST_CHANNEL_VALUES.includes(input.digestChannel as DigestChannel)
+  ) {
+    errors.push(`digestChannel must be one of: ${DIGEST_CHANNEL_VALUES.join(', ')}`);
   }
   return errors;
 }
@@ -569,6 +640,7 @@ export async function createSettings(
     ),
     defaultLanguage: 'en',
     autoDetectLanguage: true,
+    supportedLanguages: ['en'],
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -666,6 +738,7 @@ export async function ensureTenantSettings(
     defaultPaymentTermDays: 30,
     defaultLanguage: 'en',
     autoDetectLanguage: true,
+    supportedLanguages: ['en'],
     // Onboarding-blocker fix: seed the platform default AI model so the
     // onboarding "AI check" (Step 6) does not fail with `ai_config_missing`
     // for every new tenant. The webhooks/routes.ts billing handler also

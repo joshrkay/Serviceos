@@ -38,6 +38,9 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   record_payment: 1,
   send_invoice: 1,
   send_estimate: 1,
+  // RV-086 — estimate nudges are owner-approved comms, same tier as
+  // send_estimate (same-day relevance, screen-tap required).
+  send_estimate_nudge: 1,
   // Notes are low priority — they never gate other work.
   add_note: 5,
   // Expense logging is informational — captured after the fact, never
@@ -66,6 +69,11 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // critical, since they typically have ~24h relevance windows
   // (longer than appointment-related work).
   review_response_proposal: 1,
+  // Collections work surfaces high — overdue reminders and late fees are
+  // time-sensitive, customer-facing money/comms that require screen-tap.
+  // Same tier as record_payment / send_invoice.
+  send_payment_reminder: 1,
+  apply_late_fee: 1,
 };
 
 export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['urgency']; reason: string } {

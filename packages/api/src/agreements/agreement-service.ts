@@ -31,7 +31,8 @@ import {
   RecurrenceFrequency,
   RUN_STATUSES,
 } from './enums';
-import { nextOccurrence, parseRule } from './recurrence';
+import { daysInMonth, nextOccurrence, parseRule } from './recurrence';
+import { DuesCollector, DuesCollectionResult } from './dues-collector';
 
 void RUN_STATUSES;
 void ({} as RecurrenceFrequency);
@@ -48,6 +49,15 @@ export interface CreateAgreementInput {
   autoGenerateJob?: boolean;
   startsOn: string;
   endsOn?: string;
+  /** Membership auto-renew. Requires endsOn + renewalTermMonths (see validation). */
+  autoRenew?: boolean;
+  renewalTermMonths?: number;
+  /** Member-pricing discount this membership confers, in basis points. */
+  memberDiscountBps?: number;
+  /** Priority booking: extended self-service booking horizon for the member. */
+  priorityBooking?: boolean;
+  /** Auto-collect dues: charge each cycle off-session against a saved card. */
+  autoCollectDues?: boolean;
   createdBy: string;
   actorRole?: string;
 }
@@ -60,6 +70,11 @@ export interface UpdateAgreementInput {
   autoGenerateInvoice?: boolean;
   autoGenerateJob?: boolean;
   endsOn?: string | null;
+  autoRenew?: boolean;
+  renewalTermMonths?: number | null;
+  memberDiscountBps?: number;
+  priorityBooking?: boolean;
+  autoCollectDues?: boolean;
 }
 
 /**
@@ -124,6 +139,40 @@ function computeFirstRun(rule: string, startsOn: string): Date {
   return nextOccurrence(parsed, beforeStart);
 }
 
+/**
+ * Add `months` whole months to a YYYY-MM-DD calendar date, clamping the day to
+ * the target month's length (Jan 31 + 1mo → Feb 28/29). UTC throughout — these
+ * are dates, not instants.
+ */
+function addMonthsToDateString(ymd: string, months: number): string {
+  const [y, m, d] = ymd.split('-').map(Number);
+  // m is 1-indexed in the string; Date months are 0-indexed.
+  const target = new Date(Date.UTC(y, m - 1 + months, 1));
+  const ty = target.getUTCFullYear();
+  const tm = target.getUTCMonth(); // 0-indexed
+  const day = Math.min(d, daysInMonth(ty, tm + 1));
+  return new Date(Date.UTC(ty, tm, day)).toISOString().slice(0, 10);
+}
+
+/**
+ * Membership invariant: auto-renew needs a fixed term to renew (`endsOn`) and a
+ * positive term length (`renewalTermMonths`). `term === null` means "being
+ * cleared" on update and is rejected when auto-renew stays on.
+ */
+function assertAutoRenewInvariant(
+  autoRenew: boolean,
+  endsOn: string | undefined,
+  term: number | null | undefined,
+): void {
+  if (!autoRenew) return;
+  if (!endsOn) {
+    throw new ValidationError('auto-renew requires endsOn (a fixed term to renew)');
+  }
+  if (term === null || term === undefined || !Number.isInteger(term) || term < 1) {
+    throw new ValidationError('auto-renew requires renewalTermMonths >= 1');
+  }
+}
+
 export async function createAgreement(
   input: CreateAgreementInput,
   agreementRepo: AgreementRepository,
@@ -140,6 +189,7 @@ export async function createAgreement(
   if (input.endsOn && input.endsOn < input.startsOn) {
     throw new ValidationError('endsOn must not be before startsOn');
   }
+  assertAutoRenewInvariant(input.autoRenew ?? false, input.endsOn, input.renewalTermMonths);
   // Validate the rule by parsing it; throws RecurrenceRuleError on bad input.
   parseRule(input.recurrenceRule);
 
@@ -161,6 +211,12 @@ export async function createAgreement(
     status: 'active',
     startsOn: input.startsOn,
     endsOn: input.endsOn,
+    autoRenew: input.autoRenew ?? false,
+    renewalTermMonths: input.autoRenew ? input.renewalTermMonths : undefined,
+    renewalCount: 0,
+    memberDiscountBps: input.memberDiscountBps ?? 0,
+    priorityBooking: input.priorityBooking ?? false,
+    autoCollectDues: input.autoCollectDues ?? false,
     createdBy: input.createdBy,
     createdAt: now,
     updatedAt: now,
@@ -198,6 +254,18 @@ export async function updateAgreement(
   if (input.priceCents !== undefined && (!Number.isInteger(input.priceCents) || input.priceCents < 0)) {
     throw new ValidationError('priceCents must be a non-negative integer');
   }
+
+  // Enforce the auto-renew invariant against the POST-update shape: any of the
+  // three fields may come from this patch or persist from the existing row, so
+  // a patch that toggles auto-renew on (or clears endsOn/term) is validated
+  // against the others' effective values.
+  const effectiveAutoRenew = input.autoRenew ?? existing.autoRenew ?? false;
+  const effectiveEndsOn =
+    input.endsOn !== undefined ? input.endsOn ?? undefined : existing.endsOn;
+  const effectiveTerm =
+    input.renewalTermMonths !== undefined ? input.renewalTermMonths : existing.renewalTermMonths;
+  assertAutoRenewInvariant(effectiveAutoRenew, effectiveEndsOn, effectiveTerm);
+
   const updates: Partial<Agreement> = { updatedAt: new Date() };
   if (input.name !== undefined) updates.name = input.name;
   if (input.description !== undefined) updates.description = input.description;
@@ -206,6 +274,13 @@ export async function updateAgreement(
   if (input.autoGenerateInvoice !== undefined) updates.autoGenerateInvoice = input.autoGenerateInvoice;
   if (input.autoGenerateJob !== undefined) updates.autoGenerateJob = input.autoGenerateJob;
   if (input.endsOn !== undefined) updates.endsOn = input.endsOn ?? undefined;
+  if (input.autoRenew !== undefined) updates.autoRenew = input.autoRenew;
+  if (input.renewalTermMonths !== undefined) {
+    updates.renewalTermMonths = input.renewalTermMonths ?? undefined;
+  }
+  if (input.memberDiscountBps !== undefined) updates.memberDiscountBps = input.memberDiscountBps;
+  if (input.priorityBooking !== undefined) updates.priorityBooking = input.priorityBooking;
+  if (input.autoCollectDues !== undefined) updates.autoCollectDues = input.autoCollectDues;
 
   return agreementRepo.update(tenantId, id, updates);
 }
@@ -255,6 +330,9 @@ export interface RunDueDeps {
   jobsService: JobsServicePort;
   invoicesService: InvoicesServicePort;
   auditRepo?: AuditRepository;
+  /** #6 phase 4 — when wired, dues for auto-collect memberships are charged
+   * off-session against the customer's saved card. */
+  duesCollector?: DuesCollector;
   now?: Date;
 }
 
@@ -392,7 +470,136 @@ export async function runDueAgreements(
         }),
       );
     }
+
+    // #6 phase 4 — auto-collect dues for a membership with a saved card. Runs
+    // only after a clean invoice generation; a decline does NOT fail the run
+    // (the collector issues the invoice so it stays payable, and dunning takes
+    // over). A collector exception is contained so the sweep keeps going.
+    if (
+      agreement.autoCollectDues &&
+      deps.duesCollector &&
+      runStatus === 'generated' &&
+      invoiceId &&
+      agreement.priceCents > 0
+    ) {
+      let collection: DuesCollectionResult;
+      try {
+        collection = await deps.duesCollector.collect({
+          tenantId,
+          customerId: agreement.customerId,
+          invoiceId,
+          agreementId: agreement.id,
+          scheduledFor,
+          createdBy: agreement.createdBy,
+        });
+      } catch {
+        collection = { status: 'failed' };
+      }
+      if (deps.auditRepo) {
+        // Three outcomes: clean collection, a charge we couldn't record (money
+        // moved — its own loud event so ops reconcile, never re-charge), and
+        // everything else (decline / no card / auth required → dunning).
+        const collectionEventType =
+          collection.status === 'collected'
+            ? 'service_agreement.dues_collected'
+            : collection.status === 'collected_unrecorded'
+              ? 'service_agreement.dues_collected_unrecorded'
+              : 'service_agreement.auto_collect_failed';
+        await deps.auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: 'system:agreements-worker',
+            actorRole: 'system',
+            eventType: collectionEventType,
+            entityType: 'service_agreement',
+            entityId: agreement.id,
+            metadata: {
+              invoiceId,
+              scheduledFor,
+              collectionStatus: collection.status,
+              paymentIntentId: collection.paymentIntentId,
+              declineCode: collection.declineCode,
+              recordError: collection.recordError,
+            },
+          }),
+        );
+      }
+    }
   }
 
   return { generatedRunIds, skippedRunIds, failedRunIds };
+}
+
+export interface RenewDueDeps {
+  agreementRepo: AgreementRepository;
+  auditRepo?: AuditRepository;
+  now?: Date;
+}
+
+export interface RenewDueResult {
+  renewedAgreementIds: string[];
+}
+
+/**
+ * Roll forward the term of every active, auto-renew agreement whose `ends_on`
+ * has lapsed. The new `ends_on` advances by `renewalTermMonths` until it is
+ * strictly in the future, so a worker that was down for several terms catches
+ * up in one pass instead of leaving a membership lapsed. `renewal_count` is
+ * bumped by the number of terms added and a `service_agreement.renewed` audit
+ * event records the transition.
+ *
+ * Runs BEFORE runDueAgreements in the sweep so a just-renewed agreement whose
+ * next run is already due fires this cycle rather than waiting another sweep.
+ */
+export async function renewExpiringAgreements(
+  tenantId: string,
+  deps: RenewDueDeps,
+): Promise<RenewDueResult> {
+  const now = deps.now ?? new Date();
+  const today = now.toISOString().slice(0, 10);
+  const renewedAgreementIds: string[] = [];
+
+  const renewable = await deps.agreementRepo.findRenewable(tenantId, now);
+  for (const agreement of renewable) {
+    // findRenewable guarantees both are set; narrow for the type checker.
+    if (!agreement.endsOn || !agreement.renewalTermMonths) continue;
+
+    let newEndsOn = agreement.endsOn;
+    let termsAdded = 0;
+    // Cap the catch-up loop; 600 months = 50 years of missed renewals.
+    while (newEndsOn <= today && termsAdded < 600) {
+      newEndsOn = addMonthsToDateString(newEndsOn, agreement.renewalTermMonths);
+      termsAdded++;
+    }
+    if (termsAdded === 0) continue;
+
+    const newRenewalCount = (agreement.renewalCount ?? 0) + termsAdded;
+    await deps.agreementRepo.update(tenantId, agreement.id, {
+      endsOn: newEndsOn,
+      renewalCount: newRenewalCount,
+      updatedAt: new Date(),
+    });
+    renewedAgreementIds.push(agreement.id);
+
+    if (deps.auditRepo) {
+      await deps.auditRepo.create(
+        createAuditEvent({
+          tenantId,
+          actorId: 'system:agreements-worker',
+          actorRole: 'system',
+          eventType: 'service_agreement.renewed',
+          entityType: 'service_agreement',
+          entityId: agreement.id,
+          metadata: {
+            previousEndsOn: agreement.endsOn,
+            newEndsOn,
+            termsAdded,
+            renewalCount: newRenewalCount,
+          },
+        }),
+      );
+    }
+  }
+
+  return { renewedAgreementIds };
 }

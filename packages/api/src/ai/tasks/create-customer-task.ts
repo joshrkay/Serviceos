@@ -32,6 +32,7 @@ import {
   CreateCustomerVoiceMetadata,
 } from '../../proposals/contracts/create-customer-contract';
 import { assertValidProposalPayload } from '../../proposals/contracts';
+import { getConfidenceLevel } from '../guardrails/confidence';
 
 /**
  * Voice-call signals the FSM forwards into TaskContext.existingEntities.
@@ -261,10 +262,22 @@ export class CreateCustomerVoiceTaskHandler implements TaskHandler {
       ? `Caller phone matches lead ${ents.existingLeadId}. Approve to convert to customer; reject to keep as lead.`
       : 'Caller asked to sign up as a new customer. Approve to add them to the CRM.';
 
+    // RV-007 — Confidence Marker `_meta`: the intent classifier's score
+    // mapped onto the shared level vocabulary. Omitted when no
+    // classifier confidence was threaded (manual/non-voice callers keep
+    // their pre-RV-007 payload shape). This handler has no per-field
+    // certainty signal, so overall-only is correct.
+    const payloadRecord: Record<string, unknown> = {
+      ...(payload as unknown as Record<string, unknown>),
+      ...(ents.classifierConfidence !== undefined
+        ? { _meta: { overallConfidence: getConfidenceLevel(ents.classifierConfidence) } }
+        : {}),
+    };
+
     const input: CreateProposalInput = {
       tenantId: context.tenantId,
       proposalType: this.taskType,
-      payload: payload as unknown as Record<string, unknown>,
+      payload: payloadRecord,
       summary,
       explanation,
       confidenceScore: ents.classifierConfidence,

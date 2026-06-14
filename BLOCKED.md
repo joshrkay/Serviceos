@@ -1,41 +1,45 @@
-# Launch-Readiness Pass — BLOCKED
+# BLOCKED
 
-## (RESOLVED) Integration + RLS suites — now passing against a real Postgres
+Items that could not complete in this environment, with diagnosis. Per the
+checkpoint protocol, slot failure cases and hard blockers land here.
 
-**Status: RESOLVED.** Both `npm run test:rls` and `npm run test:integration` were
-run **green** in this environment against a locally-provisioned Postgres 16.
+## Slot-extraction failure cases
 
-### Original blocker
-The integration suite (`vitest.integration.config.ts`) provisions Postgres via
-**testcontainers** (`pgvector/pgvector:pg16` + `testcontainers/ryuk`). Image pulls
-fail in this sandbox — the Docker registry CDN returns **403 Forbidden** on blob
-downloads, and the session-start log warned of the same. So the container path
-could not start here.
+None. All four slot types hit **F1 = 1.0** on the frozen 20% holdout
+(target ≥ 0.88):
 
-### Resolution
-1. Installed Postgres 16 + `pgvector` locally (`postgresql-16`,
-   `postgresql-16-pgvector` 0.6.0) and started the default cluster.
-2. Added a backward-compatible escape hatch to
-   `test/integration/global-setup.ts`: when `EXTERNAL_TEST_DB_URL` is set, it
-   applies the migrations to that database and skips the testcontainer entirely
-   (same migration path, superuser role, just a different host). When the var is
-   unset, behavior is unchanged (testcontainer as before). This also lets CI run
-   the suite against a service-container Postgres.
-3. Ran both suites against the local DB:
+| Slot | Held-out N | F1 |
+|------|-----------:|---:|
+| address | 9 | 1.0 |
+| time | 8 | 1.0 |
+| phone | 8 | 1.0 |
+| service | 10 | 1.0 |
 
-```
-EXTERNAL_TEST_DB_URL="postgresql://postgres:***@127.0.0.1:5432/serviceos_test" \
-  npm run test:rls          # -> 8 passed (cross-tenant isolation verified)
-EXTERNAL_TEST_DB_URL="postgresql://postgres:***@127.0.0.1:5432/serviceos_test" \
-  npm run test:integration  # -> 40 files, 180 passed (all 146 migrations applied,
-                            #    incl. migration 146; end-to-end paths green)
-```
+Caveat: the extractors are rule-based and the fixtures were co-authored with
+them, so 1.0 reflects coverage of the *authored* phrasings, not real-world
+ASR noise. The first real failures to expect (documented for v1.1): landmark
+addresses that need geocoding, multi-window time constraints ("after 3 but
+before pickup" currently keeps only the lower bound), and 555-collision when
+a real area code happens to be 555.
 
-### Residual note
-The **literal** `npm run test:rls` / `npm run test:integration` (no env var) still
-require Docker-registry access to pull the testcontainer image, which this sandbox
-blocks. On any normal CI runner (registry reachable) the default container path
-works unchanged. The behavior and tenant-isolation guarantees are proven here via
-the external-DB path; nothing in this pass weakens them.
+## BLOCKED — Reddit acquisition (50k+ posts target)
 
-**No features are BLOCKED.** All eight are SHIPPED (see PROGRESS.md / LAUNCH_REPORT.md).
+- **What:** Bulk homeowner-problem ingestion via the Academic Torrents Reddit
+  dump (`serviceos_training/02_reddit_processor.py`).
+- **Why blocked:** This pass ran in an isolated remote container whose network
+  policy does not permit fetching the multi-GB torrent or reaching Reddit. The
+  pipeline exists and is tested (`serviceos_training/tests/`) but cannot be run
+  here.
+- **Per protocol:** acquisition paused; continued with vocab + synthetic
+  generation. Re-run `serviceos_training/02_reddit_processor.py` on a host with
+  the dump mounted to populate the Supabase `training_corpus` table.
+
+## DEFERRED (not blocked — out of scope for features 4–8)
+
+- **300+ multi-turn transcripts:** the live golden corpus has ~40
+  (`packages/api/src/ai/voice-quality/corpus/golden/`). A synthetic multi-turn
+  transcript generator is a natural next step but was not required by the
+  binding goal (single-utterance comprehension). Est. 1–2 days.
+- **1,500+ vocabulary terms:** `corpus/data/vocabulary.json` already maps lay→
+  technical terms by fixture; expanding to 1,500 entries is a separate
+  vocab-depth pass. Est. 1 day.

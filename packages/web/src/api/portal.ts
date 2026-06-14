@@ -129,6 +129,15 @@ export interface RescheduleSuccess {
 }
 export type RescheduleResult = SlotActionResult<RescheduleSuccess>;
 
+export interface PortalPaymentMethod {
+  id: string;
+  brand?: string;
+  last4?: string;
+  expMonth?: number;
+  expYear?: number;
+  isDefault: boolean;
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { headers: { Accept: 'application/json' } });
   if (!res.ok) {
@@ -237,6 +246,13 @@ export const portalApi = {
       taken: 'That time was just booked.',
       failed: 'Could not book that time.',
     }),
+  paymentMethods: (token: string) =>
+    getJson<{ paymentMethods: PortalPaymentMethod[] }>(`${base(token)}/payment-methods`),
+  startCardSetup: (token: string) =>
+    postJson<{ clientSecret: string; setupIntentId: string }>(
+      `${base(token)}/payment-methods/setup`,
+      {},
+    ),
 };
 
 export function formatPortalCents(cents: number): string {

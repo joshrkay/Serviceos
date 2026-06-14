@@ -1,0 +1,44 @@
+{"id":"slot_time_0001","text":"tomorrow morning","slot_type":"time","expected":{"kind":"relative_window","value":"tomorrow morning"},"lang":"en"}
+{"id":"slot_time_0002","text":"tomorrow afternoon","slot_type":"time","expected":{"kind":"relative_window","value":"tomorrow afternoon"},"lang":"en"}
+{"id":"slot_time_0003","text":"this afternoon","slot_type":"time","expected":{"kind":"relative_window","value":"this afternoon"},"lang":"en"}
+{"id":"slot_time_0004","text":"first thing","slot_type":"time","expected":{"kind":"relative_window","value":"first thing"},"lang":"en"}
+{"id":"slot_time_0005","text":"first thing in the morning","slot_type":"time","expected":{"kind":"relative_window","value":"first thing"},"lang":"en"}
+{"id":"slot_time_0006","text":"this weekend","slot_type":"time","expected":{"kind":"relative_window","value":"this weekend"},"lang":"en"}
+{"id":"slot_time_0007","text":"early next week","slot_type":"time","expected":{"kind":"relative_window","value":"early next week"},"lang":"en"}
+{"id":"slot_time_0008","text":"Monday morning","slot_type":"time","expected":{"kind":"relative_window","value":"monday morning"},"lang":"en"}
+{"id":"slot_time_0009","text":"Tuesday afternoon","slot_type":"time","expected":{"kind":"relative_window","value":"tuesday afternoon"},"lang":"en"}
+{"id":"slot_time_0010","text":"next Thursday","slot_type":"time","expected":{"kind":"relative_window","value":"next thursday"},"lang":"en"}
+{"id":"slot_time_0011","text":"end of the week","slot_type":"time","expected":{"kind":"relative_window","value":"end of the week"},"lang":"en"}
+{"id":"slot_time_0012","text":"sometime this week","slot_type":"time","expected":{"kind":"relative_window","value":"this week"},"lang":"en"}
+{"id":"slot_time_0013","text":"Friday at nine","slot_type":"time","expected":{"kind":"specific_time","value":"friday 9:00"},"lang":"en"}
+{"id":"slot_time_0014","text":"at three o'clock","slot_type":"time","expected":{"kind":"specific_time","value":"3:00"},"lang":"en"}
+{"id":"slot_time_0015","text":"around 2 PM","slot_type":"time","expected":{"kind":"specific_time","value":"2:00 pm"},"lang":"en"}
+{"id":"slot_time_0016","text":"noon on Wednesday","slot_type":"time","expected":{"kind":"specific_time","value":"wednesday 12:00"},"lang":"en"}
+{"id":"slot_time_0017","text":"ten thirty tomorrow","slot_type":"time","expected":{"kind":"specific_time","value":"tomorrow 10:30"},"lang":"en"}
+{"id":"slot_time_0018","text":"eight in the morning","slot_type":"time","expected":{"kind":"specific_time","value":"8:00 am"},"lang":"en"}
+{"id":"slot_time_0019","text":"after 3","slot_type":"time","expected":{"kind":"constraint_window","value":"after 3:00"},"lang":"en"}
+{"id":"slot_time_0020","text":"after three but before pickup","slot_type":"time","expected":{"kind":"constraint_window","value":"after 3:00"},"lang":"en"}
+{"id":"slot_time_0021","text":"before noon","slot_type":"time","expected":{"kind":"constraint_window","value":"before 12:00"},"lang":"en"}
+{"id":"slot_time_0022","text":"anytime after lunch","slot_type":"time","expected":{"kind":"constraint_window","value":"after lunch"},"lang":"en"}
+{"id":"slot_time_0023","text":"no earlier than ten","slot_type":"time","expected":{"kind":"constraint_window","value":"after 10:00"},"lang":"en"}
+{"id":"slot_time_0024","text":"has to be before five","slot_type":"time","expected":{"kind":"constraint_window","value":"before 5:00"},"lang":"en"}
+{"id":"slot_time_0025","text":"between two and four","slot_type":"time","expected":{"kind":"constraint_window","value":"between 2:00 and 4:00"},"lang":"en"}
+{"id":"slot_time_0026","text":"any time today","slot_type":"time","expected":{"kind":"open","value":"today"},"lang":"en"}
+{"id":"slot_time_0027","text":"whenever you can get here","slot_type":"time","expected":{"kind":"open","value":"flexible"},"lang":"en"}
+{"id":"slot_time_0028","text":"whenever works for you","slot_type":"time","expected":{"kind":"open","value":"flexible"},"lang":"en"}
+{"id":"slot_time_0029","text":"I'm flexible","slot_type":"time","expected":{"kind":"open","value":"flexible"},"lang":"en"}
+{"id":"slot_time_0030","text":"doesn't matter when","slot_type":"time","expected":{"kind":"open","value":"flexible"},"lang":"en"}
+{"id":"slot_time_0031","text":"any day this week is fine","slot_type":"time","expected":{"kind":"open","value":"this week"},"lang":"en"}
+{"id":"slot_time_0032","text":"ASAP","slot_type":"time","expected":{"kind":"asap","value":"asap"},"lang":"en"}
+{"id":"slot_time_0033","text":"as soon as possible","slot_type":"time","expected":{"kind":"asap","value":"asap"},"lang":"en"}
+{"id":"slot_time_0034","text":"right away","slot_type":"time","expected":{"kind":"asap","value":"asap"},"lang":"en"}
+{"id":"slot_time_0035","text":"as soon as you can","slot_type":"time","expected":{"kind":"asap","value":"asap"},"lang":"en"}
+{"id":"slot_time_0036","text":"immediately if you can","slot_type":"time","expected":{"kind":"asap","value":"asap"},"lang":"en"}
+{"id":"slot_time_0037","text":"today if you can","slot_type":"time","expected":{"kind":"relative_window","value":"today"},"lang":"en"}
+{"id":"slot_time_0038","text":"tomorrow if possible","slot_type":"time","expected":{"kind":"relative_window","value":"tomorrow"},"lang":"en"}
+{"id":"slot_time_0039","text":"this morning","slot_type":"time","expected":{"kind":"relative_window","value":"this morning"},"lang":"en"}
+{"id":"slot_time_0040","text":"tonight","slot_type":"time","expected":{"kind":"relative_window","value":"tonight"},"lang":"en"}
+{"id":"slot_time_0041","text":"Saturday morning","slot_type":"time","expected":{"kind":"relative_window","value":"saturday morning"},"lang":"en"}
+{"id":"slot_time_0042","text":"the morning works best","slot_type":"time","expected":{"kind":"relative_window","value":"morning"},"lang":"en"}
+{"id":"slot_time_0043","text":"late afternoon","slot_type":"time","expected":{"kind":"relative_window","value":"late afternoon"},"lang":"en"}
+{"id":"slot_time_0044","text":"first available","slot_type":"time","expected":{"kind":"asap","value":"asap"},"lang":"en"}

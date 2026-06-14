@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
+import { useUser } from '@clerk/clerk-react';
 import {
   AlertCircle, Clock, ChevronRight, ArrowRight,
   DollarSign, FileText, Send, Eye, Briefcase,
@@ -17,6 +18,7 @@ import {
 import { StatusBadge } from '../shared/StatusBadge';
 import { TimeGivenBackCard } from './TimeGivenBackCard';
 import { MoneyLoopHomeCard } from './MoneyLoopHomeCard';
+import { HfcrHeroCard } from './HfcrHeroCard';
 import { ErrorState } from '../ErrorState';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import {
@@ -24,6 +26,7 @@ import {
   formatInTenantTz,
   formatTimeInTenantTz,
 } from '../../utils/formatInTenantTz';
+import { firstNameFromUser, homeGreetingHeading } from '../../utils/greeting';
 
 // ─── API Types ────────────────────────────────────────────────────────────
 interface ApiJob {
@@ -266,7 +269,14 @@ function WeekStrip({ todayCount }: { todayCount: number }) {
 export function HomePage() {
   const navigate   = useNavigate();
   const tz         = useTenantTimezone();
+  const { user }   = useUser();
   const [dismissed, setDismiss] = useState<Set<string>>(new Set());
+
+  const ownerFirstName = firstNameFromUser(
+    user?.fullName,
+    user?.primaryEmailAddress?.emailAddress,
+  );
+  const greetingHeading = homeGreetingHeading(ownerFirstName, new Date(), tz);
 
   const today = todayIso();
   const todayDate = new Date(); todayDate.setHours(0, 0, 0, 0);
@@ -320,7 +330,7 @@ export function HomePage() {
         <div className="px-4 md:px-6 pt-5 pb-4 border-b border-slate-100">
           <div className="flex items-start justify-between">
             <div>
-              <h1 className="text-slate-900">Good morning, Mike ☀️</h1>
+              <h1 className="text-slate-900">{greetingHeading}</h1>
               <p className="text-sm text-slate-400 mt-0.5">
                 {formatInTenantTz(new Date(), tz, { weekday: 'long', month: 'long', day: 'numeric' })}
               </p>
@@ -383,6 +393,8 @@ export function HomePage() {
             </button>
           </div>
         </div>
+
+        <HfcrHeroCard />
 
         <MoneyLoopHomeCard />
 

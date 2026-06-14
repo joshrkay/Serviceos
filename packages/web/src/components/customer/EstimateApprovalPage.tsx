@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useParams } from 'react-router';
 import {
   Check, Phone, Mail, ChevronDown, ChevronUp, CheckCircle2, X,
@@ -6,7 +6,6 @@ import {
 } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import { printEstimateDocument } from '../../lib/estimatePdf';
-import { Button } from '../ui/button';
 
 /**
  * Format a USD dollar amount with exactly two fraction digits. A bare
@@ -369,7 +368,7 @@ function SuccessScreen({
               <span className="text-white" style={{ fontSize: 13 }}>F</span>
             </div>
             <div>
-              <p className="text-sm text-slate-800">Rivet Pro Services</p>
+              <p className="text-sm text-slate-800">Fieldly Pro Services</p>
               <p className="text-xs text-slate-400">Austin, TX</p>
             </div>
           </div>
@@ -409,7 +408,7 @@ function SuccessScreen({
                 <div className="size-6 rounded-lg bg-white/10 flex items-center justify-center">
                   <span className="text-white" style={{ fontSize: 11 }}>F</span>
                 </div>
-                <p className="text-sm text-white">Rivet Pro Services</p>
+                <p className="text-sm text-white">Fieldly Pro Services</p>
               </div>
               <div className="flex items-center gap-1.5">
                 <span className="size-2 rounded-full bg-green-400 animate-pulse" />
@@ -511,7 +510,7 @@ function SuccessScreen({
               className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 hover:border-slate-300 hover:bg-slate-50 transition-colors">
               <Phone size={13} className="text-slate-500" /> (512) 555-0000
             </a>
-            <a href="mailto:info@rivet.ai"
+            <a href="mailto:info@fieldly.pro"
               className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 hover:border-slate-300 hover:bg-slate-50 transition-colors">
               <Mail size={13} className="text-slate-500" /> Email us
             </a>
@@ -535,20 +534,15 @@ export function EstimateApprovalPage() {
   const [accepted,     setAccept] = useState(false);
   const [showAllItems, setAll]    = useState(false);
 
-  // Load the estimate from the real public API. We must NOT fall back to
-  // fixture/mock data on failure: this page is served on a public URL, so
-  // a fixture render would leak another customer's name, address, and
-  // pricing. 404 → "Link not found"; any other failure → retryable error.
+  // Load the estimate from the real public API. There is deliberately NO
+  // mock/fixture fallback on this public URL — see the error branch below.
   const [apiView, setApiView] = useState<PublicEstimateView | null>(null);
   const [apiLoading, setApiLoading] = useState(true);
   const [apiNotFound, setApiNotFound] = useState(false);
   // Set when the estimate could not be loaded for a reason other than 404
   // (network error or non-OK response). We render a safe error screen
-  // with a Retry action rather than any fixture data.
+  // rather than fixture data — this is a public URL.
   const [apiError, setApiError] = useState(false);
-  // Bumped by the Retry button to re-trigger the load effect after a
-  // transient network/server error.
-  const [retryNonce, setRetryNonce] = useState(0);
   // Set when a background poll detects the business revised the estimate
   // (version bumped) after the customer opened the page. The banner asks
   // them to review the latest version; approve is also blocked server-side.
@@ -556,19 +550,17 @@ export function EstimateApprovalPage() {
   // Good-better-best: the line-item ids the customer has chosen. Null
   // until the estimate loads, then seeded from the server's defaults.
   const [selectedIds, setSelectedIds] = useState<string[] | null>(null);
-
-  const retryLoad = useCallback(() => {
-    setApiError(false);
-    setApiNotFound(false);
-    setApiLoading(true);
-    setRetryNonce(n => n + 1);
-  }, []);
+  // Bumped by the error screen's "Try again" button to re-run the fetch.
+  const [retryCount, setRetryCount] = useState(0);
 
   useEffect(() => {
     if (!id) {
       setApiLoading(false);
       return;
     }
+    setApiLoading(true);
+    setApiError(false);
+    setApiNotFound(false);
     let cancelled = false;
     (async () => {
       try {
@@ -602,7 +594,7 @@ export function EstimateApprovalPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [id, retryNonce]);
+  }, [id, retryCount]);
 
   // Re-sync poll: while the page is open on a live (sent) estimate, poll
   // for a revision so the customer can't accept stale numbers. When the
@@ -670,30 +662,24 @@ export function EstimateApprovalPage() {
   // No real estimate data to show. We deliberately do NOT fall back to
   // fixture/mock data: this page is served on a public URL, so rendering a
   // mock estimate would expose another customer's name, address, and
-  // pricing. Show a safe message instead (404 vs transient error). A
-  // Retry button is offered for transient errors so the customer doesn't
-  // have to hunt for a refresh control on mobile.
+  // pricing. Show a safe message instead (404 vs transient error).
   if (!apiView) {
     const heading = apiNotFound ? 'Link not found' : 'Couldn’t load this estimate';
     const detail = apiNotFound
       ? 'This estimate link is invalid or has been revoked. Please contact the business that sent it.'
-      : 'We couldn’t load this estimate. Please refresh or contact us.';
+      : 'We couldn’t load this estimate — check the link or contact the business that sent it.';
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center px-6">
         <div className="max-w-md text-center">
           <h1 className="text-slate-900 mb-2" style={{ fontSize: '1.4rem' }}>{heading}</h1>
           <p className="text-sm text-slate-500">{detail}</p>
-          {apiError && !apiNotFound && (
-            <div className="mt-5 flex justify-center">
-              <Button
-                variant="primary"
-                size="md"
-                onClick={retryLoad}
-                data-testid="estimate-load-retry"
-              >
-                Retry
-              </Button>
-            </div>
+          {apiError && (
+            <button
+              onClick={() => setRetryCount(c => c + 1)}
+              className="mt-5 inline-flex items-center justify-center rounded-2xl bg-slate-900 text-white px-6 py-3 text-sm hover:bg-slate-700 active:scale-[0.98] transition-all"
+            >
+              Try again
+            </button>
           )}
         </div>
       </div>
@@ -907,7 +893,7 @@ export function EstimateApprovalPage() {
                           key={item.id}
                           type="button"
                           onClick={() => selectTier(groupKey, item.id)}
-                          className={`flex w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
+                          className={`flex min-h-11 w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
                         >
                           <span className="flex items-center gap-3 min-w-0">
                             <span className={`flex size-4 shrink-0 items-center justify-center rounded-full border ${isSel ? 'border-blue-600 bg-blue-600' : 'border-slate-300'}`}>
@@ -936,7 +922,7 @@ export function EstimateApprovalPage() {
                           key={item.id}
                           type="button"
                           onClick={() => toggleAddOn(item.id)}
-                          className={`flex w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
+                          className={`flex min-h-11 w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
                         >
                           <span className="flex items-center gap-3 min-w-0">
                             <span className={`flex size-4 shrink-0 items-center justify-center rounded border ${isSel ? 'border-blue-600 bg-blue-600' : 'border-slate-300'}`}>
@@ -956,7 +942,12 @@ export function EstimateApprovalPage() {
 
           {/* Line items */}
           <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden mb-4">
-            <div className="grid grid-cols-[1fr_40px_72px_72px] gap-x-2 px-5 py-2.5 bg-slate-50 border-b border-slate-100">
+            {/* minmax(0,1fr) lets the description track shrink below its
+                content width (grid items default to min-width:auto, which
+                forced horizontal overflow on ≤390px phones). Narrower fixed
+                columns below the sm breakpoint; tabular-nums keeps money
+                digits stable and right-aligned. */}
+            <div className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_40px_72px_72px] gap-x-2 px-5 py-2.5 bg-slate-50 border-b border-slate-100">
               <p className="text-xs text-slate-400">Item</p>
               <p className="text-xs text-slate-400 text-right">Qty</p>
               <p className="text-xs text-slate-400 text-right">Rate</p>
@@ -964,18 +955,18 @@ export function EstimateApprovalPage() {
             </div>
             <div className="divide-y divide-slate-50">
               {visItems.map((item, i) => (
-                <div key={i} className="grid grid-cols-[1fr_40px_72px_72px] gap-x-2 px-5 py-3 items-start">
-                  <p className="text-sm text-slate-800">{item.description}</p>
-                  <p className="text-sm text-slate-500 text-right">{item.qty}</p>
-                  <p className="text-sm text-slate-500 text-right">${fmtUsd(item.rate)}</p>
-                  <p className="text-sm text-slate-800 text-right">${fmtUsd(item.qty * item.rate)}</p>
+                <div key={i} className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_40px_72px_72px] gap-x-2 px-5 py-3 items-start">
+                  <p className="text-sm text-slate-800 min-w-0 break-words">{item.description}</p>
+                  <p className="text-sm text-slate-500 text-right tabular-nums">{item.qty}</p>
+                  <p className="text-sm text-slate-500 text-right tabular-nums">${fmtUsd(item.rate)}</p>
+                  <p className="text-sm text-slate-800 text-right tabular-nums">${fmtUsd(item.qty * item.rate)}</p>
                 </div>
               ))}
             </div>
             {lineItems.length > 3 && (
               <button
                 onClick={() => setAll(v => !v)}
-                className="flex items-center justify-center gap-1 w-full py-2.5 text-xs text-slate-400 hover:text-slate-600 border-t border-slate-100 transition-colors"
+                className="flex min-h-11 items-center justify-center gap-1 w-full py-2.5 text-xs text-slate-400 hover:text-slate-600 border-t border-slate-100 transition-colors"
               >
                 {showAllItems ? <><ChevronUp size={12} /> Show less</> : <><ChevronDown size={12} /> {lineItems.length - 3} more items</>}
               </button>
@@ -997,7 +988,7 @@ export function EstimateApprovalPage() {
               lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate })),
               totalDollars: total,
             })}
-            className="mb-4 flex items-center justify-center gap-1.5 w-full rounded-xl border border-slate-200 bg-white py-2.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors"
+            className="mb-4 flex min-h-11 items-center justify-center gap-1.5 w-full rounded-xl border border-slate-200 bg-white py-2.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors"
           >
             <Download size={12} /> Download PDF
           </button>

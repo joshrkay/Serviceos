@@ -2,8 +2,8 @@ import { promises as fs } from 'fs';
 import path from 'path';
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
-const PY_MAIN = path.resolve(REPO_ROOT, 'service-os-agent/main.py');
-const PY_STATE = path.resolve(REPO_ROOT, 'service-os-agent/agent/state.py');
+const PY_MAIN = path.resolve(REPO_ROOT, 'experiments/service-os-agent/main.py');
+const PY_STATE = path.resolve(REPO_ROOT, 'experiments/service-os-agent/agent/state.py');
 
 describe('Python agent contract parity with TS gateway', () => {
   it('process request requires tenant/auth/transcript contract fields', async () => {

@@ -63,6 +63,46 @@ _PLACEHOLDER_REGEX = re.compile(r"\[[A-Z_]+\]")
 _DIGIT_RUN_REGEX = re.compile(r"[0-9]{7,}")
 _ALL_CAPS_NAME_REGEX = re.compile(r"\b[A-Z]{2,}\s+[A-Z]{2,}\s+[A-Z]{2,}\b")
 
+# ── Self-identified names (ingestion-path helper) ────────────────────────────
+# Bare names are NOT caught by the regex sweep (phone/email/address) and a
+# mixed-case Title-word residual heuristic would over-flag "Water Heater" etc.
+# Reddit posters routinely self-identify ("I'm John", "this is John Smith"), so
+# the ingestion path derives those via cue phrases and passes them to scrub_pii()
+# as known names for redaction. The cue alternation is case-insensitive; the name
+# capture stays Title-case so lowercase words after a cue are not captured.
+_NAME_CUE_REGEX = re.compile(
+    r"\b(?:[Ii]['’]?m(?:\s+called)?|[Ii]\s+am|[Mm]y\s+name\s+(?:is|['’]s)|"
+    r"[Nn]ame['’]s|[Tt]his\s+is)\s+"
+    r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})"
+)
+# Capitalized words that commonly follow a cue but are not names — keeps
+# "I'm sorry" / "this is great" from being mistaken for self-identification.
+_NAME_STOPWORDS = frozenset({
+    "Sorry", "Not", "Just", "Going", "Looking", "Trying", "Still", "Here",
+    "Now", "Also", "So", "Very", "Really", "Great", "Good", "Okay", "Ok",
+    "Yes", "No", "Maybe", "Actually", "Currently", "Pretty", "Definitely",
+    "Probably", "Honestly", "Basically", "Literally", "Wondering", "Hoping",
+    "About", "A", "An", "The", "My", "Your", "His", "Her", "Their", "Our", "It",
+})
+
+
+def extract_self_identified_names(text: str) -> list[str]:
+    """Return distinct self-identified names found via cue phrases
+    ("I'm John", "this is John Smith"). Pure function — used by the Reddit
+    ingestion path to redact bare names the regex sweep does not catch."""
+    if not text:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _NAME_CUE_REGEX.finditer(text):
+        name = m.group(1).strip()
+        if name.split()[0] in _NAME_STOPWORDS:
+            continue
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
 
 @dataclass
 class KnownEntities:

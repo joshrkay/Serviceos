@@ -10,6 +10,12 @@ import {
   OverdueInvoiceWorkerDeps,
 } from '../../src/workers/overdue-invoice-worker';
 import type { DocumentTotals } from '../../src/shared/billing-engine';
+import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import {
+  DunningConfig,
+  InMemoryDunningConfigRepository,
+  InMemoryDunningEventRepository,
+} from '../../src/invoices/dunning-config';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 const NOW = new Date('2026-05-14T12:00:00Z');
@@ -161,5 +167,168 @@ describe('runOverdueInvoiceSweep', () => {
     expect(result.tenants).toBe(2);
     expect(result.failed).toBe(1);
     expect(result.overdue).toBe(1);
+  });
+
+  // §7 Collections cadence — owner-approved dunning proposals.
+  describe('dunning cadence', () => {
+    function makeConfig(overrides: Partial<DunningConfig> = {}): DunningConfig {
+      return {
+        id: uuidv4(),
+        tenantId: 't1',
+        enabled: true,
+        reminderSteps: [{ offsetDays: 3, channel: 'sms' }],
+        lateFeeType: 'none',
+        lateFeeValueCents: 0,
+        lateFeeGraceDays: 0,
+        createdAt: NOW,
+        updatedAt: NOW,
+        ...overrides,
+      };
+    }
+
+    async function seedOverdueInvoice(tenantId: string) {
+      const job = await createJob(
+        { tenantId, customerId: 'c1', locationId: 'l1', summary: 'Job', createdBy: 'u1' },
+        jobRepo,
+      );
+      // PAST (2026-05-01) is 13 days before NOW (2026-05-14).
+      const invoice = await invoiceRepo.create({
+        ...makeInvoice(job.id, 'open', PAST),
+        tenantId,
+      });
+      return invoice;
+    }
+
+    it('raises one send_payment_reminder proposal per due cadence step (ready_for_review)', async () => {
+      const invoice = await seedOverdueInvoice('t1');
+      const proposalRepo = new InMemoryProposalRepository();
+      const dunningEventRepo = new InMemoryDunningEventRepository();
+      const dunningConfigRepo = new InMemoryDunningConfigRepository();
+      await dunningConfigRepo.upsert(
+        makeConfig({
+          reminderSteps: [
+            { offsetDays: 3, channel: 'sms' },
+            { offsetDays: 7, channel: 'email' },
+          ],
+        }),
+      );
+
+      await runOverdueInvoiceSweep({
+        ...deps(async () => ['t1']),
+        proposalRepo,
+        dunningEventRepo,
+        dunningConfigRepo,
+      });
+
+      const proposals = await proposalRepo.findByStatus('t1', 'ready_for_review');
+      const reminders = proposals.filter((p) => p.proposalType === 'send_payment_reminder');
+      expect(reminders).toHaveLength(2);
+      expect(reminders.map((r) => r.payload.stepKey).sort()).toEqual(['3:sms', '7:email']);
+      reminders.forEach((r) => expect(r.payload.invoiceId).toBe(invoice.id));
+
+      const events = await dunningEventRepo.findByInvoice('t1', invoice.id);
+      expect(events.filter((e) => e.kind === 'reminder')).toHaveLength(2);
+    });
+
+    it('is idempotent — a second sweep raises no duplicate reminder proposals', async () => {
+      await seedOverdueInvoice('t1');
+      const proposalRepo = new InMemoryProposalRepository();
+      const dunningEventRepo = new InMemoryDunningEventRepository();
+      const dunningConfigRepo = new InMemoryDunningConfigRepository();
+      await dunningConfigRepo.upsert(
+        makeConfig({
+          reminderSteps: [
+            { offsetDays: 3, channel: 'sms' },
+            { offsetDays: 7, channel: 'email' },
+          ],
+        }),
+      );
+      const sweepDeps = {
+        ...deps(async () => ['t1']),
+        proposalRepo,
+        dunningEventRepo,
+        dunningConfigRepo,
+      };
+
+      await runOverdueInvoiceSweep(sweepDeps);
+      await runOverdueInvoiceSweep(sweepDeps);
+
+      const reminders = (await proposalRepo.findByStatus('t1', 'ready_for_review')).filter(
+        (p) => p.proposalType === 'send_payment_reminder',
+      );
+      expect(reminders).toHaveLength(2); // not 4
+    });
+
+    it('falls back to the default cadence (single 3-day SMS) when no config exists', async () => {
+      await seedOverdueInvoice('t1');
+      const proposalRepo = new InMemoryProposalRepository();
+      const dunningEventRepo = new InMemoryDunningEventRepository();
+
+      // No dunningConfigRepo → defaultDunningConfig.
+      await runOverdueInvoiceSweep({
+        ...deps(async () => ['t1']),
+        proposalRepo,
+        dunningEventRepo,
+      });
+
+      const reminders = (await proposalRepo.findByStatus('t1', 'ready_for_review')).filter(
+        (p) => p.proposalType === 'send_payment_reminder',
+      );
+      expect(reminders).toHaveLength(1);
+      expect(reminders[0].payload.stepKey).toBe('3:sms');
+    });
+
+    it('raises a late fee as a money proposal and NEVER applies money in the sweep', async () => {
+      const invoice = await seedOverdueInvoice('t1');
+      const proposalRepo = new InMemoryProposalRepository();
+      const dunningEventRepo = new InMemoryDunningEventRepository();
+      const dunningConfigRepo = new InMemoryDunningConfigRepository();
+      await dunningConfigRepo.upsert(
+        makeConfig({
+          reminderSteps: [],
+          lateFeeType: 'flat',
+          lateFeeValueCents: 2500,
+          lateFeeGraceDays: 0,
+        }),
+      );
+
+      await runOverdueInvoiceSweep({
+        ...deps(async () => ['t1']),
+        proposalRepo,
+        dunningEventRepo,
+        dunningConfigRepo,
+      });
+
+      const proposals = await proposalRepo.findByStatus('t1', 'ready_for_review');
+      const fees = proposals.filter((p) => p.proposalType === 'apply_late_fee');
+      expect(fees).toHaveLength(1);
+      expect(fees[0].payload).toMatchObject({ invoiceId: invoice.id, feeCents: 2500 });
+      // Money invariant: the sweep only PROPOSES — the invoice is untouched
+      // (no fee line, amount due unchanged) until the owner approves.
+      const after = await invoiceRepo.findById('t1', invoice.id);
+      expect(after!.amountDueCents).toBe(10000);
+      expect(after!.lineItems).toHaveLength(0);
+    });
+
+    it('isolates dunning across tenants — each proposal targets its own tenant’s invoice', async () => {
+      const inv1 = await seedOverdueInvoice('t1');
+      const inv2 = await seedOverdueInvoice('t2');
+      const proposalRepo = new InMemoryProposalRepository();
+      const dunningEventRepo = new InMemoryDunningEventRepository();
+
+      await runOverdueInvoiceSweep({
+        ...deps(async () => ['t1', 't2']),
+        proposalRepo,
+        dunningEventRepo,
+      });
+
+      const t1 = await proposalRepo.findByStatus('t1', 'ready_for_review');
+      const t2 = await proposalRepo.findByStatus('t2', 'ready_for_review');
+      expect(t1.every((p) => p.payload.invoiceId === inv1.id)).toBe(true);
+      expect(t2.every((p) => p.payload.invoiceId === inv2.id)).toBe(true);
+      // Ledger is tenant-scoped: t1's events never reference t2's invoice.
+      const t1Events = await dunningEventRepo.findByInvoice('t1', inv2.id);
+      expect(t1Events).toHaveLength(0);
+    });
   });
 });

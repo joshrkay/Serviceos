@@ -1,5 +1,7 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useUser } from '@clerk/clerk-react';
 import { apiFetch } from '../../utils/api-fetch';
+import { firstNameFromUser } from '../../utils/greeting';
 import {
   Send, Mic, Paperclip, Sparkles, Check, Zap,
   Square, Image, FileText, X, ThumbsUp, ThumbsDown,
@@ -262,6 +264,17 @@ function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
                 });
                 if (!response.ok) {
                   throw new Error(`Approve failed: ${response.status} ${response.statusText}`);
+                }
+              }}
+              onReject={async () => {
+                // Same authenticated client + throw-on-failure contract as
+                // approve: AIProposalCard reverts its "Rejected" state and
+                // shows an error toast when this rejects.
+                const response = await apiFetch(`/api/proposals/${msg.proposal!.id}/reject`, {
+                  method: 'POST',
+                });
+                if (!response.ok) {
+                  throw new Error(`Reject failed: ${response.status} ${response.statusText}`);
                 }
               }}
             />
@@ -697,6 +710,19 @@ function AttachmentPicker({ onSelect, onClose }: {
 
 // ─── Main Page ──────────────────────────────────────────────────
 export function AssistantPage() {
+  const { user } = useUser();
+  const ownerFirstName = useMemo(
+    () => firstNameFromUser(user?.fullName, user?.primaryEmailAddress?.emailAddress),
+    [user?.fullName, user?.primaryEmailAddress?.emailAddress],
+  );
+  const welcomeMessage = useMemo(
+    () =>
+      ownerFirstName === 'there'
+        ? "Hi! I'm your AI assistant. I can help you manage jobs, create estimates, schedule appointments, and more. What can I help you with?"
+        : `Hi ${ownerFirstName}! I'm your AI assistant. I can help you manage jobs, create estimates, schedule appointments, and more. What can I help you with?`,
+    [ownerFirstName],
+  );
+
   const [messages, setMessages]       = useState<Message[]>([]);
   const [input, setInput]             = useState('');
   const [typing, setTyping]           = useState(false);
@@ -730,11 +756,11 @@ export function AssistantPage() {
       setMessages([{
         id: 'welcome',
         role: 'assistant' as const,
-        content: "Hi! I'm your AI assistant. I can help you manage jobs, create estimates, schedule appointments, and more. What can I help you with?",
+        content: welcomeMessage,
         time: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
       }]);
     }
-  }, [convLoading, conversation, convError]);
+  }, [convLoading, conversation, convError, welcomeMessage]);
 
   // Auto-submit from voice bar ?q= param
   useEffect(() => {

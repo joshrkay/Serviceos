@@ -1,66 +1,46 @@
-# Intent Utterance Corpus
+# ServiceOS Voice Corpus (`data/corpus/`)
 
-`utterances.jsonl` is the labeled training/eval corpus for the ServiceOS voice
-agent. One JSON object per line.
+Launch-grade training/eval corpus for the inbound voice agent. Everything
+here is **synthetic** (no PII, no scraped copyrighted text) and **reproducible**
+from the seed files via the data pipeline.
 
-## Schema
+## Layout
 
-```jsonc
-{
-  "utterance": "Can I schedule a plumber for tomorrow morning? My sink is clogged.",
-  "intent": "create_appointment",          // must be a behavior id in data/behaviors.yaml
-  "slots": {                                  // string→string; critical slots: name,
-    "service_type": "plumbing",               //   address, service_type, time_window,
-    "time_window": "tomorrow morning",        //   problem_description
-    "problem_description": "kitchen sink clogged"
-  },
-  "source": "curated",                       // curated | template_augmented | llm_paraphrase
-  "confidence": 1.0,                          // label confidence in [0,1]
-  "reviewed_by_human": true
-}
-```
-
-Validated by `scripts/data-pipeline/validate-utterances.ts` (zod schema + all
-corpus invariants).
-
-## Provenance & the meaning of `reviewed_by_human`
-
-This is important and stated plainly so the flag is never mistaken for something
-it isn't:
-
-- **`source: "curated"` / `reviewed_by_human: true`** — hand-authored and
-  curated by the human-in-the-loop running this corpus pass. These reflect how
-  real trades customers/operators speak (terse, rambling, regional, EN/ES
-  code-switching). `reviewed_by_human: true` means **a human wrote/curated this
-  row during the pass** — it is NOT a claim of independent third-party QA.
-- **`source: "template_augmented"` / `reviewed_by_human: false`** —
-  deterministically derived from curated seeds by
-  `scripts/data-pipeline/generate-utterances.ts` (opener/closer variation,
-  domain-synonym swaps, slot-value swaps). Clearly synthetic; never marked
-  reviewed.
-- **`source: "llm_paraphrase"`** — reserved for the credential-gated
-  claude-sonnet-4-5 paraphrase path (see the comment block at the bottom of
-  `generate-utterances.ts`). Not produced in the offline sandbox. When produced,
-  ≥20% must be human-reviewed before entering the eval split.
-
-## Invariants (enforced in CI by validate-utterances.ts)
-
-- ≥ 3,000 rows total.
-- Every behavior (all 41 intents) has ≥ 50 examples.
-- `reviewed_by_human` share ≥ 20% of the corpus (backed by genuine curated rows).
-- Schema valid on every row; `intent` ∈ `data/behaviors.yaml`.
-- No exact (normalized) duplicates and no near-duplicates (offline cosine > 0.95).
-
-## Append-only discipline
-
-`utterances.jsonl` is append-only. Re-running `generate-utterances.ts`
-regenerates the file deterministically from the curated seeds; to change an
-existing label, edit the curated seed (`scripts/data-pipeline/curated-seed*.ts`)
-and regenerate, or write a migration script — do not hand-edit emitted rows.
+| File | What | Rows |
+|------|------|------|
+| `behaviors.yaml` | Intent/behavior taxonomy (source of truth, 35 behaviors) | — |
+| `utterances.jsonl` | English intent utterances | 1,820 |
+| `utterances_es.jsonl` | Spanish + code-switch utterances | 1,400 |
+| `edge_cases.jsonl` | Accent / panic / noise / repair / wrong-number fixtures | 157 |
+| `negatives.jsonl` | Telemarketer / employment / survey / kids (never book) | 62 |
+| `slot_fixtures/{address,time,phone,service}.jsonl` | Slot-extraction gold | 178 |
+| `seeds/` | Hand-authored templates + filler banks the generator expands | — |
 
 ## Regenerate
 
 ```bash
-npx tsx scripts/data-pipeline/generate-utterances.ts
-npx tsx scripts/data-pipeline/validate-utterances.ts
+pnpm corpus:build        # generate utterances + build fixtures
+pnpm test:corpus-schema  # schema + floors validate
+pnpm test:dedup          # no exact dupes; near-dupes flagged
+pnpm test:pii-leakage    # HARD STOP on any PII
 ```
+
+## Evaluate
+
+```bash
+pnpm eval:full           # intent + slots + edge + negatives + spanish-gap
+pnpm eval:edge-cases     # every edge category hits its expected_handling
+pnpm eval:negatives      # zero booking-intent classifications
+pnpm eval:spanish        # ES accuracy within 5pp of EN
+```
+
+Results land in `eval-results/<YYYY-MM-DD>/` (`metrics.json`, `confusion.csv`,
+`failures.jsonl`). The 20% test split is frozen per-row by `fnv1a(id) % 5`, so
+the held-out set never drifts and regressions are detectable.
+
+## Editing rules (see repo `FORBIDDEN` policy)
+
+- Never overwrite labeled rows in place — version files (`utterances.v2.jsonl`).
+- No PII, ever. Phones must use a `555` block; addresses/names are synthetic.
+- Synthetic rows are not promoted to "reviewed" without `reviewed_by_human=true`.
+- New behaviors go through `TAXONOMY_GAPS.md` review before entering `behaviors.yaml`.

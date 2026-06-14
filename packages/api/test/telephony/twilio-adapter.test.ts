@@ -4,6 +4,7 @@ import {
   buildTwiML,
   xmlEscape,
   buildTelephonyGreeting,
+  injectSafetySayLines,
 } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -13,11 +14,19 @@ import {
   type OnCallEntry,
 } from '../../src/oncall/rotation';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
-import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { InMemoryProposalRepository, createProposal } from '../../src/proposals/proposal';
 import { InMemoryLeadRepository } from '../../src/leads/lead';
 import { InMemoryVoiceSessionRepository } from '../../src/voice/voice-session';
 import { MEDIA_STREAM_PATH } from '../../src/telephony/media-streams/twilio-mediastream-server';
 import { InMemorySettingsRepository, type TenantSettings } from '../../src/settings/settings';
+import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
+import type { Appointment } from '../../src/appointments/appointment';
+import { InMemoryJobRepository, type Job } from '../../src/jobs/job';
+import { InMemoryDailyDigestRepository } from '../../src/digest/digest-service';
+import { InMemoryEstimateRepository, type Estimate } from '../../src/estimates/estimate';
+import { InMemoryInvoiceRepository, type Invoice } from '../../src/invoices/invoice';
+import type { DocumentTotals } from '../../src/shared/billing-engine';
+import { InMemoryDroppedCallRecoveryRepository } from '../../src/sms/recovery/scheduler';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -651,6 +660,189 @@ describe('TwilioGatherAdapter.handleGather', () => {
     }
   });
 
+  describe('Phase-2 Track A owner lookup wiring', () => {
+    const tenantId = 'tenant-owner';
+
+    function advanceToIntentCapture(session: Awaited<ReturnType<VoiceSessionStore['get']>>) {
+      if (!session) throw new Error('missing session');
+      session.machine.dispatch({ type: 'incoming_call', tenantId, callSid: 'CA-owner', from: '+15125550111', to: '+15125550000' });
+      session.machine.dispatch({ type: 'greeted_ok' });
+      session.machine.dispatch({ type: 'caller_known', customerId: 'cust-temp' });
+      session.customerId = undefined;
+    }
+
+    function totals(totalCents: number): DocumentTotals {
+      return {
+        subtotalCents: totalCents,
+        discountCents: 0,
+        taxRateBps: 0,
+        taxableSubtotalCents: totalCents,
+        taxCents: 0,
+        totalCents,
+      };
+    }
+
+    async function ownerAdapter(intentType: string, ownerSession = true, extendedIntents = true) {
+      const store = new VoiceSessionStore();
+      const gateway = makeGatewayReturning(JSON.stringify({ intentType, confidence: 0.96 }));
+      const appointmentRepo = new InMemoryAppointmentRepository();
+      const jobRepo = new InMemoryJobRepository();
+      const proposalRepo = new InMemoryProposalRepository();
+      const dailyDigestRepo = new InMemoryDailyDigestRepository();
+      const estimateRepo = new InMemoryEstimateRepository();
+      const invoiceRepo = new InMemoryInvoiceRepository();
+      const droppedCallRecoveryRepo = new InMemoryDroppedCallRecoveryRepository();
+      const adapter = new TwilioGatherAdapter({
+        store,
+        gateway,
+        businessName: 'Acme Plumbing',
+        publicBaseUrl: 'https://example.com',
+        appointmentRepo,
+        jobRepo,
+        proposalRepo,
+        dailyDigestRepo,
+        estimateRepo,
+        invoiceRepo,
+        droppedCallRecoveryRepo,
+      });
+      const session = store.create(tenantId, 'telephony', {
+        callSid: `CA-${intentType}`,
+        ...(ownerSession ? { ownerSession: true } : {}),
+        ...(extendedIntents ? { extendedIntents: true } : {}),
+      });
+      advanceToIntentCapture(session);
+      return {
+        adapter,
+        session,
+        appointmentRepo,
+        jobRepo,
+        proposalRepo,
+        dailyDigestRepo,
+        estimateRepo,
+        invoiceRepo,
+        droppedCallRecoveryRepo,
+      };
+    }
+
+    it.each([
+      ['lookup_day_overview', 'You have 1 appointment today'],
+      ['lookup_digest', 'Owner digest: revenue was strong'],
+      ['lookup_pending_items', '1 estimate is out waiting on a yes'],
+    ])('owner session dispatches %s without a customerId and speaks the summary', async (intentType, expected) => {
+      const deps = await ownerAdapter(intentType);
+      await deps.jobRepo.create({
+        id: 'job-owner-1',
+        tenantId,
+        customerId: 'cust-1',
+        locationId: 'loc-1',
+        jobNumber: 'JOB-1',
+        summary: 'Main drain repair',
+        status: 'scheduled',
+        priority: 'normal',
+        createdBy: 'u1',
+        createdAt: new Date('2026-06-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-06-01T00:00:00.000Z'),
+      } as Job);
+      await deps.appointmentRepo.create({
+        id: 'appt-owner-1',
+        tenantId,
+        jobId: 'job-owner-1',
+        scheduledStart: new Date(),
+        scheduledEnd: new Date(Date.now() + 60_000),
+        status: 'scheduled',
+        holdPendingApproval: false,
+        createdBy: 'u1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as Appointment);
+      await deps.proposalRepo.create(createProposal({
+        tenantId,
+        proposalType: 'draft_invoice',
+        payload: {},
+        summary: 'Needs approval',
+        createdBy: 'u1',
+      }));
+      await deps.dailyDigestRepo.upsert(
+        tenantId,
+        new Date().toISOString().slice(0, 10),
+        {} as Parameters<InMemoryDailyDigestRepository['upsert']>[2],
+        'Owner digest: revenue was strong',
+      );
+      await deps.estimateRepo.create({
+        id: 'est-owner-1',
+        tenantId,
+        jobId: 'job-owner-1',
+        estimateNumber: 'EST-1',
+        status: 'sent',
+        lineItems: [],
+        totals: totals(12300),
+        sentAt: new Date(Date.now() - 86_400_000),
+        version: 1,
+        createdBy: 'u1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as Estimate);
+      await deps.invoiceRepo.create({
+        id: 'inv-owner-1',
+        tenantId,
+        jobId: 'job-owner-1',
+        invoiceNumber: 'INV-1',
+        status: 'open',
+        lineItems: [],
+        totals: totals(45600),
+        amountPaidCents: 0,
+        amountDueCents: 45600,
+        createdBy: 'u1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as Invoice);
+
+      const xml = await deps.adapter.handleGather({
+        sessionId: deps.session.id,
+        callSid: `CA-${intentType}`,
+        speechResult: 'owner lookup please',
+        confidence: 0.95,
+        tenantId,
+      });
+
+      expect(xml).toContain(expected);
+      expect(xml).toContain('Anything else I can help you with?');
+    });
+
+    it.each(['lookup_day_overview', 'lookup_digest', 'lookup_pending_items'])(
+      'non-owner session refuses %s and speaks the existing lookup fallback',
+      async (intentType) => {
+        const deps = await ownerAdapter(intentType, false);
+        const xml = await deps.adapter.handleGather({
+          sessionId: deps.session.id,
+          callSid: `CA-${intentType}-non-owner`,
+          speechResult: 'owner lookup please',
+          confidence: 0.95,
+          tenantId,
+        });
+
+        expect(xml).toContain('I&apos;m having trouble pulling that up right now');
+        expect(xml).not.toContain('Owner digest: revenue was strong');
+      },
+    );
+
+    it('flag-off owner session refuses a forced lookup_digest classification without calling the skill', async () => {
+      const deps = await ownerAdapter('lookup_digest', true, false);
+      const findLatest = vi.spyOn(deps.dailyDigestRepo, 'findLatest');
+
+      const xml = await deps.adapter.handleGather({
+        sessionId: deps.session.id,
+        callSid: 'CA-lookup_digest-flag-off-owner',
+        speechResult: 'read me my day',
+        confidence: 0.95,
+        tenantId,
+      });
+
+      expect(xml).toContain('I&apos;m having trouble pulling that up right now');
+      expect(findLatest).not.toHaveBeenCalled();
+    });
+  });
+
   it('classifies a clear utterance and advances FSM through intent_confirm', async () => {
     const xml = await adapter.handleGather({
       sessionId,
@@ -708,6 +900,155 @@ describe('TwilioGatherAdapter.handleGather', () => {
     const snap = await s2.snapshot(sid);
     expect(snap?.state).toBe('intent_capture'); // reprompt, not escalated yet
     expect(xml).toContain('<Gather');
+  });
+
+  it('flag-off live calls omit extendedIntents from classifier context and resolve the flag once per call', async () => {
+    const extendedIntentsEnabled = vi.fn(async () => false);
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0.2}');
+    const store = new VoiceSessionStore();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      extendedIntentsEnabled,
+    });
+    await adapter.handleInbound({
+      callSid: 'CA-flag-off',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    const sid = Array.from((store as unknown as { sessions: Map<string, unknown> }).sessions.keys())[0] as string;
+    const sess = await store.get(sid);
+    if (sess && sess.machine.currentState === 'ask_caller') {
+      sess.machine.dispatch({ type: 'caller_known', customerId: 'c1' });
+    }
+
+    await adapter.handleGather({
+      sessionId: sid,
+      callSid: 'CA-flag-off',
+      speechResult: "What's my day look like?",
+      confidence: 0.95,
+      tenantId: 'tenant-abc',
+    });
+
+    expect(extendedIntentsEnabled).toHaveBeenCalledTimes(1);
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+    expect(systemMessages).toHaveLength(1);
+    expect(systemMessages[0].content).not.toContain('lookup_day_overview');
+  });
+
+  it('flag-on customer calls keep the legacy classifier prompt while flag-on owner calls append extended intents', async () => {
+    const settingsRepo = new InMemorySettingsRepository();
+    const now = new Date();
+    await settingsRepo.create({
+      id: 'settings-owner-extended',
+      tenantId: 'tenant-extended',
+      businessName: 'Acme Plumbing',
+      timezone: 'America/Phoenix',
+      estimatePrefix: 'EST-',
+      invoicePrefix: 'INV-',
+      nextEstimateNumber: 1,
+      nextInvoiceNumber: 1,
+      defaultPaymentTermDays: 30,
+      ownerPhone: '+15125550100',
+      createdAt: now,
+      updatedAt: now,
+    } as TenantSettings);
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0.2}');
+    const store = new VoiceSessionStore();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      settingsRepo,
+      extendedIntentsEnabled: vi.fn(async () => true),
+    });
+
+    await adapter.handleInbound({
+      callSid: 'CA-flag-on-customer',
+      from: '+15125559999',
+      to: '+15125550000',
+      tenantId: 'tenant-extended',
+    });
+    const customerSession = store.findByCallSid('CA-flag-on-customer')!;
+    if (customerSession.machine.currentState === 'ask_caller') {
+      customerSession.machine.dispatch({ type: 'caller_known', customerId: 'cust-flag-on' });
+    }
+    await adapter.handleGather({
+      sessionId: customerSession.id,
+      callSid: 'CA-flag-on-customer',
+      speechResult: 'tell me what is going on',
+      confidence: 0.95,
+      tenantId: 'tenant-extended',
+    });
+
+    await adapter.handleInbound({
+      callSid: 'CA-flag-on-owner',
+      from: '+15125550100',
+      to: '+15125550000',
+      tenantId: 'tenant-extended',
+    });
+    const ownerSession = store.findByCallSid('CA-flag-on-owner')!;
+    if (ownerSession.machine.currentState === 'ask_caller') {
+      ownerSession.machine.dispatch({ type: 'caller_known', customerId: 'cust-temp' });
+      ownerSession.customerId = undefined;
+    }
+    await adapter.handleGather({
+      sessionId: ownerSession.id,
+      callSid: 'CA-flag-on-owner',
+      speechResult: 'tell me what is going on',
+      confidence: 0.95,
+      tenantId: 'tenant-extended',
+    });
+
+    const calls = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls;
+    const customerSystemMessages = calls[0][0].messages.filter((m: { role: string }) => m.role === 'system');
+    const ownerSystemMessages = calls[1][0].messages.filter((m: { role: string }) => m.role === 'system');
+    expect(customerSystemMessages).toHaveLength(1);
+    expect(customerSystemMessages[0].content).not.toContain('lookup_day_overview');
+    expect(ownerSystemMessages.some((m: { content: string }) => m.content.includes('lookup_day_overview'))).toBe(true);
+  });
+
+  it('extended-intents resolver error is non-fatal and resolves false for the session', async () => {
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0.2}');
+    const store = new VoiceSessionStore();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      extendedIntentsEnabled: vi.fn(async () => {
+        throw new Error('flag store down');
+      }),
+    });
+    await adapter.handleInbound({
+      callSid: 'CA-flag-error',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    const sid = Array.from((store as unknown as { sessions: Map<string, unknown> }).sessions.keys())[0] as string;
+    const sess = await store.get(sid);
+    if (sess && sess.machine.currentState === 'ask_caller') {
+      sess.machine.dispatch({ type: 'caller_known', customerId: 'c1' });
+    }
+
+    await adapter.handleGather({
+      sessionId: sid,
+      callSid: 'CA-flag-error',
+      speechResult: "What's my day look like?",
+      confidence: 0.95,
+      tenantId: 'tenant-abc',
+    });
+
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+    expect(systemMessages).toHaveLength(1);
+    expect(systemMessages[0].content).not.toContain('lookup_day_overview');
   });
 
   it('emergency_dispatch fast-paths to escalating and skips intent_confirm', async () => {
@@ -1143,5 +1484,359 @@ describe('TwilioGatherAdapter.processCallerUtterance — frustration detector', 
       expect.objectContaining({ type: 'frustration_detected', source: 'keyword' }),
     );
     expect(sideEffects.length).toBeGreaterThan(0);
+  });
+});
+
+// ─── RV-140/RV-142 — emergency keyword interrupt (shared safety scan) ────────
+
+describe('RV-140 — deterministic emergency scan (both transcript entry points)', () => {
+  it('processCallerUtterance (media-streams path): escalates on emergency keyword without any LLM call, 911 line first', async () => {
+    const { adapter, store, gateway } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-1' });
+
+    const sideEffects = await adapter.processCallerUtterance({
+      sessionId: session.id,
+      callSid: 'CA-em-1',
+      speechResult: 'I think we have a gas leak in the basement',
+      tenantId: 'tenant-t1',
+    });
+
+    // No LLM call of any kind happened (scan runs BEFORE the classifier).
+    expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(session.machine.currentState).toBe('escalating');
+    const tts = sideEffects.filter((fx) => fx.type === 'tts_play');
+    expect((tts[0]?.payload as { text: string }).text).toContain('911');
+  });
+
+  it('handleGather (PSTN path): the same shared scan fires and the TwiML speaks the 911 line', async () => {
+    const { adapter, store, gateway } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-2' });
+
+    const twiml = await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-em-2',
+      speechResult: 'the outlet is sparking and I smell electrical burning',
+      confidence: 0.9,
+      tenantId: 'tenant-t1',
+    });
+
+    expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(session.machine.currentState).toBe('escalating');
+    expect(twiml).toContain('call 911');
+  });
+
+  it('emergency utterance while already escalating falls through (no double-page)', async () => {
+    const { adapter, store } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-em-3' });
+    // First hit moves the FSM to escalating.
+    await adapter.processCallerUtterance({
+      sessionId: session.id,
+      callSid: 'CA-em-3',
+      speechResult: 'gas leak',
+      tenantId: 'tenant-t1',
+    });
+    const dispatchSpy = vi.spyOn(session.machine, 'dispatch');
+    await adapter.processCallerUtterance({
+      sessionId: session.id,
+      callSid: 'CA-em-3',
+      speechResult: 'I said there is a gas leak',
+      tenantId: 'tenant-t1',
+    });
+    // The second emergency dispatch is idempotent (empty effects) and the
+    // turn falls through to the normal pipeline — no second notify_oncall.
+    const emergencyCalls = dispatchSpy.mock.calls.filter(
+      ([ev]) => (ev as { type: string }).type === 'emergency_detected',
+    );
+    expect(emergencyCalls.length).toBe(1);
+    const results = dispatchSpy.mock.results.filter((_, i) =>
+      (dispatchSpy.mock.calls[i][0] as { type: string }).type === 'emergency_detected');
+    expect(results[0].value).toEqual([]);
+  });
+});
+
+describe('RV-142 — injectSafetySayLines', () => {
+  it('prepends safety-marked tts lines as <Say> before the <Dial> verb', () => {
+    const dial =
+      '<?xml version="1.0" encoding="UTF-8"?><Response><Dial timeout="20" action="/api/telephony/dial-result?sid=s1" method="POST"><Number>+15125550100</Number></Dial></Response>';
+    const out = injectSafetySayLines(
+      dial,
+      [
+        { type: 'tts_play', payload: { text: 'If anyone is in immediate danger, hang up and call 911.', priority: 'safety' } },
+        { type: 'tts_play', payload: { text: 'Connecting you now.' } },
+      ],
+      {},
+    );
+    const sayIdx = out.indexOf('call 911');
+    const dialIdx = out.indexOf('<Dial');
+    expect(sayIdx).toBeGreaterThan(-1);
+    expect(sayIdx).toBeLessThan(dialIdx);
+    // Non-safety copy is NOT injected (preserves existing transfer behavior).
+    expect(out).not.toContain('Connecting you now.');
+  });
+
+  it('returns the document unchanged when no safety lines are present', () => {
+    const dial = '<?xml version="1.0" encoding="UTF-8"?><Response><Dial>x</Dial></Response>';
+    expect(
+      injectSafetySayLines(dial, [{ type: 'tts_play', payload: { text: 'hi' } }], {}),
+    ).toBe(dial);
+  });
+
+  it('speaks the catalogued Spanish 911/transfer lines for an es session', () => {
+    const dial =
+      '<?xml version="1.0" encoding="UTF-8"?><Response><Dial timeout="20" action="/api/telephony/dial-result?sid=s1" method="POST"><Number>+15125550100</Number></Dial></Response>';
+    const out = injectSafetySayLines(
+      dial,
+      [
+        { type: 'tts_play', payload: { text: 'If anyone is in immediate danger, hang up and call 911.', priority: 'safety' } },
+        { type: 'tts_play', payload: { text: "This sounds like an emergency. I'm connecting you with our on-call dispatcher immediately.", priority: 'safety' } },
+      ],
+      { language: 'es' },
+    );
+    // SENTENCE_CATALOG_ES entries, selected by the session language — the
+    // same selector the Polly voice switch uses.
+    expect(out).toContain('llame al 911');
+    expect(out).toContain('despachador de guardia');
+    expect(out).not.toContain('hang up and call 911');
+    expect(out).toContain('Polly.Mia-Neural');
+    // Still spoken before the bridge.
+    expect(out.indexOf('llame al 911')).toBeLessThan(out.indexOf('<Dial'));
+  });
+
+  it('keeps the English 911 line for an en session', () => {
+    const dial = '<?xml version="1.0" encoding="UTF-8"?><Response><Dial>x</Dial></Response>';
+    const out = injectSafetySayLines(
+      dial,
+      [{ type: 'tts_play', payload: { text: 'If anyone is in immediate danger, hang up and call 911.', priority: 'safety' } }],
+      { language: 'en' },
+    );
+    expect(out).toContain('hang up and call 911');
+    expect(out).not.toContain('llame al 911');
+  });
+});
+
+// ─── RV-140 (interim) — streaming interim emergency scan ────────────────────
+
+describe('RV-140 — scanInterimForEmergency (streaming interims)', () => {
+  it('an interim "gas leak" escalates immediately — before any final transcript', async () => {
+    const { adapter, store, gateway } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-int-1' });
+
+    const effects = await adapter.scanInterimForEmergency({
+      sessionId: session.id,
+      speechResult: 'there is a gas leak',
+      tenantId: 'tenant-t1',
+    });
+
+    expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(session.machine.currentState).toBe('escalating');
+    expect(effects).not.toBeNull();
+    const tts = (effects ?? []).filter((fx) => fx.type === 'tts_play');
+    expect((tts[0]?.payload as { text: string }).text).toContain('911');
+  });
+
+  it('a non-emergency interim returns null and never touches the FSM (objection scan stays finals-only)', async () => {
+    const { adapter, store } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-int-2' });
+    const dispatchSpy = vi.spyOn(session.machine, 'dispatch');
+
+    // Contains a recording-objection phrase — interims must NOT pause
+    // recordings; only the emergency keyword table applies here.
+    const effects = await adapter.scanInterimForEmergency({
+      sessionId: session.id,
+      speechResult: 'please stop recording me',
+      tenantId: 'tenant-t1',
+    });
+
+    expect(effects).toBeNull();
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    expect(session.machine.currentState).not.toBe('escalating');
+  });
+
+  it('the final transcript after an interim-fired emergency does not double-page (FSM idempotency)', async () => {
+    const { adapter, store } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-int-3' });
+
+    await adapter.scanInterimForEmergency({
+      sessionId: session.id,
+      speechResult: 'gas leak',
+      tenantId: 'tenant-t1',
+    });
+    expect(session.machine.currentState).toBe('escalating');
+
+    const dispatchSpy = vi.spyOn(session.machine, 'dispatch');
+    await adapter.processCallerUtterance({
+      sessionId: session.id,
+      callSid: 'CA-int-3',
+      speechResult: 'I said there is a gas leak in the basement',
+      tenantId: 'tenant-t1',
+    });
+
+    // The final's emergency dispatch is idempotent: empty effects, no
+    // second notify_oncall / page ladder.
+    const emergencyResults = dispatchSpy.mock.results.filter((_, i) =>
+      (dispatchSpy.mock.calls[i][0] as { type: string }).type === 'emergency_detected');
+    expect(emergencyResults).toHaveLength(1);
+    expect(emergencyResults[0].value).toEqual([]);
+  });
+
+  it('returns null for an unknown session', async () => {
+    const { adapter } = makeAdapter();
+    expect(
+      await adapter.scanInterimForEmergency({
+        sessionId: 'nope',
+        speechResult: 'gas leak',
+        tenantId: 'tenant-t1',
+      }),
+    ).toBeNull();
+  });
+});
+
+// ─── RV-115 — durable recovery context on telephony termination ─────────────
+
+describe('RV-115 — telephony termination persists the FSM snapshot', () => {
+  it('a dropped call schedules a durable recovery row with context', async () => {
+    const { InMemoryDroppedCallRecoveryRepository, DroppedCallScheduler } =
+      await import('../../src/sms/recovery/scheduler');
+    const recoveryRepo = new InMemoryDroppedCallRecoveryRepository();
+    const noopLogger = {
+      info: () => undefined,
+      warn: () => undefined,
+      error: () => undefined,
+      debug: () => undefined,
+    } as never;
+    const store = new VoiceSessionStore();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}'),
+      businessName: 'Acme',
+      droppedCallScheduler: new DroppedCallScheduler(recoveryRepo, noopLogger),
+    } as never);
+
+    // Establish the session via the stream inbound path so the caller-id
+    // map is populated (the durable row needs an E.164).
+    await adapter.handleInboundForStream({
+      callSid: 'CA-rv115',
+      from: '+15125550144',
+      tenantId: 'tenant-t1',
+    });
+    const session = store.findByCallSid('CA-rv115')!;
+    // Caller hangs up before saying anything → outcome 'dropped'.
+    session.machine.dispatch({ type: 'caller_hangup' });
+
+    adapter.finalizeTerminatedSession(session, [], 'caller_hangup');
+    // Scheduling is fire-and-forget — let the microtask settle.
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(recoveryRepo.rows).toHaveLength(1);
+    const row = recoveryRepo.rows[0];
+    expect(row.voiceSessionId).toBe(session.id);
+    expect(row.callerE164).toBe('+15125550144');
+    expect(row.context?.bucket).toBe('early');
+    expect(row.context?.proposalIds).toEqual([]);
+  });
+
+  it('a transferred call does NOT schedule recovery (detection rejects it)', async () => {
+    const { InMemoryDroppedCallRecoveryRepository, DroppedCallScheduler } =
+      await import('../../src/sms/recovery/scheduler');
+    const recoveryRepo = new InMemoryDroppedCallRecoveryRepository();
+    const noopLogger = {
+      info: () => undefined,
+      warn: () => undefined,
+      error: () => undefined,
+      debug: () => undefined,
+    } as never;
+    const store = new VoiceSessionStore();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGatewayReturning('{}'),
+      businessName: 'Acme',
+      droppedCallScheduler: new DroppedCallScheduler(recoveryRepo, noopLogger),
+    } as never);
+    await adapter.handleInboundForStream({
+      callSid: 'CA-rv115b',
+      from: '+15125550145',
+      tenantId: 'tenant-t1',
+    });
+    const session = store.findByCallSid('CA-rv115b')!;
+    // Mirror the dial-result success branch: synthetic proposal_queued +
+    // explicit 'transferred' reason → outcome 'completed'.
+    session.machine.dispatch({ type: 'proposal_queued', proposalId: 'transfer:CA-rv115b' });
+    adapter.finalizeTerminatedSession(session, [], 'transferred');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(recoveryRepo.rows).toHaveLength(0);
+  });
+});
+
+// ─── RV-130 — recording objection path (shared safety scan) ──────────────────
+
+describe('RV-130 — "stop recording" objection in the shared safety scan', () => {
+  async function makeObjectionFixture() {
+    const { InMemoryConsentEventRepository } = await import(
+      '../../src/compliance/consent-events'
+    );
+    const consentEvents = new InMemoryConsentEventRepository();
+    const pauseRecording = vi.fn(async () => undefined);
+    const auditRepo = new InMemoryAuditRepository();
+    const store = new VoiceSessionStore();
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme',
+      auditRepo,
+      consentEvents,
+      recordingControl: { pauseRecording },
+    } as never);
+    await adapter.handleInboundForStream({
+      callSid: 'CA-obj-1',
+      from: '+15125550133',
+      tenantId: 'tenant-t1',
+    });
+    const session = store.findByCallSid('CA-obj-1')!;
+    return { adapter, session, consentEvents, pauseRecording, auditRepo, gateway };
+  }
+
+  it('pauses the recording, ledgers the revocation, and acks — no LLM call', async () => {
+    const { adapter, session, consentEvents, pauseRecording, auditRepo, gateway } =
+      await makeObjectionFixture();
+    const stateBefore = session.machine.currentState;
+
+    const effects = await adapter.processCallerUtterance({
+      sessionId: session.id,
+      callSid: 'CA-obj-1',
+      speechResult: 'please stop recording this call',
+      tenantId: 'tenant-t1',
+    });
+
+    expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(pauseRecording).toHaveBeenCalledWith('CA-obj-1');
+    expect(consentEvents.rows).toHaveLength(1);
+    expect(consentEvents.rows[0]).toMatchObject({
+      kind: 'recording',
+      state: 'revoked',
+      source: 'voice',
+      voiceSessionId: session.id,
+    });
+    // The turn is consumed with the ack; FSM state is untouched.
+    expect(effects).toHaveLength(1);
+    expect((effects[0].payload as { text: string }).text).toContain('paused the recording');
+    expect(session.machine.currentState).toBe(stateBefore);
+    expect(
+      auditRepo.getAll().some((e) => e.eventType === 'recording_consent.revoked'),
+    ).toBe(true);
+  });
+
+  it('emergency keywords win the turn over an objection in the same chunk', async () => {
+    const { adapter, session, pauseRecording } = await makeObjectionFixture();
+    const effects = await adapter.processCallerUtterance({
+      sessionId: session.id,
+      callSid: 'CA-obj-1',
+      speechResult: 'stop recording — there is a gas leak in here',
+      tenantId: 'tenant-t1',
+    });
+    // Emergency consumed the turn (911 line first); objection deferred.
+    expect((effects.find((e) => e.type === 'tts_play')?.payload as { text: string }).text).toContain('911');
+    expect(pauseRecording).not.toHaveBeenCalled();
+    expect(session.machine.currentState).toBe('escalating');
   });
 });

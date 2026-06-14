@@ -1,13 +1,23 @@
 import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { LLMGateway } from '../ai/gateway/gateway';
-import { Proposal, ProposalRepository, createProposal, CreateProposalInput, ProposalType } from '../proposals/proposal';
+import { Proposal, ProposalRepository, createProposal, CreateProposalInput, ProposalType, actionClassForProposalType } from '../proposals/proposal';
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
+import { routeUnsupervisedProposal, confidenceMetaBlocksAutoApprove } from '../proposals/auto-approve';
+import { renderProposalSms, renderChainSms } from '../proposals/sms/render';
+import type { OutboundAnchorKind } from '../proposals/sms/sms-event';
+import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
+import type { AuditRepository } from '../audit/audit';
+import type { UnsupervisedProposalRouting } from '../settings/settings';
 import { ConflictError } from '../shared/errors';
 import { voiceProposalIdempotencyKey } from '../voice/voice-audit';
 import {
   classifyIntent,
+  isLookupIntent,
+  isExtendedIntent,
+  isVoiceApprovalIntent,
+  isVoiceEditIntent,
   ExtractedEntities,
   IntentClassification,
   IntentType,
@@ -34,6 +44,12 @@ import { SlotConflictChecker } from '../ai/tasks/slot-conflict-checker';
 import { AvailabilityFinder } from '../ai/tasks/availability-finder';
 import { AppointmentRepository } from '../appointments/appointment';
 import { JobRepository } from '../jobs/job';
+import { CatalogItemRepository } from '../catalog/catalog-item';
+import {
+  EntityCandidate,
+  EntityKind,
+  EntityResolver,
+} from '../ai/resolution/entity-resolver';
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
 import { CreateCustomerTaskHandler, TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
@@ -58,6 +74,14 @@ import {
   RequestFeedbackTaskHandler,
 } from '../ai/tasks/voice-extended-tasks';
 import { instrument } from '../monitoring/instrumentation';
+import {
+  ComplaintTaskHandler,
+  complaintSeverity,
+  COMPLAINT_HIGH_SEVERITY_REASON,
+} from '../ai/tasks/complaint-task';
+
+// Re-export for callers that import these from this module (e.g. router tests).
+export { complaintSeverity, COMPLAINT_HIGH_SEVERITY_REASON };
 
 /**
  * voice-action-router — the bridge between "Whisper gave us a
@@ -105,6 +129,22 @@ export interface VoiceActionRouterPayload {
  */
 export interface RecentReferentProvider {
   forConversation(tenantId: string, conversationId: string): Promise<ConversationReferent[]>;
+}
+
+export interface UnsupervisedRoutingDeps extends RouteUnsupervisedProposalDeps {
+  resolveOwnerPhone?: (tenantId: string) => Promise<string | null | undefined>;
+  resolveRouting?: (tenantId: string) => Promise<UnsupervisedProposalRouting | undefined>;
+  /**
+   * P2-034 — records the outbound proposal SMS (`proposal_sms_events`,
+   * kind `proposal_rendered`, or `review_required_rendered` for the RV-074
+   * low-confidence form) that anchors the inbound reply transport.
+   */
+  recordSmsEvent?: (args: {
+    tenantId: string;
+    proposalId: string;
+    body: string;
+    kind: OutboundAnchorKind;
+  }) => Promise<void>;
 }
 
 export interface VoiceActionRouterDeps {
@@ -194,6 +234,56 @@ export interface VoiceActionRouterDeps {
    * the flag. Optional, like every other dep here.
    */
   multiActionEnabled?: (tenantId: string) => Promise<boolean>;
+  /**
+   * P22 catalog grounding for the draft_invoice / draft_estimate
+   * handlers. When present, drafted line items are resolved against the
+   * tenant's active catalog and matched prices override the LLM's
+   * numbers (ambiguous → operator picks; uncatalogued → confidence
+   * capped below auto-approve). Optional so tests without a catalog
+   * keep the pre-P22 behavior.
+   */
+  catalogRepo?: CatalogItemRepository;
+  /**
+   * P8 — "three Bobs" closure. When present, the classifier's free-text
+   * customerName / jobReference are resolved to tenant-scoped IDs
+   * BEFORE the task handler runs: resolved → verified UUIDs land on the
+   * task context; ambiguous → a voice_clarification with the candidate
+   * list replaces the draft (no LLM drafting call is wasted);
+   * not_found → the raw reference is stamped on
+   * sourceContext.pendingReference for the review UI. Annotate-only:
+   * resolution never changes proposal status or approval logic.
+   * Production wires `PgEntityResolver` (pg_trgm); optional so tests
+   * without it keep the pre-resolver behavior.
+   */
+  entityResolver?: EntityResolver;
+  /**
+   * P12-004 — routes review-held proposals when no supervisor is present.
+   * Production sends a one-tap approval SMS for queue_and_sms tenants and
+   * records the unsupervised routing audit event. Optional for tests.
+   */
+  unsupervisedRouting?: UnsupervisedRoutingDeps;
+  /**
+   * RV-042 — review-time visibility of acceptance voiding: lets the
+   * update_estimate task handler read the targeted estimate and stamp the
+   * `_meta.markers` acceptance-void warning when it is currently accepted.
+   * Optional; absent -> marker skipped (execute-time audit still records it).
+   */
+  estimateRepo?: Pick<
+    import('../estimates/estimate').EstimateRepository,
+    'findById' | 'findByTenant'
+  >;
+  /**
+   * Phase-2 Track A — per-tenant opt-in for the extended operator intents
+   * (lookup_day_overview / lookup_digest / lookup_pending_items /
+   * complaint). Threaded as `ClassifyContext.extendedIntents` so the
+   * classifier appends the extra prompt section as a SEPARATE system
+   * message and enables the deterministic phrase short-circuits. When
+   * absent or falsy the classifier prompt stays byte-identical to the
+   * pre-Track-A prompt — voice-quality cassettes replay unchanged.
+   * Mirrors `multiActionEnabled`: optional, resolved once per message,
+   * non-fatal on resolver error.
+   */
+  extendedIntentsEnabled?: (tenantId: string) => Promise<boolean>;
 }
 
 // P11-001: lookup_* intents are READ-ONLY and never produce a
@@ -303,8 +393,8 @@ class IssueInvoiceTaskHandler implements TaskHandler {
 
 function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandler> {
   const handlers = new Map<ProposalType, TaskHandler>();
-  handlers.set('draft_invoice', new InvoiceTaskHandler(deps.gateway));
-  handlers.set('draft_estimate', new EstimateTaskHandler(deps.gateway));
+  handlers.set('draft_invoice', new InvoiceTaskHandler(deps.gateway, deps.catalogRepo));
+  handlers.set('draft_estimate', new EstimateTaskHandler(deps.gateway, deps.catalogRepo));
   handlers.set(
     'create_appointment',
     new CreateAppointmentAITaskHandler(
@@ -316,7 +406,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
     ),
   );
   handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway));
-  handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway));
+  handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo));
   handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo, deps.thresholdResolver));
   handlers.set('create_customer', new CreateCustomerTaskHandler());
   handlers.set('create_job', new CreateJobVoiceTaskHandler());
@@ -343,6 +433,12 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('log_time_entry', new LogTimeEntryTaskHandler());
   handlers.set('notify_delay', new NotifyDelayTaskHandler(deps.appointmentRepo, deps.jobRepo));
   handlers.set('request_feedback', new RequestFeedbackTaskHandler());
+  // RV-080 — complaint uses 'add_note' proposal type but needs its own
+  // handler (pinned-prefix note + companion callback). Registered under
+  // a synthetic key ('_complaint') so it doesn't collide with the plain
+  // add_note handler above. processSegment resolves it by intent name,
+  // not by proposal type, so the key here is just a stable map slot.
+  handlers.set('_complaint' as ProposalType, new ComplaintTaskHandler(deps.proposalRepo));
   return handlers;
 }
 
@@ -475,6 +571,91 @@ function entitiesForProposal(
   return payload;
 }
 
+/** Resolved-entity annotation for one utterance (see annotateResolvedEntities). */
+interface EntityAnnotation {
+  kind: 'ok';
+  resolved: { customerId?: string; jobId?: string };
+  pendingReferences: Array<{ kind: EntityKind; reference: string }>;
+}
+/** An ambiguous reference that must be clarified before drafting. */
+interface EntityAmbiguity {
+  kind: 'ambiguous';
+  entityKind: EntityKind;
+  reference: string;
+  candidates: EntityCandidate[];
+}
+
+/**
+ * Resolve the classifier's free-text entity references against
+ * tenant-scoped records (P8 "three Bobs"). Best-effort by design:
+ * a resolver failure logs a warning and behaves like 'skipped' —
+ * entity resolution must never block or fail a drafting pipeline that
+ * worked without it.
+ *
+ * The verified caller-ID identity is sacred: when `verifiedCustomerId`
+ * is present, the spoken customerName is NOT resolved (a caller saying
+ * a name must never reassign the proposal to a different customer).
+ */
+async function annotateResolvedEntities(
+  resolver: EntityResolver | undefined,
+  params: {
+    tenantId: string;
+    entities: ExtractedEntities | undefined;
+    verifiedCustomerId?: string;
+  },
+  log: Logger,
+): Promise<EntityAnnotation | EntityAmbiguity> {
+  const ok: EntityAnnotation = { kind: 'ok', resolved: {}, pendingReferences: [] };
+  if (!resolver || !params.entities) return ok;
+
+  const lookups: Array<{ kind: 'customer' | 'job'; reference: string }> = [];
+  if (params.entities.customerName && !params.verifiedCustomerId) {
+    lookups.push({ kind: 'customer', reference: params.entities.customerName });
+  }
+  if (params.entities.jobReference) {
+    lookups.push({ kind: 'job', reference: params.entities.jobReference });
+  }
+
+  for (const lookup of lookups) {
+    let result;
+    try {
+      result = await resolver.resolve({
+        tenantId: params.tenantId,
+        reference: lookup.reference,
+        kind: lookup.kind,
+      });
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      log.warn('voice-action-router: entity resolver failed, continuing unresolved', {
+        entityKind: lookup.kind,
+        error: error.message,
+      });
+      continue;
+    }
+    switch (result.kind) {
+      case 'resolved':
+        if (lookup.kind === 'customer') ok.resolved.customerId = result.candidate.id;
+        else ok.resolved.jobId = result.candidate.id;
+        break;
+      case 'ambiguous':
+        // First ambiguity wins — one clarification per utterance keeps
+        // the operator's feed to a single, answerable question.
+        return {
+          kind: 'ambiguous',
+          entityKind: lookup.kind,
+          reference: lookup.reference,
+          candidates: result.candidates,
+        };
+      case 'not_found':
+        ok.pendingReferences.push({ kind: lookup.kind, reference: lookup.reference });
+        break;
+      case 'skipped':
+        break;
+    }
+  }
+  return ok;
+}
+
 /**
  * Sanitize the classifier's free-text reasoning before persisting it
  * on a proposal. Bounds length and strips control characters so the
@@ -545,11 +726,23 @@ async function emitClarification(
      * must not collide on one key.
      */
     idempotencyKey?: string;
+    /**
+     * P8 — set when the intent classified fine but an entity reference
+     * matched several records ("three Bobs"). The clarification carries
+     * the candidate list so the review UI can render a one-tap picker.
+     */
+    entityAmbiguity?: {
+      entityKind: EntityKind;
+      reference: string;
+      candidates: EntityCandidate[];
+    };
   },
   log: Logger
 ): Promise<void> {
   const { tenantId, userId, transcript, classification, conversationId, recordingId } = input;
-  const reason = classification.unknownReason ?? 'unknown_intent';
+  const reason = input.entityAmbiguity
+    ? 'ambiguous_entity'
+    : (classification.unknownReason ?? 'unknown_intent');
 
   const suggestedIntents: string[] = [];
   if (classification.lowConfidenceIntent) {
@@ -576,6 +769,17 @@ async function emitClarification(
       : {}),
     ...(recordingId ? { recordingId } : {}),
     ...(conversationId ? { conversationId } : {}),
+    ...(input.entityAmbiguity
+      ? {
+          entityReference: input.entityAmbiguity.reference,
+          entityCandidates: input.entityAmbiguity.candidates.map((c) => ({
+            id: c.id,
+            label: c.label,
+            ...(c.hint ? { hint: c.hint } : {}),
+            score: c.score,
+          })),
+        }
+      : {}),
   };
 
   const tenantThresholdOverride = deps.thresholdResolver
@@ -588,12 +792,21 @@ async function emitClarification(
   // instead of writing a malformed proposal to storage.
   assertValidProposalPayload('voice_clarification', payload);
 
+  // Entity ambiguity is a different question than "didn't catch that" —
+  // the intent was understood; the operator just picks WHICH record.
+  const summary = input.entityAmbiguity
+    ? `Which ${input.entityAmbiguity.entityKind}? "${input.entityAmbiguity.reference}" matched ${input.entityAmbiguity.candidates.length} records`
+    : clarificationSummary(transcript);
+  const explanation = input.entityAmbiguity
+    ? `Heard the request, but "${input.entityAmbiguity.reference}" matches more than one ${input.entityAmbiguity.entityKind}. Tap the right one below.`
+    : clarificationExplanation(classification);
+
   const proposal = createProposal({
     tenantId,
     proposalType: 'voice_clarification',
     payload,
-    summary: clarificationSummary(transcript),
-    explanation: clarificationExplanation(classification),
+    summary,
+    explanation,
     confidenceScore: classification.confidence,
     sourceContext: {
       source: 'voice',
@@ -636,6 +849,8 @@ interface SegmentParams {
   recordingId?: string;
   customerId?: string;
   verticalPromptSection?: string;
+  /** Phase-2 Track A — tenant opted in to the extended operator intents. */
+  extendedIntents?: boolean;
   /**
    * When true (single-action path only), thread `recordingId` into the task
    * context — so the held-slot appointment is keyed `voice-hold:<recordingId>`
@@ -647,7 +862,13 @@ interface SegmentParams {
 }
 
 type SegmentOutcome =
-  | { kind: 'proposal'; proposal: Proposal; classification: IntentClassification }
+  | {
+      kind: 'proposal';
+      proposal: Proposal;
+      classification: IntentClassification;
+      /** Tenant-wide presence at routing time (P12-004 unsupervised routing). */
+      supervisorPresent: boolean;
+    }
   // The classifier could not route this segment — a voice_clarification
   // was emitted in its place (single path) or should be (chain path; see
   // processChain). `classification` is returned so the caller can decide.
@@ -676,7 +897,13 @@ async function processSegment(
 
   const classification = await classifyIntent(
     segmentText,
-    { tenantId, ...(params.verticalPromptSection ? { verticalPromptSection: params.verticalPromptSection } : {}) },
+    {
+      tenantId,
+      ...(params.verticalPromptSection ? { verticalPromptSection: params.verticalPromptSection } : {}),
+      // Phase-2 Track A — opt-in only: leaves the classifier prompt
+      // byte-identical for tenants without the flag (cassette hashes).
+      ...(params.extendedIntents ? { extendedIntents: true } : {}),
+    },
     deps.gateway,
   );
 
@@ -707,14 +934,132 @@ async function processSegment(
     return { kind: 'clarified', classification };
   }
 
+  // Phase-2 Track A — belt-and-braces gate: extended intents (complaint,
+  // lookup_day_overview, lookup_digest, lookup_pending_items) are ONLY
+  // actionable when the calling surface opted in via extendedIntentsEnabled.
+  // The classifier prompt gate (appending EXTENDED_INTENTS_PROMPT_SECTION
+  // only when opted in) is the primary defence; this re-check is the
+  // backstop against LLM hallucination on a non-opted surface. Route to
+  // the clarification path (same as 'unknown') rather than silently
+  // skipping, so the caller gets an auditable response.
+  // Must run BEFORE the isLookupIntent check so that hallucinated
+  // lookup_day_overview / lookup_digest / lookup_pending_items on a
+  // non-opted surface produce an auditable clarification rather than a
+  // silent skip.
+  if (isExtendedIntent(classification.intentType) && !params.extendedIntents) {
+    log.warn('voice-action-router: extended intent refused — surface not opted in', {
+      intent: classification.intentType,
+    });
+    await emitClarification(
+      deps,
+      {
+        tenantId,
+        userId,
+        transcript: segmentText,
+        classification: { ...classification, intentType: 'unknown' as IntentType },
+        conversationId,
+        recordingId,
+        ...(params.applyDedup && recordingId
+          ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
+          : {}),
+      },
+      log,
+    );
+    return { kind: 'clarified', classification };
+  }
+
+  // P11-001 / RV-010 — lookup_* intents are READ-ONLY and never produce a
+  // proposal. The voice adapters (twilio-adapter / text-mode-driver)
+  // dispatch them to the lookup-skill family (lookup-day-overview and
+  // siblings in src/ai/skills) and speak the returned summary; this worker
+  // processes recorded memos with no voice back-channel, so its only
+  // correct move is to skip. Previously this fell out of the
+  // INTENT_TO_PROPOSAL_TYPE map by omission (a warn log); the explicit
+  // guard makes the read-only invariant loud, exactly like the RV-071
+  // approval-intent gate below.
+  if (isLookupIntent(classification.intentType)) {
+    log.info('voice-action-router: read-only lookup intent — no proposal to draft', {
+      intent: classification.intentType,
+    });
+    return { kind: 'skipped', classification };
+  }
+
+  // RV-071 / RV-225 — HARD routing gate: the owner approval AND edit
+  // intents are only actionable on a live, verified owner call (the
+  // telephony FSM path, gated by RV-070's ownerSession). This worker
+  // processes recorded operator memos and synthetic transcripts, which
+  // carry NO caller-ID identity and have no confirm turn — so
+  // approve_proposal / reject_proposal / edit_proposal must NEVER
+  // dispatch a mutation here, regardless of what the classifier
+  // returned. (They are also absent from INTENT_TO_PROPOSAL_TYPE; this
+  // explicit guard makes the invariant loud instead of an accident of
+  // the map.)
+  if (
+    isVoiceApprovalIntent(classification.intentType) ||
+    isVoiceEditIntent(classification.intentType)
+  ) {
+    log.warn('voice-action-router: owner approval/edit intent refused on this channel', {
+      intent: classification.intentType,
+    });
+    return { kind: 'skipped', classification };
+  }
+
+  // RV-080 — complaint is dispatched to its dedicated handler (pinned-
+  // prefix add_note + companion callback). It reuses the EXISTING
+  // add_note proposal type, so it lives outside the intent→type map
+  // (which would collide with the plain add_note intent's handler).
+  // The handler is registered in buildHandlers under the '_complaint'
+  // sentinel key and is constructed ONCE (not per-segment).
   const proposalType = INTENT_TO_PROPOSAL_TYPE[classification.intentType];
-  const handler = proposalType ? handlers.get(proposalType) : undefined;
+  const handler =
+    classification.intentType === 'complaint'
+      ? handlers.get('_complaint' as ProposalType)
+      : proposalType
+        ? handlers.get(proposalType)
+        : undefined;
   if (!handler) {
     log.warn('voice-action-router: no handler for intent', {
       intent: classification.intentType,
       proposalType,
     });
     return { kind: 'skipped', classification };
+  }
+
+  // P8 — resolve free-text entity references to verified tenant IDs
+  // before drafting. Runs after the handler lookup so lookup_*/unknown
+  // paths never pay for it; an ambiguous reference short-circuits to a
+  // clarification BEFORE the (more expensive) LLM drafting call.
+  const annotation = await annotateResolvedEntities(
+    deps.entityResolver,
+    {
+      tenantId,
+      entities: classification.extractedEntities,
+      ...(customerId ? { verifiedCustomerId: customerId } : {}),
+    },
+    log,
+  );
+  if (annotation.kind === 'ambiguous') {
+    await emitClarification(
+      deps,
+      {
+        tenantId,
+        userId,
+        transcript: segmentText,
+        classification,
+        conversationId,
+        recordingId,
+        entityAmbiguity: {
+          entityKind: annotation.entityKind,
+          reference: annotation.reference,
+          candidates: annotation.candidates,
+        },
+        ...(params.applyDedup && recordingId
+          ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
+          : {}),
+      },
+      log,
+    );
+    return { kind: 'clarified', classification };
   }
 
   const tenantThresholdOverride = deps.thresholdResolver
@@ -743,14 +1088,21 @@ async function processSegment(
     userId,
     message: segmentText,
     conversationId,
-    existingEntities: entitiesForProposal(
-      classification.intentType,
-      classification.extractedEntities,
-    ),
+    existingEntities: {
+      ...entitiesForProposal(classification.intentType, classification.extractedEntities),
+      // P8 — resolved IDs ride the context entities so the drafting LLM
+      // (and passthrough handlers) get verified UUIDs instead of free text.
+      ...(annotation.resolved.customerId ? { customerId: annotation.resolved.customerId } : {}),
+      ...(annotation.resolved.jobId ? { jobId: annotation.resolved.jobId } : {}),
+    },
     timezone: scheduling?.timezone ?? DEFAULT_TENANT_TIMEZONE,
     now: deps.now ? deps.now() : new Date(),
     supervisorPresent,
-    ...(customerId ? { customerId } : {}),
+    // Verified caller-ID identity wins; a resolver hit fills it only
+    // when caller-ID didn't establish one.
+    ...((customerId ?? annotation.resolved.customerId)
+      ? { customerId: customerId ?? annotation.resolved.customerId }
+      : {}),
     // Single-action only: lets the held-slot path key the appointment on
     // `voice-hold:<recordingId>` so a concurrent redelivery can't double-book.
     ...(params.applyDedup && recordingId ? { recordingId } : {}),
@@ -758,6 +1110,19 @@ async function processSegment(
   };
 
   const { proposal } = await handler.handle(context);
+  // P8 — references that matched nothing are stamped on sourceContext so
+  // the review UI prompts "pick from the list or create new" instead of
+  // the operator discovering a dangling name at execution time.
+  const annotated =
+    annotation.pendingReferences.length > 0
+      ? {
+          ...proposal,
+          sourceContext: {
+            ...(proposal.sourceContext ?? {}),
+            pendingReference: annotation.pendingReferences,
+          },
+        }
+      : proposal;
   // Chokepoint backstop for the "never auto-execute when unsupervised"
   // invariant. Every task handler forwards supervisorPresent into its
   // CreateProposalInput, but this is the single place every voice-sourced
@@ -765,7 +1130,12 @@ async function processSegment(
   // to thread presence can't slip an auto-approved (→ auto-executing) proposal
   // past an unsupervised tenant. No-op in the normal case (the handler already
   // computed 'ready_for_review').
-  return { kind: 'proposal', proposal: holdIfUnsupervised(proposal, supervisorPresent), classification };
+  return {
+    kind: 'proposal',
+    proposal: holdIfUnsupervised(annotated, supervisorPresent),
+    classification,
+    supervisorPresent,
+  };
 }
 
 /**
@@ -806,6 +1176,11 @@ async function processChain(
   // they happen — they are independent records, not chain members.
   const built: { proposal: Proposal; chainIndex: number; refCount: number; type: string }[] = [];
 
+  // RV-221 — tenant-wide presence at chain-creation time. Every segment
+  // resolves the same value (one isSupervisorPresent per segment, cached);
+  // tracked here so the chain can be routed ONCE after persistence.
+  let supervisorPresent = true;
+
   for (const segment of segments) {
     const outcome = await processSegment(
       deps,
@@ -824,6 +1199,7 @@ async function processChain(
     }
 
     const proposal = outcome.proposal;
+    supervisorPresent = outcome.supervisorPresent;
 
     // Build the dependency edges this segment can actually consume. The
     // decomposer suggests (parentIndex, entityKind); we only wire an
@@ -888,6 +1264,93 @@ async function processChain(
     chainLength,
     createdCount: built.length,
   });
+
+  // RV-221 — unsupervised routing for the WHOLE chain: one summarized SMS
+  // (renderChainSms) instead of per-member sends. The HEAD member (first
+  // persisted, lowest chain index) anchors the outbound render, so the
+  // inbound Y / N / EDIT replies and the one-tap link act on the head;
+  // chained dependents stay 'draft' (forced by applyChainMetadata) and
+  // follow the existing chain-resolution execution ordering once approved
+  // from the queue. Money/comms members are listed but marked "approval
+  // follows separately" by the renderer.
+  //
+  // Gate: unlike the single-action path (which only routes proposals that
+  // WOULD have auto-approved, i.e. 'ready_for_review'), a chain never has
+  // an auto-approve path — its dependents are structurally forced to
+  // 'draft' — so the head is routed while still reviewable (draft or
+  // ready_for_review). A single chain falls back silently to the queue
+  // when no routing deps / phone are wired (same as the single path).
+  //
+  // RV-074 composition: when ANY member carries a blocking confidence
+  // level, that member's payload is handed to routeUnsupervisedProposal so
+  // the existing predicate suppresses the one-tap token and anchors the
+  // send as `review_required_rendered` — and renderChainSms emits the
+  // matching review-in-app form for the whole chain.
+  //
+  // Track E (HIGH fix): the same suppression applies when the HEAD member
+  // is not capture-class. Y and the one-tap link act on the head, and
+  // money / comms / irreversible proposals are never Y-approvable over
+  // SMS — so a non-capture head routes as the review form
+  // (`suppressApproveLink`): no token minted, anchored
+  // `review_required_rendered`, renderChainSms emits the matching copy.
+  const head = built[0].proposal;
+  if (
+    deps.unsupervisedRouting &&
+    !supervisorPresent &&
+    (head.status === 'ready_for_review' || head.status === 'draft')
+  ) {
+    const ur = deps.unsupervisedRouting;
+    const tenantId = base.tenantId;
+    try {
+      const routing = await ur.resolveRouting?.(tenantId);
+      const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
+      const ordered = built.map((b) => b.proposal);
+      const blockingMember = ordered.find((p) => confidenceMetaBlocksAutoApprove(p.payload));
+      const headNotCapture = actionClassForProposalType(head.proposalType) !== 'capture';
+      await routeUnsupervisedProposal(
+        {
+          auditRepo: ur.auditRepo,
+          ...(ur.sendSms ? { sendSms: ur.sendSms } : {}),
+          ...(ur.secret ? { secret: ur.secret } : {}),
+          ...(ur.buildApproveUrl ? { buildApproveUrl: ur.buildApproveUrl } : {}),
+          ...(ur.recordSmsEvent
+            ? {
+                onSmsSent: async ({ body, kind }: { body: string; kind: OutboundAnchorKind }) =>
+                  ur.recordSmsEvent!({ tenantId, proposalId: head.id, body, kind }),
+              }
+            : {}),
+        },
+        {
+          tenantId,
+          proposalId: head.id,
+          ...(routing ? { routing } : {}),
+          channel: 'other',
+          ...(ownerPhone ? { ownerPhone } : {}),
+          summaryText: head.summary,
+          renderSmsBody: (approveUrl: string) =>
+            renderChainSms(
+              ordered.map((p) => ({
+                proposalType: p.proposalType,
+                summary: p.summary,
+                payload: p.payload,
+              })),
+              { approveUrl: approveUrl || undefined },
+            ),
+          // Blocking-member payload (if any) drives the token-suppression /
+          // review_required_rendered anchoring; otherwise the head's.
+          payload: (blockingMember ?? head).payload,
+          // Non-capture head: never Y-approvable — review form, no token.
+          ...(headNotCapture ? { suppressApproveLink: true } : {}),
+        },
+      );
+    } catch (err) {
+      log.warn('voice-action-router: chain unsupervised routing failed', {
+        chainId,
+        headProposalId: head.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 }
 
 export function createVoiceActionRouterWorker(
@@ -980,6 +1443,21 @@ export function createVoiceActionRouterWorker(
         }
       }
 
+      // Phase-2 Track A — resolve the extended-intents opt-in once per
+      // message (mirrors multiActionEnabled). Non-fatal: a resolver error
+      // degrades to the pre-Track-A classifier prompt.
+      let extendedIntents = false;
+      if (deps.extendedIntentsEnabled) {
+        try {
+          extendedIntents = await deps.extendedIntentsEnabled(tenantId);
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          log.warn('voice-action-router: extendedIntentsEnabled resolver failed, continuing without extended intents', {
+            error: error.message,
+          });
+        }
+      }
+
       // Multi-action chaining (feature-flagged). When enabled AND the
       // utterance decomposes into more than one action, route each
       // segment through the existing single-intent pipeline and link the
@@ -1029,6 +1507,7 @@ export function createVoiceActionRouterWorker(
               recordingId,
               customerId,
               verticalPromptSection,
+              ...(extendedIntents ? { extendedIntents: true } : {}),
             },
             log,
           );
@@ -1047,6 +1526,7 @@ export function createVoiceActionRouterWorker(
           recordingId,
           customerId,
           verticalPromptSection,
+          ...(extendedIntents ? { extendedIntents: true } : {}),
           // Single-action path: apply the per-recording dedup keys.
           applyDedup: true,
         },
@@ -1066,6 +1546,81 @@ export function createVoiceActionRouterWorker(
           classifierConfidence: outcome.classification.confidence,
           proposalConfidence: outcome.proposal.confidenceScore,
         });
+
+        // P12-004 — unsupervised routing. The proposal just queued with no
+        // supervisor on the wall: apply the tenant-configured routing
+        // (`queue_and_sms` default → one-tap approve SMS to the owner) and
+        // emit the `unsupervised_proposal_routed` audit event. Best-effort:
+        // a routing failure never fails the (already persisted) proposal.
+        if (
+          deps.unsupervisedRouting &&
+          !outcome.supervisorPresent &&
+          outcome.proposal.status === 'ready_for_review'
+        ) {
+          const ur = deps.unsupervisedRouting;
+          try {
+            const routing = await ur.resolveRouting?.(tenantId);
+            const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
+            const proposal = outcome.proposal;
+            await routeUnsupervisedProposal(
+              {
+                auditRepo: ur.auditRepo,
+                ...(ur.sendSms ? { sendSms: ur.sendSms } : {}),
+                ...(ur.secret ? { secret: ur.secret } : {}),
+                ...(ur.buildApproveUrl ? { buildApproveUrl: ur.buildApproveUrl } : {}),
+                // P2-034 — persist the outbound render so the inbound
+                // Y/N/EDIT reply handler can resolve which proposal the
+                // owner is answering.
+                ...(ur.recordSmsEvent
+                  ? {
+                      onSmsSent: async ({
+                        body,
+                        kind,
+                      }: {
+                        body: string;
+                        kind: OutboundAnchorKind;
+                      }) =>
+                        ur.recordSmsEvent!({
+                          tenantId,
+                          proposalId: proposal.id,
+                          body,
+                          kind,
+                        }),
+                    }
+                  : {}),
+              },
+              {
+                tenantId,
+                proposalId: proposal.id,
+                ...(routing ? { routing } : {}),
+                // Operator voice recordings are not a live inbound call, so
+                // `escalate_to_oncall` falls back to queue_only here by design.
+                channel: 'other',
+                ...(ownerPhone ? { ownerPhone } : {}),
+                summaryText: proposal.summary,
+                // P2-034 — full reply-token body (summary + facts +
+                // "Reply Y/N/EDIT" + the one-tap link).
+                renderSmsBody: (approveUrl: string) =>
+                  renderProposalSms(
+                    {
+                      proposalType: proposal.proposalType,
+                      summary: proposal.summary,
+                      payload: proposal.payload,
+                    },
+                    { approveUrl: approveUrl || undefined },
+                  ),
+                // RV-074 (F-4) — pass payload so the routing site can guard
+                // low/very_low proposals against one-tap Y-able links.
+                payload: proposal.payload,
+              },
+            );
+          } catch (err) {
+            log.warn('voice-action-router: unsupervised routing failed', {
+              proposalId: outcome.proposal.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
       }
     },
     {

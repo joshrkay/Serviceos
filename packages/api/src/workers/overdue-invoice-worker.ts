@@ -9,18 +9,41 @@
  * For each tenant it finds unpaid invoices past their due date, refreshes
  * the linked job's money-state (which flips it to `overdue`), and emits an
  * `invoice.overdue` audit event the first time a job crosses into the
- * overdue state — §7's dunning layer listens for that event.
+ * overdue state.
+ *
+ * §7 Collections cadence (P20). For every overdue invoice the sweep walks
+ * the tenant's dunning cadence (invoices/dunning-schedule.ts) and late-fee
+ * policy (invoices/late-fee.ts) and raises OWNER-APPROVED proposals — one
+ * `send_payment_reminder` (comms) per due reminder step and an
+ * `apply_late_fee` (money) when a fee is due. Nothing is sent or charged
+ * here: the customer is contacted / the fee is applied only after the owner
+ * approves the proposal (the execution worker then runs the handler). The
+ * `invoice_dunning_events` ledger (UNIQUE on tenant+invoice+kind+step_key)
+ * gates idempotency so a re-sweep never raises a duplicate proposal.
  *
  * The sweep cadence is owned by app.ts (a setInterval driver). Tests
  * exercise this function directly with in-memory repos and a fixed clock.
  */
+import { v4 as uuidv4 } from 'uuid';
 import { Logger } from '../logging/logger';
 import { JobRepository } from '../jobs/job';
 import { EstimateRepository } from '../estimates/estimate';
-import { InvoiceRepository } from '../invoices/invoice';
+import { Invoice, InvoiceRepository } from '../invoices/invoice';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { refreshJobMoneyStateSafe } from '../jobs/job-money-state';
-import { TransactionalCommsService } from '../notifications/transactional-comms-service';
+import { ProposalRepository, createProposal } from '../proposals/proposal';
+import {
+  DunningConfig,
+  DunningConfigRepository,
+  DunningEventRepository,
+  defaultDunningConfig,
+  LATE_FEE_ONE_TIME_KEY,
+} from '../invoices/dunning-config';
+import { selectDueReminderSteps } from '../invoices/dunning-schedule';
+import { computeLateFeeCents } from '../invoices/late-fee';
+
+/** Synthetic actor for sweep-raised collections proposals (no Clerk session). */
+const DUNNING_ACTOR_ID = 'overdue-invoice-worker';
 
 export interface OverdueInvoiceWorkerDeps {
   jobRepo: JobRepository;
@@ -32,8 +55,19 @@ export interface OverdueInvoiceWorkerDeps {
   logger: Logger;
   /** Injectable clock — defaults to `() => new Date()`. */
   now?: () => Date;
-  /** §7 Layer A — overdue dunning SMS/email when a job first crosses overdue. */
-  transactionalComms?: TransactionalCommsService;
+  /**
+   * §7 Collections cadence. When `proposalRepo` and `dunningEventRepo` are
+   * both wired, each overdue invoice's due reminder steps + late fees surface
+   * as owner-approved proposals (gated for idempotency by the dunning event
+   * ledger). Absent → the sweep does money-state + overdue-audit work only
+   * (no dunning), preserving the pre-cadence behavior for callers that don't
+   * opt in. `dunningConfigRepo` is optional even when dunning is enabled:
+   * absent (or no row) → the conservative `defaultDunningConfig` (single
+   * 3-day SMS reminder, no late fee).
+   */
+  proposalRepo?: ProposalRepository;
+  dunningEventRepo?: DunningEventRepository;
+  dunningConfigRepo?: DunningConfigRepository;
 }
 
 export async function runOverdueInvoiceSweep(
@@ -52,11 +86,23 @@ export async function runOverdueInvoiceSweep(
   }
 
   const asOf = now(); // One snapshot for the entire sweep.
+  // Dunning runs only when we can both create proposals and gate them
+  // idempotently. Either dep missing → money-state-only sweep.
+  const dunningEnabled = Boolean(deps.proposalRepo && deps.dunningEventRepo);
   let overdue = 0;
   let failed = 0;
 
   for (const tenantId of tenantIds) {
     try {
+      // Load the tenant's dunning cadence once per sweep. Fall back to the
+      // conservative default so dunning is never silently off for an overdue
+      // invoice (matches defaultDunningConfig's contract).
+      const config: DunningConfig | null = dunningEnabled
+        ? ((deps.dunningConfigRepo
+            ? await deps.dunningConfigRepo.findByTenant(tenantId)
+            : null) ?? defaultDunningConfig(tenantId, asOf))
+        : null;
+
       // Prefilter: unpaid invoices whose due date has passed. The
       // authoritative overdue decision is made by computeJobMoneyState
       // inside refreshJobMoneyState — this query just narrows the set.
@@ -106,8 +152,21 @@ export async function runOverdueInvoiceSweep(
               },
             }),
           );
-          if (deps.transactionalComms) {
-            await deps.transactionalComms.notifyInvoiceOverdue(tenantId, invoice.id);
+        }
+
+        // §7 Collections cadence — raise owner-approved dunning proposals for
+        // every still-overdue invoice (not just the transition tick: reminder
+        // steps come due over time). Isolated per-invoice so one bad invoice
+        // never aborts the rest of the tenant's sweep.
+        if (config && invoice.dueDate) {
+          try {
+            await raiseDunningProposals(tenantId, invoice, config, asOf, deps);
+          } catch (err) {
+            deps.logger.warn('Overdue-invoice sweep: dunning failed for invoice', {
+              tenantId,
+              invoiceId: invoice.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
           }
         }
       }
@@ -129,4 +188,158 @@ export async function runOverdueInvoiceSweep(
   });
 
   return { tenants: tenantIds.length, overdue, failed };
+}
+
+/**
+ * Raise the dunning proposals due for one overdue invoice: a
+ * `send_payment_reminder` (comms) per due cadence step, plus an
+ * `apply_late_fee` (money) when the policy makes a fee due. The dunning
+ * event ledger is the idempotency gate — we record the event FIRST and treat
+ * a 23505 unique violation as "a prior sweep already raised this", so at most
+ * one proposal is ever created per (invoice, kind, step). Proposals are
+ * surfaced in `ready_for_review` so the owner approves them (queue / digest /
+ * SMS); execution (the actual send / fee application) happens on approval.
+ *
+ * Requires `proposalRepo` + `dunningEventRepo` (guaranteed by the
+ * `dunningEnabled` gate at the call site).
+ */
+async function raiseDunningProposals(
+  tenantId: string,
+  invoice: Invoice,
+  config: DunningConfig,
+  now: Date,
+  deps: OverdueInvoiceWorkerDeps,
+): Promise<void> {
+  const proposalRepo = deps.proposalRepo!;
+  const eventRepo = deps.dunningEventRepo!;
+  const dueDate = invoice.dueDate!;
+
+  const priorEvents = await eventRepo.findByInvoice(tenantId, invoice.id);
+  const sentStepKeys = priorEvents
+    .filter((e) => e.kind === 'reminder')
+    .map((e) => e.stepKey);
+  const alreadyAccruedCents = priorEvents
+    .filter((e) => e.kind === 'late_fee')
+    .reduce((sum, e) => sum + (e.amountCents ?? 0), 0);
+
+  // 1. Reminder cadence — one comms proposal per newly-due step.
+  const dueSteps = selectDueReminderSteps(config, { dueDate, now, sentStepKeys });
+  for (const { stepKey, step } of dueSteps) {
+    // Ledger gate: record the step BEFORE creating the proposal so a
+    // concurrent/re-run sweep that loses the UNIQUE race (23505) skips it.
+    if (
+      !(await recordDunningEvent(eventRepo, {
+        id: uuidv4(),
+        tenantId,
+        invoiceId: invoice.id,
+        kind: 'reminder',
+        stepKey,
+        channel: step.channel,
+        sentAt: now,
+      }))
+    ) {
+      continue;
+    }
+
+    const proposal = createProposal({
+      tenantId,
+      proposalType: 'send_payment_reminder',
+      payload: {
+        invoiceId: invoice.id,
+        stepKey,
+        offsetDays: step.offsetDays,
+        channel: step.channel,
+      },
+      summary: `Send overdue-payment reminder for ${invoice.invoiceNumber} (${step.offsetDays}d past due)`,
+      createdBy: DUNNING_ACTOR_ID,
+    });
+    await proposalRepo.create({ ...proposal, status: 'ready_for_review' });
+    await safeAudit(deps, tenantId, invoice.id, {
+      proposalId: proposal.id,
+      proposalType: 'send_payment_reminder',
+      stepKey,
+    });
+  }
+
+  // 2. Late fee — one money proposal when a fee is due (one-time policy).
+  const feeCents = computeLateFeeCents(config, {
+    amountDueCents: invoice.amountDueCents,
+    dueDate,
+    now,
+    alreadyAccruedCents,
+  });
+  if (feeCents > 0) {
+    if (
+      await recordDunningEvent(eventRepo, {
+        id: uuidv4(),
+        tenantId,
+        invoiceId: invoice.id,
+        kind: 'late_fee',
+        stepKey: LATE_FEE_ONE_TIME_KEY,
+        amountCents: feeCents,
+        sentAt: now,
+      })
+    ) {
+      const proposal = createProposal({
+        tenantId,
+        proposalType: 'apply_late_fee',
+        payload: {
+          invoiceId: invoice.id,
+          feeCents,
+          stepKey: LATE_FEE_ONE_TIME_KEY,
+        },
+        summary: `Apply late fee to ${invoice.invoiceNumber}`,
+        createdBy: DUNNING_ACTOR_ID,
+      });
+      await proposalRepo.create({ ...proposal, status: 'ready_for_review' });
+      await safeAudit(deps, tenantId, invoice.id, {
+        proposalId: proposal.id,
+        proposalType: 'apply_late_fee',
+        stepKey: LATE_FEE_ONE_TIME_KEY,
+        feeCents,
+      });
+    }
+  }
+}
+
+/**
+ * Insert a dunning ledger row. Returns `true` when this sweep won the row,
+ * `false` when a prior sweep already recorded it (PG unique_violation 23505 —
+ * the in-memory repo mirrors the code). Any other error propagates.
+ */
+async function recordDunningEvent(
+  eventRepo: DunningEventRepository,
+  event: Parameters<DunningEventRepository['create']>[0],
+): Promise<boolean> {
+  try {
+    await eventRepo.create(event);
+    return true;
+  } catch (err) {
+    if ((err as { code?: string }).code === '23505') return false;
+    throw err;
+  }
+}
+
+/** Failure-soft audit of a raised dunning proposal — never aborts the sweep. */
+async function safeAudit(
+  deps: OverdueInvoiceWorkerDeps,
+  tenantId: string,
+  invoiceId: string,
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await deps.auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId: DUNNING_ACTOR_ID,
+        actorRole: 'system',
+        eventType: 'invoice.dunning_proposed',
+        entityType: 'invoice',
+        entityId: invoiceId,
+        metadata,
+      }),
+    );
+  } catch {
+    // swallow — audit must never fail the sweep
+  }
 }

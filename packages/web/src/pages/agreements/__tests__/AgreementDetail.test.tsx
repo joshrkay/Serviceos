@@ -77,4 +77,50 @@ describe('P9-003 AgreementDetail', () => {
       expect(screen.getByTestId('run-now')).toBeInTheDocument();
     });
   });
+
+  it('shows auto-renew off by default', async () => {
+    render(<AgreementDetail agreementId="a1" role="dispatcher" />);
+    const status = await screen.findByTestId('auto-renew-status');
+    expect(status).toHaveTextContent('off');
+  });
+
+  it('shows the renewal cadence and count for an auto-renew membership', async () => {
+    mockGet.mockResolvedValue({
+      id: 'a1',
+      tenantId: 't',
+      customerId: 'c',
+      name: 'Gold Membership',
+      recurrenceRule: 'FREQ=MONTHLY;BYMONTHDAY=1',
+      priceCents: 1500,
+      autoGenerateInvoice: true,
+      autoGenerateJob: true,
+      nextRunAt: '2026-07-01T00:00:00.000Z',
+      status: 'active',
+      startsOn: '2026-01-01',
+      endsOn: '2027-01-01',
+      autoRenew: true,
+      renewalTermMonths: 12,
+      renewalCount: 2,
+      memberDiscountBps: 1000,
+      priorityBooking: true,
+      autoCollectDues: true,
+      createdBy: 'u',
+      createdAt: '',
+      updatedAt: '',
+      recentRuns: [],
+    });
+    render(<AgreementDetail agreementId="a1" role="owner" />);
+    const status = await screen.findByTestId('auto-renew-status');
+    expect(status).toHaveTextContent('every 12 months');
+    expect(status).toHaveTextContent('renewed 2');
+    expect(screen.getByTestId('member-discount')).toHaveTextContent('10% off');
+    expect(screen.getByTestId('priority-booking')).toBeInTheDocument();
+    expect(screen.getByTestId('auto-collect-dues')).toBeInTheDocument();
+  });
+
+  it('hides the member-discount line when there is no discount', async () => {
+    render(<AgreementDetail agreementId="a1" role="dispatcher" />);
+    await screen.findByTestId('auto-renew-status');
+    expect(screen.queryByTestId('member-discount')).toBeNull();
+  });
 });

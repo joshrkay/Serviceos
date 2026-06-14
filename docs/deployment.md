@@ -7,11 +7,12 @@ Railway is the **only** deployment target. The deployed services are
 configured by `/railway.toml` and `/Dockerfile` and shipped by
 `.github/workflows/deploy.yml` (`railway up`).
 
-Other top-level directories are **not deployed** and must not be mistaken
-for production infrastructure — see their READMEs:
-`infra/` (AWS CDK, deployed by nothing), `service-os-app/` and
-`service-os-agent/` (prototypes), and `supabase_migration.sql` (the
-prototype's schema, unrelated to the canonical in-code migrations).
+Non-deployed architectures are quarantined under `experiments/` and must
+not be mistaken for production infrastructure — see `experiments/README.md`
+and each subdirectory's README: `experiments/infra/` (AWS CDK, deployed by
+nothing), `experiments/service-os-app/` and `experiments/service-os-agent/`
+(prototypes), and `experiments/supabase_migration.sql` (the prototype's
+schema, unrelated to the canonical in-code migrations).
 
 ## API startup contract
 

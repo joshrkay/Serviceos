@@ -7,8 +7,11 @@ import {
   isChained,
   payloadPathFor,
   applyChainMetadata,
+  ENTITY_KIND_TO_PAYLOAD_PATH,
+  type ChainEntityKind,
 } from '../../src/proposals/chain';
 import { createProposal, Proposal } from '../../src/proposals/proposal';
+import { PROPOSAL_TYPE_SCHEMAS } from '../../src/proposals/contracts';
 
 function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
   return {
@@ -55,6 +58,23 @@ describe('payloadPathFor', () => {
     // an appointment cannot consume a customerId directly (needs a job)
     expect(payloadPathFor('create_appointment', 'customerId')).toBeUndefined();
     expect(payloadPathFor('create_customer', 'customerId')).toBeUndefined();
+  });
+
+  // RV-220 — chain coverage for the comms/money follow-up types. These are
+  // the segments the decomposer emits for "…and send her the estimate" /
+  // "…then send the invoice" — without map entries the dependency edge was
+  // silently dropped and the send executed against a free-text reference.
+  it('maps the send/issue/record follow-up types to their id fields', () => {
+    expect(payloadPathFor('send_estimate', 'estimateId')).toBe('estimateId');
+    expect(payloadPathFor('send_invoice', 'invoiceId')).toBe('invoiceId');
+    expect(payloadPathFor('issue_invoice', 'invoiceId')).toBe('invoiceId');
+    expect(payloadPathFor('record_payment', 'invoiceId')).toBe('invoiceId');
+  });
+
+  it('follow-up types cannot consume unrelated entity kinds', () => {
+    expect(payloadPathFor('send_estimate', 'invoiceId')).toBeUndefined();
+    expect(payloadPathFor('send_invoice', 'estimateId')).toBeUndefined();
+    expect(payloadPathFor('record_payment', 'customerId')).toBeUndefined();
   });
 });
 
@@ -120,5 +140,81 @@ describe('applyChainMetadata', () => {
     // Dependent with unresolved refs can never race ahead of its parent.
     expect(p.status).toBe('draft');
     expect(p.approvedAt).toBeUndefined();
+  });
+
+  // RV-220 — the dependents-forced-draft invariant holds for every type in
+  // ENTITY_KIND_TO_PAYLOAD_PATH, including the newly covered follow-up
+  // types: a chained dependent with unresolved refs is ALWAYS forced to
+  // 'draft' (never auto-approve ahead of its parent), with the ref token
+  // written to the payload path the map declares.
+  it('forces draft for every (type, entityKind) pair in the coverage map', () => {
+    for (const [proposalType, kinds] of Object.entries(ENTITY_KIND_TO_PAYLOAD_PATH)) {
+      for (const [entityKind, payloadPath] of Object.entries(kinds ?? {})) {
+        const p = makeProposal({
+          proposalType: proposalType as Proposal['proposalType'],
+          status: 'approved',
+          approvedAt: new Date(),
+        });
+        applyChainMetadata(p, {
+          chainId: 'c',
+          chainIndex: 1,
+          chainLength: 2,
+          dependsOnChainIndices: [0],
+          chainRefs: [
+            {
+              payloadPath: payloadPath as string,
+              parentChainIndex: 0,
+              entityKind: entityKind as ChainEntityKind,
+            },
+          ],
+        });
+        expect(p.payload[payloadPath as string]).toBe(
+          `$ref:chain[0].${entityKind}`,
+        );
+        expect(p.status).toBe('draft');
+        expect(p.approvedAt).toBeUndefined();
+      }
+    }
+  });
+
+  it('every mapped payload path exists in that proposal type schema', () => {
+    const unwrap = (schema: any): any => {
+      let current = schema;
+      while (current?._def?.schema || current?._def?.innerType) {
+        current = current._def.schema ?? current._def.innerType;
+      }
+      return current;
+    };
+    for (const [proposalType, kinds] of Object.entries(ENTITY_KIND_TO_PAYLOAD_PATH)) {
+      const objectSchema = unwrap(
+        PROPOSAL_TYPE_SCHEMAS[proposalType as Proposal['proposalType']] as any,
+      );
+      const shape =
+        typeof objectSchema?.shape === 'function' ? objectSchema.shape() : objectSchema?.shape;
+      for (const payloadPath of Object.values(kinds ?? {})) {
+        expect(shape, `${proposalType} schema should expose an object shape`).toBeDefined();
+        expect(Object.keys(shape)).toContain(payloadPath);
+      }
+    }
+  });
+
+  it('writes add_note refs to targetId and sets targetKind for the parent entity', () => {
+    const p = makeProposal({
+      proposalType: 'add_note',
+      payload: { body: 'Call back tomorrow', targetKind: 'customer', targetId: 'placeholder' },
+      status: 'approved',
+      approvedAt: new Date(),
+    });
+    applyChainMetadata(p, {
+      chainId: 'c',
+      chainIndex: 1,
+      chainLength: 2,
+      dependsOnChainIndices: [0],
+      chainRefs: [{ payloadPath: 'targetId', parentChainIndex: 0, entityKind: 'jobId' }],
+    });
+
+    expect(p.payload.targetId).toBe('$ref:chain[0].jobId');
+    expect(p.payload.targetKind).toBe('job');
+    expect(p.status).toBe('draft');
   });
 });

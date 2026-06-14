@@ -26,6 +26,9 @@ import { SendService } from '../notifications/send-service';
 import { Job, JobRepository } from '../jobs/job';
 import { EstimateRepository } from '../estimates/estimate';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
+import { applyBps } from '../shared/billing-engine';
+import { AgreementRepository } from '../agreements/agreement';
+import { getCustomerMemberDiscountBps } from '../agreements/member-pricing';
 import { createLogger } from '../logging/logger';
 import { PaymentLinkProvider } from '../payments/payment-link-provider';
 import { createInvoicePaymentLink } from '../invoices/invoice-payment-link';
@@ -58,6 +61,10 @@ export function createInvoiceRouter(
   // are wired.
   estimateRepo?: EstimateRepository,
   paymentLinkProvider?: PaymentLinkProvider,
+  // Membership member-pricing (#6). When wired, a DIRECT invoice (not one
+  // converted from an estimate, which already carries the discount) for a
+  // member has that discount folded in. Optional so legacy harnesses build.
+  agreementRepo?: AgreementRepository,
 ): Router {
   const router = Router();
 
@@ -89,9 +96,34 @@ export function createInvoiceRouter(
           await ownership.requireExists(req.auth!.tenantId, 'estimate', parsed.estimateId);
         }
 
+        // Member pricing (#6): fold an active membership's discount into a
+        // DIRECT invoice. Skipped when converting from an estimate — that
+        // estimate already had the discount applied, so re-applying here would
+        // double it. Resolved server-side; additive to any manual discount.
+        let discountCents = parsed.discountCents ?? 0;
+        let memberDiscount: { bps: number; cents: number } | null = null;
+        if (!parsed.estimateId && agreementRepo) {
+          // Prefer the job already loaded by the ownership guard; fall back to
+          // the repo (the permissive test guard doesn't return the row).
+          const memberJob =
+            job ?? (jobRepo ? await jobRepo.findById(req.auth!.tenantId, parsed.jobId) : undefined);
+          const bps = memberJob
+            ? await getCustomerMemberDiscountBps(req.auth!.tenantId, memberJob.customerId, agreementRepo)
+            : 0;
+          if (bps > 0) {
+            const subtotalCents = parsed.lineItems.reduce((sum, li) => sum + li.totalCents, 0);
+            const cents = applyBps(subtotalCents, bps);
+            if (cents > 0) {
+              discountCents += cents;
+              memberDiscount = { bps, cents };
+            }
+          }
+        }
+
         const result = await createInvoiceWithNextNumber(
           {
             ...parsed,
+            discountCents,
             originatingLeadId: job?.originatingLeadId,
             tenantId: req.auth!.tenantId,
             createdBy: req.auth!.userId,
@@ -100,6 +132,24 @@ export function createInvoiceRouter(
           settingsRepo,
           auditRepo
         );
+
+        if (memberDiscount) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId: req.auth!.tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role ?? 'unknown',
+              eventType: 'invoice.member_discount_applied',
+              entityType: 'invoice',
+              entityId: result.id,
+              metadata: {
+                memberDiscountBps: memberDiscount.bps,
+                memberDiscountCents: memberDiscount.cents,
+                jobId: parsed.jobId,
+              },
+            }),
+          );
+        }
 
         // Tier 4 (Deposit rules — PR 3c). When the linked job has a
         // paid deposit that hasn't been credited to any invoice yet,

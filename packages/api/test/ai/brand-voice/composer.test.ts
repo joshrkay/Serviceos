@@ -241,7 +241,7 @@ describe('P4-015 — brand-voice composer', () => {
     ).rejects.toBeInstanceOf(AppError);
   });
 
-  it('P4-015 — all four intents are registered and discoverable from the registry', () => {
+  it('P4-015/RV-061 — all intents are registered and discoverable from the registry', () => {
     const intents = listBrandVoicePromptIntents();
     expect(intents.map((i) => i.intent).sort()).toEqual(
       [...BRAND_VOICE_INTENTS].sort(),

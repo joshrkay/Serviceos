@@ -358,6 +358,13 @@ export const updateSettingsSchema = z.object({
       trigger_llm_sentiment: z.boolean(),
       llm_sentiment_threshold: z.number().min(0).max(1),
       after_hours_voice_mode: z.enum(['voicemail', 'ai_answering']),
+      // RV-071 — spoken challenge (PIN/passphrase) gating money/
+      // irreversible VOICE approvals on the recognized owner line
+      // (caller-ID match; see approver-identity.ts).
+      // Interim home in this JSONB (no new migration); min length keeps
+      // out trivially guessable one-digit codes. Unset → those voice
+      // approvals are refused with a one-tap SMS fallback (fail-safe).
+      voice_approval_challenge: z.string().min(4).max(64),
     })
     .partial()
     .optional(),
@@ -372,6 +379,17 @@ export const updateSettingsSchema = z.object({
   ttsVoiceEn: ttsVoiceField,
   ttsVoiceEs: ttsVoiceField,
   spanishDispatcherUserIds: z.array(z.string().uuid()).optional(),
+  // Voice-parity (migration 152) — E.164 warm-transfer line. Normalized to
+  // E.164 (or null to clear) at the route boundary, mirroring ownerPhone.
+  transferNumber: z.string().max(40).nullable().optional(),
+  // RV-063 — end-of-day digest delivery. digestTime is tenant-local
+  // 'HH:MM' (24h); channel 'none' stores the digest without owner SMS.
+  digestEnabled: z.boolean().optional(),
+  digestTime: z
+    .string()
+    .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "digestTime must be 'HH:MM' (24-hour)")
+    .optional(),
+  digestChannel: z.enum(['sms', 'none']).optional(),
 }).superRefine((val, ctx) => {
   if (val.depositStrategy === 'percentage') {
     if (val.depositPercentageBps == null) {

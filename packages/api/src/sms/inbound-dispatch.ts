@@ -33,11 +33,19 @@ const logger = createLogger({
   environment: process.env.NODE_ENV || 'dev',
 });
 
+/** RV-050 — one inbound MMS media item (Twilio MediaUrlN / MediaContentTypeN). */
+export interface InboundSmsMedia {
+  url: string;
+  contentType?: string;
+}
+
 export interface InboundSmsContext {
   tenantId: string;
   fromE164: string;
   body: string;
   messageSid: string;
+  /** RV-050 — MMS media attached to the inbound message, when any. */
+  media?: InboundSmsMedia[];
 }
 
 export interface HandlerResult {
@@ -51,12 +59,51 @@ export interface KeywordHandler {
   handle(ctx: InboundSmsContext): Promise<HandlerResult>;
 }
 
+/**
+ * P2-034 — fallback for messages no keyword claims. The proposal-reply
+ * feature needs to see free-text from the owner ("make it $200 instead")
+ * during an edit session, and to send the one-time "Reply Y/N/EDIT"
+ * clarification — neither starts with a registered keyword. Exactly one
+ * fallback may be registered; it runs only after keyword routing declines
+ * (no match, or the matched handler returned `handled: false`).
+ */
+export interface FallbackHandler {
+  readonly name: string;
+  handle(ctx: InboundSmsContext): Promise<HandlerResult>;
+}
+
+/**
+ * RV-116 — dropped-call recovery resume. A reply on a recovery thread is
+ * free text from a CUSTOMER phone (not the owner), so neither keyword
+ * routing nor the owner-edit fallback claims it. Exactly one resume handler
+ * may be registered; it runs LAST — only after keyword routing and the
+ * fallback have both declined — so every existing dispatch path is
+ * untouched. Same `FallbackHandler` shape (name + handle).
+ */
+export type RecoveryResumeHandler = FallbackHandler;
+
+/**
+ * RV-050 — media side-channel. Exactly one media handler may register; it
+ * runs for every inbound message that carries media, INDEPENDENTLY of
+ * keyword/fallback routing (a photo with no body still ingests; a photo
+ * accompanying "OUT" ingests AND the keyword still routes). Its failures
+ * are swallowed and logged — media ingestion must never break normal SMS
+ * handling or turn an acknowledged Twilio delivery into a retry.
+ */
+export interface MediaHandler {
+  readonly name: string;
+  handle(ctx: InboundSmsContext): Promise<unknown>;
+}
+
 interface RegistryEntry {
   keyword: string;
   handler: KeywordHandler;
 }
 
 const registry = new Map<string, RegistryEntry>();
+let fallback: FallbackHandler | undefined;
+let recoveryResume: RecoveryResumeHandler | undefined;
+let mediaHandler: MediaHandler | undefined;
 
 function normalize(keyword: string): string {
   return keyword.trim().toLowerCase();
@@ -91,22 +138,125 @@ export function registerKeywordHandler(
   }
 }
 
+export function registerFallbackHandler(
+  handler: FallbackHandler,
+  options: RegisterKeywordHandlerOptions = {},
+): void {
+  if (fallback && !options.overwrite) {
+    throw new Error(
+      `duplicate fallback registration: '${fallback.name}' is already registered`,
+    );
+  }
+  fallback = handler;
+}
+
+export function registerRecoveryResumeHandler(
+  handler: RecoveryResumeHandler,
+  options: RegisterKeywordHandlerOptions = {},
+): void {
+  if (recoveryResume && !options.overwrite) {
+    throw new Error(
+      `duplicate recovery-resume registration: '${recoveryResume.name}' is already registered`,
+    );
+  }
+  recoveryResume = handler;
+}
+
+async function runRecoveryResume(
+  ctx: InboundSmsContext,
+): Promise<HandlerResult | null> {
+  if (!recoveryResume) return null;
+  try {
+    return await recoveryResume.handle({ ...ctx });
+  } catch (err) {
+    logger.error('Inbound SMS recovery-resume handler threw', {
+      tenantId: ctx.tenantId,
+      messageSid: ctx.messageSid,
+      handler: recoveryResume.name,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { handled: false, handler: recoveryResume.name, reason: 'handler_error' };
+  }
+}
+
+/** RV-050 — register the (single) inbound-media handler. */
+export function registerMediaHandler(
+  handler: MediaHandler,
+  options: RegisterKeywordHandlerOptions = {},
+): void {
+  if (mediaHandler && !options.overwrite) {
+    throw new Error(
+      `duplicate media-handler registration: '${mediaHandler.name}' is already registered`,
+    );
+  }
+  mediaHandler = handler;
+}
+
+/**
+ * RV-050 — failure-isolated media ingestion. Awaited so the webhook's
+ * side-effects complete before the 200 is returned, but ANY error is logged
+ * and swallowed: media failures never break normal SMS handling.
+ */
+async function runMediaHandler(ctx: InboundSmsContext): Promise<void> {
+  if (!mediaHandler || !ctx.media || ctx.media.length === 0) return;
+  try {
+    await mediaHandler.handle({ ...ctx, media: ctx.media.map((m) => ({ ...m })) });
+  } catch (err) {
+    logger.error('Inbound SMS media handler threw', {
+      tenantId: ctx.tenantId,
+      messageSid: ctx.messageSid,
+      mediaHandler: mediaHandler.name,
+      mediaCount: ctx.media.length,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+async function runFallback(ctx: InboundSmsContext): Promise<HandlerResult | null> {
+  if (!fallback) return null;
+  try {
+    return await fallback.handle({ ...ctx });
+  } catch (err) {
+    logger.error('Inbound SMS fallback handler threw', {
+      tenantId: ctx.tenantId,
+      messageSid: ctx.messageSid,
+      fallback: fallback.name,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { handled: false, handler: fallback.name, reason: 'handler_error' };
+  }
+}
+
 export async function dispatchInboundSms(
   ctx: InboundSmsContext,
 ): Promise<HandlerResult> {
+  // RV-050 — media ingestion runs FIRST and independently: a photo-only
+  // message (empty body) must still ingest even though keyword routing
+  // below has nothing to match. Failure-isolated inside runMediaHandler.
+  await runMediaHandler(ctx);
+
   const firstToken = ctx.body.trim().split(/\s+/, 1)[0] ?? '';
   if (!firstToken) {
     return { handled: false, reason: 'no_matching_handler' };
   }
 
-  const entry = registry.get(firstToken.toLowerCase());
+  // Strip surrounding punctuation so "Yes!", "OK.", '"approve"' route to
+  // their keyword like the bare word does — handlers' own parsers are
+  // punctuation-tolerant, but they never run if the lookup misses here.
+  const token = firstToken.toLowerCase().replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
+  const entry = token ? registry.get(token) : undefined;
   if (!entry) {
+    const viaFallback = await runFallback(ctx);
+    if (viaFallback?.handled) return viaFallback;
+    // RV-116 — last chance: a reply on a dropped-call recovery thread.
+    const viaResume = await runRecoveryResume(ctx);
+    if (viaResume?.handled) return viaResume;
     return { handled: false, reason: 'no_matching_handler' };
   }
 
+  let keywordResult: HandlerResult;
   try {
-    const result = await entry.handler.handle({ ...ctx });
-    return result;
+    keywordResult = await entry.handler.handle({ ...ctx });
   } catch (err) {
     logger.error('Inbound SMS handler threw', {
       tenantId: ctx.tenantId,
@@ -114,12 +264,25 @@ export async function dispatchInboundSms(
       keyword: entry.keyword,
       error: err instanceof Error ? err.message : String(err),
     });
-    return {
+    keywordResult = {
       handled: false,
       handler: entry.keyword,
       reason: 'handler_error',
     };
   }
+  if (keywordResult.handled) return keywordResult;
+
+  // The keyword's feature declined (e.g. 'out' from a non-technician
+  // mobile). Give the fallback a look — during an owner edit session the
+  // whole message is free-text and any first token is plausible.
+  const viaFallback = await runFallback(ctx);
+  if (viaFallback?.handled) return viaFallback;
+  // RV-116 — last chance: a reply on a dropped-call recovery thread (e.g.
+  // a customer replying "yes" — a keyword another feature owns but whose
+  // handler declined a non-matching phone).
+  const viaResume = await runRecoveryResume(ctx);
+  if (viaResume?.handled) return viaResume;
+  return keywordResult;
 }
 
 /**
@@ -128,4 +291,7 @@ export async function dispatchInboundSms(
  */
 export function __resetKeywordRegistryForTests(): void {
   registry.clear();
+  fallback = undefined;
+  recoveryResume = undefined;
+  mediaHandler = undefined;
 }

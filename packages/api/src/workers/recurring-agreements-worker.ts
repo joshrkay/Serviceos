@@ -11,6 +11,7 @@
 import { Logger } from '../logging/logger';
 import {
   runDueAgreements,
+  renewExpiringAgreements,
   RunDueDeps,
   RunDueResult,
   JobsServicePort,
@@ -18,6 +19,7 @@ import {
 } from '../agreements/agreement-service';
 import { AgreementRepository } from '../agreements/agreement';
 import { AgreementRunRepository } from '../agreements/agreement-run';
+import { DuesCollector } from '../agreements/dues-collector';
 import { AuditRepository } from '../audit/audit';
 
 export interface RecurringAgreementsWorkerDeps {
@@ -28,12 +30,14 @@ export interface RecurringAgreementsWorkerDeps {
   /** Returns the list of tenant IDs we should sweep. */
   listTenantIds: () => Promise<string[]>;
   auditRepo?: AuditRepository;
+  /** #6 phase 4 — off-session dues collection for auto-collect memberships. */
+  duesCollector?: DuesCollector;
   logger: Logger;
 }
 
 export async function runRecurringAgreementsSweep(
   deps: RecurringAgreementsWorkerDeps,
-): Promise<{ tenants: number; generated: number; skipped: number; failed: number }> {
+): Promise<{ tenants: number; renewed: number; generated: number; skipped: number; failed: number }> {
   let tenantIds: string[];
   try {
     tenantIds = await deps.listTenantIds();
@@ -41,14 +45,37 @@ export async function runRecurringAgreementsSweep(
     deps.logger.error('Recurring-agreements sweep: failed to list tenants', {
       error: err instanceof Error ? err.message : String(err),
     });
-    return { tenants: 0, generated: 0, skipped: 0, failed: 0 };
+    return { tenants: 0, renewed: 0, generated: 0, skipped: 0, failed: 0 };
   }
 
+  let renewed = 0;
   let generated = 0;
   let skipped = 0;
   let failed = 0;
 
   for (const tenantId of tenantIds) {
+    // Renew lapsed memberships first so a just-renewed agreement that is also
+    // due fires in the same sweep. Isolated try: a renewal failure must not
+    // block this tenant's run sweep.
+    try {
+      const renewResult = await renewExpiringAgreements(tenantId, {
+        agreementRepo: deps.agreementRepo,
+        auditRepo: deps.auditRepo,
+      });
+      renewed += renewResult.renewedAgreementIds.length;
+      if (renewResult.renewedAgreementIds.length > 0) {
+        deps.logger.info('Recurring-agreements sweep: memberships renewed', {
+          tenantId,
+          renewed: renewResult.renewedAgreementIds.length,
+        });
+      }
+    } catch (err) {
+      deps.logger.warn('Recurring-agreements sweep: renewal failed', {
+        tenantId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     try {
       const result: RunDueResult = await runDueAgreements(tenantId, {
         agreementRepo: deps.agreementRepo,
@@ -56,6 +83,7 @@ export async function runRecurringAgreementsSweep(
         jobsService: deps.jobsService,
         invoicesService: deps.invoicesService,
         auditRepo: deps.auditRepo,
+        duesCollector: deps.duesCollector,
       } satisfies RunDueDeps);
       generated += result.generatedRunIds.length;
       skipped += result.skippedRunIds.length;
@@ -81,5 +109,5 @@ export async function runRecurringAgreementsSweep(
     }
   }
 
-  return { tenants: tenantIds.length, generated, skipped, failed };
+  return { tenants: tenantIds.length, renewed, generated, skipped, failed };
 }

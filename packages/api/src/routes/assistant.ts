@@ -12,6 +12,8 @@ import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
 import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
 import type { InvoiceRepository } from '../invoices/invoice';
+import type { CatalogItemRepository } from '../catalog/catalog-item';
+import type { EstimateRepository } from '../estimates/estimate';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -133,6 +135,19 @@ export interface AssistantRouterDeps {
    * can omit it.
    */
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
+  /**
+   * P22 — catalog grounding for assistant-drafted invoices/estimates:
+   * line items get priced from the tenant's catalog instead of trusting
+   * the LLM's invented numbers. Optional so tests can omit it.
+   */
+  catalogRepo?: CatalogItemRepository;
+  /**
+   * RV-042 — review-time visibility of acceptance voiding: lets the
+   * update_estimate task handler read the targeted estimate and stamp the
+   * `_meta.markers` acceptance-void warning when it is currently accepted.
+   * Optional; absent -> marker skipped.
+   */
+  estimateRepo?: Pick<EstimateRepository, 'findById' | 'findByTenant'>;
 }
 
 type AssistantProposal = z.infer<typeof assistantProposalSchema>;
@@ -324,12 +339,12 @@ async function generateAssistantReply(
           }
           const chainHandlers: Record<string, (() => TaskHandler) | undefined> = {
             create_customer: () => new CreateCustomerTaskHandler(),
-            draft_estimate: () => new EstimateTaskHandler(deps.gateway),
-            update_estimate: () => new EstimateEditTaskHandler(deps.gateway),
-            create_invoice: () => new InvoiceTaskHandler(deps.gateway),
-            send_invoice: () => new InvoiceTaskHandler(deps.gateway),
-            issue_invoice: () => new InvoiceTaskHandler(deps.gateway),
-            update_invoice: () => new InvoiceTaskHandler(deps.gateway),
+            draft_estimate: () => new EstimateTaskHandler(deps.gateway, deps.catalogRepo),
+            update_estimate: () => new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo),
+            create_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
+            send_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
+            issue_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
+            update_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
           };
           const factory = chainHandlers[segClass.intentType];
           if (!factory) continue;
@@ -400,12 +415,12 @@ async function generateAssistantReply(
       // the REAL task handlers and persist — the generic LLM path returned
       // unpersisted JSON cards whose ids 404'd on approve.
       const proposalHandlers: Record<string, () => TaskHandler> = {
-        draft_estimate: () => new EstimateTaskHandler(deps.gateway),
-        update_estimate: () => new EstimateEditTaskHandler(deps.gateway),
-        create_invoice: () => new InvoiceTaskHandler(deps.gateway),
-        send_invoice: () => new InvoiceTaskHandler(deps.gateway),
-        issue_invoice: () => new InvoiceTaskHandler(deps.gateway),
-        update_invoice: () => new InvoiceTaskHandler(deps.gateway),
+        draft_estimate: () => new EstimateTaskHandler(deps.gateway, deps.catalogRepo),
+        update_estimate: () => new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo),
+        create_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
+        send_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
+        issue_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
+        update_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
       };
       const handlerFactory = proposalHandlers[classification.intentType];
       if (handlerFactory) {

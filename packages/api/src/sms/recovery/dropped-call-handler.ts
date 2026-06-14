@@ -26,6 +26,7 @@ import type { Logger } from '../../logging/logger';
 import type { AuditRepository } from '../../audit/audit';
 import { createAuditEvent } from '../../audit/audit';
 import { extractContextCue } from '../../voice/recovery/extract-context-cue';
+import { composeStateAwareCue } from './state-aware-cue';
 import type {
   DroppedCallRecoveryRepository,
   DroppedCallRecoveryRow,
@@ -147,10 +148,16 @@ export async function handleDroppedCallRecovery(
   }
 
   // 3. Compose (brand voice + PII-safe context cue), send, thread, stamp.
-  const topIntent = deps.topIntentFor
-    ? await deps.topIntentFor(row.tenantId, row.voiceSessionId)
-    : undefined;
-  const contextCue = extractContextCue(topIntent);
+  //    RV-115 — the persisted FSM snapshot wins (state-aware cue: proposal
+  //    status vs "about your <intent>"); rows without context fall back to
+  //    the legacy top-intent template lookup.
+  let contextCue = composeStateAwareCue(row.context);
+  if (!contextCue) {
+    const topIntent = deps.topIntentFor
+      ? await deps.topIntentFor(row.tenantId, row.voiceSessionId)
+      : undefined;
+    contextCue = extractContextCue(topIntent);
+  }
 
   const body = await deps.compose({
     tenantId: row.tenantId,

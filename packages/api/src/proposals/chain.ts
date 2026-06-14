@@ -1,4 +1,5 @@
 import { Proposal, ProposalType } from './proposal';
+import type { AddNotePayload } from './contracts/notes';
 
 /**
  * Multi-action chaining — shared types + helpers.
@@ -159,6 +160,25 @@ export function isChained(proposal: Proposal): boolean {
  * Note create_appointment consumes a jobId (not a customerId) — booking
  * a brand-new customer therefore requires an intermediate create_job
  * segment; the decomposer is taught to emit one.
+ *
+ * RV-220 — coverage audit for "new types":
+ *   - send_estimate / send_invoice / issue_invoice / record_payment are
+ *     covered below. They are the canonical chain tails ("draft the
+ *     estimate and send it") and each consumes exactly one id its
+ *     contract already declares (estimateId / invoiceId). Their
+ *     comms/money action class is untouched — chained or not, they never
+ *     auto-approve (decideInitialStatus) and the chain SMS lists them as
+ *     "approval follows separately" (RV-221).
+ *   - attach_photos, create_agreement, apply_route_plan (named by the
+ *     architect plan for this story) are intentionally ABSENT: none of
+ *     them exists as a ProposalType in this codebase (RV-022 — which
+ *     would introduce attach_photos + its contract — is unimplemented),
+ *     so there is no payload schema or execution handler to consume a
+ *     ref. This map is keyed by ProposalType, which makes premature
+ *     entries a compile error by design; wire them when the types land.
+ *   - create_booking is deliberately not covered: it confirms an
+ *     ALREADY-HELD appointment slot created by the live booking path —
+ *     chaining it after create_appointment would double-book.
  */
 export const ENTITY_KIND_TO_PAYLOAD_PATH: Partial<
   Record<ProposalType, Partial<Record<ChainEntityKind, string>>>
@@ -168,7 +188,22 @@ export const ENTITY_KIND_TO_PAYLOAD_PATH: Partial<
   draft_estimate: { customerId: 'customerId', jobId: 'jobId' },
   draft_invoice: { customerId: 'customerId', jobId: 'jobId', estimateId: 'estimateId' },
   add_service_location: { customerId: 'customerId' },
-  add_note: { customerId: 'customerId', jobId: 'jobId' },
+  // Two refs into one add_note would overwrite targetId/targetKind; the decomposer does not wire that shape today.
+  add_note: {
+    customerId: 'targetId',
+    jobId: 'targetId',
+    invoiceId: 'targetId',
+    estimateId: 'targetId',
+    appointmentId: 'targetId',
+  },
+  // RV-220 — comms/money chain tails. The contract fields are
+  // `.uuid().optional()` + reference fallback; the ref token transiently
+  // occupies the id field until execution-time resolution swaps in the
+  // parent's resultEntityId (same precedent as draft_estimate.customerId).
+  send_estimate: { estimateId: 'estimateId' },
+  send_invoice: { invoiceId: 'invoiceId' },
+  issue_invoice: { invoiceId: 'invoiceId' },
+  record_payment: { invoiceId: 'invoiceId' },
 };
 
 /**
@@ -224,6 +259,9 @@ export function applyChainMetadata(
   // gaps, so they are intentionally kept out of missingFields.
   for (const ref of meta.chainRefs) {
     proposal.payload[ref.payloadPath] = buildChainRefToken(ref.parentChainIndex, ref.entityKind);
+    if (proposal.proposalType === 'add_note' && ref.payloadPath === 'targetId') {
+      proposal.payload.targetKind = targetKindForNoteRef(ref.entityKind);
+    }
   }
 
   proposal.sourceContext = {
@@ -242,5 +280,22 @@ export function applyChainMetadata(
   if (meta.chainRefs.length > 0) {
     proposal.status = 'draft';
     proposal.approvedAt = undefined;
+  }
+}
+
+function targetKindForNoteRef(entityKind: ChainEntityKind): AddNotePayload['targetKind'] {
+  switch (entityKind) {
+    case 'customerId':
+      return 'customer';
+    case 'jobId':
+      return 'job';
+    case 'invoiceId':
+      return 'invoice';
+    case 'estimateId':
+      return 'estimate';
+    case 'appointmentId':
+      return 'appointment';
+    case 'leadId':
+      throw new Error('add_note chain refs do not support leadId');
   }
 }

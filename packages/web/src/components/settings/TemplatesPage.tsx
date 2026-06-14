@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router';
+import { useUser } from '@clerk/clerk-react';
 import { formatCurrency as formatCents } from '../../utils/currency';
 import {
   ArrowLeft, Sparkles, Check, X, ChevronRight, RefreshCw,
@@ -9,6 +10,7 @@ import {
 } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import { useMe } from '../../hooks/useMe';
+import { firstNameFromUser } from '../../utils/greeting';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type SuggestionStatus = 'pending' | 'accepted' | 'skipped';
@@ -548,6 +550,12 @@ function DigestModal({ settings, onChange, onClose }: {
   onChange: (s: DigestSettings) => void;
   onClose: () => void;
 }) {
+  const { user } = useUser();
+  const ownerFirstName = firstNameFromUser(
+    user?.fullName,
+    user?.primaryEmailAddress?.emailAddress,
+  );
+  const ownerEmail = user?.primaryEmailAddress?.emailAddress ?? 'you@yourbusiness.com';
   const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
   return (
@@ -644,12 +652,12 @@ function DigestModal({ settings, onChange, onClose }: {
                     </div>
                     <div>
                       <p className="text-xs text-white">Rivet Weekly · Mar 10, 2026</p>
-                      <p className="text-xs text-slate-400 mt-0.5">To: mike@ortegarv.com</p>
+                      <p className="text-xs text-slate-400 mt-0.5">To: {ownerEmail}</p>
                     </div>
                   </div>
 
                   <div className="bg-white px-4 py-4 flex flex-col gap-3">
-                    <p className="text-sm text-slate-900">Hey Mike 👋</p>
+                    <p className="text-sm text-slate-900">Hey {ownerFirstName} 👋</p>
                     <p className="text-xs text-slate-600 leading-relaxed">
                       Here's your Rivet summary for the week of March 4–10.
                     </p>
@@ -1058,9 +1066,11 @@ export function LiveTemplatesSection() {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export function TemplatesPage() {
   const navigate = useNavigate();
+  const { user } = useUser();
   const [suggestions, setSuggestions] = useState<AISuggestion[]>(INITIAL_SUGGESTIONS);
   const [selectedTemplate, setSelectedTemplate] = useState<Template | null>(null);
   const [digestOpen, setDigestOpen] = useState(false);
+  const [businessName, setBusinessName] = useState<string | null>(null);
   const [digest, setDigest] = useState<DigestSettings>({
     enabled: true,
     day: 'Monday',
@@ -1068,6 +1078,40 @@ export function TemplatesPage() {
     includeAiSuggestions: true,
     includeCommunityTips: true,
   });
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await apiFetch('/api/settings');
+        if (!res.ok || !alive) return;
+        const data = (await res.json()) as { businessName?: string };
+        if (typeof data.businessName === 'string' && data.businessName.trim()) {
+          setBusinessName(data.businessName.trim());
+        }
+      } catch {
+        /* preview-only */
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  const templates = useMemo(() => {
+    const owner = firstNameFromUser(
+      user?.fullName,
+      user?.primaryEmailAddress?.emailAddress,
+    );
+    const signature = businessName ? `— ${owner} @ ${businessName}` : `— ${owner}`;
+    return TEMPLATES.map((t) => {
+      if (t.key !== 'comms_tone') return t;
+      return {
+        ...t,
+        fields: t.fields.map((f) =>
+          f.label === 'Signature' ? { ...f, value: signature } : f,
+        ),
+      };
+    });
+  }, [user?.fullName, user?.primaryEmailAddress?.emailAddress, businessName]);
 
   const pendingCount = suggestions.filter(s => s.status === 'pending').length;
   const jobsProcessed = 47;
@@ -1082,7 +1126,7 @@ export function TemplatesPage() {
   function customize(id: string) {
     const s = suggestions.find(x => x.id === id);
     if (s) {
-      const t = TEMPLATES.find(t => t.key === s.templateKey);
+      const t = templates.find(t => t.key === s.templateKey);
       if (t) setSelectedTemplate(t);
     }
   }
@@ -1204,7 +1248,7 @@ export function TemplatesPage() {
             </button>
           </div>
           <div className="flex flex-col gap-3">
-            {TEMPLATES.map(t => (
+            {templates.map(t => (
               <TemplateCard
                 key={t.key}
                 template={t}

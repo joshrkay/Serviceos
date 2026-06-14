@@ -5,12 +5,21 @@ import { MemoryRouter } from 'react-router';
 import { AssistantPage } from './AssistantPage';
 
 vi.mock('../../hooks/useDetailQuery', () => ({ useDetailQuery: vi.fn() }));
-vi.mock('../shared/AIProposalCard', () => ({ AIProposalCard: () => null }));
 vi.mock('../../data/mock-data', () => ({
   type: {},
 }));
+// Mock the authenticated fetch wrapper so tests can assert the page uses it
+// (with the Clerk bearer token attached) instead of bare global fetch.
+vi.mock('../../utils/api-fetch', () => ({ apiFetch: vi.fn() }));
+// sonner's <Toaster> isn't mounted in unit tests — spy on toast.error to
+// assert the visible error surface.
+vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
 
 import { useDetailQuery } from '../../hooks/useDetailQuery';
+import { apiFetch } from '../../utils/api-fetch';
+import { toast } from 'sonner';
+
+const mockedApiFetch = vi.mocked(apiFetch);
 
 // jsdom doesn't implement scrollIntoView
 beforeAll(() => {
@@ -26,7 +35,17 @@ const defaultDetailResult = {
 
 beforeEach(() => {
   vi.mocked(useDetailQuery).mockReturnValue(defaultDetailResult);
+  mockedApiFetch.mockReset();
+  vi.mocked(toast.error).mockReset();
+  localStorage.clear();
 });
+
+function jsonResponse(body: unknown, init: ResponseInit = { status: 200 }): Response {
+  return new Response(JSON.stringify(body), {
+    ...init,
+    headers: { 'content-type': 'application/json', ...(init.headers ?? {}) },
+  });
+}
 
 function renderPage() {
   return render(
@@ -40,6 +59,7 @@ describe('AssistantPage', () => {
   it('shows welcome message when no conversationId', async () => {
     renderPage();
     await waitFor(() => {
+      expect(screen.getByText(/Hi Ada!/)).toBeInTheDocument();
       expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
     });
   });
@@ -98,24 +118,20 @@ describe('AssistantPage', () => {
 // ─── P20-005: Accurate AI failure messaging ──────────────────────────────────
 
 describe('P20-005 — AI failure messaging', () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it('P20-005: shows accurate error message when chat API call fails (network error)', async () => {
-    // Simulate a network failure on the assistant chat endpoint.
-    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new Error('Network error'));
-
-    renderPage();
-
-    // Wait for welcome message then type and send
+  async function typeAndSend(text: string) {
     await waitFor(() => {
       expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
     });
-
     const input = screen.getByPlaceholderText('Ask anything or give a command…');
-    fireEvent.change(input, { target: { value: 'Hello' } });
+    fireEvent.change(input, { target: { value: text } });
     fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+  }
+
+  it('P20-005: shows accurate error message when chat API call fails (network error)', async () => {
+    mockedApiFetch.mockRejectedValueOnce(new Error('Network error'));
+
+    renderPage();
+    await typeAndSend('Hello');
 
     await waitFor(() => {
       expect(
@@ -125,8 +141,7 @@ describe('P20-005 — AI failure messaging', () => {
   });
 
   it('P20-005: shows accurate error message when chat API returns a non-2xx status', async () => {
-    // Simulate an HTTP 503 response from the assistant chat endpoint.
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    mockedApiFetch.mockResolvedValueOnce(
       new Response('Service Unavailable', {
         status: 503,
         headers: { 'Content-Type': 'text/plain' },
@@ -134,14 +149,7 @@ describe('P20-005 — AI failure messaging', () => {
     );
 
     renderPage();
-
-    await waitFor(() => {
-      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
-    });
-
-    const input = screen.getByPlaceholderText('Ask anything or give a command…');
-    fireEvent.change(input, { target: { value: 'Hello' } });
-    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    await typeAndSend('Hello');
 
     await waitFor(() => {
       expect(
@@ -151,17 +159,10 @@ describe('P20-005 — AI failure messaging', () => {
   });
 
   it('P20-005: does not display "not connected yet" string on AI failure', async () => {
-    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new Error('Network error'));
+    mockedApiFetch.mockRejectedValueOnce(new Error('Network error'));
 
     renderPage();
-
-    await waitFor(() => {
-      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
-    });
-
-    const input = screen.getByPlaceholderText('Ask anything or give a command…');
-    fireEvent.change(input, { target: { value: 'Hello' } });
-    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    await typeAndSend('Hello');
 
     await waitFor(() => {
       expect(
@@ -171,5 +172,109 @@ describe('P20-005 — AI failure messaging', () => {
 
     // The old misleading copy must not appear anywhere in the rendered output
     expect(screen.queryByText(/not connected yet/i)).not.toBeInTheDocument();
+  });
+});
+
+// ─── B4: authenticated proposal approve/reject with visible failures ─────────
+
+describe('B4 — proposal approve/reject', () => {
+  const proposal = {
+    id: 'prop-1',
+    title: 'Invoice the Rodriguez job',
+    summary: 'Create a $1,850 invoice for the Rodriguez exterior paint job.',
+    explanation: 'Job marked complete with no invoice on file.',
+    confidence: 'High',
+    type: 'Invoice',
+    status: 'Pending',
+  };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Send a chat message whose reply carries a proposal card. */
+  async function renderWithProposal() {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({ message: { content: 'Here is a draft invoice.', proposal } })
+    );
+
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    fireEvent.change(input, { target: { value: 'Invoice the Rodriguez job' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /approve/i })).toBeInTheDocument();
+    });
+  }
+
+  it('B4: approve goes through the authenticated api client, not bare fetch', async () => {
+    await renderWithProposal();
+
+    const bareFetch = vi.spyOn(globalThis, 'fetch');
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse({ data: { id: 'prop-1', status: 'approved' } }));
+
+    fireEvent.click(screen.getByRole('button', { name: /approve/i }));
+
+    await waitFor(() => {
+      expect(mockedApiFetch).toHaveBeenCalledWith(
+        '/api/proposals/prop-1/approve',
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+    expect(bareFetch).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(screen.getByText('Applied successfully')).toBeInTheDocument();
+    });
+  });
+
+  it('B4: failed approve shows an error and does not mark the proposal approved', async () => {
+    await renderWithProposal();
+
+    mockedApiFetch.mockResolvedValueOnce(new Response('Unauthorized', { status: 401 }));
+    fireEvent.click(screen.getByRole('button', { name: /approve/i }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Couldn’t apply this suggestion. Please try again.');
+    });
+    // Card reverted to Pending — no fake success state.
+    expect(screen.queryByText('Applied successfully')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /approve/i })).toBeInTheDocument();
+  });
+
+  it('B4: reject goes through the authenticated api client, not bare fetch', async () => {
+    await renderWithProposal();
+
+    const bareFetch = vi.spyOn(globalThis, 'fetch');
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse({ data: { id: 'prop-1', status: 'rejected' } }));
+
+    fireEvent.click(screen.getByRole('button', { name: /dismiss/i }));
+
+    await waitFor(() => {
+      expect(mockedApiFetch).toHaveBeenCalledWith(
+        '/api/proposals/prop-1/reject',
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+    expect(bareFetch).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(screen.getByText(/dismissed/)).toBeInTheDocument();
+    });
+  });
+
+  it('B4: failed reject shows an error and does not mark the proposal rejected', async () => {
+    await renderWithProposal();
+
+    mockedApiFetch.mockResolvedValueOnce(new Response('Unauthorized', { status: 401 }));
+    fireEvent.click(screen.getByRole('button', { name: /dismiss/i }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Couldn’t dismiss this suggestion. Please try again.');
+    });
+    expect(screen.queryByText(/dismissed/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
   });
 });

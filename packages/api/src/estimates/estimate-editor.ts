@@ -74,9 +74,14 @@ function validateInput(input: EstimateEditLineItemInput): void {
 
 export function applyEstimateEdits(
   estimate: Estimate,
-  actions: EstimateEditAction[]
+  actions: EstimateEditAction[],
+  // RV-042: the update_estimate execution handler edits ACCEPTED estimates
+  // under acceptance-invalidation semantics (updateEstimate clears the
+  // acceptance + audits it). Default false keeps the hard lock for every
+  // other caller.
+  opts: { allowAccepted?: boolean } = {},
 ): ApplyEstimateEditsResult {
-  assertEstimateEditable(estimate);
+  assertEstimateEditable(estimate, { allowAccepted: opts.allowAccepted ?? false });
   if (actions.length === 0) {
     throw new ValidationError('applyEstimateEdits requires at least one action');
   }

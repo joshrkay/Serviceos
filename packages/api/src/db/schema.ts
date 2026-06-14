@@ -2481,7 +2481,7 @@ export const MIGRATIONS = {
       DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
     ALTER TABLE message_dispatches
       ADD CONSTRAINT message_dispatches_entity_type_check
-        CHECK (entity_type IN ('estimate', 'invoice', 'appointment_confirmation', 'delay_notice'));
+        CHECK (entity_type IN ('estimate', 'invoice', 'appointment_confirmation', 'appointment_reminder', 'delay_notice'));
     CREATE INDEX IF NOT EXISTS idx_dispatches_tenant_sent_at
       ON message_dispatches (tenant_id, sent_at DESC);
   `,
@@ -3837,6 +3837,601 @@ export const MIGRATIONS = {
     -- column needs no policy change.
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS bill_labor_from_time_entries BOOLEAN NOT NULL DEFAULT false;
+  `,
+
+  // Voice CSR parity — bilingual opt-in + single-line human transfer.
+  // (Renumbered to 152/153 on merge: main landed 147–151 first; migrations
+  // are append-only and ordered, so these slot in after.)
+  //   * transfer_number: E.164 line the inbound-CSR warm transfer dials. When
+  //     set it REPLACES the on-call rotation for the standard human handoff
+  //     (low-confidence / caller-requested). Nullable — tenants without it fall
+  //     back to the rotation path.
+  //   * supported_languages: opt-in language stack for the voice agent. Defaults
+  //     to ['en']; a tenant opts into Spanish by storing ARRAY['en','es']. The
+  //     language detector only switches a call to 'es' when 'es' is present here.
+  // App/Zod layer constrains values to the {en,es} subset; the DB keeps the
+  // permissive TEXT[] so a future language add doesn't need a CHECK rewrite.
+  '152_voice_parity_transfer_and_languages': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS transfer_number TEXT,
+      ADD COLUMN IF NOT EXISTS supported_languages TEXT[] NOT NULL DEFAULT ARRAY['en']::TEXT[];
+  `,
+
+  // call_me_back_tasks — first-class follow-up captured when a warm transfer to
+  // transfer_number fails (no-answer/busy). The AI takes a callback message from
+  // the caller; the async sweep (call-me-back-worker, P0-009 pattern) notifies
+  // the CSR. Distinct from proposals: a callback is an operational task, not an
+  // AI mutation requiring approval.
+  '153_create_call_me_back_tasks': `
+    CREATE TABLE IF NOT EXISTS call_me_back_tasks (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      session_id TEXT,
+      call_sid TEXT,
+      caller_phone TEXT NOT NULL,
+      caller_name TEXT,
+      callback_message TEXT,
+      intent_summary TEXT,
+      reason TEXT NOT NULL DEFAULT 'transfer_failed',
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'notified', 'completed', 'cancelled')),
+      scheduled_for TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE call_me_back_tasks ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE call_me_back_tasks FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_call_me_back ON call_me_back_tasks;
+    CREATE POLICY tenant_isolation_call_me_back ON call_me_back_tasks
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+    CREATE INDEX IF NOT EXISTS idx_cmb_tenant
+      ON call_me_back_tasks (tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_cmb_pending
+      ON call_me_back_tasks (tenant_id) WHERE status = 'pending';
+  `,
+
+  // Idempotency for the failed-transfer callback. A Twilio retry of
+  // /callback-message carries the same session id (?sid), so one pending
+  // callback per session lets create() no-op + return the existing row
+  // instead of inserting a duplicate that would notify the CSR twice. Partial
+  // (session_id IS NOT NULL) so non-session-originated rows are unconstrained.
+  '154_call_me_back_session_idempotency': `
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_cmb_session_unique
+      ON call_me_back_tasks (tenant_id, session_id)
+      WHERE session_id IS NOT NULL;
+  `,
+
+  '155_tenant_integrations_google_business': `
+    -- QA-2026-06-10: google-reviews-worker logs "column credentials does not exist"
+    -- on every sweep. Root cause: migration 101_google_reviews added the
+    -- google_business integration but never updated tenant_integrations:
+    --   1. The provider CHECK only allows ('twilio', 'sendgrid') — no 'google_business'
+    --   2. There is no 'credentials' JSONB column — CredentialResolver.getCredential
+    --      runs: SELECT tenant_id, provider, credentials, credential_version
+    --            FROM tenant_integrations ...
+    --      which fails immediately.
+    -- Fix: widen the provider constraint and add the credentials column.
+
+    -- Widen the provider CHECK constraint to include 'google_business'.
+    ALTER TABLE tenant_integrations
+      DROP CONSTRAINT IF EXISTS tenant_integrations_provider_check;
+    ALTER TABLE tenant_integrations
+      ADD CONSTRAINT tenant_integrations_provider_check
+        CHECK (provider IN ('twilio', 'sendgrid', 'google_business'));
+
+    -- Add the credentials JSONB column used by CredentialResolver.getCredential.
+    -- Defaults to '{}' so existing twilio/sendgrid rows are unaffected.
+    ALTER TABLE tenant_integrations
+      ADD COLUMN IF NOT EXISTS credentials JSONB NOT NULL DEFAULT '{}';
+  `,
+
+  '156_proposal_sms_events': `
+    -- P2-034: SMS approval transport. Append-only record of the SMS
+    -- conversation around a proposal (outbound renders, inbound
+    -- approve/reject replies, edit sessions, clarification nudges).
+    -- Read paths: latest outbound render (which proposal is the owner
+    -- replying to?) and open edit session (unconsumed, unexpired).
+    CREATE TABLE IF NOT EXISTS proposal_sms_events (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID NOT NULL REFERENCES proposals(id),
+      direction TEXT NOT NULL CHECK (direction IN ('outbound','inbound')),
+      kind TEXT NOT NULL CHECK (kind IN (
+        'proposal_rendered','reapproval_rendered','clarification_sent',
+        'reply_approve','reply_reject','edit_session_opened','edit_request'
+      )),
+      message_sid TEXT,
+      body TEXT NOT NULL,
+      expires_at TIMESTAMPTZ,
+      consumed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_proposal_sms_events_tenant_recent
+      ON proposal_sms_events (tenant_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_proposal_sms_events_proposal
+      ON proposal_sms_events (tenant_id, proposal_id);
+    ALTER TABLE proposal_sms_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE proposal_sms_events FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_proposal_sms_events ON proposal_sms_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '157_proposal_sms_events_from_phone': `
+    -- P2-034 review fix: edit sessions must be scoped to the sender.
+    -- Tenants can have two approvers (owner + backup supervisor); a
+    -- tenant-wide open session let approver B's Y/N be consumed as
+    -- approver A's edit instruction. Normalized sender digits, set on
+    -- inbound events; outbound rows stay NULL.
+    ALTER TABLE proposal_sms_events
+      ADD COLUMN IF NOT EXISTS from_phone TEXT;
+  `,
+
+  '158_proposal_sms_events_seq': `
+    -- P2-034 review fix: created_at has millisecond precision, so
+    -- back-to-back renders (multi-action chains) can tie and "the latest
+    -- outbound render" — which decides what a Y/N reply targets — becomes
+    -- nondeterministic. BIGSERIAL backfills existing rows in insertion
+    -- order and gives every new row a monotonic tiebreaker.
+    ALTER TABLE proposal_sms_events
+      ADD COLUMN IF NOT EXISTS seq BIGSERIAL;
+  `,
+
+  // RV-001: per-tenant feature flag overrides.
+  // Resolution order: tenant override → platform flag → false.
+  '159_create_tenant_feature_flags': `
+    CREATE TABLE IF NOT EXISTS tenant_feature_flags (
+      tenant_id  UUID      NOT NULL REFERENCES tenants(id),
+      flag_key   TEXT      NOT NULL,
+      enabled    BOOLEAN   NOT NULL,
+      updated_by UUID,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (tenant_id, flag_key)
+    );
+    ALTER TABLE tenant_feature_flags ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_feature_flags FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_tenant_feature_flags ON tenant_feature_flags
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // RV-005: generalized attachments foundation — photos & documents linked
+  // to any supported entity. `job_photos` stays untouched for back-compat;
+  // new surfaces (invoice/estimate photo UX, voice attach, portal galleries)
+  // read this table. `pair_group_id`/`pair_role` model before/after pairs;
+  // `archived_at` is a soft delete (the underlying files row + S3 object
+  // remain, mirroring the job-photos delete semantics).
+  '160_create_attachments': `
+    CREATE TABLE IF NOT EXISTS attachments (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      file_id UUID NOT NULL REFERENCES files(id),
+      entity_type TEXT NOT NULL CHECK (entity_type IN ('job','invoice','estimate','form_response','expense','agreement_run','customer')),
+      entity_id UUID NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('photo','document')),
+      caption TEXT,
+      category TEXT CHECK (category IN ('before','after','problem','completion','receipt','signature','other')),
+      pair_group_id UUID,
+      pair_role TEXT CHECK (pair_role IN ('before','after')),
+      portal_visible BOOLEAN NOT NULL DEFAULT false,
+      annotated_file_id UUID REFERENCES files(id),
+      uploaded_by TEXT,
+      source TEXT NOT NULL DEFAULT 'app' CHECK (source IN ('app','voice','portal','sms')),
+      sort_order INT NOT NULL DEFAULT 0,
+      archived_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_attachments_tenant_entity ON attachments(tenant_id, entity_type, entity_id);
+    CREATE INDEX IF NOT EXISTS idx_attachments_tenant_pair_group ON attachments(tenant_id, pair_group_id);
+    ALTER TABLE attachments ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE attachments FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_attachments ON attachments
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // RV-006: image post-process pipeline outputs. The async worker stamps
+  // dimensions (post EXIF-rotation), the 480px thumbnail key, whether EXIF
+  // was stripped (false = non-image or graceful-degraded unsupported
+  // format), and the SHA-256 of the final stored object. content_hash
+  // doubles as the worker's idempotency marker and powers the attach-time
+  // dedupe lookup, hence the (tenant_id, content_hash) index.
+  '161_files_image_pipeline_columns': `
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS width INT;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS height INT;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS thumbnail_s3_key TEXT;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS exif_stripped BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE files ADD COLUMN IF NOT EXISTS content_hash TEXT;
+    CREATE INDEX IF NOT EXISTS idx_files_tenant_content_hash ON files(tenant_id, content_hash);
+  `,
+  // RV-060 (F-9): end-of-day digest snapshots. One row per tenant per
+  // tenant-local calendar day; `payload` is the computed snapshot (money in,
+  // jobs done, tomorrow's schedule, pending approvals, flags) so the web
+  // view and voice readback render exactly what was sent. `narrative` is the
+  // brand-voice text; `sms_dispatch_id` records the owner SMS send (NULL =
+  // stored but not yet sent — the worker's resend guard keys off it). The
+  // UNIQUE(tenant_id, digest_date) is the idempotency anchor: overlapping
+  // sweeps INSERT … ON CONFLICT DO NOTHING and only the winner sends.
+  // The message_dispatches CHECK is widened so the owner digest SMS can be
+  // recorded in the same dispatch audit trail as every other send.
+  '162_create_daily_digests': `
+    CREATE TABLE IF NOT EXISTS daily_digests (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      digest_date DATE NOT NULL,
+      payload JSONB NOT NULL,
+      narrative TEXT,
+      sms_dispatch_id UUID,
+      generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE(tenant_id, digest_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_daily_digests_tenant_date
+      ON daily_digests (tenant_id, digest_date);
+    ALTER TABLE daily_digests ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE daily_digests FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_daily_digests ON daily_digests
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // RV-063 (F-9): per-tenant digest delivery settings. Opt-in
+  // (digest_enabled defaults false); digest_time is a tenant-local
+  // wall-clock time (the worker buckets it in tenant tz); digest_channel
+  // 'none' keeps generating/storing the digest (web view) without SMS.
+  '163_tenant_settings_digest': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS digest_enabled BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS digest_time TIME NOT NULL DEFAULT '18:00';
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS digest_channel TEXT NOT NULL DEFAULT 'sms'
+        CHECK (digest_channel IN ('sms','none'));
+  `,
+
+  // RV-061 (F-9): widen message_dispatches entity_type CHECK to allow
+  // 'daily_digest' (owner end-of-day digest SMS, entity_id = daily_digests.id).
+  // Mirrors the prior widenings in 092_extend_dispatch_entity_types and
+  // 125_dispatch_entity_en_route — kept separate from 162_create_daily_digests
+  // so the table-creation and the constraint change are independently
+  // reviewable and reversible.
+  '164_dispatch_entity_daily_digest': `
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_entity_type_check
+        CHECK (entity_type IN (
+          'estimate', 'invoice', 'appointment_confirmation',
+          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
+          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
+          'daily_digest'
+        ));
+  `,
+
+  // RV-074 review fix: widen the proposal_sms_events kind CHECK from 156 to
+  // allow 'review_required_rendered' — the outbound anchor row recorded when
+  // a LOW/VERY_LOW-confidence proposal SMS ("needs review in app — reply N
+  // to reject") goes out. Without an anchor, the reply transport's
+  // findRecentOutbound targeted the previous (older) render, so the N the
+  // message itself solicits would reject the WRONG proposal. Mirrors the
+  // CHECK-widening style of 164_dispatch_entity_daily_digest.
+  '165_proposal_sms_events_review_required_kind': `
+    ALTER TABLE proposal_sms_events
+      DROP CONSTRAINT IF EXISTS proposal_sms_events_kind_check;
+    ALTER TABLE proposal_sms_events
+      ADD CONSTRAINT proposal_sms_events_kind_check
+        CHECK (kind IN (
+          'proposal_rendered','reapproval_rendered','clarification_sent',
+          'reply_approve','reply_reject','edit_session_opened','edit_request',
+          'review_required_rendered'
+        ));
+  `,
+
+  // RV-120 — per-call vulnerability triage outcomes. One row per
+  // `evaluateTriage` evaluation (turn-batch grader, RV-122) so post-incident
+  // review can audit the triage matrix per session without replaying audio.
+  // `signals` carries the NON-PII evidence strings (same discipline as
+  // migration 115's vulnerability_signals); `action_taken` records what the
+  // call actually did with the decision (patched owner, urgent booking,
+  // normal flow). voice_session_id is TEXT — in-memory session ids are not
+  // UUIDs on every channel. Idempotent (IF NOT EXISTS + DROP/CREATE POLICY).
+  '166_create_triage_events': `
+    CREATE TABLE IF NOT EXISTS triage_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      voice_session_id TEXT NOT NULL,
+      customer_id UUID,
+      score NUMERIC NOT NULL,
+      tier TEXT NOT NULL CHECK (tier IN ('none', 'low', 'elevated', 'critical')),
+      signals JSONB NOT NULL DEFAULT '[]'::jsonb,
+      action_taken TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_triage_events_tenant_created
+      ON triage_events (tenant_id, created_at);
+    ALTER TABLE triage_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE triage_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_triage_events ON triage_events;
+    CREATE POLICY tenant_isolation_triage_events ON triage_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+  // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy engine).
+  // Note: migrations 165 and 166 are reserved by parallel sibling tracks.
+  //
+  // supervisor_policies: versioned per-tenant rule sets. `rules` is the
+  // SupervisorRules JSONB (src/proposals/supervisor/policy.ts) — all keys
+  // optional, unset = permissive. Exactly one version per tenant SHOULD be
+  // active at a time (enforced by the repo's activate(), which deactivates
+  // siblings in the same transaction); UNIQUE(tenant_id, version) pins the
+  // version ledger. Indexed on (tenant_id, active) for the hot
+  // getActive() read on every proposal creation.
+  //
+  // tenant_budget_counters: fixed-window counters backing the budget caps
+  // (daily executed spend per UTC day, auto-approvals per UTC hour —
+  // window_start is the UTC truncation; v1 deliberately does NOT use
+  // tenant-local windows). Incremented via INSERT .. ON CONFLICT value =
+  // value + delta so concurrent writers never lose updates.
+  '167_create_supervisor_policies': `
+    CREATE TABLE IF NOT EXISTS supervisor_policies (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      version INT NOT NULL,
+      active BOOLEAN NOT NULL DEFAULT false,
+      rules JSONB NOT NULL,
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE(tenant_id, version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_supervisor_policies_tenant_active
+      ON supervisor_policies (tenant_id, active);
+    ALTER TABLE supervisor_policies ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE supervisor_policies FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_supervisor_policies ON supervisor_policies
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS tenant_budget_counters (
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      counter_key TEXT NOT NULL,
+      window_start TIMESTAMPTZ NOT NULL,
+      value BIGINT NOT NULL DEFAULT 0,
+      PRIMARY KEY (tenant_id, counter_key, window_start)
+    );
+    ALTER TABLE tenant_budget_counters ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_budget_counters FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_tenant_budget_counters ON tenant_budget_counters
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // RV-130 — append-only consent ledger. Every consent-relevant moment
+  // (implicit recording consent at disclosure, an explicit "stop recording"
+  // objection, an SMS opt-in/out, portal/manual grants) appends one event;
+  // rows are NEVER updated or deleted (the derived customers.consent_status
+  // from migration 132 is the mutable rollup). phone_normalized is the
+  // digits-only E.164 so lookups survive formatting drift. Idempotent.
+  '168_create_consent_events': `
+    CREATE TABLE IF NOT EXISTS consent_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID,
+      phone_normalized TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('recording', 'sms', 'marketing')),
+      state TEXT NOT NULL CHECK (state IN ('granted', 'revoked', 'implicit')),
+      source TEXT NOT NULL CHECK (source IN ('voice', 'sms', 'portal', 'manual')),
+      voice_session_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_consent_events_tenant_phone
+      ON consent_events (tenant_id, phone_normalized);
+    ALTER TABLE consent_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE consent_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_consent_events ON consent_events;
+    CREATE POLICY tenant_isolation_consent_events ON consent_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // RV-132 — per-tenant recording retention. recording_retention_days drives
+  // the retention worker's purge horizon; legal_hold exempts a recording from
+  // any purge regardless of age; purged_at is the tombstone the worker stamps
+  // after deleting the S3 object (the row is kept for audit — the 007 status
+  // CHECK has no 'deleted' value, so a dedicated nullable marker is the
+  // non-destructive tombstone). Idempotent.
+  '169_recording_retention': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS recording_retention_days INT NOT NULL DEFAULT 365;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS chk_recording_retention_days_positive;
+    ALTER TABLE tenant_settings
+      ADD CONSTRAINT chk_recording_retention_days_positive
+        CHECK (recording_retention_days > 0);
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS legal_hold BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS purged_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_retention
+      ON voice_recordings (created_at)
+      WHERE purged_at IS NULL AND legal_hold = false;
+  `,
+  // NOTE: recording_retention_days is not currently exposed at any settings
+  // write surface (no API endpoint, no settings contract field). If a write
+  // route is added in the future, validate retention_days > 0 there too.
+
+  // RV-115 — state-aware dropped-call recovery. The scheduler snapshots
+  // {state, intent, entitiesResolved, proposalIds} from the FSM at the moment
+  // the call terminated without reaching 'closing'; the recovery SMS handler
+  // composes a state-aware cue from it and the inbound resume handler
+  // (RV-116) uses it to confirm a pending booking / schedule a callback.
+  // JSONB NULL — rows scheduled before this migration simply have no context.
+  '170_dropped_call_recovery_context': `
+    ALTER TABLE dropped_call_recoveries
+      ADD COLUMN IF NOT EXISTS context JSONB;
+  `,
+  // Track E (RV-225 audit fix): widen the proposal_sms_events kind CHECK
+  // from 165 to allow 'voice_reapproval' — recorded when a VOICE edit is
+  // applied and the updated values were read back by voice only (no SMS
+  // re-render deps wired at the call site). It clears
+  // hasUnappliedEditRequest like reapproval_rendered, but is EXCLUDED from
+  // findRecentOutbound: no text was sent for it, so it must never become
+  // the owner's Y/N reply anchor. Mirrors the CHECK-widening style of
+  // 165_proposal_sms_events_review_required_kind.
+  '171_proposal_sms_events_voice_reapproval_kind': `
+    ALTER TABLE proposal_sms_events
+      DROP CONSTRAINT IF EXISTS proposal_sms_events_kind_check;
+    ALTER TABLE proposal_sms_events
+      ADD CONSTRAINT proposal_sms_events_kind_check
+        CHECK (kind IN (
+          'proposal_rendered','reapproval_rendered','clarification_sent',
+          'reply_approve','reply_reject','edit_session_opened','edit_request',
+          'review_required_rendered','voice_reapproval'
+        ));
+  `,
+
+  // F17 / P15-001 — per-tenant QuickBooks (Xero enum reserved) accounting sync.
+  '172_create_accounting_integrations': `
+    CREATE TABLE IF NOT EXISTS accounting_integrations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL UNIQUE REFERENCES tenants(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL CHECK (provider IN ('quickbooks', 'xero')),
+      access_token_encrypted TEXT NOT NULL,
+      refresh_token_encrypted TEXT NOT NULL,
+      realm_id TEXT NOT NULL,
+      connected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_synced_at TIMESTAMPTZ,
+      status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'expired', 'disconnected', 'error')),
+      error_message TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE accounting_integrations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE accounting_integrations FORCE ROW LEVEL SECURITY;
+    CREATE POLICY accounting_integrations_tenant ON accounting_integrations
+      USING (
+        tenant_id = current_setting('app.current_tenant_id', true)::uuid
+        OR current_setting('app.system_lookup', true) = 'true'
+      );
+
+    CREATE TABLE IF NOT EXISTS accounting_sync_log (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      integration_id UUID NOT NULL REFERENCES accounting_integrations(id) ON DELETE CASCADE,
+      entity_type TEXT NOT NULL CHECK (entity_type IN ('invoice', 'customer', 'payment')),
+      entity_id UUID NOT NULL,
+      external_id TEXT,
+      action TEXT NOT NULL CHECK (action IN ('push', 'pull', 'conflict')),
+      status TEXT NOT NULL CHECK (status IN ('success', 'failed')),
+      payload_hash TEXT NOT NULL,
+      error_message TEXT,
+      synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE accounting_sync_log ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE accounting_sync_log FORCE ROW LEVEL SECURITY;
+    CREATE POLICY accounting_sync_log_tenant ON accounting_sync_log
+      USING (
+        tenant_id = current_setting('app.current_tenant_id', true)::uuid
+        OR current_setting('app.system_lookup', true) = 'true'
+      );
+    CREATE INDEX IF NOT EXISTS accounting_sync_log_tenant_integration_synced_idx
+      ON accounting_sync_log (tenant_id, integration_id, synced_at DESC);
+
+    ALTER TABLE oauth_states DROP CONSTRAINT IF EXISTS oauth_states_provider_check;
+    ALTER TABLE oauth_states ADD CONSTRAINT oauth_states_provider_check
+      CHECK (provider IN ('google', 'quickbooks', 'xero'));
+  `,
+
+  '173_create_hfcr_weekly_sends': `
+    CREATE TABLE IF NOT EXISTS hfcr_weekly_sends (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      -- Stable per-week idempotency key: the Monday (UTC) the summarized week
+      -- started. UNIQUE (tenant_id, week_starting_date) makes the weekly sweep
+      -- send exactly one owner HFCR summary per tenant per week.
+      week_starting_date DATE NOT NULL,
+      hfcr_cents BIGINT NOT NULL DEFAULT 0,
+      recovered_call_count INTEGER NOT NULL DEFAULT 0,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, week_starting_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_hfcr_weekly_sends_tenant ON hfcr_weekly_sends(tenant_id);
+    ALTER TABLE hfcr_weekly_sends ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE hfcr_weekly_sends FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_hfcr_weekly_sends ON hfcr_weekly_sends;
+    CREATE POLICY tenant_isolation_hfcr_weekly_sends ON hfcr_weekly_sends
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // Membership engine (#6) — auto-renew on service_agreements. Additive ALTERs
+  // only: the runner re-executes every migration on every boot, so each
+  // statement is idempotent (ADD COLUMN IF NOT EXISTS, DROP+ADD the CHECK).
+  // renewal_term_months is the stable membership term the renewal sweep rolls
+  // ends_on forward by (positivity guarded here and in the Zod/service layer);
+  // renewal_count is an audit counter. The partial index backs findRenewable.
+  '173_service_agreements_auto_renew': `
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS auto_renew BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS renewal_term_months INTEGER;
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS renewal_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE service_agreements
+      DROP CONSTRAINT IF EXISTS chk_agreement_renewal_term_positive;
+    ALTER TABLE service_agreements
+      ADD CONSTRAINT chk_agreement_renewal_term_positive
+        CHECK (renewal_term_months IS NULL OR renewal_term_months > 0);
+    CREATE INDEX IF NOT EXISTS idx_agreements_auto_renew
+      ON service_agreements (tenant_id, ends_on)
+      WHERE auto_renew = TRUE AND status = 'active';
+  `,
+
+  // Membership engine (#6 phase 2) — member pricing. A membership with
+  // member_discount_bps > 0 confers that percentage discount on the customer's
+  // estimates/invoices. Additive ALTER + re-run-safe DROP/ADD CHECK (0..10000
+  // bps = 0..100%). Resolution reuses the existing tenant+customer index.
+  '174_service_agreements_member_discount': `
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS member_discount_bps INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE service_agreements
+      DROP CONSTRAINT IF EXISTS chk_agreement_member_discount_bps;
+    ALTER TABLE service_agreements
+      ADD CONSTRAINT chk_agreement_member_discount_bps
+        CHECK (member_discount_bps >= 0 AND member_discount_bps <= 10000);
+  `,
+
+  // Membership engine (#6 phase 3) — priority booking. A membership with
+  // priority_booking lets the customer book further into the future (extended
+  // horizon) than a non-member in the self-service portal. Additive boolean.
+  '175_service_agreements_priority_booking': `
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS priority_booking BOOLEAN NOT NULL DEFAULT FALSE;
+  `,
+
+  // Membership engine (#6 phase 4) — saved cards for off-session dues billing.
+  // Stores ONLY Stripe ids + non-sensitive display metadata (brand/last4/exp);
+  // raw card data never reaches our server (browser -> Stripe via SetupIntent).
+  // The Stripe customer + payment method are scoped to the tenant's connected
+  // account (where dues are charged). auto_collect_dues opts a membership into
+  // automatic charging.
+  '176_customer_payment_methods': `
+    CREATE TABLE IF NOT EXISTS customer_payment_methods (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      stripe_customer_id TEXT NOT NULL,
+      stripe_payment_method_id TEXT NOT NULL,
+      brand TEXT,
+      last4 TEXT,
+      exp_month INT,
+      exp_year INT,
+      is_default BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, stripe_payment_method_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cpm_tenant_customer
+      ON customer_payment_methods (tenant_id, customer_id);
+    ALTER TABLE customer_payment_methods ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_payment_methods FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_payment_methods ON customer_payment_methods;
+    CREATE POLICY tenant_isolation_customer_payment_methods ON customer_payment_methods
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    ALTER TABLE service_agreements
+      ADD COLUMN IF NOT EXISTS auto_collect_dues BOOLEAN NOT NULL DEFAULT FALSE;
   `,
 };
 

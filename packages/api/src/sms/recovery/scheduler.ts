@@ -30,9 +30,58 @@ import type { CallOutcome } from '../../voice/voice-service';
 export const RECOVERY_DELAY_MS = 60_000;
 
 /**
+ * RV-115 — FSM snapshot persisted alongside the recovery row (migration
+ * 170's `context` JSONB). `bucket` is the cue selector the recovery SMS
+ * handler and the inbound resume handler (RV-116) branch on:
+ *
+ *   - 'proposal_created' — a proposal was queued before the drop;
+ *   - 'mid_intent'       — an intent was captured but nothing queued;
+ *   - 'early'            — the call dropped before intent capture.
+ */
+export interface DroppedCallRecoveryContext {
+  /** Raw FSM state at termination (often 'terminated'; informational). */
+  state: string;
+  bucket: 'proposal_created' | 'mid_intent' | 'early';
+  intent?: string;
+  /** String-valued resolved entities only (PII-light snapshot). */
+  entitiesResolved?: Record<string, string>;
+  proposalIds: string[];
+}
+
+/**
+ * Build the RV-115 context snapshot from plain FSM-derived values. Pure —
+ * adapters pass `machine.currentState` / `machine.currentContext` fields.
+ */
+export function buildRecoveryContext(args: {
+  state: string;
+  currentIntent?: string;
+  extractedEntities?: Record<string, unknown>;
+  proposalIds: ReadonlyArray<string>;
+}): DroppedCallRecoveryContext {
+  const entitiesResolved: Record<string, string> = {};
+  for (const [k, v] of Object.entries(args.extractedEntities ?? {})) {
+    if (typeof v === 'string') entitiesResolved[k] = v;
+  }
+  const bucket: DroppedCallRecoveryContext['bucket'] =
+    args.proposalIds.length > 0
+      ? 'proposal_created'
+      : args.currentIntent
+        ? 'mid_intent'
+        : 'early';
+  return {
+    state: args.state,
+    bucket,
+    ...(args.currentIntent ? { intent: args.currentIntent } : {}),
+    ...(Object.keys(entitiesResolved).length > 0 ? { entitiesResolved } : {}),
+    proposalIds: [...args.proposalIds],
+  };
+}
+
+/**
  * A pending/sent recovery row. Mirrors the `dropped_call_recoveries` table
- * (migration 112). `sentAt`/`suppressedReason`/`smsMessageSid` are stamped by
- * the worker at execution time.
+ * (migration 112; `context` added by migration 170). `sentAt` /
+ * `suppressedReason`/`smsMessageSid` are stamped by the worker at execution
+ * time.
  */
 export interface DroppedCallRecoveryRow {
   id: string;
@@ -43,6 +92,8 @@ export interface DroppedCallRecoveryRow {
   sentAt?: Date | null;
   suppressedReason?: string | null;
   smsMessageSid?: string | null;
+  /** RV-115 — FSM snapshot at the drop. Null for pre-170 rows. */
+  context?: DroppedCallRecoveryContext | null;
   createdAt: Date;
 }
 
@@ -53,6 +104,8 @@ export interface ScheduleRecoveryInput {
   callerE164: string;
   outcome: CallOutcome;
   channel: string;
+  /** RV-115 — FSM snapshot at termination (see buildRecoveryContext). */
+  context?: DroppedCallRecoveryContext;
 }
 
 /** Persistence port — in-memory for unit tests, Pg in production. */
@@ -67,10 +120,32 @@ export interface DroppedCallRecoveryRepository {
       voiceSessionId: string;
       callerE164: string;
       scheduledFor: Date;
+      context?: DroppedCallRecoveryContext;
     },
   ): Promise<DroppedCallRecoveryRow>;
   /** Cross-tenant: due rows not yet sent or suppressed (worker drain). */
   findDue(now: Date, limit: number): Promise<DroppedCallRecoveryRow[]>;
+  /**
+   * Tenant-scoped owner lookup read: recovery SMS rows that have been sent
+   * and remain actionable. This table has no inbound-reply-consumed column;
+   * the durable resolved signal it owns is `suppressed_reason`, so
+   * "unanswered" is defined here as sent_at IS NOT NULL and
+   * suppressed_reason IS NULL. Newest first, bounded by limit.
+   */
+  listUnansweredRecoveries(
+    tenantId: string,
+    limit?: number,
+  ): Promise<DroppedCallRecoveryRow[]>;
+  /**
+   * RV-116 — most recent recovery row for a caller within the resume
+   * window (matched on digits so formatting drift never misses). Pending
+   * AND sent rows both match — a reply can arrive before the worker sends.
+   */
+  findRecentByPhone(
+    tenantId: string,
+    callerE164: string,
+    since: Date,
+  ): Promise<DroppedCallRecoveryRow | null>;
   /** Stamp a successful send. */
   markSent(
     tenantId: string,
@@ -118,6 +193,7 @@ export class DroppedCallScheduler {
         voiceSessionId: input.voiceSessionId,
         callerE164: input.callerE164,
         scheduledFor,
+        ...(input.context ? { context: input.context } : {}),
       });
       this.logger.info('dropped-call recovery scheduled', {
         tenantId: input.tenantId,
@@ -149,13 +225,19 @@ export class InMemoryDroppedCallRecoveryRepository
     voiceSessionId: string;
     callerE164: string;
     scheduledFor: Date;
+    context?: DroppedCallRecoveryContext;
   }): Promise<DroppedCallRecoveryRow> {
     const existing = this.rows.find(
       (r) =>
         r.tenantId === input.tenantId &&
         r.voiceSessionId === input.voiceSessionId,
     );
-    if (existing) return { ...existing };
+    if (existing) {
+      // Idempotent on (tenant, session); a later schedule may still fill a
+      // missing context (mirrors the Pg COALESCE).
+      if (!existing.context && input.context) existing.context = input.context;
+      return { ...existing };
+    }
     const row: DroppedCallRecoveryRow = {
       id: `rec_${++this.seq}`,
       tenantId: input.tenantId,
@@ -165,10 +247,30 @@ export class InMemoryDroppedCallRecoveryRepository
       sentAt: null,
       suppressedReason: null,
       smsMessageSid: null,
+      context: input.context ?? null,
       createdAt: new Date(),
     };
     this.rows.push(row);
     return { ...row };
+  }
+
+  async findRecentByPhone(
+    tenantId: string,
+    callerE164: string,
+    since: Date,
+  ): Promise<DroppedCallRecoveryRow | null> {
+    const key = phoneMatchKey(callerE164);
+    if (!key) return null;
+    const matches = this.rows
+      .filter(
+        (r) =>
+          r.tenantId === tenantId &&
+          phoneMatchKey(r.callerE164) === key &&
+          r.createdAt.getTime() >= since.getTime() &&
+          !r.suppressedReason,
+      )
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    return matches[0] ? { ...matches[0] } : null;
   }
 
   async findDue(now: Date, limit: number): Promise<DroppedCallRecoveryRow[]> {
@@ -179,6 +281,21 @@ export class InMemoryDroppedCallRecoveryRepository
           !r.suppressedReason &&
           r.scheduledFor.getTime() <= now.getTime(),
       )
+      .slice(0, limit)
+      .map((r) => ({ ...r }));
+  }
+
+  async listUnansweredRecoveries(
+    tenantId: string,
+    limit = 10,
+  ): Promise<DroppedCallRecoveryRow[]> {
+    return this.rows
+      .filter((r) => r.tenantId === tenantId && !!r.sentAt && !r.suppressedReason)
+      .sort((a, b) => {
+        const aTime = a.sentAt?.getTime() ?? a.createdAt.getTime();
+        const bTime = b.sentAt?.getTime() ?? b.createdAt.getTime();
+        return bTime - aTime;
+      })
       .slice(0, limit)
       .map((r) => ({ ...r }));
   }
@@ -220,6 +337,7 @@ export class PgDroppedCallRecoveryRepository
     voiceSessionId: string;
     callerE164: string;
     scheduledFor: Date;
+    context?: DroppedCallRecoveryContext;
   }): Promise<DroppedCallRecoveryRow> {
     return this.withTenant(input.tenantId, async (client) => {
       // tenant_id comes from the RLS GUC so it can never diverge from the
@@ -227,16 +345,49 @@ export class PgDroppedCallRecoveryRepository
       // idempotent per (tenant_id, voice_session_id).
       const { rows } = await client.query(
         `INSERT INTO dropped_call_recoveries
-           (tenant_id, voice_session_id, caller_e164, scheduled_for)
-         VALUES (current_setting('app.current_tenant_id')::uuid, $1, $2, $3)
+           (tenant_id, voice_session_id, caller_e164, scheduled_for, context)
+         VALUES (current_setting('app.current_tenant_id')::uuid, $1, $2, $3, $4::jsonb)
          ON CONFLICT (tenant_id, voice_session_id) DO UPDATE
-           SET voice_session_id = dropped_call_recoveries.voice_session_id
+           SET context = COALESCE(dropped_call_recoveries.context, EXCLUDED.context)
          RETURNING id, tenant_id, voice_session_id, caller_e164,
                    scheduled_for, sent_at, suppressed_reason,
-                   sms_message_sid, created_at`,
-        [input.voiceSessionId, input.callerE164, input.scheduledFor],
+                   sms_message_sid, context, created_at`,
+        [
+          input.voiceSessionId,
+          input.callerE164,
+          input.scheduledFor,
+          input.context ? JSON.stringify(input.context) : null,
+        ],
       );
       return mapRow(rows[0]);
+    });
+  }
+
+  async findRecentByPhone(
+    tenantId: string,
+    callerE164: string,
+    since: Date,
+  ): Promise<DroppedCallRecoveryRow | null> {
+    const key = phoneMatchKey(callerE164);
+    if (!key) return null;
+    return this.withTenant(tenantId, async (client) => {
+      // Last-10-digit comparison so NANP formatting drift ("+1512…" vs
+      // "(512) …") never misses the thread — same normalization as
+      // phoneMatchKey below.
+      const { rows } = await client.query(
+        `SELECT id, tenant_id, voice_session_id, caller_e164,
+                scheduled_for, sent_at, suppressed_reason,
+                sms_message_sid, context, created_at
+           FROM dropped_call_recoveries
+          WHERE tenant_id = current_setting('app.current_tenant_id')::uuid
+            AND right(regexp_replace(caller_e164, '\\D', '', 'g'), 10) = $1
+            AND created_at >= $2
+            AND suppressed_reason IS NULL
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        [key, since],
+      );
+      return rows[0] ? mapRow(rows[0]) : null;
     });
   }
 
@@ -248,7 +399,7 @@ export class PgDroppedCallRecoveryRepository
       const { rows } = await client.query(
         `SELECT id, tenant_id, voice_session_id, caller_e164,
                 scheduled_for, sent_at, suppressed_reason,
-                sms_message_sid, created_at
+                sms_message_sid, context, created_at
            FROM dropped_call_recoveries
           WHERE sent_at IS NULL
             AND suppressed_reason IS NULL
@@ -256,6 +407,29 @@ export class PgDroppedCallRecoveryRepository
           ORDER BY scheduled_for ASC
           LIMIT $2`,
         [now, limit],
+      );
+      return rows.map(mapRow);
+    });
+  }
+
+  async listUnansweredRecoveries(
+    tenantId: string,
+    limit = 10,
+  ): Promise<DroppedCallRecoveryRow[]> {
+    return this.withTenant(tenantId, async (client) => {
+      // "Unanswered" uses the columns this table owns: a recovery SMS was
+      // sent, and no durable suppression/resolution reason has been stamped.
+      const { rows } = await client.query(
+        `SELECT id, tenant_id, voice_session_id, caller_e164,
+                scheduled_for, sent_at, suppressed_reason,
+                sms_message_sid, context, created_at
+           FROM dropped_call_recoveries
+          WHERE tenant_id = current_setting('app.current_tenant_id')::uuid
+            AND sent_at IS NOT NULL
+            AND suppressed_reason IS NULL
+          ORDER BY sent_at DESC, created_at DESC
+          LIMIT $1`,
+        [limit],
       );
       return rows.map(mapRow);
     });
@@ -303,6 +477,44 @@ function mapRow(row: Record<string, unknown>): DroppedCallRecoveryRow {
     sentAt: row.sent_at ? new Date(row.sent_at as string) : null,
     suppressedReason: (row.suppressed_reason as string | null) ?? null,
     smsMessageSid: (row.sms_message_sid as string | null) ?? null,
+    context: parseContext(row.context),
     createdAt: new Date(row.created_at as string),
   };
+}
+
+function parseContext(raw: unknown): DroppedCallRecoveryContext | null {
+  if (raw === null || raw === undefined) return null;
+  const value = typeof raw === 'string' ? safeJson(raw) : raw;
+  if (typeof value !== 'object' || value === null) return null;
+  const v = value as Partial<DroppedCallRecoveryContext>;
+  if (typeof v.state !== 'string' || typeof v.bucket !== 'string') return null;
+  return {
+    state: v.state,
+    bucket: v.bucket as DroppedCallRecoveryContext['bucket'],
+    ...(typeof v.intent === 'string' ? { intent: v.intent } : {}),
+    ...(v.entitiesResolved && typeof v.entitiesResolved === 'object'
+      ? { entitiesResolved: v.entitiesResolved as Record<string, string> }
+      : {}),
+    proposalIds: Array.isArray(v.proposalIds)
+      ? v.proposalIds.filter((p): p is string => typeof p === 'string')
+      : [],
+  };
+}
+
+/**
+ * Phone match key: digits only, last 10 (NANP local number). Returns ''
+ * for unusably short values so an empty caller-id can never match.
+ */
+export function phoneMatchKey(phone: string): string {
+  const digits = (phone ?? '').replace(/\D/g, '');
+  if (digits.length < 7) return '';
+  return digits.slice(-10);
+}
+
+function safeJson(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }

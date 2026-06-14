@@ -6,6 +6,7 @@ import {
 } from '../../src/proposals/proposal';
 import {
   approveProposal,
+  approveChainSet,
   rejectProposal,
   editProposal,
   undoProposal,
@@ -224,5 +225,443 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
         undoProposal(repo, tenantId, 'nonexistent-id', actorId, 'owner')
       ).rejects.toThrow(NotFoundError);
     });
+  });
+});
+
+// ─── RV-073 — approval-channel audit tagging ────────────────────────────────
+//
+// approveProposal/rejectProposal accept an optional `channel`
+// ('ui' | 'sms' | 'one_tap' | 'voice') recorded on the audit-event
+// metadata. When the call site does not declare one, the key is OMITTED
+// (legacy behavior) rather than defaulted.
+
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { approveProposalsBatch } from '../../src/proposals/actions';
+import { applyChainMetadata } from '../../src/proposals/chain';
+
+describe('RV-073 — approval channel audit tagging', () => {
+  const tenantId = 'tenant-1';
+  const actorId = 'user-1';
+
+  const baseInput: CreateProposalInput = {
+    tenantId,
+    proposalType: 'create_customer',
+    payload: { name: 'John Doe' },
+    summary: 'Create customer from voice call',
+    createdBy: actorId,
+  };
+
+  async function createReady(repo: InMemoryProposalRepository): Promise<Proposal> {
+    const proposal = createProposal(baseInput);
+    await repo.create(proposal);
+    await repo.updateStatus(tenantId, proposal.id, 'ready_for_review');
+    return (await repo.findById(tenantId, proposal.id))!;
+  }
+
+  it('approveProposal records channel on the proposal.approved audit metadata', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const proposal = await createReady(repo);
+
+    await approveProposal(repo, tenantId, proposal.id, actorId, 'owner', auditRepo, 'voice');
+
+    const event = auditRepo.getAll().find((e) => e.eventType === 'proposal.approved');
+    expect(event).toBeDefined();
+    expect(event!.metadata).toMatchObject({
+      proposalType: 'create_customer',
+      status: 'approved',
+      channel: 'voice',
+    });
+  });
+
+  it('approveProposal omits the channel key entirely when no channel is passed (legacy)', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const proposal = await createReady(repo);
+
+    await approveProposal(repo, tenantId, proposal.id, actorId, 'owner', auditRepo);
+
+    const event = auditRepo.getAll().find((e) => e.eventType === 'proposal.approved');
+    expect(event).toBeDefined();
+    expect(event!.metadata).not.toHaveProperty('channel');
+  });
+
+  it('rejectProposal records channel on the proposal.rejected audit metadata', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const proposal = await createReady(repo);
+
+    await rejectProposal(
+      repo,
+      tenantId,
+      proposal.id,
+      actorId,
+      'owner',
+      'not needed',
+      undefined,
+      undefined,
+      auditRepo,
+      'sms',
+    );
+
+    const event = auditRepo.getAll().find((e) => e.eventType === 'proposal.rejected');
+    expect(event).toBeDefined();
+    expect(event!.metadata).toMatchObject({
+      rejectionReason: 'not needed',
+      channel: 'sms',
+    });
+  });
+
+  it('rejectProposal omits the channel key when no channel is passed (legacy)', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const proposal = await createReady(repo);
+
+    await rejectProposal(
+      repo,
+      tenantId,
+      proposal.id,
+      actorId,
+      'owner',
+      'not needed',
+      undefined,
+      undefined,
+      auditRepo,
+    );
+
+    const event = auditRepo.getAll().find((e) => e.eventType === 'proposal.rejected');
+    expect(event).toBeDefined();
+    expect(event!.metadata).not.toHaveProperty('channel');
+  });
+
+  it('approveProposalsBatch threads the channel onto each member approval', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const a = await createReady(repo);
+    const b = await createReady(repo);
+
+    const result = await approveProposalsBatch(
+      repo,
+      tenantId,
+      [a.id, b.id],
+      actorId,
+      'owner',
+      auditRepo,
+      'ui',
+    );
+
+    expect(result.approved).toEqual([a.id, b.id]);
+    const approvedEvents = auditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'proposal.approved');
+    expect(approvedEvents).toHaveLength(2);
+    for (const event of approvedEvents) {
+      expect(event.metadata).toMatchObject({ channel: 'ui' });
+    }
+  });
+});
+
+describe('Track E — chain-set approval', () => {
+  const tenantId = 'tenant-chain';
+  const actorId = 'owner-1';
+
+  async function seedChain(repo: InMemoryProposalRepository): Promise<{
+    customer: Proposal;
+    job: Proposal;
+    sendEstimate: Proposal;
+  }> {
+    const chainId = 'chain-approve-1';
+    const customer = createProposal({
+      tenantId,
+      proposalType: 'create_customer',
+      payload: { name: 'Jane Chain' },
+      summary: 'Create Jane Chain',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(customer, {
+      chainId,
+      chainIndex: 0,
+      chainLength: 3,
+      dependsOnChainIndices: [],
+      chainRefs: [],
+    });
+    const job = createProposal({
+      tenantId,
+      proposalType: 'create_job',
+      payload: { customerId: 'placeholder', title: 'Install' },
+      summary: 'Create install job',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(job, {
+      chainId,
+      chainIndex: 1,
+      chainLength: 3,
+      dependsOnChainIndices: [0],
+      chainRefs: [{ payloadPath: 'customerId', parentChainIndex: 0, entityKind: 'customerId' }],
+    });
+    const sendEstimate = createProposal({
+      tenantId,
+      proposalType: 'send_estimate',
+      payload: { estimateId: '550e8400-e29b-41d4-a716-446655440001' },
+      summary: 'Send estimate',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(sendEstimate, {
+      chainId,
+      chainIndex: 2,
+      chainLength: 3,
+      dependsOnChainIndices: [1],
+      chainRefs: [{ payloadPath: 'estimateId', parentChainIndex: 1, entityKind: 'estimateId' }],
+    });
+    await repo.createMany([
+      { ...customer, status: 'ready_for_review' },
+      { ...job, status: 'draft' },
+      { ...sendEstimate, status: 'draft' },
+    ]);
+    return {
+      customer: (await repo.findById(tenantId, customer.id))!,
+      job: (await repo.findById(tenantId, job.id))!,
+      sendEstimate: (await repo.findById(tenantId, sendEstimate.id))!,
+    };
+  }
+
+  it('approves the chain head plus capture siblings in chainIndex order and audits each channel', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const { customer, job, sendEstimate } = await seedChain(repo);
+
+    const result = await approveChainSet(
+      repo,
+      tenantId,
+      customer.id,
+      actorId,
+      'owner',
+      auditRepo,
+      'sms',
+    );
+
+    expect(result.approved.map((p) => p.id)).toEqual([customer.id, job.id]);
+    expect(result.skipped).toEqual([{ id: sendEstimate.id, reason: 'non_capture' }]);
+    expect((await repo.findById(tenantId, customer.id))?.status).toBe('approved');
+    expect((await repo.findById(tenantId, job.id))?.status).toBe('approved');
+    expect((await repo.findById(tenantId, sendEstimate.id))?.status).toBe('draft');
+    const approvedEvents = auditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'proposal.approved');
+    expect(approvedEvents.map((e) => e.entityId)).toEqual([customer.id, job.id]);
+    expect(approvedEvents.every((e) => e.metadata.channel === 'sms')).toBe(true);
+  });
+
+  it('excludes low-confidence capture siblings while approving the rest', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const { customer, job, sendEstimate } = await seedChain(repo);
+    await repo.update(tenantId, job.id, {
+      payload: {
+        ...job.payload,
+        _meta: { overallConfidence: 'low' },
+      },
+    });
+
+    const result = await approveChainSet(
+      repo,
+      tenantId,
+      customer.id,
+      actorId,
+      'owner',
+      auditRepo,
+      'voice',
+    );
+
+    expect(result.approved.map((p) => p.id)).toEqual([customer.id]);
+    expect(result.skipped).toEqual([
+      { id: job.id, reason: 'low_confidence' },
+      { id: sendEstimate.id, reason: 'non_capture' },
+    ]);
+    expect((await repo.findById(tenantId, job.id))?.status).toBe('draft');
+  });
+
+  it('excludes pending-edit capture siblings while approving the rest', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const { customer, job, sendEstimate } = await seedChain(repo);
+
+    const result = await approveChainSet(
+      repo,
+      tenantId,
+      customer.id,
+      actorId,
+      'owner',
+      auditRepo,
+      'sms',
+      async (_tenant, proposalId) => proposalId === job.id,
+    );
+
+    expect(result.approved.map((p) => p.id)).toEqual([customer.id]);
+    expect(result.skipped).toEqual([
+      { id: job.id, reason: 'pending_edit' },
+      { id: sendEstimate.id, reason: 'non_capture' },
+    ]);
+    expect((await repo.findById(tenantId, job.id))?.status).toBe('draft');
+  });
+
+  it('skips capture siblings with missing fields while keeping the head approval successful', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const { customer, job, sendEstimate } = await seedChain(repo);
+    await repo.update(tenantId, job.id, {
+      sourceContext: {
+        ...job.sourceContext,
+        missingFields: ['title'],
+      },
+    });
+
+    const result = await approveChainSet(
+      repo,
+      tenantId,
+      customer.id,
+      actorId,
+      'owner',
+      auditRepo,
+      'sms',
+    );
+
+    expect(result.approved.map((p) => p.id)).toEqual([customer.id]);
+    expect(result.skipped).toEqual([
+      { id: job.id, reason: 'missing_fields' },
+      { id: sendEstimate.id, reason: 'non_capture' },
+    ]);
+    expect((await repo.findById(tenantId, customer.id))?.status).toBe('approved');
+    expect((await repo.findById(tenantId, job.id))?.status).toBe('draft');
+  });
+
+  it('skips a member that throws during approval and continues the chain set', async () => {
+    class ThrowingMemberRepo extends InMemoryProposalRepository {
+      failId: string | null = null;
+
+      override async updateStatus(
+        ...args: Parameters<InMemoryProposalRepository['updateStatus']>
+      ): ReturnType<InMemoryProposalRepository['updateStatus']> {
+        const [, id, status] = args;
+        if (id === this.failId && status === 'approved') {
+          throw new Error('member write failed');
+        }
+        return super.updateStatus(...args);
+      }
+    }
+
+    const repo = new ThrowingMemberRepo();
+    const auditRepo = new InMemoryAuditRepository();
+    const { customer, job, sendEstimate } = await seedChain(repo);
+    const appointment = createProposal({
+      tenantId,
+      proposalType: 'create_appointment',
+      payload: {
+        jobId: 'placeholder',
+        customerName: 'Jane Chain',
+        scheduledStart: '2026-06-16T19:00:00Z',
+        scheduledEnd: '2026-06-16T20:00:00Z',
+      },
+      summary: 'Book install appointment',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(appointment, {
+      chainId: 'chain-approve-1',
+      chainIndex: 2,
+      chainLength: 4,
+      dependsOnChainIndices: [1],
+      chainRefs: [{ payloadPath: 'jobId', parentChainIndex: 1, entityKind: 'jobId' }],
+    });
+    await repo.create({ ...appointment, status: 'draft' });
+    await repo.update(tenantId, sendEstimate.id, {
+      sourceContext: {
+        ...sendEstimate.sourceContext,
+        chainIndex: 3,
+        chainLength: 4,
+      },
+    });
+    repo.failId = job.id;
+
+    const result = await approveChainSet(
+      repo,
+      tenantId,
+      customer.id,
+      actorId,
+      'owner',
+      auditRepo,
+      'voice',
+    );
+
+    expect(result.approved.map((p) => p.id)).toEqual([customer.id, appointment.id]);
+    expect(result.skipped).toEqual([
+      { id: job.id, reason: 'error' },
+      { id: sendEstimate.id, reason: 'non_capture' },
+    ]);
+    expect((await repo.findById(tenantId, customer.id))?.status).toBe('approved');
+    expect((await repo.findById(tenantId, job.id))?.status).toBe('draft');
+    expect((await repo.findById(tenantId, appointment.id))?.status).toBe('approved');
+    expect(auditRepo.getAll()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventType: 'proposal.chain_set_member_skipped',
+          entityId: job.id,
+          metadata: expect.objectContaining({ reason: 'error', headId: customer.id }),
+        }),
+      ]),
+    );
+  });
+
+  it('falls back to head-only approval when chain lookup omits the head', async () => {
+    class HeadOmittingRepo extends InMemoryProposalRepository {
+      headId: string | null = null;
+
+      override async findByChain(
+        ...args: Parameters<InMemoryProposalRepository['findByChain']>
+      ): ReturnType<InMemoryProposalRepository['findByChain']> {
+        const rows = await super.findByChain(...args);
+        return rows.filter((p) => p.id !== this.headId);
+      }
+    }
+
+    const repo = new HeadOmittingRepo();
+    const auditRepo = new InMemoryAuditRepository();
+    const { customer, job } = await seedChain(repo);
+    repo.headId = customer.id;
+
+    const result = await approveChainSet(
+      repo,
+      tenantId,
+      customer.id,
+      actorId,
+      'owner',
+      auditRepo,
+      'one_tap',
+    );
+
+    expect(result.approved.map((p) => p.id)).toEqual([customer.id]);
+    expect(result.skipped).toEqual([]);
+    expect((await repo.findById(tenantId, customer.id))?.status).toBe('approved');
+    expect((await repo.findById(tenantId, job.id))?.status).toBe('draft');
+    expect(auditRepo.getAll()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventType: 'proposal.chain_set_warning',
+          entityId: customer.id,
+          metadata: expect.objectContaining({ reason: 'head_missing_from_chain_lookup' }),
+        }),
+      ]),
+    );
+  });
+
+  it('approving a non-head chain member only approves that member', async () => {
+    const repo = new InMemoryProposalRepository();
+    const { customer, job, sendEstimate } = await seedChain(repo);
+
+    const result = await approveChainSet(repo, tenantId, job.id, actorId, 'owner');
+
+    expect(result.approved.map((p) => p.id)).toEqual([job.id]);
+    expect(result.skipped).toEqual([]);
+    expect((await repo.findById(tenantId, customer.id))?.status).toBe('ready_for_review');
+    expect((await repo.findById(tenantId, sendEstimate.id))?.status).toBe('draft');
   });
 });

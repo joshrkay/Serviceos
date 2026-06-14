@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { InvoicesPage } from './InvoicesPage';
@@ -7,6 +7,9 @@ import { InvoicesPage } from './InvoicesPage';
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
 vi.mock('../../hooks/useDetailQuery', () => ({ useDetailQuery: vi.fn() }));
 vi.mock('../../hooks/useMutation', () => ({ useMutation: vi.fn() }));
+vi.mock('../shared/CameraCapture', () => ({
+  CameraCapture: () => <div data-testid="mock-capture-sheet">Capture open</div>,
+}));
 vi.mock('sonner', () => ({
   toast: {
     success: vi.fn(),
@@ -15,6 +18,7 @@ vi.mock('sonner', () => ({
 }));
 
 import { useListQuery } from '../../hooks/useListQuery';
+import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { toast } from 'sonner';
 
@@ -70,7 +74,9 @@ const defaultListResult = {
 };
 
 beforeEach(() => {
+  vi.restoreAllMocks();
   vi.mocked(useListQuery).mockReturnValue(defaultListResult);
+  vi.mocked(useDetailQuery).mockReturnValue({ data: null, isLoading: false, error: null, refetch: vi.fn() });
   vi.mocked(useMutation).mockReturnValue({ mutate: vi.fn(), isLoading: false, error: null });
 });
 
@@ -100,6 +106,79 @@ describe('InvoicesPage', () => {
     renderPage();
     expect(screen.getAllByText('$1,200.00').length).toBeGreaterThan(0);
     expect(screen.getAllByText('$850.00').length).toBeGreaterThan(0);
+  });
+
+  it('formats detail line items with fixed cents (123450 cents → $1,234.50)', () => {
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: {
+        id: 'i-detail',
+        invoiceNumber: 'INV-999',
+        status: 'open',
+        dueDate: '2026-04-01',
+        lineItems: [
+          {
+            id: 'li-1',
+            description: 'Labor',
+            quantity: 1,
+            unitPriceCents: 123450,
+            totalCents: 123450,
+            category: 'labor',
+            sortOrder: 0,
+            taxable: true,
+          },
+        ],
+        totals: totalsOf(123450),
+        amountDueCents: 123450,
+        customer: { id: 'c1', displayName: 'Detail Customer' },
+      },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    render(
+      <MemoryRouter>
+        <InvoicesPage defaultSelectedId="i-detail" />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getAllByText('$1,234.50').length).toBeGreaterThan(0);
+  });
+
+  it('keeps trailing .00 on round dollar detail totals', () => {
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: {
+        id: 'i-round',
+        invoiceNumber: 'INV-1000',
+        status: 'open',
+        lineItems: [
+          {
+            id: 'li-1',
+            description: 'Flat rate',
+            quantity: 1,
+            unitPriceCents: 120000,
+            totalCents: 120000,
+            category: 'labor',
+            sortOrder: 0,
+            taxable: true,
+          },
+        ],
+        totals: totalsOf(120000),
+        amountDueCents: 120000,
+        customer: { id: 'c1', displayName: 'Round Total Customer' },
+      },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    render(
+      <MemoryRouter>
+        <InvoicesPage defaultSelectedId="i-round" />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getAllByText('$1,200.00').length).toBeGreaterThan(0);
   });
 
   it('normalizes API statuses to UI labels', () => {
@@ -156,6 +235,51 @@ describe('InvoicesPage', () => {
   it('uses /api/invoices endpoint', () => {
     renderPage();
     expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/invoices');
+  });
+
+  it('renders invoice attachments and opens capture from Add photo', async () => {
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: {
+        id: 'i1',
+        invoiceNumber: 'INV-001',
+        status: 'draft',
+        lineItems: [],
+        totals: totalsOf(0),
+        amountDueCents: 0,
+        customer: { id: 'c1', displayName: 'Alice Smith' },
+      },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith('/api/attachments')) {
+        return new Response(JSON.stringify([{
+          id: 'a1',
+          fileId: 'f1',
+          entityType: 'invoice',
+          entityId: 'i1',
+          kind: 'photo',
+          caption: 'Receipt photo',
+          portalVisible: true,
+          downloadUrl: 'https://cdn.test/receipt.jpg',
+        }]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }));
+
+    render(
+      <MemoryRouter>
+        <InvoicesPage defaultSelectedId="i1" />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('invoice-attachments-section')).toBeInTheDocument();
+    expect(screen.getByText('Receipt photo')).toBeInTheDocument();
+    expect(screen.getByText('Visible to customer')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /add photo/i }));
+    await waitFor(() => expect(screen.getByTestId('mock-capture-sheet')).toBeInTheDocument());
   });
 });
 
