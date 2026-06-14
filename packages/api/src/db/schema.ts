@@ -4270,6 +4270,20 @@ export const MIGRATIONS = {
       END IF;
     END $do$;
   `,
+
+  // Several PR #557 tables shipped with ENABLE ROW LEVEL SECURITY + a
+  // tenant_isolation policy but WITHOUT FORCE — so the table owner (and any
+  // BYPASSRLS-adjacent role) would skip the policy, weakening the tenant
+  // backstop the schema invariant (test/db/schema.test.ts) requires. Force it
+  // on all of them. Idempotent; additive (the original migration blocks are
+  // immutable once shipped, so this lands as a follow-up rather than an edit).
+  '178_force_rls_pr557_tables': `
+    ALTER TABLE proposal_sms_events FORCE ROW LEVEL SECURITY;
+    ALTER TABLE proposal_sms_edit_sessions FORCE ROW LEVEL SECURITY;
+    ALTER TABLE digest_entries FORCE ROW LEVEL SECURITY;
+    ALTER TABLE invoice_photos FORCE ROW LEVEL SECURITY;
+    ALTER TABLE job_checklists FORCE ROW LEVEL SECURITY;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
