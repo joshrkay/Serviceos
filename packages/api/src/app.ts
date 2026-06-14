@@ -2001,6 +2001,10 @@ export function createApp(): express.Express {
     '/api/public-payments',
     createPublicPaymentsRouter({
       invoiceRepo,
+      // E2a — lets the status-poll endpoint surface the in-flight ACH
+      // `processing` payment to the paying customer (reuses the same
+      // tenant-scoped payment repo the rest of the app uses).
+      paymentRepo,
       stripeConfig: process.env.STRIPE_SECRET_KEY
         ? { apiKey: process.env.STRIPE_SECRET_KEY }
         : null,

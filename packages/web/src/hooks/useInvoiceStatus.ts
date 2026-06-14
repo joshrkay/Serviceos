@@ -25,6 +25,15 @@ export interface InvoiceStatusSnapshot {
   amountDueCents: number;
   amountPaidCents: number;
   paidAt: string | null;
+  /**
+   * E2a (one-time ACH) — true while an in-flight `processing` payment
+   * exists for the invoice (a bank transfer settling over 1–4 business
+   * days). The invoice itself stays `open`; this is a payment-level
+   * signal so the page can show a persistent "payment processing" state
+   * that survives reloads and flips to the paid screen on settlement.
+   * Optional for backwards compatibility with older API responses.
+   */
+  paymentProcessing?: boolean;
 }
 
 export interface UseInvoiceStatusOptions {

@@ -15,6 +15,7 @@ import request from 'supertest';
 import { v4 as uuidv4 } from 'uuid';
 import { createPublicPaymentsRouter } from '../../src/routes/public-payments';
 import { Invoice, InMemoryInvoiceRepository } from '../../src/invoices/invoice';
+import { InMemoryPaymentRepository, Payment } from '../../src/invoices/payment';
 import { calculateDocumentTotals } from '../../src/shared/billing-engine';
 
 const TENANT = 'tenant-public-payments-status';
@@ -90,7 +91,51 @@ describe('P5-018 routes/public-payments-status — GET /status/:invoiceId', () =
       amountDueCents: invoice.amountDueCents,
       amountPaidCents: 0,
       paidAt: null,
+      paymentProcessing: false,
     });
+  });
+
+  it('returns paymentProcessing: true when an in-flight ACH processing payment exists (E2a)', async () => {
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const paymentRepo = new InMemoryPaymentRepository();
+    const invoice = makeInvoice();
+    await invoiceRepo.create(invoice);
+    const now = new Date();
+    const processing: Payment = {
+      id: uuidv4(),
+      tenantId: TENANT,
+      invoiceId: invoice.id,
+      amountCents: invoice.amountDueCents,
+      method: 'bank_transfer',
+      status: 'processing',
+      providerReference: 'pi_ach_inflight',
+      receivedAt: now,
+      processedBy: 'stripe_webhook',
+      createdAt: now,
+      updatedAt: now,
+      refundedAmountCents: 0,
+      refundedAt: null,
+      lastRefundStripeId: null,
+      reversedAt: null,
+      reversalReason: null,
+    };
+    await paymentRepo.create(processing);
+
+    const app = express();
+    app.use(express.json());
+    app.use(
+      '/api/public-payments',
+      createPublicPaymentsRouter({ invoiceRepo, paymentRepo, stripeConfig: { apiKey: 'sk_test' } }),
+    );
+
+    const res = await request(app)
+      .get(`/api/public-payments/status/${invoice.id}`)
+      .query({ token: VIEW_TOKEN });
+
+    expect(res.status).toBe(200);
+    expect(res.body.paymentProcessing).toBe(true);
+    // The invoice itself stays open until settlement.
+    expect(res.body.status).toBe('open');
   });
 
   it('does NOT include sensitive fields like line items or customer PII', async () => {

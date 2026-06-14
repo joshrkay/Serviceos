@@ -422,15 +422,27 @@ export function InvoicePaymentPage() {
     [clientSecret],
   );
 
-  // P5-018 — Poll the public status endpoint while an async payment
-  // is settling. Stop polling as soon as the status flips to `paid`.
+  // P5-018 / E2a — Poll the public status endpoint while a payment may
+  // be settling. Stop polling as soon as the status flips to `paid`.
   // We need to disable polling on BOTH the initial server-fetched
   // invoice.isPaid (page loaded after a previous redirect) AND on
   // polledStatus.status === 'paid' (the hook itself reported paid in a
   // prior tick). Without the second clause the hook keeps firing 5s
   // requests on the success screen forever.
+  //
+  // E2a — polling is enabled not only right after an async submit
+  // (`processingAsync`) but for ANY payable, unsettled invoice, so a
+  // customer who RELOADS the page (or returns days later) while an ACH
+  // bank transfer is still clearing picks up the persistent
+  // `paymentProcessing` flag from the first poll and the page flips to
+  // the paid screen once settlement lands — no resubmit required.
   const [polledPaid, setPolledPaid] = useState(false);
-  const pollEnabled = processingAsync && !!invoice && !invoice.isPaid && !polledPaid;
+  const pollEnabled =
+    !!invoice &&
+    !invoice.isPaid &&
+    invoice.amountDueCents > 0 &&
+    !paymentSucceeded &&
+    !polledPaid;
   const { status: polledStatus } = useInvoiceStatus(
     invoice?.id ?? null,
     token ?? null,
@@ -439,6 +451,15 @@ export function InvoicePaymentPage() {
   useEffect(() => {
     if (polledStatus?.status === 'paid' && !polledPaid) setPolledPaid(true);
   }, [polledStatus?.status, polledPaid]);
+
+  // E2a — show the persistent full-page "payment processing" screen ONLY when a
+  // poll reports an in-flight `processing` payment exists. This is the reload /
+  // return-visit path (the customer comes back days later while the ACH bank
+  // transfer is still clearing). The active just-submitted path is left to the
+  // existing in-form "processing with your bank" banner (PayStatus
+  // 'processing_async') so the two processing UIs never double-render. It is
+  // subordinate to the paid screen (checked below) so settlement always wins.
+  const paymentProcessing = polledStatus?.paymentProcessing === true;
 
   if (loading) {
     return (
@@ -478,6 +499,30 @@ export function InvoicePaymentPage() {
         businessPhone={inv.businessPhone}
         paidAt={polledStatus?.paidAt ?? null}
       />
+    );
+  }
+
+  // E2a — persistent "payment processing" screen for an in-flight ACH bank
+  // transfer. Driven by the polled `paymentProcessing` flag so it survives a
+  // reload / return visit; placed AFTER the paid screen above so settlement
+  // always wins. Polling stays enabled here, flipping to the paid screen when
+  // the transfer clears.
+  if (paymentProcessing) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center px-5">
+        <div
+          role="status"
+          className="max-w-md w-full rounded-2xl bg-white border border-slate-200 px-6 py-8 text-center"
+        >
+          <span className="mx-auto mb-4 block size-8 rounded-full border-2 border-slate-200 border-t-slate-900 animate-spin" />
+          <h1 className="text-slate-900 mb-1" style={{ fontSize: '1.25rem' }}>Payment processing</h1>
+          <p className="text-sm text-slate-500">
+            We&apos;ve received your bank transfer and it&apos;s clearing with your
+            bank — this usually takes 1–4 business days. You&apos;ll get a
+            confirmation when the funds settle. No further action is needed.
+          </p>
+        </div>
+      </div>
     );
   }
 

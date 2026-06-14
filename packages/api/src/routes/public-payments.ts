@@ -18,6 +18,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { InvoiceRepository } from '../invoices/invoice';
+import { PaymentRepository } from '../invoices/payment';
 import {
   createPaymentIntent,
   StripeFetch,
@@ -32,6 +33,14 @@ const requestSchema = z.object({
 
 export interface PublicPaymentsDeps {
   invoiceRepo: InvoiceRepository;
+  /**
+   * E2a (one-time ACH) — used by the status-poll endpoint to surface a
+   * `paymentProcessing` flag while an ACH bank transfer settles (1–4
+   * business days). Optional so existing constructions (and tests that
+   * only exercise create-payment-intent) don't have to wire it; when
+   * absent the flag is simply always `false`.
+   */
+  paymentRepo?: PaymentRepository;
   stripeConfig: StripePaymentIntentConfig | null;
   /**
    * ISO 4217 currency code (lowercase per Stripe convention) used when
@@ -163,6 +172,26 @@ export function createPublicPaymentsRouter(deps: PublicPaymentsDeps): Router {
         return;
       }
 
+      // E2a (one-time ACH) — surface whether an in-flight `processing`
+      // payment exists so the customer page can show a persistent
+      // "payment processing — clears in 1–4 business days" state across
+      // reloads (and the owner view can do the same). Best-effort: the
+      // payment lookup must NEVER break the status response, so a repo
+      // error (or an absent paymentRepo) defaults the flag to `false`.
+      // Tenant-scoped via the token-resolved invoice — no access loosening.
+      let paymentProcessing = false;
+      if (deps.paymentRepo) {
+        try {
+          const payments = await deps.paymentRepo.findByInvoice(
+            invoice.tenantId,
+            invoice.id,
+          );
+          paymentProcessing = payments.some((p) => p.status === 'processing');
+        } catch {
+          paymentProcessing = false;
+        }
+      }
+
       res.status(200).json({
         status: invoice.status,
         amountDueCents: invoice.amountDueCents,
@@ -171,6 +200,7 @@ export function createPublicPaymentsRouter(deps: PublicPaymentsDeps): Router {
         // `null` today so the frontend hook contract is stable across
         // the rollout.
         paidAt: null,
+        paymentProcessing,
       });
     } catch (err) {
       const { statusCode, body } = toErrorResponse(err);

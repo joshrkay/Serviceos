@@ -334,6 +334,9 @@ describe('P5-018 InvoicePaymentPage — async settlement polling', () => {
     confirmPaymentMock.mockResolvedValue({ paymentIntent: { id: 'pi_async', status: 'processing' } });
     mockFetch({
       statusResponses: [
+        // First poll fires on load (E2a always-on poll) and must report the
+        // still-open invoice, so the post-submit poll observes the paid flip.
+        { ok: true, status: 200, body: { status: 'open', amountDueCents: 42500, amountPaidCents: 0, paidAt: null } },
         { ok: true, status: 200, body: { status: 'paid', amountDueCents: 0, amountPaidCents: 42500, paidAt: '2026-04-29T12:00:00Z' } },
       ],
     });
@@ -346,6 +349,42 @@ describe('P5-018 InvoicePaymentPage — async settlement polling', () => {
       expect(screen.getByText('Payment received!')).toBeInTheDocument(),
     { timeout: 10_000 });
     expect(screen.getByText('Paid on')).toBeInTheDocument();
+  }, 15_000);
+
+  it('E2a — shows a persistent "payment processing" screen when a poll reports an in-flight ACH payment (no resubmit)', async () => {
+    mockFetch({
+      statusResponses: [
+        { ok: true, status: 200, body: { status: 'open', amountDueCents: 42500, amountPaidCents: 0, paidAt: null, paymentProcessing: true } },
+      ],
+    });
+    renderPage();
+
+    await waitFor(
+      () => expect(screen.getByText(/payment processing/i)).toBeInTheDocument(),
+      { timeout: 10_000 },
+    );
+    expect(screen.getByText(/clearing with your bank/i)).toBeInTheDocument();
+    // Settlement always wins — the paid screen is not shown yet.
+    expect(screen.queryByText('Payment received!')).not.toBeInTheDocument();
+  }, 15_000);
+
+  it('E2a — the processing screen flips to the paid screen once the bank transfer settles', async () => {
+    mockFetch({
+      statusResponses: [
+        { ok: true, status: 200, body: { status: 'open', amountDueCents: 42500, amountPaidCents: 0, paidAt: null, paymentProcessing: true } },
+        { ok: true, status: 200, body: { status: 'paid', amountDueCents: 0, amountPaidCents: 42500, paidAt: '2026-04-29T12:00:00Z' } },
+      ],
+    });
+    renderPage();
+
+    await waitFor(
+      () => expect(screen.getByText(/payment processing/i)).toBeInTheDocument(),
+      { timeout: 10_000 },
+    );
+    await waitFor(
+      () => expect(screen.getByText('Payment received!')).toBeInTheDocument(),
+      { timeout: 10_000 },
+    );
   }, 15_000);
 });
 
