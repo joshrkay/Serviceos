@@ -3154,6 +3154,48 @@ export function createApp(): express.Express {
         }
       : {}),
     auditRepo,
+    // U2 — customer MMS-to-quote. When the sender is NOT a registered
+    // tech, the worker hands the same inbound MMS to this intake:
+    // resolve/create the customer (ambiguous → clarification, never a
+    // silent guess), store + presign the photo(s), then draft a
+    // catalog-grounded draft_estimate proposal into the owner approval
+    // queue (never auto-issued). Reuses the same Twilio fetcher + files
+    // pipeline + LLM gateway as the rest of the app.
+    customerIntake: {
+      customerRepo,
+      proposalRepo,
+      fileRepo,
+      storage: storageProvider,
+      storageBucket,
+      fetchMedia: createTwilioMediaFetcher(async (tenantId) => {
+        const integration = await integrationResolver?.(tenantId, 'twilio');
+        if (
+          !integration ||
+          integration.provider !== 'twilio' ||
+          !integration.subaccountSid ||
+          !integration.authTokenPrimary
+        ) {
+          return null;
+        }
+        return {
+          accountSid: integration.subaccountSid,
+          authToken: integration.authTokenPrimary,
+        };
+      }),
+      gateway: llmGateway,
+      catalogRepo,
+      auditRepo,
+      ...(messageDelivery
+        ? {
+            notifyOwner: async (tenantId: string, body: string) => {
+              const ownerPhone = await resolveUnsupervisedOwnerPhone(tenantId);
+              if (ownerPhone) {
+                await messageDelivery!.sendSms({ to: ownerPhone, body, tenantId });
+              }
+            },
+          }
+        : {}),
+    },
   });
   workerRegistry.set(
     mmsIngestWorker.type,
