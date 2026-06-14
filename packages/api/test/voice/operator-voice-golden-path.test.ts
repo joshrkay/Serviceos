@@ -176,6 +176,9 @@ describe('Operator voice golden path — HVAC tenant', () => {
         customerName: 'Smith',
         scheduledStart: '2026-05-26T21:00:00Z',
         scheduledEnd: '2026-05-26T22:00:00Z',
+        // A furnace tune-up is a maintenance visit — the typed kind the task
+        // handler emits must ride onto the booking proposal.
+        appointmentType: 'maintenance',
         confidence_score: 0.9,
       }),
     ]);
@@ -193,6 +196,8 @@ describe('Operator voice golden path — HVAC tenant', () => {
     const proposals = await proposalRepo.findByTenant(TENANT);
     expect(proposals).toHaveLength(1);
     expect(proposals[0].proposalType).toBe('create_appointment');
+    // R1 — the classified visit kind reaches the booking proposal payload.
+    expect((proposals[0].payload as Record<string, unknown>).appointmentType).toBe('maintenance');
     // HVAC terminology must be on the classifier system prompt so the
     // model recognizes "furnace tune-up" as a canonical service.
     const { systemContents } = lastClassifierCall(gateway);
