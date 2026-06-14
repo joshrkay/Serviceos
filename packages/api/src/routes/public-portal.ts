@@ -20,6 +20,7 @@
 import { NextFunction, Response, Router } from 'express';
 import { z } from 'zod';
 import { toErrorResponse } from '../shared/errors';
+import { isUuid } from '../shared/uuid';
 import { CustomerRepository } from '../customers/customer';
 import { EstimateRepository } from '../estimates/estimate';
 import { InvoiceRepository, Invoice } from '../invoices/invoice';
@@ -331,6 +332,10 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       return;
     }
     try {
+      if (!isUuid(req.params.jobId)) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid jobId' });
+        return;
+      }
       const { tenantId, customerId } = req.portal!;
       const job = await deps.jobRepo.findById(tenantId, req.params.jobId);
       if (!job || job.customerId !== customerId) {

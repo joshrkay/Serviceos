@@ -23,6 +23,7 @@ import {
   EntityResolverResult,
   TAU_ENT,
 } from './entity-resolver';
+import { isUuid } from '../../shared/uuid';
 
 /** Minimum similarity score to even consider a candidate (pre-filter). */
 const SIMILARITY_PREFILTER = 0.3;
@@ -36,6 +37,13 @@ export class PgEntityResolver implements EntityResolver {
     kind: EntityKind;
   }): Promise<EntityResolverResult> {
     const { tenantId, reference, kind } = input;
+
+    // Guard: a malformed tenantId would make `set_config('app.current_tenant_id', …)`
+    // / the `tenant_id = $1::uuid` filter throw once a pooled client is already
+    // checked out. Reject up front so we never acquire a connection for it.
+    if (!isUuid(tenantId)) {
+      return { kind: 'skipped' };
+    }
 
     // Guard: empty/null/whitespace-only references are not resolvable.
     if (!reference || reference.trim() === '') {

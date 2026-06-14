@@ -21,23 +21,47 @@ export interface DigestWorkerDeps {
   now?: () => Date;
 }
 
+// `Intl.DateTimeFormat` construction is comparatively expensive and the sweep
+// loops over every tenant, so cache one formatter per timezone and reuse it.
+// Many tenants share a timezone, so the cache stays small.
+const hourFormatters = new Map<string, Intl.DateTimeFormat>();
+const dateFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function hourFormatter(timezone: string): Intl.DateTimeFormat {
+  let fmt = hourFormatters.get(timezone);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      hour: 'numeric',
+      hour12: false,
+    });
+    hourFormatters.set(timezone, fmt);
+  }
+  return fmt;
+}
+
+function dateFormatter(timezone: string): Intl.DateTimeFormat {
+  let fmt = dateFormatters.get(timezone);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    dateFormatters.set(timezone, fmt);
+  }
+  return fmt;
+}
+
 function tenantLocalHour(now: Date, timezone: string): number {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone,
-    hour: 'numeric',
-    hour12: false,
-  }).formatToParts(now);
+  const parts = hourFormatter(timezone).formatToParts(now);
   const hour = parts.find((p) => p.type === 'hour')?.value;
   return hour ? Number(hour) : now.getUTCHours();
 }
 
 function tenantLocalDate(now: Date, timezone: string): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(now);
+  return dateFormatter(timezone).format(now);
 }
 
 export async function runDigestSweep(deps: DigestWorkerDeps): Promise<{ sent: number }> {

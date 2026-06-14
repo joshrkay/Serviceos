@@ -1741,7 +1741,7 @@ export function createApp(): express.Express {
   registerKeywordHandler(
     {
       keywords: ['looks', 'good', 'looks good'],
-      handle: (ctx) => handleDigestAckSms(ctx, { userRepo, digestRepo }),
+      handle: (ctx) => handleDigestAckSms(ctx, { userRepo, digestRepo, settingsRepo }),
     },
     { overwrite: true },
   );

@@ -2,6 +2,7 @@ import { Response, Router } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requirePermission, requireTenant } from '../middleware/auth';
 import { toErrorResponse } from '../shared/errors';
+import { isUuid } from '../shared/uuid';
 import type { ChecklistItem, JobChecklistRepository } from '../jobs/checklist';
 
 export function createJobChecklistsRouter(repo: JobChecklistRepository): Router {
@@ -14,6 +15,10 @@ export function createJobChecklistsRouter(repo: JobChecklistRepository): Router 
     requirePermission('jobs:view'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
+        if (!isUuid(req.params.jobId)) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid jobId' });
+          return;
+        }
         const rows = await repo.listByJob(req.auth!.tenantId, req.params.jobId);
         res.json(rows);
       } catch (err) {
@@ -56,6 +61,10 @@ export function createJobChecklistsRouter(repo: JobChecklistRepository): Router 
     requirePermission('jobs:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
+        if (!isUuid(req.params.jobId) || !isUuid(req.params.checklistId)) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid jobId or checklistId' });
+          return;
+        }
         const items = (req.body as { items?: ChecklistItem[] }).items;
         if (!Array.isArray(items)) {
           res.status(400).json({ error: 'VALIDATION_ERROR', message: 'items array required' });

@@ -15,6 +15,7 @@ import { InvoicePhotoService } from '../invoices/invoice-photo-service';
 import { isValidJobPhotoCategory } from '../invoices/invoice-photo';
 import { requireAuth, requirePermission, requireTenant } from '../middleware/auth';
 import { toErrorResponse } from '../shared/errors';
+import { isUuid } from '../shared/uuid';
 import { MAX_JOB_PHOTO_SIZE } from './job-photos';
 
 const ALLOWED_PHOTO_CONTENT_TYPES = new Set([
@@ -209,6 +210,10 @@ export function createInvoicePhotosRouter(deps: InvoicePhotosRouterDeps): Router
     requirePermission('invoices:view'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
+        if (!isUuid(req.params.id)) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid invoiceId' });
+          return;
+        }
         const tenantId = req.auth!.tenantId;
         const photos = await service.listInvoicePhotos(tenantId, req.params.id);
         res.json(photos);

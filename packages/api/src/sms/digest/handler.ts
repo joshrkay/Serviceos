@@ -1,6 +1,7 @@
 import { InboundSmsContext, HandlerResult } from '../inbound-dispatch';
 import type { DigestEntryRepository } from '../../digest/repository';
 import { UserRepository } from '../../users/user';
+import type { SettingsRepository } from '../../settings/settings';
 
 /**
  * P5-020 — digest acknowledgement via SMS ("LOOKS GOOD").
@@ -8,6 +9,7 @@ import { UserRepository } from '../../users/user';
 export interface DigestAckHandlerDeps {
   userRepo: UserRepository;
   digestRepo: DigestEntryRepository;
+  settingsRepo: SettingsRepository;
 }
 
 export async function handleDigestAckSms(
@@ -24,8 +26,14 @@ export async function handleDigestAckSms(
     return { handled: false, handler: 'digest-ack', reason: 'unrecognized' };
   }
 
+  // The sweep writes `digest_entries` keyed by the tenant's local date in
+  // their configured timezone (digest/worker.ts). Resolve the SAME timezone
+  // here — a hardcoded zone would look up the wrong date for any tenant
+  // outside it and silently miss the digest it just sent.
+  const settings = await deps.settingsRepo.findByTenant(ctx.tenantId);
+  const tz = settings?.timezone ?? 'America/New_York';
   const localDate = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/New_York',
+    timeZone: tz,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
