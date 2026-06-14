@@ -11,8 +11,20 @@ import { isValidTenantId } from '../db/schema';
 import { bootstrapTenant, TenantRepository } from '../auth/clerk';
 import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
-import { PaymentRepository, recordPayment, PaymentReceiptNotifier, PaymentMethod } from '../invoices/payment';
-import { recordRefund, reversePayment, recordFailedPaymentAttempt } from '../payments/payment-service';
+import {
+  PaymentRepository,
+  recordPayment,
+  recordProcessingPayment,
+  PaymentReceiptNotifier,
+  PaymentMethod,
+} from '../invoices/payment';
+import {
+  recordRefund,
+  reversePayment,
+  recordFailedPaymentAttempt,
+  settleProcessingPayment,
+  failProcessingPayment,
+} from '../payments/payment-service';
 import { randomUUID } from 'crypto';
 import { CustomerPaymentMethodRepository } from '../payments/customer-payment-method';
 import { retrievePaymentMethod } from '../payments/stripe-saved-card';
@@ -1068,6 +1080,102 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         }
       }
 
+      // E2a (one-time ACH) — the 1-4 business-day "processing" window.
+      // Stripe fires payment_intent.processing once an ACH debit is
+      // submitted but BEFORE the funds clear. We record a first-class
+      // `processing` payment (provider_reference = PI id) so the owner
+      // and customer can see money is in flight, WITHOUT marking the
+      // invoice paid or firing a receipt — settlement
+      // (payment_intent.succeeded) upgrades this row to `completed`.
+      //
+      // recordProcessingPayment is internally idempotent (any-row guard
+      // + ON CONFLICT DO NOTHING against the migration-178 partial unique
+      // index), so a redelivered or concurrent processing event is a
+      // safe no-op. The branch itself must guard the invoice's payability
+      // (recordProcessingPayment does NOT re-read the invoice) so a
+      // processing event for an already-paid/void/canceled invoice ACKs
+      // 200 without writing a row. Every non-exceptional path ends in
+      // updateStatus('processed') + 200 so a terminal condition never
+      // 500s into a Stripe retry storm.
+      if (event.type === 'payment_intent.processing') {
+        const pi = event.data.object as {
+          id?: string;
+          amount?: number;
+          metadata?: { tenant_id?: string; invoice_id?: string };
+          payment_method_types?: unknown;
+          charges?: { data?: Array<{ payment_method_details?: { type?: string } | null } | null> };
+        };
+
+        const tenantId = pi.metadata?.tenant_id;
+        const invoiceId = pi.metadata?.invoice_id;
+        const piId = pi.id;
+        const amountCents = pi.amount;
+
+        if (!tenantId || !invoiceId || !piId || !amountCents || amountCents <= 0) {
+          logger.info('payment_intent.processing missing invoice metadata — skipping', {
+            eventId: event.id, paymentIntentId: piId,
+          });
+          await webhookRepo.updateStatus(webhookEvent.id, 'processed');
+          return res.status(200).json({ received: true, skipped: true });
+        }
+
+        if (!deps.invoiceRepo || !deps.paymentRepo) {
+          // Repos not wired (legacy harness) — ACK rather than 500 so we
+          // never trigger a Stripe retry storm for a config gap.
+          logger.error('Invoice/payment repos not wired to Stripe webhook handler');
+          await webhookRepo.updateStatus(webhookEvent.id, 'processed');
+          return res.status(200).json({ received: true, skipped: true });
+        }
+
+        // Guard the invoice's payability HERE — recordProcessingPayment
+        // does not re-read the invoice, so a processing event for an
+        // already-paid / void / canceled (or vanished) invoice must ACK
+        // 200 with NO row written.
+        const invoice = await deps.invoiceRepo.findById(tenantId, invoiceId);
+        const PAYABLE_STATUSES = ['open', 'partially_paid'];
+        if (!invoice || !PAYABLE_STATUSES.includes(invoice.status)) {
+          logger.info('payment_intent.processing for non-payable invoice — ACK, no row', {
+            tenantId, invoiceId, paymentIntentId: piId, invoiceStatus: invoice?.status,
+          });
+          await webhookRepo.updateStatus(webhookEvent.id, 'processed');
+          return res.status(200).json({ received: true, skipped: true });
+        }
+
+        try {
+          const { created } = await recordProcessingPayment(
+            {
+              tenantId,
+              invoiceId,
+              amountCents,
+              method: mapStripePaymentMethod(pi),
+              providerReference: piId,
+              processedBy: 'stripe_webhook',
+            },
+            deps.paymentRepo,
+            deps.auditRepo,
+            { actorRole: 'system', correlationId: piId },
+          );
+          logger.info('Recorded ACH processing payment (in flight)', {
+            tenantId, invoiceId, amountCents, paymentIntentId: piId, created,
+          });
+        } catch (procErr) {
+          if (
+            procErr instanceof ValidationError &&
+            (procErr.message.includes('status') ||
+              procErr.message.includes('not found') ||
+              procErr.message.includes('exceeds'))
+          ) {
+            // Terminal condition (invoice already settled / vanished mid
+            // flight) — idempotent success, mirror the succeeded branch.
+            logger.info('payment_intent.processing terminal condition, ACKing', {
+              tenantId, invoiceId, paymentIntentId: piId,
+            });
+          } else {
+            throw procErr;
+          }
+        }
+      }
+
       // Invoice-to-cash — async (ACH/bank) settlement success. The
       // checkout.session.completed branch SKIPS sessions with
       // payment_status != 'paid' (bank debits clear later), so for ACH
@@ -1104,48 +1212,90 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           return res.status(500).json({ error: 'Payment processing not configured' });
         }
 
+        // E2a — route on the existing row's status. Migration 178 added a
+        // partial unique index on payments(tenant_id, reference_number),
+        // so the old unconditional recordPayment fall-through would now
+        // UNIQUE-violate (→ 500 → Stripe retry storm) whenever a row
+        // already exists for this PI id. Each branch below avoids a plain
+        // INSERT against an existing row.
         const existing = await deps.paymentRepo.findByProviderReference(tenantId, piId);
-        if (existing && existing.status === 'completed') {
+
+        if (existing?.status === 'completed') {
+          // Duplicate settlement (card already recorded by
+          // checkout.session.completed, or a redelivered success) — skip.
           logger.info('payment_intent.succeeded already recorded — skipping', {
             tenantId, invoiceId, paymentIntentId: piId,
           });
           await webhookRepo.updateStatus(webhookEvent.id, 'processed');
           return res.status(200).json({ received: true, duplicate: true });
-        }
-
-        try {
-          await recordPayment(
+        } else if (existing?.status === 'processing') {
+          // ACH settlement — UPGRADE the in-flight processing row to
+          // completed via the atomic CAS, then apply the FULL settled-money
+          // effect set (invoice balance/status, payment.recorded audit,
+          // money-state rollup, receipt). Uses amount_received (the
+          // authoritative settled figure) and caps to amountDueCents.
+          await settleProcessingPayment(
             {
               tenantId,
-              invoiceId,
-              amountCents,
-              method: mapStripePaymentMethod(pi),
               providerReference: piId,
-              processedBy: 'stripe_webhook',
+              settledAmountCents: amountCents,
+              actorId: 'system:stripe_webhook',
+              correlationId: piId,
             },
             deps.invoiceRepo,
             deps.paymentRepo,
+            deps.auditRepo,
             buildMoneyStateDeps(deps),
             deps.paymentReceiptNotifier,
-            deps.auditRepo,
-            { actorRole: 'system', correlationId: piId },
           );
-          logger.info('Invoice marked paid via payment_intent.succeeded (async settlement)', {
+          logger.info('ACH processing payment settled via payment_intent.succeeded', {
             tenantId, invoiceId, amountCents, paymentIntentId: piId,
           });
-        } catch (payErr) {
-          if (
-            payErr instanceof ValidationError &&
-            (payErr.message.includes('status') || payErr.message.includes('exceeds amount due'))
-          ) {
-            // Invoice already settled (e.g. checkout.session.completed used
-            // the 'stripe_checkout' provider_reference fallback so the dedup
-            // above missed) — idempotent success.
-            logger.info('Invoice already settled, ignoring payment_intent.succeeded', {
-              tenantId, invoiceId,
+        } else if (existing) {
+          // Any OTHER existing row (e.g. 'failed') — idempotent ACK. A
+          // plain INSERT via recordPayment would UNIQUE-violate against the
+          // migration-178 index (→ 500). Stripe does not re-succeed a
+          // failed PI, so this branch just stays safe; we do NOT re-record.
+          logger.info('payment_intent.succeeded for non-processing/non-completed row — ACK', {
+            tenantId, invoiceId, paymentIntentId: piId, existingStatus: existing.status,
+          });
+        } else {
+          // No existing row — the card path, unchanged. Keep the existing
+          // overpayment cap + already-settled ACK try/catch.
+          try {
+            await recordPayment(
+              {
+                tenantId,
+                invoiceId,
+                amountCents,
+                method: mapStripePaymentMethod(pi),
+                providerReference: piId,
+                processedBy: 'stripe_webhook',
+              },
+              deps.invoiceRepo,
+              deps.paymentRepo,
+              buildMoneyStateDeps(deps),
+              deps.paymentReceiptNotifier,
+              deps.auditRepo,
+              { actorRole: 'system', correlationId: piId },
+            );
+            logger.info('Invoice marked paid via payment_intent.succeeded (async settlement)', {
+              tenantId, invoiceId, amountCents, paymentIntentId: piId,
             });
-          } else {
-            throw payErr;
+          } catch (payErr) {
+            if (
+              payErr instanceof ValidationError &&
+              (payErr.message.includes('status') || payErr.message.includes('exceeds amount due'))
+            ) {
+              // Invoice already settled (e.g. checkout.session.completed used
+              // the 'stripe_checkout' provider_reference fallback so the dedup
+              // above missed) — idempotent success.
+              logger.info('Invoice already settled, ignoring payment_intent.succeeded', {
+                tenantId, invoiceId,
+              });
+            } else {
+              throw payErr;
+            }
           }
         }
       }
@@ -1191,10 +1341,16 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           pi.last_payment_error?.code ??
           pi.last_payment_error?.message;
 
+        // E2a — route on the existing row's status. Migration 178's partial
+        // unique index makes the old recordFailedPaymentAttempt fall-through
+        // (a plain INSERT) UNIQUE-violate (→ 500 → retry storm) whenever a
+        // row already exists for this PI id, so every existing-row branch
+        // below avoids a plain INSERT.
         const existing = await deps.paymentRepo.findByProviderReference(tenantId, piId);
 
-        if (existing && existing.status === 'completed') {
-          // Post-settlement failure (ACH return / NSF) — reverse it.
+        if (existing?.status === 'completed') {
+          // Post-settlement failure (ACH return / NSF) — reverse it,
+          // reopening the invoice.
           await reversePayment(
             {
               tenantId,
@@ -1210,12 +1366,33 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.warn('Settled payment reversed via payment_intent.payment_failed (ACH return/NSF)', {
             tenantId, invoiceId, paymentId: existing.id, paymentIntentId: piId, reason: reasonText,
           });
-        } else if (existing && existing.reversedAt) {
-          // Already reversed by a prior delivery — no-op.
-          logger.info('payment_intent.payment_failed for already-reversed payment — skipping', {
-            tenantId, invoiceId, paymentIntentId: piId,
+        } else if (existing?.status === 'processing') {
+          // ACH debit returned BEFORE settlement — fail the in-flight row
+          // via the atomic CAS. The invoice was never marked paid, so it is
+          // left untouched (distinct from the reversePayment path above).
+          await failProcessingPayment(
+            {
+              tenantId,
+              providerReference: piId,
+              reason: reasonText ?? 'ach_failed',
+              correlationId: piId,
+            },
+            deps.paymentRepo,
+            deps.auditRepo,
+          );
+          logger.info('ACH processing payment failed before settlement', {
+            tenantId, invoiceId, paymentIntentId: piId, reason: reasonText,
+          });
+        } else if (existing) {
+          // Already recorded as 'failed' (a prior decline/return, or a
+          // reversed payment) — idempotent ACK. Re-recording via
+          // recordFailedPaymentAttempt would UNIQUE-violate on redelivery.
+          logger.info('payment_intent.payment_failed for already-failed payment — skipping', {
+            tenantId, invoiceId, paymentIntentId: piId, existingStatus: existing.status,
           });
         } else {
+          // No existing row — plain decline (no money ever captured).
+          // Record a 'failed' attempt for visibility; invoice untouched.
           await recordFailedPaymentAttempt(
             {
               tenantId,
