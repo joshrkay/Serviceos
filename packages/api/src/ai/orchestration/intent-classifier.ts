@@ -81,6 +81,14 @@ export type IntentType =
   // types, dispatched by a dedicated router handler). Same
   // extendedIntents gating as the Track A lookups.
   | 'complaint'
+  // N-003 (P2-036) — caller pushes on price, scope, or terms: discount ask,
+  // scope-change ("throw it in for free"), refund-as-leverage, "talk to the
+  // owner" in a pricing context, or a review/walk-away threat. PROPOSAL-DRIVING
+  // and EXTENDED (same extendedIntents gating as complaint): routed to a
+  // dedicated guardrail handler that emits an owner callback with a
+  // recommendation — the AI never negotiates. extractedEntities.negotiationAsk
+  // carries the verbatim ask.
+  | 'negotiation'
   // P11-002: caller asks to switch the call language ("english please" /
   // "hablo español"). The adapter consumes this as a signal to flip the
   // session language — it is NOT a proposal-driving intent.
@@ -147,6 +155,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'lookup_digest',
   'lookup_pending_items',
   'complaint',
+  'negotiation',
   'language_switch',
   'operator_request',
   'confirm',
@@ -174,13 +183,27 @@ export function isLookupIntent(intent: IntentType | undefined | null): boolean {
  */
 export const EXTENDED_INTENT_TYPES = new Set<IntentType>([
   'complaint',
+  'negotiation',
   'lookup_day_overview',
   'lookup_digest',
   'lookup_pending_items',
 ]);
 
+/**
+ * Extended intents that are NOT owner read-only lookups — they are
+ * customer-side, proposal-driving intents (complaint, negotiation). Excluded
+ * from OWNER_LOOKUP_INTENT_TYPES so the owner-lookup routing never treats them
+ * as a read-only skill.
+ */
+const NON_LOOKUP_EXTENDED_INTENTS: ReadonlySet<IntentType> = new Set<IntentType>([
+  'complaint',
+  'negotiation',
+]);
+
 export const OWNER_LOOKUP_INTENT_TYPES = new Set<IntentType>(
-  [...EXTENDED_INTENT_TYPES].filter((intent): intent is IntentType => intent !== 'complaint'),
+  [...EXTENDED_INTENT_TYPES].filter(
+    (intent): intent is IntentType => !NON_LOOKUP_EXTENDED_INTENTS.has(intent),
+  ),
 );
 
 export function isExtendedIntent(intent: IntentType | undefined | null): boolean {
@@ -267,6 +290,10 @@ export interface ExtractedEntities {
   // the shared edit interpreter (proposals/edit-interpreter.ts), whose
   // delta is Zod-validated by editProposal — never trusted as a payload.
   editInstruction?: string;
+  // N-003 (P2-036) — negotiation: the customer's verbatim ask ("can you knock
+  // $50 off?", "throw in the trip fee", "refund or I'll leave a 1-star"). The
+  // guardrail handler refines it into a specific ask type deterministically.
+  negotiationAsk?: string;
 }
 
 /**
@@ -866,9 +893,30 @@ export const EXTENDED_INTENTS_PROMPT_SECTION = `Extended operator intents (this 
                            Examples: "I want to file a complaint about the install"
                                      "Mrs. Patel called furious about the leak coming back"
                                      "I'm really unhappy with the work and I want a refund"
+- "negotiation"          — the caller pushes on PRICE, SCOPE, or TERMS to get a
+                           better deal: asks for a discount, asks you to throw
+                           work in for free, demands a refund as leverage, asks
+                           to "talk to the owner/manager" to haggle, or threatens
+                           a bad review / to walk away unless you lower the price.
+                           Put the caller's verbatim ask in
+                           extractedEntities.negotiationAsk (and customerName /
+                           jobReference when stated). The agent must NOT negotiate;
+                           this routes to the owner.
+                           Examples: "Can you knock fifty bucks off that?"
+                                     "What's the best price you can do?"
+                                     "Throw in the trip fee and you've got a deal"
+                                     "Give me a refund or I'll leave a one-star review"
+                                     "That's too expensive — any discount for cash?"
 Notes:
 - The lookup_* entries above are READ-ONLY intents — never classify a
   command that creates or changes a record as one of them.
+- complaint vs negotiation: dissatisfaction with delivered work is "complaint"
+  (even when it mentions a refund as redress). A demand aimed at getting a
+  cheaper price/scope/terms is "negotiation". When both are present, prefer
+  "negotiation" only if the PRIMARY ask is a better deal.
+- negotiation vs operator_request: "let me talk to the owner" with NO price/scope
+  context is operator_request (a transfer). The same phrase used to haggle a
+  price is "negotiation".
 - Do not change the JSON output schema.`;
 
 /**
@@ -1089,6 +1137,8 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.proposalReference === 'string') extracted.proposalReference = ee.proposalReference;
     // edit_proposal fields (RV-225)
     if (typeof ee.editInstruction === 'string') extracted.editInstruction = ee.editInstruction;
+    // negotiation fields (N-003)
+    if (typeof ee.negotiationAsk === 'string') extracted.negotiationAsk = ee.negotiationAsk;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }
