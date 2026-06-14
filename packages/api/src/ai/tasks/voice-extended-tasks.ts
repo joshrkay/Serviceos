@@ -466,11 +466,15 @@ export class SendEstimateNudgeTaskHandler implements TaskHandler {
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
-    const missing: string[] = [];
+    // estimateId is a required UUID for the execution handler and is NOT
+    // resolved by the customer/job entity resolver — always flag it missing so
+    // the approval gate holds until the operator resolves the estimate (matches
+    // reassign_appointment's toTechnicianId contract). The reference, when
+    // present, gives the review card something to resolve from.
+    const missing: string[] = ['estimateId'];
 
     if (ee.jobReference) payload.estimateReference = ee.jobReference;
     else if (ee.customerName) payload.estimateReference = ee.customerName;
-    else missing.push('estimateId');
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
@@ -496,11 +500,13 @@ export class SendPaymentReminderTaskHandler implements TaskHandler {
       offsetDays: 0,
       channel: ee.sendChannel ?? 'sms',
     };
-    const missing: string[] = [];
+    // invoiceId is a required UUID for the execution handler and is NOT
+    // resolved by the customer/job entity resolver — always flag it missing so
+    // the approval gate holds until the operator resolves the invoice.
+    const missing: string[] = ['invoiceId'];
 
     if (ee.jobReference) payload.invoiceReference = ee.jobReference;
     else if (ee.customerName) payload.invoiceReference = ee.customerName;
-    else missing.push('invoiceId');
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
@@ -524,11 +530,13 @@ export class ApplyLateFeeTaskHandler implements TaskHandler {
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = { stepKey: 'manual' };
-    const missing: string[] = [];
+    // invoiceId is a required UUID for the execution handler and is NOT
+    // resolved by the customer/job entity resolver — always flag it missing so
+    // the approval gate holds until the operator resolves the invoice.
+    const missing: string[] = ['invoiceId'];
 
     if (ee.jobReference) payload.invoiceReference = ee.jobReference;
     else if (ee.customerName) payload.invoiceReference = ee.customerName;
-    else missing.push('invoiceId');
 
     if (typeof ee.amount === 'number' && ee.amount > 0) {
       payload.feeCents = ee.amount;

@@ -24,11 +24,12 @@ describe('ApplyLateFeeTaskHandler', () => {
       ctx({ existingEntities: { jobReference: 'the Smith invoice', amount: 2500 } }),
     );
     expect(res.proposal.proposalType).toBe('apply_late_fee');
-    // Reference present → resolved by the review UI; not a hard-missing field
-    // (mirrors send_invoice / record_payment).
     expect(res.proposal.payload.invoiceReference).toBe('the Smith invoice');
     expect(res.proposal.payload.feeCents).toBe(2500);
     expect(res.proposal.payload.stepKey).toBe('manual');
+    // invoiceId always flagged missing (approval gate holds until resolved);
+    // feeCents was stated, so it is not missing.
+    expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
     expect(missingFieldsFor(res.proposal)).not.toContain('feeCents');
     expect(res.proposal.status).toBe('draft'); // money never auto-approves
   });

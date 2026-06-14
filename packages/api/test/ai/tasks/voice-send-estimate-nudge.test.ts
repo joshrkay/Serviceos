@@ -22,7 +22,8 @@ describe('SendEstimateNudgeTaskHandler', () => {
     );
     expect(res.proposal.proposalType).toBe('send_estimate_nudge');
     expect(res.proposal.payload.estimateReference).toBe('the Khan estimate');
-    expect(missingFieldsFor(res.proposal)).not.toContain('estimateId');
+    // estimateId always flagged missing → approval gate holds until resolved.
+    expect(missingFieldsFor(res.proposal)).toContain('estimateId');
     expect(res.proposal.status).toBe('draft');
   });
 

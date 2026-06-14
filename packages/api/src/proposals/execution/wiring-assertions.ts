@@ -26,21 +26,24 @@ export function findDegradedVoiceHandlers(
   registry: Map<ProposalType, ExecutionHandler>,
   voiceReachableTypes: readonly (ProposalType | undefined)[],
 ): ProposalType[] {
-  const degraded: ProposalType[] = [];
-  for (const type of voiceReachableTypes) {
+  // Multiple voice intents can map to the same ProposalType, so dedupe the
+  // inputs (and outputs) to avoid redundant checks and duplicate names in the
+  // boot-blocking error message.
+  const degraded = new Set<ProposalType>();
+  for (const type of new Set(voiceReachableTypes)) {
     if (!type) continue;
     const handler = registry.get(type);
     if (!handler) {
       // A voice intent maps to a proposal type with no execution handler at
       // all — it could never persist. Surface it like a degraded handler.
-      degraded.push(type);
+      degraded.add(type);
       continue;
     }
     if (handler.isFullyWired && !handler.isFullyWired()) {
-      degraded.push(type);
+      degraded.add(type);
     }
   }
-  return degraded;
+  return Array.from(degraded);
 }
 
 export function assertVoiceHandlersWired(

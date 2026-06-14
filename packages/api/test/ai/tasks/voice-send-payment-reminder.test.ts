@@ -28,7 +28,8 @@ describe('SendPaymentReminderTaskHandler', () => {
     expect(res.proposal.payload.stepKey).toBe('manual');
     expect(res.proposal.payload.offsetDays).toBe(0);
     expect(res.proposal.payload.channel).toBe('sms');
-    expect(missingFieldsFor(res.proposal)).not.toContain('invoiceId');
+    // invoiceId always flagged missing → approval gate holds until resolved.
+    expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
     expect(res.proposal.status).toBe('draft'); // comms never auto-approves
   });
 
