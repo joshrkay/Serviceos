@@ -17,12 +17,16 @@ export type ApprovalAction = 'approve' | 'reject';
 
 /**
  * First-token keywords the inbound dispatcher routes to this handler.
- * APPROVE/REJECT are the canonical verbs; YES/NO (+ OK/Y/N) are the
- * natural one-word replies an owner actually types. Kept deliberately
- * small so we don't squat common words other handlers may want.
+ *
+ * Deliberately limited to unambiguous verbs. We MUST NOT claim YES/NO/Y/N:
+ * 'YES' is the TCPA-mandated SMS opt-in keyword (DNC re-subscribe, see
+ * compliance/stop-reply START_KEYWORDS) and the dispatcher is
+ * single-handler (first match wins, no fall-through), so claiming 'yes'
+ * here would shadow the legally-required re-subscribe path. 'OK' and bare
+ * 'Y'/'N' are likewise too ambiguous to safely squat.
  */
-export const APPROVE_KEYWORDS = ['approve', 'yes', 'ok', 'y'] as const;
-export const REJECT_KEYWORDS = ['reject', 'no', 'decline', 'n'] as const;
+export const APPROVE_KEYWORDS = ['approve', 'approved'] as const;
+export const REJECT_KEYWORDS = ['reject', 'decline'] as const;
 export const PROPOSAL_APPROVAL_KEYWORDS: readonly string[] = [
   ...APPROVE_KEYWORDS,
   ...REJECT_KEYWORDS,
@@ -168,7 +172,7 @@ function clip(text: string, max: number): string {
  * clip the description, never the actionable part).
  */
 export function renderApprovalRequestSms(proposal: Proposal, code: string): string {
-  const instruction = `Reply YES ${code} to approve or NO ${code} to decline.`;
+  const instruction = `Reply APPROVE ${code} to approve or DECLINE ${code} to decline.`;
   const room = SMS_MAX_CHARS - instruction.length - 1;
   return `${clip(proposalShortLine(proposal), Math.max(0, room))}\n${instruction}`;
 }
@@ -198,7 +202,7 @@ export function renderApprovalReplySms(
         SMS_MAX_CHARS,
       );
     case 'needs_code':
-      return `You have ${ctx.pendingCount ?? 'a few'} items waiting. Reply APPROVE <code> or REJECT <code> — the code is in each request.`;
+      return `You have ${ctx.pendingCount ?? 'a few'} items waiting. Reply APPROVE <code> or DECLINE <code> — the code is in each request.`;
     case 'nothing_pending':
       return "You're all caught up — nothing is waiting for your approval right now.";
     case 'not_found':

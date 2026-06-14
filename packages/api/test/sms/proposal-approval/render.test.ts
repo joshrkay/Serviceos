@@ -8,7 +8,10 @@ import {
   renderApprovalRequestSms,
   renderApprovalReplySms,
   smsApprovalCodeOf,
+  PROPOSAL_APPROVAL_KEYWORDS,
 } from '../../../src/sms/proposal-approval/render';
+import { STOP_KEYWORDS, START_KEYWORDS } from '../../../src/compliance/stop-reply';
+import { TECH_STATUS_KEYWORDS } from '@ai-service-os/shared';
 import type { Proposal } from '../../../src/proposals/proposal';
 
 function proposal(overrides: Partial<Proposal> = {}): Proposal {
@@ -57,20 +60,35 @@ describe('normalizeApprovalCode', () => {
 
 describe('parseApprovalReply', () => {
   it('maps approve keywords to approve', () => {
-    for (const kw of ['APPROVE', 'yes', 'OK', 'y']) {
+    for (const kw of ['APPROVE', 'approved', 'Approve']) {
       expect(parseApprovalReply(kw)?.action).toBe('approve');
     }
   });
 
   it('maps reject keywords to reject', () => {
-    for (const kw of ['REJECT', 'no', 'decline', 'N']) {
+    for (const kw of ['REJECT', 'decline', 'Decline']) {
       expect(parseApprovalReply(kw)?.action).toBe('reject');
+    }
+  });
+
+  it('does NOT claim YES/NO/Y/N (reserved: YES is the TCPA opt-in keyword)', () => {
+    for (const kw of ['YES', 'yes', 'y', 'NO', 'no', 'n', 'ok']) {
+      expect(parseApprovalReply(kw)).toBeNull();
+    }
+  });
+
+  it('keyword set is disjoint from compliance + tech-status keywords (no dispatcher shadowing)', () => {
+    const reserved = new Set(
+      [...STOP_KEYWORDS, ...START_KEYWORDS, ...TECH_STATUS_KEYWORDS].map((k) => k.toLowerCase()),
+    );
+    for (const kw of PROPOSAL_APPROVAL_KEYWORDS) {
+      expect(reserved.has(kw.toLowerCase())).toBe(false);
     }
   });
 
   it('extracts and normalizes a code from the second token', () => {
     expect(parseApprovalReply('APPROVE a7kq')).toEqual({ action: 'approve', code: 'A7KQ' });
-    expect(parseApprovalReply('NO   A7KQ')).toEqual({ action: 'reject', code: 'A7KQ' });
+    expect(parseApprovalReply('DECLINE   A7KQ')).toEqual({ action: 'reject', code: 'A7KQ' });
   });
 
   it('returns null for non-approval first tokens', () => {
@@ -119,8 +137,8 @@ describe('renderApprovalRequestSms', () => {
       payload: { lineItems: [{ description: 'WH', quantity: 1, unitPriceCents: 185_000 }] },
     });
     const sms = renderApprovalRequestSms(p, 'A7KQ');
-    expect(sms).toContain('YES A7KQ');
-    expect(sms).toContain('NO A7KQ');
+    expect(sms).toContain('APPROVE A7KQ');
+    expect(sms).toContain('DECLINE A7KQ');
     expect(sms).toContain('$1,850.00');
     expect(sms.length).toBeLessThanOrEqual(320);
   });
@@ -129,7 +147,7 @@ describe('renderApprovalRequestSms', () => {
     const p = proposal({ proposalType: 'add_note', summary: 'x'.repeat(500), payload: {} });
     const sms = renderApprovalRequestSms(p, 'A7KQ');
     expect(sms.length).toBeLessThanOrEqual(320);
-    expect(sms).toContain('YES A7KQ to approve or NO A7KQ to decline.');
+    expect(sms).toContain('APPROVE A7KQ to approve or DECLINE A7KQ to decline.');
   });
 });
 

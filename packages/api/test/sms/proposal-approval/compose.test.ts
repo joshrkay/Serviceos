@@ -63,7 +63,7 @@ describe('sendProposalApprovalRequest', () => {
     // Owner texted a one-tap request.
     expect(delivery.sentSms).toHaveLength(1);
     expect(delivery.sentSms[0].to).toBe(OWNER_MOBILE);
-    expect(delivery.sentSms[0].body).toContain('YES A7KQ');
+    expect(delivery.sentSms[0].body).toContain('APPROVE A7KQ');
     expect(delivery.sentSms[0].body).toContain('$1,850.00');
     expect(delivery.sentSms[0].idempotencyKey).toBe('proposal-approval-request:p-1');
 

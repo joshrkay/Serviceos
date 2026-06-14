@@ -112,7 +112,7 @@ describe('handleProposalApprovalSms', () => {
   it('rejects the single pending proposal on a bare NO', async () => {
     await h.proposalRepo.create(makeProposal());
 
-    const result = await handleProposalApprovalSms(ctx('NO'), h.deps);
+    const result = await handleProposalApprovalSms(ctx('DECLINE'), h.deps);
 
     expect(result).toMatchObject({ handled: true, reason: 'rejected' });
     const after = await h.proposalRepo.findById(TENANT, 'p-1');
