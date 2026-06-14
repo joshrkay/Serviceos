@@ -496,15 +496,18 @@ export async function runDueAgreements(
         collection = { status: 'failed' };
       }
       if (deps.auditRepo) {
-        // Three outcomes: clean collection, a charge we couldn't record (money
-        // moved — its own loud event so ops reconcile, never re-charge), and
-        // everything else (decline / no card / auth required → dunning).
+        // Outcomes get distinct events: clean collection; a charge we couldn't
+        // record (money moved — reconcile, never re-charge); no card on file
+        // (a setup gap, not a payment failure — keep it out of the dunning
+        // signal); and a genuine decline / auth-required → dunning.
         const collectionEventType =
           collection.status === 'collected'
             ? 'service_agreement.dues_collected'
             : collection.status === 'collected_unrecorded'
               ? 'service_agreement.dues_collected_unrecorded'
-              : 'service_agreement.auto_collect_failed';
+              : collection.status === 'no_card'
+                ? 'service_agreement.auto_collect_skipped'
+                : 'service_agreement.auto_collect_failed';
         await deps.auditRepo.create(
           createAuditEvent({
             tenantId,

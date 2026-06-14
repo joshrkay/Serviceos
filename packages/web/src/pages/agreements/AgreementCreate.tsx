@@ -59,7 +59,8 @@ export function AgreementCreate({
         if (!endsOn) {
           throw new Error('Auto-renew needs an end date to renew from');
         }
-        renewalTerm = parseInt(renewalTermMonths, 10);
+        // Number() (not parseInt) so "12.5" is rejected, not silently truncated.
+        renewalTerm = Number(renewalTermMonths);
         if (!Number.isInteger(renewalTerm) || renewalTerm < 1) {
           throw new Error('Renewal term must be a whole number of months (at least 1)');
         }

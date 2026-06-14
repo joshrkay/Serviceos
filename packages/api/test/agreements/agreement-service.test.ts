@@ -716,6 +716,30 @@ describe('runDueAgreements: auto-collect dues', () => {
     expect(events.some((e) => e.eventType === 'service_agreement.auto_collect_failed')).toBe(true);
   });
 
+  it('audits auto_collect_skipped (not failed) when the member has no card on file', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const runRepo = new InMemoryAgreementRunRepository();
+    const { jobsService, invoicesService } = makeMocks();
+    const auditRepo = new InMemoryAuditRepository();
+    const t = tenantId();
+    const a = await seedDueMembership(repo, t, true);
+    const duesCollector = makeCollector({ status: 'no_card' });
+
+    await runDueAgreements(t, {
+      agreementRepo: repo,
+      runRepo,
+      jobsService,
+      invoicesService,
+      auditRepo,
+      duesCollector,
+      now,
+    });
+
+    const events = await auditRepo.findByEntity(t, 'service_agreement', a.id);
+    expect(events.some((e) => e.eventType === 'service_agreement.auto_collect_skipped')).toBe(true);
+    expect(events.some((e) => e.eventType === 'service_agreement.auto_collect_failed')).toBe(false);
+  });
+
   it('does not collect for a non-auto-collect agreement', async () => {
     const repo = new InMemoryAgreementRepository();
     const runRepo = new InMemoryAgreementRunRepository();

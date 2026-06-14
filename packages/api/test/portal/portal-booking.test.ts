@@ -266,31 +266,47 @@ describe('booking-availability service', () => {
 });
 
 describe('clampBookingHorizon', () => {
-  const now = new Date('2026-06-14T12:00:00Z'); // horizon 14 → max 2026-06-28
+  const now = new Date('2026-06-14T12:00:00Z'); // UTC: horizon 14 → max 2026-06-28
 
   it('returns the window unchanged when it is within the horizon', () => {
-    expect(clampBookingHorizon('2026-06-15', '2026-06-20', 14, now)).toEqual({
+    expect(clampBookingHorizon('2026-06-15', '2026-06-20', 14, now, 'UTC')).toEqual({
       from: '2026-06-15',
       to: '2026-06-20',
     });
   });
 
   it('clamps `to` down to the horizon', () => {
-    expect(clampBookingHorizon('2026-06-15', '2026-07-30', 14, now)).toEqual({
+    expect(clampBookingHorizon('2026-06-15', '2026-07-30', 14, now, 'UTC')).toEqual({
       from: '2026-06-15',
       to: '2026-06-28',
     });
   });
 
   it('returns null when `from` is already beyond the horizon', () => {
-    expect(clampBookingHorizon('2026-07-30', '2026-08-01', 14, now)).toBeNull();
+    expect(clampBookingHorizon('2026-07-30', '2026-08-01', 14, now, 'UTC')).toBeNull();
   });
 
   it('a larger (priority) horizon admits a window the standard one rejects', () => {
-    expect(clampBookingHorizon('2026-07-30', '2026-07-30', 14, now)).toBeNull();
-    expect(clampBookingHorizon('2026-07-30', '2026-07-30', 60, now)).toEqual({
+    expect(clampBookingHorizon('2026-07-30', '2026-07-30', 14, now, 'UTC')).toBeNull();
+    expect(clampBookingHorizon('2026-07-30', '2026-07-30', 60, now, 'UTC')).toEqual({
       from: '2026-07-30',
       to: '2026-07-30',
+    });
+  });
+
+  it('computes the horizon in the tenant timezone, not UTC', () => {
+    // 02:00Z on the 14th is still the 13th in Los Angeles (UTC-7), so the
+    // 14-day max is the 27th there vs the 28th in UTC.
+    const nearMidnight = new Date('2026-06-14T02:00:00Z');
+    expect(clampBookingHorizon('2026-06-28', '2026-06-28', 14, nearMidnight, 'America/Los_Angeles')).toBeNull();
+    expect(clampBookingHorizon('2026-06-27', '2026-06-27', 14, nearMidnight, 'America/Los_Angeles')).toEqual({
+      from: '2026-06-27',
+      to: '2026-06-27',
+    });
+    // Same instant in UTC still admits the 28th.
+    expect(clampBookingHorizon('2026-06-28', '2026-06-28', 14, nearMidnight, 'UTC')).toEqual({
+      from: '2026-06-28',
+      to: '2026-06-28',
     });
   });
 });
