@@ -388,6 +388,7 @@ import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import { registerKeywordHandler } from './sms/inbound-dispatch';
+import { buildProposalApprovalKeywordHandler } from './sms/proposal-approval';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -1141,6 +1142,24 @@ export function createApp(): express.Express {
       );
     }
   }
+  // P2-034 — SMS one-tap proposal approval. An owner replies APPROVE/YES
+  // or REJECT/NO (optionally with a code) to act on a pending proposal
+  // from the truck, no app needed. Only registered when a delivery
+  // provider exists (so we can text the confirmation back); the inbound
+  // dispatcher already verifies the Twilio signature + dedupes MessageSid.
+  if (messageDelivery) {
+    registerKeywordHandler(
+      buildProposalApprovalKeywordHandler({
+        userRepo,
+        proposalRepo,
+        messageDelivery,
+        appointmentRepo,
+        auditRepo,
+      }),
+      { overwrite: true },
+    );
+  }
+
   // Voice intents (add_note, send_invoice, record_payment) execute
   // against real domain repositories. Invoice delivery routes through
   // SendService when configured; resolveInvoiceDeliveryProvider throws at
