@@ -160,23 +160,30 @@ export async function purchasePhoneNumber(
   authToken: string,
   region: string | null,
   voiceUrl: string,
-  statusCallbackUrl: string
+  statusCallbackUrl: string,
+  // When the tradesperson picked a specific number, order exactly that one
+  // and skip the search. Twilio rejects the purchase (throws) if the number
+  // was taken between the picker listing it and this call.
+  preferredNumber?: string
 ): Promise<PurchasedNumber> {
-  const areaCode = region ? STATE_AREA_CODE[region.toUpperCase()] : null;
+  let phoneToOrder: string | null = preferredNumber ?? null;
 
-  const firstAvailable = async (ac?: string): Promise<string | null> => {
-    const found = await searchAvailableNumbers(subaccountSid, authToken, {
-      ...(ac ? { areaCode: ac } : {}),
-      limit: 1,
-    });
-    return found[0]?.phoneNumber ?? null;
-  };
-
-  let phoneToOrder = areaCode ? await firstAvailable(areaCode) : null;
-  // Fallback: any available US number
-  if (!phoneToOrder) phoneToOrder = await firstAvailable();
   if (!phoneToOrder) {
-    throw new Error(`No available US phone numbers found for region ${region ?? 'any'}`);
+    const areaCode = region ? STATE_AREA_CODE[region.toUpperCase()] : null;
+    const firstAvailable = async (ac?: string): Promise<string | null> => {
+      const found = await searchAvailableNumbers(subaccountSid, authToken, {
+        ...(ac ? { areaCode: ac } : {}),
+        limit: 1,
+      });
+      return found[0]?.phoneNumber ?? null;
+    };
+
+    phoneToOrder = areaCode ? await firstAvailable(areaCode) : null;
+    // Fallback: any available US number
+    if (!phoneToOrder) phoneToOrder = await firstAvailable();
+    if (!phoneToOrder) {
+      throw new Error(`No available US phone numbers found for region ${region ?? 'any'}`);
+    }
   }
 
   const purchased = await twilioPost<{ sid: string; phone_number: string }>(

@@ -53,6 +53,9 @@ export interface ProvisionTwilioPayload {
   tenantId: string;
   region: string | null;
   baseUrl: string;
+  // Number picker: the specific E.164 the tradesperson claimed. When set, the
+  // worker orders exactly this number instead of auto-picking by region.
+  phoneNumber?: string;
 }
 
 export const PROVISION_TWILIO_JOB_TYPE = 'provision_twilio_subaccount';
@@ -68,7 +71,7 @@ export function createProvisionTwilioWorker(deps: {
     type: PROVISION_TWILIO_JOB_TYPE,
 
     async handle(message: QueueMessage<ProvisionTwilioPayload>, logger: Logger): Promise<void> {
-      const { tenantId, region, baseUrl } = message.payload;
+      const { tenantId, region, baseUrl, phoneNumber: preferredNumber } = message.payload;
       const { pool } = deps;
 
       const masterSid = process.env.TWILIO_ACCOUNT_SID;
@@ -196,18 +199,49 @@ export function createProvisionTwilioWorker(deps: {
               tenantId, phoneE164,
             });
           } else {
-            logger.info('Purchasing phone number', { tenantId, region });
-            const number = await purchasePhoneNumber(
-              subaccountSid,
-              authToken,
+            logger.info('Purchasing phone number', {
+              tenantId,
               region,
-              // VoiceUrl must return TwiML — point it at the existing
-              // /api/telephony/voice handler which resolves tenant from
-              // the inbound `to` number. The /webhooks/twilio/* routes only
-              // 200-ack and don't emit TwiML, so they'd break call handling.
-              `${baseUrl}/api/telephony/voice`,
-              `${baseUrl}/webhooks/twilio/status/${tenantId}`
-            );
+              preferred: preferredNumber ?? null,
+            });
+            let number;
+            try {
+              number = await purchasePhoneNumber(
+                subaccountSid,
+                authToken,
+                region,
+                // VoiceUrl must return TwiML — point it at the existing
+                // /api/telephony/voice handler which resolves tenant from
+                // the inbound `to` number. The /webhooks/twilio/* routes only
+                // 200-ack and don't emit TwiML, so they'd break call handling.
+                `${baseUrl}/api/telephony/voice`,
+                `${baseUrl}/webhooks/twilio/status/${tenantId}`,
+                preferredNumber
+              );
+            } catch (purchaseErr) {
+              if (preferredNumber) {
+                // The tradesperson picked a specific number Twilio can no
+                // longer sell us (taken since the picker listed it). Don't
+                // retry-loop on a number that won't come back — record a
+                // re-pickable failure (status 'failed') and stop so the UI
+                // can prompt for another choice.
+                const msg = `Selected number ${preferredNumber} is no longer available — please choose another`;
+                logger.warn('Preferred number unavailable at purchase', {
+                  tenantId,
+                  error: purchaseErr instanceof Error ? purchaseErr.message : String(purchaseErr),
+                });
+                await tenantQuery(
+                  pool,
+                  tenantId,
+                  `UPDATE tenant_integrations
+                   SET status = 'failed', last_error = $1, updated_at = NOW()
+                   WHERE tenant_id = $2 AND provider = 'twilio'`,
+                  [msg, tenantId]
+                ).catch(() => {});
+                return;
+              }
+              throw purchaseErr;
+            }
             phoneNumberSid = number.sid;
             phoneE164 = number.phoneNumber;
             logger.info('Phone number purchased', { tenantId, phoneE164 });

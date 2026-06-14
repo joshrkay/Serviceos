@@ -98,3 +98,36 @@ describe('purchasePhoneNumber (reuses searchAvailableNumbers)', () => {
     expect(String(fetchFn.mock.calls[1][0])).toContain('/IncomingPhoneNumbers.json');
   });
 });
+
+describe('purchasePhoneNumber with a preferred (claimed) number', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('orders the requested number directly, skipping the search', async () => {
+    const fetchFn = mockFetch(
+      // Only the purchase POST — no AvailablePhoneNumbers search GET.
+      { body: { sid: 'PN999', phone_number: '+15125559999' } },
+    );
+
+    const purchased = await purchasePhoneNumber(
+      'ACsub',
+      'token',
+      null,
+      'https://example.com/voice',
+      'https://example.com/status',
+      '+15125559999',
+    );
+
+    expect(purchased).toEqual({ sid: 'PN999', phoneNumber: '+15125559999' });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchFn.mock.calls[0];
+    expect(String(url)).toContain('/IncomingPhoneNumbers.json');
+    expect(String((init as RequestInit).body)).toContain('PhoneNumber=%2B15125559999');
+  });
+
+  it('propagates a purchase failure when the chosen number was taken', async () => {
+    mockFetch({ ok: false, status: 400, body: { message: 'unavailable' } });
+    await expect(
+      purchasePhoneNumber('ACsub', 'token', null, 'v', 's', '+15125559999'),
+    ).rejects.toThrow(/400/);
+  });
+});

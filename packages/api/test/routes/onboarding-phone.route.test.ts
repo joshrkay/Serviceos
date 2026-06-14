@@ -7,6 +7,7 @@ import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { InMemoryPackActivationRepository } from '../../src/settings/pack-activation';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryQueue } from '../../src/queues/queue';
+import { PROVISION_TWILIO_JOB_TYPE } from '../../src/workers/provision-twilio';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 
 const TENANT_ID = 'tenant-test-1';
@@ -117,5 +118,59 @@ describe('POST /api/onboarding/phone/available', () => {
 
     expect(res.status).toBe(503);
     expect(res.body.error).toBe('TWILIO_NOT_CONFIGURED');
+  });
+});
+
+describe('POST /api/onboarding/phone/claim', () => {
+  it('enqueues provisioning with the chosen number and audits the claim', async () => {
+    const queue = new InMemoryQueue();
+    const auditRepo = new InMemoryAuditRepository();
+    const { app } = buildApp({ pool: fakePool('t0_requested'), queue, auditRepo });
+
+    const res = await request(app)
+      .post('/api/onboarding/phone/claim')
+      .send({ phoneNumber: '+15125550123' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, enqueued: true, phoneNumber: '+15125550123' });
+
+    const msg = await queue.receive<{ tenantId: string; phoneNumber?: string }>();
+    expect(msg?.type).toBe(PROVISION_TWILIO_JOB_TYPE);
+    expect(msg?.payload.phoneNumber).toBe('+15125550123');
+
+    const events = auditRepo.events.filter(
+      (e: { eventType: string }) => e.eventType === 'tenant.phone_number_claimed',
+    );
+    expect(events).toHaveLength(1);
+  });
+
+  it('rejects a non-E.164 number with 400', async () => {
+    const { app } = buildApp({ pool: fakePool('t0_requested'), queue: new InMemoryQueue() });
+    const res = await request(app)
+      .post('/api/onboarding/phone/claim')
+      .send({ phoneNumber: '512-555-0123' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('INVALID_PHONE_NUMBER');
+  });
+
+  it('409s when provisioning is past the claimable state', async () => {
+    const { app } = buildApp({ pool: fakePool('partial_readiness'), queue: new InMemoryQueue() });
+    const res = await request(app)
+      .post('/api/onboarding/phone/claim')
+      .send({ phoneNumber: '+15125550123' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('PHONE_CLAIM_NOT_ALLOWED');
+  });
+
+  it('is idempotent when provisioning is already active', async () => {
+    const { app } = buildApp({ pool: fakePool('full_readiness'), queue: new InMemoryQueue() });
+    const res = await request(app)
+      .post('/api/onboarding/phone/claim')
+      .send({ phoneNumber: '+15125550123' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, skipped: true, reason: 'already_active' });
   });
 });

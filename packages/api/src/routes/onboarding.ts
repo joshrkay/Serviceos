@@ -678,6 +678,86 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     },
   );
 
+  // Number picker — claim the specific number the tradesperson chose. Mirrors
+  // /phone/retry's status gate, but threads the chosen E.164 to the worker so
+  // it orders exactly that number. The purchase itself (money, hard to undo)
+  // stays server-side in the worker — the client never buys directly.
+  router.post(
+    '/phone/claim',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!pool || !queue) {
+          res.status(503).json({
+            error: 'ONBOARDING_NOT_CONFIGURED',
+            message: 'Phone claim requires database and queue',
+          });
+          return;
+        }
+        const parsed = PhoneClaimInputSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: 'INVALID_PHONE_NUMBER',
+            message: parsed.error.issues[0]?.message ?? 'Invalid phone number',
+          });
+          return;
+        }
+        const tenantId = req.auth!.tenantId;
+        const db = currentTenantContext()?.client ?? pool;
+        const integ = await db.query<{ status: string }>(
+          `SELECT status FROM tenant_integrations
+           WHERE tenant_id = $1 AND provider = 'twilio' LIMIT 1`,
+          [tenantId],
+        );
+        const status = integ.rows[0]?.status;
+        if (status === 'full_readiness') {
+          res.json({ ok: true, skipped: true, reason: 'already_active' });
+          return;
+        }
+        if (status && status !== 't0_requested' && status !== 'failed') {
+          res.status(409).json({
+            error: 'PHONE_CLAIM_NOT_ALLOWED',
+            message: `Cannot claim from status ${status}`,
+          });
+          return;
+        }
+        const callbackBaseUrl =
+          process.env.PUBLIC_API_URL ??
+          process.env.APP_PUBLIC_URL ??
+          'http://localhost:3000';
+        const payload: ProvisionTwilioPayload = {
+          tenantId,
+          region: null,
+          baseUrl: callbackBaseUrl,
+          phoneNumber: parsed.data.phoneNumber,
+        };
+        await queue.send(
+          PROVISION_TWILIO_JOB_TYPE,
+          payload,
+          `provision-twilio-claim-${tenantId}`,
+        );
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: req.auth!.userId,
+            actorRole: 'owner',
+            eventType: 'tenant.phone_number_claimed',
+            entityType: 'tenant_integrations',
+            entityId: tenantId,
+            metadata: { phoneNumber: parsed.data.phoneNumber },
+          }),
+        );
+        res.json({ ok: true, enqueued: true, phoneNumber: parsed.data.phoneNumber });
+      } catch (error: unknown) {
+        res.status(500).json({
+          error: 'PHONE_CLAIM_FAILED',
+          message: error instanceof Error ? error.message : 'Failed to claim phone number',
+        });
+      }
+    },
+  );
+
   router.post(
     '/ai-check/retry',
     requireAuth,
