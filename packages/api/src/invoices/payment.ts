@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { Invoice, InvoiceRepository } from './invoice';
+import { Invoice, InvoiceRepository, InvoiceStatus } from './invoice';
 import { ValidationError } from '../shared/errors';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
@@ -27,7 +27,7 @@ export interface PaymentReceiptNotifier {
   ): Promise<void>;
 }
 
-export type PaymentStatus = 'pending' | 'completed' | 'failed' | 'refunded';
+export type PaymentStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'refunded';
 export type PaymentMethod = 'cash' | 'check' | 'credit_card' | 'bank_transfer' | 'other';
 
 export interface Payment {
@@ -83,6 +83,23 @@ export interface RecordPaymentInput {
   processedBy: string;
 }
 
+/**
+ * E2a (one-time ACH) — input for recording an in-flight `processing`
+ * payment. `providerReference` is REQUIRED (it is the Stripe
+ * `payment_intent` id that uniqueness + idempotency key on) — unlike
+ * `RecordPaymentInput` where it is optional for manual cash/check rows.
+ */
+export interface RecordProcessingPaymentInput {
+  tenantId: string;
+  invoiceId: string;
+  amountCents: number;
+  method: PaymentMethod;
+  /** Stripe `payment_intent` id — the uniqueness + idempotency key. */
+  providerReference: string;
+  note?: string;
+  processedBy: string;
+}
+
 export interface PaymentListOptions {
   status?: PaymentStatus;
   /** Inclusive lower bound on `receivedAt`. */
@@ -121,6 +138,28 @@ export interface ReversePaymentOptions {
   reason: string;
 }
 
+/**
+ * E2a (one-time ACH) — extra columns to stamp alongside the atomic
+ * `processing -> {completed|failed}` transition (`transitionFromProcessing`).
+ *
+ * On a `completed` settlement we reconcile `amountCents` to Stripe's
+ * authoritative `amount_received` (which can drift from the originally
+ * announced `processing` amount) and set `receivedAt` to the settlement
+ * time. On a `failed` transition we stamp `reversalReason` so the failure
+ * carries a human-readable cause, mirroring `reversePaymentAtomic`. Every
+ * field is optional — only the columns present are written.
+ */
+export interface TransitionFromProcessingExtras {
+  /** Reconcile the row's settled magnitude (Stripe `amount_received`). */
+  amountCents?: number;
+  /** Stamp the settlement/failure time onto `paid_at`. */
+  receivedAt?: Date;
+  /** Why a processing payment failed (e.g. 'ach_failed'). */
+  reversalReason?: string;
+  /** Stamp the failure time onto `reversed_at` (failed transition only). */
+  reversedAt?: Date;
+}
+
 export interface PaymentRepository {
   create(payment: Payment): Promise<Payment>;
   findById(tenantId: string, id: string): Promise<Payment | null>;
@@ -136,9 +175,12 @@ export interface PaymentRepository {
    * not enough to find the originating payment.
    *
    * Returns the most recently received matching payment, or `null` when
-   * none exists. `tenant_id` is required (the unique index on
-   * `provider_reference` is per-tenant; without it cross-tenant
-   * collisions could resolve incorrectly).
+   * none exists. `tenant_id` is required: the partial unique index on
+   * `payments(tenant_id, reference_number)` (migration 178) is per-tenant,
+   * so without the explicit scope a cross-tenant collision could resolve
+   * incorrectly. The `ORDER BY paid_at DESC LIMIT 1` in the pg impl is kept
+   * defensively for legacy rows written before migration 178 (and for the
+   * dirty-data fallback where the migration created a NON-unique index).
    */
   findByProviderReference(tenantId: string, providerReference: string): Promise<Payment | null>;
   /**
@@ -180,6 +222,35 @@ export interface PaymentRepository {
     tenantId: string,
     id: string,
     opts: ReversePaymentOptions,
+  ): Promise<Payment | null>;
+  /**
+   * E2a (one-time ACH) — race-safe insert of an in-flight `processing`
+   * payment. `INSERT ... ON CONFLICT (tenant_id, reference_number) DO
+   * NOTHING RETURNING *` against the partial unique index added in
+   * migration 178. Returns the inserted row, or `null` when a row with
+   * the same `(tenant_id, reference_number)` already exists (a redelivered
+   * or concurrent `payment_intent.processing` event). This is the DB-level
+   * backstop the ACH idempotency story rests on — the webhook-base dedup
+   * keys on `(source, event_id)` and gives zero protection across the
+   * distinct processing/succeeded/failed event ids for one PaymentIntent.
+   */
+  createIfNotExists(payment: Payment): Promise<Payment | null>;
+  /**
+   * E2a (one-time ACH) — atomic compare-and-swap out of `processing`. A
+   * single `UPDATE payments SET status=$toStatus ... WHERE tenant_id AND
+   * id AND status='processing' RETURNING *` so settle and fail are mutually
+   * exclusive: whichever commits first flips the row, the loser sees a
+   * non-`processing` status and matches 0 rows. Returns the updated row on
+   * a winning CAS, or `null` when the row already left `processing`
+   * (terminal no-op), mirroring `reversePaymentAtomic`'s idempotency. The
+   * caller runs invoice/money-state/receipt effects ONLY after a non-null
+   * return, so a lost CAS can never produce a phantom-paid invoice.
+   */
+  transitionFromProcessing(
+    tenantId: string,
+    id: string,
+    toStatus: PaymentStatus,
+    extras?: TransitionFromProcessingExtras,
   ): Promise<Payment | null>;
 }
 
@@ -243,21 +314,106 @@ export async function recordPayment(
 
   await paymentRepo.create(payment);
 
-  // Update invoice balances
-  const newAmountPaid = invoice.amountPaidCents + input.amountCents;
-  const newAmountDue = Math.max(0, invoice.totals.totalCents - newAmountPaid);
+  // Apply the FULL settled-money effect set (invoice balance/status,
+  // audit `payment.recorded` + conditional `invoice.status_changed`,
+  // money-state rollup, receipt). Shared verbatim with ACH settlement
+  // (`settleProcessingPayment`) so the card path and the ACH path run
+  // byte-identical effects — see `applySettledPayment`.
+  const { invoice: updatedInvoice } = await applySettledPayment(
+    invoice,
+    payment,
+    payment.amountCents,
+    invoiceRepo,
+    {
+      actorId: input.processedBy,
+      actorRole: auditContext?.actorRole,
+      correlationId: auditContext?.correlationId,
+    },
+    moneyStateDeps,
+    paymentReceiptNotifier,
+    auditRepo,
+  );
 
-  let newStatus = invoice.status;
-  if (newAmountDue === 0) {
-    newStatus = 'paid';
-  } else if (newAmountPaid > 0 && ['open', 'partially_paid'].includes(invoice.status)) {
-    newStatus = 'partially_paid';
+  return { payment, invoice: updatedInvoice };
+}
+
+/**
+ * E2a — context for the shared settled-money effect helper.
+ */
+export interface ApplySettledPaymentContext {
+  /** Audit actor id (the recording user, or a `system:*` sentinel). */
+  actorId: string;
+  /** Actor role to stamp (defaults to 'system'). */
+  actorRole?: string;
+  /** Correlation id (Stripe payment_intent / event id) for traceability. */
+  correlationId?: string;
+}
+
+/**
+ * Pure invoice balance + status math for applying `amountCents` of settled
+ * money to `invoice`. Extracted from `recordPayment` so the card path and
+ * ACH settlement compute the post-payment state identically. Returns the
+ * new figures; the CALLER persists them (so the persisted row can be
+ * audited atomically with the invoice update on /api routes).
+ *
+ * Integer cents throughout. `amountDueCents` floors at 0; status flips to
+ * 'paid' when nothing is due, else 'partially_paid' while the invoice is
+ * still open/partially_paid (a terminal status is left untouched).
+ */
+export function applyPaymentToInvoice(
+  invoice: Invoice,
+  amountCents: number,
+): { amountPaidCents: number; amountDueCents: number; status: InvoiceStatus } {
+  const amountPaidCents = invoice.amountPaidCents + amountCents;
+  const amountDueCents = Math.max(0, invoice.totals.totalCents - amountPaidCents);
+
+  let status = invoice.status;
+  if (amountDueCents === 0) {
+    status = 'paid';
+  } else if (amountPaidCents > 0 && ['open', 'partially_paid'].includes(invoice.status)) {
+    status = 'partially_paid';
   }
 
-  const updatedInvoice = await invoiceRepo.update(input.tenantId, input.invoiceId, {
-    amountPaidCents: newAmountPaid,
-    amountDueCents: newAmountDue,
-    status: newStatus,
+  return { amountPaidCents, amountDueCents, status };
+}
+
+/**
+ * E2a — the shared post-create settled-money effect set. Performs EVERY
+ * effect a normal settled payment has, in the order `recordPayment` always
+ * has:
+ *  1. invoice balance + status update (via `applyPaymentToInvoice`),
+ *  2. audit `payment.recorded` (+ conditional `invoice.status_changed`),
+ *  3. `refreshJobMoneyStateSafe` money-state rollup (best-effort),
+ *  4. the payment-receipt notifier.
+ *
+ * Used by BOTH `recordPayment` (card/manual capture) and
+ * `settleProcessingPayment` (ACH settlement) so the two paths are
+ * byte-identical and ACH cannot diverge — same audit event TYPES the card
+ * path emits (`payment.recorded`, NOT a new `payment.completed`, which
+ * revenue consumers filtering `payment.recorded` would miss), the same
+ * money-state call, the same receipt.
+ *
+ * The `payment` row is assumed already persisted (created or CAS-settled).
+ * `appliedAmountCents` is the magnitude to apply to the invoice and to
+ * stamp in the audit/receipt — for settlement this is the amount AFTER the
+ * over-collection cap, which can be less than `payment.amountCents`.
+ */
+export async function applySettledPayment(
+  invoice: Invoice,
+  payment: Payment,
+  appliedAmountCents: number,
+  invoiceRepo: InvoiceRepository,
+  context: ApplySettledPaymentContext,
+  moneyStateDeps?: RefreshJobMoneyStateDeps,
+  paymentReceiptNotifier?: PaymentReceiptNotifier,
+  auditRepo?: AuditRepository,
+): Promise<{ payment: Payment; invoice: Invoice }> {
+  const next = applyPaymentToInvoice(invoice, appliedAmountCents);
+
+  const updatedInvoice = await invoiceRepo.update(invoice.tenantId, invoice.id, {
+    amountPaidCents: next.amountPaidCents,
+    amountDueCents: next.amountDueCents,
+    status: next.status,
     updatedAt: new Date(),
   });
 
@@ -268,20 +424,20 @@ export async function recordPayment(
   // writes. A failure here intentionally bubbles: a payment with no audit
   // record is not an acceptable committed state.
   if (auditRepo) {
-    const actorRole = auditContext?.actorRole ?? 'system';
-    const correlationId = auditContext?.correlationId;
+    const actorRole = context.actorRole ?? 'system';
+    const correlationId = context.correlationId;
     await auditRepo.create(
       createAuditEvent({
-        tenantId: input.tenantId,
-        actorId: input.processedBy,
+        tenantId: invoice.tenantId,
+        actorId: context.actorId,
         actorRole,
         eventType: 'payment.recorded',
         entityType: 'invoice',
-        entityId: input.invoiceId,
+        entityId: invoice.id,
         correlationId,
         metadata: {
           paymentId: payment.id,
-          amountCents: payment.amountCents,
+          amountCents: appliedAmountCents,
           method: payment.method,
           providerReference: payment.providerReference ?? null,
           newInvoiceStatus: (updatedInvoice ?? invoice).status,
@@ -292,12 +448,12 @@ export async function recordPayment(
     if (updatedInvoice && updatedInvoice.status !== invoice.status) {
       await auditRepo.create(
         createAuditEvent({
-          tenantId: input.tenantId,
-          actorId: input.processedBy,
+          tenantId: invoice.tenantId,
+          actorId: context.actorId,
           actorRole,
           eventType: 'invoice.status_changed',
           entityType: 'invoice',
-          entityId: input.invoiceId,
+          entityId: invoice.id,
           correlationId,
           metadata: {
             oldStatus: invoice.status,
@@ -314,22 +470,126 @@ export async function recordPayment(
   // must not bounce them). No-op when the caller didn't wire the deps.
   if (updatedInvoice && moneyStateDeps) {
     await refreshJobMoneyStateSafe(
-      input.tenantId,
+      invoice.tenantId,
       updatedInvoice.jobId,
-      input.processedBy,
+      context.actorId,
       moneyStateDeps,
     );
   }
 
   if (updatedInvoice && paymentReceiptNotifier) {
     await paymentReceiptNotifier.notifyPaymentReceived(
-      input.tenantId,
-      input.invoiceId,
-      input.amountCents,
+      invoice.tenantId,
+      invoice.id,
+      appliedAmountCents,
     );
   }
 
   return { payment, invoice: updatedInvoice! };
+}
+
+/**
+ * E2a (one-time ACH) — record an in-flight `processing` payment WITHOUT
+ * touching the invoice. Used by the `payment_intent.processing` webhook
+ * branch: ACH funds take 1–4 business days to clear, so the invoice stays
+ * `open` and NO receipt fires until settlement upgrades this row to
+ * `completed` (`settleProcessingPayment`).
+ *
+ * Idempotency (two layers, R5/R9):
+ *  - App-level any-row guard: if ANY payment already exists for this
+ *    `(tenant, provider_reference)` we no-op and return it. This also
+ *    covers the dirty-data fallback where migration 178 created a
+ *    NON-unique index (so `createIfNotExists`'s ON CONFLICT cannot infer).
+ *  - DB-level race backstop: the insert is `ON CONFLICT DO NOTHING`
+ *    (`createIfNotExists`). A concurrent processing event that slips past
+ *    the any-row read still cannot create a second row; a null insert
+ *    result then resolves to the existing row.
+ *
+ * Emits `payment.processing` (entityType 'invoice', mirroring
+ * `recordPayment`'s `payment.recorded`) ONLY when a row is actually
+ * inserted, so a redelivered event does not duplicate the audit trail.
+ * Does NOT validate the invoice balance or run the money-state rollup —
+ * none of those effects apply until funds clear.
+ */
+export async function recordProcessingPayment(
+  input: RecordProcessingPaymentInput,
+  paymentRepo: PaymentRepository,
+  auditRepo?: AuditRepository,
+  auditContext?: RecordPaymentAuditContext,
+): Promise<{ payment: Payment; created: boolean }> {
+  if (!input.tenantId) throw new ValidationError('tenantId is required');
+  if (!input.invoiceId) throw new ValidationError('invoiceId is required');
+  if (!input.providerReference) throw new ValidationError('providerReference is required');
+  if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) {
+    throw new ValidationError('amountCents must be a positive integer');
+  }
+  if (!input.method) throw new ValidationError('method is required');
+  if (!input.processedBy) throw new ValidationError('processedBy is required');
+
+  // App-level any-row guard — no-op if a row already exists for this
+  // provider_reference (idempotent redelivery, or a row already settled /
+  // failed). Also the only guard in the non-unique-index fallback case.
+  const existing = await paymentRepo.findByProviderReference(
+    input.tenantId,
+    input.providerReference,
+  );
+  if (existing) {
+    return { payment: existing, created: false };
+  }
+
+  const now = new Date();
+  const payment: Payment = {
+    id: uuidv4(),
+    tenantId: input.tenantId,
+    invoiceId: input.invoiceId,
+    amountCents: input.amountCents,
+    method: input.method,
+    status: 'processing',
+    providerReference: input.providerReference,
+    note: input.note,
+    receivedAt: now,
+    processedBy: input.processedBy,
+    createdAt: now,
+    updatedAt: now,
+    refundedAmountCents: 0,
+    refundedAt: null,
+    lastRefundStripeId: null,
+    reversedAt: null,
+    reversalReason: null,
+  };
+
+  // DB-level race backstop: ON CONFLICT DO NOTHING. `null` ⇒ a concurrent
+  // insert won the race; resolve to that row and treat as a no-op.
+  const inserted = await paymentRepo.createIfNotExists(payment);
+  if (!inserted) {
+    const raced = await paymentRepo.findByProviderReference(
+      input.tenantId,
+      input.providerReference,
+    );
+    return { payment: raced ?? payment, created: false };
+  }
+
+  if (auditRepo) {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId: input.tenantId,
+        actorId: input.processedBy,
+        actorRole: auditContext?.actorRole ?? 'system',
+        eventType: 'payment.processing',
+        entityType: 'invoice',
+        entityId: input.invoiceId,
+        correlationId: auditContext?.correlationId ?? input.providerReference,
+        metadata: {
+          paymentId: inserted.id,
+          amountCents: inserted.amountCents,
+          method: inserted.method,
+          providerReference: inserted.providerReference ?? null,
+        },
+      }),
+    );
+  }
+
+  return { payment: inserted, created: true };
 }
 
 export async function getPaymentsByInvoice(
@@ -448,6 +708,63 @@ export class InMemoryPaymentRepository implements PaymentRepository {
       status: 'failed',
       reversedAt: opts.reversedAt,
       reversalReason: opts.reason,
+      updatedAt: new Date(),
+    };
+    this.payments.set(id, updated);
+    return { ...updated };
+  }
+
+  /**
+   * E2a — mirror of the pg `INSERT ... ON CONFLICT DO NOTHING`. The
+   * partial unique index is `(tenant_id, reference_number) WHERE
+   * reference_number IS NOT NULL`, so the conflict key is the
+   * (tenantId, providerReference) pair and a NULL providerReference is
+   * never constrained (manual cash/check rows). Yields to the microtask
+   * queue once so two concurrent callers interleave (matching the other
+   * atomic helpers), then performs the existence check + insert as one
+   * synchronous block — the atomicity of the `ON CONFLICT` statement.
+   * Returns the inserted row, or `null` when a constrained duplicate
+   * already exists.
+   */
+  async createIfNotExists(payment: Payment): Promise<Payment | null> {
+    await Promise.resolve();
+    if (payment.providerReference != null) {
+      const conflict = Array.from(this.payments.values()).some(
+        (p) =>
+          p.tenantId === payment.tenantId &&
+          p.providerReference === payment.providerReference,
+      );
+      if (conflict) return null;
+    }
+    this.payments.set(payment.id, { ...payment });
+    return { ...payment };
+  }
+
+  /**
+   * E2a — mirror of the pg atomic CAS out of `processing`. Yields to the
+   * microtask queue once so a concurrent settle+fail pair interleaves,
+   * then the guard — only flip while `status === 'processing'` — runs
+   * synchronously, matching `UPDATE ... WHERE status='processing'
+   * RETURNING *`. The loser sees a non-`processing` status and gets
+   * `null`, so exactly one transition wins.
+   */
+  async transitionFromProcessing(
+    tenantId: string,
+    id: string,
+    toStatus: PaymentStatus,
+    extras?: TransitionFromProcessingExtras,
+  ): Promise<Payment | null> {
+    await Promise.resolve();
+    const p = this.payments.get(id);
+    if (!p || p.tenantId !== tenantId) return null;
+    if (p.status !== 'processing') return null;
+    const updated: Payment = {
+      ...p,
+      status: toStatus,
+      amountCents: extras?.amountCents ?? p.amountCents,
+      receivedAt: extras?.receivedAt ?? p.receivedAt,
+      reversedAt: extras?.reversedAt ?? p.reversedAt,
+      reversalReason: extras?.reversalReason ?? p.reversalReason,
       updatedAt: new Date(),
     };
     this.payments.set(id, updated);

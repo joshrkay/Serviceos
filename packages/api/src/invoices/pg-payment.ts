@@ -8,6 +8,7 @@ import {
   PaymentStatus,
   IncrementRefundOptions,
   ReversePaymentOptions,
+  TransitionFromProcessingExtras,
 } from './payment';
 
 export class PgPaymentRepository extends PgBaseRepository implements PaymentRepository {
@@ -85,10 +86,12 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
    * alongside RLS — a misconfigured GUC must not silently leak a payment
    * from another tenant on a colliding reference.
    *
-   * Returns the most recently received match (ORDER BY received_at DESC)
-   * to defend against an extremely rare duplicate-reference edge case
-   * (e.g. a manual replay that re-recorded the same payment_intent
-   * before D2-4 made the column unique). Returns `null` when no match.
+   * Returns the most recently received match (ORDER BY paid_at DESC). The
+   * `LIMIT 1` is defensive: uniqueness on `(tenant_id, reference_number)`
+   * was NOT enforced until migration 178 (the partial unique index), so a
+   * legacy row written before it — or a row written in the dirty-data
+   * fallback where 178 created a NON-unique index — could share a
+   * reference. Returns `null` when no match.
    */
   async findByProviderReference(
     tenantId: string,
@@ -293,6 +296,114 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
            AND reversed_at IS NULL
          RETURNING *`,
         [tenantId, id, opts.reversedAt, opts.reason],
+      );
+      if (rows.length === 0) return null;
+      return this.mapRowToPayment(rows[0]);
+    });
+  }
+
+  /**
+   * E2a (one-time ACH) — race-safe insert of a `processing` payment.
+   * `INSERT ... ON CONFLICT (tenant_id, reference_number) WHERE
+   * reference_number IS NOT NULL DO NOTHING RETURNING *`. The ON CONFLICT
+   * target + predicate match the partial unique index `uq_payments_provider_reference`
+   * from migration 178, so a redelivered or concurrent
+   * `payment_intent.processing` event cannot create a second row: the
+   * second statement conflicts, inserts nothing, and RETURNING yields 0
+   * rows → `null`. The caller (`recordProcessingPayment`) resolves a null
+   * to the existing row.
+   *
+   * NOTE: if migration 178 fell back to a NON-unique index on dirty legacy
+   * data, this ON CONFLICT inference has no unique index to match and the
+   * statement would error. That is the acknowledged degraded path — the
+   * app-level any-row guard in `recordProcessingPayment` runs FIRST and
+   * catches the common case until the dupes are reconciled.
+   */
+  async createIfNotExists(payment: Payment): Promise<Payment | null> {
+    return this.withTenant(payment.tenantId, async (client) => {
+      const { rows } = await client.query(
+        `INSERT INTO payments (
+          id, tenant_id, invoice_id, amount_cents, status,
+          payment_method, reference_number, notes,
+          paid_at, created_by, created_at, updated_at,
+          refunded_amount_cents, refunded_at, last_refund_stripe_id,
+          reversed_at, reversal_reason
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+        ON CONFLICT (tenant_id, reference_number) WHERE reference_number IS NOT NULL
+        DO NOTHING
+        RETURNING *`,
+        [
+          payment.id,
+          payment.tenantId,
+          payment.invoiceId,
+          payment.amountCents,
+          payment.status,
+          payment.method,
+          payment.providerReference ?? null,
+          payment.note ?? null,
+          payment.receivedAt,
+          payment.processedBy,
+          payment.createdAt,
+          payment.updatedAt,
+          payment.refundedAmountCents ?? 0,
+          payment.refundedAt ?? null,
+          payment.lastRefundStripeId ?? null,
+          payment.reversedAt ?? null,
+          payment.reversalReason ?? null,
+        ],
+      );
+      if (rows.length === 0) return null;
+      return this.mapRowToPayment(rows[0]);
+    });
+  }
+
+  /**
+   * E2a (one-time ACH) — atomic compare-and-swap OUT of `processing`. A
+   * single UPDATE flips the row to `$toStatus` ONLY while it is still
+   * `processing`, so a concurrent settle + fail are mutually exclusive:
+   * whichever statement commits first wins, the loser's predicate fails
+   * and 0 rows return. `tenant_id` is in the WHERE for defense-in-depth
+   * alongside RLS. Returns `null` on 0 rows (not found, wrong tenant, or
+   * already left `processing`) — a terminal no-op, mirroring
+   * `reversePaymentAtomic`.
+   *
+   * `extras` reconcile the settled magnitude (`amount_cents` ←
+   * `amount_received`) and stamp the settle/fail time + reversal reason.
+   * Only the provided columns are written; `updated_at` always advances.
+   */
+  async transitionFromProcessing(
+    tenantId: string,
+    id: string,
+    toStatus: PaymentStatus,
+    extras?: TransitionFromProcessingExtras,
+  ): Promise<Payment | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const setClauses: string[] = ['status = $3', 'updated_at = now()'];
+      const values: unknown[] = [tenantId, id, toStatus];
+      if (extras?.amountCents !== undefined) {
+        values.push(extras.amountCents);
+        setClauses.push(`amount_cents = $${values.length}`);
+      }
+      if (extras?.receivedAt !== undefined) {
+        values.push(extras.receivedAt);
+        setClauses.push(`paid_at = $${values.length}`);
+      }
+      if (extras?.reversedAt !== undefined) {
+        values.push(extras.reversedAt);
+        setClauses.push(`reversed_at = $${values.length}`);
+      }
+      if (extras?.reversalReason !== undefined) {
+        values.push(extras.reversalReason);
+        setClauses.push(`reversal_reason = $${values.length}`);
+      }
+      const { rows } = await client.query(
+        `UPDATE payments
+         SET ${setClauses.join(', ')}
+         WHERE tenant_id = $1
+           AND id = $2
+           AND status = 'processing'
+         RETURNING *`,
+        values,
       );
       if (rows.length === 0) return null;
       return this.mapRowToPayment(rows[0]);

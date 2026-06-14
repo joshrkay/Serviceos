@@ -14,7 +14,13 @@
  * guard and skip the `payment.refunded` audit event.
  */
 import { v4 as uuidv4 } from 'uuid';
-import { PaymentRepository, Payment, PaymentMethod } from '../invoices/payment';
+import {
+  PaymentRepository,
+  Payment,
+  PaymentMethod,
+  PaymentReceiptNotifier,
+  applySettledPayment,
+} from '../invoices/payment';
 import {
   Invoice,
   InvoiceRepository,
@@ -403,4 +409,225 @@ export async function recordFailedPaymentAttempt(
   }
 
   return payment;
+}
+
+/**
+ * E2a (one-time ACH) — SETTLE an in-flight `processing` payment when its
+ * funds clear (`payment_intent.succeeded`).
+ *
+ * Drives the load-bearing money-safe upgrade:
+ *  1. Atomic CAS `processing -> completed` via
+ *     `paymentRepo.transitionFromProcessing` (the guard lives in the WHERE
+ *     clause). `null` ⇒ the row already left `processing` (a concurrent
+ *     fail won, or a duplicate succeeded already settled it) ⇒ idempotent
+ *     no-op, NOT a throw. Invoice/money-state/receipt effects therefore
+ *     run ONLY after a winning CAS — a lost race can never phantom-pay.
+ *  2. The CAS reconciles the row's `amountCents` to Stripe's authoritative
+ *     `amount_received` (`settledAmountCents`), which can drift from the
+ *     amount announced on the `processing` event, and stamps `paid_at` to
+ *     the settlement time.
+ *  3. Re-read the invoice. A non-payable invoice (already paid / void /
+ *     canceled, or vanished) is an idempotent no-op — the row is settled
+ *     for accounting, but no further invoice effect is correct.
+ *  4. CAP the applied amount to the invoice's CURRENT `amountDueCents`
+ *     (R7 over-collection guard: ACH processing $500 → owner records $200
+ *     cash → ACH settles → apply only the remaining $300, never $500), then
+ *     run the SHARED `applySettledPayment` — the SAME effect set the card
+ *     path runs: invoice balance/status, `payment.recorded` (+ conditional
+ *     `invoice.status_changed`) audit, `refreshJobMoneyStateSafe` rollup,
+ *     and the receipt.
+ *
+ * Mirrors `reversePayment`'s atomic-CAS + re-read-invoice structure.
+ */
+export interface SettleProcessingPaymentInput {
+  tenantId: string;
+  /** Stripe `payment_intent` id stamped into provider_reference. */
+  providerReference: string;
+  /** Stripe `amount_received` — the authoritative settled figure (cents). */
+  settledAmountCents: number;
+  /** Audit actor id; defaults to 'system:stripe_webhook'. */
+  actorId?: string;
+  actorRole?: string;
+  /** Correlation id (Stripe payment_intent / event id) for tracing. */
+  correlationId?: string;
+  /** Settlement time (defaults to now). */
+  settledAt?: Date;
+}
+
+export interface SettleProcessingPaymentResult {
+  settled: boolean;
+  payment?: Payment;
+  invoice?: Invoice;
+}
+
+export async function settleProcessingPayment(
+  input: SettleProcessingPaymentInput,
+  invoiceRepo: InvoiceRepository,
+  paymentRepo: PaymentRepository,
+  auditRepo?: AuditRepository,
+  moneyStateDeps?: RefreshJobMoneyStateDeps,
+  paymentReceiptNotifier?: PaymentReceiptNotifier,
+): Promise<SettleProcessingPaymentResult> {
+  if (!input.tenantId) throw new ValidationError('tenantId is required');
+  if (!input.providerReference) throw new ValidationError('providerReference is required');
+  if (!Number.isInteger(input.settledAmountCents) || input.settledAmountCents <= 0) {
+    throw new ValidationError('settledAmountCents must be a positive integer');
+  }
+
+  const settledAt = input.settledAt ?? new Date();
+  const actorId = input.actorId ?? 'system:stripe_webhook';
+
+  // Resolve the in-flight row by provider_reference, then CAS by id. The
+  // status guard inside `transitionFromProcessing`'s WHERE makes the flip
+  // idempotent + mutually exclusive with `failProcessingPayment`.
+  const existing = await paymentRepo.findByProviderReference(
+    input.tenantId,
+    input.providerReference,
+  );
+  if (!existing) {
+    // No row to settle. The webhook layer decides whether to fall back to
+    // the card path (`recordPayment`); here it is simply a no-op.
+    return { settled: false };
+  }
+
+  const settled = await paymentRepo.transitionFromProcessing(
+    input.tenantId,
+    existing.id,
+    'completed',
+    {
+      // Reconcile to Stripe's authoritative settled figure + stamp the
+      // settlement time onto the row.
+      amountCents: input.settledAmountCents,
+      receivedAt: settledAt,
+    },
+  );
+
+  if (!settled) {
+    // Lost CAS: the row already left `processing` (concurrent fail, or a
+    // duplicate succeeded already settled it). Idempotent no-op.
+    return { settled: false, payment: existing };
+  }
+
+  // Re-read the invoice AFTER the winning CAS so the cap reflects current
+  // balances (an external payment may have landed during the ACH window).
+  const invoice = await invoiceRepo.findById(input.tenantId, settled.invoiceId);
+  if (!invoice) {
+    return { settled: true, payment: settled };
+  }
+
+  const PAYABLE_STATUSES = ['open', 'partially_paid'];
+  if (!PAYABLE_STATUSES.includes(invoice.status)) {
+    // Already paid / void / canceled — settling the row is correct for
+    // accounting, but no further invoice effect (or receipt) is. R7.
+    return { settled: true, payment: settled, invoice };
+  }
+
+  // R7 over-collection guard: never apply more than is currently due.
+  const appliedAmountCents = Math.min(input.settledAmountCents, invoice.amountDueCents);
+
+  const { invoice: updatedInvoice } = await applySettledPayment(
+    invoice,
+    settled,
+    appliedAmountCents,
+    invoiceRepo,
+    {
+      actorId,
+      actorRole: input.actorRole,
+      correlationId: input.correlationId ?? input.providerReference,
+    },
+    moneyStateDeps,
+    paymentReceiptNotifier,
+    auditRepo,
+  );
+
+  return { settled: true, payment: settled, invoice: updatedInvoice };
+}
+
+/**
+ * E2a (one-time ACH) — FAIL an in-flight `processing` payment when the ACH
+ * debit is returned BEFORE settlement (`payment_intent.payment_failed`
+ * while still processing). The invoice was never marked paid, so there is
+ * NOTHING to reopen — this is distinct from `reversePayment`, which claws
+ * back an ALREADY-settled payment and reopens the invoice.
+ *
+ * Atomic CAS `processing -> failed` via `transitionFromProcessing` (guard
+ * in the WHERE). `null` ⇒ the row already left `processing` (a concurrent
+ * settle won, or it already failed) ⇒ idempotent no-op, not a throw. The
+ * invoice is untouched on every path. Emits `payment.failed`. Mirrors
+ * `reversePayment`'s atomic-CAS structure.
+ */
+export interface FailProcessingPaymentInput {
+  tenantId: string;
+  /** Stripe `payment_intent` id stamped into provider_reference. */
+  providerReference: string;
+  /** Why the ACH debit failed (e.g. 'ach_failed', decline code). */
+  reason: string;
+  failedAt?: Date;
+  actorId?: string;
+  actorRole?: string;
+  correlationId?: string;
+}
+
+export interface FailProcessingPaymentResult {
+  failed: boolean;
+  payment?: Payment;
+}
+
+export async function failProcessingPayment(
+  input: FailProcessingPaymentInput,
+  paymentRepo: PaymentRepository,
+  auditRepo?: AuditRepository,
+): Promise<FailProcessingPaymentResult> {
+  if (!input.tenantId) throw new ValidationError('tenantId is required');
+  if (!input.providerReference) throw new ValidationError('providerReference is required');
+  if (!input.reason) throw new ValidationError('reason is required');
+
+  const failedAt = input.failedAt ?? new Date();
+  const actorId = input.actorId ?? 'system:stripe_webhook';
+
+  const existing = await paymentRepo.findByProviderReference(
+    input.tenantId,
+    input.providerReference,
+  );
+  if (!existing) {
+    return { failed: false };
+  }
+
+  const failed = await paymentRepo.transitionFromProcessing(
+    input.tenantId,
+    existing.id,
+    'failed',
+    {
+      reversedAt: failedAt,
+      reversalReason: input.reason,
+    },
+  );
+
+  if (!failed) {
+    // Lost CAS / already terminal — idempotent no-op. Invoice untouched.
+    return { failed: false, payment: existing };
+  }
+
+  if (auditRepo) {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId: input.tenantId,
+        actorId,
+        actorRole: input.actorRole ?? 'system',
+        eventType: 'payment.failed',
+        entityType: 'invoice',
+        entityId: failed.invoiceId,
+        correlationId: input.correlationId ?? input.providerReference,
+        metadata: {
+          paymentId: failed.id,
+          amountCents: failed.amountCents,
+          method: failed.method,
+          providerReference: failed.providerReference ?? null,
+          reason: input.reason,
+        },
+      }),
+    );
+  }
+
+  return { failed: true, payment: failed };
 }

@@ -4467,6 +4467,49 @@ export const MIGRATIONS = {
     ALTER TABLE customer_payment_methods
       ADD COLUMN IF NOT EXISTS stripe_account_id TEXT;
   `,
+
+  // E2a (one-time ACH "processing") — partial UNIQUE index on
+  // payments(tenant_id, reference_number) WHERE reference_number IS NOT NULL.
+  //
+  // This is the backstop the whole ACH idempotency story rests on. The
+  // processing→succeeded→failed lifecycle is driven by THREE distinct Stripe
+  // events with THREE distinct event ids, so the webhook-base dedup (keyed on
+  // (source, event_id)) gives zero protection across them. Uniqueness on the
+  // provider_reference is what makes recordProcessingPayment's
+  // `INSERT ... ON CONFLICT DO NOTHING` race-safe (a redelivered or concurrent
+  // processing event cannot create a second row). NULL reference_number
+  // (manually recorded cash/check payments) is unconstrained.
+  //
+  // NOTE: the in-code comments at payment.ts/pg-payment.ts long CLAIMED this
+  // index already existed — it did NOT (migrations 026/100/133 never created
+  // it; findByProviderReference even ORDER BY paid_at DESC LIMIT 1 precisely
+  // because dups were possible). Those comments are corrected alongside this
+  // migration.
+  //
+  // Deploy safety: if existing data already has two payments sharing a
+  // (tenant_id, reference_number), a UNIQUE index would FAIL the whole
+  // migration batch. Detect that and fall back to a plain (non-unique) index +
+  // RAISE WARNING so the deploy never breaks on dirty legacy data — mirroring
+  // the migration-126/129 duplicate-guard pattern. ON CONFLICT then degrades
+  // to the app-level any-row guard until the dupes are reconciled and the
+  // unique index is added manually.
+  '178_payments_provider_reference_unique': `
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM payments
+        WHERE reference_number IS NOT NULL
+        GROUP BY tenant_id, reference_number HAVING COUNT(*) > 1
+      ) THEN
+        CREATE INDEX IF NOT EXISTS idx_payments_provider_reference
+          ON payments(tenant_id, reference_number) WHERE reference_number IS NOT NULL;
+        RAISE WARNING 'payments has duplicate (tenant_id, reference_number) rows; created NON-unique index. Reconcile duplicates then add the unique index manually.';
+      ELSE
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_provider_reference
+          ON payments(tenant_id, reference_number) WHERE reference_number IS NOT NULL;
+      END IF;
+    END $$;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
