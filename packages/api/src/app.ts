@@ -147,7 +147,7 @@ import { InMemoryAppointmentRepository } from './appointments/appointment';
 import { InMemoryAssignmentRepository } from './appointments/assignment';
 import { InMemoryEstimateRepository } from './estimates/estimate';
 import { InMemoryInvoiceRepository } from './invoices/invoice';
-import { InMemoryDunningConfigRepository } from './invoices/dunning-config';
+import { InMemoryDunningConfigRepository, InMemoryDunningEventRepository } from './invoices/dunning-config';
 import { InMemoryInvoiceScheduleRepository } from './invoices/invoice-schedule';
 import { PgInvoiceScheduleRepository } from './invoices/pg-invoice-schedule';
 import { InMemoryBatchInvoiceRunRepository } from './invoices/batch-invoice-run';
@@ -235,7 +235,7 @@ import { PgJobTimelineRepository } from './jobs/pg-job-lifecycle';
 import { PgAppointmentRepository } from './appointments/pg-appointment';
 import { PgEstimateRepository } from './estimates/pg-estimate';
 import { PgInvoiceRepository } from './invoices/pg-invoice';
-import { PgDunningConfigRepository } from './invoices/pg-dunning-config';
+import { PgDunningConfigRepository, PgDunningEventRepository } from './invoices/pg-dunning-config';
 import { PgPaymentRepository } from './invoices/pg-payment';
 import { InMemoryExpenseRepository } from './expenses/expense';
 import { PgExpenseRepository } from './expenses/pg-expense';
@@ -311,6 +311,11 @@ import { PgDailyDigestRepository } from './digest/pg-daily-digest';
 import { InMemoryDailyDigestRepository, type DailyDigestPayload } from './digest/digest-service';
 import { composeBrandVoiceMessage } from './ai/brand-voice/composer';
 import { runOverdueInvoiceSweep } from './workers/overdue-invoice-worker';
+import { runHfcrWeeklySendSweep } from './workers/hfcr-weekly-send-worker';
+import {
+  PgHfcrWeeklySendRepository,
+  InMemoryHfcrWeeklySendRepository,
+} from './metrics/hfcr-weekly-send';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
 import { PgReviewRepository } from './reputation/pg-review';
 import { PgReviewPollStateRepository } from './reputation/poll-state';
@@ -838,6 +843,8 @@ export function createApp(): express.Express {
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
   const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
   const dunningConfigRepo  = pool ? new PgDunningConfigRepository(pool)  : new InMemoryDunningConfigRepository();
+  const dunningEventRepo   = pool ? new PgDunningEventRepository(pool)   : new InMemoryDunningEventRepository();
+  const hfcrWeeklySendRepo = pool ? new PgHfcrWeeklySendRepository(pool) : new InMemoryHfcrWeeklySendRepository();
   const invoiceScheduleRepo = pool ? new PgInvoiceScheduleRepository(pool) : new InMemoryInvoiceScheduleRepository();
   const batchInvoiceRunRepo = pool ? new PgBatchInvoiceRunRepository(pool) : new InMemoryBatchInvoiceRunRepository();
   const batchInvoiceTxRunner = pool ? new PgTenantTransactionRunner(pool) : new InMemoryTransactionRunner();
@@ -1593,6 +1600,7 @@ export function createApp(): express.Express {
     recordingRetention: 590011,
     supervisorAnnotate: 590012,
     accountingSync: 590013,
+    hfcrWeeklySend: 590014,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -3241,6 +3249,10 @@ export function createApp(): express.Express {
       invoiceRepo,
       paymentRepo,
       timeGivenBackReporter,
+      // HFCR hero metric (GET /api/reports/hfcr) — reads paid payments +
+      // their gating proposals' approval channels.
+      proposalRepo,
+      auditRepo,
       // Look up the tenant tz so /money-dashboard buckets by local
       // month boundaries. Without this the dashboard would default
       // to America/New_York (matches tenant_settings.timezone's DB
@@ -3811,7 +3823,12 @@ export function createApp(): express.Express {
         estimateRepo,
         invoiceRepo,
         auditRepo,
-        transactionalComms,
+        // §7 Collections cadence — raise owner-approved dunning proposals
+        // (send_payment_reminder / apply_late_fee) per the tenant's dunning
+        // policy, gated for idempotency by the dunning event ledger.
+        proposalRepo,
+        dunningConfigRepo,
+        dunningEventRepo,
         listTenantIds: async () => {
           if (!pool) return [];
           const r = await pool.query('SELECT id FROM tenants');
@@ -3827,6 +3844,47 @@ export function createApp(): express.Express {
   }, Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) > 0 ? Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) : 60 * 60_000));
   // QA-2026-06-05: interval is env-tunable (OVERDUE_SWEEP_INTERVAL_MS) so dev/QA
   // can observe the sweep inside a test window; default stays hourly.
+
+  // HFCR weekly owner summary — one SMS per tenant per completed week,
+  // idempotent via hfcr_weekly_sends. Only registered when an SMS sender is
+  // wired (in-memory dev has none → no-op); reuses the owner-phone resolver
+  // and the one-tap owner-SMS seam used by the unsupervised-routing path.
+  //
+  // Driven on a DAILY tick, not a 7-day one: a weekly setInterval would reset
+  // on every redeploy (Railway redeploys far more often than weekly) and could
+  // never elapse. The per-week hfcr_weekly_sends gate makes a daily run send
+  // exactly one summary per tenant per completed week — restart-safe.
+  if (oneTapSmsSender) {
+    const oneTapOwnerSms = oneTapSmsSender;
+    const hfcrWeeklyLogger = createLogger({
+      service: 'hfcr-weekly-send-worker',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    registerInterval(
+      setInterval(() => {
+        void runAsLeader(SWEEP_LOCK.hfcrWeeklySend, async () => {
+          await runHfcrWeeklySendSweep({
+            paymentRepo,
+            proposalRepo,
+            auditRepo,
+            hfcrSendRepo: hfcrWeeklySendRepo,
+            resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
+            sendSms: (args) => oneTapOwnerSms(args.to, args.body),
+            listTenantIds: async () => {
+              if (!pool) return [];
+              const r = await pool.query('SELECT id FROM tenants');
+              return r.rows.map((row: { id: string }) => row.id);
+            },
+            logger: hfcrWeeklyLogger,
+          });
+        }).catch((err) => {
+          hfcrWeeklyLogger.error('HFCR weekly send failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }, 24 * 60 * 60_000),
+    );
+  }
 
   // F17 — push paid invoices + customers to QuickBooks every 5 minutes.
   if (qboConfig) {
