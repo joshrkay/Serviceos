@@ -365,6 +365,7 @@ export async function handleOwnerReply(
   now: Date = new Date(),
 ): Promise<void> {
   if (!isValidTenantId(tenantId)) return;
+  if (!isValidTenantId(tenantId)) return;
   const localDate = DateTime.fromJSDate(now, { zone: timezone }).toISODate();
   if (!localDate) return;
 
