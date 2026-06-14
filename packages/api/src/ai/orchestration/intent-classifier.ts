@@ -19,6 +19,9 @@ export type IntentType =
   | 'update_invoice'
   | 'update_estimate'
   | 'issue_invoice'
+  // Capture-class batch on-ramp: invoice ALL completed-unbilled jobs at once.
+  // On approval the batch_invoice proposal fans out one draft_invoice per job.
+  | 'batch_invoice'
   | 'create_customer'
   | 'create_job'
   | 'reschedule_appointment'
@@ -130,6 +133,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'update_invoice',
   'update_estimate',
   'issue_invoice',
+  'batch_invoice',
   'create_customer',
   'create_job',
   'reschedule_appointment',
@@ -473,6 +477,13 @@ Supported intents (return exactly ONE):
                                      "Make the Jones invoice official"
                                      "Send out the bill for the Acme job"
                                      "Send the invoice we just drafted"
+- "batch_invoice"       — user wants to invoice ALL their completed jobs that
+                           haven't been invoiced yet, in one go (a batch). On
+                           approval each job gets its own draft invoice to
+                           review. No entities to extract.
+                           Examples: "Invoice all my completed jobs"
+                                     "Bill everything that's done"
+                                     "Send out invoices for all finished jobs"
 - "unknown"             — anything else: genuinely ambiguous transcripts,
                            or commands without a clear target. Note that
                            read-only queries ("when is my next appointment",

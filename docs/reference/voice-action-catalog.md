@@ -26,7 +26,7 @@ exist today.
 
 ## A) Speakable today — intent + proposal + execution handler all exist
 
-These 25 actions can be spoken, drafted as a proposal, approved, and executed.
+These 31 actions can be spoken, drafted as a proposal, approved, and executed.
 "Persistence proof" = a Docker-gated integration test that proves the row +
 audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
 catch schema drift or a missing dependency).
@@ -39,6 +39,7 @@ catch schema drift or a missing dependency).
 | "Add a $90 contactor to the Smith invoice" | `update_invoice` | `update_invoice` | capture | unit |
 | "Change the Khan quote to a 3-ton" | `update_estimate` | `update_estimate` | capture | unit |
 | "Issue the Garcia invoice" | `issue_invoice` | `issue_invoice` | money | unit |
+| "Invoice all my completed jobs" | `batch_invoice` | `batch_invoice` | capture | handler-level |
 | "New customer Maria Alvarez, 480-555-0102" | `create_customer` | `create_customer` | capture | integration (`integration/voice-create-customer.test.ts`) |
 | "Open a job for Alvarez, no AC" | `create_job` | `create_job` | capture | integration (`integration/create-job-execution.test.ts`) |
 | "Move the Garcia job to Thursday 10" | `reschedule_appointment` | `reschedule_appointment` | capture | unit |
@@ -84,7 +85,6 @@ migration).
 
 | Spoken example a tradesperson would expect to work | Proposal type | Class | Plan |
 |---|---|---|---|
-| "Invoice all my completed jobs from today" | `batch_invoice` | capture | deferred — needs DB job-enumeration + estimate→line-item resolution (sweep-oriented payload) |
 | "Set up 50% deposit, 50% on completion for Garcia" | `create_invoice_schedule` | capture | deferred (complex payload) |
 | "Respond to that 1-star review" | `review_response_proposal` | comms | deferred (review-monitoring driven) |
 | "Book this caller for Thursday" | `create_booking` | capture | deferred (customer-call FSM path) |
@@ -124,6 +124,7 @@ approves by screen/SMS tap).
     { "intent": "update_invoice", "proposalType": "update_invoice", "actionClass": "capture" },
     { "intent": "update_estimate", "proposalType": "update_estimate", "actionClass": "capture" },
     { "intent": "issue_invoice", "proposalType": "issue_invoice", "actionClass": "money" },
+    { "intent": "batch_invoice", "proposalType": "batch_invoice", "actionClass": "capture" },
     { "intent": "create_customer", "proposalType": "create_customer", "actionClass": "capture" },
     { "intent": "create_job", "proposalType": "create_job", "actionClass": "capture" },
     { "intent": "reschedule_appointment", "proposalType": "reschedule_appointment", "actionClass": "capture" },
@@ -150,7 +151,6 @@ approves by screen/SMS tap).
     { "intent": "request_feedback", "proposalType": "request_feedback", "actionClass": "comms" }
   ],
   "handlerNoOnramp": [
-    "batch_invoice",
     "create_invoice_schedule",
     "review_response_proposal",
     "create_booking"

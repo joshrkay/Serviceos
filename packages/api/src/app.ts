@@ -1702,6 +1702,10 @@ export function createApp(): express.Express {
     // P22 — catalog grounding: drafted invoice/estimate line items get
     // priced from the tenant's catalog instead of trusting the LLM.
     catalogRepo,
+    // P21-003 — batch_invoice voice on-ramp: enumerates completed-unbilled
+    // jobs (findJobsRequiringInvoicing) so "invoice all my completed jobs"
+    // mints one batch_invoice proposal. Same repos the batch sweep + digest use.
+    invoicingDeps: { jobRepo, invoiceRepo, estimateRepo },
     // P8 — "three Bobs": free-text customer/job references resolve to
     // verified tenant IDs (pg_trgm) before drafting; ambiguous matches
     // become one-tap clarifications. In-memory mode (no pool) skips

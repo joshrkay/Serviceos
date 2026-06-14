@@ -28,6 +28,7 @@ import type { AppointmentRepository } from '../../appointments/appointment';
 import type { JobRepository } from '../../jobs/job';
 import type { LLMGateway } from '../gateway/gateway';
 import { resolveDateTime, DEFAULT_TENANT_TIMEZONE } from '../scheduling/resolve-datetime';
+import { findJobsRequiringInvoicing, InvoicingQueueDeps } from '../../invoices/invoicing-queue';
 
 function entitiesFrom(context: TaskContext): ExtractedEntities {
   return (context.existingEntities ?? {}) as ExtractedEntities;
@@ -547,6 +548,69 @@ export class ApplyLateFeeTaskHandler implements TaskHandler {
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
       taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── batch_invoice ─────────────
+//
+// "Invoice all my completed jobs" — enumerates the SAME completed-unbilled
+// candidates the batch sweep + digest use (findJobsRequiringInvoicing) and
+// mints ONE batch_invoice proposal that, on approval, fans out a draft_invoice
+// per job (each separately reviewed before sending). Capture-class. When
+// nothing is billable, emits a clarification instead of an empty batch (the
+// execution handler rejects an empty jobs[] / the schema requires min 1).
+export class BatchInvoiceTaskHandler implements TaskHandler {
+  readonly taskType = 'batch_invoice' as const;
+
+  constructor(private readonly invoicingDeps?: InvoicingQueueDeps) {}
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    if (!this.invoicingDeps) {
+      return this.clarify(context, 'Batch invoicing is not available right now.');
+    }
+    const candidates = await findJobsRequiringInvoicing(context.tenantId, this.invoicingDeps);
+    if (candidates.length === 0) {
+      return this.clarify(context, 'You have no completed jobs waiting to be invoiced right now.');
+    }
+    const now = context.now ?? new Date();
+    const payload: Record<string, unknown> = {
+      batchDate: now.toISOString().slice(0, 10),
+      totalCents: candidates.reduce((sum, c) => sum + c.amountCents, 0),
+      jobs: candidates.map((c) => ({
+        jobId: c.jobId,
+        customerId: c.customerId,
+        ...(c.estimateId ? { estimateId: c.estimateId } : {}),
+        amountCents: c.amountCents,
+        discountCents: c.discountCents,
+        taxRateBps: c.taxRateBps,
+        lineItems: c.lineItems,
+      })),
+    };
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, [])),
+      taskType: this.taskType,
+    };
+  }
+
+  // voice_clarification is the established "can't proceed, tell the operator"
+  // surface. Reuses the file's createProposal + baseSourceContext; missing_entities
+  // is the right reason for "nothing billable to put in the batch".
+  private clarify(context: TaskContext, message: string): TaskResult {
+    return {
+      proposal: createProposal({
+        tenantId: context.tenantId,
+        proposalType: 'voice_clarification',
+        payload: {
+          transcript: context.message,
+          reason: 'missing_entities',
+          classifierReasoning: message,
+        },
+        summary: context.message,
+        sourceContext: baseSourceContext(context),
+        createdBy: context.userId,
+      }),
+      taskType: 'voice_clarification',
     };
   }
 }

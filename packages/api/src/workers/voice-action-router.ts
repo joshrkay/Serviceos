@@ -46,6 +46,7 @@ import { AvailabilityFinder } from '../ai/tasks/availability-finder';
 import { AppointmentRepository } from '../appointments/appointment';
 import { JobRepository } from '../jobs/job';
 import { CatalogItemRepository } from '../catalog/catalog-item';
+import { InvoicingQueueDeps } from '../invoices/invoicing-queue';
 import {
   EntityCandidate,
   EntityKind,
@@ -78,6 +79,7 @@ import {
   LogTimeEntryTaskHandler,
   NotifyDelayTaskHandler,
   RequestFeedbackTaskHandler,
+  BatchInvoiceTaskHandler,
 } from '../ai/tasks/voice-extended-tasks';
 import { instrument } from '../monitoring/instrumentation';
 import {
@@ -256,6 +258,14 @@ export interface VoiceActionRouterDeps {
    */
   catalogRepo?: CatalogItemRepository;
   /**
+   * P21-003 — completed-unbilled enumeration for the batch_invoice voice
+   * on-ramp. When wired, BatchInvoiceTaskHandler enumerates the same
+   * candidates the batch sweep + digest use (findJobsRequiringInvoicing) and
+   * mints one batch_invoice proposal; absent → the handler emits a
+   * clarification instead of a draft. Optional so tests can omit it.
+   */
+  invoicingDeps?: InvoicingQueueDeps;
+  /**
    * P8 — "three Bobs" closure. When present, the classifier's free-text
    * customerName / jobReference are resolved to tenant-scoped IDs
    * BEFORE the task handler runs: resolved → verified UUIDs land on the
@@ -309,6 +319,7 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   update_invoice: 'update_invoice',
   update_estimate: 'update_estimate',
   issue_invoice: 'issue_invoice',
+  batch_invoice: 'batch_invoice',
   create_customer: 'create_customer',
   create_job: 'create_job',
   reschedule_appointment: 'reschedule_appointment',
@@ -455,6 +466,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('log_time_entry', new LogTimeEntryTaskHandler());
   handlers.set('notify_delay', new NotifyDelayTaskHandler(deps.appointmentRepo, deps.jobRepo));
   handlers.set('request_feedback', new RequestFeedbackTaskHandler());
+  handlers.set('batch_invoice', new BatchInvoiceTaskHandler(deps.invoicingDeps));
   // RV-080 — complaint uses 'add_note' proposal type but needs its own
   // handler (pinned-prefix note + companion callback). Registered under
   // a synthetic key ('_complaint') so it doesn't collide with the plain
