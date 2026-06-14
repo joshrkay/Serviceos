@@ -2338,6 +2338,9 @@ export function createApp(): express.Express {
     ...(pool ? { pool } : {}),
     proposalRepo,
     ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
+    // P2-036 V2 — live-call discount engine (fail-closed; dormant until a tenant
+    // configures a discount policy). settingsRepo is wired below.
+    negotiationQuoteResolver,
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     callControl: telephonyCallControl,

@@ -102,7 +102,17 @@ import type {
   ProposalType,
 } from '../../proposals/proposal';
 import { createProposal as buildProposal } from '../../proposals/proposal';
-import { buildNegotiationCallbackContent } from '../../proposals/guardrails/negotiation-guardrail';
+import {
+  buildNegotiationCallbackContent,
+  evaluateNegotiationDiscount,
+} from '../../proposals/guardrails/negotiation-guardrail';
+import {
+  buildAllowDiscountCallbackContent,
+  buildDiscountClarificationPayload,
+  discountAuditMetadata,
+  DISCOUNT_CLARIFICATION_QUESTION,
+} from '../../conversations/negotiation/discount-proposal-content';
+import type { CurrentQuoteResolver } from '../../conversations/negotiation/current-quote-resolver';
 import type { LeadRepository } from '../../leads/lead';
 import type { AuditRepository } from '../../audit/audit';
 import { createAuditEvent } from '../../audit/audit';
@@ -224,6 +234,8 @@ export interface VoiceTurnProcessorDeps {
    * enriched with the caller's LTV/recency (resolved via the session customerId).
    */
   customerNegotiationContextProvider?: CustomerNegotiationContextProvider;
+  /** P2-036 V2 — resolves the live caller's current quote for the discount engine. */
+  negotiationQuoteResolver?: CurrentQuoteResolver;
   systemActorId?: string;
   businessName: string;
   publicBaseUrl?: string;
@@ -566,19 +578,90 @@ export function createVoiceTurnProcessor(
             customerContext = null;
           }
         }
-        const content = buildNegotiationCallbackContent({
-          detectText,
-          ...(askText ? { askText } : {}),
-          ...(customerName ? { customerName } : {}),
-          ...(conversationId ? { conversationId } : {}),
-          customerContext,
-        });
+        // U6 (P2-036 V2) — additive discount evaluation on the live call. Only
+        // engages when fully wired AND a customer is resolved; a null result
+        // (unconfigured tenant / no quote / error) keeps the V1 path identical.
+        const evaluation =
+          negotiationCustomerId && deps.settingsRepo && deps.negotiationQuoteResolver
+            ? await evaluateNegotiationDiscount({
+                tenantId,
+                customerId: negotiationCustomerId,
+                askText: detectText || askText,
+                settingsRepo: deps.settingsRepo,
+                quoteResolver: deps.negotiationQuoteResolver,
+              })
+            : null;
+
+        let proposalType: 'callback' | 'voice_clarification' = 'callback';
+        let payload: Record<string, unknown>;
+        let summary: string;
+        let explanation: string;
+        if (evaluation?.decision.kind === 'CLARIFY') {
+          // Couldn't parse the target price — ask, never guess.
+          proposalType = 'voice_clarification';
+          payload = buildDiscountClarificationPayload({
+            transcript: detectText || askText,
+            ...(conversationId ? { conversationId } : {}),
+          });
+          summary = DISCOUNT_CLARIFICATION_QUESTION;
+          explanation =
+            'Heard a discount ask but couldn\'t make out the price they named. Tap to tell me what to quote — I never guess a discount.';
+        } else if (evaluation?.decision.kind === 'ALLOW') {
+          // Within policy — a CONFIDENCE-CAPPED one-tap owner action (never auto-applies).
+          const allow = buildAllowDiscountCallbackContent({
+            decision: evaluation.decision,
+            quote: evaluation.quote,
+            askText: askText || detectText,
+            ...(customerName ? { customerName } : {}),
+            ...(conversationId ? { conversationId } : {}),
+          });
+          payload = allow.payload;
+          summary = allow.summary;
+          explanation = allow.explanation;
+        } else {
+          // NEEDS_APPROVAL / REJECT_WITH_COUNTER → enriched callback; null → V1.
+          const content = buildNegotiationCallbackContent({
+            detectText,
+            ...(askText ? { askText } : {}),
+            ...(customerName ? { customerName } : {}),
+            ...(conversationId ? { conversationId } : {}),
+            customerContext,
+            ...(evaluation
+              ? { decision: evaluation.decision, quote: evaluation.quote }
+              : {}),
+          });
+          payload = content.payload;
+          summary = content.summary;
+          explanation = content.explanation;
+        }
+
+        if (evaluation && deps.auditRepo) {
+          try {
+            await deps.auditRepo.create(
+              createAuditEvent({
+                tenantId,
+                actorId: deps.systemActorId ?? 'calling-agent',
+                actorRole: 'system',
+                eventType: 'negotiation.discount_evaluated',
+                entityType: 'voice_session',
+                entityId: session.id,
+                metadata: discountAuditMetadata(
+                  evaluation.decision,
+                  evaluation.quote.quotedCents,
+                ),
+              }),
+            );
+          } catch {
+            /* audit is best-effort */
+          }
+        }
+
         const negotiationProposal = buildProposal({
           tenantId,
-          proposalType: 'callback',
-          payload: content.payload,
-          summary: content.summary,
-          explanation: content.explanation,
+          proposalType,
+          payload,
+          summary,
+          explanation,
           sourceContext: {
             source: 'calling-agent',
             channel: 'telephony',
