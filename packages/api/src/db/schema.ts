@@ -4455,6 +4455,8 @@ export const MIGRATIONS = {
     ALTER TABLE digest_entries FORCE ROW LEVEL SECURITY;
     CREATE POLICY digest_entries_tenant_isolation ON digest_entries
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
   // Membership engine (#6 phase 4 review) — pin a saved card to the Stripe
   // account it was created on. A PaymentMethod/Customer is scoped to one
   // account (the tenant's connected account, or the platform when NULL); the
