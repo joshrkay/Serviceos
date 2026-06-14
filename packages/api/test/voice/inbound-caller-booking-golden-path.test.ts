@@ -226,9 +226,13 @@ describe('Inbound caller booking — golden path', () => {
     // No appointment was booked off a low-confidence guess, and the agent
     // did not advance to the confirmation/readback step.
     const proposals = await h.proposalRepo.findByTenant(h.resolvedTenantId);
-    expect(proposals.every((p) => p.proposalType !== 'create_appointment')).toBe(
-      true,
+    const appointmentProposals = proposals.filter(
+      (p) => p.proposalType === 'create_appointment',
     );
+    expect(
+      appointmentProposals,
+      'Expected no appointment proposals from a low-confidence utterance',
+    ).toEqual([]);
     expect(h.session.machine.currentState).not.toBe('intent_confirm');
   });
 });
