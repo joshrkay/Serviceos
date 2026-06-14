@@ -324,6 +324,9 @@ import { InMemoryAgreementRepository } from './agreements/agreement';
 import { PgAgreementRepository } from './agreements/pg-agreement';
 import { InMemoryCustomerPaymentMethodRepository } from './payments/customer-payment-method';
 import { PgCustomerPaymentMethodRepository } from './payments/pg-customer-payment-method';
+import { StripeDuesCollector, DuesInvoiceOps } from './agreements/dues-collector';
+import { issueInvoice } from './invoices/invoice';
+import { recordPayment } from './invoices/payment';
 import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
 import { PgAgreementRunRepository } from './agreements/pg-agreement-run';
 import { createAgreementsRouter } from './routes/agreements';
@@ -3560,6 +3563,44 @@ export function createApp(): express.Express {
     service: 'recurring-agreements-worker',
     environment: process.env.NODE_ENV || 'development',
   });
+  // #6 phase 4 — off-session dues collection. Gated on pool + Stripe key; the
+  // sweep skips collection when either is absent. The invoice is issued before
+  // charging so a decline leaves a payable invoice (dunning), never a draft.
+  const duesInvoiceOps: DuesInvoiceOps = {
+    ensureIssued: async (tenantId, invoiceId) => {
+      const inv = await invoiceRepo.findById(tenantId, invoiceId);
+      if (inv && inv.status === 'draft') {
+        await issueInvoice(tenantId, invoiceId, 30, invoiceRepo);
+      }
+    },
+    recordPayment: async ({ tenantId, invoiceId, amountCents, providerReference, createdBy }) => {
+      await recordPayment(
+        {
+          tenantId,
+          invoiceId,
+          amountCents,
+          method: 'credit_card',
+          providerReference,
+          processedBy: createdBy,
+          note: 'Membership dues (auto-collected)',
+        },
+        invoiceRepo,
+        paymentRepo,
+        undefined,
+        undefined,
+        auditRepo,
+      );
+    },
+  };
+  const duesCollector =
+    pool && process.env.STRIPE_SECRET_KEY
+      ? new StripeDuesCollector({
+          customerPaymentMethodRepo,
+          stripeConfig: { apiKey: process.env.STRIPE_SECRET_KEY },
+          invoiceOps: duesInvoiceOps,
+          connectAccountResolver,
+        })
+      : undefined;
   registerInterval(setInterval(() => {
     void runAsLeader(SWEEP_LOCK.recurringAgreements, async () => {
       await runRecurringAgreementsSweep({
@@ -3573,6 +3614,7 @@ export function createApp(): express.Express {
           return r.rows.map((row: { id: string }) => row.id);
         },
         auditRepo,
+        duesCollector,
         logger: agreementsLogger,
       });
     }).catch((err) => {

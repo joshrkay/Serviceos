@@ -19,6 +19,7 @@ import {
 } from '../agreements/agreement-service';
 import { AgreementRepository } from '../agreements/agreement';
 import { AgreementRunRepository } from '../agreements/agreement-run';
+import { DuesCollector } from '../agreements/dues-collector';
 import { AuditRepository } from '../audit/audit';
 
 export interface RecurringAgreementsWorkerDeps {
@@ -29,6 +30,8 @@ export interface RecurringAgreementsWorkerDeps {
   /** Returns the list of tenant IDs we should sweep. */
   listTenantIds: () => Promise<string[]>;
   auditRepo?: AuditRepository;
+  /** #6 phase 4 — off-session dues collection for auto-collect memberships. */
+  duesCollector?: DuesCollector;
   logger: Logger;
 }
 
@@ -80,6 +83,7 @@ export async function runRecurringAgreementsSweep(
         jobsService: deps.jobsService,
         invoicesService: deps.invoicesService,
         auditRepo: deps.auditRepo,
+        duesCollector: deps.duesCollector,
       } satisfies RunDueDeps);
       generated += result.generatedRunIds.length;
       skipped += result.skippedRunIds.length;

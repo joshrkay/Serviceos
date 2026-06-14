@@ -7,8 +7,6 @@
  * account, so a card saved via SetupIntent can later be charged off-session on
  * the SAME account. Card data never touches our server — the SetupIntent client
  * secret is confirmed browser-side in Stripe Elements.
- *
- * (The off-session charge wrapper lands with the dues-collection worker.)
  */
 import { StripeFetch } from './stripe-payment-intent';
 
@@ -156,4 +154,85 @@ export async function retrievePaymentMethod(
     expMonth: data.card?.exp_month,
     expYear: data.card?.exp_year,
   };
+}
+
+export type OffSessionChargeStatus = 'succeeded' | 'processing' | 'requires_action' | 'failed';
+
+export interface OffSessionChargeResult {
+  status: OffSessionChargeStatus;
+  paymentIntentId?: string;
+  declineCode?: string;
+  errorMessage?: string;
+}
+
+export interface ChargeOffSessionInput {
+  amount: number; // integer cents
+  currency: string;
+  stripeCustomerId: string;
+  paymentMethodId: string;
+  /** Stable key so a retried sweep can't double-charge the same cycle. */
+  idempotencyKey: string;
+  metadata?: Record<string, string>;
+}
+
+/**
+ * Charge a saved card off-session. Returns a structured result rather than
+ * throwing on a decline / authentication_required, so the dues sweep can fall
+ * back to a payable invoice instead of crashing. Only true transport/config
+ * errors throw.
+ */
+export async function chargeOffSession(
+  config: StripeAccountConfig,
+  input: ChargeOffSessionInput,
+  fetcher: StripeFetch = globalThis.fetch as unknown as StripeFetch,
+): Promise<OffSessionChargeResult> {
+  if (!config.apiKey) throw new Error('chargeOffSession requires a Stripe API key');
+  if (!Number.isInteger(input.amount) || input.amount <= 0) {
+    throw new Error('amount must be a positive integer in cents');
+  }
+  if (!input.currency) throw new Error('currency is required');
+  if (!input.stripeCustomerId) throw new Error('stripeCustomerId is required');
+  if (!input.paymentMethodId) throw new Error('paymentMethodId is required');
+  if (!input.idempotencyKey) throw new Error('idempotencyKey is required');
+
+  const params: Record<string, string> = {
+    amount: String(input.amount),
+    currency: input.currency,
+    customer: input.stripeCustomerId,
+    payment_method: input.paymentMethodId,
+    off_session: 'true',
+    confirm: 'true',
+  };
+  for (const [k, v] of Object.entries(input.metadata ?? {})) {
+    params[`metadata[${k}]`] = v;
+  }
+
+  const res = await fetcher('https://api.stripe.com/v1/payment_intents', {
+    method: 'POST',
+    headers: buildHeaders(config, input.idempotencyKey),
+    body: new URLSearchParams(params).toString(),
+  });
+  const data = (await res.json().catch(() => ({}))) as StripePaymentIntentResponse;
+
+  if (!res.ok) {
+    // Card declined or off-session authentication required. Stripe returns the
+    // PaymentIntent inside `error` for card_error cases.
+    const err = data.error;
+    return {
+      status: err?.payment_intent?.status === 'requires_action' ? 'requires_action' : 'failed',
+      paymentIntentId: err?.payment_intent?.id,
+      declineCode: err?.decline_code ?? err?.code,
+      errorMessage: err?.message,
+    };
+  }
+
+  const status: OffSessionChargeStatus =
+    data.status === 'succeeded'
+      ? 'succeeded'
+      : data.status === 'processing'
+        ? 'processing'
+        : data.status === 'requires_action'
+          ? 'requires_action'
+          : 'failed';
+  return { status, paymentIntentId: data.id };
 }

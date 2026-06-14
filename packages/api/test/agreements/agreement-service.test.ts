@@ -1,7 +1,9 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import { InMemoryAgreementRepository } from '../../src/agreements/agreement';
 import { InMemoryAgreementRunRepository } from '../../src/agreements/agreement-run';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { DuesCollectionResult } from '../../src/agreements/dues-collector';
 import {
   createAgreement,
   updateAgreement,
@@ -597,5 +599,122 @@ describe('membership member pricing: createAgreement / updateAgreement', () => {
     );
     const updated = await updateAgreement(t, a.id, { memberDiscountBps: 2000 }, repo);
     expect(updated?.memberDiscountBps).toBe(2000);
+  });
+});
+
+describe('runDueAgreements: auto-collect dues', () => {
+  function makeCollector(result: DuesCollectionResult) {
+    return { collect: vi.fn().mockResolvedValue(result) };
+  }
+
+  async function seedDueMembership(
+    repo: InMemoryAgreementRepository,
+    t: string,
+    autoCollectDues: boolean,
+  ) {
+    return createAgreement(
+      {
+        tenantId: t,
+        customerId: uuidv4(),
+        name: 'membership',
+        recurrenceRule: 'FREQ=MONTHLY;BYMONTHDAY=1',
+        priceCents: 5000,
+        startsOn: '2026-06-01',
+        autoCollectDues,
+        createdBy: 'u',
+      },
+      repo,
+    );
+  }
+
+  const now = new Date(Date.UTC(2026, 5, 1));
+
+  it('collects dues for an auto-collect membership and audits dues_collected', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const runRepo = new InMemoryAgreementRunRepository();
+    const { jobsService, invoicesService } = makeMocks();
+    const auditRepo = new InMemoryAuditRepository();
+    const t = tenantId();
+    const a = await seedDueMembership(repo, t, true);
+    const duesCollector = makeCollector({ status: 'collected', paymentIntentId: 'pi_1' });
+
+    await runDueAgreements(t, {
+      agreementRepo: repo,
+      runRepo,
+      jobsService,
+      invoicesService,
+      auditRepo,
+      duesCollector,
+      now,
+    });
+
+    expect(duesCollector.collect).toHaveBeenCalledTimes(1);
+    expect(duesCollector.collect).toHaveBeenCalledWith(
+      expect.objectContaining({ amountCents: 5000, agreementId: a.id, customerId: a.customerId }),
+    );
+    const events = await auditRepo.findByEntity(t, 'service_agreement', a.id);
+    expect(events.some((e) => e.eventType === 'service_agreement.dues_collected')).toBe(true);
+  });
+
+  it('audits auto_collect_failed on a decline (run still generated)', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const runRepo = new InMemoryAgreementRunRepository();
+    const { jobsService, invoicesService } = makeMocks();
+    const auditRepo = new InMemoryAuditRepository();
+    const t = tenantId();
+    const a = await seedDueMembership(repo, t, true);
+    const duesCollector = makeCollector({ status: 'failed', declineCode: 'insufficient_funds' });
+
+    const result = await runDueAgreements(t, {
+      agreementRepo: repo,
+      runRepo,
+      jobsService,
+      invoicesService,
+      auditRepo,
+      duesCollector,
+      now,
+    });
+
+    expect(result.generatedRunIds.length).toBe(1); // the run/invoice still generated
+    const events = await auditRepo.findByEntity(t, 'service_agreement', a.id);
+    expect(events.some((e) => e.eventType === 'service_agreement.auto_collect_failed')).toBe(true);
+  });
+
+  it('does not collect for a non-auto-collect agreement', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const runRepo = new InMemoryAgreementRunRepository();
+    const { jobsService, invoicesService } = makeMocks();
+    const t = tenantId();
+    await seedDueMembership(repo, t, false);
+    const duesCollector = makeCollector({ status: 'collected' });
+
+    await runDueAgreements(t, {
+      agreementRepo: repo,
+      runRepo,
+      jobsService,
+      invoicesService,
+      duesCollector,
+      now,
+    });
+
+    expect(duesCollector.collect).not.toHaveBeenCalled();
+  });
+
+  it('runs normally when no collector is wired', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const runRepo = new InMemoryAgreementRunRepository();
+    const { jobsService, invoicesService } = makeMocks();
+    const t = tenantId();
+    await seedDueMembership(repo, t, true);
+
+    const result = await runDueAgreements(t, {
+      agreementRepo: repo,
+      runRepo,
+      jobsService,
+      invoicesService,
+      now,
+    });
+
+    expect(result.generatedRunIds.length).toBe(1);
   });
 });

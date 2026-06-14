@@ -67,3 +67,64 @@ describe('retrievePaymentMethod', () => {
     expect(pm).toEqual({ id: 'pm_1', brand: 'visa', last4: '4242', expMonth: 11, expYear: 2031 });
   });
 });
+
+describe('chargeOffSession', () => {
+  const base = {
+    amount: 5000,
+    currency: 'usd',
+    stripeCustomerId: 'cus',
+    paymentMethodId: 'pm',
+    idempotencyKey: 'k1',
+  };
+
+  it('returns succeeded with the payment-intent id', async () => {
+    const fetcher: StripeFetch = async () => jsonRes(true, 200, { id: 'pi_1', status: 'succeeded' });
+    const r = await chargeOffSession({ apiKey: 'sk' }, base, fetcher);
+    expect(r).toEqual({ status: 'succeeded', paymentIntentId: 'pi_1' });
+  });
+
+  it('returns a structured failure on a decline (does not throw)', async () => {
+    const fetcher: StripeFetch = async () =>
+      jsonRes(false, 402, {
+        error: {
+          code: 'card_declined',
+          decline_code: 'insufficient_funds',
+          message: 'Your card was declined.',
+          payment_intent: { id: 'pi_2', status: 'requires_payment_method' },
+        },
+      });
+    const r = await chargeOffSession({ apiKey: 'sk' }, base, fetcher);
+    expect(r.status).toBe('failed');
+    expect(r.declineCode).toBe('insufficient_funds');
+    expect(r.paymentIntentId).toBe('pi_2');
+  });
+
+  it('maps off-session authentication_required to requires_action', async () => {
+    const fetcher: StripeFetch = async () =>
+      jsonRes(false, 402, {
+        error: {
+          code: 'authentication_required',
+          message: 'auth',
+          payment_intent: { id: 'pi_3', status: 'requires_action' },
+        },
+      });
+    const r = await chargeOffSession({ apiKey: 'sk' }, base, fetcher);
+    expect(r.status).toBe('requires_action');
+    expect(r.paymentIntentId).toBe('pi_3');
+  });
+
+  it('sends the idempotency key + connect header', async () => {
+    let captured: Record<string, string> = {};
+    const fetcher: StripeFetch = async (_url, init) => {
+      captured = init.headers;
+      return jsonRes(true, 200, { id: 'pi', status: 'succeeded' });
+    };
+    await chargeOffSession(
+      { apiKey: 'sk', stripeAccountId: 'acct_9' },
+      { ...base, idempotencyKey: 'idem-xyz' },
+      fetcher,
+    );
+    expect(captured['Idempotency-Key']).toBe('idem-xyz');
+    expect(captured['Stripe-Account']).toBe('acct_9');
+  });
+});

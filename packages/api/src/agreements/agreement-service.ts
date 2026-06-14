@@ -32,6 +32,7 @@ import {
   RUN_STATUSES,
 } from './enums';
 import { daysInMonth, nextOccurrence, parseRule } from './recurrence';
+import { DuesCollector, DuesCollectionResult } from './dues-collector';
 
 void RUN_STATUSES;
 void ({} as RecurrenceFrequency);
@@ -329,6 +330,9 @@ export interface RunDueDeps {
   jobsService: JobsServicePort;
   invoicesService: InvoicesServicePort;
   auditRepo?: AuditRepository;
+  /** #6 phase 4 — when wired, dues for auto-collect memberships are charged
+   * off-session against the customer's saved card. */
+  duesCollector?: DuesCollector;
   now?: Date;
 }
 
@@ -465,6 +469,55 @@ export async function runDueAgreements(
           metadata: { runId: saved.id, scheduledFor, jobId, invoiceId },
         }),
       );
+    }
+
+    // #6 phase 4 — auto-collect dues for a membership with a saved card. Runs
+    // only after a clean invoice generation; a decline does NOT fail the run
+    // (the collector issues the invoice so it stays payable, and dunning takes
+    // over). A collector exception is contained so the sweep keeps going.
+    if (
+      agreement.autoCollectDues &&
+      deps.duesCollector &&
+      runStatus === 'generated' &&
+      invoiceId &&
+      agreement.priceCents > 0
+    ) {
+      let collection: DuesCollectionResult;
+      try {
+        collection = await deps.duesCollector.collect({
+          tenantId,
+          customerId: agreement.customerId,
+          invoiceId,
+          amountCents: agreement.priceCents,
+          agreementId: agreement.id,
+          scheduledFor,
+          createdBy: agreement.createdBy,
+        });
+      } catch {
+        collection = { status: 'failed' };
+      }
+      if (deps.auditRepo) {
+        await deps.auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: 'system:agreements-worker',
+            actorRole: 'system',
+            eventType:
+              collection.status === 'collected'
+                ? 'service_agreement.dues_collected'
+                : 'service_agreement.auto_collect_failed',
+            entityType: 'service_agreement',
+            entityId: agreement.id,
+            metadata: {
+              invoiceId,
+              scheduledFor,
+              collectionStatus: collection.status,
+              paymentIntentId: collection.paymentIntentId,
+              declineCode: collection.declineCode,
+            },
+          }),
+        );
+      }
     }
   }
 
