@@ -4718,6 +4718,24 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_customer_cfv ON customer_custom_field_values
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '188_service_location_address_type': `
+    -- U3 (CRM Jobber parity) — distinguish a billing/mailing address from a
+    -- service property on the existing service_locations model (rather than
+    -- bolting billing columns onto customers). Nullable-safe: defaults to
+    -- 'service', so every existing row and most properties are unaffected.
+    -- Read/written by src/locations/pg-location.ts; the resolution preference
+    -- lives in resolveBillingLocation (src/locations/location.ts). The named
+    -- CHECK is made re-run-safe by getMigrationSQL's DROP-CONSTRAINT rewriter.
+    ALTER TABLE service_locations
+      ADD COLUMN IF NOT EXISTS address_type TEXT NOT NULL DEFAULT 'service';
+    ALTER TABLE service_locations
+      ADD CONSTRAINT service_locations_address_type_check
+      CHECK (address_type IN ('service', 'billing', 'both'));
+    CREATE INDEX IF NOT EXISTS idx_service_locations_billing
+      ON service_locations(tenant_id, customer_id)
+      WHERE address_type IN ('billing', 'both');
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

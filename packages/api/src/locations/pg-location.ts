@@ -19,6 +19,7 @@ function mapRow(row: Record<string, unknown>): ServiceLocation {
     longitude: row.longitude != null ? Number(row.longitude) : undefined,
     accessNotes: (row.access_notes as string) ?? undefined,
     isPrimary: row.is_primary as boolean,
+    addressType: (row.address_type as ServiceLocation['addressType']) ?? 'service',
     isArchived: row.is_archived as boolean,
     archivedAt: row.archived_at ? new Date(row.archived_at as string) : undefined,
     createdAt: new Date(row.created_at as string),
@@ -37,8 +38,8 @@ export class PgLocationRepository extends PgBaseRepository implements LocationRe
         `INSERT INTO service_locations (
           id, tenant_id, customer_id, label, street1, street2, city, state,
           postal_code, country, latitude, longitude, access_notes,
-          is_primary, is_archived, archived_at, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+          is_primary, address_type, is_archived, archived_at, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
         RETURNING *`,
         [
           location.id,
@@ -55,6 +56,7 @@ export class PgLocationRepository extends PgBaseRepository implements LocationRe
           location.longitude ?? null,
           location.accessNotes ?? null,
           location.isPrimary,
+          location.addressType ?? 'service',
           location.isArchived,
           location.archivedAt ?? null,
           location.createdAt,
@@ -110,6 +112,7 @@ export class PgLocationRepository extends PgBaseRepository implements LocationRe
         longitude: 'longitude',
         accessNotes: 'access_notes',
         isPrimary: 'is_primary',
+        addressType: 'address_type',
         isArchived: 'is_archived',
         archivedAt: 'archived_at',
         updatedAt: 'updated_at',

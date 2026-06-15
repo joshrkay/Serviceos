@@ -187,6 +187,8 @@ export const createServiceLocationSchema = z.object({
   longitude: z.number().optional(),
   accessNotes: z.string().optional(),
   isPrimary: z.boolean().optional(),
+  // U3 (CRM Jobber parity) — service vs billing/mailing address.
+  addressType: z.enum(['service', 'billing', 'both']).optional(),
 });
 
 export const createJobSchema = z.object({
