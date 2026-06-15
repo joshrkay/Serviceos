@@ -4605,6 +4605,137 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_correction_lessons ON correction_lessons
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '186_customer_contacts': `
+    -- U1 (CRM Jobber parity) — multiple contacts per customer. A B2B /
+    -- property-manager account separates the decision-maker, the bill-to,
+    -- and the on-site contact onto distinct contact rows. One-to-many on
+    -- customers, mirroring the service_locations pattern (per-customer child
+    -- rows, is_primary, archive flag). Read/written by
+    -- src/customers/pg-contact.ts. Tenant-scoped with FORCE RLS like every
+    -- other tenant table. The named CHECK is made re-run-safe by
+    -- getMigrationSQL's DROP-CONSTRAINT rewriter; the role set is kept in
+    -- lockstep with customerContactRoleSchema
+    -- (packages/shared/src/contracts/customer.ts).
+    CREATE TABLE IF NOT EXISTS customer_contacts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      name TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'other'
+        CHECK (role IN ('primary', 'billing', 'site', 'other')),
+      phone TEXT,
+      email TEXT,
+      is_primary BOOLEAN NOT NULL DEFAULT false,
+      notes TEXT,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      archived_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_customer_contacts_tenant ON customer_contacts(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_customer_contacts_customer
+      ON customer_contacts(tenant_id, customer_id);
+    ALTER TABLE customer_contacts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_contacts FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_contacts ON customer_contacts;
+    CREATE POLICY tenant_isolation_customer_contacts ON customer_contacts
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '187_customer_tags_custom_fields': `
+    -- U2 (CRM Jobber parity) — customer tags + tenant-defined custom fields.
+    -- The Customer list contract already declared a 'tags' field but it was
+    -- never persisted; these tables make tags real and add segmentable,
+    -- tenant-defined custom fields. Read/written by src/customers/pg-tag.ts
+    -- and src/customers/pg-custom-field.ts. All tenant-scoped with FORCE RLS.
+
+    -- Tags: a simple join with an idempotent unique constraint. The named
+    -- UNIQUE is created via ADD CONSTRAINT so the getMigrationSQL
+    -- DROP-CONSTRAINT rewriter keeps re-runs safe.
+    CREATE TABLE IF NOT EXISTS customer_tags (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      tag TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE customer_tags
+      ADD CONSTRAINT customer_tags_unique UNIQUE (tenant_id, customer_id, tag);
+    CREATE INDEX IF NOT EXISTS idx_customer_tags_customer
+      ON customer_tags(tenant_id, customer_id);
+    CREATE INDEX IF NOT EXISTS idx_customer_tags_tag
+      ON customer_tags(tenant_id, tag);
+    ALTER TABLE customer_tags ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_tags FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_tags ON customer_tags;
+    CREATE POLICY tenant_isolation_customer_tags ON customer_tags
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    -- Custom-field definitions: tenant-defined, typed, enumerable for the
+    -- editor UI and segmentable. field_type is kept in lockstep with
+    -- customerCustomFieldTypeSchema (packages/shared/src/contracts/customer.ts).
+    CREATE TABLE IF NOT EXISTS customer_custom_field_defs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      field_type TEXT NOT NULL DEFAULT 'text'
+        CHECK (field_type IN ('text', 'number', 'date', 'select')),
+      options JSONB NOT NULL DEFAULT '[]'::jsonb,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE customer_custom_field_defs
+      ADD CONSTRAINT customer_custom_field_defs_key_unique UNIQUE (tenant_id, key);
+    CREATE INDEX IF NOT EXISTS idx_customer_cfd_tenant
+      ON customer_custom_field_defs(tenant_id);
+    ALTER TABLE customer_custom_field_defs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_custom_field_defs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_cfd ON customer_custom_field_defs;
+    CREATE POLICY tenant_isolation_customer_cfd ON customer_custom_field_defs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    -- Per-customer values: one value per (customer, field def), upserted.
+    CREATE TABLE IF NOT EXISTS customer_custom_field_values (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      field_def_id UUID NOT NULL REFERENCES customer_custom_field_defs(id),
+      value TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE customer_custom_field_values
+      ADD CONSTRAINT customer_cfv_unique UNIQUE (tenant_id, customer_id, field_def_id);
+    CREATE INDEX IF NOT EXISTS idx_customer_cfv_customer
+      ON customer_custom_field_values(tenant_id, customer_id);
+    ALTER TABLE customer_custom_field_values ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_custom_field_values FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_cfv ON customer_custom_field_values;
+    CREATE POLICY tenant_isolation_customer_cfv ON customer_custom_field_values
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '188_service_location_address_type': `
+    -- U3 (CRM Jobber parity) — distinguish a billing/mailing address from a
+    -- service property on the existing service_locations model (rather than
+    -- bolting billing columns onto customers). Nullable-safe: defaults to
+    -- 'service', so every existing row and most properties are unaffected.
+    -- Read/written by src/locations/pg-location.ts; the resolution preference
+    -- lives in resolveBillingLocation (src/locations/location.ts). The named
+    -- CHECK is made re-run-safe by getMigrationSQL's DROP-CONSTRAINT rewriter.
+    ALTER TABLE service_locations
+      ADD COLUMN IF NOT EXISTS address_type TEXT NOT NULL DEFAULT 'service';
+    ALTER TABLE service_locations
+      ADD CONSTRAINT service_locations_address_type_check
+      CHECK (address_type IN ('service', 'billing', 'both'));
+    CREATE INDEX IF NOT EXISTS idx_service_locations_billing
+      ON service_locations(tenant_id, customer_id)
+      WHERE address_type IN ('billing', 'both');
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
