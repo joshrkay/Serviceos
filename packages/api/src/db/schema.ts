@@ -4550,6 +4550,27 @@ export const MIGRATIONS = {
       CHECK (appointment_type IN ('estimate', 'repair', 'install', 'maintenance', 'diagnostic'));
     CREATE INDEX IF NOT EXISTS idx_appointments_type ON appointments(tenant_id, appointment_type);
   `,
+
+  '183_customers_account_type_property_manager': `
+    -- B2B account hierarchy added 'property_manager' to the accountType union
+    -- (customer.ts) and an integration test inserts it, but the
+    -- customers_account_type_check CHECK still only allowed 'residential'/'b2b',
+    -- so the INSERT failed (23514). Widen the constraint to include the value.
+    ALTER TABLE customers DROP CONSTRAINT IF EXISTS customers_account_type_check;
+    ALTER TABLE customers ADD CONSTRAINT customers_account_type_check
+      CHECK (account_type IS NULL OR account_type IN ('residential', 'b2b', 'property_manager'));
+  `,
+
+  '184_tenant_settings_labor_rate': `
+    -- P22-005 (per-job profit by voice) reads/writes
+    -- tenant_settings.labor_rate_cents_per_hour (pg-settings mapRow + UPDATE
+    -- field-map + validateCommonSettingsFields) but no migration ever added the
+    -- column, so the settings UPDATE failed (42703). Integer cents, nullable,
+    -- non-negative.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS labor_rate_cents_per_hour INTEGER
+        CHECK (labor_rate_cents_per_hour IS NULL OR labor_rate_cents_per_hour >= 0);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

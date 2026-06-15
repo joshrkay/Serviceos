@@ -274,6 +274,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // appointment-type feature (from main); migration landed in schema.ts but its
   // snapshot entry was lost in the auto-merge into this branch.
   ['182_appointment_type', '0dc29a194dbb25f2a19a53a453044362a86afde22a3a29447e1cc99e512547e1'],
+  // CI fix: merged features whose code shipped without their migrations.
+  ['183_customers_account_type_property_manager', 'f373682884c0e1e5b74d1b8a186d44fb302e25c1791595da9814a7b572c453c3'],
+  ['184_tenant_settings_labor_rate', '5552a7d845275663af1ac4f2df1c64897989f11625ffeb6f595153d9305b1355'],
 ];
 
 function hashMigration(value: string): string {
