@@ -521,6 +521,7 @@ import {
   PgProposalSmsEventRepository,
   InMemoryProposalSmsEventRepository,
   createProposalSmsEvent,
+  encodeDigestApproveAllBody,
   createLlmEditInterpreter,
   type OutboundAnchorKind,
 } from './proposals/sms';
@@ -4119,6 +4120,25 @@ export function createApp(): express.Express {
         buildApproveUrl: (token: string) =>
           `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
         publicBaseUrl,
+        // U5 (JTBD #7) — record the "APPROVE ALL" anchor over the P2-034
+        // transport. proposal_id is NOT NULL (FK), so the row uses the first
+        // batch-approvable id as its representative; the full ordered set is
+        // encoded in the body and read back by the reply handler.
+        recordApproveAllAnchor: async ({ tenantId, proposalIds, body }) => {
+          await proposalSmsEventRepo.create(
+            createProposalSmsEvent({
+              tenantId,
+              proposalId: proposalIds[0]!,
+              direction: 'outbound',
+              kind: 'digest_approve_all_rendered',
+              body: encodeDigestApproveAllBody(proposalIds),
+            }),
+          );
+          // `body` is the rendered digest SMS; intentionally not stored on the
+          // anchor (the id set is what the reply path needs, and the dispatch
+          // row already records the send). Referenced to satisfy the seam.
+          void body;
+        },
         logger: dailyDigestLogger,
       });
     }).catch((err) => {
