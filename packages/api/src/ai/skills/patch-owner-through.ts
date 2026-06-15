@@ -37,6 +37,12 @@ export interface PatchOwnerThroughDeps {
   /** Rung 2 — on-call rotation. Both optional; absent skips the rung. */
   onCallRepo?: OnCallRepository;
   dispatcherPhoneResolver?: DispatcherPhoneResolver;
+  /**
+   * Tenant-level last resort — the shared business_phone, used by rungs 2 & 3
+   * only when no on-call user has a personal mobile (preserves the pre-per-user
+   * bridge so a tenant mid-adoption never loses the patch path).
+   */
+  businessPhoneFallbackResolver?: (tenantId: string) => Promise<string | null>;
   /** Rung 3 — urgent owner/on-call SMS page. */
   sendSms?: (args: { to: string; body: string }) => Promise<unknown>;
   /** Rung 3 — durable urgent callback task. */
@@ -174,6 +180,22 @@ export async function patchOwnerThrough(
           return { kind: 'bridged', target: 'oncall', phone, twiml };
         }
       }
+      // No on-call user has a personal mobile — bridge the shared business
+      // line as a last resort (preserves the pre-per-user-number behavior).
+      const fallbackPhone = deps.businessPhoneFallbackResolver
+        ? await deps.businessPhoneFallbackResolver(input.tenantId).catch(() => null)
+        : null;
+      if (fallbackPhone) {
+        const twiml = withAnnounce(
+          deps.callControl.dialDispatcher(callSid, fallbackPhone, {
+            actionUrl: input.dialActionUrl,
+            timeoutSeconds: PATCH_DIAL_TIMEOUT_SECONDS,
+          }),
+          PATCH_ANNOUNCE_LINE_ONCALL,
+        );
+        await audit('bridged_oncall', { dispatcherUserId: 'business_phone' });
+        return { kind: 'bridged', target: 'oncall', phone: fallbackPhone, twiml };
+      }
     } catch {
       /* rotation lookup failure falls through to rung 3 */
     }
@@ -192,6 +214,9 @@ export async function patchOwnerThrough(
         for (const entry of rotation) {
           pageTo = await deps.dispatcherPhoneResolver(input.tenantId, entry.userId).catch(() => null);
           if (pageTo) break;
+        }
+        if (!pageTo && deps.businessPhoneFallbackResolver) {
+          pageTo = await deps.businessPhoneFallbackResolver(input.tenantId).catch(() => null);
         }
       } catch {
         pageTo = null;

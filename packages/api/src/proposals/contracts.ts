@@ -388,6 +388,9 @@ export const voiceClarificationPayloadSchema = z.object({
     'ambiguous_entity',
     // V2 negotiation (D-013) — a discount ask whose target price could not be
     // parsed deterministically; the evaluator returned CLARIFY rather than guess.
+    // P2-036 V2 — a discount ask was understood, but the target price /
+    // amount couldn't be parsed ("knock some off"); the discount evaluator
+    // emits this instead of silently guessing a discount.
     'ambiguous_discount_target',
   ]),
   suggestedIntents: z.array(z.string()).optional(),

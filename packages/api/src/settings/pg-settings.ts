@@ -78,6 +78,10 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // V2 negotiation (D-013) — migration 183. Discount policy. The NOT NULL
     // columns (max_bps default 0, never_below_catalog default true) read
     // directly; the nullable absolute floor surfaces as undefined when unset.
+    // P2-036 V2 (Discount policy — U1) — migration 178. All three columns
+    // are nullable with no DEFAULT; NULL surfaces as undefined to match the
+    // InMemory repo shape. resolveDiscountPolicy fail-closes any absent
+    // value to the V1-identical posture.
     discountMaxBps: (row.discount_max_bps as number | null) ?? undefined,
     discountFloorCents: (row.discount_floor_cents as number | null) ?? undefined,
     discountNeverBelowCatalog:
@@ -300,6 +304,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         depositRequiredAboveCents: 'deposit_required_above_cents',
         // V2 negotiation (D-013) — migration 183. Discount policy. An
         // explicit null on discount_floor_cents clears the absolute floor.
+        // P2-036 V2 (Discount policy — U1) — migration 178. Each accepts an
+        // explicit `null` to clear the value (vs `undefined` = "don't touch").
         discountMaxBps: 'discount_max_bps',
         discountFloorCents: 'discount_floor_cents',
         discountNeverBelowCatalog: 'discount_never_below_catalog',

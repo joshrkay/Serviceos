@@ -173,5 +173,43 @@ describe('evaluateDiscountAsk — extremes & rounding', () => {
     // bps = round(2223 * 10000 / 30000) = round(741) = 741.
     const d = evaluate({ policy: policy({ maxBps: 2000 }), grounding: grounded(30000), target: price(27777) });
     expect(d).toMatchObject({ outcome: 'ALLOW', discountCents: 2223, discountBps: 741 });
+  it('stricter of absolute vs catalog floor wins when both set', () => {
+    const d = run({
+      parsed: targetPrice(20_000),
+      catalogFloorCents: 21_000, // catalog floor stricter than absolute
+      policy: { maxDiscountBps: 1_000, absoluteFloorCents: 18_000, neverBelowCatalog: true },
+    });
+    expect(d).toEqual({
+      kind: 'REJECT_WITH_COUNTER',
+      counterCents: 21_000,
+      floorCents: 21_000,
+    });
+  });
+});
+
+describe('evaluateDiscountAsk — schema compliance across all decision kinds', () => {
+  const cases: Array<{ name: string; input: EvaluateDiscountAskInput }> = [
+    {
+      name: 'ALLOW',
+      input: { currentQuotedCents: QUOTE, parsed: discountPercent(800), policy: configured, catalogGrounded: true },
+    },
+    {
+      name: 'NEEDS_APPROVAL',
+      input: { currentQuotedCents: QUOTE, parsed: discountPercent(1_200), policy: configured, catalogGrounded: true },
+    },
+    {
+      name: 'CLARIFY',
+      input: { currentQuotedCents: QUOTE, parsed: ambiguous, policy: configured, catalogGrounded: true },
+    },
+    {
+      name: 'REJECT_WITH_COUNTER',
+      input: { currentQuotedCents: QUOTE, parsed: targetPrice(5_000), policy: configured, catalogGrounded: true },
+    },
+  ];
+
+  it.each(cases)('$name decision validates against discountDecisionSchema', ({ input }) => {
+    const decision = evaluateDiscountAsk(input);
+    const parsed = discountDecisionSchema.parse(decision);
+    expect(parsed).toEqual(decision);
   });
 });

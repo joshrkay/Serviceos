@@ -9,7 +9,8 @@ import { renderProposalSms, renderChainSms } from '../proposals/sms/render';
 import type { OutboundAnchorKind } from '../proposals/sms/sms-event';
 import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
 import type { AuditRepository } from '../audit/audit';
-import type { UnsupervisedProposalRouting } from '../settings/settings';
+import type { SettingsRepository, UnsupervisedProposalRouting } from '../settings/settings';
+import type { CurrentQuoteResolver } from '../conversations/negotiation/current-quote-resolver';
 import { ConflictError } from '../shared/errors';
 import { voiceProposalIdempotencyKey } from '../voice/voice-audit';
 import type { CustomerNegotiationContextProvider } from '../customers/customer-negotiation-context';
@@ -164,6 +165,17 @@ export interface VoiceActionRouterDeps {
    * callback with the caller's LTV/recency (resolved via the verified customerId).
    */
   customerNegotiationContextProvider?: CustomerNegotiationContextProvider;
+  /**
+   * U5b (P2-036 V2) — when BOTH this and `negotiationQuoteResolver` are wired
+   * (and a customer is resolved), the negotiation handler additively consults
+   * the discount engine. Absent → the handler is V1-identical. `settingsRepo`
+   * feeds `resolveDiscountPolicy` (fail-closed: unconfigured tenants stay V1).
+   */
+  settingsRepo?: Pick<SettingsRepository, 'findByTenant'>;
+  /** U5b — resolves the customer's current live quote for the discount engine. */
+  negotiationQuoteResolver?: CurrentQuoteResolver;
+  /** U5b — best-effort sink for the `negotiation.discount_evaluated` audit event. */
+  auditRepo?: AuditRepository;
   recentReferents?: RecentReferentProvider;
   /**
    * Optional: pre-draft slot-conflict checker for `create_appointment`
@@ -480,7 +492,15 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   // processSegment resolves it by intent name, like '_complaint'.
   handlers.set(
     '_negotiation' as ProposalType,
-    new NegotiationGuardrailTaskHandler(deps.customerNegotiationContextProvider),
+    new NegotiationGuardrailTaskHandler(deps.customerNegotiationContextProvider, {
+      // U5b — additive discount engine. Only engages when BOTH are wired AND a
+      // customer is resolved; otherwise the handler stays V1-identical.
+      ...(deps.settingsRepo ? { settingsRepo: deps.settingsRepo } : {}),
+      ...(deps.negotiationQuoteResolver
+        ? { quoteResolver: deps.negotiationQuoteResolver }
+        : {}),
+      ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+    }),
   );
   return handlers;
 }
