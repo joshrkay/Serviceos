@@ -75,6 +75,13 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     depositFixedCents: (row.deposit_fixed_cents as number | null) ?? undefined,
     depositRequiredAboveCents:
       (row.deposit_required_above_cents as number | null) ?? undefined,
+    // V2 negotiation (D-013) — migration 183. Discount policy. The NOT NULL
+    // columns (max_bps default 0, never_below_catalog default true) read
+    // directly; the nullable absolute floor surfaces as undefined when unset.
+    discountMaxBps: (row.discount_max_bps as number | null) ?? undefined,
+    discountFloorCents: (row.discount_floor_cents as number | null) ?? undefined,
+    discountNeverBelowCatalog:
+      (row.discount_never_below_catalog as boolean | null) ?? undefined,
     // Tier 4 — migration 079. Default 'after_approval' applies at the
     // column level so any row written before this migration reads as
     // the safe pre-existing flow.
@@ -291,6 +298,11 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         depositPercentageBps: 'deposit_percentage_bps',
         depositFixedCents: 'deposit_fixed_cents',
         depositRequiredAboveCents: 'deposit_required_above_cents',
+        // V2 negotiation (D-013) — migration 183. Discount policy. An
+        // explicit null on discount_floor_cents clears the absolute floor.
+        discountMaxBps: 'discount_max_bps',
+        discountFloorCents: 'discount_floor_cents',
+        discountNeverBelowCatalog: 'discount_never_below_catalog',
         // Tier 4 — migration 079.
         depositTimingPolicy: 'deposit_timing_policy',
         // §9 — migration 098.

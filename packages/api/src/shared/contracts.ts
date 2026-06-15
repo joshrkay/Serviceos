@@ -331,6 +331,12 @@ export const updateSettingsSchema = z.object({
   depositPercentageBps: z.number().int().min(0).max(10000).nullable().optional(),
   depositFixedCents: z.number().int().min(0).nullable().optional(),
   depositRequiredAboveCents: z.number().int().min(0).nullable().optional(),
+  // V2 negotiation (D-013) — discount policy. maxBps 0–10000 (0%–100%);
+  // floorCents is integer cents (null clears); never-below-catalog is a flag
+  // that defaults true server-side via resolveDiscountPolicy.
+  discountMaxBps: z.number().int().min(0).max(10000).optional(),
+  discountFloorCents: z.number().int().min(0).nullable().optional(),
+  discountNeverBelowCatalog: z.boolean().optional(),
   // Tier 4 (Deposit rules — PR 3a-extended). Selects whether the
   // customer pays the deposit BEFORE they can approve the estimate
   // ('before_approval') or AFTER ('after_approval'). Default behavior

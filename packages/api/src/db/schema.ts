@@ -4563,6 +4563,28 @@ export const MIGRATIONS = {
       CHECK (appointment_type IN ('estimate', 'repair', 'install', 'maintenance', 'diagnostic'));
     CREATE INDEX IF NOT EXISTS idx_appointments_type ON appointments(tenant_id, appointment_type);
   `,
+
+  '183_tenant_settings_discount_policy': `
+    -- V2 negotiation (D-013) — bounded, policy-gated discount self-service.
+    -- Per-tenant opt-in consumed by the discount evaluator (evaluateDiscountAsk).
+    -- Fail-closed: discount_max_bps defaults to 0 so every existing tenant
+    -- behaves EXACTLY like V1 (no self-service discount) until they opt in.
+    --
+    --   discount_max_bps             : discount ceiling in basis points
+    --                                  (0-10000 = 0%-100%). 0 = no discount.
+    --   discount_floor_cents         : optional absolute price floor (cents).
+    --                                  NULL = no absolute floor (the
+    --                                  catalog-grounded floor still applies).
+    --   discount_never_below_catalog : when true (default), the evaluator's
+    --                                  floor is catalog-grounded and an
+    --                                  ungrounded scope forces owner approval.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS discount_max_bps INTEGER NOT NULL DEFAULT 0
+        CHECK (discount_max_bps >= 0 AND discount_max_bps <= 10000),
+      ADD COLUMN IF NOT EXISTS discount_floor_cents INTEGER
+        CHECK (discount_floor_cents IS NULL OR discount_floor_cents >= 0),
+      ADD COLUMN IF NOT EXISTS discount_never_below_catalog BOOLEAN NOT NULL DEFAULT true;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -66,6 +66,62 @@ export function resolveEscalationSettings(
 }
 
 /**
+ * V2 negotiation (D-013) — resolved per-tenant discount policy. The raw
+ * tenant_settings columns (migration 183) carry the opt-in; this is the
+ * normalized, fail-closed shape the discount evaluator (`evaluateDiscountAsk`)
+ * consumes.
+ *
+ *   - maxBps:            discount ceiling in basis points (0 = no discount
+ *                        allowed → behaves exactly like V1).
+ *   - floorCents:        optional absolute price floor in cents (null = none).
+ *   - neverBelowCatalog: when true, the evaluator's floor is catalog-grounded
+ *                        and an ungrounded/uncatalogued scope forces approval.
+ */
+export interface DiscountPolicy {
+  maxBps: number;
+  floorCents: number | null;
+  neverBelowCatalog: boolean;
+}
+
+/**
+ * Fail-closed defaults: an unconfigured tenant resolves to `maxBps: 0` (no
+ * self-service discount → identical to V1) with the strictest catalog
+ * grounding. This is the policy used for any tenant with no settings row.
+ */
+export const DEFAULT_DISCOUNT_POLICY: DiscountPolicy = {
+  maxBps: 0,
+  floorCents: null,
+  neverBelowCatalog: true,
+};
+
+/**
+ * Resolve a tenant's discount policy, falling back to the fail-closed
+ * default for any missing/invalid field. Defensive by design: a stale or
+ * out-of-range column (negative bps, >100%, non-integer cents) resolves to
+ * the safe value (no discount / no floor) rather than trusting bad data —
+ * the money core must never be tricked into selling below margin. Safe to
+ * call with `null` (tenant has no settings row).
+ */
+export function resolveDiscountPolicy(settings: TenantSettings | null): DiscountPolicy {
+  if (!settings) return { ...DEFAULT_DISCOUNT_POLICY };
+  const rawMax = settings.discountMaxBps;
+  const maxBps =
+    typeof rawMax === 'number' && Number.isInteger(rawMax) && rawMax > 0 && rawMax <= 10000
+      ? rawMax
+      : 0;
+  const rawFloor = settings.discountFloorCents;
+  const floorCents =
+    typeof rawFloor === 'number' && Number.isInteger(rawFloor) && rawFloor >= 0
+      ? rawFloor
+      : null;
+  return {
+    maxBps,
+    floorCents,
+    neverBelowCatalog: settings.discountNeverBelowCatalog ?? true,
+  };
+}
+
+/**
  * Phase 12 — supervisor-mode-related settings on tenant_settings.
  *
  * Schema lives in migration 063 (P12-001). The repository round-trips
@@ -229,6 +285,23 @@ export interface TenantSettings {
    * 'after_approval' (preserves existing flow).
    */
   depositTimingPolicy?: 'before_approval' | 'after_approval';
+  /**
+   * V2 negotiation discount policy (D-013, migration 183). Opt-in,
+   * fail-closed bounded discount self-service. Resolved via
+   * `resolveDiscountPolicy` and consumed by `evaluateDiscountAsk`. Default
+   * behavior is identical to V1 (no self-service discount) until a tenant
+   * sets a non-zero ceiling. Each column accepts an explicit `null` on
+   * update to clear it; reads normalize NULL → undefined per the repo.
+   *
+   *   - depositMaxBps-equivalent `discountMaxBps`: ceiling in basis points
+   *     (0–10000 = 0%–100%). DB default 0 ⇒ no self-service discount.
+   *   - `discountFloorCents`: optional absolute price floor (cents); null = none.
+   *   - `discountNeverBelowCatalog`: when true (default), the evaluator's
+   *     floor is catalog-grounded and ungrounded scope forces approval.
+   */
+  discountMaxBps?: number;
+  discountFloorCents?: number | null;
+  discountNeverBelowCatalog?: boolean;
   /**
    * §9 — the owner's effective hourly rate, integer cents. Used by the
    * Time-Given-Back surface to convert saved hours into a dollar
@@ -415,6 +488,12 @@ export interface UpdateSettingsInput {
   depositRequiredAboveCents?: number | null;
   /** Tier 4 — when the deposit is collected relative to approval. */
   depositTimingPolicy?: 'before_approval' | 'after_approval';
+  /** V2 negotiation (D-013) — discount ceiling in bps (0–10000); 0 disables. */
+  discountMaxBps?: number;
+  /** V2 negotiation (D-013) — optional absolute price floor (cents); null clears. */
+  discountFloorCents?: number | null;
+  /** V2 negotiation (D-013) — when true, never discount below the catalog floor. */
+  discountNeverBelowCatalog?: boolean;
   /** §9 — owner's effective hourly rate (integer cents); null clears. */
   hourlyRateCents?: number | null;
   /** P22-005 (U7) — billable labor rate (integer cents/hr); null clears. */
@@ -524,6 +603,8 @@ function validateCommonSettingsFields(
     digestTime?: string;
     digestChannel?: string;
     laborRateCentsPerHour?: number | null;
+    discountMaxBps?: number;
+    discountFloorCents?: number | null;
   }
 ): string[] {
   const errors: string[] = [];
@@ -555,6 +636,22 @@ function validateCommonSettingsFields(
     const rate = input.laborRateCentsPerHour;
     if (!Number.isInteger(rate) || rate < 0) {
       errors.push('laborRateCentsPerHour must be a non-negative integer of cents');
+    }
+  }
+  // V2 negotiation (D-013) — discount policy. maxBps is a percentage in basis
+  // points (0–10000 = 0%–100%); the absolute floor is integer cents. Mirrors
+  // the migration 183 CHECK ranges; the DB enforces them, this returns a
+  // friendly 400 before the write.
+  if (input.discountMaxBps !== undefined) {
+    const bps = input.discountMaxBps;
+    if (!Number.isInteger(bps) || bps < 0 || bps > 10000) {
+      errors.push('discountMaxBps must be an integer between 0 and 10000');
+    }
+  }
+  if (input.discountFloorCents !== undefined && input.discountFloorCents !== null) {
+    const floor = input.discountFloorCents;
+    if (!Number.isInteger(floor) || floor < 0) {
+      errors.push('discountFloorCents must be a non-negative integer of cents');
     }
   }
   return errors;
