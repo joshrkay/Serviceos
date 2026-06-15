@@ -12,6 +12,7 @@ import {
 } from '../users/user';
 import { PendingInvitationRepository } from '../users/pending-invitation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { normalizeMobileE164 } from '../shared/phone/normalize';
 
 const updateUserSchema = z.object({
   role: z.enum(['owner', 'dispatcher', 'technician']).optional(),
@@ -23,6 +24,12 @@ const updateUserSchema = z.object({
 const inviteUserSchema = z.object({
   email: z.string().trim().email().max(320),
   role: z.enum(['owner', 'dispatcher', 'technician']),
+});
+
+const setPhoneSchema = z.object({
+  // Loose at the schema boundary (free-form entry); normalized to E.164 in the
+  // handler. `null` clears the number.
+  mobileNumber: z.string().max(40).nullable(),
 });
 
 /**
@@ -113,6 +120,91 @@ export function createUsersRouter(
               entityType: 'user',
               entityId: updated.id,
               metadata: { changedFields: Object.keys(parsed) },
+            }),
+          );
+        }
+
+        res.json(updated);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  /**
+   * Self-service mobile number for escalation routing. A technician sets
+   * their OWN number (`:id` = `me` or their userId); an owner may set any
+   * teammate's. The on-call escalation path (dispatcher-phone-resolver) dials
+   * this number, so a tradesperson controls where their calls ring. PII-safe
+   * audit: we record that a number changed, never the digits.
+   */
+  router.put(
+    '/:id/phone',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const tenantId = req.auth!.tenantId;
+        const actorId = req.auth!.userId;
+        const actorRole = req.auth!.role;
+        const targetId = req.params.id === 'me' ? actorId : req.params.id;
+
+        // A user may set their own number; only an owner may set someone else's.
+        if (targetId !== actorId && actorRole !== 'owner') {
+          res
+            .status(403)
+            .json({ error: 'FORBIDDEN', message: 'You can only set your own phone number.' });
+          return;
+        }
+
+        const parsed = setPhoneSchema.parse(req.body ?? {});
+        // Normalize at the boundary; a null/blank value clears the number.
+        let e164: string | null = null;
+        if (parsed.mobileNumber !== null) {
+          const trimmed = parsed.mobileNumber.trim();
+          if (trimmed !== '') {
+            try {
+              e164 = normalizeMobileE164(trimmed);
+            } catch (err) {
+              throw new ValidationError(
+                err instanceof Error ? err.message : 'Invalid mobile number',
+                { field: 'mobileNumber' },
+              );
+            }
+          }
+        }
+
+        let updated;
+        try {
+          updated = await userRepo.setMobileNumber(tenantId, targetId, e164);
+        } catch (err) {
+          // (tenant_id, mobile_number) partial-unique index — two teammates
+          // can't share a number. Surface a clean 409 rather than a 500.
+          if (err && typeof err === 'object' && (err as { code?: string }).code === '23505') {
+            res.status(409).json({
+              error: 'CONFLICT',
+              message: 'That number is already assigned to another teammate.',
+            });
+            return;
+          }
+          throw err;
+        }
+        if (!updated) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'User not found' });
+          return;
+        }
+
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId,
+              actorRole,
+              eventType: 'user.mobile_number.updated',
+              entityType: 'user',
+              entityId: updated.id,
+              metadata: { set: e164 !== null, self: targetId === actorId },
             }),
           );
         }
