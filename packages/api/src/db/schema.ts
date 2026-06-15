@@ -4521,6 +4521,21 @@ export const MIGRATIONS = {
         CHECK (pricing_source IS NULL
                OR pricing_source IN ('catalog','ambiguous','uncatalogued','manual'));
   `,
+
+  '180_customers_parent_account': `
+    -- B2B account hierarchy — the parent_account_id column + lookup index
+    -- that src/customers/pg-customer.ts already reads and writes (the
+    -- customers INSERT, mapRow, assertNoParentCycle, findByParentAccount)
+    -- but whose migration was never landed. Without it every INSERT INTO
+    -- customers fails against a real database (PG 42703) — integration
+    -- tests AND production. Self-referential FK, NULLABLE (most customers
+    -- have no parent account); the index name matches the pg-customer.ts
+    -- reference. Additive no-op for existing rows.
+    ALTER TABLE customers
+      ADD COLUMN IF NOT EXISTS parent_account_id UUID REFERENCES customers(id);
+    CREATE INDEX IF NOT EXISTS idx_customers_parent_account
+      ON customers(tenant_id, parent_account_id);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

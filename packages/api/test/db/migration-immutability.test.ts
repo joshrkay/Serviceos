@@ -267,6 +267,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // (pricing_source) on estimate_line_items; nullable, additive, CHECK
   // admits NULL. NULL reads as not-grounded (conservative).
   ['179_estimate_line_items_pricing_source', '7ee44a4eb201341367064df3df6dcae61544a1873f88ee4b57d5429aef64f4bd'],
+  // CI fix: B2B account-hierarchy parent_account_id column + index that
+  // pg-customer.ts already used but had no migration for (broke every
+  // customers INSERT against a real DB).
+  ['180_customers_parent_account', '7019b21f41726e45265629443c381175f5cc5ef8e01dd14b8d60fec701d4303b'],
 ];
 
 function hashMigration(value: string): string {
