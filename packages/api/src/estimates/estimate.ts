@@ -205,6 +205,36 @@ export function isValidEstimateTransition(from: EstimateStatus, to: EstimateStat
   return ESTIMATE_STATUS_TRANSITIONS[from]?.includes(to) ?? false;
 }
 
+/**
+ * Is every priced line on this estimate grounded in the tenant catalog
+ * (or explicitly manual), so its pricing can be trusted by a later step
+ * (e.g. to auto-allow a discount)?
+ *
+ * CONSERVATIVE / FAIL-CLOSED by design:
+ *   - Returns true ONLY when every PRICED line item carries a
+ *     `pricingSource` of 'catalog' or 'manual'.
+ *   - Any priced line whose `pricingSource` is 'uncatalogued', 'ambiguous',
+ *     or null/undefined (legacy rows persisted before this column existed,
+ *     or any manual-create path that didn't set a signal) → false. Absence
+ *     of a signal is deliberately treated as NOT grounded: we never assume
+ *     trust we can't prove.
+ *   - "Priced" means unitPriceCents > 0. Zero-priced lines (e.g. a free
+ *     consultation) carry no money risk, so they neither require nor break
+ *     grounding — they're skipped.
+ *   - Empty estimate (no priced lines at all) → false. There is nothing to
+ *     vouch for, so we do not assert grounding; the safe default is "not
+ *     grounded" rather than vacuously true.
+ *
+ * Pure; reads only the estimate's line items.
+ */
+export function isEstimateCatalogGrounded(estimate: Pick<Estimate, 'lineItems'>): boolean {
+  const pricedLines = estimate.lineItems.filter((li) => li.unitPriceCents > 0);
+  if (pricedLines.length === 0) return false;
+  return pricedLines.every(
+    (li) => li.pricingSource === 'catalog' || li.pricingSource === 'manual',
+  );
+}
+
 export async function createEstimate(
   input: CreateEstimateInput,
   repository: EstimateRepository,

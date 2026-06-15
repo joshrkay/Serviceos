@@ -36,6 +36,11 @@ export const lineItemSchema = z.object({
   groupLabel: z.string().optional(),
   isOptional: z.boolean().optional(),
   isDefaultSelected: z.boolean().optional(),
+  // Catalog-grounding signal (estimates only). Carried from proposal
+  // drafting (the catalog resolver stamps it) through to
+  // estimate_line_items.pricing_source. Optional/nullish: invoice lines
+  // and legacy estimate rows have no signal and serialize it as absent.
+  pricingSource: z.enum(['catalog', 'ambiguous', 'uncatalogued', 'manual']).optional(),
 });
 export type LineItem = z.infer<typeof lineItemSchema>;
 

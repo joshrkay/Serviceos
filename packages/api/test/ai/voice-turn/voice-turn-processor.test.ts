@@ -19,6 +19,23 @@ import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
 import { InMemoryVoiceSessionRepository } from '../../../src/voice/voice-session';
 import type { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
+import type { TenantSettings, SettingsRepository } from '../../../src/settings/settings';
+import type { CurrentQuoteResolver } from '../../../src/conversations/negotiation/current-quote-resolver';
+
+/** A configured (opted-in) discount policy + a grounded $250 quote, for U6 tests. */
+const u6DiscountDeps = {
+  settingsRepo: {
+    findByTenant: async () =>
+      ({
+        discountMaxBps: 1000,
+        discountFloorCents: 15000,
+        discountNeverBelowCatalog: true,
+      }) as unknown as TenantSettings,
+  } as Pick<SettingsRepository, 'findByTenant'>,
+  negotiationQuoteResolver: {
+    resolve: async () => ({ estimateId: 'est-1', quotedCents: 25000, catalogGrounded: true }),
+  } as CurrentQuoteResolver,
+};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -68,7 +85,12 @@ interface BuiltCtx {
   session: ReturnType<VoiceSessionStore['create']>;
 }
 
-function makeCtx(opts: { gateway: LLMGateway; withRepos?: boolean } = {
+function makeCtx(opts: {
+  gateway: LLMGateway;
+  withRepos?: boolean;
+  settingsRepo?: Pick<SettingsRepository, 'findByTenant'>;
+  negotiationQuoteResolver?: CurrentQuoteResolver;
+} = {
   gateway: makeGatewayReturning('{}'),
   withRepos: true,
 }): BuiltCtx {
@@ -101,6 +123,10 @@ function makeCtx(opts: { gateway: LLMGateway; withRepos?: boolean } = {
     systemActorId: 'test-actor',
     ...(opts.withRepos !== false
       ? { auditRepo, proposalRepo, voiceSessionRepo }
+      : {}),
+    ...(opts.settingsRepo ? { settingsRepo: opts.settingsRepo } : {}),
+    ...(opts.negotiationQuoteResolver
+      ? { negotiationQuoteResolver: opts.negotiationQuoteResolver }
       : {}),
   });
 
@@ -575,5 +601,58 @@ describe('createVoiceTurnProcessor — negotiation guardrail (N-003)', () => {
       ),
     ).toBe(true);
     expect(session.machine.currentState).toBe('intent_capture');
+  });
+
+  // U6 (P2-036 V2) — live-call discount engine (additive, behind the policy gate).
+  it('ALLOW: an in-policy live ask drafts a confidence-capped callback', async () => {
+    const gateway = makeGatewayReturning(
+      JSON.stringify({
+        intentType: 'negotiation',
+        confidence: 0.95,
+        reasoning: 'price push',
+        extractedEntities: { negotiationAsk: 'can you do $230?', customerName: 'Acme' },
+      }),
+    );
+    const { processor, session, proposalRepo } = makeCtx({ gateway, withRepos: true, ...u6DiscountDeps });
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'can you do $230?',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+    const cb = (await proposalRepo.findByTenant('tenant-abc')).find(
+      (p) => p.proposalType === 'callback',
+    );
+    expect(cb).toBeDefined();
+    expect((cb!.payload._meta as { overallConfidence: string }).overallConfidence).toBe('low');
+    expect(cb!.payload.approvedDiscountBps).toBe(800); // $250→$230 = 8%, within 10% cap
+    expect(cb!.status).toBe('draft'); // capped → never auto-approves
+  });
+
+  it('CLARIFY: an ambiguous live discount ask drafts a voice_clarification', async () => {
+    const gateway = makeGatewayReturning(
+      JSON.stringify({
+        intentType: 'negotiation',
+        confidence: 0.95,
+        reasoning: 'price push',
+        extractedEntities: { negotiationAsk: 'come on, give me a deal', customerName: 'Acme' },
+      }),
+    );
+    const { processor, session, proposalRepo } = makeCtx({ gateway, withRepos: true, ...u6DiscountDeps });
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'come on, give me a deal',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+    const vc = (await proposalRepo.findByTenant('tenant-abc')).find(
+      (p) => p.proposalType === 'voice_clarification',
+    );
+    expect(vc).toBeDefined();
+    expect(vc!.payload.reason).toBe('ambiguous_discount_target');
   });
 });

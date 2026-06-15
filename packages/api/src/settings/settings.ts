@@ -66,6 +66,46 @@ export function resolveEscalationSettings(
 }
 
 /**
+ * P2-036 V2 (Discount-policy engine — U1) — the resolved per-tenant
+ * discount policy consumed by the pure decision engine (U3
+ * `evaluateDiscountAsk`, lands later). All money is integer cents and all
+ * percentages are basis points (bps), per the repo invariants.
+ *
+ *   maxDiscountBps     — ceiling the AI may auto-propose without a full
+ *                        owner callback (0-10000 = 0%-100%). `0` means
+ *                        "no auto-allow": every ask escalates, identical
+ *                        to V1 which blocks discounts entirely.
+ *   absoluteFloorCents — optional hard price floor in cents. `null` = no
+ *                        absolute floor term (the catalog list-minus-cap
+ *                        floor still applies in U3).
+ *   neverBelowCatalog  — when true, an ask is never allowed to land below
+ *                        the catalog list price. Defaults true (stricter).
+ */
+export interface DiscountPolicy {
+  maxDiscountBps: number;
+  absoluteFloorCents: number | null;
+  neverBelowCatalog: boolean;
+}
+
+/**
+ * Resolve the discount policy for a tenant. FAIL-CLOSED: an unconfigured
+ * tenant (no settings row, or any column NULL/undefined) resolves to the
+ * V1-identical posture — `maxDiscountBps: 0` ("no auto-allow", so every
+ * discount ask routes to an owner callback exactly like V1), no absolute
+ * floor, and `neverBelowCatalog: true` (the stricter default). Safe to
+ * call with `null`.
+ */
+export function resolveDiscountPolicy(
+  settings: TenantSettings | null,
+): DiscountPolicy {
+  return {
+    maxDiscountBps: settings?.discountMaxBps ?? 0,
+    absoluteFloorCents: settings?.discountFloorCents ?? null,
+    neverBelowCatalog: settings?.discountNeverBelowCatalog ?? true,
+  };
+}
+
+/**
  * Phase 12 — supervisor-mode-related settings on tenant_settings.
  *
  * Schema lives in migration 063 (P12-001). The repository round-trips
@@ -222,6 +262,24 @@ export interface TenantSettings {
   depositPercentageBps?: number | null;
   depositFixedCents?: number | null;
   depositRequiredAboveCents?: number | null;
+  /**
+   * P2-036 V2 (Discount-policy engine — U1: data plane only). Per-tenant
+   * policy bounding AI-proposed discounts. Consumed via
+   * `resolveDiscountPolicy`, which fail-closes any missing value to the
+   * V1-identical posture (see that resolver + migration 178). All
+   * nullable so existing tenants are unaffected and absence reads as
+   * "policy not configured":
+   *   - `discountMaxBps`: ceiling the AI may auto-propose without an
+   *     owner callback (0-10000 = 0%-100%). Absent/`null` → 0 ("no
+   *     auto-allow", identical to V1).
+   *   - `discountFloorCents`: optional absolute price floor (integer
+   *     cents, >= 0). Absent/`null` → no absolute floor term.
+   *   - `discountNeverBelowCatalog`: never let an ask land below the
+   *     catalog list price. Absent/`null` → treated as `true` (stricter).
+   */
+  discountMaxBps?: number | null;
+  discountFloorCents?: number | null;
+  discountNeverBelowCatalog?: boolean | null;
   /**
    * Tier 4 (Deposit rules — PR 3a-extended). Controls when the
    * customer is prompted to pay the deposit relative to estimate
@@ -413,6 +471,10 @@ export interface UpdateSettingsInput {
   depositPercentageBps?: number | null;
   depositFixedCents?: number | null;
   depositRequiredAboveCents?: number | null;
+  /** P2-036 V2 (Discount policy — U1) — see TenantSettings doc; null clears. */
+  discountMaxBps?: number | null;
+  discountFloorCents?: number | null;
+  discountNeverBelowCatalog?: boolean | null;
   /** Tier 4 — when the deposit is collected relative to approval. */
   depositTimingPolicy?: 'before_approval' | 'after_approval';
   /** §9 — owner's effective hourly rate (integer cents); null clears. */
@@ -523,6 +585,8 @@ function validateCommonSettingsFields(
     defaultPaymentTermDays?: number;
     digestTime?: string;
     digestChannel?: string;
+    discountMaxBps?: number | null;
+    discountFloorCents?: number | null;
     laborRateCentsPerHour?: number | null;
   }
 ): string[] {
@@ -538,6 +602,26 @@ function validateCommonSettingsFields(
   }
   if (input.defaultPaymentTermDays !== undefined && input.defaultPaymentTermDays < 0) {
     errors.push('defaultPaymentTermDays must be non-negative');
+  }
+  // P2-036 V2 (Discount policy — U1) — shape guard mirroring the migration
+  // CHECKs. `null` is "clear this column" and is allowed; only present,
+  // non-null values are range-checked. discountMaxBps is basis points
+  // (0-10000 = 0%-100%); discountFloorCents is integer cents (>= 0).
+  if (
+    input.discountMaxBps !== undefined &&
+    input.discountMaxBps !== null &&
+    (!Number.isInteger(input.discountMaxBps) ||
+      input.discountMaxBps < 0 ||
+      input.discountMaxBps > 10000)
+  ) {
+    errors.push('discountMaxBps must be an integer between 0 and 10000');
+  }
+  if (
+    input.discountFloorCents !== undefined &&
+    input.discountFloorCents !== null &&
+    (!Number.isInteger(input.discountFloorCents) || input.discountFloorCents < 0)
+  ) {
+    errors.push('discountFloorCents must be a non-negative integer');
   }
   // RV-063 — digest delivery fields.
   if (input.digestTime !== undefined && !DIGEST_TIME_RE.test(input.digestTime)) {

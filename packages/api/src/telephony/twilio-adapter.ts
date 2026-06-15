@@ -106,6 +106,7 @@ import {
   type VoiceTurnProcessor,
 } from '../ai/voice-turn';
 import type { CustomerNegotiationContextProvider } from '../customers/customer-negotiation-context';
+import type { CurrentQuoteResolver } from '../conversations/negotiation/current-quote-resolver';
 import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
 import { detectEmergency } from '../ai/agents/customer-calling/emergency-detector';
@@ -214,6 +215,8 @@ export interface TwilioAdapterDeps {
    * negotiation callback can carry the caller's LTV/recency.
    */
   customerNegotiationContextProvider?: CustomerNegotiationContextProvider;
+  /** P2-036 V2 — threaded to the voice-turn processor for the live-call discount engine. */
+  negotiationQuoteResolver?: CurrentQuoteResolver;
   estimateRepo?: EstimateRepository;
   /** Full-app voice coverage: owner-scoped revenue + catalog lookups. */
   moneyDashboardRepo?: MoneyDashboardRepository;

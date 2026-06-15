@@ -4467,87 +4467,74 @@ export const MIGRATIONS = {
     ALTER TABLE customer_payment_methods
       ADD COLUMN IF NOT EXISTS stripe_account_id TEXT;
   `,
-  // B2B account hierarchy (R2): add 'property_manager' to the account_type
-  // CHECK (re-adds the same-named constraint; getMigrationSQL auto-prepends
-  // DROP CONSTRAINT IF EXISTS so the old inline check from migration 113 is
-  // replaced) and a self-referential parent_account_id for sub-accounts.
-  '178_customer_b2b_hierarchy': `
-    ALTER TABLE customers
-      ADD CONSTRAINT customers_account_type_check
-      CHECK (account_type IS NULL OR account_type IN ('residential', 'b2b', 'property_manager'));
-    ALTER TABLE customers ADD COLUMN IF NOT EXISTS parent_account_id UUID REFERENCES customers(id);
-    CREATE INDEX IF NOT EXISTS idx_customers_parent_account
-      ON customers(tenant_id, parent_account_id) WHERE parent_account_id IS NOT NULL;
+
+  '178_tenant_settings_discount_policy': `
+    -- P2-036 V2 (Discount-policy engine — U1: data plane only) —
+    -- per-tenant policy bounding how far the AI may discount before it
+    -- must escalate to a full owner callback. The pure decision engine
+    -- (U3 evaluateDiscountAsk) and handler wiring (U5) land in later
+    -- units; this migration establishes the settings columns. Behavior
+    -- is unchanged until those units ship.
+    --
+    -- FAIL-CLOSED semantics: all three columns are NULLABLE with no
+    -- DEFAULT, so adding them is a no-op for every existing tenant and an
+    -- absent value reads as "policy not configured". The application
+    -- resolver (resolveDiscountPolicy) maps absence to the V1-identical
+    -- posture:
+    --   - discount_max_bps absent          -> maxDiscountBps 0
+    --     ("no auto-allow"; every ask routes to an owner callback,
+    --      exactly like V1 which blocks discounts entirely).
+    --   - discount_floor_cents absent       -> no absolute floor term
+    --     (the catalog list-minus-cap floor still applies in U3).
+    --   - discount_never_below_catalog absent -> treated as TRUE
+    --     (the stricter, safer default: never sell below the catalog).
+    --
+    -- discount_max_bps is basis points (0-10000 = 0%-100%), mirroring
+    -- deposit_percentage_bps. discount_floor_cents is integer cents
+    -- (>= 0), mirroring deposit_fixed_cents. The CHECKs guard shape only;
+    -- cross-field policy correlation lives in the application layer.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS discount_max_bps INTEGER
+        CHECK (discount_max_bps IS NULL
+               OR (discount_max_bps >= 0 AND discount_max_bps <= 10000)),
+      ADD COLUMN IF NOT EXISTS discount_floor_cents INTEGER
+        CHECK (discount_floor_cents IS NULL OR discount_floor_cents >= 0),
+      ADD COLUMN IF NOT EXISTS discount_never_below_catalog BOOLEAN;
   `,
 
-  // U5 (ACH async lifecycle) — durable IN-FLIGHT payment state. ACH /
-  // us_bank_account debits settle asynchronously: Stripe fires
-  // `payment_intent.processing` on initiation (we record status='processing'
-  // and credit the invoice in-flight), then `payment_intent.succeeded` on
-  // settlement (flip -> 'completed') or `payment_intent.payment_failed` /
-  // an ACH return (reverse the credit + reopen the invoice). The status
-  // column's CHECK already allows 'processing' (migration 026), but we
-  // RE-ASSERT it here idempotently so the in-flight state is guaranteed
-  // durable on any database whose 026 predated the value — recording a
-  // 'processing' payment would otherwise violate a stale CHECK and corrupt
-  // ACH accounting silently. Also adds a partial index on in-flight rows so
-  // settlement reconciliation / "money on the way" lookups stay cheap.
-  '179_ach_payment_processing_state': `
-    ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_status_check;
-    ALTER TABLE payments ADD CONSTRAINT payments_status_check
-      CHECK (status IN ('pending', 'processing', 'completed', 'failed', 'refunded'));
-    CREATE INDEX IF NOT EXISTS idx_payments_processing
-      ON payments(tenant_id, status) WHERE status = 'processing';
+  '179_estimate_line_items_pricing_source': `
+    -- P2-036 V2 (U-G — grounding prerequisite) — persist the per-line
+    -- catalog-grounding signal the catalog resolver already stamps on
+    -- PROPOSAL line items (pricingSource: catalog | ambiguous |
+    -- uncatalogued | manual) so a later unit can decide whether an
+    -- estimate's price is trustworthy enough to auto-allow a discount.
+    -- Until now this signal was DROPPED when the proposal became an
+    -- estimate — estimate_line_items had no such column.
+    --
+    -- NULLABLE with no DEFAULT: additive no-op for every existing row.
+    -- A NULL reads as "no grounding signal" — legacy rows and any
+    -- manual-create path that doesn't set it are treated as NOT grounded
+    -- (the conservative posture; see isEstimateCatalogGrounded). The
+    -- CHECK guards shape only and admits NULL.
+    ALTER TABLE estimate_line_items
+      ADD COLUMN IF NOT EXISTS pricing_source TEXT
+        CHECK (pricing_source IS NULL
+               OR pricing_source IN ('catalog','ambiguous','uncatalogued','manual'));
   `,
-  // N-009 / P2-038 — correction loop. When the owner edits an AI-drafted
-  // proposal, the edit is distilled into a STRUCTURED LESSON (labor rate, part
-  // price, banned phrase, scope reclass) that applies forward within the
-  // tenant-local day and is reversible. Each lesson carries its cascaded
-  // config change in `payload` as { before, after } so a single undo reverses
-  // both the lesson and the config. tenant_id + FORCE RLS; audited on
-  // apply/undo. local_date is the tenant-local calendar day (storage is UTC;
-  // forward application + digest window scope to this day). Status flips
-  // applied -> reverted on undo.
-  '180_correction_lessons': `
-    CREATE TABLE IF NOT EXISTS correction_lessons (
-      id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      tenant_id          UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-      lesson_type        TEXT NOT NULL
-                         CHECK (lesson_type IN (
-                           'labor_rate_changed','part_price_changed',
-                           'banned_phrase','scope_reclassified')),
-      status             TEXT NOT NULL DEFAULT 'applied'
-                         CHECK (status IN ('applied','reverted')),
-      source_proposal_id UUID NOT NULL,
-      owner_id           UUID NOT NULL,
-      summary            TEXT NOT NULL,
-      payload            JSONB NOT NULL,
-      local_date         DATE NOT NULL,
-      created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      reverted_at        TIMESTAMPTZ
-    );
-    CREATE INDEX IF NOT EXISTS idx_correction_lessons_day
-      ON correction_lessons (tenant_id, local_date)
-      WHERE status = 'applied';
-    CREATE INDEX IF NOT EXISTS idx_correction_lessons_source
-      ON correction_lessons (tenant_id, source_proposal_id);
-    ALTER TABLE correction_lessons ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE correction_lessons FORCE ROW LEVEL SECURITY;
-    CREATE POLICY correction_lessons_tenant_isolation ON correction_lessons
-      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
-  `,
-  // P22-005 (U7) — tenant-level billable LABOR rate, integer cents per hour.
-  // Drives per-job profit (jobs/job-profit.ts): tracked job minutes × this
-  // rate = labor cost. Nullable: when unset, per-job profit reports
-  // minutes-only with a spoken caveat. Distinct from hourly_rate_cents
-  // (migration 098), which is the owner's value-of-time for Time-Given-Back.
-  // Per-tech rates are out of scope (single tenant-level rate). Idempotent.
-  // Renamed from 143 → 181 at integration (143/178/179 already taken; 180 is
-  // reserved for U8 correction-loop) and moved to the end of MIGRATIONS so the
-  // sequence stays monotonic.
-  '181_tenant_settings_labor_rate': `
-    ALTER TABLE tenant_settings
-      ADD COLUMN IF NOT EXISTS labor_rate_cents_per_hour INT;
+
+  '180_customers_parent_account': `
+    -- B2B account hierarchy — the parent_account_id column + lookup index
+    -- that src/customers/pg-customer.ts already reads and writes (the
+    -- customers INSERT, mapRow, assertNoParentCycle, findByParentAccount)
+    -- but whose migration was never landed. Without it every INSERT INTO
+    -- customers fails against a real database (PG 42703) — integration
+    -- tests AND production. Self-referential FK, NULLABLE (most customers
+    -- have no parent account); the index name matches the pg-customer.ts
+    -- reference. Additive no-op for existing rows.
+    ALTER TABLE customers
+      ADD COLUMN IF NOT EXISTS parent_account_id UUID REFERENCES customers(id);
+    CREATE INDEX IF NOT EXISTS idx_customers_parent_account
+      ON customers(tenant_id, parent_account_id);
   `,
   // Appointment-type taxonomy (U2): the typed *kind* of visit, distinct from
   // the classifier intent and the free-text summary. Nullable + additive —
@@ -4562,6 +4549,61 @@ export const MIGRATIONS = {
       ADD CONSTRAINT appointments_appointment_type_check
       CHECK (appointment_type IN ('estimate', 'repair', 'install', 'maintenance', 'diagnostic'));
     CREATE INDEX IF NOT EXISTS idx_appointments_type ON appointments(tenant_id, appointment_type);
+  `,
+
+  '183_customers_account_type_property_manager': `
+    -- B2B account hierarchy added 'property_manager' to the accountType union
+    -- (customer.ts) and an integration test inserts it, but the
+    -- customers_account_type_check CHECK still only allowed 'residential'/'b2b',
+    -- so the INSERT failed (23514). Widen the constraint to include the value.
+    ALTER TABLE customers DROP CONSTRAINT IF EXISTS customers_account_type_check;
+    ALTER TABLE customers ADD CONSTRAINT customers_account_type_check
+      CHECK (account_type IS NULL OR account_type IN ('residential', 'b2b', 'property_manager'));
+  `,
+
+  '184_tenant_settings_labor_rate': `
+    -- P22-005 (per-job profit by voice) reads/writes
+    -- tenant_settings.labor_rate_cents_per_hour (pg-settings mapRow + UPDATE
+    -- field-map + validateCommonSettingsFields) but no migration ever added the
+    -- column, so the settings UPDATE failed (42703). Integer cents, nullable,
+    -- non-negative.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS labor_rate_cents_per_hour INTEGER
+        CHECK (labor_rate_cents_per_hour IS NULL OR labor_rate_cents_per_hour >= 0);
+  `,
+
+  '185_correction_lessons': `
+    -- N-009 / P2-038 (correction loop) — the correction_lessons table that
+    -- src/learning/corrections/pg-correction-lesson.ts reads/writes (INSERT,
+    -- findAppliedForDay, markReverted) and the correction-loop integration test
+    -- exercises, but whose migration never landed in schema.ts (relation did
+    -- not exist, 42P01). Tenant-scoped with FORCE RLS, matching every other
+    -- tenant table. Columns/enums derived from the shared contract
+    -- (correction-lesson.ts) + the repo's queries.
+    CREATE TABLE IF NOT EXISTS correction_lessons (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      lesson_type TEXT NOT NULL
+        CHECK (lesson_type IN ('labor_rate_changed', 'part_price_changed', 'banned_phrase', 'scope_reclassified')),
+      status TEXT NOT NULL DEFAULT 'applied'
+        CHECK (status IN ('applied', 'reverted')),
+      source_proposal_id UUID,
+      owner_id TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      local_date DATE NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      reverted_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_correction_lessons_day
+      ON correction_lessons(tenant_id, local_date);
+    CREATE INDEX IF NOT EXISTS idx_correction_lessons_status
+      ON correction_lessons(tenant_id, status, local_date);
+    ALTER TABLE correction_lessons ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE correction_lessons FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_correction_lessons ON correction_lessons;
+    CREATE POLICY tenant_isolation_correction_lessons ON correction_lessons
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 };
 
