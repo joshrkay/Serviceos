@@ -271,6 +271,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // pg-customer.ts already used but had no migration for (broke every
   // customers INSERT against a real DB).
   ['180_customers_parent_account', '7019b21f41726e45265629443c381175f5cc5ef8e01dd14b8d60fec701d4303b'],
+  // appointment-type feature (from main); migration landed in schema.ts but its
+  // snapshot entry was lost in the auto-merge into this branch.
+  ['182_appointment_type', '0dc29a194dbb25f2a19a53a453044362a86afde22a3a29447e1cc99e512547e1'],
 ];
 
 function hashMigration(value: string): string {
