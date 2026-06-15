@@ -29,7 +29,12 @@ function buildApp(
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
     (req as AuthenticatedRequest).auth = {
-      userId: auth.userId,
+      // Production sets req.auth.userId to the Clerk subject (auth/clerk.ts),
+      // NOT the internal users.id. seedUser stores clerkUserId as `clerk_${id}`,
+      // so inject that shape here to exercise the route's real Clerk-id →
+      // internal-user resolution (a mock that used the internal id hid the
+      // prod bug where the Clerk id hit a uuid column and 500'd).
+      userId: `clerk_${auth.userId}`,
       sessionId: 'sess-1',
       tenantId: TENANT,
       role: auth.role,
@@ -127,6 +132,14 @@ describe('PUT /api/users/:id/phone — self-service escalation number', () => {
     const app = buildApp(repo, { userId: techId, role: 'technician' });
     const res = await request(app).put('/api/users/me/phone').send({ mobileNumber: '5125550111' });
     expect(res.status).toBe(409);
+  });
+
+  it('rejects a malformed (non-UUID) explicit id with 400, never a 500', async () => {
+    const app = buildApp(repo, { userId: techId, role: 'technician' });
+    const res = await request(app)
+      .put('/api/users/not-a-uuid/phone')
+      .send({ mobileNumber: '5125550111' });
+    expect(res.status).toBe(400);
   });
 });
 
