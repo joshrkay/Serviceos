@@ -153,6 +153,27 @@ export const updateCustomerContactSchema = z.object({
   notes: z.string().optional(),
 });
 
+// U2 (CRM Jobber parity) — tag + custom-field request bodies.
+export const addCustomerTagSchema = z.object({
+  tag: z.string().min(1).max(50),
+});
+
+export const createCustomFieldDefSchema = z.object({
+  key: z
+    .string()
+    .min(1)
+    .max(50)
+    .regex(/^[a-z][a-z0-9_]*$/, 'key must be lowercase alphanumeric/underscore, starting with a letter'),
+  label: z.string().min(1).max(200),
+  fieldType: z.enum(['text', 'number', 'date', 'select']).optional(),
+  options: z.array(z.string().min(1)).optional(),
+  sortOrder: z.number().int().optional(),
+});
+
+export const setCustomFieldValueSchema = z.object({
+  value: z.string().nullable(),
+});
+
 export const createServiceLocationSchema = z.object({
   customerId: z.string().min(1),
   label: z.string().optional(),

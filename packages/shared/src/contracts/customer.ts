@@ -77,6 +77,42 @@ export const customerContactSchema = z.object({
 export type CustomerContact = z.infer<typeof customerContactSchema>;
 
 /**
+ * U2 (CRM Jobber parity) — tenant-defined custom fields on customers. The
+ * field type drives both the editor control and the value validation
+ * (`number` must parse, `date` must be ISO, `select` must be one of `options`).
+ * Kept in lockstep with `customer_custom_field_defs.field_type` (migration 187)
+ * and the server-side `CustomFieldType` in
+ * `packages/api/src/customers/custom-field.ts`.
+ */
+export const customerCustomFieldTypeSchema = z.enum(['text', 'number', 'date', 'select']);
+export type CustomerCustomFieldType = z.infer<typeof customerCustomFieldTypeSchema>;
+
+export const customerCustomFieldDefSchema = z.object({
+  id: z.string().uuid(),
+  tenantId: z.string().uuid(),
+  key: z.string(),
+  label: z.string(),
+  fieldType: customerCustomFieldTypeSchema,
+  options: z.array(z.string()),
+  sortOrder: z.number().int(),
+  isArchived: z.boolean(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type CustomerCustomFieldDef = z.infer<typeof customerCustomFieldDefSchema>;
+
+/** A single field value resolved against its definition, for the editor UI. */
+export const customerCustomFieldValueSchema = z.object({
+  fieldDefId: z.string().uuid(),
+  key: z.string(),
+  label: z.string(),
+  fieldType: customerCustomFieldTypeSchema,
+  options: z.array(z.string()),
+  value: z.string().nullable(),
+});
+export type CustomerCustomFieldValue = z.infer<typeof customerCustomFieldValueSchema>;
+
+/**
  * Minimal customer summary embedded in enriched list/detail responses for other
  * entities (e.g. the optional `customer` on an invoice/job response). A subset
  * of the full Customer record — just what list/detail views render.

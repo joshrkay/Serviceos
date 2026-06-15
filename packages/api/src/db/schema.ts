@@ -4642,6 +4642,82 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_customer_contacts ON customer_contacts
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '187_customer_tags_custom_fields': `
+    -- U2 (CRM Jobber parity) — customer tags + tenant-defined custom fields.
+    -- The Customer list contract already declared a 'tags' field but it was
+    -- never persisted; these tables make tags real and add segmentable,
+    -- tenant-defined custom fields. Read/written by src/customers/pg-tag.ts
+    -- and src/customers/pg-custom-field.ts. All tenant-scoped with FORCE RLS.
+
+    -- Tags: a simple join with an idempotent unique constraint. The named
+    -- UNIQUE is created via ADD CONSTRAINT so the getMigrationSQL
+    -- DROP-CONSTRAINT rewriter keeps re-runs safe.
+    CREATE TABLE IF NOT EXISTS customer_tags (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      tag TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE customer_tags
+      ADD CONSTRAINT customer_tags_unique UNIQUE (tenant_id, customer_id, tag);
+    CREATE INDEX IF NOT EXISTS idx_customer_tags_customer
+      ON customer_tags(tenant_id, customer_id);
+    CREATE INDEX IF NOT EXISTS idx_customer_tags_tag
+      ON customer_tags(tenant_id, tag);
+    ALTER TABLE customer_tags ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_tags FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_tags ON customer_tags;
+    CREATE POLICY tenant_isolation_customer_tags ON customer_tags
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    -- Custom-field definitions: tenant-defined, typed, enumerable for the
+    -- editor UI and segmentable. field_type is kept in lockstep with
+    -- customerCustomFieldTypeSchema (packages/shared/src/contracts/customer.ts).
+    CREATE TABLE IF NOT EXISTS customer_custom_field_defs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      field_type TEXT NOT NULL DEFAULT 'text'
+        CHECK (field_type IN ('text', 'number', 'date', 'select')),
+      options JSONB NOT NULL DEFAULT '[]'::jsonb,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE customer_custom_field_defs
+      ADD CONSTRAINT customer_custom_field_defs_key_unique UNIQUE (tenant_id, key);
+    CREATE INDEX IF NOT EXISTS idx_customer_cfd_tenant
+      ON customer_custom_field_defs(tenant_id);
+    ALTER TABLE customer_custom_field_defs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_custom_field_defs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_cfd ON customer_custom_field_defs;
+    CREATE POLICY tenant_isolation_customer_cfd ON customer_custom_field_defs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    -- Per-customer values: one value per (customer, field def), upserted.
+    CREATE TABLE IF NOT EXISTS customer_custom_field_values (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      field_def_id UUID NOT NULL REFERENCES customer_custom_field_defs(id),
+      value TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE customer_custom_field_values
+      ADD CONSTRAINT customer_cfv_unique UNIQUE (tenant_id, customer_id, field_def_id);
+    CREATE INDEX IF NOT EXISTS idx_customer_cfv_customer
+      ON customer_custom_field_values(tenant_id, customer_id);
+    ALTER TABLE customer_custom_field_values ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_custom_field_values FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_cfv ON customer_custom_field_values;
+    CREATE POLICY tenant_isolation_customer_cfv ON customer_custom_field_values
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
