@@ -41,6 +41,7 @@ function fakeUserRepo(users: User[]): UserRepository {
       users.filter((u) => u.tenantId === t && (!opts?.role || u.role === opts.role)).map((u) => ({ ...u })),
     findById: async (t, id) => users.find((u) => u.tenantId === t && u.id === id) ?? null,
     findByMobileNumber: async () => null,
+    setMobileNumber: async () => null,
     update: async () => null,
   };
 }

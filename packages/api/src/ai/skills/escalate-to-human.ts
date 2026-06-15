@@ -181,6 +181,13 @@ export interface EscalateToHumanInput {
    */
   ownerPhoneResolver?: OwnerPhoneResolver;
   /**
+   * Telephony only. Tenant-level last-resort phone (the shared
+   * `business_phone`), dialed only when the rotation walk finds NO on-call
+   * user with a personal mobile. Keeps escalation working for tenants that
+   * haven't adopted per-user numbers. Built by `createBusinessPhoneFallback`.
+   */
+  businessPhoneFallbackResolver?: (tenantId: string) => Promise<string | null>;
+  /**
    * Telephony only. Twilio CallSid of the active call leg. Required
    * for `callControl.dialDispatcher` to bind the `<Dial>` to the
    * right call. Falls back to `sessionId` when omitted (less precise
@@ -340,6 +347,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     emergencyDescription,
     callControl,
     dispatcherPhoneResolver,
+    businessPhoneFallbackResolver,
     callSid,
     dialActionUrl,
     session,
@@ -505,9 +513,72 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     }
 
     if (!chosen) {
-      // Rotation exhausted (or empty). Audit + fall through to the
-      // no-dispatcher path so the route can queue the customer
-      // callback proposal.
+      // No on-call user has a personal mobile on file. Fall back to the
+      // tenant's shared business line so escalation still reaches someone —
+      // a tenant that hasn't adopted per-user numbers must not lose
+      // escalation. Mirrors the transfer_number branch: a single-target dial
+      // with sentinel ids and no rotation cascade. Only when the business
+      // line is ALSO absent do we give up.
+      const fallbackPhone = businessPhoneFallbackResolver
+        ? await businessPhoneFallbackResolver(tenantId).catch(() => null)
+        : null;
+      if (fallbackPhone) {
+        // Degraded last resort: the shared business line is NOT a specific
+        // on-call person, so we intentionally skip the per-dispatcher
+        // whisper/summary + context-SMS that the rotation / transfer_number
+        // branches build (there is no individual CSR to brief). We DO preserve
+        // the emergency-vs-generic spoken message so an emergency caller still
+        // hears the right copy on this path.
+        const fallbackTwiml: string | undefined = callControl
+          ? callControl.dialDispatcher(callSid ?? sessionId, fallbackPhone, {
+              actionUrl:
+                dialActionUrl ??
+                `/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`,
+            })
+          : undefined;
+        if (auditRepo) {
+          await auditRepo.create(
+            buildEscalationAudit({
+              tenantId,
+              sessionId,
+              reason,
+              assignedUserId: null,
+              outcome: 'transfer_initiated',
+              rotationIndex: 0,
+            }),
+          );
+        }
+        if (session) {
+          session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(reason));
+        }
+        let fallbackMessage = transferringText;
+        if (reason === 'emergency_dispatch') {
+          const desc = emergencyDescription ? ` regarding: ${emergencyDescription}` : '';
+          fallbackMessage =
+            lang === 'es'
+              ? `Escalamiento de emergencia en curso${desc}. Le voy a conectar con un despachador de inmediato.`
+              : `Emergency escalation in progress${desc}. Connecting you with a dispatcher immediately.`;
+        }
+        return {
+          escalated: true,
+          message: fallbackMessage,
+          transfer: {
+            dispatcherPhone: fallbackPhone,
+            fallbackTwiml,
+            rotationEntryId: 'business_phone',
+            dispatcherUserId: 'business_phone',
+            rotationIndex: 0,
+            channelPreferences: input.channelPreferences ?? {
+              sms: true,
+              in_app: true,
+              whisper: true,
+            },
+          },
+        };
+      }
+      // Rotation exhausted AND no business line — give up. Audit + fall
+      // through to the no-dispatcher path so the route can queue the
+      // customer callback proposal.
       if (auditRepo) {
         await auditRepo.create(
           buildEscalationAudit({

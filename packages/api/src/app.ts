@@ -13,7 +13,7 @@ import { createIntegrationResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
-import { createBusinessPhoneDispatcherResolver } from './telephony/dispatcher-phone-resolver';
+import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from './telephony/dispatcher-phone-resolver';
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
@@ -2358,7 +2358,8 @@ export function createApp(): express.Express {
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     callControl: telephonyCallControl,
-    dispatcherPhoneResolver: createBusinessPhoneDispatcherResolver(settingsRepo),
+    dispatcherPhoneResolver: createUserPhoneDispatcherResolver(userRepo),
+    businessPhoneFallbackResolver: createBusinessPhoneFallback(settingsRepo),
     settingsRepo,
     // RV-070 — owner-line recognition: backup supervisor mobile lookup
     // (mirrors the SMS reply transport's approver identity).
@@ -2847,7 +2848,8 @@ export function createApp(): express.Express {
                   callControl: telephonyCallControl,
                   ownerPhoneResolver: createSettingsOwnerPhoneResolver(settingsRepo),
                   onCallRepo: sharedOnCallRepo,
-                  dispatcherPhoneResolver: createBusinessPhoneDispatcherResolver(settingsRepo),
+                  dispatcherPhoneResolver: createUserPhoneDispatcherResolver(userRepo),
+                  businessPhoneFallbackResolver: createBusinessPhoneFallback(settingsRepo),
                   ...(messageDelivery
                     ? {
                         sendSms: (args: { to: string; body: string }) =>
