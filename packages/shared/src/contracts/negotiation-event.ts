@@ -107,8 +107,6 @@ export type DiscountDecisionOutcome = (typeof DISCOUNT_DECISION_OUTCOMES)[number
 const DISCOUNT_APPROVAL_REASONS = [
   /** Tenant has not opted into self-service discounts (maxBps 0 → V1 behavior). */
   'no_policy',
-  /** The requested discount exceeds the tenant's configured ceiling. */
-  'exceeds_policy',
   /** Scope is not catalog-grounded, so no trustworthy floor can be computed. */
   'ungrounded_scope',
 ] as const;

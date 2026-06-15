@@ -122,13 +122,13 @@ describe('discountDecisionSchema (V2, D-013)', () => {
   });
 
   it('accepts every NEEDS_APPROVAL reason, with optional context', () => {
-    for (const reason of ['no_policy', 'exceeds_policy', 'ungrounded_scope']) {
+    for (const reason of ['no_policy', 'ungrounded_scope']) {
       expect(() => discountDecisionSchema.parse({ outcome: 'NEEDS_APPROVAL', reason })).not.toThrow();
     }
     expect(() =>
       discountDecisionSchema.parse({
         outcome: 'NEEDS_APPROVAL',
-        reason: 'exceeds_policy',
+        reason: 'ungrounded_scope',
         targetPriceCents: 12000,
         floorCents: 17000,
       }),
