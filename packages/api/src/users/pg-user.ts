@@ -61,8 +61,9 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
                 mobile_number,
                 created_at, updated_at
          FROM users
-         WHERE id = $1`,
-        [id],
+         WHERE id = $1
+           AND tenant_id = $2`,
+        [id, tenantId],
       );
       return result.rows.length > 0
         ? mapRow(result.rows[0] as Record<string, unknown>)
