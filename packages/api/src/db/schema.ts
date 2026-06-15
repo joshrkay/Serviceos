@@ -4571,6 +4571,40 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS labor_rate_cents_per_hour INTEGER
         CHECK (labor_rate_cents_per_hour IS NULL OR labor_rate_cents_per_hour >= 0);
   `,
+
+  '185_correction_lessons': `
+    -- N-009 / P2-038 (correction loop) — the correction_lessons table that
+    -- src/learning/corrections/pg-correction-lesson.ts reads/writes (INSERT,
+    -- findAppliedForDay, markReverted) and the correction-loop integration test
+    -- exercises, but whose migration never landed in schema.ts (relation did
+    -- not exist, 42P01). Tenant-scoped with FORCE RLS, matching every other
+    -- tenant table. Columns/enums derived from the shared contract
+    -- (correction-lesson.ts) + the repo's queries.
+    CREATE TABLE IF NOT EXISTS correction_lessons (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      lesson_type TEXT NOT NULL
+        CHECK (lesson_type IN ('labor_rate_changed', 'part_price_changed', 'banned_phrase', 'scope_reclassified')),
+      status TEXT NOT NULL DEFAULT 'applied'
+        CHECK (status IN ('applied', 'reverted')),
+      source_proposal_id UUID,
+      owner_id TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      local_date DATE NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      reverted_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_correction_lessons_day
+      ON correction_lessons(tenant_id, local_date);
+    CREATE INDEX IF NOT EXISTS idx_correction_lessons_status
+      ON correction_lessons(tenant_id, status, local_date);
+    ALTER TABLE correction_lessons ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE correction_lessons FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_correction_lessons ON correction_lessons;
+    CREATE POLICY tenant_isolation_correction_lessons ON correction_lessons
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

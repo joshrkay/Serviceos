@@ -277,6 +277,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // CI fix: merged features whose code shipped without their migrations.
   ['183_customers_account_type_property_manager', 'f373682884c0e1e5b74d1b8a186d44fb302e25c1791595da9814a7b572c453c3'],
   ['184_tenant_settings_labor_rate', '5552a7d845275663af1ac4f2df1c64897989f11625ffeb6f595153d9305b1355'],
+  ['185_correction_lessons', 'cb361b7505166e97eab2b627e660df67788b446fedd147f918e877d14b8ca8cf'],
 ];
 
 function hashMigration(value: string): string {
