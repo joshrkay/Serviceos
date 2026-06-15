@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { appointmentTypeSchema, type AppointmentTypeValue } from '@ai-service-os/shared';
 import { Proposal, ProposalType, ProposalRepository } from '../proposal';
 import { CreateInvoiceExecutionHandler } from './invoice-execution-handler';
 import { CreateInvoiceScheduleExecutionHandler } from './invoice-schedule-handler';
@@ -387,6 +388,11 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
           : typeof payload.summary === 'string'
             ? payload.summary
             : undefined,
+      // Typed visit kind — enum-validate before persisting. The payload was
+      // Zod-checked upstream, but never forward a raw value unguarded.
+      appointmentType: appointmentTypeSchema.safeParse(payload.appointmentType).success
+        ? (payload.appointmentType as AppointmentTypeValue)
+        : undefined,
       createdBy: context.executedBy,
     }, this.appointmentRepo);
 

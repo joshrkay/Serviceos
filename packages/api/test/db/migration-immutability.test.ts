@@ -264,6 +264,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['179_ach_payment_processing_state', '866664ba47094254581ef04a5864f8529652c308b309ae11bf1abd5ebb47ec3d'],
   ['180_correction_lessons', '1b75f1cb10c7754370eb74f2b2b4873375657920429d4839aa372e35ebad8139'],
   ['181_tenant_settings_labor_rate', 'f650607b44e90ac94e357f83ad46fee1dbe74aef2e19dc8134147ec5901195aa'],
+  ['182_appointment_type', '0dc29a194dbb25f2a19a53a453044362a86afde22a3a29447e1cc99e512547e1'],
 ];
 
 function hashMigration(value: string): string {

@@ -29,6 +29,7 @@ function mapRow(row: Record<string, unknown>): Appointment {
     holdExpiryAt: row.hold_expiry_at ? new Date(row.hold_expiry_at as string) : undefined,
     idempotencyKey: (row.idempotency_key as string) ?? undefined,
     notes: (row.notes as string) ?? undefined,
+    appointmentType: (row.appointment_type as Appointment['appointmentType']) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -68,8 +69,8 @@ export class PgAppointmentRepository extends PgBaseRepository implements Appoint
           id, tenant_id, job_id, scheduled_start, scheduled_end,
           arrival_window_start, arrival_window_end, timezone, status,
           hold_pending_approval, hold_expiry_at, idempotency_key,
-          notes, created_by, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+          notes, created_by, created_at, updated_at, appointment_type
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
         RETURNING *`,
         [
@@ -89,6 +90,7 @@ export class PgAppointmentRepository extends PgBaseRepository implements Appoint
           appointment.createdBy,
           appointment.createdAt,
           appointment.updatedAt,
+          appointment.appointmentType ?? null,
         ]
       );
       if (result.rows.length === 0) {
