@@ -125,6 +125,7 @@ describe('EstimateApprovalPage — Tier 4 deposit (PR 3b: before_approval gate +
           depositRequiredCents: 25000,
           depositStatus: 'pending',
           depositTimingPolicy: 'before_approval',
+          depositPayable: true,
           // Backend marks the estimate non-actionable when before_approval
           // gates approval — page mirrors that gate.
           isActionable: false,
@@ -156,6 +157,7 @@ describe('EstimateApprovalPage — Tier 4 deposit (PR 3b: before_approval gate +
           depositRequiredCents: 25000,
           depositStatus: 'pending',
           depositTimingPolicy: 'before_approval',
+          depositPayable: true,
           isActionable: false,
         });
       }
@@ -174,14 +176,17 @@ describe('EstimateApprovalPage — Tier 4 deposit (PR 3b: before_approval gate +
     );
   });
 
-  it('after_approval policy keeps the Accept CTA even when a deposit is required', async () => {
+  it('after_approval — Accept CTA shows while sent; deposit is deferred to after acceptance', async () => {
     apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       if (!init || init.method === undefined) {
         return jsonResponse({
           ...baseView,
-          depositRequiredCents: 25000,
-          depositStatus: 'pending',
+          // Under after_approval the deposit isn't written onto the job until
+          // the customer accepts, so a sent estimate is not yet payable.
+          depositRequiredCents: 0,
+          depositStatus: 'not_required',
           depositTimingPolicy: 'after_approval',
+          depositPayable: false,
           isActionable: true,
         });
       }
@@ -191,5 +196,74 @@ describe('EstimateApprovalPage — Tier 4 deposit (PR 3b: before_approval gate +
 
     expect(await screen.findByText(/Accept this estimate/i)).toBeInTheDocument();
     expect(screen.queryByTestId('estimate-pay-deposit-cta')).not.toBeInTheDocument();
+  });
+});
+
+describe('EstimateApprovalPage — after_approval deposit on the success screen', () => {
+  beforeEach(() => {
+    apiFetchMock.mockReset();
+  });
+
+  const acceptedPayableView = {
+    ...baseView,
+    status: 'accepted',
+    depositRequiredCents: 25000,
+    depositPaidCents: 0,
+    depositStatus: 'pending',
+    depositTimingPolicy: 'after_approval',
+    depositPayable: true,
+    isActionable: false,
+  };
+
+  it('surfaces the Pay-deposit prompt on the success screen when an accepted estimate still owes a deposit', async () => {
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (!init || init.method === undefined) return jsonResponse(acceptedPayableView);
+      return jsonResponse({});
+    });
+    renderPageAtToken('test-token');
+
+    const prompt = await screen.findByTestId('success-deposit-prompt');
+    expect(prompt).toHaveTextContent('$250.00');
+    expect(screen.getByTestId('estimate-pay-deposit-cta')).toBeInTheDocument();
+  });
+
+  it('clicking Pay deposit on the success screen fetches the checkout URL and redirects', async () => {
+    const assignSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...window.location, assign: assignSpy },
+    });
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes('/deposit-checkout')) {
+        return jsonResponse({ url: 'https://checkout.stripe.com/c/plink_dep' });
+      }
+      if (!init || init.method === undefined) return jsonResponse(acceptedPayableView);
+      return jsonResponse({});
+    });
+    renderPageAtToken('test-token');
+
+    const cta = await screen.findByTestId('estimate-pay-deposit-cta');
+    cta.click();
+    await waitFor(() =>
+      expect(assignSpy).toHaveBeenCalledWith('https://checkout.stripe.com/c/plink_dep'),
+    );
+  });
+
+  it('shows the deposit-paid confirmation once settled (no prompt)', async () => {
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (!init || init.method === undefined) {
+        return jsonResponse({
+          ...acceptedPayableView,
+          depositPaidCents: 25000,
+          depositStatus: 'paid',
+          depositPayable: false,
+        });
+      }
+      return jsonResponse({});
+    });
+    renderPageAtToken('test-token');
+
+    expect(await screen.findByTestId('success-deposit-paid')).toBeInTheDocument();
+    expect(screen.queryByTestId('success-deposit-prompt')).not.toBeInTheDocument();
   });
 });

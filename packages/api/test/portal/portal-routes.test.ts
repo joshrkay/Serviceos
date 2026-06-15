@@ -291,6 +291,116 @@ describe('P10-001 GET /api/public/portal/:token/estimates|invoices|jobs', () => 
     expect(res.body.estimates[0].id).toBe(estimateId);
   });
 
+  async function seedJobWithDeposit(
+    h: Harness,
+    opts: {
+      depositRequiredCents: number;
+      depositPaidCents: number;
+      estimateStatuses: Estimate['status'][];
+    },
+  ): Promise<void> {
+    const job: Job = {
+      id: uuidv4(),
+      tenantId: TENANT,
+      customerId: h.customer.id,
+      locationId: uuidv4(),
+      jobNumber: `JOB-${uuidv4().slice(0, 8)}`,
+      summary: 'Deposit job',
+      status: 'new',
+      priority: 'normal',
+      depositRequiredCents: opts.depositRequiredCents,
+      depositPaidCents: opts.depositPaidCents,
+      createdBy: ACTOR,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    await h.jobRepo.create(job);
+    for (const status of opts.estimateStatuses) {
+      const estimate: Estimate = {
+        id: uuidv4(),
+        tenantId: TENANT,
+        jobId: job.id,
+        estimateNumber: `EST-${uuidv4().slice(0, 8)}`,
+        status,
+        lineItems: [],
+        totals: {
+          subtotalCents: 10000,
+          discountCents: 0,
+          taxableSubtotalCents: 10000,
+          taxCents: 0,
+          totalCents: 10000,
+          taxRateBps: 0,
+        },
+        createdBy: ACTOR,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      await h.estimateRepo.create(estimate);
+    }
+  }
+
+  it('surfaces a payable deposit on the accepted estimate (after_approval)', async () => {
+    const h = await build();
+    const token = await mintToken(h);
+    await seedJobWithDeposit(h, {
+      depositRequiredCents: 2500,
+      depositPaidCents: 0,
+      estimateStatuses: ['accepted'],
+    });
+    const res = await request(h.app).get(`/api/public/portal/${token}/estimates`);
+    expect(res.status).toBe(200);
+    const est = res.body.estimates[0];
+    expect(est.depositRequiredCents).toBe(2500);
+    expect(est.depositStatus).toBe('pending');
+    expect(est.depositPayable).toBe(true);
+  });
+
+  it('does not mark the deposit payable once it is paid', async () => {
+    const h = await build();
+    const token = await mintToken(h);
+    await seedJobWithDeposit(h, {
+      depositRequiredCents: 2500,
+      depositPaidCents: 2500,
+      estimateStatuses: ['accepted'],
+    });
+    const res = await request(h.app).get(`/api/public/portal/${token}/estimates`);
+    const est = res.body.estimates[0];
+    expect(est.depositStatus).toBe('paid');
+    expect(est.depositPayable).toBe(false);
+  });
+
+  it('never surfaces the job deposit on a sibling (non-accepted) estimate', async () => {
+    const h = await build();
+    const token = await mintToken(h);
+    // Same job owes a deposit; one accepted estimate + one sent sibling.
+    await seedJobWithDeposit(h, {
+      depositRequiredCents: 2500,
+      depositPaidCents: 0,
+      estimateStatuses: ['accepted', 'sent'],
+    });
+    const res = await request(h.app).get(`/api/public/portal/${token}/estimates`);
+    expect(res.body.estimates).toHaveLength(2);
+    const accepted = res.body.estimates.find(
+      (e: { status: string }) => e.status === 'accepted',
+    );
+    const sent = res.body.estimates.find(
+      (e: { status: string }) => e.status === 'sent',
+    );
+    expect(accepted.depositPayable).toBe(true);
+    // Sibling-bleed guard: the job-level deposit is NOT payable on the sent one.
+    expect(sent.depositPayable).toBe(false);
+  });
+
+  it('marks an estimate with no deposit rule as not payable', async () => {
+    const h = await build();
+    const token = await mintToken(h);
+    await seedJobAndDocs(h);
+    const res = await request(h.app).get(`/api/public/portal/${token}/estimates`);
+    expect(res.body.estimates[0].depositRequiredCents).toBe(0);
+    expect(res.body.estimates[0].depositStatus).toBe('not_required');
+    expect(res.body.estimates[0].depositPayable).toBe(false);
+  });
+
   it('lists invoices scoped to the customer (without payNowUrl when no provider)', async () => {
     const h = await build();
     const token = await mintToken(h);

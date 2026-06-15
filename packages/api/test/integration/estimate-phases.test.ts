@@ -245,6 +245,41 @@ describe('Postgres integration — estimate phases (real DB effects)', () => {
       const selection = row!.accepted_selection as string[];
       expect(selection.sort()).toEqual([baseId, betterId].sort());
     });
+
+    it('after_approval — accepting writes the deposit onto the job and the view is payable', async () => {
+      await settingsRepo.update(tenant.tenantId, {
+        depositStrategy: 'percentage',
+        depositPercentageBps: 2500, // 25%
+        depositTimingPolicy: 'after_approval',
+      });
+      const jobId = await newJob();
+      const token = `aftertoken-${crypto.randomUUID()}`;
+      await seedEstimate(
+        jobId,
+        [buildLineItem(crypto.randomUUID(), 'Repair', 1, 100000, 0, true)],
+        { status: 'sent', viewToken: token, sentAt: new Date() },
+      );
+
+      const service = new PublicEstimateService({
+        estimateRepo, jobRepo, customerRepo, locationRepo, settingsRepo,
+        auditRepo: new InMemoryAuditRepository(),
+      });
+
+      // after_approval must NOT block acceptance on an unpaid deposit.
+      const view = await service.approve({ token, acceptedByName: 'Sarah J' });
+      expect(view.status).toBe('accepted');
+      // The accept hook wrote the 25%-of-$1000 deposit onto the real job row.
+      expect(view.depositRequiredCents).toBe(25000);
+      expect(view.depositStatus).toBe('pending');
+      // ...and the view exposes it as payable, computed off real columns —
+      // the gap this whole change closes (no Pay-deposit path existed before).
+      expect(view.depositPayable).toBe(true);
+
+      // Persisted on the job, not just computed in the view.
+      const job = await jobRepo.findById(tenant.tenantId, jobId);
+      expect(job!.depositRequiredCents).toBe(25000);
+      expect(job!.depositStatus).toBe('pending');
+    });
   });
 
   describe('Phase 2 — convert race', () => {
