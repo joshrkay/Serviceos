@@ -48,6 +48,35 @@ export const customerSchema = z.object({
 export type Customer = z.infer<typeof customerSchema>;
 
 /**
+ * U1 (CRM Jobber parity) — a contact attached to a customer. A B2B /
+ * property-manager account separates the decision-maker (`primary`), the
+ * bill-to (`billing`), and the on-site contact (`site`) onto distinct rows.
+ * Kept in lockstep with `customer_contacts.role` (migration 186) and the
+ * server-side `CustomerContactRole` in
+ * `packages/api/src/customers/contact.ts`. Defined as a string-literal enum
+ * (not z.nativeEnum) so it can't silently drift from the persisted set.
+ */
+export const customerContactRoleSchema = z.enum(['primary', 'billing', 'site', 'other']);
+export type CustomerContactRole = z.infer<typeof customerContactRoleSchema>;
+
+export const customerContactSchema = z.object({
+  id: z.string().uuid(),
+  tenantId: z.string().uuid(),
+  customerId: z.string().uuid(),
+  name: z.string(),
+  role: customerContactRoleSchema,
+  phone: z.string().optional(),
+  email: z.string().optional(),
+  isPrimary: z.boolean(),
+  notes: z.string().optional(),
+  isArchived: z.boolean(),
+  archivedAt: z.string().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type CustomerContact = z.infer<typeof customerContactSchema>;
+
+/**
  * Minimal customer summary embedded in enriched list/detail responses for other
  * entities (e.g. the optional `customer` on an invoice/job response). A subset
  * of the full Customer record — just what list/detail views render.

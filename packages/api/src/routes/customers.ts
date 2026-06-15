@@ -20,6 +20,17 @@ import {
   type CustomerTimelineDeps,
 } from '../customers/timeline-service';
 import { timelineQuerySchema } from '../customers/timeline';
+import {
+  ContactRepository,
+  createContact,
+  listContacts,
+  updateContact,
+  archiveContact,
+} from '../customers/contact';
+import {
+  createCustomerContactSchema,
+  updateCustomerContactSchema,
+} from '../shared/contracts';
 
 /**
  * P9-002 — Optional dependencies for the customer timeline endpoint.
@@ -31,7 +42,12 @@ export type CustomerRouterTimelineDeps = CustomerTimelineDeps;
 export function createCustomerRouter(
   customerRepo: CustomerRepository,
   auditRepo: AuditRepository,
-  timelineDeps?: CustomerRouterTimelineDeps
+  timelineDeps?: CustomerRouterTimelineDeps,
+  // U1 (CRM Jobber parity) — when provided, mounts the nested
+  // /:id/contacts CRUD. Optional so existing call sites/tests that don't
+  // wire a contact repo keep the routes quietly 404 (same pattern as
+  // timelineDeps above).
+  contactRepo?: ContactRepository
 ): Router {
   const router = Router();
 
@@ -231,6 +247,133 @@ export function createCustomerRouter(
             }
           );
           res.json(result);
+        } catch (err) {
+          const { statusCode, body } = toErrorResponse(err);
+          res.status(statusCode).json(body);
+        }
+      }
+    );
+  }
+
+  // U1 (CRM Jobber parity) — nested customer-contacts CRUD. Every handler
+  // first confirms the parent customer exists within the tenant (so a
+  // cross-tenant or bogus customerId 404s before any contact write), then
+  // delegates to the tenant-scoped contact repo.
+  if (contactRepo) {
+    const loadCustomerOr404 = async (
+      req: AuthenticatedRequest,
+      res: Response
+    ): Promise<boolean> => {
+      const customer = await getCustomer(req.auth!.tenantId, req.params.id, customerRepo);
+      if (!customer) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
+        return false;
+      }
+      return true;
+    };
+
+    router.get(
+      '/:id/contacts',
+      requireAuth,
+      requireTenant,
+      requirePermission('customers:view'),
+      async (req: AuthenticatedRequest, res: Response) => {
+        try {
+          if (!(await loadCustomerOr404(req, res))) return;
+          const includeArchived = req.query.includeArchived === 'true';
+          const contacts = await listContacts(
+            req.auth!.tenantId,
+            req.params.id,
+            contactRepo,
+            includeArchived
+          );
+          res.json(contacts);
+        } catch (err) {
+          const { statusCode, body } = toErrorResponse(err);
+          res.status(statusCode).json(body);
+        }
+      }
+    );
+
+    router.post(
+      '/:id/contacts',
+      requireAuth,
+      requireTenant,
+      requirePermission('customers:update'),
+      async (req: AuthenticatedRequest, res: Response) => {
+        try {
+          if (!(await loadCustomerOr404(req, res))) return;
+          const parsed = createCustomerContactSchema.parse(req.body);
+          const contact = await createContact(
+            {
+              ...parsed,
+              tenantId: req.auth!.tenantId,
+              customerId: req.params.id,
+              createdBy: req.auth!.userId,
+              actorRole: req.auth!.role,
+            },
+            contactRepo,
+            auditRepo
+          );
+          res.status(201).json(contact);
+        } catch (err) {
+          const { statusCode, body } = toErrorResponse(err);
+          res.status(statusCode).json(body);
+        }
+      }
+    );
+
+    router.put(
+      '/:id/contacts/:contactId',
+      requireAuth,
+      requireTenant,
+      requirePermission('customers:update'),
+      async (req: AuthenticatedRequest, res: Response) => {
+        try {
+          if (!(await loadCustomerOr404(req, res))) return;
+          const parsed = updateCustomerContactSchema.parse(req.body);
+          const existing = await contactRepo.findById(req.auth!.tenantId, req.params.contactId);
+          if (!existing || existing.customerId !== req.params.id) {
+            res.status(404).json({ error: 'NOT_FOUND', message: 'Contact not found' });
+            return;
+          }
+          const updated = await updateContact(
+            req.auth!.tenantId,
+            req.params.contactId,
+            parsed,
+            contactRepo,
+            req.auth!.userId,
+            auditRepo
+          );
+          res.json(updated);
+        } catch (err) {
+          const { statusCode, body } = toErrorResponse(err);
+          res.status(statusCode).json(body);
+        }
+      }
+    );
+
+    router.post(
+      '/:id/contacts/:contactId/archive',
+      requireAuth,
+      requireTenant,
+      requirePermission('customers:update'),
+      async (req: AuthenticatedRequest, res: Response) => {
+        try {
+          if (!(await loadCustomerOr404(req, res))) return;
+          const existing = await contactRepo.findById(req.auth!.tenantId, req.params.contactId);
+          if (!existing || existing.customerId !== req.params.id) {
+            res.status(404).json({ error: 'NOT_FOUND', message: 'Contact not found' });
+            return;
+          }
+          const archived = await archiveContact(
+            req.auth!.tenantId,
+            req.params.contactId,
+            contactRepo,
+            req.auth!.userId,
+            auditRepo
+          );
+          res.json(archived);
         } catch (err) {
           const { statusCode, body } = toErrorResponse(err);
           res.status(statusCode).json(body);

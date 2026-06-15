@@ -132,6 +132,27 @@ export const createCustomerSchema = z.object({
   communicationNotes: z.string().optional(),
 });
 
+// U1 (CRM Jobber parity) — request bodies for the nested customer-contacts
+// routes. `customerId` is taken from the URL path, not the body. Mirrors the
+// service-location create/update shape.
+export const createCustomerContactSchema = z.object({
+  name: z.string().min(1).max(200),
+  role: z.enum(['primary', 'billing', 'site', 'other']).optional(),
+  phone: z.string().min(1).optional(),
+  email: z.string().email().optional(),
+  isPrimary: z.boolean().optional(),
+  notes: z.string().optional(),
+});
+
+export const updateCustomerContactSchema = z.object({
+  name: z.string().min(1).max(200).optional(),
+  role: z.enum(['primary', 'billing', 'site', 'other']).optional(),
+  phone: z.string().min(1).optional(),
+  email: z.string().email().optional(),
+  isPrimary: z.boolean().optional(),
+  notes: z.string().optional(),
+});
+
 export const createServiceLocationSchema = z.object({
   customerId: z.string().min(1),
   label: z.string().optional(),

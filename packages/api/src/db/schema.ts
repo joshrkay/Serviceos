@@ -4605,6 +4605,43 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_correction_lessons ON correction_lessons
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '186_customer_contacts': `
+    -- U1 (CRM Jobber parity) — multiple contacts per customer. A B2B /
+    -- property-manager account separates the decision-maker, the bill-to,
+    -- and the on-site contact onto distinct contact rows. One-to-many on
+    -- customers, mirroring the service_locations pattern (per-customer child
+    -- rows, is_primary, archive flag). Read/written by
+    -- src/customers/pg-contact.ts. Tenant-scoped with FORCE RLS like every
+    -- other tenant table. The named CHECK is made re-run-safe by
+    -- getMigrationSQL's DROP-CONSTRAINT rewriter; the role set is kept in
+    -- lockstep with customerContactRoleSchema
+    -- (packages/shared/src/contracts/customer.ts).
+    CREATE TABLE IF NOT EXISTS customer_contacts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      name TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'other'
+        CHECK (role IN ('primary', 'billing', 'site', 'other')),
+      phone TEXT,
+      email TEXT,
+      is_primary BOOLEAN NOT NULL DEFAULT false,
+      notes TEXT,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      archived_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_customer_contacts_tenant ON customer_contacts(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_customer_contacts_customer
+      ON customer_contacts(tenant_id, customer_id);
+    ALTER TABLE customer_contacts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_contacts FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_contacts ON customer_contacts;
+    CREATE POLICY tenant_isolation_customer_contacts ON customer_contacts
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

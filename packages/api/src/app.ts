@@ -139,6 +139,8 @@ import { initSentry, setSentryClient } from './monitoring/sentry';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
+import { InMemoryContactRepository } from './customers/contact';
+import { PgContactRepository } from './customers/pg-contact';
 import { InMemoryLeadRepository } from './leads/lead';
 import { InMemoryLocationRepository } from './locations/location';
 import { InMemoryJobRepository } from './jobs/job';
@@ -828,6 +830,8 @@ export function createApp(): express.Express {
   }
 
   const customerRepo       = pool ? new PgCustomerRepository(pool)       : new InMemoryCustomerRepository();
+  // U1 (CRM Jobber parity) — multiple contacts per customer.
+  const customerContactRepo = pool ? new PgContactRepository(pool)       : new InMemoryContactRepository();
   // N-003 (P2-036) — caller LTV/recency for the negotiation guardrail callback.
   const customerNegotiationContextProvider = pool
     ? new PgCustomerNegotiationContextProvider(pool)
@@ -3100,7 +3104,7 @@ export function createApp(): express.Express {
   }
 
   // Mount API routes
-  app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
+  app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo, undefined, customerContactRepo));
   app.use('/api/time-entries', createTimeEntriesRouter(timeEntryRepo, auditRepo));
   // P10-001: portal session creation/revocation. Mounted at
   // `/api/portal-sessions` (NOT `/api/customers/:id/portal-session`)
