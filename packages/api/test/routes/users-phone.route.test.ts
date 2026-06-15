@@ -129,3 +129,38 @@ describe('PUT /api/users/:id/phone — self-service escalation number', () => {
     expect(res.status).toBe(409);
   });
 });
+
+describe('GET /api/users/:id/phone — read the current escalation number', () => {
+  let repo: InMemoryUserRepository;
+  let techId: string;
+  let ownerId: string;
+
+  beforeEach(async () => {
+    repo = new InMemoryUserRepository();
+    techId = uuidv4();
+    ownerId = uuidv4();
+    await seedUser(repo, techId, 'technician', 'tech@example.com');
+    await seedUser(repo, ownerId, 'owner', 'owner@example.com');
+    await repo.setMobileNumber(TENANT, techId, '+15125550111');
+  });
+
+  it("returns the caller's own number via me", async () => {
+    const app = buildApp(repo, { userId: techId, role: 'technician' });
+    const res = await request(app).get('/api/users/me/phone');
+    expect(res.status).toBe(200);
+    expect(res.body.mobileNumber).toBe('+15125550111');
+  });
+
+  it('returns null when the caller has no number set', async () => {
+    const app = buildApp(repo, { userId: ownerId, role: 'owner' });
+    const res = await request(app).get('/api/users/me/phone');
+    expect(res.status).toBe(200);
+    expect(res.body.mobileNumber).toBeNull();
+  });
+
+  it("forbids a technician reading another user's number (403)", async () => {
+    const app = buildApp(repo, { userId: techId, role: 'technician' });
+    const res = await request(app).get(`/api/users/${ownerId}/phone`);
+    expect(res.status).toBe(403);
+  });
+});

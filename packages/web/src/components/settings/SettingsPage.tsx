@@ -15,6 +15,7 @@ import { apiFetch } from '../../utils/api-fetch';
 import { useMe } from '../../hooks/useMe';
 import { SupervisorBackupSection } from './SupervisorBackupSection';
 import { BusinessProfileSheet } from './BusinessProfileSheet';
+import { TechnicianPhoneSheet } from './TechnicianPhoneSheet';
 import { TerminologySheet } from './TerminologySheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
@@ -162,6 +163,7 @@ export function SettingsPage() {
   const qbConnected = qbIntegration?.status === 'active';
   const [suppliersOpen, setSuppliersOpen] = useState(false);
   const [businessProfileOpen, setBusinessProfileOpen] = useState(false);
+  const [technicianPhoneOpen, setTechnicianPhoneOpen] = useState(false);
   const [terminologyOpen, setTerminologyOpen] = useState(false);
   const [aiRulesOpen, setAiRulesOpen] = useState(false);
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
@@ -340,6 +342,7 @@ export function SettingsPage() {
       title: 'Business',
       items: [
         { icon: Building2, label: 'Business profile',    description: 'Name, phone, email, timezone',                   action: () => setBusinessProfileOpen(true) },
+        { icon: Phone,     label: 'On-call phone',       description: 'The number escalations ring when you are on call',     action: () => setTechnicianPhoneOpen(true) },
         { icon: Globe,     label: 'Language & region',   description: 'English / Español · Voice + customer messages', action: () => navigate('/settings/language') },
         { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => setTerminologyOpen(true) },
         { icon: BookOpen,  label: 'Price book',          description: 'Services, parts & materials with set prices',          action: () => navigate('/settings/price-book') },
@@ -818,6 +821,11 @@ export function SettingsPage() {
           onClose={() => setBusinessProfileOpen(false)}
           onSaved={(fields) => setBusinessName(fields.businessName)}
         />
+      )}
+
+      {/* On-call phone — the technician's own escalation number (users.mobile_number). */}
+      {technicianPhoneOpen && (
+        <TechnicianPhoneSheet onClose={() => setTechnicianPhoneOpen(false)} />
       )}
 
       {/* Terminology sheet — entity-label overrides (Quote vs Estimate, etc.) */}

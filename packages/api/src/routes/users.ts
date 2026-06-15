@@ -133,6 +133,39 @@ export function createUsersRouter(
   );
 
   /**
+   * Read the current user's escalation number (`:id` = `me` or a userId).
+   * Self-or-owner gated like the PUT below; powers the technician phone sheet.
+   */
+  router.get(
+    '/:id/phone',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const tenantId = req.auth!.tenantId;
+        const actorId = req.auth!.userId;
+        const actorRole = req.auth!.role;
+        const targetId = req.params.id === 'me' ? actorId : req.params.id;
+        if (targetId !== actorId && actorRole !== 'owner') {
+          res
+            .status(403)
+            .json({ error: 'FORBIDDEN', message: 'You can only view your own phone number.' });
+          return;
+        }
+        const user = await userRepo.findById(tenantId, targetId);
+        if (!user) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'User not found' });
+          return;
+        }
+        res.json({ mobileNumber: user.mobileNumber ?? null });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  /**
    * Self-service mobile number for escalation routing. A technician sets
    * their OWN number (`:id` = `me` or their userId); an owner may set any
    * teammate's. The on-call escalation path (dispatcher-phone-resolver) dials
