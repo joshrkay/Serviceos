@@ -25,6 +25,8 @@ import { UpgradeNudgeBanner } from '../onboarding/v2/UpgradeNudgeBanner';
 import { ActivationCelebrationBanner } from '../onboarding/v2/ActivationCelebrationBanner';
 import { PastDueBanner } from '../billing/PastDueBanner';
 import { EscalationPanelHost } from '../dispatch/EscalationPanelHost';
+import { GlobalMicButton } from '../voice/GlobalMicButton';
+import { VoiceOverlay } from '../voice/VoiceOverlay';
 import {
   usePendingProposals,
   type PendingProposalSummary,
@@ -238,6 +240,7 @@ export function Shell() {
 function ShellInner() {
   const location = useLocation();
   const [cameraOpen, setCameraOpen] = useState(false);
+  const [voiceOverlayOpen, setVoiceOverlayOpen] = useState(false);
   const voiceBarRef = useRef<VoiceBarHandle>(null);
   const isExact = (to: string) =>
     to === '/' ? location.pathname === '/' : location.pathname.startsWith(to);
@@ -598,6 +601,13 @@ function ShellInner() {
       {cameraOpen && (
         <CameraCapture onClose={() => setCameraOpen(false)} />
       )}
+
+      {/* P22-003 — global push-to-talk mic (authenticated shell only). */}
+      <GlobalMicButton
+        active={voiceOverlayOpen}
+        onClick={() => setVoiceOverlayOpen((open) => !open)}
+      />
+      <VoiceOverlay open={voiceOverlayOpen} onClose={() => setVoiceOverlayOpen(false)} />
 
       {/* F5 — escalation panel host. Renders floating overlays for
           dispatcher context when a call is transferred. Mounted at the

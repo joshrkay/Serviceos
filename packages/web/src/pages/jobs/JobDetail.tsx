@@ -1,6 +1,6 @@
 import React from 'react';
 import { DetailPage } from '../../components/DetailPage';
-import { PhotoBucket } from '../../components/jobs/PhotoBucket';
+import { JobPhotosSection } from '../../components/jobs/JobPhotosSection';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 
 interface Job {
@@ -43,12 +43,7 @@ export function JobDetail({ jobId, onBack }: JobDetailProps) {
         },
         {
           title: 'Site Media',
-          content: (
-            <div className="space-y-6">
-              <PhotoBucket jobId={jobId} category="before" />
-              <PhotoBucket jobId={jobId} category="after" />
-            </div>
-          ),
+          content: <JobPhotosSection jobId={jobId} compact />,
         },
       ]}
     />

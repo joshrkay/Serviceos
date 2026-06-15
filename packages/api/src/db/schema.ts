@@ -4563,6 +4563,127 @@ export const MIGRATIONS = {
       CHECK (appointment_type IN ('estimate', 'repair', 'install', 'maintenance', 'diagnostic'));
     CREATE INDEX IF NOT EXISTS idx_appointments_type ON appointments(tenant_id, appointment_type);
   `,
+
+  // ===== PR #557 net-new migrations, layered after main's canonical 156-182 =====
+
+  // Estimate entity resolution — trigram index for PgEntityResolver (estimate kind).
+  '183_estimate_entity_trgm_index': `
+    CREATE INDEX IF NOT EXISTS idx_estimates_number_trgm
+      ON estimates USING GIN (estimate_number gin_trgm_ops);
+  `,
+
+  // P2-034 (PR #557 legacy transport) — direction/inbound_action SMS approval
+  // audit + edit sessions used by src/sms/proposal-approval. Table renamed to
+  // proposal_approval_sms_events to coexist with main's kind-based
+  // proposal_sms_events (migration 156).
+  '184_proposal_approval_sms_events': `
+    CREATE TABLE IF NOT EXISTS proposal_approval_sms_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID REFERENCES proposals(id),
+      direction TEXT NOT NULL CHECK (direction IN ('outbound', 'inbound')),
+      message_sid TEXT NOT NULL,
+      owner_e164 TEXT NOT NULL,
+      body_preview TEXT NOT NULL,
+      inbound_action TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT uq_proposal_approval_sms_message_sid UNIQUE (message_sid)
+    );
+    CREATE INDEX IF NOT EXISTS idx_proposal_approval_sms_tenant_proposal
+      ON proposal_approval_sms_events (tenant_id, proposal_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_proposal_approval_sms_tenant_phone
+      ON proposal_approval_sms_events (tenant_id, owner_e164, created_at DESC);
+    ALTER TABLE proposal_approval_sms_events ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_proposal_approval_sms_events ON proposal_approval_sms_events;
+    CREATE POLICY tenant_isolation_proposal_approval_sms_events ON proposal_approval_sms_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS proposal_sms_edit_sessions (
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID NOT NULL REFERENCES proposals(id),
+      owner_user_id UUID NOT NULL REFERENCES users(id),
+      opened_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      expires_at TIMESTAMPTZ NOT NULL,
+      PRIMARY KEY (tenant_id, owner_user_id)
+    );
+    ALTER TABLE proposal_sms_edit_sessions ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_proposal_sms_edit_sessions ON proposal_sms_edit_sessions;
+    CREATE POLICY tenant_isolation_proposal_sms_edit_sessions ON proposal_sms_edit_sessions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // PHOTO-INVOICE + client_visible on job photos for Client Hub.
+  '185_invoice_photos_and_client_visible': `
+    ALTER TABLE job_photos
+      ADD COLUMN IF NOT EXISTS client_visible BOOLEAN NOT NULL DEFAULT false;
+
+    CREATE TABLE IF NOT EXISTS invoice_photos (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      invoice_id UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+      uploaded_by_user_id TEXT NOT NULL,
+      file_id UUID NOT NULL REFERENCES files(id),
+      category TEXT NOT NULL DEFAULT 'other'
+        CHECK (category IN ('before','after','problem','completion','other')),
+      notes TEXT,
+      taken_at TIMESTAMPTZ,
+      client_visible BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_invoice_photos_tenant_invoice
+      ON invoice_photos(tenant_id, invoice_id);
+    ALTER TABLE invoice_photos ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_invoice_photos ON invoice_photos;
+    CREATE POLICY tenant_isolation_invoice_photos ON invoice_photos
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P23 — job checklists + completion gating.
+  '186_job_checklists': `
+    CREATE TABLE IF NOT EXISTS job_checklists (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      items JSONB NOT NULL DEFAULT '[]',
+      completed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    ALTER TABLE job_checklists ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_checklists ON job_checklists;
+    CREATE POLICY tenant_isolation_job_checklists ON job_checklists
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // RV-116 fix — RLS-safe cross-tenant drain for the dropped-call recovery sweep.
+  '187_dropped_call_recoveries_due_fn': `
+    DO $do$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'find_due_dropped_call_recoveries') THEN
+        CREATE FUNCTION find_due_dropped_call_recoveries(p_now TIMESTAMPTZ, p_limit INT)
+        RETURNS SETOF dropped_call_recoveries
+        LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+        AS $fn$
+          SELECT *
+            FROM dropped_call_recoveries
+           WHERE sent_at IS NULL
+             AND suppressed_reason IS NULL
+             AND scheduled_for <= p_now
+           ORDER BY scheduled_for ASC
+           LIMIT p_limit
+        $fn$;
+      END IF;
+    END $do$;
+  `,
+
+  // FORCE RLS on the remaining PR #557 tables that shipped ENABLE + policy but no
+  // FORCE (digest_entries handled by main's 177_digest_entries above).
+  '188_force_rls_pr557_tables': `
+    ALTER TABLE proposal_approval_sms_events FORCE ROW LEVEL SECURITY;
+    ALTER TABLE proposal_sms_edit_sessions FORCE ROW LEVEL SECURITY;
+    ALTER TABLE invoice_photos FORCE ROW LEVEL SECURITY;
+    ALTER TABLE job_checklists FORCE ROW LEVEL SECURITY;
+  `,
+
 };
 
 function makePoliciesIdempotent(sql: string): string {

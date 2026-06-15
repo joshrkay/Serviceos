@@ -181,6 +181,8 @@ export enum ProposalType {
   CANCEL_APPOINTMENT = 'cancel_appointment',
   VOICE_CLARIFICATION = 'voice_clarification',
   ADD_NOTE = 'add_note',
+  ATTACH_JOB_PHOTO = 'attach_job_photo',
+  ATTACH_INVOICE_PHOTO = 'attach_invoice_photo',
   SEND_INVOICE = 'send_invoice',
   SEND_ESTIMATE = 'send_estimate',
   SEND_ESTIMATE_NUDGE = 'send_estimate_nudge',

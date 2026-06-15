@@ -153,7 +153,9 @@ approves by screen/SMS tap).
   "handlerNoOnramp": [
     "create_invoice_schedule",
     "review_response_proposal",
-    "create_booking"
+    "create_booking",
+    "attach_job_photo",
+    "attach_invoice_photo"
   ],
   "gated": ["approve_proposal", "reject_proposal", "edit_proposal"]
 }

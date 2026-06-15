@@ -13,6 +13,7 @@ import { createIntegrationResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
+import { TwilioRecordingControl } from './telephony/recording-control';
 import { createBusinessPhoneDispatcherResolver } from './telephony/dispatcher-phone-resolver';
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
@@ -110,13 +111,21 @@ import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
 import { createJobFilesRouter } from './routes/job-files';
 import { createJobPhotosRouter } from './routes/job-photos';
-import { JobPhotoService } from './jobs/job-photo-service';
-import { InMemoryJobPhotoRepository } from './jobs/job-photo';
-import { PgJobPhotoRepository } from './jobs/pg-job-photo';
+import { createInvoicePhotosRouter } from './routes/invoice-photos';
 import { createAttachmentsRouter } from './routes/attachments';
+import { createJobChecklistsRouter } from './routes/job-checklists';
+import { JobPhotoService } from './jobs/job-photo-service';
 import { AttachmentService } from './attachments/attachment-service';
 import { InMemoryAttachmentRepository } from './attachments/attachment';
 import { PgAttachmentRepository } from './attachments/pg-attachment';
+import { InMemoryJobPhotoRepository } from './jobs/job-photo';
+import { PgJobPhotoRepository } from './jobs/pg-job-photo';
+import { InMemoryInvoicePhotoRepository } from './invoices/invoice-photo';
+import { PgInvoicePhotoRepository } from './invoices/pg-invoice-photo';
+import { InvoicePhotoService } from './invoices/invoice-photo-service';
+import { InMemoryJobChecklistRepository } from './jobs/checklist';
+import { PgJobChecklistRepository } from './jobs/pg-checklist';
+import { createDroppedCallHandlerDeps } from './sms/recovery/wiring';
 import { createDispatchRoutes } from './dispatch/routes';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
@@ -323,7 +332,9 @@ import { PgReviewPollStateRepository } from './reputation/poll-state';
 import { PgServiceCreditRepository } from './reputation/pg-service-credit';
 import { PgGoogleBusinessReplyResolver } from './reputation/pg-google-business-reply-resolver';
 import { MessageDeliveryReviewPrivateMessageSender } from './reputation/private-message-sender-adapter';
-import { NoopBrandVoiceLoader } from './reputation/brand-voice';
+import { SettingsBrandVoiceLoader } from './reputation/settings-brand-voice-loader';
+import { createQboRouter } from './integrations/accounting/qbo-router';
+import { createPayrollExportRouter } from './routes/payroll-export';
 import { PgCustomerLoader } from './reputation/match-customer';
 import { createCredentialResolver } from './integrations/credentials';
 import { InMemoryAgreementRepository } from './agreements/agreement';
@@ -463,6 +474,7 @@ import { runAppointmentReminderSweep } from './workers/appointment-reminder-work
 import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
 import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
+import { PgConsentEventRepository, InMemoryConsentEventRepository } from './compliance/consent-events';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import {
   registerKeywordHandler,
@@ -479,25 +491,29 @@ import {
 } from './sms/recovery/scheduler';
 import { createDroppedCallResumeHandler } from './sms/recovery/resume-handler';
 import {
-  PgConsentEventRepository,
-  InMemoryConsentEventRepository,
-} from './compliance/consent-events';
-import { TwilioRecordingControl } from './telephony/recording-control';
-// RV-050 — inbound MMS photo ingestion from registered tech phones.
-// P0-009: the webhook seam enqueues; the worker runs the pipeline.
-import {
-  registerMmsIngestHandler,
-  createTwilioMediaFetcher,
-} from './sms/tech-status/mms-ingest';
-import { createMmsIngestWorker } from './workers/mms-ingest-worker';
-import {
   registerProposalReplySms,
-  PgProposalSmsEventRepository,
-  InMemoryProposalSmsEventRepository,
-  createProposalSmsEvent,
   createLlmEditInterpreter,
+  createProposalSmsEvent,
+  InMemoryProposalSmsEventRepository,
+  PgProposalSmsEventRepository,
   type OutboundAnchorKind,
 } from './proposals/sms';
+import {
+  registerProposalApprovalKeywords,
+  InMemoryProposalSmsEventRepository as InMemoryLegacyProposalSmsEventRepository,
+  PgProposalSmsEventRepository as PgLegacyProposalSmsEventRepository,
+} from './sms/proposal-approval';
+import {
+  registerTechStatusKeywords,
+  PgTechStatusTodayRepository,
+  InMemoryTechStatusTodayRepository,
+  registerMmsIngestHandler,
+  createTwilioMediaFetcher,
+} from './sms/tech-status';
+import { createMmsIngestWorker } from './workers/mms-ingest-worker';
+import { PgUnavailableBlockRepository } from './availability/pg-unavailable-block';
+import { handleDigestAckSms } from './sms/digest/handler';
+import { runDroppedCallRecoverySweep } from './workers/dropped-call-worker';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -847,7 +863,9 @@ export function createApp(): express.Express {
   // InMemory for now — wiring its Pg variant (table from migration 116) is a
   // separate, out-of-scope change. InMemory variants stay for tests / no-pool.
   const workingHoursRepo       = pool ? new PgWorkingHoursRepository(pool)     : new InMemoryWorkingHoursRepository();
-  const unavailableBlockRepo   = new InMemoryUnavailableBlockRepository();
+  const unavailableBlockRepo   = pool
+    ? new PgUnavailableBlockRepository(pool)
+    : new InMemoryUnavailableBlockRepository();
   const travelTimeProvider     = createTravelTimeProvider(process.env);
   const skillMatcher           = new StubSkillMatcher();
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
@@ -1000,6 +1018,18 @@ export function createApp(): express.Express {
   const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
     process.env as NodeJS.ProcessEnv
   );
+  const jobPhotoService = new JobPhotoService(jobPhotoRepo, fileRepo, storageProvider);
+  const invoicePhotoRepo = pool
+    ? new PgInvoicePhotoRepository(pool)
+    : new InMemoryInvoicePhotoRepository();
+  const invoicePhotoService = new InvoicePhotoService(
+    invoicePhotoRepo,
+    fileRepo,
+    storageProvider,
+  );
+  const jobChecklistRepo = pool
+    ? new PgJobChecklistRepository(pool)
+    : new InMemoryJobChecklistRepository();
 
   const canonicalPackRegistry = pool
     ? new PgVerticalPackRegistry(pool)
@@ -1121,6 +1151,27 @@ export function createApp(): express.Express {
         publicBaseUrl,
       })
     : undefined;
+
+  const droppedCallRecoveryLogger = createLogger({
+    service: 'dropped-call-recovery',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  const droppedCallRecoveryRepo = pool
+    ? new PgDroppedCallRecoveryRepository(pool)
+    : new InMemoryDroppedCallRecoveryRepository();
+  const droppedCallScheduler = new DroppedCallScheduler(droppedCallRecoveryRepo, droppedCallRecoveryLogger);
+  const droppedCallHandlerDeps =
+    pool && messageDelivery && droppedCallRecoveryRepo
+      ? createDroppedCallHandlerDeps({
+          pool,
+          auditRepo,
+          settingsRepo,
+          voiceSessionRepo,
+          delivery: messageDelivery,
+          gateway: llmGateway,
+          logger: droppedCallRecoveryLogger,
+        })
+      : undefined;
 
   // ── P12-004 wiring — one-tap approve (unsupervised queue_and_sms) ────────
   // HMAC secret for the single-use approve token in the owner SMS. In prod /
@@ -1448,6 +1499,8 @@ export function createApp(): express.Express {
     timeEntryService: new TimeEntryService(timeEntryRepo, auditRepo),
     feedbackRepo: feedbackRequestRepo,
     delayNotificationService,
+    jobPhotoService,
+    invoicePhotoService,
     // RV-141 — emergency_dispatch owner page goes through the same
     // delivery provider as every other dispatch SMS.
     ...(messageDelivery ? { emergencySmsSender: messageDelivery } : {}),
@@ -1614,13 +1667,16 @@ export function createApp(): express.Express {
     batchInvoice: 590007,
     callMeBack: 590008,
     dailyDigest: 590009,
+    droppedCall: 590010,
     // RV-132 — recording retention purge. 590010 is reserved by a parallel
     // track; this sweep owns 590011.
     recordingRetention: 590011,
     supervisorAnnotate: 590012,
     accountingSync: 590013,
-    digest: 590014,
     hfcrWeeklySend: 590014,
+    // P5-020 end-of-day digest sweep — distinct id (merge collided it with
+    // dailyDigest/hfcrWeeklySend; advisory-lock ids must be unique per sweep).
+    digest: 590015,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -1687,6 +1743,57 @@ export function createApp(): express.Express {
     appointmentRepo,
     assignmentRepo,
   });
+  const legacyProposalSmsEventRepo = pool
+    ? new PgLegacyProposalSmsEventRepository(pool)
+    : new InMemoryLegacyProposalSmsEventRepository();
+  registerProposalApprovalKeywords(
+    {
+      userRepo,
+      proposalRepo,
+      smsEventRepo: legacyProposalSmsEventRepo,
+      auditRepo,
+      ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
+    },
+    { overwrite: true },
+  );
+
+  // P5-020 — main's digest entry repo (status / source_data / owner_reply
+  // model), shared by the SMS "LOOKS GOOD" ack handler and the hourly digest
+  // sweep below. Pg-only; the SMS ack and the sweep both no-op without a pool.
+  const digestEntryRepo = pool ? new PgDigestEntryRepository(pool) : null;
+  if (digestEntryRepo) {
+    registerKeywordHandler(
+      {
+        keywords: ['looks', 'good', 'looks good'],
+        handle: (ctx) =>
+          handleDigestAckSms(ctx, { userRepo, digestRepo: digestEntryRepo, settingsRepo }),
+      },
+      { overwrite: true },
+    );
+  }
+
+  const techStatusTodayRepo = pool
+    ? new PgTechStatusTodayRepository(pool)
+    : new InMemoryTechStatusTodayRepository();
+  registerTechStatusKeywords(
+    {
+      userRepo,
+      settingsRepo,
+      unavailableBlockRepo,
+      techStatusTodayRepo,
+      auditRepo,
+      rescheduleDeps: {
+        appointmentRepo,
+        assignmentRepo,
+        proposalRepo,
+        jobRepo,
+        customerRepo,
+        brandVoiceDeps: { gateway: llmGateway, settingsRepo },
+      },
+    },
+    { overwrite: true },
+  );
+
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
     gateway: llmGateway,
     proposalRepo,
@@ -1972,6 +2079,7 @@ export function createApp(): express.Express {
         ? new PgTenantTransactionRunner(pool)
         : new InMemoryTransactionRunner(),
       paymentLinkProvider,
+      jobPhotoService: new JobPhotoService(jobPhotoRepo, fileRepo, storageProvider),
       // #6 phase 4 — card-on-file for membership auto-billing.
       customerPaymentMethodRepo,
       stripeConfig: process.env.STRIPE_SECRET_KEY
@@ -2200,19 +2308,8 @@ export function createApp(): express.Express {
   const dailyDigestRepo = pool
     ? new PgDailyDigestRepository(pool)
     : new InMemoryDailyDigestRepository();
-  // RV-115/RV-116 — durable dropped-call recovery: the scheduler persists
-  // the FSM context snapshot at termination; the resume handler picks the
-  // thread back up when the caller replies to the recovery SMS.
-  const droppedCallRecoveryRepo = pool
-    ? new PgDroppedCallRecoveryRepository(pool)
-    : new InMemoryDroppedCallRecoveryRepository();
-  const droppedCallScheduler = new DroppedCallScheduler(
-    droppedCallRecoveryRepo,
-    createLogger({
-      service: 'sms.dropped-call-recovery',
-      environment: process.env.NODE_ENV || 'development',
-    }),
-  );
+  // RV-115/RV-116 — inbound SMS resume uses the dropped-call recovery repo/scheduler
+  // created near the voice-session store so all recovery paths share one durable tail.
   if (messageDelivery) {
     registerRecoveryResumeHandler(
       createDroppedCallResumeHandler({
@@ -2320,6 +2417,7 @@ export function createApp(): express.Express {
     store: voiceSessionStore,
     gateway: llmGateway,
     ...(pool ? { pool } : {}),
+    ...(droppedCallScheduler ? { droppedCallScheduler } : {}),
     proposalRepo,
     ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
     auditRepo,
@@ -2442,7 +2540,10 @@ export function createApp(): express.Express {
   // off — when off, the existing Gather adapter remains the only
   // telephony surface. When on, /voice returns a <Connect><Stream/>
   // TwiML and audio flows over the WebSocket attached below.
-  const mediaStreamsEnabled = process.env.TWILIO_MEDIA_STREAMS_ENABLED === 'true';
+  const mediaStreamsEnabled =
+    process.env.TWILIO_MEDIA_STREAMS_DISABLED !== 'true' &&
+    (process.env.TWILIO_MEDIA_STREAMS_ENABLED === 'true' ||
+      process.env.TWILIO_MEDIA_STREAMS_DEFAULT_ON === 'true');
 
   // Per-tenant Twilio token + tenant-id resolvers, keyed off
   // tenant_integrations. Falls back to the legacy single-account env
@@ -3119,6 +3220,17 @@ export function createApp(): express.Express {
       auditRepo,
     })
   );
+  app.use('/api/jobs', createJobChecklistsRouter(jobChecklistRepo));
+  app.use(
+    '/api/invoices',
+    createInvoicePhotosRouter({
+      service: invoicePhotoService,
+      fileRepo,
+      storage: storageProvider,
+      bucket: storageBucket,
+      auditRepo,
+    }),
+  );
   app.use(
     '/api/attachments',
     createAttachmentsRouter({
@@ -3522,6 +3634,8 @@ export function createApp(): express.Express {
     ),
   );
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry, auditRepo));
+  app.use('/api/integrations/qbo', createQboRouter());
+  app.use('/api/reports/payroll', createPayrollExportRouter());
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
   app.use('/api/vertical-training-assets', createVerticalTrainingAssetsRouter(trainingAssetService));
   app.use('/api/templates', createTemplateRouter(templateRepo, auditRepo));
@@ -4051,6 +4165,22 @@ export function createApp(): express.Express {
     service: 'estimate-reminder-worker',
     environment: process.env.NODE_ENV || 'development',
   });
+  if (droppedCallRecoveryRepo && droppedCallHandlerDeps) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.droppedCall, async () => {
+        await runDroppedCallRecoverySweep({
+          repo: droppedCallRecoveryRepo,
+          handlerDeps: droppedCallHandlerDeps,
+          logger: droppedCallRecoveryLogger,
+        });
+      }).catch((err) => {
+        droppedCallRecoveryLogger.error('Dropped-call sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 30_000));
+  }
+
   if (sendService) {
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.estimateReminder, async () => {
@@ -4123,7 +4253,7 @@ export function createApp(): express.Express {
   // missing, we log a one-shot warning so ops can see "ingestion only,
   // no proposals being created" without grepping the per-tick logs.
   const googleReviewsCustomerLoader = pool ? new PgCustomerLoader(pool) : null;
-  const googleReviewsBrandVoiceLoader = new NoopBrandVoiceLoader();
+  const googleReviewsBrandVoiceLoader = new SettingsBrandVoiceLoader(settingsRepo);
   const googleReviewsProposalEmission =
     serviceCreditRepo && googleReviewsCustomerLoader
       ? {
@@ -4183,7 +4313,7 @@ export function createApp(): express.Express {
     service: 'digest-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  const digestEntryRepo = pool ? new PgDigestEntryRepository(pool) : null;
+  // digestEntryRepo is constructed once near the SMS digest-ack registration.
   registerInterval(setInterval(() => {
     if (!digestEntryRepo) return;
     void runAsLeader(SWEEP_LOCK.digest, async () => {
@@ -4227,6 +4357,7 @@ export function createApp(): express.Express {
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     ...(pool ? { pool } : {}),
+    ...(droppedCallScheduler ? { droppedCallScheduler } : {}),
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,

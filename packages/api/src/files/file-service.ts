@@ -110,6 +110,10 @@ const ALLOWED_CONTENT_TYPES = [
   'audio/wav',
   'audio/ogg',
   'audio/webm',
+  // Safari / iOS MediaRecorder emits audio/mp4 (the global voice recorder's
+  // first supported candidate there); without it those uploads 400 before
+  // transcription. OpenAI transcription accepts mp4/m4a.
+  'audio/mp4',
   'text/plain',
   'application/json',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',

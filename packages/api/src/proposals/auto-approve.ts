@@ -440,6 +440,12 @@ export interface RouteUnsupervisedProposalInput {
   /** Short human label for the SMS body, e.g. "New booking for Jane D." */
   summaryText?: string;
   /**
+   * P2-034 — when provided, outbound SMS uses the keyword transport renderer
+   * (summary + confidence markers + APPROVE/EDIT/REJECT) with the one-tap
+   * link appended as a fallback.
+   */
+  smsBody?: string;
+  /**
    * P2-034 — full SMS body builder (proposal summary + key facts + reply
    * tokens + the one-tap link). When absent the legacy link-only body is
    * sent, so existing callers keep their exact behavior.

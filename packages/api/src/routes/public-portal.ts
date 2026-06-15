@@ -20,6 +20,7 @@
 import { NextFunction, Response, Router } from 'express';
 import { z } from 'zod';
 import { toErrorResponse } from '../shared/errors';
+import { isUuid } from '../shared/uuid';
 import { CustomerRepository } from '../customers/customer';
 import { EstimateRepository } from '../estimates/estimate';
 import { InvoiceRepository, Invoice } from '../invoices/invoice';
@@ -60,6 +61,7 @@ import {
   createPortalTokenMiddleware,
   PortalTokenMiddlewareOptions,
 } from '../portal/portal-token-middleware';
+import type { JobPhotoService } from '../jobs/job-photo-service';
 
 export interface PublicPortalDeps {
   portalRepo: PortalSessionRepository;
@@ -91,6 +93,8 @@ export interface PublicPortalDeps {
   stripeFetch?: StripeFetch;
   /** Test override for the token middleware (rate limit / clock). */
   middlewareOptions?: PortalTokenMiddlewareOptions;
+  /** PHOTO-PORTAL — client-visible job photos for Customer Hub. */
+  jobPhotoService?: JobPhotoService;
 }
 
 const requestServiceSchema = z.object({
@@ -315,6 +319,41 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         ),
       );
       res.json({ invoices: enriched });
+    } catch (err) {
+      const { statusCode, body } = toErrorResponse(err);
+      res.status(statusCode).json(body);
+    }
+  });
+
+  router.get('/:token/jobs/:jobId/photos', async (req: PortalRequest, res: Response) => {
+    if (!ensurePortal(req, res)) return;
+    if (!deps.jobPhotoService) {
+      res.status(503).json({ error: 'PHOTO_SERVICE_UNAVAILABLE' });
+      return;
+    }
+    try {
+      if (!isUuid(req.params.jobId)) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid jobId' });
+        return;
+      }
+      const { tenantId, customerId } = req.portal!;
+      const job = await deps.jobRepo.findById(tenantId, req.params.jobId);
+      if (!job || job.customerId !== customerId) {
+        res.status(404).json({ error: 'JOB_NOT_FOUND' });
+        return;
+      }
+      const photos = await deps.jobPhotoService.listJobPhotos(tenantId, job.id);
+      res.json({
+        photos: photos
+          .filter((p) => p.clientVisible === true)
+          .map((p) => ({
+            id: p.id,
+            category: p.category,
+            notes: p.notes ?? null,
+            takenAt: p.takenAt?.toISOString() ?? null,
+            downloadUrl: p.downloadUrl,
+          })),
+      });
     } catch (err) {
       const { statusCode, body } = toErrorResponse(err);
       res.status(statusCode).json(body);

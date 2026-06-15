@@ -4,6 +4,7 @@ import { emitProposalsChanged } from '../../lib/proposal-events';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatInTenantTz } from '../../utils/formatInTenantTz';
 import { ProposalChainCard, ChainRow } from './ProposalChainCard';
+import { ClarificationPicker, type EntityCandidate } from './ClarificationPicker';
 
 type Urgency = 'critical' | 'high' | 'normal' | 'low';
 
@@ -15,14 +16,13 @@ interface InboxProposalRow {
     status: string;
     createdAt: string;
     expiresAt?: string;
-    // Multi-action chaining: present on proposals decomposed from one
-    // utterance. The inbox serializes the full proposal, so these ride
-    // through without an API change.
+    payload?: Record<string, unknown>;
     chainId?: string;
     sourceContext?: Record<string, unknown>;
   };
   urgency: Urgency;
   reason?: string;
+  confidenceMarkers?: string[];
 }
 
 /**
@@ -185,6 +185,46 @@ export function InboxPage() {
     }
   }
 
+  async function patchProposal(
+    proposalId: string,
+    edits: Record<string, unknown>,
+  ): Promise<void> {
+    const res = await apiFetch(`/api/proposals/${proposalId}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ edits }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = (await res.json()) as { proposal: InboxProposalRow['proposal'] };
+    setRows((prev) =>
+      prev.map((r) =>
+        r.proposal.id === proposalId ? { ...r, proposal: body.proposal } : r,
+      ),
+    );
+    emitProposalsChanged();
+  }
+
+  function clarificationCandidates(
+    row: InboxProposalRow,
+  ): { candidates: EntityCandidate[]; entityKind?: string } | null {
+    if (row.proposal.proposalType !== 'voice_clarification') return null;
+    const payload = row.proposal.payload;
+    if (!payload || payload.reason !== 'ambiguous_entity') return null;
+    const raw = payload.entityCandidates;
+    if (!Array.isArray(raw) || raw.length === 0) return null;
+    const candidates = raw.filter(
+      (c): c is EntityCandidate =>
+        typeof c === 'object' &&
+        c !== null &&
+        typeof (c as EntityCandidate).id === 'string' &&
+        typeof (c as EntityCandidate).label === 'string',
+    );
+    if (candidates.length === 0) return null;
+    const kind =
+      typeof payload.entityKind === 'string' ? payload.entityKind : 'customer';
+    return { candidates, entityKind: kind };
+  }
+
   const feed = groupIntoFeed(rows);
 
   return (
@@ -230,6 +270,7 @@ export function InboxPage() {
             }
             const { row } = item;
             const badge = URGENCY_BADGE[row.urgency];
+            const clarification = clarificationCandidates(row);
             return (
               <li
                 key={row.proposal.id}
@@ -249,6 +290,27 @@ export function InboxPage() {
                       <p className="text-xs text-amber-700 mt-0.5">{holdExpiryLine(row, tz)}</p>
                     )}
                     {row.reason && <p className="text-xs text-slate-500 mt-0.5">{row.reason}</p>}
+                    {row.confidenceMarkers && row.confidenceMarkers.length > 0 && (
+                      <p
+                        className="text-xs text-amber-700 mt-1"
+                        data-testid="confidence-markers"
+                      >
+                        Not sure: {row.confidenceMarkers.join('; ')}
+                      </p>
+                    )}
+                    {clarification ? (
+                      <ClarificationPicker
+                        proposalId={row.proposal.id}
+                        candidates={clarification.candidates}
+                        entityKind={clarification.entityKind}
+                        onPatch={patchProposal}
+                        onResolved={() => {
+                          setRows((prev) =>
+                            prev.filter((r) => r.proposal.id !== row.proposal.id),
+                          );
+                        }}
+                      />
+                    ) : null}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <button

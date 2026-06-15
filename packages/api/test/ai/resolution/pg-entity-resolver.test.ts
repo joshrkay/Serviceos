@@ -26,6 +26,7 @@ interface MockRow {
   summary?: string;
   status?: string | null;
   invoice_number?: string;
+  estimate_number?: string;
   scheduled_start?: string;
   score?: number;
 }
@@ -435,21 +436,32 @@ describe('PgEntityResolver — appointment', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Estimate kind → skipped (no index defined)
+// Estimate resolution
 // ---------------------------------------------------------------------------
 
 describe('PgEntityResolver — estimate', () => {
-  it('estimate kind always returns skipped', async () => {
-    const { pool } = makeMockPool([]);
+  it('estimate kind resolves when estimate_number matches', async () => {
+    const { pool } = makeMockPool([
+      [],
+      [
+        {
+          id: 'est-1',
+          estimate_number: 'EST-1001',
+          status: 'draft',
+          score: 0.95,
+        },
+      ],
+    ]);
     const resolver = new PgEntityResolver(pool);
-
     const result = await resolver.resolve({
       tenantId: TENANT_ID,
-      reference: 'EST-001',
+      reference: 'EST-1001',
       kind: 'estimate',
     });
-
-    expect(result.kind).toBe('skipped');
+    expect(result.kind).toBe('resolved');
+    if (result.kind === 'resolved') {
+      expect(result.candidate.id).toBe('est-1');
+    }
   });
 });
 

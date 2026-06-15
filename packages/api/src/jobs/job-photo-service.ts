@@ -204,4 +204,15 @@ export class JobPhotoService {
 
     return deleted;
   }
+
+  async setClientVisible(
+    tenantId: string,
+    jobId: string,
+    photoId: string,
+    clientVisible: boolean,
+  ): Promise<JobPhoto | null> {
+    const photo = await this.repo.findById(tenantId, photoId);
+    if (!photo || photo.jobId !== jobId) return null;
+    return this.repo.updateClientVisible(tenantId, photoId, clientVisible);
+  }
 }

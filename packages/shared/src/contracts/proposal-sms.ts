@@ -1,106 +1,69 @@
 /**
- * P2-034 — SMS approval transport reply contract.
- *
- * When a proposal is routed to the owner via SMS (unsupervised
- * `queue_and_sms`), the body invites three reply tokens:
- *
- *   APPROVE (or Y)  → approve the proposal through the existing approval
- *                     path (execution, undo window, audits all unchanged)
- *   REJECT  (or N)  → reject; any text after the token is the reason
- *   EDIT            → open a 10-minute edit session; the next message is
- *                     the requested change
- *
- * This module is the single typed contract for parsing those replies so
- * the API handler (consumer) and any future surface that renders the
- * invitation (producer) agree on the accepted tokens. The parser is
- * deliberately tolerant — the owner is typing with gloves on, in a truck:
- * capitalization, leading whitespace/punctuation, and the most common
- * typos all resolve to the intended action. Anything else is
- * `unrecognized` and triggers a one-time clarification, never a guess.
+ * P2-034 — SMS approval transport keywords and event shapes.
  */
-import { z } from 'zod';
-
-export const PROPOSAL_SMS_REPLY_INTENTS = [
+export const PROPOSAL_APPROVE_KEYWORDS = [
   'approve',
-  'reject',
-  'edit',
-  'unrecognized',
-] as const;
-
-export type ProposalSmsReplyIntent = (typeof PROPOSAL_SMS_REPLY_INTENTS)[number];
-
-/**
- * Accepted first tokens per intent, lowercase. Includes the common
- * typo/casual variants the review prompt calls out (`YES`, `OK`,
- * `approve`). Tokens must stay unique across intents AND must not collide
- * with other registered inbound-SMS keywords (STOP/START compliance,
- * OUT/SICK/UNAVAILABLE tech status).
- */
-export const APPROVE_TOKENS = [
   'y',
   'yes',
-  'yess',
-  'yep',
-  'yeah',
   'ok',
-  'okay',
-  'approve',
-  'approved',
-  'aprove',
 ] as const;
 
-export const REJECT_TOKENS = [
-  'n',
-  'no',
-  'nope',
-  'reject',
-  'rejected',
-  'decline',
-  'deny',
+export const PROPOSAL_REJECT_KEYWORDS = ['reject', 'n', 'no'] as const;
+
+export const PROPOSAL_EDIT_KEYWORDS = ['edit'] as const;
+
+export type ProposalApproveKeyword = (typeof PROPOSAL_APPROVE_KEYWORDS)[number];
+export type ProposalRejectKeyword = (typeof PROPOSAL_REJECT_KEYWORDS)[number];
+export type ProposalEditKeyword = (typeof PROPOSAL_EDIT_KEYWORDS)[number];
+
+export const ALL_PROPOSAL_SMS_KEYWORDS = [
+  ...PROPOSAL_APPROVE_KEYWORDS,
+  ...PROPOSAL_REJECT_KEYWORDS,
+  ...PROPOSAL_EDIT_KEYWORDS,
 ] as const;
 
-export const EDIT_TOKENS = ['edit', 'change', 'modify', 'fix'] as const;
+export type ProposalSmsDirection = 'outbound' | 'inbound';
 
-const INTENT_BY_TOKEN: ReadonlyMap<string, ProposalSmsReplyIntent> = new Map([
-  ...APPROVE_TOKENS.map((t) => [t, 'approve'] as const),
-  ...REJECT_TOKENS.map((t) => [t, 'reject'] as const),
-  ...EDIT_TOKENS.map((t) => [t, 'edit'] as const),
-]);
-
-export const ProposalSmsReplySchema = z.object({
-  intent: z.enum(PROPOSAL_SMS_REPLY_INTENTS),
-  /**
-   * Everything after the recognized token, trimmed. Carries the rejection
-   * reason ("N too expensive") or, for `unrecognized`, the full normalized
-   * body so the clarification/edit-capture path can use it.
-   */
-  remainder: z.string(),
-});
-
-export type ProposalSmsReply = z.infer<typeof ProposalSmsReplySchema>;
-
-/**
- * Strip the leading/trailing punctuation an owner's reply commonly picks
- * up ("Yes!", "'approve'", "ok.") so token matching sees the bare word.
- */
-function bareToken(raw: string): string {
-  return raw.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
+export interface ProposalSmsEventRecord {
+  id: string;
+  tenantId: string;
+  proposalId: string;
+  direction: ProposalSmsDirection;
+  messageSid: string;
+  ownerE164: string;
+  bodyPreview: string;
+  createdAt: Date;
 }
 
-/**
- * Parse an inbound SMS body into a reply intent. Pure, total — never
- * throws. Unknown or empty bodies come back `unrecognized` with the
- * trimmed body as remainder so the caller can run the
- * clarify-once-then-escalate flow.
- */
-export function parseProposalSmsReply(body: string): ProposalSmsReply {
-  const trimmed = (body ?? '').trim();
-  if (!trimmed) return { intent: 'unrecognized', remainder: '' };
 
-  const [first = '', ...rest] = trimmed.split(/\s+/);
-  const token = bareToken(first.toLowerCase());
-  const intent = INTENT_BY_TOKEN.get(token);
-  if (!intent) return { intent: 'unrecognized', remainder: trimmed };
+export const APPROVE_TOKENS = PROPOSAL_APPROVE_KEYWORDS;
+export const REJECT_TOKENS = PROPOSAL_REJECT_KEYWORDS;
+export const EDIT_TOKENS = PROPOSAL_EDIT_KEYWORDS;
 
-  return { intent, remainder: rest.join(' ').trim() };
+export type ParsedProposalSmsReply =
+  | { intent: 'approve'; remainder: string }
+  | { intent: 'reject'; remainder: string }
+  | { intent: 'edit'; remainder: string }
+  | { intent: 'unrecognized'; remainder: string };
+
+function normalizeReplyBody(body: string): string {
+  return body.trim().replace(/^["'“”‘’]+|["'“”‘’.,!?;:]+$/g, '').trim();
+}
+
+export function parseProposalSmsReply(body: string): ParsedProposalSmsReply {
+  const normalized = normalizeReplyBody(body);
+  if (!normalized) return { intent: 'unrecognized', remainder: '' };
+  const [rawFirst = '', ...rest] = normalized.split(/\s+/);
+  const first = rawFirst.toLowerCase().replace(/[^a-z]/g, '');
+  const remainder = rest.join(' ').trim();
+  if ((APPROVE_TOKENS as readonly string[]).includes(first)) {
+    return { intent: 'approve', remainder };
+  }
+  if ((REJECT_TOKENS as readonly string[]).includes(first)) {
+    return { intent: 'reject', remainder };
+  }
+  if ((EDIT_TOKENS as readonly string[]).includes(first)) {
+    return { intent: 'edit', remainder };
+  }
+  return { intent: 'unrecognized', remainder: normalized };
 }

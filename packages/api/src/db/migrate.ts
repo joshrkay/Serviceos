@@ -1,5 +1,6 @@
 import { createPool } from './pool';
 import { getMigrationSQL } from './schema';
+import { resolveMigrationConnectionString, usingDedicatedMigrationRole } from './migrate-config';
 
 interface PgLikeError {
   code?: string;
@@ -14,11 +15,15 @@ function isDuplicatePolicyError(err: unknown): err is PgLikeError {
 }
 
 async function runMigrations(): Promise<void> {
-  if (!process.env.DATABASE_URL) {
-    console.log('DATABASE_URL not set — skipping migrations');
+  const connectionString = resolveMigrationConnectionString();
+  if (!connectionString) {
+    console.log('DATABASE_URL/MIGRATION_DATABASE_URL not set — skipping migrations');
     return;
   }
-  const pool = createPool();
+  if (usingDedicatedMigrationRole()) {
+    console.log('Running migrations via MIGRATION_DATABASE_URL (dedicated migration role)');
+  }
+  const pool = createPool(connectionString);
   const client = await pool.connect();
   try {
     // Prevent DDL lock waits from stalling startup: ALTER TABLE ENABLE RLS
@@ -26,6 +31,14 @@ async function runMigrations(): Promise<void> {
     // previous deployment still holds open connections.
     await client.query("SET lock_timeout = '5s'");
     await client.query("SET statement_timeout = '25s'");
+    // FORCE ROW LEVEL SECURITY tables carry policies that read
+    // current_setting('app.current_tenant_id'). A non-superuser/non-BYPASSRLS
+    // migration role evaluates those policies during the data-fixup UPDATEs and
+    // errors on the unset GUC ("unrecognized configuration parameter
+    // app.current_tenant_id"). Seed a sentinel tenant so they evaluate cleanly:
+    // the migration set contains no INSERTs and the fixups touch no rows under
+    // the sentinel, and superuser roles bypass RLS so it is a harmless no-op.
+    await client.query("SET app.current_tenant_id = '00000000-0000-0000-0000-000000000000'");
     await client.query(getMigrationSQL());
     console.log('Migrations completed successfully');
   } catch (err) {

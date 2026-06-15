@@ -70,12 +70,6 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['016_create_jobs', 'd13851154b8b98a02c7f73b59d5be99c813b7d04aecef004ace5dc9d39723c31'],
   ['017_create_job_timeline_events', 'b249f4702f2904b120a5b3b6a01d0372e701f768bd2c50e53cea7bedd99f6e47'],
   ['018_create_appointments', '5b9aab1df3fabe35d130752b5af9d7531d7dc92da97a41e7fab601b5cfe6815c'],
-  // 070's region CHECK was changed to NOT VALID on this branch (3db4b4a) — the
-  // runner re-executes every migration on every boot (no ledger) and the named
-  // constraint is DROP'd + re-ADD'd each time, so a validating ADD CONSTRAINT
-  // re-checked all rows and bricked deploys (23514) on any NULL-region row that
-  // the relaxed 088 constraint allows. NOT VALID is the only fix that takes
-  // effect at the 070 step itself; hash regenerated to lock in the edit.
   ['070_tenant_location_and_integrations', '56a32f2c0274b18ebcae94c747dc0885660078edc629b168ce1bc67fb887bea0'],
   ['019_create_appointment_assignments', 'e9394cf3cdc8c89bc8b7f12556d397a86bfdd5a980f3b39af70e45815e98c35b'],
   ['020_create_estimates', 'b4b9e04bbe669956419eb7083e1e8b441db7398aaa8e9e4d80f683c68792cc4d'],
@@ -149,9 +143,6 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['089_drop_vertical_packs_type_check', 'dd41709b4300eb0ed03b2a477bdbe163440c76a557d5c07cdbe3e02910a803b8'],
   ['090_tenant_settings_voice_persona', '95805b86eb94d010c5c231ae4ab641e05debba20464a61888a42ac4809b0dcfb'],
   ['091_voice_session_outcome', '6fea1ddb8c3725191aff36013b7134fe7bf91af7392cc815da7f9c041fcfc59c'],
-  // 092_extend_dispatch_entity_types: added 'appointment_reminder' to the entity_type CHECK
-  // constraint — 11 rows in message_dispatches had this value, causing pg error 23514 on every
-  // deploy (runner re-runs all migrations on every boot, DROP+re-ADD re-validates all rows).
   ['092_extend_dispatch_entity_types', 'cc5d07bbf11a26fb95ec6dc93a8344b24fa44472f89e167e4023bb60da603435'],
   ['092_voice_session_transcript', 'f06ebad750ef6b1a8540d27aa14516f6db350b6debda0ec5cc444ad3a6e37f48'],
   ['093_users_deleted_at', '7d2ed611ca7751641c8cff049b55617e4af203b43257528e7c46c15bd80c127f'],
@@ -217,40 +208,22 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['152_voice_parity_transfer_and_languages', '437c19e7db82a2a1ec8c04d62d433b13ec609dd55315b3fe859fee39bad680a0'],
   ['153_create_call_me_back_tasks', '9b9d430535e2f9d35c71de35e7389198a71ed8946f8262527ed9378535952abe'],
   ['154_call_me_back_session_idempotency', 'a08d1ad3f4a42adb17e2fd5ea464b52fb87721d3dd5fe534c662dd787228c65e'],
-  // QA-2026-06-10: credentials column + google_business provider missing from tenant_integrations
   ['155_tenant_integrations_google_business', 'd626700ea571d2691927cf6adf43704b3bc44aecde7071f3895c1cf801cf2a7f'],
-  // P2-034: SMS approval transport — proposal_sms_events
   ['156_proposal_sms_events', '57fcfceeddded524d51d9d941e139b094dc684e818ea6c5772d561710a72d469'],
-  // P2-034 review: sender-scoped edit sessions
   ['157_proposal_sms_events_from_phone', 'ba440770da6030cbbeb747578d33763768ef56191219f082b3b5233a6d204561'],
-  // P2-034 review: monotonic tiebreaker for latest-render ordering
   ['158_proposal_sms_events_seq', '69e5325add052650a0355aeddab03b016018bf3d3272f63601b468ba32a67b9d'],
-  // RV-001: per-tenant feature flag overrides table
   ['159_create_tenant_feature_flags', 'd30f579a89e543e42fec2f499dfd30b170994696d5f08b43b838a1cff483a319'],
-  // RV-005: generalized attachments foundation (photos & documents on any entity)
   ['160_create_attachments', '25894a97ec6e05ddf8be60c0c90616e0b20355b9425008c334e188e5c21b1d9b'],
-  // RV-006: image post-process pipeline columns on files (dims, thumbnail, exif flag, content hash)
   ['161_files_image_pipeline_columns', '237e44d6cf831a1fa52d972ccbe1de5180b2578f696857c642cc43f50c592464'],
-  // RV-060: end-of-day digest snapshots (CHECK widening moved to 164)
   ['162_create_daily_digests', '2a55425f1609477624a0de73d215b33cff416a1aab7ad2e053619f41c76a702d'],
-  // RV-063: per-tenant digest delivery settings (enabled/time/channel)
   ['163_tenant_settings_digest', '3fb34512c152ba262d2e21e4aa84608374156f89c07d5f71e3cd43d38b718836'],
   ['164_dispatch_entity_daily_digest', '4d3ad093b4319cf786bfd047df3d5898720a4d6712e5037704c5a06fffc492e9'],
-  // RV-074: widen proposal_sms_events kind CHECK for 'review_required_rendered'
   ['165_proposal_sms_events_review_required_kind', '0a1ccd582e840a57ec622344a0a41a690229bfd30b7b9e87b0265c255b1dff56'],
-  // RV-120: per-call vulnerability triage outcomes (turn-batch grader log)
-  // tier CHECK added (none/low/elevated/critical = UrgencyTier enum) — branch-local, pre-deploy
   ['166_create_triage_events', 'a6e1f2eeefc1aba830d600aa36b1635535938bd9a83abc16c371c590f7568147'],
-  // tenant_budget_counters (fixed-window budget counters), both RLS'd.
   ['167_create_supervisor_policies', '6bf3ba1a21e1bc1a829fe4addd9a71cd8e9c64587c23338909df15c0f6988d48'],
-  // RV-130: append-only consent ledger (recording/sms/marketing events)
   ['168_create_consent_events', '6c9ba983361d9dec2a5a28e97ff13b210628cd194d22b6b5bd5b880a4af11970'],
-  // RV-132: per-tenant retention horizon + legal hold + purge tombstone
-  // CHECK (recording_retention_days > 0) added — branch-local, pre-deploy
   ['169_recording_retention', 'aac50e6e535fc4347f0c9f3dc45f27ac8016902bc0fbbceb2b9ba9cd0d033afa'],
-  // RV-115: FSM context snapshot on dropped-call recovery rows
   ['170_dropped_call_recovery_context', 'f05149c2f4fb0fabaa390b35054ba3bd9c8caeb75298cf729992e5a3955d91f6'],
-  // block, never a reply anchor)
   ['171_proposal_sms_events_voice_reapproval_kind', '84e29ec755102c0b5f00bddc21544610d2c6d6e05ad9e20fafad6f0e700b99fe'],
   ['172_create_accounting_integrations', '70acc51d76a63c01b9047b15198502d8ae013bcf0985f457d67a03a405097d33'],
   ['173_create_hfcr_weekly_sends', '2f1846bc7819304ca7af8db0a79f2a8aa99f25f4e076f50f88049122a035e2eb'],
@@ -265,6 +238,12 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['180_correction_lessons', '1b75f1cb10c7754370eb74f2b2b4873375657920429d4839aa372e35ebad8139'],
   ['181_tenant_settings_labor_rate', 'f650607b44e90ac94e357f83ad46fee1dbe74aef2e19dc8134147ec5901195aa'],
   ['182_appointment_type', '0dc29a194dbb25f2a19a53a453044362a86afde22a3a29447e1cc99e512547e1'],
+  ['183_estimate_entity_trgm_index', '5c35bf46e89c5bd9659d8e4dc1c51c8735e5e8c5d956d838ba5f055e64412d39'],
+  ['184_proposal_approval_sms_events', '9a58f38d4c12a65395de6d6fd296f227461d1536f8eba490a995d50d8631b0b5'],
+  ['185_invoice_photos_and_client_visible', 'b26ce21cdbf46812a6d961693c0e21f45048c46c61ebf51db20a914533bb579b'],
+  ['186_job_checklists', '85e7ebb0f66d2b8356b72241acdc586acb0f3e1dabb1cf5f6a62c6d1888ef8b0'],
+  ['187_dropped_call_recoveries_due_fn', '1115a83b60eb95298aa4abc9f05e60db306cbade882dd3c4018c784fa6491b7c'],
+  ['188_force_rls_pr557_tables', '060fda05982bd019f16dee7583fe610a0d1e5d04ae09d962821c5328d594f51d'],
 ];
 
 function hashMigration(value: string): string {

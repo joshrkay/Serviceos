@@ -7,9 +7,9 @@ vi.mock('../../hooks/useDetailQuery', () => ({
   useDetailQuery: vi.fn(),
 }));
 
-vi.mock('../../components/jobs/PhotoBucket', () => ({
-  PhotoBucket: ({ category }: { category: string }) => (
-    <div data-testid={`photo-bucket-${category}`}>photo-bucket-{category}</div>
+vi.mock('../../components/jobs/JobPhotosSection', () => ({
+  JobPhotosSection: ({ jobId }: { jobId: string }) => (
+    <div data-testid="job-photos-section">photos-{jobId}</div>
   ),
 }));
 
@@ -43,14 +43,9 @@ describe('JobDetail', () => {
       expect(screen.getByText('Site Media')).toBeInTheDocument();
     });
 
-    it('renders photo-bucket-before', () => {
+    it('renders job photos section wired to job id', () => {
       render(<JobDetail jobId="1" />);
-      expect(screen.getByTestId('photo-bucket-before')).toBeInTheDocument();
-    });
-
-    it('renders photo-bucket-after', () => {
-      render(<JobDetail jobId="1" />);
-      expect(screen.getByTestId('photo-bucket-after')).toBeInTheDocument();
+      expect(screen.getByTestId('job-photos-section')).toHaveTextContent('photos-1');
     });
   });
 });

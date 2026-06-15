@@ -14,6 +14,7 @@ import { SuppliersSheet } from '../jobs/SuppliersSheet';
 import { apiFetch } from '../../utils/api-fetch';
 import { useMe } from '../../hooks/useMe';
 import { SupervisorBackupSection } from './SupervisorBackupSection';
+import { BrandVoiceSection } from './BrandVoiceSection';
 import { BusinessProfileSheet } from './BusinessProfileSheet';
 import { TerminologySheet } from './TerminologySheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
@@ -799,7 +800,8 @@ export function SettingsPage() {
           so this gate is a UX nicety. Mounted only when role==='owner'
           to avoid rendering disabled UI for dispatchers/techs. */}
       {me?.role === 'owner' && (
-        <div className="px-4 md:px-6 pb-6">
+        <div className="px-4 md:px-6 pb-6 space-y-4">
+          <BrandVoiceSection />
           <SupervisorBackupSection
             initialBackupUserId={me.backup_supervisor_user_id ?? null}
             initialRouting={me.unsupervised_proposal_routing}

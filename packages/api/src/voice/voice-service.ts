@@ -115,7 +115,10 @@ export interface TranscriptionProvider {
   transcribe(audioUrl: string): Promise<{ transcript: string; metadata: Record<string, unknown> }>;
 }
 
-const AUDIO_CONTENT_TYPES = ['audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm'];
+// audio/mp4 covers Safari / iOS MediaRecorder output; keep in sync with the
+// file-upload allow-list (files/file-service.ts) so the global voice recorder
+// works end-to-end on those browsers.
+const AUDIO_CONTENT_TYPES = ['audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm', 'audio/mp4'];
 
 export function validateVoiceIngest(input: IngestVoiceInput, fileContentType?: string): string[] {
   const errors: string[] = [];

@@ -8,13 +8,20 @@
  * `uploader` prop so unit tests can stub it without going near
  * fetch/S3.
  */
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   JobPhoto,
   JobPhotoCategory,
   JOB_PHOTO_CATEGORIES,
   uploadJobPhoto,
 } from '../../api/job-photos';
+import {
+  enqueueOfflinePhoto,
+  fileToBase64,
+  listOfflinePhotos,
+  removeOfflinePhoto,
+  base64ToFile,
+} from '../../lib/offline-photo-queue';
 
 export interface JobPhotoUploaderProps {
   jobId: string;
@@ -50,10 +57,83 @@ export function JobPhotoUploader({
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
+  // P22-004 — drain photos that were queued while offline. The offline branch
+  // of handleFile stores them in IndexedDB but, until now, nothing consumed
+  // them, so they were stranded forever. Drain on mount (the app may load
+  // online with a backlog) and whenever connectivity returns. Uploads use each
+  // item's OWN jobId so a backlog spanning jobs drains too; onUploaded only
+  // fires for this job's gallery. A row is deleted only after its upload
+  // succeeds — a failure just leaves it queued for the next attempt.
+  const uploaderRef = useRef(uploader);
+  const onUploadedRef = useRef(onUploaded);
+  const jobIdRef = useRef(jobId);
+  uploaderRef.current = uploader;
+  onUploadedRef.current = onUploaded;
+  jobIdRef.current = jobId;
+  const drainingRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function drainQueue() {
+      if (drainingRef.current || typeof navigator === 'undefined' || !navigator.onLine) {
+        return;
+      }
+      drainingRef.current = true;
+      try {
+        const pending = await listOfflinePhotos();
+        for (const item of pending) {
+          if (cancelled) break;
+          try {
+            const file = base64ToFile(item.base64, item.fileName, item.contentType);
+            const photo = await uploaderRef.current(
+              item.jobId,
+              file,
+              item.category as JobPhotoCategory,
+              item.notes,
+              item.createdAt,
+            );
+            await removeOfflinePhoto(item.id);
+            if (!cancelled && item.jobId === jobIdRef.current) {
+              onUploadedRef.current?.(photo);
+            }
+          } catch {
+            // Leave the row queued; the next drain retries it.
+          }
+        }
+      } catch {
+        // IndexedDB unavailable (or the list read failed) — nothing to drain.
+      } finally {
+        drainingRef.current = false;
+      }
+    }
+    void drainQueue();
+    window.addEventListener('online', drainQueue);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('online', drainQueue);
+    };
+  }, []);
+
   async function handleFile(file: File) {
     setBusy(true);
     setError(null);
     try {
+      if (!navigator.onLine) {
+        const base64 = await fileToBase64(file);
+        await enqueueOfflinePhoto({
+          id: crypto.randomUUID(),
+          jobId,
+          fileName: file.name,
+          contentType: file.type || 'image/jpeg',
+          base64,
+          category,
+          notes: notes.trim() || undefined,
+          createdAt: new Date().toISOString(),
+        });
+        setNotes('');
+        setError('Saved offline — will upload when back online.');
+        return;
+      }
       const photo = await uploader(
         jobId,
         file,

@@ -18,6 +18,7 @@ function mapRow(row: Record<string, unknown>): JobPhoto {
     category: row.category as JobPhotoCategory,
     notes: (row.notes as string | null) ?? undefined,
     takenAt: row.taken_at ? new Date(row.taken_at as string) : undefined,
+    clientVisible: row.client_visible === true,
     createdAt: new Date(row.created_at as string),
   };
 }
@@ -31,8 +32,9 @@ export class PgJobPhotoRepository extends PgBaseRepository implements JobPhotoRe
     const photo = buildJobPhoto(input);
     return this.withTenant(photo.tenantId, async (client) => {
       const result = await client.query(
-        `INSERT INTO job_photos (id, tenant_id, job_id, uploaded_by_user_id, file_id, category, notes, taken_at, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        `INSERT INTO job_photos
+           (id, tenant_id, job_id, uploaded_by_user_id, file_id, category, notes, taken_at, client_visible, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false, $9)
          RETURNING *`,
         [
           photo.id,
@@ -80,6 +82,23 @@ export class PgJobPhotoRepository extends PgBaseRepository implements JobPhotoRe
         [id, tenantId]
       );
       return (result.rowCount ?? 0) > 0;
+    });
+  }
+
+  async updateClientVisible(
+    tenantId: string,
+    id: string,
+    clientVisible: boolean,
+  ): Promise<JobPhoto | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE job_photos SET client_visible = $3
+         WHERE id = $1 AND tenant_id = $2
+         RETURNING *`,
+        [id, tenantId, clientVisible],
+      );
+      if (result.rows.length === 0) return null;
+      return mapRow(result.rows[0]);
     });
   }
 }

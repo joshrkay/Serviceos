@@ -46,6 +46,7 @@ interface AttachBody {
   category?: string;
   notes?: string;
   takenAt?: string;
+  clientVisible?: boolean;
 }
 
 export interface JobPhotosRouterDeps {
@@ -177,15 +178,18 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
           return;
         }
 
-        const photo = await service.attachPhotoToJob(
+        let photo = await service.attachPhotoToJob(
           tenantId,
           jobId,
           body.fileId,
           body.category,
           body.notes,
           takenAt,
-          req.auth!.userId
+          req.auth!.userId,
         );
+        if (body.clientVisible === true) {
+          photo = (await service.setClientVisible(tenantId, jobId, photo.id, true)) ?? photo;
+        }
 
         await auditRepo.create(
           createAuditEvent({
@@ -199,6 +203,7 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
               photoId: photo.id,
               fileId: photo.fileId,
               category: photo.category,
+              clientVisible: photo.clientVisible === true,
             },
           })
         );
@@ -232,6 +237,37 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
   // intentionally remain so download URLs already shared in
   // (e.g.) audit metadata still resolve. A separate cleanup job
   // can reap orphaned files later.
+  router.patch(
+    '/:id/photos/:photoId',
+    requireAuth,
+    requireTenant,
+    requirePermission('jobs:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const tenantId = req.auth!.tenantId;
+        const clientVisible = (req.body as { clientVisible?: boolean }).clientVisible;
+        if (typeof clientVisible !== 'boolean') {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'clientVisible boolean required' });
+          return;
+        }
+        const photo = await service.setClientVisible(
+          tenantId,
+          req.params.id,
+          req.params.photoId,
+          clientVisible,
+        );
+        if (!photo) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Job photo not found' });
+          return;
+        }
+        res.json(photo);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
   router.delete(
     '/:id/photos/:photoId',
     requireAuth,

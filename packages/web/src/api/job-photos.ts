@@ -27,6 +27,7 @@ export interface JobPhoto {
   category: JobPhotoCategory;
   notes?: string;
   takenAt?: string;
+  clientVisible?: boolean;
   createdAt: string;
   downloadUrl: string;
   filename: string;
@@ -73,6 +74,19 @@ export async function listJobPhotos(jobId: string): Promise<JobPhoto[]> {
   const res = await apiFetch(`/api/jobs/${encodeURIComponent(jobId)}/photos`);
   if (!res.ok) throw new Error(`List failed: ${res.status}`);
   return (await res.json()) as JobPhoto[];
+}
+
+export async function setJobPhotoClientVisible(
+  jobId: string,
+  photoId: string,
+  clientVisible: boolean,
+): Promise<JobPhoto> {
+  const res = await apiFetch(
+    `/api/jobs/${encodeURIComponent(jobId)}/photos/${encodeURIComponent(photoId)}`,
+    { method: 'PATCH', body: JSON.stringify({ clientVisible }) },
+  );
+  if (!res.ok) throw new Error(`Update failed: ${res.status}`);
+  return (await res.json()) as JobPhoto;
 }
 
 export async function deleteJobPhoto(jobId: string, photoId: string): Promise<void> {
