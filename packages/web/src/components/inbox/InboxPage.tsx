@@ -4,6 +4,7 @@ import { emitProposalsChanged } from '../../lib/proposal-events';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatInTenantTz } from '../../utils/formatInTenantTz';
 import { ProposalChainCard, ChainRow } from './ProposalChainCard';
+import { AmbiguityPicker, AmbiguityCandidate } from './AmbiguityPicker';
 
 type Urgency = 'critical' | 'high' | 'normal' | 'low';
 
@@ -19,10 +20,50 @@ interface InboxProposalRow {
     // utterance. The inbox serializes the full proposal, so these ride
     // through without an API change.
     chainId?: string;
+    // P2-035 (U2) — the inbox serializes the full proposal, so the
+    // payload (line items + their pricingSource) and the ambiguous-line
+    // candidate map ride through without an API change.
+    payload?: Record<string, unknown>;
     sourceContext?: Record<string, unknown>;
   };
   urgency: Urgency;
   reason?: string;
+}
+
+/** P2-035 (U2) — a single ambiguous line awaiting an operator's pick. */
+interface AmbiguousLine {
+  lineIndex: number;
+  description: string;
+  candidates: AmbiguityCandidate[];
+}
+
+/**
+ * P2-035 (U2) — extract the ambiguous lines for a proposal from its
+ * `sourceContext.catalogResolution` map (keyed by line index) joined with
+ * the payload's line descriptions. Returns [] when nothing is ambiguous,
+ * so non-estimate/invoice rows render exactly as before.
+ */
+function ambiguousLinesFor(row: InboxProposalRow): AmbiguousLine[] {
+  const resolution = row.proposal.sourceContext?.catalogResolution as
+    | Record<string, AmbiguityCandidate[]>
+    | undefined;
+  if (!resolution || typeof resolution !== 'object') return [];
+  const lineItems = row.proposal.payload?.lineItems;
+  const lines = Array.isArray(lineItems) ? lineItems : [];
+  const out: AmbiguousLine[] = [];
+  for (const [key, candidates] of Object.entries(resolution)) {
+    const lineIndex = Number(key);
+    if (!Number.isInteger(lineIndex) || !Array.isArray(candidates) || candidates.length === 0) {
+      continue;
+    }
+    const line = lines[lineIndex] as Record<string, unknown> | undefined;
+    out.push({
+      lineIndex,
+      description: typeof line?.description === 'string' ? line.description : `Line ${lineIndex + 1}`,
+      candidates,
+    });
+  }
+  return out.sort((a, b) => a.lineIndex - b.lineIndex);
 }
 
 /**
@@ -149,6 +190,49 @@ export function InboxPage() {
   }
 
   /**
+   * P2-035 (U2) — resolve one ambiguous catalog line by POSTing the
+   * operator's pick to the resolve-line endpoint. On success the server
+   * returns the patched proposal, so we splice its new payload +
+   * sourceContext back into the row (the resolved line drops out of the
+   * candidate map, removing its picker). On failure we throw so the
+   * AmbiguityPicker reverts its optimistic chip — the row is left
+   * untouched. Same optimistic-update + revert posture as actOnProposal.
+   */
+  async function resolveLine(
+    proposalId: string,
+    lineIndex: number,
+    catalogItemId: string,
+  ): Promise<void> {
+    const res = await apiFetch(`/api/proposals/${proposalId}/resolve-line`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ lineIndex, catalogItemId }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const updated = (await res.json()) as {
+      payload?: Record<string, unknown>;
+      sourceContext?: Record<string, unknown>;
+      status?: string;
+    };
+    setRows((prev) =>
+      prev.map((r) =>
+        r.proposal.id === proposalId
+          ? {
+              ...r,
+              proposal: {
+                ...r.proposal,
+                payload: updated.payload ?? r.proposal.payload,
+                sourceContext: updated.sourceContext,
+                status: updated.status ?? r.proposal.status,
+              },
+            }
+          : r,
+      ),
+    );
+    emitProposalsChanged();
+  }
+
+  /**
    * Approve a whole chain in one tap via the batch-approve endpoint.
    * Optimistically removes every member; restores them on failure. The
    * backend executes them in dependency order (a dependent can't run
@@ -230,6 +314,7 @@ export function InboxPage() {
             }
             const { row } = item;
             const badge = URGENCY_BADGE[row.urgency];
+            const ambiguousLines = ambiguousLinesFor(row);
             return (
               <li
                 key={row.proposal.id}
@@ -249,6 +334,25 @@ export function InboxPage() {
                       <p className="text-xs text-amber-700 mt-0.5">{holdExpiryLine(row, tz)}</p>
                     )}
                     {row.reason && <p className="text-xs text-slate-500 mt-0.5">{row.reason}</p>}
+                    {/* P2-035 (U2) — one-tap picker per ambiguous catalog line.
+                        Resolving stamps the chosen price and (when nothing
+                        else is missing) moves the proposal to ready_for_review;
+                        it never approves. */}
+                    {ambiguousLines.length > 0 && (
+                      <div className="mt-2 flex flex-col gap-2">
+                        {ambiguousLines.map((line) => (
+                          <AmbiguityPicker
+                            key={`${row.proposal.id}-${line.lineIndex}`}
+                            lineIndex={line.lineIndex}
+                            description={line.description}
+                            candidates={line.candidates}
+                            onResolve={(lineIndex, catalogItemId) =>
+                              resolveLine(row.proposal.id, lineIndex, catalogItemId)
+                            }
+                          />
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <button

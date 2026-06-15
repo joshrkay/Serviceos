@@ -446,6 +446,7 @@ import { resolveEstimateDeliveryProvider } from './proposals/execution/estimate-
 import { InMemoryWorkingHoursRepository } from './availability/working-hours';
 import { PgWorkingHoursRepository } from './availability/pg-working-hours';
 import { InMemoryUnavailableBlockRepository } from './availability/unavailable-block';
+import { PgUnavailableBlockRepository } from './availability/pg-unavailable-block';
 import { createTravelTimeProvider } from './scheduling/travel-time/factory';
 import { StubSkillMatcher } from './scheduling/skill-matcher';
 import { createSchedulingRouter } from './scheduling/routes';
@@ -467,6 +468,7 @@ import {
 import { TwilioDelayNotificationService } from './notifications/twilio-delay-notification-service';
 import { TransactionalCommsService } from './notifications/transactional-comms-service';
 import { runAppointmentReminderSweep } from './workers/appointment-reminder-worker';
+import { runHoldReaperSweep } from './workers/hold-reaper-worker';
 import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
 import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
@@ -498,6 +500,13 @@ import {
   registerMmsIngestHandler,
   createTwilioMediaFetcher,
 } from './sms/tech-status/mms-ingest';
+// P6-028 — tech "I'm out" keyword handler (OUT|SICK|UNAVAILABLE) registration
+// + its tenant-local daily idempotency store.
+import { registerTechStatusKeywords } from './sms/tech-status';
+import {
+  PgTechStatusTodayRepository,
+  InMemoryTechStatusTodayRepository,
+} from './sms/tech-status/idempotency';
 import { createMmsIngestWorker } from './workers/mms-ingest-worker';
 import {
   registerProposalReplySms,
@@ -857,11 +866,12 @@ export function createApp(): express.Express {
   // Working hours are now Pg-backed in production (migration 137 added
   // technician_working_hours), so the dispatch feasibility composer and the
   // inbound-AI availability search enforce real working-hours rows instead of
-  // treating missing rows as no-conflict. The unavailable-block repo stays
-  // InMemory for now — wiring its Pg variant (table from migration 116) is a
-  // separate, out-of-scope change. InMemory variants stay for tests / no-pool.
+  // treating missing rows as no-conflict. The unavailable-block repo is now
+  // Pg-backed too (migration 116 `tech_unavailable_blocks`) so the P6-028
+  // tech "I'm out" handler persists real same-day blocks the feasibility
+  // composer reads. InMemory variants stay for tests / no-pool.
   const workingHoursRepo       = pool ? new PgWorkingHoursRepository(pool)     : new InMemoryWorkingHoursRepository();
-  const unavailableBlockRepo   = new InMemoryUnavailableBlockRepository();
+  const unavailableBlockRepo   = pool ? new PgUnavailableBlockRepository(pool) : new InMemoryUnavailableBlockRepository();
   const travelTimeProvider     = createTravelTimeProvider(process.env);
   const skillMatcher           = new StubSkillMatcher();
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
@@ -1314,6 +1324,44 @@ export function createApp(): express.Express {
     }
   }
 
+  // ── P6-028 wiring — tech "I'm out today" keyword handler ─────────────────
+  // Registers the OUT|SICK|UNAVAILABLE inbound-SMS keywords with the P2-034
+  // dispatcher so a verified technician's "OUT" text marks the day unavailable
+  // and drafts owner-gated reschedule proposals end-to-end. Placed HERE,
+  // AFTER proposalRepo (the last-declared dep), because the reschedule path
+  // also needs userRepo (852), settingsRepo (885), unavailableBlockRepo (861),
+  // appointmentRepo (848), assignmentRepo (849), jobRepo (739), customerRepo
+  // (838), auditRepo (914) and the LLM gateway (1043) — all already constructed
+  // above. The keyword registry is module-global, so registration order within
+  // createApp() is free as long as every dep exists. `overwrite: true` mirrors
+  // the STOP/START registrations so re-running createApp() (across test files /
+  // multiple bootstraps in one process) re-registers without tripping the
+  // duplicate-keyword guard.
+  const techStatusTodayRepo = pool
+    ? new PgTechStatusTodayRepository(pool)
+    : new InMemoryTechStatusTodayRepository();
+  registerTechStatusKeywords(
+    {
+      userRepo,
+      settingsRepo,
+      unavailableBlockRepo,
+      techStatusTodayRepo,
+      auditRepo,
+      rescheduleDeps: {
+        appointmentRepo,
+        assignmentRepo,
+        proposalRepo,
+        jobRepo,
+        customerRepo,
+        // Brand-voice customer SMS drafts route through the shared LLM gateway
+        // (CLAUDE.md: all AI calls go through the gateway); tone is read from
+        // tenant_settings via settingsRepo.
+        brandVoiceDeps: { gateway: llmGateway, settingsRepo },
+      },
+    },
+    { overwrite: true },
+  );
+
   // ── P2-034 wiring — SMS approval transport ───────────────────────────────
   // Outbound: the unsupervised queue_and_sms body now carries reply tokens
   // (Y / N / EDIT) and each render is persisted to proposal_sms_events.
@@ -1637,6 +1685,7 @@ export function createApp(): express.Express {
     accountingSync: 590013,
     digest: 590014,
     hfcrWeeklySend: 590014,
+    holdReaper: 590015,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -2911,6 +2960,16 @@ export function createApp(): express.Express {
           })
         : undefined;
 
+      // RV-122 — attach the per-turn vulnerability triage hook to the Gather
+      // (legacy/PSTN) adapter too, not only the media-streams server below.
+      // The hook is built after `twilioAdapter` (its patch-owner action closes
+      // over the adapter), so it is injected post-construction via the setter.
+      // The SAME hook instance is passed to the media-streams server further
+      // down — one hook, both transports.
+      if (vulnerabilityTriageHookDep) {
+        twilioAdapter.setVulnerabilityTriageHook(vulnerabilityTriageHookDep);
+      }
+
       const origListen = app.listen.bind(app);
       // Wrap listen() so the WS upgrade handler is attached the moment
       // the http.Server exists. Fire-and-forget; errors during attach
@@ -4104,6 +4163,34 @@ export function createApp(): express.Express {
       });
     }, 60 * 60_000));
   }
+
+  // Held-slot reaper (JTBD #3) — durably cancels tentative AI-placed holds
+  // whose `hold_expiry_at` has passed. Without it, expired holds rot as
+  // `scheduled` rows with `hold_pending_approval = true` (only lazily skipped
+  // on the scheduling read paths), polluting any raw appointment list/report.
+  // Runs every 15 minutes, leader-gated like the other tenant-wide sweeps.
+  const holdReaperLogger = createLogger({
+    service: 'hold-reaper-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.holdReaper, async () => {
+      await runHoldReaperSweep({
+        appointmentRepo,
+        auditRepo,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        logger: holdReaperLogger,
+      });
+    }).catch((err) => {
+      holdReaperLogger.error('Hold-reaper sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 15 * 60_000));
 
   // Estimate-reminder worker — nudges customers on estimates sent but
   // unviewed/unaccepted after 3 days (1 reminder, capped). Only runs when
