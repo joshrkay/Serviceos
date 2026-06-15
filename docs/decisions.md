@@ -159,7 +159,37 @@ confirmed gaps is planned separately under `docs/plans/`.
 **Alternatives rejected:** Build the three gaps before correcting the doc —
 rejected; the doc should tell the truth now, build is sequenced separately.
 
-### D-013: [Template — copy for new decisions]
+### D-013: Negotiation V2 — bounded, policy-gated discount self-service
+**Date:** 2026-06-15
+**Decision:** Lift the V1 P2-036 non-goals ("automatic price floors (V2)",
+"per-tenant negotiation playbooks (V2)") behind an opt-in, fail-closed per-tenant
+discount policy. A pure evaluator (`evaluateDiscountAsk`) classifies each haggling
+ask into `ALLOW` / `NEEDS_APPROVAL` / `CLARIFY` / `REJECT_WITH_COUNTER` against a
+catalog-grounded floor (`max(list−cap, optional margin floor, optional absolute
+floor)`). The "AI never silently discounts" posture is preserved: even `ALLOW` is
+confidence-capped (`_meta.overallConfidence:'low'`) so it routes to a one-tap human
+approval over the existing transport — the engine only changes whether an in-policy
+ask may be *proposed* without escalating to a full owner callback. Default
+`maxDiscountBps: 0` ⇒ behavior-identical to V1 until a tenant opts in.
+**Rationale:** V1 deliberately blocks every discount, so for tenants who want
+bounded self-service every routine ask becomes a manual owner callback. A policy
+ceiling + catalog-grounded floor turns in-policy asks into one-tap proposals
+without ever letting the AI sell below margin or concede silently. Policy lives on
+`tenant_settings` columns (deposit-rules precedent, migration `077`) for DB-level
+money guards (`CHECK`s), not a JSONB grab-bag. All percentage math via the shared
+`applyBps` (the single rounding home) — never `* 0.9`.
+**Story:** V2 evolution of P2-036 / N-003 —
+`docs/plans/2026-06-14-002-feat-negotiation-discount-policy-engine-plan.md`
+(depends on the now-shipped V1 closure plan).
+**Alternatives rejected:** (1) Keep V1 all-or-nothing — rejected: forces a manual
+callback for every routine in-policy ask. (2) Let the AI auto-execute in-policy
+discounts — rejected: violates the human-approval invariant; `ALLOW` stays
+confidence-capped to a tap. (3) JSONB policy grab-bag — rejected: loses DB-level
+`CHECK` money guards. (4) Embed discount logic in `decideInitialStatus` — rejected:
+keeps the universal status gate money-agnostic; the money core is a pure,
+exhaustively-tested standalone evaluator.
+
+### D-014: [Template — copy for new decisions]
 **Date:** YYYY-MM-DD
 **Decision:** [What was decided]
 **Rationale:** [Why this choice over alternatives]
