@@ -10,7 +10,13 @@ export type InvoicePricingSource = 'catalog' | 'ambiguous' | 'uncatalogued' | 'm
 export interface InvoiceLineItem {
   description: string;
   quantity: number;
-  unitPrice: number;
+  /**
+   * Estimate-shaped proposals carry `unitPrice` (integer cents); invoice
+   * proposals normalize to `unitPriceCents` (see proposals/resolve-line.ts).
+   * Both are read defensively so an invoice line never renders NaN.
+   */
+  unitPrice?: number;
+  unitPriceCents?: number;
   category?: string;
   /** P2-035 (U2) — where this line's price came from. */
   pricingSource?: InvoicePricingSource;
@@ -164,6 +170,8 @@ export function InvoiceProposalReview({
                 item.pricingSource && item.pricingSource !== 'manual'
                   ? PRICING_SOURCE_BADGE[item.pricingSource]
                   : null;
+              // Estimate lines carry `unitPrice`; invoice lines `unitPriceCents`.
+              const unitCents = item.unitPrice ?? item.unitPriceCents ?? 0;
               return (
                 <tr key={index} data-testid={`line-item-${index}`}>
                   <td>
@@ -178,8 +186,8 @@ export function InvoiceProposalReview({
                     )}
                   </td>
                   <td>{item.quantity}</td>
-                  <td>{formatCents(item.unitPrice)}</td>
-                  <td>{formatCents(Math.round(item.quantity * item.unitPrice))}</td>
+                  <td>{formatCents(unitCents)}</td>
+                  <td>{formatCents(Math.round(item.quantity * unitCents))}</td>
                 </tr>
               );
             })}
