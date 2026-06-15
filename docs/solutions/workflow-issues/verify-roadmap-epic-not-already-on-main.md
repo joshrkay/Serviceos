@@ -32,7 +32,7 @@ Before `ce-plan` **and** before `ce-work` on any roadmap/story epic — and agai
    git fetch origin main
    # 2-3 symbols/files the epic would introduce:
    git grep -lE "recordProcessingPayment|settleProcessingPayment|LLMContentPart|countByRatingInRange" origin/main -- packages/api/src
-   git show origin/main:packages/api/src/db/schema.ts | grep -nE "ach_payment_processing|provider_reference"
+   git grep -nE "ach_payment_processing|provider_reference" origin/main -- packages/api/src/db/schema.ts
    ```
    If the symbols already exist on `main`, the epic is built (or landing) → **skip or reconcile; do not rebuild.**
 2. **Re-verify per epic, not once per roadmap.** Parallel work lands continuously; a check made at roadmap-planning time is stale within hours.
