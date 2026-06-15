@@ -461,6 +461,7 @@ import {
 import { TwilioDelayNotificationService } from './notifications/twilio-delay-notification-service';
 import { TransactionalCommsService } from './notifications/transactional-comms-service';
 import { runAppointmentReminderSweep } from './workers/appointment-reminder-worker';
+import { runHoldReaperSweep } from './workers/hold-reaper-worker';
 import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
 import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
@@ -1672,6 +1673,7 @@ export function createApp(): express.Express {
     accountingSync: 590013,
     digest: 590014,
     hfcrWeeklySend: 590014,
+    holdReaper: 590015,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -4135,6 +4137,34 @@ export function createApp(): express.Express {
       });
     }, 60 * 60_000));
   }
+
+  // Held-slot reaper (JTBD #3) — durably cancels tentative AI-placed holds
+  // whose `hold_expiry_at` has passed. Without it, expired holds rot as
+  // `scheduled` rows with `hold_pending_approval = true` (only lazily skipped
+  // on the scheduling read paths), polluting any raw appointment list/report.
+  // Runs every 15 minutes, leader-gated like the other tenant-wide sweeps.
+  const holdReaperLogger = createLogger({
+    service: 'hold-reaper-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.holdReaper, async () => {
+      await runHoldReaperSweep({
+        appointmentRepo,
+        auditRepo,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        logger: holdReaperLogger,
+      });
+    }).catch((err) => {
+      holdReaperLogger.error('Hold-reaper sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 15 * 60_000));
 
   // Estimate-reminder worker — nudges customers on estimates sent but
   // unviewed/unaccepted after 3 days (1 reminder, capped). Only runs when
