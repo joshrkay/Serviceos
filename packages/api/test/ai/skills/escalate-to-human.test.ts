@@ -376,6 +376,30 @@ describe('escalateToHuman — per-technician phone routing (U4)', () => {
     expect(result.escalated).toBe(false);
     expect(result.transfer).toBeUndefined();
   });
+
+  it('cascade guard — with NO fallback resolver wired, a numberless rotation terminates (escalated:false), preventing a business-line redial loop', async () => {
+    // routes/telephony.ts deliberately omits businessPhoneFallbackResolver on
+    // the /dial-result cascade so a no-answer on the shared line does NOT
+    // redial it forever. Mirror that: per-user resolver returns null, no
+    // fallback wired → the walk exhausts and we give up (→ voicemail), rather
+    // than re-firing the business-line fallback on every cascade re-invocation.
+    const onCallRepo = {
+      listRotation: vi.fn(async () => [{ id: 'rot-1', userId: 'u-no-phone', cursorIndex: 0 }]),
+    };
+
+    const result = await escalateToHuman({
+      tenantId: 'tenant-1',
+      sessionId: 'sess-1',
+      reason: 'caller_requested',
+      channel: 'telephony',
+      onCallRepo: onCallRepo as never,
+      dispatcherPhoneResolver: async () => null,
+      // businessPhoneFallbackResolver intentionally omitted (cascade behavior)
+    });
+
+    expect(result.escalated).toBe(false);
+    expect(result.transfer).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

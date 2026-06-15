@@ -523,6 +523,12 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
         ? await businessPhoneFallbackResolver(tenantId).catch(() => null)
         : null;
       if (fallbackPhone) {
+        // Degraded last resort: the shared business line is NOT a specific
+        // on-call person, so we intentionally skip the per-dispatcher
+        // whisper/summary + context-SMS that the rotation / transfer_number
+        // branches build (there is no individual CSR to brief). We DO preserve
+        // the emergency-vs-generic spoken message so an emergency caller still
+        // hears the right copy on this path.
         const fallbackTwiml: string | undefined = callControl
           ? callControl.dialDispatcher(callSid ?? sessionId, fallbackPhone, {
               actionUrl:
@@ -538,15 +544,24 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
               reason,
               assignedUserId: null,
               outcome: 'transfer_initiated',
+              rotationIndex: 0,
             }),
           );
         }
         if (session) {
           session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(reason));
         }
+        let fallbackMessage = transferringText;
+        if (reason === 'emergency_dispatch') {
+          const desc = emergencyDescription ? ` regarding: ${emergencyDescription}` : '';
+          fallbackMessage =
+            lang === 'es'
+              ? `Escalamiento de emergencia en curso${desc}. Le voy a conectar con un despachador de inmediato.`
+              : `Emergency escalation in progress${desc}. Connecting you with a dispatcher immediately.`;
+        }
         return {
           escalated: true,
-          message: transferringText,
+          message: fallbackMessage,
           transfer: {
             dispatcherPhone: fallbackPhone,
             fallbackTwiml,
