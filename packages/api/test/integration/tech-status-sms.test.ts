@@ -228,9 +228,10 @@ describe('Postgres integration — tech-status SMS (P6-028)', () => {
   it('tech "OUT" via dispatchInboundSms → block + reschedule proposals + audit (real Postgres)', async () => {
     const result = await dispatchInboundSms(ctx({ body: 'OUT' }));
 
-    expect(result.handled).toBe(true);
-    expect(result.handler).toBe('tech-status');
-    expect(result.reason).toBe('recorded');
+    // Assert the whole result object so a decline surfaces its reason
+    // ('unknown_mobile' vs 'processing_failed') in the CI diff — the handler
+    // swallows failures into the reason field rather than throwing.
+    expect(result).toEqual({ handled: true, handler: 'tech-status', reason: 'recorded' });
 
     // 1. The same-day unavailable block landed.
     const blocks = await unavailableBlockRepo.findByTechnician(tenant.tenantId, techId);
