@@ -422,7 +422,10 @@ import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation'
 import { InMemoryProposalRepository, createProposal as buildProposalRow } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy hook + advisory annotator).
-import { configureSupervisorCreationHook } from './proposals/supervisor/hook';
+import {
+  configureSupervisorCreationHook,
+  SUPERVISOR_DISABLED_FLAG,
+} from './proposals/supervisor/hook';
 import {
   SupervisorPolicyService,
   recordExecutedProposalSpend,
@@ -4532,18 +4535,32 @@ export function createApp(): express.Express {
   // the injection rationale — createProposal is a sync pure builder with
   // 50+ call sites, so a repo dep can't be threaded through them), and
   // (b) the advisory annotator sweep that adds LLM risk notes to
-  // ready_for_review proposals. Both are gated per tenant by the
-  // 'supervisor_agent' flag (tenant_feature_flags override → platform
-  // flag → false), so the supervisor is INERT for every tenant until the
-  // flag is turned on. Routes/settings exposure for policy versions is
-  // deferred to a follow-up track.
+  // ready_for_review proposals.
+  //
+  // Unit U3 (decision D-004): the supervisor runs BY DEFAULT for every
+  // tenant — the post-hoc advisory review and the conservative budget
+  // backstop now apply unless a tenant explicitly opts OUT. The platform
+  // feature-flag API (`isEnabledForTenant`) is a plain default-FALSE
+  // boolean (tenant override → platform flag → false; see
+  // pg-tenant-feature-flags.ts) with no per-flag default-true or tri-state,
+  // so a default-ON gate cannot be expressed as an "enable" flag. We
+  // therefore invert to the explicit OPT-OUT flag SUPERVISOR_DISABLED_FLAG
+  // ('supervisor_agent_disabled'): unset ⇒ reads false ⇒ "not disabled" ⇒
+  // supervisor ON; a tenant turns it OFF by setting that flag to true. The
+  // gate below resolves `enabled = !disabled` and feeds BOTH the creation
+  // hook (SupervisorPolicyService.isEnabledForTenant) and the annotator
+  // sweep, so the two halves stay consistent on this single key. With NO
+  // flag repo (in-memory dev), the gate is undefined and the service's
+  // "absent gate ⇒ enabled" default keeps the supervisor ON. Routes/settings
+  // exposure for policy versions is deferred to a follow-up track.
   //
   // Merge note: this reuses the single shared PgTenantFeatureFlagRepository
   // constructed in the RV-122 wiring block above (`tenantFeatureFlags`) —
   // one instance serves both the per-tenant triage/voice flag resolution
   // and the supervisor gate (its 30s cache is per-instance only).
   const supervisorFlagGate = tenantFeatureFlags
-    ? (tenantId: string) => tenantFeatureFlags.isEnabledForTenant(tenantId, 'supervisor_agent')
+    ? async (tenantId: string) =>
+        !(await tenantFeatureFlags.isEnabledForTenant(tenantId, SUPERVISOR_DISABLED_FLAG))
     : undefined;
   const supervisorLogger = createLogger({
     service: 'supervisor-agent',
@@ -4573,9 +4590,13 @@ export function createApp(): express.Express {
       proposalId,
       logger: supervisorLogger,
     });
-  // Advisory annotator sweep — only with a REAL LLM provider (the mock
-  // gateway's canned JSON must never be written into proposal payloads as
-  // a "risk note"), and per-tenant flag-gated inside the sweep itself.
+  // Advisory annotator sweep — scheduled whenever a REAL LLM provider is
+  // configured (the mock gateway's canned JSON must never be written into
+  // proposal payloads as a "risk note"). It runs for every NON-opted-out
+  // tenant by default: the same inverted opt-out gate as the creation hook
+  // is passed through, so a tenant with no flag set is swept and only an
+  // explicitly opted-out tenant is skipped. Stays advisory — never a status
+  // change.
   if (config.AI_PROVIDER_API_KEY) {
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.supervisorAnnotate, async () => {
