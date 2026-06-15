@@ -62,7 +62,9 @@ export function parseDiscountAsk(text: string): ParsedDiscountAsk {
   if (!text || text.trim() === '') return { kind: 'ambiguous' };
 
   // 1. Percent off — "10% off", "10 percent". Reject 0 / >100% as nonsensical.
-  const pm = text.match(/(\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b)/i);
+  //    The leading \b anchors the number to a word boundary so a 4+ digit run
+  //    can't backtrack into a valid suffix ("1025%" must NOT match "025%").
+  const pm = text.match(/\b(\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b)/i);
   if (pm) {
     const bps = Math.round(parseFloat(pm[1]) * 100);
     if (bps > 0 && bps <= 10000) return { kind: 'percent_off', bps };

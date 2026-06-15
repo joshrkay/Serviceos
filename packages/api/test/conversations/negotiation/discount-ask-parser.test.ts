@@ -19,6 +19,12 @@ describe('parseDiscountAsk — percent off', () => {
     // 150% off is nonsense; with no $ amount it falls through to ambiguous.
     expect(parseDiscountAsk('150% off')).toEqual({ kind: 'ambiguous' });
   });
+
+  it('does not backtrack a 4+ digit number into a valid percent suffix', () => {
+    // "1025%" must NOT match "025%" as 25% — the leading \b anchors the number.
+    expect(parseDiscountAsk('1025% off')).toEqual({ kind: 'ambiguous' });
+    expect(parseDiscountAsk('that is 2500% more')).toEqual({ kind: 'ambiguous' });
+  });
 });
 
 describe('parseDiscountAsk — amount off', () => {
