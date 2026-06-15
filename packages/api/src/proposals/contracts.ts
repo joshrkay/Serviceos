@@ -386,6 +386,9 @@ export const voiceClarificationPayloadSchema = z.object({
     // P8 — intent understood, but an entity reference matched several
     // tenant records ("three Bobs"); candidates carry the picker list.
     'ambiguous_entity',
+    // V2 negotiation (D-013) — a discount ask whose target price could not be
+    // parsed deterministically; the evaluator returned CLARIFY rather than guess.
+    'ambiguous_discount_target',
   ]),
   suggestedIntents: z.array(z.string()).optional(),
   classifierReasoning: z.string().optional(),

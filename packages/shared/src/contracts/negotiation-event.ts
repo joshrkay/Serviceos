@@ -81,3 +81,88 @@ export const negotiationCallbackPayloadSchema = z.object({
   _meta: negotiationMetaSchema,
 });
 export type NegotiationCallbackPayload = z.infer<typeof negotiationCallbackPayloadSchema>;
+
+/**
+ * V2 negotiation (D-013) — the discount evaluator's decision.
+ *
+ * `evaluateDiscountAsk` (api `proposals/guardrails/discount-evaluator.ts`)
+ * classifies a resolved discount ask into one of four outcomes. All money is
+ * integer cents; all percentages are basis points. The decision is the single
+ * source of truth the handlers branch on (capped ALLOW proposal vs. owner
+ * callback vs. voice clarification vs. counter). Even `ALLOW` never
+ * auto-executes — it is surfaced as a one-tap, confidence-capped proposal (R5).
+ *
+ * Outcome + reason constants are UPPERCASE/snake_case to match the D-013
+ * decision record verbatim.
+ */
+const DISCOUNT_DECISION_OUTCOMES = [
+  'ALLOW',
+  'NEEDS_APPROVAL',
+  'CLARIFY',
+  'REJECT_WITH_COUNTER',
+] as const;
+export type DiscountDecisionOutcome = (typeof DISCOUNT_DECISION_OUTCOMES)[number];
+
+/** Why a within-reason ask routes to the owner rather than an auto-proposal. */
+const DISCOUNT_APPROVAL_REASONS = [
+  /** Tenant has not opted into self-service discounts (maxBps 0 → V1 behavior). */
+  'no_policy',
+  /** The requested discount exceeds the tenant's configured ceiling. */
+  'exceeds_policy',
+  /** Scope is not catalog-grounded, so no trustworthy floor can be computed. */
+  'ungrounded_scope',
+] as const;
+export type DiscountApprovalReason = (typeof DISCOUNT_APPROVAL_REASONS)[number];
+
+/** Why the ask could not be resolved to a concrete target price. */
+const DISCOUNT_CLARIFY_REASONS = [
+  /** The spoken/typed target price could not be parsed deterministically. */
+  'ambiguous_target',
+] as const;
+export type DiscountClarifyReason = (typeof DISCOUNT_CLARIFY_REASONS)[number];
+
+const centsField = z.number().int().min(0);
+
+/**
+ * Discriminated on `outcome`. The priced branches (`ALLOW`,
+ * `REJECT_WITH_COUNTER`) echo `listCents` + `floorCents` so the handler can
+ * render/audit the grounding without recomputing it.
+ */
+export const discountDecisionSchema = z.discriminatedUnion('outcome', [
+  // Within policy AND at/above floor: may be PROPOSED (confidence-capped, R5).
+  z.object({
+    outcome: z.literal('ALLOW'),
+    /** Price to propose — guaranteed `>= floorCents`. */
+    targetPriceCents: centsField,
+    /** `listCents - targetPriceCents`. */
+    discountCents: centsField,
+    /** Effective discount in basis points (0–10000). */
+    discountBps: z.number().int().min(0).max(10000),
+    listCents: centsField,
+    floorCents: centsField,
+  }),
+  // Plausible but not auto-proposable: routes to the owner callback.
+  z.object({
+    outcome: z.literal('NEEDS_APPROVAL'),
+    reason: z.enum(DISCOUNT_APPROVAL_REASONS),
+    /** Present when a concrete target was parsed; absent when none was. */
+    targetPriceCents: centsField.optional(),
+    floorCents: centsField.optional(),
+  }),
+  // Target price is ambiguous: emit a voice_clarification, never guess (R4).
+  z.object({
+    outcome: z.literal('CLARIFY'),
+    reason: z.enum(DISCOUNT_CLARIFY_REASONS),
+  }),
+  // Below the floor: reject the ask, offer the floor as the counter.
+  z.object({
+    outcome: z.literal('REJECT_WITH_COUNTER'),
+    /** What the customer asked for (strictly `< floorCents`). */
+    requestedPriceCents: centsField,
+    /** The floor price — the best the AI may offer. */
+    counterPriceCents: centsField,
+    listCents: centsField,
+    floorCents: centsField,
+  }),
+]);
+export type DiscountDecision = z.infer<typeof discountDecisionSchema>;
