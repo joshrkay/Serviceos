@@ -378,7 +378,7 @@ import { PgProposalExecutionRepository } from './proposals/pg-proposal-execution
 import { PgCallTranscriptTurnRepository } from './voice/pg-call-transcript-turn';
 import { InMemoryCallTranscriptTurnRepository } from './voice/call-transcript-turn';
 import type { EmbeddingProvider } from './ai/providers/openai-compatible';
-import { createVoiceActionRouterWorker, VoiceActionRouterPayload } from './workers/voice-action-router';
+import { createVoiceActionRouterWorker, VoiceActionRouterPayload, INTENT_TO_PROPOSAL_TYPE } from './workers/voice-action-router';
 import { PgEntityResolver } from './ai/resolution/pg-entity-resolver';
 import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
 import { DefaultAvailabilityFinder } from './ai/tasks/availability-finder';
@@ -433,6 +433,7 @@ import {
   PgIdempotencyLockProvider,
 } from './proposals/execution/idempotency-lock';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
+import { assertVoiceHandlersWired } from './proposals/execution/wiring-assertions';
 import { resolveInvoiceDeliveryProvider } from './proposals/execution/invoice-delivery-factory';
 import { resolveEstimateDeliveryProvider } from './proposals/execution/estimate-delivery-factory';
 import { InMemoryWorkingHoursRepository } from './availability/working-hours';
@@ -1455,6 +1456,15 @@ export function createApp(): express.Express {
     ...(sendService ? { sendService } : {}),
     dispatchRepo,
   });
+  // U5 — fail boot loudly if a voice-reachable persist handler is degraded
+  // (would return success without saving). Only the persist-critical
+  // handlers (invoice / job / appointment) report isFullyWired today; the
+  // rest are treated as wired until they opt in.
+  assertVoiceHandlersWired(
+    executionHandlers,
+    Object.values(INTENT_TO_PROPOSAL_TYPE),
+    { poolConfigured: Boolean(pool), logger: workerLogger },
+  );
   // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
   // default to `proposal-run:{tenant}:{id}` when callers omit one.
   const proposalIdempotencyLock = pool
@@ -1692,6 +1702,10 @@ export function createApp(): express.Express {
     // P22 — catalog grounding: drafted invoice/estimate line items get
     // priced from the tenant's catalog instead of trusting the LLM.
     catalogRepo,
+    // P21-003 — batch_invoice voice on-ramp: enumerates completed-unbilled
+    // jobs (findJobsRequiringInvoicing) so "invoice all my completed jobs"
+    // mints one batch_invoice proposal. Same repos the batch sweep + digest use.
+    invoicingDeps: { jobRepo, invoiceRepo, estimateRepo },
     // P8 — "three Bobs": free-text customer/job references resolve to
     // verified tenant IDs (pg_trgm) before drafting; ambiguous matches
     // become one-tap clarifications. In-memory mode (no pool) skips

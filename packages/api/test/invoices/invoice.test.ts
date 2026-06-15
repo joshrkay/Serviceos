@@ -11,6 +11,7 @@ import {
   InMemoryInvoiceRepository,
 } from '../../src/invoices/invoice';
 import { buildLineItem } from '../../src/shared/billing-engine';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 
 describe('P1-011 — Invoice entity + balance calculations', () => {
   let repo: InMemoryInvoiceRepository;
@@ -114,6 +115,20 @@ describe('P1-011 — Invoice entity + balance calculations', () => {
 
     const found = await getInvoice('tenant-2', invoice.id, repo);
     expect(found).toBeNull();
+  });
+
+  it('audit — emits exactly one invoice.created event on create (U4: dropping it fails this test)', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    const invoice = await createInvoice(
+      { tenantId: 'tenant-1', jobId: 'job-1', invoiceNumber: 'INV-0001', lineItems: sampleItems, createdBy: 'user-1' },
+      repo,
+      auditRepo
+    );
+
+    const events = await auditRepo.findByEntity('tenant-1', 'invoice', invoice.id);
+    expect(events).toHaveLength(1);
+    expect(events[0].eventType).toBe('invoice.created');
+    expect(events[0].entityId).toBe(invoice.id);
   });
 
   it('zero amount edge case — zero value invoice', async () => {
