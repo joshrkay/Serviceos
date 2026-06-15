@@ -28,6 +28,7 @@ import type { AppointmentRepository } from '../../appointments/appointment';
 import type { JobRepository } from '../../jobs/job';
 import type { LLMGateway } from '../gateway/gateway';
 import { resolveDateTime, DEFAULT_TENANT_TIMEZONE } from '../scheduling/resolve-datetime';
+import { findJobsRequiringInvoicing, InvoicingQueueDeps } from '../../invoices/invoicing-queue';
 
 function entitiesFrom(context: TaskContext): ExtractedEntities {
   return (context.existingEntities ?? {}) as ExtractedEntities;
@@ -330,6 +331,50 @@ export class ReassignAppointmentTaskHandler implements TaskHandler {
   }
 }
 
+// ───────────── add_crew_member / remove_crew_member ─────────────
+//
+// Crew add/remove attach or detach a NON-PRIMARY technician on an existing
+// appointment. The classifier returns a technician NAME and an appointment
+// REFERENCE, never UUIDs — so we always list appointmentId + technicianId as
+// missing and let the review UI resolve both before the mutation can run (the
+// same contract as reassign_appointment). Capture-class, but the always-missing
+// ids keep the proposal in draft until an operator resolves them.
+export class AddCrewMemberTaskHandler implements TaskHandler {
+  readonly taskType = 'add_crew_member' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = ['appointmentId', 'technicianId'];
+
+    if (ee.appointmentReference) payload.appointmentReference = ee.appointmentReference;
+    if (ee.targetTechnicianName) payload.targetTechnicianName = ee.targetTechnicianName;
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+export class RemoveCrewMemberTaskHandler implements TaskHandler {
+  readonly taskType = 'remove_crew_member' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = ['appointmentId', 'technicianId'];
+
+    if (ee.appointmentReference) payload.appointmentReference = ee.appointmentReference;
+    if (ee.targetTechnicianName) payload.targetTechnicianName = ee.targetTechnicianName;
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
 // ───────────── add_note ─────────────
 export class AddNoteTaskHandler implements TaskHandler {
   readonly taskType = 'add_note' as const;
@@ -405,6 +450,167 @@ export class SendEstimateTaskHandler implements TaskHandler {
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
       taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── send_estimate_nudge ─────────────
+//
+// Comms class — never auto-approves. A nudge re-sends the link for an
+// ALREADY-sent estimate (the execution handler enforces a 48h cooldown and
+// requires the estimate to be in 'sent'). Mirrors SendEstimateTaskHandler:
+// carry estimateReference (free text) and flag estimateId missing so the
+// operator resolves it in the review card before approval.
+export class SendEstimateNudgeTaskHandler implements TaskHandler {
+  readonly taskType = 'send_estimate_nudge' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    // estimateId is a required UUID for the execution handler and is NOT
+    // resolved by the customer/job entity resolver — always flag it missing so
+    // the approval gate holds until the operator resolves the estimate (matches
+    // reassign_appointment's toTechnicianId contract). The reference, when
+    // present, gives the review card something to resolve from.
+    const missing: string[] = ['estimateId'];
+
+    if (ee.jobReference) payload.estimateReference = ee.jobReference;
+    else if (ee.customerName) payload.estimateReference = ee.customerName;
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── send_payment_reminder ─────────────
+//
+// Comms class — never auto-approves. An ad-hoc voice reminder ("chase the
+// Smith invoice") delivers the same overdue notice the dunning sweep sends,
+// but on demand. The execution handler only acts on invoiceId; the cadence
+// fields (stepKey / offsetDays / channel) are audit-only metadata, so we stamp
+// manual defaults and flag invoiceId missing for the review UI to resolve.
+export class SendPaymentReminderTaskHandler implements TaskHandler {
+  readonly taskType = 'send_payment_reminder' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {
+      stepKey: 'manual',
+      offsetDays: 0,
+      channel: ee.sendChannel ?? 'sms',
+    };
+    // invoiceId is a required UUID for the execution handler and is NOT
+    // resolved by the customer/job entity resolver — always flag it missing so
+    // the approval gate holds until the operator resolves the invoice.
+    const missing: string[] = ['invoiceId'];
+
+    if (ee.jobReference) payload.invoiceReference = ee.jobReference;
+    else if (ee.customerName) payload.invoiceReference = ee.customerName;
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── apply_late_fee ─────────────
+//
+// Money class — never auto-approves; the owner sees and approves the amount.
+// We surface what the owner stated ("add a $25 late fee") or flag feeCents
+// missing for the review card — we never invent a charge. stepKey 'manual'
+// distinguishes an on-demand fee from the dunning ledger's accrual steps and
+// makes the fee line idempotent (the execution handler keys on
+// `late-fee:<stepKey>`, so re-executing this proposal can't double-charge).
+// invoiceId is resolved from the reference by the review UI.
+export class ApplyLateFeeTaskHandler implements TaskHandler {
+  readonly taskType = 'apply_late_fee' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = { stepKey: 'manual' };
+    // invoiceId is a required UUID for the execution handler and is NOT
+    // resolved by the customer/job entity resolver — always flag it missing so
+    // the approval gate holds until the operator resolves the invoice.
+    const missing: string[] = ['invoiceId'];
+
+    if (ee.jobReference) payload.invoiceReference = ee.jobReference;
+    else if (ee.customerName) payload.invoiceReference = ee.customerName;
+
+    if (typeof ee.amount === 'number' && ee.amount > 0) {
+      payload.feeCents = ee.amount;
+    } else {
+      missing.push('feeCents');
+    }
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── batch_invoice ─────────────
+//
+// "Invoice all my completed jobs" — enumerates the SAME completed-unbilled
+// candidates the batch sweep + digest use (findJobsRequiringInvoicing) and
+// mints ONE batch_invoice proposal that, on approval, fans out a draft_invoice
+// per job (each separately reviewed before sending). Capture-class. When
+// nothing is billable, emits a clarification instead of an empty batch (the
+// execution handler rejects an empty jobs[] / the schema requires min 1).
+export class BatchInvoiceTaskHandler implements TaskHandler {
+  readonly taskType = 'batch_invoice' as const;
+
+  constructor(private readonly invoicingDeps?: InvoicingQueueDeps) {}
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    if (!this.invoicingDeps) {
+      return this.clarify(context, 'Batch invoicing is not available right now.');
+    }
+    const candidates = await findJobsRequiringInvoicing(context.tenantId, this.invoicingDeps);
+    if (candidates.length === 0) {
+      return this.clarify(context, 'You have no completed jobs waiting to be invoiced right now.');
+    }
+    const now = context.now ?? new Date();
+    const payload: Record<string, unknown> = {
+      batchDate: now.toISOString().slice(0, 10),
+      totalCents: candidates.reduce((sum, c) => sum + c.amountCents, 0),
+      jobs: candidates.map((c) => ({
+        jobId: c.jobId,
+        customerId: c.customerId,
+        ...(c.estimateId ? { estimateId: c.estimateId } : {}),
+        amountCents: c.amountCents,
+        discountCents: c.discountCents,
+        taxRateBps: c.taxRateBps,
+        lineItems: c.lineItems,
+      })),
+    };
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, [])),
+      taskType: this.taskType,
+    };
+  }
+
+  // voice_clarification is the established "can't proceed, tell the operator"
+  // surface. Reuses the file's createProposal + baseSourceContext; missing_entities
+  // is the right reason for "nothing billable to put in the batch".
+  private clarify(context: TaskContext, message: string): TaskResult {
+    return {
+      proposal: createProposal({
+        tenantId: context.tenantId,
+        proposalType: 'voice_clarification',
+        payload: {
+          transcript: context.message,
+          reason: 'missing_entities',
+          classifierReasoning: message,
+        },
+        summary: context.message,
+        sourceContext: baseSourceContext(context),
+        createdBy: context.userId,
+      }),
+      taskType: 'voice_clarification',
     };
   }
 }

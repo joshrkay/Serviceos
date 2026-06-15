@@ -299,6 +299,69 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
     });
   }
 
+  /**
+   * U5 (ACH async lifecycle) — atomic compare-and-swap settle. A single
+   * UPDATE flips 'processing' -> 'completed' only while still 'processing',
+   * so a duplicate `payment_intent.succeeded` (or one that races the
+   * already-completed card path) is a no-op. The invoice balance is NOT
+   * touched — it was credited in-flight at `payment_intent.processing`.
+   * `tenant_id` is in the WHERE for defense-in-depth alongside RLS.
+   * Returns `null` on 0 rows (not found or not 'processing').
+   */
+  async settleProcessingPaymentAtomic(
+    tenantId: string,
+    id: string,
+  ): Promise<Payment | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const { rows } = await client.query(
+        `UPDATE payments
+         SET status = 'completed',
+             updated_at = now()
+         WHERE tenant_id = $1
+           AND id = $2
+           AND status = 'processing'
+         RETURNING *`,
+        [tenantId, id],
+      );
+      if (rows.length === 0) return null;
+      return this.mapRowToPayment(rows[0]);
+    });
+  }
+
+  /**
+   * U5 (ACH async lifecycle) — atomic compare-and-swap in-flight reversal.
+   * A single UPDATE flips 'processing' -> 'failed' (stamping
+   * reversed_at/reversal_reason) only while still 'processing' and not yet
+   * reversed, so a duplicate ACH-return delivery is a no-op. Distinct from
+   * `reversePaymentAtomic` (which guards `status = 'completed'`) so the
+   * settled-NSF path keeps its own guard. `tenant_id` is in the WHERE for
+   * defense-in-depth alongside RLS. Returns `null` on 0 rows (not found or
+   * not 'processing').
+   */
+  async reverseInFlightPaymentAtomic(
+    tenantId: string,
+    id: string,
+    opts: ReversePaymentOptions,
+  ): Promise<Payment | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const { rows } = await client.query(
+        `UPDATE payments
+         SET status = 'failed',
+             reversed_at = $3,
+             reversal_reason = $4,
+             updated_at = now()
+         WHERE tenant_id = $1
+           AND id = $2
+           AND status = 'processing'
+           AND reversed_at IS NULL
+         RETURNING *`,
+        [tenantId, id, opts.reversedAt, opts.reason],
+      );
+      if (rows.length === 0) return null;
+      return this.mapRowToPayment(rows[0]);
+    });
+  }
+
   private mapRowToPayment(row: Record<string, any>): Payment {
     return {
       id: row.id,

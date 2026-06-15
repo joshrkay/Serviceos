@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { appointmentTypeSchema } from '@ai-service-os/shared';
 import { ProposalType } from './proposal';
 import { ValidationError } from '../shared/errors';
 import { reassignAppointmentPayloadSchema } from './contracts/reassignment';
@@ -129,6 +130,10 @@ export const createAppointmentPayloadSchema = z
     customerId: z.string().optional(),
     customerName: z.string().optional(),
     summary: z.string().optional(),
+    // Typed visit kind (estimate/repair/install/maintenance/diagnostic),
+    // emitted enum-validated by the appointment task. Optional: inbound-caller
+    // DRAFTs built at classify time carry none, and legacy payloads predate it.
+    appointmentType: appointmentTypeSchema.optional(),
   })
   .refine(
     (v) => {

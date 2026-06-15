@@ -125,7 +125,41 @@ bad-day failure modes + the 14 locked product decisions),
 `docs/strategy/roadmap-audit.md` (full mapping of v1 phases to v2 waves
 with cut / defer / pull-forward rationale).
 
-### D-012: [Template — copy for new decisions]
+### D-012: PRD §5 status reconciled against the codebase
+**Date:** 2026-06-14
+**Decision:** The §5 Rivet-vs-Jobber parity map's Status column is the
+canonical feature-status surface and must reflect what is actually wired +
+tested in `/packages`, not aspirational status. Reconciliation on 2026-06-14,
+verified by code inspection (wiring into `app.ts`/workers/registries +
+presence of tests):
+- **Downgraded ✅→🔧 (claimed built, only partial):**
+  - **MMS-to-quote** — photos ingest and attach to jobs
+    (`sms/tech-status/mms-ingest.ts`); no image-analysis → draft-estimate
+    pipeline exists (no vision/multimodal code in `ai/`).
+  - **ACH payments** — Stripe card + payment links + saved-card off-session
+    are live; ACH origination/bank-debit is not configured or exercised.
+  - **B2B account recognition** — `customers.account_type` is a binary
+    `residential|b2b` flag (consumed only by vulnerability triage); no
+    `property_manager` type, no `parent_account_id`/sub-account hierarchy,
+    no dedicated B2B routing flow.
+- **Upgraded 📋/🔧→✅ (shipped ahead of roadmap status):** memberships
+  (auto-renew off-session + member pricing + priority booking), auto-invoice
+  on completion, dunning/overdue cadence, late fees, estimate follow-up
+  (reminder cadence), auto-pay/saved-card (membership dues).
+- **Investigated, found already built (left ✅):** review-request gating
+  (`routes/public-feedback.ts` gates ≥4★ → Google/Yelp links), voice
+  en-route/ETA (`notifications/delay-notifications.ts` `enqueueEnRouteNotice`),
+  voice dispatch reassignment (`reassign_appointment` intent + task).
+**Rationale:** Status accuracy is a sales/credibility and planning input — the
+PRD tells GTM what ships. Three differentiators were marked Built but only
+partially implemented; six parity/closing items were under-reported as
+Specced/Partial when already shipped.
+**Story:** Status audit requested 2026-06-14; build work to close the three
+confirmed gaps is planned separately under `docs/plans/`.
+**Alternatives rejected:** Build the three gaps before correcting the doc —
+rejected; the doc should tell the truth now, build is sequenced separately.
+
+### D-013: [Template — copy for new decisions]
 **Date:** YYYY-MM-DD
 **Decision:** [What was decided]
 **Rationale:** [Why this choice over alternatives]

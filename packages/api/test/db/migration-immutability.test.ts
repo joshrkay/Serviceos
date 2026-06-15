@@ -233,12 +233,17 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['176_customer_payment_methods', '6fe12975c7999002a67de1722a402a6bd017d0e8db4c84fd70d2d85dad439890'],
   ['177_digest_entries', '8ebc2dc5b5c449bf7b94f2c6a11a17af2c91092e0fff24bdf6e824f0f1af21ac'],
   ['177_customer_payment_methods_stripe_account', '4aac0f8afc6b5e3fb72ec4e866233905e9e7e4ea95699e61705c8da10878ab12'],
-  ['178_estimate_entity_trgm_index', '5c35bf46e89c5bd9659d8e4dc1c51c8735e5e8c5d956d838ba5f055e64412d39'],
-  ['179_proposal_approval_sms_events', '9a58f38d4c12a65395de6d6fd296f227461d1536f8eba490a995d50d8631b0b5'],
-  ['180_invoice_photos_and_client_visible', 'b26ce21cdbf46812a6d961693c0e21f45048c46c61ebf51db20a914533bb579b'],
-  ['181_job_checklists', '85e7ebb0f66d2b8356b72241acdc586acb0f3e1dabb1cf5f6a62c6d1888ef8b0'],
-  ['182_dropped_call_recoveries_due_fn', '1115a83b60eb95298aa4abc9f05e60db306cbade882dd3c4018c784fa6491b7c'],
-  ['183_force_rls_pr557_tables', '060fda05982bd019f16dee7583fe610a0d1e5d04ae09d962821c5328d594f51d'],
+  ['178_customer_b2b_hierarchy', '4c4adc2260d47abaa8a833d59ac20995902f0dd5d5a19d5ab9a25d61a3bd8523'],
+  ['179_ach_payment_processing_state', '866664ba47094254581ef04a5864f8529652c308b309ae11bf1abd5ebb47ec3d'],
+  ['180_correction_lessons', '1b75f1cb10c7754370eb74f2b2b4873375657920429d4839aa372e35ebad8139'],
+  ['181_tenant_settings_labor_rate', 'f650607b44e90ac94e357f83ad46fee1dbe74aef2e19dc8134147ec5901195aa'],
+  ['182_appointment_type', '0dc29a194dbb25f2a19a53a453044362a86afde22a3a29447e1cc99e512547e1'],
+  ['183_estimate_entity_trgm_index', '5c35bf46e89c5bd9659d8e4dc1c51c8735e5e8c5d956d838ba5f055e64412d39'],
+  ['184_proposal_approval_sms_events', '9a58f38d4c12a65395de6d6fd296f227461d1536f8eba490a995d50d8631b0b5'],
+  ['185_invoice_photos_and_client_visible', 'b26ce21cdbf46812a6d961693c0e21f45048c46c61ebf51db20a914533bb579b'],
+  ['186_job_checklists', '85e7ebb0f66d2b8356b72241acdc586acb0f3e1dabb1cf5f6a62c6d1888ef8b0'],
+  ['187_dropped_call_recoveries_due_fn', '1115a83b60eb95298aa4abc9f05e60db306cbade882dd3c4018c784fa6491b7c'],
+  ['188_force_rls_pr557_tables', '060fda05982bd019f16dee7583fe610a0d1e5d04ae09d962821c5328d594f51d'],
 ];
 
 function hashMigration(value: string): string {

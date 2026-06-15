@@ -19,14 +19,22 @@ export type IntentType =
   | 'update_invoice'
   | 'update_estimate'
   | 'issue_invoice'
+  // Capture-class batch on-ramp: invoice ALL completed-unbilled jobs at once.
+  // On approval the batch_invoice proposal fans out one draft_invoice per job.
+  | 'batch_invoice'
   | 'create_customer'
   | 'create_job'
   | 'reschedule_appointment'
   | 'cancel_appointment'
   | 'reassign_appointment'
+  | 'add_crew_member'
+  | 'remove_crew_member'
   | 'add_note'
   | 'send_invoice'
   | 'send_estimate'
+  | 'send_estimate_nudge'
+  | 'send_payment_reminder'
+  | 'apply_late_fee'
   | 'record_payment'
   | 'emergency_dispatch'
   // Phase: full-app voice coverage. update_customer / log_expense reuse
@@ -89,6 +97,11 @@ export type IntentType =
   // recommendation — the AI never negotiates. extractedEntities.negotiationAsk
   // carries the verbatim ask.
   | 'negotiation'
+  // P22-005 (U7) — owner asks whether a specific job made money ("did I make
+  // money on the Miller job?"). Owner/tenant-scoped, read-only — routed to the
+  // lookup_job_profit skill, which speaks a per-job P&L. The job is referenced
+  // free-text in extractedEntities.jobReference and resolved downstream.
+  | 'lookup_job_profit'
   // P11-002: caller asks to switch the call language ("english please" /
   // "hablo español"). The adapter consumes this as a signal to flip the
   // session language — it is NOT a proposal-driving intent.
@@ -113,21 +126,27 @@ export type IntentType =
   | 'edit_proposal'
   | 'unknown';
 
-const SUPPORTED_INTENTS: readonly IntentType[] = [
+export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'create_invoice',
   'draft_estimate',
   'create_appointment',
   'update_invoice',
   'update_estimate',
   'issue_invoice',
+  'batch_invoice',
   'create_customer',
   'create_job',
   'reschedule_appointment',
   'cancel_appointment',
   'reassign_appointment',
+  'add_crew_member',
+  'remove_crew_member',
   'add_note',
   'send_invoice',
   'send_estimate',
+  'send_estimate_nudge',
+  'send_payment_reminder',
+  'apply_late_fee',
   'record_payment',
   'emergency_dispatch',
   'update_customer',
@@ -156,6 +175,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'lookup_pending_items',
   'complaint',
   'negotiation',
+  'lookup_job_profit',
   'language_switch',
   'operator_request',
   'confirm',
@@ -457,6 +477,13 @@ Supported intents (return exactly ONE):
                                      "Make the Jones invoice official"
                                      "Send out the bill for the Acme job"
                                      "Send the invoice we just drafted"
+- "batch_invoice"       — user wants to invoice ALL their completed jobs that
+                           haven't been invoiced yet, in one go (a batch). On
+                           approval each job gets its own draft invoice to
+                           review. No entities to extract.
+                           Examples: "Invoice all my completed jobs"
+                                     "Bill everything that's done"
+                                     "Send out invoices for all finished jobs"
 - "unknown"             — anything else: genuinely ambiguous transcripts,
                            or commands without a clear target. Note that
                            read-only queries ("when is my next appointment",
@@ -519,6 +546,16 @@ Supported intents (return exactly ONE):
                            and targetTechnicianName.
                            Examples: "Give Tuesday's Davis job to Mike"
                                      "Reassign the 2pm to Sarah"
+- "add_crew_member"     — user wants to ADD a second/helper technician to an
+                           EXISTING appointment (the primary tech stays on).
+                           Extract appointmentReference and targetTechnicianName.
+                           Examples: "Add Carlos to the Garcia appointment"
+                                     "Put Mike on Tuesday's Davis job too"
+- "remove_crew_member"  — user wants to REMOVE a helper/crew technician from an
+                           appointment (never the primary — that is a reassign).
+                           Extract appointmentReference and targetTechnicianName.
+                           Examples: "Take Carlos off Tuesday's job"
+                                     "Drop Mike from the Davis appointment"
 - "add_note"            — user wants to attach a note to an existing record.
                            Extract noteTargetKind (job / customer / invoice /
                            estimate / appointment) and noteBody.
@@ -546,6 +583,29 @@ Supported intents (return exactly ONE):
                            Examples: "Send estimate EST-0042 to Sarah"
                                      "Email the Jones estimate"
                                      "Text the Miller estimate to them"
+- "send_estimate_nudge" — user wants to FOLLOW UP on / re-send an estimate
+                           ALREADY sent to a customer (a reminder, not a first
+                           send — prefer send_estimate for the first send).
+                           Customer comms — never auto-execute. Extract the
+                           estimate reference.
+                           Examples: "Nudge the Khan estimate again"
+                                     "Follow up on the Jones quote"
+                                     "Remind Sarah about her estimate"
+- "send_payment_reminder" — user wants to send an overdue-payment REMINDER to a
+                           customer about an unpaid/overdue invoice (on demand,
+                           separate from the automatic dunning cadence).
+                           Customer comms — never auto-execute. Extract the
+                           invoice reference.
+                           Examples: "Send a payment reminder on the Smith invoice"
+                                     "Remind the Jones customer their invoice is overdue"
+                                     "Chase the unpaid Acme invoice"
+- "apply_late_fee"      — user wants to add a LATE FEE to an overdue invoice.
+                           Money action — never auto-execute; the owner approves
+                           the amount. Extract the invoice reference and, if the
+                           owner stated one, the fee amount (otherwise leave it
+                           for the review card — never invent a charge).
+                           Examples: "Add a $25 late fee to the Smith invoice"
+                                     "Charge a late fee on the overdue Jones invoice"
 - "record_payment"      — user wants to log a PAYMENT received against an
                            invoice. This is money-moving — never
                            auto-execute, always require a screen-tap
@@ -751,6 +811,17 @@ Supported intents (return exactly ONE):
                            Examples: "What services do we offer?"
                                      "What's in our catalog?"
                                      "Do we have a catalog item for a water heater?"
+- "lookup_job_profit"   — owner is ASKING whether a SPECIFIC job made money:
+                           its profit / margin / "did I come out ahead". Always
+                           tied to ONE job — put the job reference (customer
+                           name, "the Miller job", a JOB- number) in
+                           jobReference. Distinct from lookup_revenue, which is
+                           the whole month's business-wide revenue. Read-only.
+                           Examples: "Did I make money on the Miller job?"
+                                     "What's my margin on the Johnson install?"
+                                     "How'd we do on the Smith water heater?"
+                                     "Did the Davis job turn a profit?"
+                                     "What did I clear on JOB-0042?"
 - "unknown"             — anything else: ambiguous transcripts, or edit
                            commands without a clear reference.
 

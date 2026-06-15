@@ -389,7 +389,7 @@ import { PgProposalExecutionRepository } from './proposals/pg-proposal-execution
 import { PgCallTranscriptTurnRepository } from './voice/pg-call-transcript-turn';
 import { InMemoryCallTranscriptTurnRepository } from './voice/call-transcript-turn';
 import type { EmbeddingProvider } from './ai/providers/openai-compatible';
-import { createVoiceActionRouterWorker, VoiceActionRouterPayload } from './workers/voice-action-router';
+import { createVoiceActionRouterWorker, VoiceActionRouterPayload, INTENT_TO_PROPOSAL_TYPE } from './workers/voice-action-router';
 import { PgEntityResolver } from './ai/resolution/pg-entity-resolver';
 import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
 import { DefaultAvailabilityFinder } from './ai/tasks/availability-finder';
@@ -444,6 +444,7 @@ import {
   PgIdempotencyLockProvider,
 } from './proposals/execution/idempotency-lock';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
+import { assertVoiceHandlersWired } from './proposals/execution/wiring-assertions';
 import { resolveInvoiceDeliveryProvider } from './proposals/execution/invoice-delivery-factory';
 import { resolveEstimateDeliveryProvider } from './proposals/execution/estimate-delivery-factory';
 import { InMemoryWorkingHoursRepository } from './availability/working-hours';
@@ -1508,6 +1509,15 @@ export function createApp(): express.Express {
     ...(sendService ? { sendService } : {}),
     dispatchRepo,
   });
+  // U5 — fail boot loudly if a voice-reachable persist handler is degraded
+  // (would return success without saving). Only the persist-critical
+  // handlers (invoice / job / appointment) report isFullyWired today; the
+  // rest are treated as wired until they opt in.
+  assertVoiceHandlersWired(
+    executionHandlers,
+    Object.values(INTENT_TO_PROPOSAL_TYPE),
+    { poolConfigured: Boolean(pool), logger: workerLogger },
+  );
   // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
   // default to `proposal-run:{tenant}:{id}` when callers omit one.
   const proposalIdempotencyLock = pool
@@ -1799,6 +1809,10 @@ export function createApp(): express.Express {
     // P22 — catalog grounding: drafted invoice/estimate line items get
     // priced from the tenant's catalog instead of trusting the LLM.
     catalogRepo,
+    // P21-003 — batch_invoice voice on-ramp: enumerates completed-unbilled
+    // jobs (findJobsRequiringInvoicing) so "invoice all my completed jobs"
+    // mints one batch_invoice proposal. Same repos the batch sweep + digest use.
+    invoicingDeps: { jobRepo, invoiceRepo, estimateRepo },
     // P8 — "three Bobs": free-text customer/job references resolve to
     // verified tenant IDs (pg_trgm) before drafting; ambiguous matches
     // become one-tap clarifications. In-memory mode (no pool) skips
@@ -3285,6 +3299,48 @@ export function createApp(): express.Express {
         }
       : {}),
     auditRepo,
+    // U2 — customer MMS-to-quote. When the sender is NOT a registered
+    // tech, the worker hands the same inbound MMS to this intake:
+    // resolve/create the customer (ambiguous → clarification, never a
+    // silent guess), store + presign the photo(s), then draft a
+    // catalog-grounded draft_estimate proposal into the owner approval
+    // queue (never auto-issued). Reuses the same Twilio fetcher + files
+    // pipeline + LLM gateway as the rest of the app.
+    customerIntake: {
+      customerRepo,
+      proposalRepo,
+      fileRepo,
+      storage: storageProvider,
+      storageBucket,
+      fetchMedia: createTwilioMediaFetcher(async (tenantId) => {
+        const integration = await integrationResolver?.(tenantId, 'twilio');
+        if (
+          !integration ||
+          integration.provider !== 'twilio' ||
+          !integration.subaccountSid ||
+          !integration.authTokenPrimary
+        ) {
+          return null;
+        }
+        return {
+          accountSid: integration.subaccountSid,
+          authToken: integration.authTokenPrimary,
+        };
+      }),
+      gateway: llmGateway,
+      catalogRepo,
+      auditRepo,
+      ...(messageDelivery
+        ? {
+            notifyOwner: async (tenantId: string, body: string) => {
+              const ownerPhone = await resolveUnsupervisedOwnerPhone(tenantId);
+              if (ownerPhone) {
+                await messageDelivery!.sendSms({ to: ownerPhone, body, tenantId });
+              }
+            },
+          }
+        : {}),
+    },
   });
   workerRegistry.set(
     mmsIngestWorker.type,
@@ -3408,6 +3464,13 @@ export function createApp(): express.Express {
       // their gating proposals' approval channels.
       proposalRepo,
       auditRepo,
+      // P22-005 (U7) — per-job profit (GET /api/reports/job-profit/:jobId).
+      // Aggregates the job's invoices + tracked labor + expenses against the
+      // tenant labor rate. No materialsResolver: the P14 job_parts table is not
+      // built, so materials default to 0 (job-profit.ts handles its absence).
+      jobRepo,
+      timeEntryRepo,
+      settingsRepo,
       // Look up the tenant tz so /money-dashboard buckets by local
       // month boundaries. Without this the dashboard would default
       // to America/New_York (matches tenant_settings.timezone's DB

@@ -4467,11 +4467,107 @@ export const MIGRATIONS = {
     ALTER TABLE customer_payment_methods
       ADD COLUMN IF NOT EXISTS stripe_account_id TEXT;
   `,
+  // B2B account hierarchy (R2): add 'property_manager' to the account_type
+  // CHECK (re-adds the same-named constraint; getMigrationSQL auto-prepends
+  // DROP CONSTRAINT IF EXISTS so the old inline check from migration 113 is
+  // replaced) and a self-referential parent_account_id for sub-accounts.
+  '178_customer_b2b_hierarchy': `
+    ALTER TABLE customers
+      ADD CONSTRAINT customers_account_type_check
+      CHECK (account_type IS NULL OR account_type IN ('residential', 'b2b', 'property_manager'));
+    ALTER TABLE customers ADD COLUMN IF NOT EXISTS parent_account_id UUID REFERENCES customers(id);
+    CREATE INDEX IF NOT EXISTS idx_customers_parent_account
+      ON customers(tenant_id, parent_account_id) WHERE parent_account_id IS NOT NULL;
+  `,
 
-  // ===== PR #557 net-new migrations, layered after main's canonical 156-177 =====
+  // U5 (ACH async lifecycle) — durable IN-FLIGHT payment state. ACH /
+  // us_bank_account debits settle asynchronously: Stripe fires
+  // `payment_intent.processing` on initiation (we record status='processing'
+  // and credit the invoice in-flight), then `payment_intent.succeeded` on
+  // settlement (flip -> 'completed') or `payment_intent.payment_failed` /
+  // an ACH return (reverse the credit + reopen the invoice). The status
+  // column's CHECK already allows 'processing' (migration 026), but we
+  // RE-ASSERT it here idempotently so the in-flight state is guaranteed
+  // durable on any database whose 026 predated the value — recording a
+  // 'processing' payment would otherwise violate a stale CHECK and corrupt
+  // ACH accounting silently. Also adds a partial index on in-flight rows so
+  // settlement reconciliation / "money on the way" lookups stay cheap.
+  '179_ach_payment_processing_state': `
+    ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_status_check;
+    ALTER TABLE payments ADD CONSTRAINT payments_status_check
+      CHECK (status IN ('pending', 'processing', 'completed', 'failed', 'refunded'));
+    CREATE INDEX IF NOT EXISTS idx_payments_processing
+      ON payments(tenant_id, status) WHERE status = 'processing';
+  `,
+  // N-009 / P2-038 — correction loop. When the owner edits an AI-drafted
+  // proposal, the edit is distilled into a STRUCTURED LESSON (labor rate, part
+  // price, banned phrase, scope reclass) that applies forward within the
+  // tenant-local day and is reversible. Each lesson carries its cascaded
+  // config change in `payload` as { before, after } so a single undo reverses
+  // both the lesson and the config. tenant_id + FORCE RLS; audited on
+  // apply/undo. local_date is the tenant-local calendar day (storage is UTC;
+  // forward application + digest window scope to this day). Status flips
+  // applied -> reverted on undo.
+  '180_correction_lessons': `
+    CREATE TABLE IF NOT EXISTS correction_lessons (
+      id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id          UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      lesson_type        TEXT NOT NULL
+                         CHECK (lesson_type IN (
+                           'labor_rate_changed','part_price_changed',
+                           'banned_phrase','scope_reclassified')),
+      status             TEXT NOT NULL DEFAULT 'applied'
+                         CHECK (status IN ('applied','reverted')),
+      source_proposal_id UUID NOT NULL,
+      owner_id           UUID NOT NULL,
+      summary            TEXT NOT NULL,
+      payload            JSONB NOT NULL,
+      local_date         DATE NOT NULL,
+      created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      reverted_at        TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_correction_lessons_day
+      ON correction_lessons (tenant_id, local_date)
+      WHERE status = 'applied';
+    CREATE INDEX IF NOT EXISTS idx_correction_lessons_source
+      ON correction_lessons (tenant_id, source_proposal_id);
+    ALTER TABLE correction_lessons ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE correction_lessons FORCE ROW LEVEL SECURITY;
+    CREATE POLICY correction_lessons_tenant_isolation ON correction_lessons
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+  // P22-005 (U7) — tenant-level billable LABOR rate, integer cents per hour.
+  // Drives per-job profit (jobs/job-profit.ts): tracked job minutes × this
+  // rate = labor cost. Nullable: when unset, per-job profit reports
+  // minutes-only with a spoken caveat. Distinct from hourly_rate_cents
+  // (migration 098), which is the owner's value-of-time for Time-Given-Back.
+  // Per-tech rates are out of scope (single tenant-level rate). Idempotent.
+  // Renamed from 143 → 181 at integration (143/178/179 already taken; 180 is
+  // reserved for U8 correction-loop) and moved to the end of MIGRATIONS so the
+  // sequence stays monotonic.
+  '181_tenant_settings_labor_rate': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS labor_rate_cents_per_hour INT;
+  `,
+  // Appointment-type taxonomy (U2): the typed *kind* of visit, distinct from
+  // the classifier intent and the free-text summary. Nullable + additive —
+  // inbound-caller DRAFTs and legacy rows carry NULL (a CHECK permits NULL).
+  // The named CHECK is made re-run-safe by getMigrationSQL's DROP-CONSTRAINT
+  // rewriter; the value set is kept in lockstep with `appointmentTypeSchema`
+  // (packages/shared/src/contracts/appointment-type.ts).
+  '182_appointment_type': `
+    ALTER TABLE appointments
+      ADD COLUMN IF NOT EXISTS appointment_type TEXT;
+    ALTER TABLE appointments
+      ADD CONSTRAINT appointments_appointment_type_check
+      CHECK (appointment_type IN ('estimate', 'repair', 'install', 'maintenance', 'diagnostic'));
+    CREATE INDEX IF NOT EXISTS idx_appointments_type ON appointments(tenant_id, appointment_type);
+  `,
+
+  // ===== PR #557 net-new migrations, layered after main's canonical 156-182 =====
 
   // Estimate entity resolution — trigram index for PgEntityResolver (estimate kind).
-  '178_estimate_entity_trgm_index': `
+  '183_estimate_entity_trgm_index': `
     CREATE INDEX IF NOT EXISTS idx_estimates_number_trgm
       ON estimates USING GIN (estimate_number gin_trgm_ops);
   `,
@@ -4480,7 +4576,7 @@ export const MIGRATIONS = {
   // audit + edit sessions used by src/sms/proposal-approval. Table renamed to
   // proposal_approval_sms_events to coexist with main's kind-based
   // proposal_sms_events (migration 156).
-  '179_proposal_approval_sms_events': `
+  '184_proposal_approval_sms_events': `
     CREATE TABLE IF NOT EXISTS proposal_approval_sms_events (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id),
@@ -4517,7 +4613,7 @@ export const MIGRATIONS = {
   `,
 
   // PHOTO-INVOICE + client_visible on job photos for Client Hub.
-  '180_invoice_photos_and_client_visible': `
+  '185_invoice_photos_and_client_visible': `
     ALTER TABLE job_photos
       ADD COLUMN IF NOT EXISTS client_visible BOOLEAN NOT NULL DEFAULT false;
 
@@ -4543,7 +4639,7 @@ export const MIGRATIONS = {
   `,
 
   // P23 — job checklists + completion gating.
-  '181_job_checklists': `
+  '186_job_checklists': `
     CREATE TABLE IF NOT EXISTS job_checklists (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id),
@@ -4560,7 +4656,7 @@ export const MIGRATIONS = {
   `,
 
   // RV-116 fix — RLS-safe cross-tenant drain for the dropped-call recovery sweep.
-  '182_dropped_call_recoveries_due_fn': `
+  '187_dropped_call_recoveries_due_fn': `
     DO $do$ BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'find_due_dropped_call_recoveries') THEN
         CREATE FUNCTION find_due_dropped_call_recoveries(p_now TIMESTAMPTZ, p_limit INT)
@@ -4581,7 +4677,7 @@ export const MIGRATIONS = {
 
   // FORCE RLS on the remaining PR #557 tables that shipped ENABLE + policy but no
   // FORCE (digest_entries handled by main's 177_digest_entries above).
-  '183_force_rls_pr557_tables': `
+  '188_force_rls_pr557_tables': `
     ALTER TABLE proposal_approval_sms_events FORCE ROW LEVEL SECURITY;
     ALTER TABLE proposal_sms_edit_sessions FORCE ROW LEVEL SECURITY;
     ALTER TABLE invoice_photos FORCE ROW LEVEL SECURITY;
