@@ -363,6 +363,12 @@ import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
 import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
+import { PgCorrectionLessonRepository } from './learning/corrections/pg-correction-lesson';
+import { createPgConfigPorts } from './learning/corrections/pg-config-ports';
+import { recordCorrectionLessons } from './learning/corrections/apply-undo';
+import { buildCorrectionLessonDrafts } from './learning/corrections/build-correction-drafts';
+import { localDateFor } from './learning/corrections/correction-lesson';
+import type { ExtractorConfigSnapshot } from './learning/corrections/correction-extractor';
 import {
   runRecordingRetentionSweep,
   PgRecordingRetentionRepository,
@@ -1553,6 +1559,18 @@ export function createApp(): express.Express {
   let supervisorSpendRecorder:
     | ((tenantId: string, proposalId: string) => Promise<void>)
     | null = null;
+  // N-009 / P2-038 — structured correction-lesson loop. Pool-gated like the
+  // sibling repos: with no pool (in-memory dev) there is nothing to persist
+  // lessons into, so the loop is skipped and the digest falls back to the RAG
+  // chunk-count line. The ports cascade a recorded lesson into the real tenant
+  // config (labor rate + banned phrases on tenant_settings, SKU price on
+  // catalog_items) so the NEXT same-day draft reflects the correction.
+  const correctionLessonRepo = pool ? new PgCorrectionLessonRepository(pool) : null;
+  const correctionConfigPorts = createPgConfigPorts({
+    settingsRepo,
+    catalogRepo,
+    logger: workerLogger,
+  });
   const proposalExecutor = new ProposalExecutor(
     executionHandlers,
     proposalRepo,
@@ -1586,6 +1604,67 @@ export function createApp(): express.Express {
             proposalId: event.proposalId,
             error: err instanceof Error ? err.message : String(err),
           });
+        }
+
+        // N-009 / P2-038 — record STRUCTURED correction lessons alongside the
+        // RAG chunk above. This is the deterministic config cascade (labor
+        // rate / SKU / banned phrase), NOT embeddings, so it runs whenever a
+        // pool + lesson repo exist — independent of `embeddingProvider`. The
+        // proposal is already executed (human-approved); recording a lesson
+        // adds no new auto-execution. Fully failure-soft: a throw here must
+        // never break the executor's invariants.
+        if (correctionLessonRepo) {
+          try {
+            const proposal = await proposalRepo.findById(event.tenantId, event.proposalId);
+            const execution = await proposalExecutionRepo.findLatestByProposal(
+              event.tenantId,
+              event.proposalId,
+            );
+            if (proposal && execution && execution.executedPayload) {
+              // Current tenant config the cascade reverses against. Labor rate +
+              // banned phrases live on tenant_settings; SKU prices are read per
+              // catalog item by the extractor only when a line carries its
+              // catalogItemId, so an empty map here is the conservative default.
+              const settings = await settingsRepo.findByTenant(event.tenantId);
+              const config: ExtractorConfigSnapshot = {
+                laborRateCents: settings?.laborRateCentsPerHour ?? null,
+                skuPriceCents: {},
+                bannedPhrases: settings?.brandVoice?.banned_phrases ?? [],
+                templateWeights: {},
+              };
+              const drafts = buildCorrectionLessonDrafts(
+                {
+                  drafted: (proposal.payload ?? {}) as Record<string, unknown>,
+                  executed: execution.executedPayload as Record<string, unknown>,
+                },
+                config,
+              );
+              if (drafts.length > 0) {
+                const timezone = settings?.timezone ?? 'UTC';
+                const localDate = localDateFor(execution.executedAt ?? new Date(), timezone);
+                await recordCorrectionLessons(
+                  {
+                    tenantId: event.tenantId,
+                    sourceProposalId: event.proposalId,
+                    ownerId: proposal.executedBy ?? proposal.createdBy,
+                    localDate,
+                    drafts,
+                  },
+                  {
+                    repository: correctionLessonRepo,
+                    ports: correctionConfigPorts,
+                    auditRepo,
+                  },
+                );
+              }
+            }
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.error('app: recordCorrectionLessons failed', {
+              proposalId: event.proposalId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
       },
     },
@@ -3710,7 +3789,20 @@ export function createApp(): express.Express {
   );
   // D2-1c — audit-log proposal approve / reject / edit / undo.
   app.use('/api/dispatch', createSchedulingRouter(feasibilityDeps, userRepo));
-  app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo, auditRepo, feasibilityDeps));
+  app.use(
+    '/api/proposals',
+    createProposalsRouter(
+      proposalRepo,
+      appointmentRepo,
+      auditRepo,
+      feasibilityDeps,
+      // N-009 / P2-038 — undoing a proposal reverses the structured correction
+      // lessons it recorded. Pool-gated: only present when lessons can persist.
+      correctionLessonRepo
+        ? { lessonRepo: correctionLessonRepo, ports: correctionConfigPorts }
+        : undefined,
+    ),
+  );
   if (pool) {
     app.use('/api/interactions', createInteractionsRouter({ pool }));
   }

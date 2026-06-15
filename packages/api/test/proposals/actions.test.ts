@@ -13,6 +13,10 @@ import {
 } from '../../src/proposals/actions';
 import { UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
 import { AppError, ForbiddenError, ValidationError, NotFoundError } from '../../src/shared/errors';
+import { InMemoryCorrectionLessonRepository } from '../../src/learning/corrections/correction-lesson';
+import { FakeConfigPorts } from '../../src/learning/corrections/lesson-applicator';
+import { extractCorrectionLessons } from '../../src/learning/corrections/correction-extractor';
+import { recordCorrectionLessons } from '../../src/learning/corrections/apply-undo';
 
 describe('P2-005 — Approve / reject / edit interactions', () => {
   const tenantId = 'tenant-1';
@@ -182,6 +186,68 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
       expect(undone.status).toBe('undone');
       expect(undone.undoneAt).toBeInstanceOf(Date);
       expect(undone.undoneBy).toBe(actorId);
+    });
+
+    it('reverses correction lessons linked to the proposal (and the cascaded config)', async () => {
+      const repo = makeRepo();
+      const proposal = await createReadyProposal(repo);
+      const approved = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+      expect(approved.status).toBe('approved');
+
+      const auditRepo = new InMemoryAuditRepository();
+      const lessonRepo = new InMemoryCorrectionLessonRepository();
+      const ports = new FakeConfigPorts({ laborRateCents: 11500 });
+      const drafts = extractCorrectionLessons({
+        deltas: [{ type: 'price_changed', lineItemId: 'li-1', oldValue: 11500, newValue: 13500 }],
+        lineItems: [{ id: 'li-1', category: 'labor' }],
+        config: { laborRateCents: 11500, skuPriceCents: {}, bannedPhrases: [], templateWeights: {} },
+      });
+      await recordCorrectionLessons(
+        { tenantId, sourceProposalId: proposal.id, ownerId: actorId, localDate: '2026-06-14', drafts },
+        { repository: lessonRepo, ports, auditRepo },
+      );
+      expect(ports.laborRateCents).toBe(13500); // cascaded forward
+
+      const undone = await undoProposal(
+        repo,
+        tenantId,
+        proposal.id,
+        actorId,
+        'owner',
+        auditRepo,
+        { lessonRepo, ports },
+      );
+      expect(undone.status).toBe('undone');
+      // The cascaded config was rolled back and the lesson marked reverted.
+      expect(ports.laborRateCents).toBe(11500);
+      const linked = await lessonRepo.findBySourceProposal(tenantId, proposal.id);
+      expect(linked.every((l) => l.status === 'reverted')).toBe(true);
+      expect(
+        auditRepo.getAll().filter((a) => a.eventType === 'correction_lesson.reverted'),
+      ).toHaveLength(1);
+    });
+
+    it('a throw in correction-lesson reversal never blocks the proposal undo', async () => {
+      const repo = makeRepo();
+      const proposal = await createReadyProposal(repo);
+      await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+      const auditRepo = new InMemoryAuditRepository();
+      const throwingRepo = {
+        async findBySourceProposal() {
+          throw new Error('boom');
+        },
+      } as unknown as InMemoryCorrectionLessonRepository;
+      const undone = await undoProposal(
+        repo,
+        tenantId,
+        proposal.id,
+        actorId,
+        'owner',
+        auditRepo,
+        { lessonRepo: throwingRepo, ports: new FakeConfigPorts() },
+      );
+      // Undo still succeeds — the loop failure is swallowed.
+      expect(undone.status).toBe('undone');
     });
 
     it('undoProposal fails after the window closes (UNDO_WINDOW_CLOSED)', async () => {
