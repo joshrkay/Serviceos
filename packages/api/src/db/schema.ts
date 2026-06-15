@@ -4736,6 +4736,26 @@ export const MIGRATIONS = {
       ON service_locations(tenant_id, customer_id)
       WHERE address_type IN ('billing', 'both');
   `,
+
+  // U5 (JTBD #7) — widen the proposal_sms_events kind CHECK from 171 to allow
+  // 'digest_approve_all_rendered': the outbound anchor row recorded when the
+  // daily digest SMS goes out, capturing the day's BATCH-APPROVABLE proposal
+  // ids (the body holds the id set as JSON). An inbound ALL / APPROVE ALL
+  // reply resolves against this anchor and delegates to the P2-035 batch
+  // approve path. Mirrors the CHECK-widening style of
+  // 171_proposal_sms_events_voice_reapproval_kind.
+  '189_proposal_sms_events_digest_approve_all_kind': `
+    ALTER TABLE proposal_sms_events
+      DROP CONSTRAINT IF EXISTS proposal_sms_events_kind_check;
+    ALTER TABLE proposal_sms_events
+      ADD CONSTRAINT proposal_sms_events_kind_check
+        CHECK (kind IN (
+          'proposal_rendered','reapproval_rendered','clarification_sent',
+          'reply_approve','reply_reject','edit_session_opened','edit_request',
+          'review_required_rendered','voice_reapproval',
+          'digest_approve_all_rendered'
+        ));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -103,6 +103,21 @@ export class PgCorrectionLessonRepository
     });
   }
 
+  async findBySourceProposal(
+    tenantId: string,
+    sourceProposalId: string,
+  ): Promise<CorrectionLesson[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM correction_lessons
+         WHERE tenant_id = $1 AND source_proposal_id = $2
+         ORDER BY created_at ASC`,
+        [tenantId, sourceProposalId],
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
   async markReverted(
     tenantId: string,
     id: string,

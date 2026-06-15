@@ -17,6 +17,7 @@ import {
   rejectProposal,
   editProposal,
   undoProposal,
+  type UndoCorrectionLoopDeps,
 } from '../proposals/actions';
 import {
   proposalFilterSchema,
@@ -52,6 +53,9 @@ export function createProposalsRouter(
   appointmentRepo?: AppointmentRepository,
   auditRepo?: AuditRepository,
   feasibilityDeps?: FeasibilityDependencies,
+  // N-009 / P2-038 — when supplied, undoing a proposal also reverses the
+  // structured correction lessons it recorded (and the config each cascaded).
+  undoCorrectionLoop?: UndoCorrectionLoopDeps,
 ): Router {
   const router = Router();
 
@@ -315,6 +319,7 @@ export function createProposalsRouter(
           req.auth!.userId,
           req.auth!.role as Role,
           auditRepo,
+          undoCorrectionLoop,
         );
         res.json(result);
       } catch (err) {

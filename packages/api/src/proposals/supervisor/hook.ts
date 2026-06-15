@@ -20,6 +20,20 @@
 import type { ActionClass, Proposal, ProposalType } from '../proposal';
 import type { SupervisorDecision } from './policy';
 
+/**
+ * Unit U3 (decision D-004): the supervisor runs BY DEFAULT for every
+ * tenant. The platform feature-flag API (`isEnabledForTenant`) is a plain
+ * default-FALSE boolean — it has no per-flag default-true or tri-state —
+ * so a default-ON gate cannot be expressed with an "enable" flag. We
+ * therefore invert to an explicit OPT-OUT flag: when this flag is unset
+ * the read returns false ⇒ "not disabled" ⇒ supervisor ON; a tenant turns
+ * it OFF by setting the flag to true. The boot wiring (app.ts) reads this
+ * flag and passes `enabled = !disabled` into the service/sweep gates,
+ * which both already expect "true = enabled". Keep both paths (creation
+ * hook + annotator sweep) consistent on this single key.
+ */
+export const SUPERVISOR_DISABLED_FLAG = 'supervisor_agent_disabled';
+
 export interface SupervisorCreationHookInput {
   tenantId: string;
   proposalType: ProposalType;

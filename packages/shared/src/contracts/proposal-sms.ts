@@ -22,6 +22,7 @@ import { z } from 'zod';
 
 export const PROPOSAL_SMS_REPLY_INTENTS = [
   'approve',
+  'approve_all',
   'reject',
   'edit',
   'unrecognized',
@@ -61,11 +62,25 @@ export const REJECT_TOKENS = [
 
 export const EDIT_TOKENS = ['edit', 'change', 'modify', 'fix'] as const;
 
+/**
+ * U5 (JTBD #7) — "APPROVE ALL" reply over the daily-digest transport. A
+ * multi-item digest invites the owner to approve EVERY batch-approvable item
+ * at once. Accepted as a bare `ALL`/`EVERYTHING` first token, or as the
+ * composite `APPROVE ALL` (an APPROVE_TOKEN followed by `all`/`everything`).
+ * The handler only delegates to the batch path when the owner's latest
+ * outbound anchor is the digest anchor; otherwise it falls through to the
+ * normal single-proposal approve.
+ */
+export const APPROVE_ALL_TOKENS = ['all', 'everything'] as const;
+
 const INTENT_BY_TOKEN: ReadonlyMap<string, ProposalSmsReplyIntent> = new Map([
   ...APPROVE_TOKENS.map((t) => [t, 'approve'] as const),
   ...REJECT_TOKENS.map((t) => [t, 'reject'] as const),
   ...EDIT_TOKENS.map((t) => [t, 'edit'] as const),
 ]);
+
+const APPROVE_TOKEN_SET: ReadonlySet<string> = new Set(APPROVE_TOKENS);
+const APPROVE_ALL_TOKEN_SET: ReadonlySet<string> = new Set(APPROVE_ALL_TOKENS);
 
 export const ProposalSmsReplySchema = z.object({
   intent: z.enum(PROPOSAL_SMS_REPLY_INTENTS),
@@ -99,6 +114,22 @@ export function parseProposalSmsReply(body: string): ProposalSmsReply {
 
   const [first = '', ...rest] = trimmed.split(/\s+/);
   const token = bareToken(first.toLowerCase());
+
+  // U5 — bare `ALL` / `EVERYTHING`.
+  if (APPROVE_ALL_TOKEN_SET.has(token)) {
+    return { intent: 'approve_all', remainder: rest.join(' ').trim() };
+  }
+
+  // U5 — composite `APPROVE ALL` (an approve token immediately followed by
+  // `all`/`everything`). The bare-approve case (e.g. "APPROVE this") still
+  // resolves to plain `approve` below.
+  if (APPROVE_TOKEN_SET.has(token)) {
+    const second = bareToken((rest[0] ?? '').toLowerCase());
+    if (APPROVE_ALL_TOKEN_SET.has(second)) {
+      return { intent: 'approve_all', remainder: rest.slice(1).join(' ').trim() };
+    }
+  }
+
   const intent = INTENT_BY_TOKEN.get(token);
   if (!intent) return { intent: 'unrecognized', remainder: trimmed };
 

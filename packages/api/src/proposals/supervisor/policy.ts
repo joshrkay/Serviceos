@@ -47,9 +47,52 @@ export interface SupervisorRules {
 
 /**
  * Permissive parity defaults: all caps unset → `evaluateSupervisorPolicy`
- * always returns 'allow', i.e. exactly today's behavior.
+ * always returns 'allow', i.e. exactly today's behavior. Used as the rule
+ * set when the supervisor is OFF for a tenant (opt-out) so a stale
+ * `enabled:false` snapshot still carries a valid, no-op rule object.
  */
 export const DEFAULT_SUPERVISOR_RULES: SupervisorRules = {};
+
+/**
+ * Platform-default supervisor rules — the backstop applied to every
+ * (non-opted-out) tenant that has NOT set its own `supervisor_policies`
+ * version. Decision D-004 (Unit U3): the supervisor runs by default, so
+ * the default must be a genuine safety net WITHOUT disrupting normal
+ * operation. These caps are deliberately GENEROUS — they catch anomalous
+ * volume/amounts (a runaway agent, a fat-fingered amount), not everyday
+ * proposals. They only ever DOWNGRADE (force_review / block); they can
+ * never auto-approve (the verdict vocabulary has no upgrade member).
+ *
+ * Rationale for each value (all integer cents):
+ *  - perProposalCapCents = 50_000_00 ($50,000): a single auto-approvable
+ *    money proposal above $50k is well outside normal field-service
+ *    ticket sizes; block it to human review (lands in 'draft'). Note this
+ *    only fires for money-class proposals that the legacy path would
+ *    otherwise auto-approve; money class already never auto-approves at
+ *    decideInitialStatus, so this is pure defense-in-depth.
+ *  - dailySpendCapCents = 250_000_00 ($250,000): cumulative executed
+ *    money-class spend per UTC day. Crossing a quarter-million in
+ *    machine-executed spend in a single day is anomalous for one tenant;
+ *    further auto-approvals that day are forced to review (never blocked
+ *    outright, so the business keeps moving via human sign-off).
+ *  - maxAutoApprovalsPerHour = 200: a generous machine-approval budget.
+ *    A tenant legitimately auto-approving >200 proposals in one UTC hour
+ *    signals a loop or a misconfiguration; subsequent approvals that hour
+ *    fall back to human review rather than firing unbounded.
+ *  - blockedProposalTypes: none by default — type-level blocks are a
+ *    per-tenant choice, not a platform-wide opinion.
+ *
+ * Tenant-set rules (an active `supervisor_policies` version) take
+ * precedence over this default in their entirety — see
+ * SupervisorPolicyService.refresh(). Money/comms/irreversible classes
+ * remain hard-blocked from auto-approval by decideInitialStatus
+ * regardless of these caps; this default cannot weaken that.
+ */
+export const PLATFORM_DEFAULT_SUPERVISOR_RULES: SupervisorRules = {
+  perProposalCapCents: 50_000_00,
+  dailySpendCapCents: 250_000_00,
+  maxAutoApprovalsPerHour: 200,
+};
 
 /**
  * 'allow'        → unchanged path (whatever decideInitialStatus said).

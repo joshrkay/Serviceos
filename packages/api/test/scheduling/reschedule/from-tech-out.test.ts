@@ -165,7 +165,21 @@ describe('P6-028 reschedule_from_tech — from-tech-out proposal walk', () => {
       expect((p.sourceContext?.draftSms as string).length).toBeGreaterThan(0);
       expect(p.payload.appointmentId).toBeTruthy();
       expect(p.targetEntityType).toBe('appointment');
+      // Required NOT NULL idempotency_key — the real proposals table enforces
+      // it; the in-memory repo does not. This pins what CI's integration test
+      // caught: a missing key hit a NOT NULL violation, swallowed as
+      // processing_failed (the handler returned handled:false).
+      expect(p.idempotencyKey).toBeTruthy();
+      // prompt_version_id is a UUID column; the brand-voice composer returns a
+      // string id ('brand_voice_v1'), so it must NOT be placed on
+      // promptVersionId (the real insert throws "invalid input syntax for type
+      // uuid"). It rides in sourceContext for provenance instead.
+      expect(p.promptVersionId).toBeUndefined();
+      expect(typeof p.sourceContext?.brandVoicePromptVersion).toBe('string');
     }
+    // Distinct keys per appointment so two reschedules never collide on the
+    // unique (tenant_id, idempotency_key) index.
+    expect(proposals[0].idempotencyKey).not.toBe(proposals[1].idempotencyKey);
     // The draft references the customer name (brand voice composes from context).
     expect(proposals[0].summary).toContain('Jamie Rivera');
 

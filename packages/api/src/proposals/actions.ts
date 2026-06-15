@@ -8,6 +8,20 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { logProposalEvent } from './audit';
 import { confidenceMetaBlocksAutoApprove } from './auto-approve';
 import { chainMetaFor } from './chain';
+import { undoCorrectionLesson } from '../learning/corrections/apply-undo';
+import type { CorrectionLessonRepository } from '../learning/corrections/correction-lesson';
+import type { ConfigPorts } from '../learning/corrections/lesson-applicator';
+
+/**
+ * N-009 / P2-038 — optional correction-loop reversal wired into `undoProposal`.
+ * When supplied, undoing a proposal reverses every structured lesson that
+ * proposal recorded (and the config each cascaded). Failure-soft: a throw is
+ * logged and swallowed so it can never block the proposal undo itself.
+ */
+export interface UndoCorrectionLoopDeps {
+  lessonRepo: CorrectionLessonRepository;
+  ports: ConfigPorts;
+}
 
 export interface BatchApproveResult {
   approved: string[];
@@ -350,6 +364,7 @@ export async function undoProposal(
   actorId: string,
   actorRole: Role,
   auditRepo?: AuditRepository,
+  correctionLoop?: UndoCorrectionLoopDeps,
 ): Promise<Proposal> {
   if (!hasPermission(actorRole, 'proposals:approve')) {
     // Same permission as approve — if you can approve you can undo.
@@ -392,6 +407,39 @@ export async function undoProposal(
       id: actorId,
       role: actorRole,
     });
+  }
+
+  // N-009 / P2-038 — reverse any structured correction lessons this proposal
+  // recorded (and the config each cascaded). Linked via source_proposal_id, so
+  // no proposal-payload change is needed. Failure-soft: each undo is idempotent
+  // and a throw here is logged + swallowed — it must never break the undo path.
+  if (correctionLoop && auditRepo) {
+    try {
+      const lessons = await correctionLoop.lessonRepo.findBySourceProposal(tenantId, proposalId);
+      for (const lesson of lessons) {
+        // Per-lesson failure-soft: one lesson's reversal throwing must not
+        // abort the remaining reversals (a single outer try would skip them).
+        try {
+          await undoCorrectionLesson(
+            { tenantId, lessonId: lesson.id, ownerId: actorId },
+            { repository: correctionLoop.lessonRepo, ports: correctionLoop.ports, auditRepo },
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error('undoProposal: individual undoCorrectionLesson reversal failed', {
+            proposalId,
+            lessonId: lesson.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('undoProposal: findBySourceProposal failed', {
+        proposalId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   return updated;

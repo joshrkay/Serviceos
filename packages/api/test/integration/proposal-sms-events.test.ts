@@ -19,6 +19,8 @@ import {
 import {
   PgProposalSmsEventRepository,
   createProposalSmsEvent,
+  encodeDigestApproveAllBody,
+  parseDigestApproveAllIds,
 } from '../../src/proposals/sms/sms-event';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { createProposal } from '../../src/proposals/proposal';
@@ -215,6 +217,37 @@ describe('Postgres integration — proposal_sms_events (P2-034)', () => {
         kind: 'bogus_kind' as never,
       }),
     ).rejects.toThrow();
+  });
+
+  it('U5: round-trips a digest_approve_all_rendered anchor (migration 189 CHECK) and finds it via findRecentDigestApproveAll', async () => {
+    // The anchor's proposal_id is the first batch-approvable id (NOT NULL FK);
+    // the full set is encoded in the body.
+    const a = await seedProposal(tenant.tenantId);
+    const b = await seedProposal(tenant.tenantId);
+    const ids = [a, b];
+    const t = new Date(Date.now() + 3 * 60 * 60 * 1000); // newest in this tenant
+    const anchor = await repo.create(
+      createProposalSmsEvent({
+        tenantId: tenant.tenantId,
+        proposalId: ids[0],
+        direction: 'outbound',
+        kind: 'digest_approve_all_rendered',
+        body: encodeDigestApproveAllBody(ids),
+        now: t,
+      }),
+    );
+
+    const found = await repo.findRecentDigestApproveAll(tenant.tenantId);
+    expect(found?.id).toBe(anchor.id);
+    expect(found?.kind).toBe('digest_approve_all_rendered');
+    expect(parseDigestApproveAllIds(found!.body)).toEqual(ids);
+
+    // The digest anchor must NOT pollute the Y/N reply target query.
+    const recentOutbound = await repo.findRecentOutbound(tenant.tenantId, 10);
+    expect(recentOutbound.map((e) => e.kind)).not.toContain('digest_approve_all_rendered');
+
+    // Tenant isolation: tenant B never sees tenant A's digest anchor.
+    expect(await repo.findRecentDigestApproveAll(other.tenantId)).toBeNull();
   });
 
   it('accepts review_required_rendered (migration 165 CHECK) and returns it as the latest findRecentOutbound target', async () => {

@@ -284,6 +284,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['187_customer_tags_custom_fields', 'b1f86f9b3a0073f5d82cfeb0d3b2d7e5c288c37a206d91a8e2506f03449d9ad4'],
   // U3 (CRM Jobber parity): billing vs service address on service_locations.
   ['188_service_location_address_type', '0595b37bf8f98f5663ab0b55c50834f6d38e5124c05768ff18bde6ad88db62d2'],
+  // U5 (JTBD #7): widen proposal_sms_events kind CHECK for the digest
+  // 'digest_approve_all_rendered' anchor (additive, pre-deploy).
+  ['189_proposal_sms_events_digest_approve_all_kind', 'e66034b7738726dc1289801770c998c722b7a13c314f410c38d993b6973c296d'],
 ];
 
 function hashMigration(value: string): string {

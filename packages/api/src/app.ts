@@ -314,7 +314,6 @@ import { createOneTapApproveRouter } from './routes/one-tap-approve';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
 import { runDailyDigestSweep, DIGEST_SWEEP_INTERVAL_MS } from './workers/daily-digest-worker';
-import { runDigestSweep, PgDigestEntryRepository } from './workers/digest-worker';
 import { PgDailyDigestRepository } from './digest/pg-daily-digest';
 import { InMemoryDailyDigestRepository, type DailyDigestPayload } from './digest/digest-service';
 import { composeBrandVoiceMessage } from './ai/brand-voice/composer';
@@ -363,6 +362,12 @@ import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
 import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
+import { PgCorrectionLessonRepository } from './learning/corrections/pg-correction-lesson';
+import { createPgConfigPorts } from './learning/corrections/pg-config-ports';
+import { recordCorrectionLessons } from './learning/corrections/apply-undo';
+import { buildCorrectionLessonDrafts } from './learning/corrections/build-correction-drafts';
+import { localDateFor } from './learning/corrections/correction-lesson';
+import type { ExtractorConfigSnapshot } from './learning/corrections/correction-extractor';
 import {
   runRecordingRetentionSweep,
   PgRecordingRetentionRepository,
@@ -416,7 +421,10 @@ import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation'
 import { InMemoryProposalRepository, createProposal as buildProposalRow } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy hook + advisory annotator).
-import { configureSupervisorCreationHook } from './proposals/supervisor/hook';
+import {
+  configureSupervisorCreationHook,
+  SUPERVISOR_DISABLED_FLAG,
+} from './proposals/supervisor/hook';
 import {
   SupervisorPolicyService,
   recordExecutedProposalSpend,
@@ -513,6 +521,7 @@ import {
   PgProposalSmsEventRepository,
   InMemoryProposalSmsEventRepository,
   createProposalSmsEvent,
+  encodeDigestApproveAllBody,
   createLlmEditInterpreter,
   type OutboundAnchorKind,
 } from './proposals/sms';
@@ -1553,6 +1562,18 @@ export function createApp(): express.Express {
   let supervisorSpendRecorder:
     | ((tenantId: string, proposalId: string) => Promise<void>)
     | null = null;
+  // N-009 / P2-038 — structured correction-lesson loop. Pool-gated like the
+  // sibling repos: with no pool (in-memory dev) there is nothing to persist
+  // lessons into, so the loop is skipped and the digest falls back to the RAG
+  // chunk-count line. The ports cascade a recorded lesson into the real tenant
+  // config (labor rate + banned phrases on tenant_settings, SKU price on
+  // catalog_items) so the NEXT same-day draft reflects the correction.
+  const correctionLessonRepo = pool ? new PgCorrectionLessonRepository(pool) : null;
+  const correctionConfigPorts = createPgConfigPorts({
+    settingsRepo,
+    catalogRepo,
+    logger: workerLogger,
+  });
   const proposalExecutor = new ProposalExecutor(
     executionHandlers,
     proposalRepo,
@@ -1586,6 +1607,67 @@ export function createApp(): express.Express {
             proposalId: event.proposalId,
             error: err instanceof Error ? err.message : String(err),
           });
+        }
+
+        // N-009 / P2-038 — record STRUCTURED correction lessons alongside the
+        // RAG chunk above. This is the deterministic config cascade (labor
+        // rate / SKU / banned phrase), NOT embeddings, so it runs whenever a
+        // pool + lesson repo exist — independent of `embeddingProvider`. The
+        // proposal is already executed (human-approved); recording a lesson
+        // adds no new auto-execution. Fully failure-soft: a throw here must
+        // never break the executor's invariants.
+        if (correctionLessonRepo) {
+          try {
+            const proposal = await proposalRepo.findById(event.tenantId, event.proposalId);
+            const execution = await proposalExecutionRepo.findLatestByProposal(
+              event.tenantId,
+              event.proposalId,
+            );
+            if (proposal && execution && execution.executedPayload) {
+              // Current tenant config the cascade reverses against. Labor rate +
+              // banned phrases live on tenant_settings; SKU prices are read per
+              // catalog item by the extractor only when a line carries its
+              // catalogItemId, so an empty map here is the conservative default.
+              const settings = await settingsRepo.findByTenant(event.tenantId);
+              const config: ExtractorConfigSnapshot = {
+                laborRateCents: settings?.laborRateCentsPerHour ?? null,
+                skuPriceCents: {},
+                bannedPhrases: settings?.brandVoice?.banned_phrases ?? [],
+                templateWeights: {},
+              };
+              const drafts = buildCorrectionLessonDrafts(
+                {
+                  drafted: (proposal.payload ?? {}) as Record<string, unknown>,
+                  executed: execution.executedPayload as Record<string, unknown>,
+                },
+                config,
+              );
+              if (drafts.length > 0) {
+                const timezone = settings?.timezone ?? 'UTC';
+                const localDate = localDateFor(execution.executedAt ?? new Date(), timezone);
+                await recordCorrectionLessons(
+                  {
+                    tenantId: event.tenantId,
+                    sourceProposalId: event.proposalId,
+                    ownerId: proposal.executedBy ?? proposal.createdBy,
+                    localDate,
+                    drafts,
+                  },
+                  {
+                    repository: correctionLessonRepo,
+                    ports: correctionConfigPorts,
+                    auditRepo,
+                  },
+                );
+              }
+            }
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.error('app: recordCorrectionLessons failed', {
+              proposalId: event.proposalId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
       },
     },
@@ -1683,7 +1765,6 @@ export function createApp(): express.Express {
     recordingRetention: 590011,
     supervisorAnnotate: 590012,
     accountingSync: 590013,
-    digest: 590014,
     hfcrWeeklySend: 590014,
     holdReaper: 590015,
   } as const;
@@ -3710,7 +3791,20 @@ export function createApp(): express.Express {
   );
   // D2-1c — audit-log proposal approve / reject / edit / undo.
   app.use('/api/dispatch', createSchedulingRouter(feasibilityDeps, userRepo));
-  app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo, auditRepo, feasibilityDeps));
+  app.use(
+    '/api/proposals',
+    createProposalsRouter(
+      proposalRepo,
+      appointmentRepo,
+      auditRepo,
+      feasibilityDeps,
+      // N-009 / P2-038 — undoing a proposal reverses the structured correction
+      // lessons it recorded. Pool-gated: only present when lessons can persist.
+      correctionLessonRepo
+        ? { lessonRepo: correctionLessonRepo, ports: correctionConfigPorts }
+        : undefined,
+    ),
+  );
   if (pool) {
     app.use('/api/interactions', createInteractionsRouter({ pool }));
   }
@@ -4026,6 +4120,25 @@ export function createApp(): express.Express {
         buildApproveUrl: (token: string) =>
           `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
         publicBaseUrl,
+        // U5 (JTBD #7) — record the "APPROVE ALL" anchor over the P2-034
+        // transport. proposal_id is NOT NULL (FK), so the row uses the first
+        // batch-approvable id as its representative; the full ordered set is
+        // encoded in the body and read back by the reply handler.
+        recordApproveAllAnchor: async ({ tenantId, proposalIds, body }) => {
+          await proposalSmsEventRepo.create(
+            createProposalSmsEvent({
+              tenantId,
+              proposalId: proposalIds[0]!,
+              direction: 'outbound',
+              kind: 'digest_approve_all_rendered',
+              body: encodeDigestApproveAllBody(proposalIds),
+            }),
+          );
+          // `body` is the rendered digest SMS; intentionally not stored on the
+          // anchor (the id set is what the reply path needs, and the dispatch
+          // row already records the send). Referenced to satisfy the seam.
+          void body;
+        },
         logger: dailyDigestLogger,
       });
     }).catch((err) => {
@@ -4324,41 +4437,6 @@ export function createApp(): express.Express {
     });
   }, 15 * 60_000));
 
-  // P5-020 — end-of-day digest sweep. Runs hourly; tenants in the 6–9pm
-  // local delivery window get their digest built and sent via SMS.
-  // Idempotency: UNIQUE(tenant_id, date) on digest_entries; up to 3 retries.
-  const digestSweepLogger = createLogger({
-    service: 'digest-worker',
-    environment: process.env.NODE_ENV || 'development',
-  });
-  const digestEntryRepo = pool ? new PgDigestEntryRepository(pool) : null;
-  registerInterval(setInterval(() => {
-    if (!digestEntryRepo) return;
-    void runAsLeader(SWEEP_LOCK.digest, async () => {
-      await runDigestSweep({
-        digestEntryRepo,
-        settingsRepo,
-        pool,
-        ...(messageDelivery
-          ? {
-              sendSms: (args: { to: string; body: string }) =>
-                messageDelivery.sendSms({ to: args.to, body: args.body }),
-            }
-          : {}),
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        logger: digestSweepLogger,
-      });
-    }).catch((err) => {
-      digestSweepLogger.error('Digest sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, 60 * 60_000));
-
   // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
   // unified TTS provider, and the existing proposal/audit/oncall repos.
   // The voiceSessionStore is shared with the Twilio adapter (created above).
@@ -4440,18 +4518,32 @@ export function createApp(): express.Express {
   // the injection rationale — createProposal is a sync pure builder with
   // 50+ call sites, so a repo dep can't be threaded through them), and
   // (b) the advisory annotator sweep that adds LLM risk notes to
-  // ready_for_review proposals. Both are gated per tenant by the
-  // 'supervisor_agent' flag (tenant_feature_flags override → platform
-  // flag → false), so the supervisor is INERT for every tenant until the
-  // flag is turned on. Routes/settings exposure for policy versions is
-  // deferred to a follow-up track.
+  // ready_for_review proposals.
+  //
+  // Unit U3 (decision D-004): the supervisor runs BY DEFAULT for every
+  // tenant — the post-hoc advisory review and the conservative budget
+  // backstop now apply unless a tenant explicitly opts OUT. The platform
+  // feature-flag API (`isEnabledForTenant`) is a plain default-FALSE
+  // boolean (tenant override → platform flag → false; see
+  // pg-tenant-feature-flags.ts) with no per-flag default-true or tri-state,
+  // so a default-ON gate cannot be expressed as an "enable" flag. We
+  // therefore invert to the explicit OPT-OUT flag SUPERVISOR_DISABLED_FLAG
+  // ('supervisor_agent_disabled'): unset ⇒ reads false ⇒ "not disabled" ⇒
+  // supervisor ON; a tenant turns it OFF by setting that flag to true. The
+  // gate below resolves `enabled = !disabled` and feeds BOTH the creation
+  // hook (SupervisorPolicyService.isEnabledForTenant) and the annotator
+  // sweep, so the two halves stay consistent on this single key. With NO
+  // flag repo (in-memory dev), the gate is undefined and the service's
+  // "absent gate ⇒ enabled" default keeps the supervisor ON. Routes/settings
+  // exposure for policy versions is deferred to a follow-up track.
   //
   // Merge note: this reuses the single shared PgTenantFeatureFlagRepository
   // constructed in the RV-122 wiring block above (`tenantFeatureFlags`) —
   // one instance serves both the per-tenant triage/voice flag resolution
   // and the supervisor gate (its 30s cache is per-instance only).
   const supervisorFlagGate = tenantFeatureFlags
-    ? (tenantId: string) => tenantFeatureFlags.isEnabledForTenant(tenantId, 'supervisor_agent')
+    ? async (tenantId: string) =>
+        !(await tenantFeatureFlags.isEnabledForTenant(tenantId, SUPERVISOR_DISABLED_FLAG))
     : undefined;
   const supervisorLogger = createLogger({
     service: 'supervisor-agent',
@@ -4481,9 +4573,13 @@ export function createApp(): express.Express {
       proposalId,
       logger: supervisorLogger,
     });
-  // Advisory annotator sweep — only with a REAL LLM provider (the mock
-  // gateway's canned JSON must never be written into proposal payloads as
-  // a "risk note"), and per-tenant flag-gated inside the sweep itself.
+  // Advisory annotator sweep — scheduled whenever a REAL LLM provider is
+  // configured (the mock gateway's canned JSON must never be written into
+  // proposal payloads as a "risk note"). It runs for every NON-opted-out
+  // tenant by default: the same inverted opt-out gate as the creation hook
+  // is passed through, so a tenant with no flag set is swept and only an
+  // explicitly opted-out tenant is skipped. Stays advisory — never a status
+  // change.
   if (config.AI_PROVIDER_API_KEY) {
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.supervisorAnnotate, async () => {
