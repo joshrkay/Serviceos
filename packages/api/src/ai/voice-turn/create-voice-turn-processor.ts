@@ -229,6 +229,7 @@ export interface VoiceTurnProcessorDeps {
   publicBaseUrl?: string;
   callControl?: TwilioCallControl;
   dispatcherPhoneResolver?: DispatcherPhoneResolver;
+  businessPhoneFallbackResolver?: (tenantId: string) => Promise<string | null>;
   recordingCallbackPath?: string;
   jobRepo?: JobRepository;
   appointmentRepo?: AppointmentRepository;
@@ -709,6 +710,9 @@ export function createVoiceTurnProcessor(
         ...(deps.callControl ? { callControl: deps.callControl } : {}),
         ...(deps.dispatcherPhoneResolver
           ? { dispatcherPhoneResolver: deps.dispatcherPhoneResolver }
+          : {}),
+        ...(deps.businessPhoneFallbackResolver
+          ? { businessPhoneFallbackResolver: deps.businessPhoneFallbackResolver }
           : {}),
         ...(transferNumber ? { transferNumber } : {}),
         ...(session.callSid ? { callSid: session.callSid } : {}),
@@ -1494,6 +1498,9 @@ export function createVoiceTurnProcessor(
             ...(deps.callControl ? { callControl: deps.callControl } : {}),
             ...(deps.dispatcherPhoneResolver
               ? { dispatcherPhoneResolver: deps.dispatcherPhoneResolver }
+              : {}),
+            ...(deps.businessPhoneFallbackResolver
+              ? { businessPhoneFallbackResolver: deps.businessPhoneFallbackResolver }
               : {}),
             ...(session.callSid ? { callSid: session.callSid } : {}),
             dialActionUrl: dialResultUrl(session.id),

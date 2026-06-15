@@ -181,6 +181,12 @@ export interface TwilioAdapterDeps {
    */
   dispatcherPhoneResolver?: DispatcherPhoneResolver;
   /**
+   * Tenant-level last-resort phone (shared business_phone), dialed only when
+   * the on-call rotation has no per-user mobile. Threaded into escalateToHuman
+   * so the /dial-result cascade can fall back when no tradesperson is reachable.
+   */
+  businessPhoneFallbackResolver?: (tenantId: string) => Promise<string | null>;
+  /**
    * P8-014: when set, the initial inbound TwiML emits a
    * `<Start><Record recordingStatusCallback="..."/></Start>` block so
    * Twilio asynchronously records the entire call and POSTs the

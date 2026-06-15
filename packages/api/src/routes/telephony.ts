@@ -622,6 +622,9 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
           ...(adapterDeps.auditRepo ? { auditRepo: adapterDeps.auditRepo } : {}),
           callControl: adapterDeps.callControl,
           dispatcherPhoneResolver: adapterDeps.dispatcherPhoneResolver,
+          ...(adapterDeps.businessPhoneFallbackResolver
+            ? { businessPhoneFallbackResolver: adapterDeps.businessPhoneFallbackResolver }
+            : {}),
           callSid: session.callSid ?? callSid,
           dialActionUrl: buildDialResultUrl(deps.publicBaseUrl, sessionId),
         });

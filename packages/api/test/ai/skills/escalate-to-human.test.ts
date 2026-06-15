@@ -296,6 +296,88 @@ describe('escalateToHuman — emits escalate_with_context', () => {
   });
 });
 
+describe('escalateToHuman — per-technician phone routing (U4)', () => {
+  const callerContext = {
+    caller: { name: 'Sarah Chen', phone: '+15125550142' },
+    intent: { type: 'create_appointment', entities: {}, confidence: 0.4 },
+    transcriptSnapshot: [],
+  };
+
+  it('advances the rotation past a numberless user to one who set a mobile', async () => {
+    const onCallRepo = {
+      listRotation: vi.fn(async () => [
+        { id: 'rot-1', userId: 'u-no-phone', cursorIndex: 0 },
+        { id: 'rot-2', userId: 'u-has-phone', cursorIndex: 1 },
+      ]),
+    };
+    // per-user resolver: u-no-phone returns null (→ advance), u-has-phone resolves.
+    const dispatcherPhoneResolver = vi.fn(async (_t: string, userId: string) =>
+      userId === 'u-has-phone' ? '+15125550222' : null,
+    );
+
+    const result = await escalateToHuman({
+      tenantId: 'tenant-1',
+      sessionId: 'sess-1',
+      reason: 'caller_requested',
+      channel: 'telephony',
+      callSid: 'CA-test',
+      onCallRepo: onCallRepo as never,
+      dispatcherPhoneResolver,
+      callerContext,
+    });
+
+    expect(result.escalated).toBe(true);
+    expect(result.transfer?.dispatcherPhone).toBe('+15125550222');
+    expect(result.assignedUserId).toBe('u-has-phone');
+    // the numberless user was consulted (then skipped), proving the walk advanced.
+    expect(dispatcherPhoneResolver).toHaveBeenCalledWith('tenant-1', 'u-no-phone');
+  });
+
+  it('falls back to business_phone when NO on-call user has a personal mobile', async () => {
+    const onCallRepo = {
+      listRotation: vi.fn(async () => [
+        { id: 'rot-1', userId: 'u-no-phone-1', cursorIndex: 0 },
+        { id: 'rot-2', userId: 'u-no-phone-2', cursorIndex: 1 },
+      ]),
+    };
+
+    const result = await escalateToHuman({
+      tenantId: 'tenant-1',
+      sessionId: 'sess-1',
+      reason: 'caller_requested',
+      channel: 'telephony',
+      callSid: 'CA-test',
+      onCallRepo: onCallRepo as never,
+      dispatcherPhoneResolver: async () => null, // nobody set a personal mobile
+      businessPhoneFallbackResolver: async () => '+15125550100',
+      callerContext,
+    });
+
+    expect(result.escalated).toBe(true);
+    expect(result.transfer?.dispatcherPhone).toBe('+15125550100');
+    expect(result.transfer?.dispatcherUserId).toBe('business_phone');
+  });
+
+  it('gives up (no_dispatcher) when neither a personal mobile nor business_phone exists', async () => {
+    const onCallRepo = {
+      listRotation: vi.fn(async () => [{ id: 'rot-1', userId: 'u-no-phone', cursorIndex: 0 }]),
+    };
+
+    const result = await escalateToHuman({
+      tenantId: 'tenant-1',
+      sessionId: 'sess-1',
+      reason: 'caller_requested',
+      channel: 'telephony',
+      onCallRepo: onCallRepo as never,
+      dispatcherPhoneResolver: async () => null,
+      businessPhoneFallbackResolver: async () => null,
+    });
+
+    expect(result.escalated).toBe(false);
+    expect(result.transfer).toBeUndefined();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // mapSkillReasonToBuilderReason — reason mapping
 // ---------------------------------------------------------------------------
