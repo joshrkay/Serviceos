@@ -125,39 +125,35 @@ bad-day failure modes + the 14 locked product decisions),
 `docs/strategy/roadmap-audit.md` (full mapping of v1 phases to v2 waves
 with cut / defer / pull-forward rationale).
 
-### D-012: PRD §5 status reconciled against the codebase
+### D-012: V2 negotiation discount-policy + catalog-grounded floor engine
 **Date:** 2026-06-14
-**Decision:** The §5 Rivet-vs-Jobber parity map's Status column is the
-canonical feature-status surface and must reflect what is actually wired +
-tested in `/packages`, not aspirational status. Reconciliation on 2026-06-14,
-verified by code inspection (wiring into `app.ts`/workers/registries +
-presence of tests):
-- **Downgraded ✅→🔧 (claimed built, only partial):**
-  - **MMS-to-quote** — photos ingest and attach to jobs
-    (`sms/tech-status/mms-ingest.ts`); no image-analysis → draft-estimate
-    pipeline exists (no vision/multimodal code in `ai/`).
-  - **ACH payments** — Stripe card + payment links + saved-card off-session
-    are live; ACH origination/bank-debit is not configured or exercised.
-  - **B2B account recognition** — `customers.account_type` is a binary
-    `residential|b2b` flag (consumed only by vulnerability triage); no
-    `property_manager` type, no `parent_account_id`/sub-account hierarchy,
-    no dedicated B2B routing flow.
-- **Upgraded 📋/🔧→✅ (shipped ahead of roadmap status):** memberships
-  (auto-renew off-session + member pricing + priority booking), auto-invoice
-  on completion, dunning/overdue cadence, late fees, estimate follow-up
-  (reminder cadence), auto-pay/saved-card (membership dues).
-- **Investigated, found already built (left ✅):** review-request gating
-  (`routes/public-feedback.ts` gates ≥4★ → Google/Yelp links), voice
-  en-route/ETA (`notifications/delay-notifications.ts` `enqueueEnRouteNotice`),
-  voice dispatch reassignment (`reassign_appointment` intent + task).
-**Rationale:** Status accuracy is a sales/credibility and planning input — the
-PRD tells GTM what ships. Three differentiators were marked Built but only
-partially implemented; six parity/closing items were under-reported as
-Specced/Partial when already shipped.
-**Story:** Status audit requested 2026-06-14; build work to close the three
-confirmed gaps is planned separately under `docs/plans/`.
-**Alternatives rejected:** Build the three gaps before correcting the doc —
-rejected; the doc should tell the truth now, build is sequenced separately.
+**Decision:** Build a per-tenant discount-policy + catalog-grounded price-floor
+engine on top of the shipped V1 negotiation guardrail (P2-036). A pure evaluator
+classifies a haggling ask into ALLOW / NEEDS_APPROVAL / CLARIFY /
+REJECT_WITH_COUNTER; even ALLOW is confidence-capped to a human tap (never
+auto-executed). Policy lives on `tenant_settings` (deposit-rules-style columns)
+and defaults **fail-closed** (`maxDiscountBps = 0`) so behavior is identical to
+V1 until a tenant opts in.
+**Rationale:** P2-036 V1 intentionally "blocks discounts entirely" and deferred
+price-floor configuration + negotiation playbooks to V2 (the story's own
+non-goals). This decision explicitly **lifts those V1 non-goals** as a separate,
+reviewable story so the scope change is on the record. Fail-closed defaults make
+the rollout behavior-neutral; the AI-never-concedes invariant holds because ALLOW
+only changes whether an in-policy discount may be *proposed* (one tap, over the
+existing approval transport), never applied silently.
+**Story:** P2-036 V2 —
+`docs/plans/2026-06-14-002-feat-negotiation-discount-policy-engine-plan.md`
+(depends on the V1 closure, `…-001-…`).
+**Alternatives rejected:**
+- Keep V1's "always route to owner callback" (no policy). Rejected: tenants who
+  want bounded self-service get all-or-nothing.
+- Embed discount math in the proposal engine's `decideInitialStatus`. Rejected:
+  couples a domain rule to the universal status gate; the evaluator is a pure
+  module the handlers call.
+- Store policy in the `escalation_settings` JSONB grab-bag or a new table.
+  Rejected: JSONB loses the DB-level money CHECK guards; a table is over-built
+  for 1:1 cardinality. `tenant_settings` columns mirror the deposit-rules
+  precedent.
 
 ### D-013: [Template — copy for new decisions]
 **Date:** YYYY-MM-DD

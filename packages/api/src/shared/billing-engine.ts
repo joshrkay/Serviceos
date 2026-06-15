@@ -3,6 +3,18 @@
 
 export type LineItemCategory = 'labor' | 'material' | 'equipment' | 'other';
 
+/**
+ * Where a line item's price came from, carried from proposal drafting
+ * (the catalog resolver stamps it — see
+ * ai/resolution/catalog-resolver.ts) through to persistence on
+ * estimate_line_items.pricing_source. ESTIMATES ONLY: invoices never set
+ * this (the column lives on estimate_line_items), so it stays optional
+ * and reads back undefined on invoice lines. A later step uses it to
+ * decide whether an estimate's pricing is catalog-grounded enough to
+ * auto-allow a discount.
+ */
+export type PricingSource = 'catalog' | 'ambiguous' | 'uncatalogued' | 'manual';
+
 export interface LineItem {
   id: string;
   description: string;
@@ -12,6 +24,13 @@ export interface LineItem {
   totalCents: number;
   sortOrder: number;
   taxable: boolean;
+  /**
+   * Catalog-grounding signal (estimates only). Set by the catalog
+   * resolver during proposal drafting and persisted on estimate line
+   * items; undefined/absent on invoice lines and on legacy estimate rows
+   * (treated as NOT grounded — see isEstimateCatalogGrounded).
+   */
+  pricingSource?: PricingSource;
   /**
    * Good-better-best grouping. Items sharing a non-null `groupKey` are
    * mutually exclusive tiers — the customer selects exactly one per group.

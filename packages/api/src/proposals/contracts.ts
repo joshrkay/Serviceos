@@ -386,6 +386,10 @@ export const voiceClarificationPayloadSchema = z.object({
     // P8 — intent understood, but an entity reference matched several
     // tenant records ("three Bobs"); candidates carry the picker list.
     'ambiguous_entity',
+    // P2-036 V2 — a discount ask was understood, but the target price /
+    // amount couldn't be parsed ("knock some off"); the discount evaluator
+    // emits this instead of silently guessing a discount.
+    'ambiguous_discount_target',
   ]),
   suggestedIntents: z.array(z.string()).optional(),
   classifierReasoning: z.string().optional(),
