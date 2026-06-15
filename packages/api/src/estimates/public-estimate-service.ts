@@ -10,7 +10,7 @@ import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
 import { LocationRepository } from '../locations/location';
 import { SettingsRepository } from '../settings/settings';
-import { evaluateDepositRule, deriveDepositStatus } from '../jobs/deposit-rule';
+import { evaluateDepositRule, deriveDepositStatus, isDepositPayable } from '../jobs/deposit-rule';
 import { ValidationError, NotFoundError, ConflictError } from '../shared/errors';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { publicActorFromToken } from '../feedback/feedback-response';
@@ -105,6 +105,13 @@ export interface PublicEstimateView {
   depositRequiredCents: number;
   depositPaidCents: number;
   depositStatus: 'not_required' | 'pending' | 'paid';
+  /**
+   * Whether the customer can pay the deposit now (required + unpaid on a
+   * live estimate), policy-agnostic. True for before_approval (sent) and
+   * after_approval (accepted). The page renders the Pay-deposit control off
+   * this rather than re-deriving the rule.
+   */
+  depositPayable: boolean;
   /**
    * Tier 4 (Deposit rules — PR 3b). Tenant policy controlling whether
    * the customer can approve before paying the deposit. The customer
@@ -630,6 +637,10 @@ export class PublicEstimateService {
       depositRequiredCents: computedRequired,
       depositPaidCents,
       depositStatus: computedStatus,
+      // Whether the customer can pay the deposit now — true for both the
+      // before_approval (sent + pending) and after_approval (accepted +
+      // pending) cases. The page renders the Pay-deposit control off this.
+      depositPayable: isDepositPayable(computedStatus, estimate.status, isExpired),
       depositTimingPolicy: policy,
       depositCheckoutUrl: job?.depositStripePaymentLinkUrl ?? undefined,
       depositCheckoutExpiresAt:

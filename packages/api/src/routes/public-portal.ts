@@ -24,6 +24,7 @@ import { CustomerRepository } from '../customers/customer';
 import { EstimateRepository } from '../estimates/estimate';
 import { InvoiceRepository, Invoice } from '../invoices/invoice';
 import { JobRepository, createJob } from '../jobs/job';
+import { deriveDepositStatus, isDepositPayable } from '../jobs/deposit-rule';
 import { AgreementRepository } from '../agreements/agreement';
 import { Appointment, AppointmentRepository, createAppointment } from '../appointments/appointment';
 import { AssignmentRepository } from '../appointments/assignment';
@@ -263,6 +264,10 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
     try {
       const { tenantId, customerId } = req.portal!;
       const jobs = await deps.jobRepo.findByTenant(tenantId, { customerId });
+      // Keep each estimate's parent job in reach so we can surface the
+      // job-level deposit state on the accepted estimate's card without a
+      // second query (deposit is a property of the job — deposit-rule.ts).
+      const jobsById = new Map(jobs.map((j) => [j.id, j]));
       const allEstimates = (
         await Promise.all(
           jobs.map((j) => deps.estimateRepo.findByJob(tenantId, j.id)),
@@ -273,18 +278,36 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
       );
       res.json({
-        estimates: allEstimates.map((e) => ({
-          id: e.id,
-          estimateNumber: e.estimateNumber,
-          status: e.status,
-          totalCents: e.totals.totalCents,
-          createdAt: e.createdAt.toISOString(),
-          validUntil: e.validUntil ? e.validUntil.toISOString() : null,
-          // The customer can use the existing public approval link to
-          // view a full estimate. Only surface the token if the owner
-          // already shared the estimate; otherwise omit.
-          publicViewToken: e.viewToken ?? null,
-        })),
+        estimates: allEstimates.map((e) => {
+          const job = jobsById.get(e.jobId);
+          const depositRequiredCents = job?.depositRequiredCents ?? 0;
+          const depositPaidCents = job?.depositPaidCents ?? 0;
+          const depositStatus = deriveDepositStatus(
+            depositRequiredCents,
+            depositPaidCents,
+          );
+          return {
+            id: e.id,
+            estimateNumber: e.estimateNumber,
+            status: e.status,
+            totalCents: e.totals.totalCents,
+            createdAt: e.createdAt.toISOString(),
+            validUntil: e.validUntil ? e.validUntil.toISOString() : null,
+            depositRequiredCents,
+            depositPaidCents,
+            depositStatus,
+            // The job's deposit belongs to the ACCEPTED estimate (after_approval);
+            // never surface a payable deposit on a sibling estimate of the same
+            // job. The customer pays on /e/:token, which this card links to.
+            depositPayable:
+              e.status === 'accepted' &&
+              isDepositPayable(depositStatus, e.status, false),
+            // The customer can use the existing public approval link to
+            // view a full estimate. Only surface the token if the owner
+            // already shared the estimate; otherwise omit.
+            publicViewToken: e.viewToken ?? null,
+          };
+        }),
       });
     } catch (err) {
       const { statusCode, body } = toErrorResponse(err);

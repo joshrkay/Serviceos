@@ -517,6 +517,7 @@ describe('PublicEstimateService.approve — Tier 4 deposit hook (PR 2)', () => {
     expect(view.depositRequiredCents).toBe(0);
     expect(view.depositPaidCents).toBe(0);
     expect(view.depositStatus).toBe('not_required');
+    expect(view.depositPayable).toBe(false);
   });
 });
 
@@ -629,6 +630,9 @@ describe('PublicEstimateService — Tier 4 deposit (PR 3b: before_approval gate 
     expect(view.status).toBe('accepted');
     expect(view.depositRequiredCents).toBe(25000);
     expect(view.depositStatus).toBe('pending');
+    // After acceptance under after_approval the deposit is owed and payable —
+    // this is the flag the /e/:token page renders the Pay-deposit CTA off.
+    expect(view.depositPayable).toBe(true);
   });
 
   it('mints a Stripe Payment Link on getOrCreateDepositCheckoutUrl and persists it', async () => {

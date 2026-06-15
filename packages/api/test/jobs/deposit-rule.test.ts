@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   evaluateDepositRule,
   deriveDepositStatus,
+  isDepositPayable,
   type DepositRuleSettings,
 } from '../../src/jobs/deposit-rule';
 
@@ -152,5 +153,29 @@ describe('deriveDepositStatus — Tier 4 PR 2', () => {
   });
   it('returns paid when paid > required (overpayment edge — treat as satisfied)', () => {
     expect(deriveDepositStatus(50000, 75000)).toBe('paid');
+  });
+});
+
+describe('isDepositPayable — policy-agnostic Pay-deposit gate', () => {
+  it('is payable for a sent estimate with a pending deposit (before_approval)', () => {
+    expect(isDepositPayable('pending', 'sent', false)).toBe(true);
+  });
+  it('is payable for an accepted estimate with a pending deposit (after_approval)', () => {
+    expect(isDepositPayable('pending', 'accepted', false)).toBe(true);
+  });
+  it('is not payable once the deposit is paid', () => {
+    expect(isDepositPayable('paid', 'accepted', false)).toBe(false);
+    expect(isDepositPayable('paid', 'sent', false)).toBe(false);
+  });
+  it('is not payable when no deposit is required', () => {
+    expect(isDepositPayable('not_required', 'accepted', false)).toBe(false);
+  });
+  it('is not payable when the estimate link is expired', () => {
+    expect(isDepositPayable('pending', 'accepted', true)).toBe(false);
+    expect(isDepositPayable('pending', 'sent', true)).toBe(false);
+  });
+  it('is not payable on a dead estimate status (rejected/expired)', () => {
+    expect(isDepositPayable('pending', 'rejected', false)).toBe(false);
+    expect(isDepositPayable('pending', 'expired', false)).toBe(false);
   });
 });

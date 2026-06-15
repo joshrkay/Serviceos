@@ -81,3 +81,23 @@ export function deriveDepositStatus(
   if (depositPaidCents >= depositRequiredCents) return 'paid';
   return 'pending';
 }
+
+/**
+ * Whether a deposit can be collected from the customer right now: it's
+ * required and unpaid (`pending`), on a live estimate (not expired, not a
+ * dead status). Policy-agnostic on purpose so both the `before_approval`
+ * case (deposit owed while the estimate is still `sent`) and the
+ * `after_approval` case (deposit owed once the estimate is `accepted`)
+ * funnel through one predicate. Centralized here so the public estimate
+ * view and the portal projection agree on when to show a "Pay deposit"
+ * affordance and never drift.
+ */
+export function isDepositPayable(
+  depositStatus: DepositStatus,
+  estimateStatus: string,
+  isExpired: boolean,
+): boolean {
+  if (isExpired) return false;
+  if (depositStatus !== 'pending') return false;
+  return estimateStatus === 'sent' || estimateStatus === 'accepted';
+}
