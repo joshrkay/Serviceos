@@ -2,8 +2,8 @@ import { Pool, PoolConfig } from 'pg';
 
 const isProd = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod';
 
-export function createPool(): Pool {
-  const databaseUrl = process.env.DATABASE_URL;
+export function createPool(connectionStringOverride?: string): Pool {
+  const databaseUrl = connectionStringOverride ?? process.env.DATABASE_URL;
 
   let config: PoolConfig;
 

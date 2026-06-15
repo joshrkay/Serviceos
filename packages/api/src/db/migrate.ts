@@ -1,5 +1,6 @@
 import { createPool } from './pool';
 import { getMigrationSQL } from './schema';
+import { resolveMigrationConnectionString, usingDedicatedMigrationRole } from './migrate-config';
 
 interface PgLikeError {
   code?: string;
@@ -14,11 +15,15 @@ function isDuplicatePolicyError(err: unknown): err is PgLikeError {
 }
 
 async function runMigrations(): Promise<void> {
-  if (!process.env.DATABASE_URL) {
-    console.log('DATABASE_URL not set — skipping migrations');
+  const connectionString = resolveMigrationConnectionString();
+  if (!connectionString) {
+    console.log('DATABASE_URL/MIGRATION_DATABASE_URL not set — skipping migrations');
     return;
   }
-  const pool = createPool();
+  if (usingDedicatedMigrationRole()) {
+    console.log('Running migrations via MIGRATION_DATABASE_URL (dedicated migration role)');
+  }
+  const pool = createPool(connectionString);
   const client = await pool.connect();
   try {
     // Prevent DDL lock waits from stalling startup: ALTER TABLE ENABLE RLS
