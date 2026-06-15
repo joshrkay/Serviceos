@@ -170,6 +170,12 @@ describe('P6-028 reschedule_from_tech — from-tech-out proposal walk', () => {
       // caught: a missing key hit a NOT NULL violation, swallowed as
       // processing_failed (the handler returned handled:false).
       expect(p.idempotencyKey).toBeTruthy();
+      // prompt_version_id is a UUID column; the brand-voice composer returns a
+      // string id ('brand_voice_v1'), so it must NOT be placed on
+      // promptVersionId (the real insert throws "invalid input syntax for type
+      // uuid"). It rides in sourceContext for provenance instead.
+      expect(p.promptVersionId).toBeUndefined();
+      expect(typeof p.sourceContext?.brandVoicePromptVersion).toBe('string');
     }
     // Distinct keys per appointment so two reschedules never collide on the
     // unique (tenant_id, idempotency_key) index.

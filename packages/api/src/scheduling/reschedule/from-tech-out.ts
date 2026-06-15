@@ -187,10 +187,15 @@ export async function createRescheduleProposalsFromTechOut(
         'drafted message.',
       targetEntityType: 'appointment',
       targetEntityId: appt.id,
-      promptVersionId: draft.promptVersionId,
+      // Do NOT map draft.promptVersionId onto the proposal's promptVersionId:
+      // that column is `prompt_version_id UUID`, but the brand-voice composer
+      // returns a string id ('brand_voice_v1'), so the insert failed with
+      // "invalid input syntax for type uuid". Record it in sourceContext
+      // (JSONB) for provenance instead; the UUID column stays null.
       sourceContext: {
         // Tier-2-safe: the brand-voice customer SMS rides in sourceContext.
         draftSms: draft.text,
+        brandVoicePromptVersion: draft.promptVersionId,
         techStatus: input.reason,
         technicianId: input.technicianId,
         // The payload is seeded with the appointment's CURRENT times (the owner
