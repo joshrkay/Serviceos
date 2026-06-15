@@ -25,6 +25,7 @@ import {
 } from '../proposals/proposal-contracts';
 import { FeasibilityDependencies } from '../scheduling/feasibility-types';
 import { createSchedulingProposal } from '../proposals/create-scheduling';
+import { resolveProposalLine } from '../proposals/resolve-line';
 
 // P2-035 — Batch approval body schema. Lives inline rather than in
 // proposal-contracts.ts so this story stays within its allowed-files
@@ -34,6 +35,16 @@ import { createSchedulingProposal } from '../proposals/create-scheduling';
 // scripted caller flood approval audit rows.
 const approveBatchBodySchema = z.object({
   proposalIds: z.array(z.string().uuid()).min(1).max(50),
+});
+
+// P2-035 (U2) — resolve-line body. The operator picks ONE catalog
+// candidate for an ambiguous line; the service validates the chosen id
+// is among the resolver-surfaced candidates before stamping the price.
+// Inline (vs. proposal-contracts.ts) to mirror the batch-approve schema
+// above and keep this slice self-contained.
+const resolveLineBodySchema = z.object({
+  lineIndex: z.number().int().min(0),
+  catalogItemId: z.string().uuid(),
 });
 
 export function createProposalsRouter(
@@ -259,6 +270,35 @@ export function createProposalsRouter(
         res.status(statusCode).json(body);
       }
     }
+  );
+
+  // P2-035 (U2) — resolve ONE ambiguous catalog line by picking a
+  // resolver-surfaced candidate. Same RBAC as approve/reject; mirrors
+  // their shape. The service patches the draft and stops at
+  // 'ready_for_review' — it NEVER approves or executes (D-004).
+  router.post(
+    '/:id/resolve-line',
+    requireAuth,
+    requireTenant,
+    requirePermission('proposals:approve'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const parsed = validate(resolveLineBodySchema, req.body);
+        const result = await resolveProposalLine(
+          proposalRepo,
+          req.auth!.tenantId,
+          req.params.id,
+          req.auth!.userId,
+          req.auth!.role as Role,
+          parsed,
+          auditRepo,
+        );
+        res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
   );
 
   router.post(
