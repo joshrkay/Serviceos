@@ -2946,6 +2946,16 @@ export function createApp(): express.Express {
           })
         : undefined;
 
+      // RV-122 — attach the per-turn vulnerability triage hook to the Gather
+      // (legacy/PSTN) adapter too, not only the media-streams server below.
+      // The hook is built after `twilioAdapter` (its patch-owner action closes
+      // over the adapter), so it is injected post-construction via the setter.
+      // The SAME hook instance is passed to the media-streams server further
+      // down — one hook, both transports.
+      if (vulnerabilityTriageHookDep) {
+        twilioAdapter.setVulnerabilityTriageHook(vulnerabilityTriageHookDep);
+      }
+
       const origListen = app.listen.bind(app);
       // Wrap listen() so the WS upgrade handler is attached the moment
       // the http.Server exists. Fire-and-forget; errors during attach

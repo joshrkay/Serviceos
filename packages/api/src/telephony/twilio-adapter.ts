@@ -365,6 +365,23 @@ export interface TwilioAdapterDeps {
    * recording itself can't be paused — logged loudly).
    */
   recordingControl?: RecordingControl;
+  /**
+   * RV-122 — per-turn vulnerability triage hook. Fired after each
+   * `<Gather>` caller turn exactly like the media-streams adapter fires it
+   * after each final transcript (fire-and-forget, never blocks the TwiML
+   * response). The hook owns its own per-tenant flag gate
+   * (`voice_vulnerability_triage`), grading, triage persistence (RV-120) and
+   * the patch-owner action (RV-121) — the adapter only supplies the turn
+   * context. Injected post-construction via `setVulnerabilityTriageHook`
+   * because the hook closes over this adapter (the patch-owner action reads
+   * the per-session caller phone).
+   */
+  vulnerabilityTriageHook?: (args: {
+    session: VoiceSession;
+    transcript: string;
+    priorTurns: ReadonlyArray<{ role: 'caller' | 'ai'; text: string }>;
+    tenantId: string;
+  }) => Promise<void>;
 }
 
 /**
@@ -691,6 +708,43 @@ export class TwilioGatherAdapter {
         });
       },
     });
+  }
+
+  /**
+   * RV-122 — inject the per-turn vulnerability triage hook after
+   * construction. The hook closes over THIS adapter (its patch-owner action
+   * reads the per-session caller phone via `getCallerPhone`), so it cannot be
+   * supplied to the constructor. app.ts builds the hook once and attaches it
+   * to both the media-streams server and this Gather adapter; the hook itself
+   * is identical across transports. Optional — when never set, Gather turns
+   * simply don't grade (exactly as before this wiring).
+   */
+  setVulnerabilityTriageHook(hook: TwilioAdapterDeps['vulnerabilityTriageHook']): void {
+    this.deps.vulnerabilityTriageHook = hook;
+  }
+
+  /**
+   * RV-122 — last `n` transcript lines as role-tagged turns for the
+   * vulnerability grader. Mirrors the media-streams adapter's
+   * `extractPriorTurns`: transcript lines are `"<speaker>: <text>"`
+   * (appended by VoiceSessionStore.appendTranscript), and any speaker other
+   * than `caller` maps to `ai`.
+   */
+  private extractPriorTurns(
+    session: VoiceSession,
+    n: number,
+  ): ReadonlyArray<{ role: 'caller' | 'ai'; text: string }> {
+    const snapshot = [...session.transcript].slice(-n);
+    return snapshot
+      .map((line) => {
+        const colonIdx = line.indexOf(': ');
+        if (colonIdx === -1) return null;
+        const speaker = line.slice(0, colonIdx);
+        const text = line.slice(colonIdx + 2);
+        const role: 'caller' | 'ai' = speaker === 'caller' ? 'caller' : 'ai';
+        return { role, text };
+      })
+      .filter((t): t is { role: 'caller' | 'ai'; text: string } => t !== null);
   }
 
   /**
@@ -1659,6 +1713,37 @@ export class TwilioGatherAdapter {
     );
     if (gatherSafetyEffects) {
       return this.finalizeTwiml(session, gatherSafetyEffects, opts.sessionId);
+    }
+
+    // RV-122 — per-turn vulnerability triage, fire-and-forget behind the
+    // tenant flag (gated inside the hook). Mirrors the media-streams
+    // invocation (mediastream-adapter.ts ~775): runs AFTER the deterministic
+    // safety scan (RV-140) and after the caller utterance is appended, never
+    // blocks the TwiML path, and swallows errors. Skipped for empty speech
+    // (no utterance to grade) and once the call has escalated/terminated —
+    // further grading is wasted LLM spend (the same skip the streaming path
+    // applies). The RV-140 emergency + frustration early-returns above already
+    // covered the just-escalated cases.
+    const callState = session.machine.currentState;
+    if (
+      this.deps.vulnerabilityTriageHook &&
+      opts.speechResult.trim().length > 0 &&
+      callState !== 'escalating' &&
+      callState !== 'terminated'
+    ) {
+      void this.deps
+        .vulnerabilityTriageHook({
+          session,
+          transcript: opts.speechResult,
+          priorTurns: this.extractPriorTurns(session, 4),
+          tenantId: opts.tenantId,
+        })
+        .catch((err) =>
+          logger.warn('vulnerability triage hook failed', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: session.id,
+          }),
+        );
     }
 
     // B3.2 — keyword frustration check on the PSTN/Gather path, mirroring
