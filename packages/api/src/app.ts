@@ -469,6 +469,8 @@ import {
   registerNegotiationHandler,
 } from './sms/inbound-dispatch';
 import { createInboundNegotiationHandler } from './sms/negotiation/inbound-negotiation-handler';
+import { PgCustomerNegotiationContextProvider } from './customers/pg-customer-negotiation-context';
+import { normalizePhone } from './customers/dedup';
 import {
   DroppedCallScheduler,
   PgDroppedCallRecoveryRepository,
@@ -823,6 +825,10 @@ export function createApp(): express.Express {
   }
 
   const customerRepo       = pool ? new PgCustomerRepository(pool)       : new InMemoryCustomerRepository();
+  // N-003 (P2-036) — caller LTV/recency for the negotiation guardrail callback.
+  const customerNegotiationContextProvider = pool
+    ? new PgCustomerNegotiationContextProvider(pool)
+    : undefined;
   const leadRepo           = pool ? new PgLeadRepository(pool)           : new InMemoryLeadRepository();
   const locationRepo       = pool ? new PgLocationRepository(pool)       : new InMemoryLocationRepository();
   // jobRepo is hoisted earlier so the Stripe webhook + everything else
@@ -1674,6 +1680,7 @@ export function createApp(): express.Express {
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
     gateway: llmGateway,
     proposalRepo,
+    ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
     slotConflictChecker,
     availabilityFinder,
     thresholdResolver,
@@ -2213,9 +2220,20 @@ export function createApp(): express.Express {
     // fires on a customer negotiation ask no other handler claimed. Declines
     // to negotiate: drafts an owner callback + replies with a brand-voiced
     // holding line.
+    const resolveNegotiationCustomerContext = async (tenantId: string, phoneE164: string) => {
+      if (!customerNegotiationContextProvider) return null;
+      try {
+        const matches = await customerRepo.findByPhoneNormalized(tenantId, normalizePhone(phoneE164));
+        if (matches.length !== 1) return null; // zero or many matches → no silent guess
+        return await customerNegotiationContextProvider.getContext(tenantId, matches[0].id);
+      } catch {
+        return null;
+      }
+    };
     registerNegotiationHandler(
       createInboundNegotiationHandler({
         proposalRepo,
+        resolveCustomerContext: resolveNegotiationCustomerContext,
         sendSms: (args: { to: string; body: string }) =>
           messageDelivery.sendSms({ to: args.to, body: args.body }),
         auditRepo,
@@ -2293,6 +2311,7 @@ export function createApp(): express.Express {
     gateway: llmGateway,
     ...(pool ? { pool } : {}),
     proposalRepo,
+    ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     callControl: telephonyCallControl,
@@ -3158,6 +3177,48 @@ export function createApp(): express.Express {
         }
       : {}),
     auditRepo,
+    // U2 — customer MMS-to-quote. When the sender is NOT a registered
+    // tech, the worker hands the same inbound MMS to this intake:
+    // resolve/create the customer (ambiguous → clarification, never a
+    // silent guess), store + presign the photo(s), then draft a
+    // catalog-grounded draft_estimate proposal into the owner approval
+    // queue (never auto-issued). Reuses the same Twilio fetcher + files
+    // pipeline + LLM gateway as the rest of the app.
+    customerIntake: {
+      customerRepo,
+      proposalRepo,
+      fileRepo,
+      storage: storageProvider,
+      storageBucket,
+      fetchMedia: createTwilioMediaFetcher(async (tenantId) => {
+        const integration = await integrationResolver?.(tenantId, 'twilio');
+        if (
+          !integration ||
+          integration.provider !== 'twilio' ||
+          !integration.subaccountSid ||
+          !integration.authTokenPrimary
+        ) {
+          return null;
+        }
+        return {
+          accountSid: integration.subaccountSid,
+          authToken: integration.authTokenPrimary,
+        };
+      }),
+      gateway: llmGateway,
+      catalogRepo,
+      auditRepo,
+      ...(messageDelivery
+        ? {
+            notifyOwner: async (tenantId: string, body: string) => {
+              const ownerPhone = await resolveUnsupervisedOwnerPhone(tenantId);
+              if (ownerPhone) {
+                await messageDelivery!.sendSms({ to: ownerPhone, body, tenantId });
+              }
+            },
+          }
+        : {}),
+    },
   });
   workerRegistry.set(
     mmsIngestWorker.type,
@@ -3281,6 +3342,13 @@ export function createApp(): express.Express {
       // their gating proposals' approval channels.
       proposalRepo,
       auditRepo,
+      // P22-005 (U7) — per-job profit (GET /api/reports/job-profit/:jobId).
+      // Aggregates the job's invoices + tracked labor + expenses against the
+      // tenant labor rate. No materialsResolver: the P14 job_parts table is not
+      // built, so materials default to 0 (job-profit.ts handles its absence).
+      jobRepo,
+      timeEntryRepo,
+      settingsRepo,
       // Look up the tenant tz so /money-dashboard buckets by local
       // month boundaries. Without this the dashboard would default
       // to America/New_York (matches tenant_settings.timezone's DB

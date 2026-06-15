@@ -50,6 +50,12 @@ export interface BrandVoiceTone {
   vibe_words?: string[];
   /** Optional human-readable business name used in the signature/greeting. */
   business_name?: string;
+  /**
+   * N-009 / P2-038 — negative prompt. Phrases the voice must never use,
+   * grown by the correction loop from owner edits. Rendered as a
+   * non-overridable "never say" instruction in the tone authority.
+   */
+  banned_phrases?: string[];
 }
 
 export const DEFAULT_BRAND_VOICE_TONE: Required<
@@ -121,6 +127,12 @@ function renderToneAuthority(tone: BrandVoiceTone): string {
   }
   if (t.business_name) {
     lines.push(`- The business name is "${t.business_name}".`);
+  }
+  if (t.banned_phrases && t.banned_phrases.length > 0) {
+    // Negative prompt (N-009): the correction loop grows this list from owner
+    // edits. Never use these phrases, regardless of context.
+    const quoted = t.banned_phrases.map((p) => `"${p}"`).join(', ');
+    lines.push(`- NEVER use these phrases or wordings: ${quoted}.`);
   }
   lines.push(
     '- Do not invent facts, prices, dates, or names that are not given in ' +

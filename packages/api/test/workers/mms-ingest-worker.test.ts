@@ -8,7 +8,10 @@
  * seam (MessageDelivery in production).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createMmsIngestWorker } from '../../src/workers/mms-ingest-worker';
+import {
+  createMmsIngestWorker,
+  type MmsIngestWorkerDeps,
+} from '../../src/workers/mms-ingest-worker';
 import {
   MMS_CLOCK_IN_FIRST_REPLY,
   MMS_INGEST_QUEUE_TYPE,
@@ -16,6 +19,16 @@ import {
   type MmsIngestDeps,
   type MmsIngestQueuePayload,
 } from '../../src/sms/tech-status/mms-ingest';
+import * as customerMms from '../../src/sms/customer-mms/customer-mms-intake';
+
+// U2 — the worker delegates the non-tech (customer) branch to
+// ingestCustomerMms. Spy on it so the delegation can be asserted without
+// dragging the full intake pipeline into this worker-focused suite (the
+// intake itself is unit-tested in test/sms/customer-mms/).
+vi.mock('../../src/sms/customer-mms/customer-mms-intake', async (importOriginal) => {
+  const actual = await importOriginal<typeof customerMms>();
+  return { ...actual, ingestCustomerMms: vi.fn() };
+});
 import type { QueueMessage } from '../../src/queues/queue';
 import { AttachmentService } from '../../src/attachments/attachment-service';
 import { InMemoryAttachmentRepository } from '../../src/attachments/attachment';
@@ -118,8 +131,8 @@ describe('mms-ingest-worker (RV-050 / P0-009)', () => {
     fetchMedia = vi.fn(async () => ({
       bytes: Buffer.from('jpeg-bytes'),
       contentType: 'image/jpeg',
-    }));
-    sendReply = vi.fn(async (): Promise<void> => undefined);
+    })) as ReturnType<typeof vi.fn>;
+    sendReply = vi.fn(async (): Promise<void> => undefined) as ReturnType<typeof vi.fn>;
     deps = {
       userRepo: { findByMobileNumber: vi.fn(async () => makeTech()) },
       timeEntries: { findActiveEntry: vi.fn(async () => activeEntry(JOB_ID)) },
@@ -240,5 +253,69 @@ describe('mms-ingest-worker (RV-050 / P0-009)', () => {
     ).resolves.toBeUndefined();
     expect(logger.error).toHaveBeenCalled();
     expect(fetchMedia).not.toHaveBeenCalled();
+  });
+
+  // U2 — customer MMS-to-quote delegation. The customerIntake dep is
+  // OPTIONAL; the tech-only path above is unchanged when it's absent.
+  describe('U2 — customer intake delegation', () => {
+    const intakeSpy = customerMms.ingestCustomerMms as unknown as ReturnType<typeof vi.fn>;
+
+    function withIntake(): MmsIngestWorkerDeps {
+      // The worker only forwards this bag to ingestCustomerMms (mocked), so
+      // a minimal non-undefined object is enough to enter the branch.
+      return {
+        ...deps,
+        customerIntake: {
+          customerRepo: {} as never,
+          proposalRepo: {} as never,
+          fileRepo: {} as never,
+          storage: {} as never,
+          storageBucket: 'b',
+          fetchMedia: vi.fn() as never,
+          gateway: {} as never,
+        },
+      };
+    }
+
+    beforeEach(() => {
+      intakeSpy.mockReset();
+      intakeSpy.mockResolvedValue({ outcome: 'drafted', proposalId: 'p-1', storedImages: 1 });
+    });
+
+    it('non-tech sender → customer intake is invoked with the inbound MMS', async () => {
+      (deps.userRepo.findByMobileNumber as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      const worker = createMmsIngestWorker(withIntake());
+      await worker.handle(
+        queueMessage({ ...fullPayload(), fromPhone: '+15125559999' }),
+        silentLogger(),
+      );
+      expect(intakeSpy).toHaveBeenCalledTimes(1);
+      expect(intakeSpy.mock.calls[0][0]).toMatchObject({
+        tenantId: TENANT,
+        fromE164: '+15125559999',
+      });
+    });
+
+    it('registered tech sender → customer intake is NOT invoked', async () => {
+      const worker = createMmsIngestWorker(withIntake());
+      await worker.handle(queueMessage(fullPayload()), silentLogger());
+      expect(intakeSpy).not.toHaveBeenCalled();
+    });
+
+    it('a customer-intake failure is isolated — the worker does not throw', async () => {
+      (deps.userRepo.findByMobileNumber as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      intakeSpy.mockRejectedValue(new Error('intake boom'));
+      const worker = createMmsIngestWorker(withIntake());
+      const logger = silentLogger();
+      await expect(worker.handle(queueMessage(fullPayload()), logger)).resolves.toBeUndefined();
+      expect(logger.error).toHaveBeenCalled();
+    });
+
+    it('no customerIntake dep → tech-only behavior unchanged (intake never called)', async () => {
+      (deps.userRepo.findByMobileNumber as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      const worker = createMmsIngestWorker(deps); // no customerIntake
+      await worker.handle(queueMessage(fullPayload()), silentLogger());
+      expect(intakeSpy).not.toHaveBeenCalled();
+    });
   });
 });

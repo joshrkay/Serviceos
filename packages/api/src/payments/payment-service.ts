@@ -229,15 +229,30 @@ export async function reversePayment(
 
   // Atomic, idempotent flip. `null` means: not found, already reversed,
   // or not in 'completed' status (the guard lives in the WHERE clause).
-  const reversed = await paymentRepo.reversePaymentAtomic(input.tenantId, input.paymentId, {
+  let reversed = await paymentRepo.reversePaymentAtomic(input.tenantId, input.paymentId, {
     reversedAt,
     reason: input.reason,
   });
 
   if (!reversed) {
+    // U5 (ACH async lifecycle) — the completed-only flip missed. The
+    // payment may instead be IN-FLIGHT ('processing'): an ACH return that
+    // arrived BEFORE the debit ever settled. Try the in-flight reversal,
+    // which flips 'processing' -> 'failed' under its own guard. The
+    // invoice-reopen logic below is identical (it backs out the in-flight
+    // credit we applied at `payment_intent.processing`). Idempotent: a
+    // duplicate delivery finds the row already 'failed' and this also
+    // returns null, falling through to the no-op branch.
+    reversed = await paymentRepo.reverseInFlightPaymentAtomic(input.tenantId, input.paymentId, {
+      reversedAt,
+      reason: input.reason,
+    });
+  }
+
+  if (!reversed) {
     // Distinguish "row missing" (retryable — webhook ordering) from
-    // "already reversed / not completed" (terminal no-op), exactly like
-    // recordRefund's 0-row diagnostic read.
+    // "already reversed / not completed/processing" (terminal no-op),
+    // exactly like recordRefund's 0-row diagnostic read.
     const existing = await paymentRepo.findById(input.tenantId, input.paymentId);
     if (!existing) {
       throw new NotFoundError('Payment', input.paymentId);

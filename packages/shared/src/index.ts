@@ -7,6 +7,7 @@ export * from './contracts/email-templates.js';
 export * from './contracts/review-response-proposal.js';
 export * from './contracts/proposal.js';
 export * from './contracts/status.js';
+export * from './contracts/appointment-type.js';
 export * from './contracts/job.js';
 export * from './contracts/customer.js';
 export * from './contracts/money.js';
@@ -18,3 +19,5 @@ export * from './contracts/tech-status-event.js';
 export * from './contracts/proposal-sms.js';
 
 export * from './contracts/digest.js';
+export * from './contracts/correction-lesson.js';
+export * from './contracts/negotiation-event.js';

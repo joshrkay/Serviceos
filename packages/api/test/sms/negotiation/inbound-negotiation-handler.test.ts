@@ -50,6 +50,26 @@ describe('createInboundNegotiationHandler', () => {
     expect(sent.body).not.toMatch(/discount|\$|deal/i);
   });
 
+  it('enriches the owner callback with LTV/recency when the phone resolves to a customer', async () => {
+    const repo = new InMemoryProposalRepository();
+    const sendSms = vi.fn(async () => undefined);
+    const handler = createInboundNegotiationHandler({
+      proposalRepo: repo,
+      sendSms,
+      resolveCustomerContext: async () => ({
+        lifetimeValueCents: 300000,
+        lastSeenAt: new Date(Date.now() - 14 * 86_400_000),
+        jobsCompletedCount: 4,
+      }),
+    });
+
+    await handler.handle(ctx());
+    const [p] = await repo.findByTenant('t-1');
+    const cc = p.payload.customerContext as { lifetimeValueCents: number } | null;
+    expect(cc?.lifetimeValueCents).toBe(300000);
+    expect(String(p.payload.recommendation)).toContain('$3,000');
+  });
+
   it('declines (handled:false) on a non-negotiation message — no proposal, no reply', async () => {
     const repo = new InMemoryProposalRepository();
     const sendSms = vi.fn(async () => undefined);

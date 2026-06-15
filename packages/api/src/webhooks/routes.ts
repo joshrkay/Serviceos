@@ -1184,6 +1184,13 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       // already recorded the payment (stamping the PI id into
       // provider_reference) — so we dedup on that completed row to avoid
       // double-recording.
+      //
+      // U5 (ACH async lifecycle): when payment_intent.processing already
+      // recorded an IN-FLIGHT row for this PI, we SETTLE it (flip
+      // 'processing' -> 'completed') WITHOUT re-crediting the invoice —
+      // the credit was applied at processing time. Only a PI with no
+      // existing row falls through to recordPayment (the card / first-time
+      // path).
       if (event.type === 'payment_intent.succeeded') {
         const pi = event.data.object as {
           id?: string;
@@ -1363,8 +1370,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             deps.auditRepo,
             buildMoneyStateDeps(deps),
           );
-          logger.warn('Settled payment reversed via payment_intent.payment_failed (ACH return/NSF)', {
-            tenantId, invoiceId, paymentId: existing.id, paymentIntentId: piId, reason: reasonText,
+          logger.warn('Payment reversed via payment_intent.payment_failed (ACH return/NSF)', {
+            tenantId, invoiceId, paymentId: existing.id, paymentIntentId: piId,
+            priorStatus: existing.status, reason: reasonText,
           });
         } else if (existing?.status === 'processing') {
           // ACH debit returned BEFORE settlement — fail the in-flight row

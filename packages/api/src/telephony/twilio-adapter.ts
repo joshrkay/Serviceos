@@ -64,6 +64,7 @@ import { discloseRecording } from '../ai/skills/disclose-recording';
 import { t, type Language } from '../ai/i18n/i18n';
 import { identifyCaller } from '../ai/skills/identify-caller';
 import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
+import { assembleB2bAccountContext } from '../ai/agents/customer-calling/b2b-account-context';
 import { confirmIntent } from '../ai/skills/confirm-intent';
 import { summarizeSession } from '../ai/skills/summarize-session';
 import {
@@ -104,6 +105,7 @@ import {
   appendAgentTts,
   type VoiceTurnProcessor,
 } from '../ai/voice-turn';
+import type { CustomerNegotiationContextProvider } from '../customers/customer-negotiation-context';
 import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
 import { detectEmergency } from '../ai/agents/customer-calling/emergency-detector';
@@ -207,6 +209,11 @@ export interface TwilioAdapterDeps {
   agreementRepo?: AgreementRepository;
   /** VQ-006: read-only customer + estimate lookups. */
   customerRepo?: CustomerRepository;
+  /**
+   * N-003 (P2-036) — threaded through to the voice-turn processor so a live-call
+   * negotiation callback can carry the caller's LTV/recency.
+   */
+  customerNegotiationContextProvider?: CustomerNegotiationContextProvider;
   estimateRepo?: EstimateRepository;
   /** Full-app voice coverage: owner-scoped revenue + catalog lookups. */
   moneyDashboardRepo?: MoneyDashboardRepository;
@@ -708,6 +715,47 @@ export class TwilioGatherAdapter {
     }
   }
 
+  /**
+   * U4 — B2B priority routing. After the caller is matched to a customer,
+   * assemble the business-account context (parent + sub-accounts + priority +
+   * occupied-property awareness) and stash it on the session so triage /
+   * booking and the live-call prompt assembly route it with priority. No-op
+   * for residential callers and when no customerRepo is wired. Best-effort:
+   * a lookup failure never strands the call — it simply leaves the context
+   * unset (the caller routes as a normal account).
+   */
+  private async loadB2bAccountContext(
+    session: VoiceSession,
+    tenantId: string,
+    customerId: string,
+  ): Promise<void> {
+    if (!this.deps.customerRepo) return;
+    try {
+      const customer = await this.deps.customerRepo.findById(tenantId, customerId);
+      if (!customer) return;
+      const ctx = await assembleB2bAccountContext({
+        tenantId,
+        customer,
+        repo: this.deps.customerRepo,
+      });
+      if (ctx) {
+        session.b2bAccountContext = ctx;
+        logger.info('inbound call: B2B account context assembled', {
+          sessionId: session.id,
+          accountType: ctx.accountType,
+          hasParent: Boolean(ctx.parentAccount),
+          parentMissing: ctx.parentMissing,
+          subAccountCount: ctx.subAccounts.length,
+        });
+      }
+    } catch (err) {
+      logger.warn('loadB2bAccountContext failed — caller routes as normal account', {
+        sessionId: session.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   private async resolveEscalationTriggers(
     tenantId: string,
   ): Promise<CallingAgentContext['escalationTriggers'] | undefined> {
@@ -927,6 +975,9 @@ export class TwilioGatherAdapter {
 
     if (callerKnown) {
       session.customerId = callerKnown.customerId;
+      // U4 — assemble B2B priority routing context for a business / property-
+      // manager caller before driving the FSM forward.
+      await this.loadB2bAccountContext(session, opts.tenantId, callerKnown.customerId);
       sideEffects.push(
         ...session.machine.dispatch({ type: 'caller_known', customerId: callerKnown.customerId }),
       );
@@ -1464,6 +1515,9 @@ export class TwilioGatherAdapter {
 
     if (callerKnown) {
       session.customerId = callerKnown.customerId;
+      // U4 — assemble B2B priority routing context for a business / property-
+      // manager caller before driving the FSM forward.
+      await this.loadB2bAccountContext(session, opts.tenantId, callerKnown.customerId);
       expanded.push(
         ...session.machine.dispatch({
           type: 'caller_known',

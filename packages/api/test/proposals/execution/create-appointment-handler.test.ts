@@ -67,6 +67,43 @@ describe('CreateAppointmentExecutionHandler', () => {
     }));
   });
 
+  it('threads a valid appointmentType from the payload onto the appointment', async () => {
+    const handler = new CreateAppointmentExecutionHandler(appointmentRepo, assignmentRepo, {
+      enqueue,
+    });
+    const proposal = makeProposal({
+      jobId: '11111111-1111-4111-8111-111111111111',
+      scheduledStart: '2026-04-20T14:00:00Z',
+      scheduledEnd: '2026-04-20T15:00:00Z',
+      appointmentType: 'repair',
+    });
+
+    const result = await handler.execute(proposal, context);
+    expect(result.success).toBe(true);
+
+    const created = await appointmentRepo.findById(tenantId, result.resultEntityId!);
+    expect(created!.appointmentType).toBe('repair');
+  });
+
+  it('drops an out-of-enum appointmentType rather than forwarding it', async () => {
+    const handler = new CreateAppointmentExecutionHandler(appointmentRepo, assignmentRepo, {
+      enqueue,
+    });
+    const proposal = makeProposal({
+      jobId: '11111111-1111-4111-8111-111111111111',
+      scheduledStart: '2026-04-20T14:00:00Z',
+      scheduledEnd: '2026-04-20T15:00:00Z',
+      // urgency is not a type — the handler must not persist it
+      appointmentType: 'emergency',
+    });
+
+    const result = await handler.execute(proposal, context);
+    expect(result.success).toBe(true);
+
+    const created = await appointmentRepo.findById(tenantId, result.resultEntityId!);
+    expect(created!.appointmentType).toBeUndefined();
+  });
+
   it('blocks overlapping technician slots', async () => {
     const handler = new CreateAppointmentExecutionHandler(
       appointmentRepo,
@@ -204,5 +241,44 @@ describe('CreateAppointmentExecutionHandler', () => {
     expect(events).toHaveLength(1);
 
     appointmentRepo.update = originalUpdate;
+  });
+
+  it('persists the spoken reason-for-visit from payload.summary when notes is absent', async () => {
+    // An inbound cold call has no jobId on the transcript, so the AI task
+    // handler skips the held-slot path and emits a plain create_appointment
+    // proposal carrying the work description in `summary`. The execution
+    // handler must persist that as the appointment notes, not drop it.
+    const handler = new CreateAppointmentExecutionHandler(appointmentRepo);
+
+    const proposal = makeProposal({
+      jobId: '77777777-7777-4777-8777-777777777777',
+      scheduledStart: '2026-04-24T14:00:00Z',
+      scheduledEnd: '2026-04-24T15:00:00Z',
+      summary: 'Leaking water heater',
+    });
+
+    const result = await handler.execute(proposal, context);
+    expect(result.success).toBe(true);
+
+    const created = await appointmentRepo.findById(tenantId, result.resultEntityId!);
+    expect(created?.notes).toBe('Leaking water heater');
+  });
+
+  it('prefers an explicit notes field over summary', async () => {
+    const handler = new CreateAppointmentExecutionHandler(appointmentRepo);
+
+    const proposal = makeProposal({
+      jobId: '88888888-8888-4888-8888-888888888888',
+      scheduledStart: '2026-04-25T14:00:00Z',
+      scheduledEnd: '2026-04-25T15:00:00Z',
+      notes: 'Dispatcher note',
+      summary: 'Leaking water heater',
+    });
+
+    const result = await handler.execute(proposal, context);
+    expect(result.success).toBe(true);
+
+    const created = await appointmentRepo.findById(tenantId, result.resultEntityId!);
+    expect(created?.notes).toBe('Dispatcher note');
   });
 });

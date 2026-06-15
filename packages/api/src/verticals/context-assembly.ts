@@ -212,10 +212,12 @@ export function formatIntakeQuestionsForPrompt(
  * Returns an empty string when no pack is provided so callers can
  * unconditionally concatenate the result.
  *
- * Emergency indicators, intake disambiguation questions, and objection
- * scripts (§3D / §3E) are tracked separately — their data shape isn't
- * on `VerticalPack` yet. Once those fields land, extend this formatter
- * with additional sections.
+ * Intake disambiguation questions and objection scripts (§3D / §3E) now
+ * live on `VerticalPack` and are rendered by `formatIntakeQuestionsForPrompt`
+ * / `formatObjectionScriptsForPrompt` (below); `resolve-active-pack.ts`
+ * concatenates those blocks alongside this one. Emergency indicators are
+ * handled deterministically by the pre-LLM keyword detector
+ * (`ai/agents/customer-calling/emergency-detector.ts`), not via this prompt.
  */
 export function formatVerticalForCallerPrompt(
   pack: import('./registry').VerticalPack | null | undefined,
