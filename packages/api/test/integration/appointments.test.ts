@@ -144,6 +144,72 @@ describe('Postgres integration — appointments', () => {
       const appointments = await appointmentRepo.findByJob(tenant.tenantId, jobId);
       expect(appointments.length).toBeGreaterThanOrEqual(1);
     });
+
+    it('persists and round-trips appointment_type (real column)', async () => {
+      const startTime = new Date();
+      const endTime = new Date(startTime.getTime() + 3600000);
+
+      const appointment = await appointmentRepo.create({
+        id: crypto.randomUUID(),
+        tenantId: tenant.tenantId,
+        jobId,
+        scheduledStart: startTime,
+        scheduledEnd: endTime,
+        timezone: 'America/Chicago',
+        status: 'scheduled',
+        appointmentType: 'install',
+        createdBy: tenant.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const found = await appointmentRepo.findById(tenant.tenantId, appointment.id);
+      expect(found!.appointmentType).toBe('install');
+    });
+
+    it('leaves appointment_type undefined when unset', async () => {
+      const startTime = new Date();
+      const endTime = new Date(startTime.getTime() + 3600000);
+
+      const appointment = await appointmentRepo.create({
+        id: crypto.randomUUID(),
+        tenantId: tenant.tenantId,
+        jobId,
+        scheduledStart: startTime,
+        scheduledEnd: endTime,
+        timezone: 'America/Chicago',
+        status: 'scheduled',
+        createdBy: tenant.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const found = await appointmentRepo.findById(tenant.tenantId, appointment.id);
+      expect(found!.appointmentType).toBeUndefined();
+    });
+
+    it('rejects an out-of-enum appointment_type at the DB CHECK', async () => {
+      const startTime = new Date();
+      const endTime = new Date(startTime.getTime() + 3600000);
+
+      await expect(
+        appointmentRepo.create({
+          id: crypto.randomUUID(),
+          tenantId: tenant.tenantId,
+          jobId,
+          scheduledStart: startTime,
+          scheduledEnd: endTime,
+          timezone: 'America/Chicago',
+          status: 'scheduled',
+          // 'emergency' is intentionally NOT a valid type — urgency is a
+          // trust-tier concern; the DB CHECK must reject it.
+          appointmentType: 'emergency' as unknown as 'install',
+          createdBy: tenant.userId,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        }),
+      ).rejects.toThrow();
+    });
   });
 
   describe('tenant isolation', () => {

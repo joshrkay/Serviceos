@@ -55,6 +55,26 @@ describe('P2-002 — Typed proposal contracts', () => {
     expect(result.errors).toBeUndefined();
   });
 
+  it('create_appointment — accepts a valid appointmentType, rejects out-of-enum', () => {
+    const base = {
+      jobId: validJobId,
+      scheduledStart: '2026-04-01T09:00:00Z',
+      scheduledEnd: '2026-04-01T11:00:00Z',
+    };
+    // valid enum value rides through
+    expect(
+      validateProposalPayload('create_appointment', { ...base, appointmentType: 'install' })
+        .valid,
+    ).toBe(true);
+    // optional — absence is still valid
+    expect(validateProposalPayload('create_appointment', base).valid).toBe(true);
+    // never trust an unconstrained value (urgency is not a type)
+    expect(
+      validateProposalPayload('create_appointment', { ...base, appointmentType: 'emergency' })
+        .valid,
+    ).toBe(false);
+  });
+
   it('happy path — validates draft_estimate payload', () => {
     const result = validateProposalPayload('draft_estimate', {
       customerId: validCustomerId,

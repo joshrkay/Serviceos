@@ -67,6 +67,43 @@ describe('CreateAppointmentExecutionHandler', () => {
     }));
   });
 
+  it('threads a valid appointmentType from the payload onto the appointment', async () => {
+    const handler = new CreateAppointmentExecutionHandler(appointmentRepo, assignmentRepo, {
+      enqueue,
+    });
+    const proposal = makeProposal({
+      jobId: '11111111-1111-4111-8111-111111111111',
+      scheduledStart: '2026-04-20T14:00:00Z',
+      scheduledEnd: '2026-04-20T15:00:00Z',
+      appointmentType: 'repair',
+    });
+
+    const result = await handler.execute(proposal, context);
+    expect(result.success).toBe(true);
+
+    const created = await appointmentRepo.findById(tenantId, result.resultEntityId!);
+    expect(created!.appointmentType).toBe('repair');
+  });
+
+  it('drops an out-of-enum appointmentType rather than forwarding it', async () => {
+    const handler = new CreateAppointmentExecutionHandler(appointmentRepo, assignmentRepo, {
+      enqueue,
+    });
+    const proposal = makeProposal({
+      jobId: '11111111-1111-4111-8111-111111111111',
+      scheduledStart: '2026-04-20T14:00:00Z',
+      scheduledEnd: '2026-04-20T15:00:00Z',
+      // urgency is not a type — the handler must not persist it
+      appointmentType: 'emergency',
+    });
+
+    const result = await handler.execute(proposal, context);
+    expect(result.success).toBe(true);
+
+    const created = await appointmentRepo.findById(tenantId, result.resultEntityId!);
+    expect(created!.appointmentType).toBeUndefined();
+  });
+
   it('blocks overlapping technician slots', async () => {
     const handler = new CreateAppointmentExecutionHandler(
       appointmentRepo,

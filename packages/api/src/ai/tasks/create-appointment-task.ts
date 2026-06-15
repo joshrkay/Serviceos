@@ -15,6 +15,7 @@ import {
   ResolveDateTimeFailureReason,
 } from '../scheduling/resolve-datetime';
 import { voiceHoldIdempotencyKey } from '../../voice/voice-audit';
+import { appointmentTypeSchema, type AppointmentTypeValue } from '@ai-service-os/shared';
 
 /**
  * LLM-backed CreateAppointmentTaskHandler.
@@ -52,6 +53,7 @@ Return valid JSON with this shape (no prose, no markdown fences):
   "customerId": "<uuid, optional — only if explicitly known>",
   "jobId": "<uuid, optional — only if explicitly known>",
   "summary": "<one-line description of the work requested>",
+  "appointmentType": "<optional — one of: estimate, repair, install, maintenance, diagnostic>",
   "durationMinutes": <integer, optional — estimated job length if stated or clearly implied by the service>,
   "confidence_score": <number between 0 and 1>
 }
@@ -61,6 +63,10 @@ Rules:
   date, do NOT compute a timezone, do NOT output an ISO timestamp. Downstream
   code resolves the actual time against the tenant's timezone.
 - If the transcript mentions no date or time at all, set dateTimePhrase to "".
+- appointmentType is the KIND of visit: estimate (a quote/estimate visit), repair,
+  install, maintenance, or diagnostic. Choose the closest fit from that set, or
+  omit it entirely when the kind isn't clear. Never output a value outside that
+  set ("emergency" is urgency, not a type).
 - durationMinutes is a hint only (e.g. a quick diagnostic ~60, a furnace install ~240).
 - Never invent a customerId or jobId.`;
 
@@ -88,6 +94,14 @@ function buildPayload(parsed: Record<string, unknown> | null): Record<string, un
   if (typeof parsed.jobId === 'string') payload.jobId = parsed.jobId;
   if (typeof parsed.summary === 'string') payload.summary = parsed.summary;
   if (typeof parsed.technicianId === 'string') payload.technicianId = parsed.technicianId;
+  // Typed visit kind — only forward a value the enum allows; never trust a raw
+  // LLM string (an out-of-set or hallucinated kind is dropped, not persisted).
+  if (
+    typeof parsed.appointmentType === 'string' &&
+    appointmentTypeSchema.safeParse(parsed.appointmentType).success
+  ) {
+    payload.appointmentType = parsed.appointmentType;
+  }
   return payload;
 }
 
@@ -491,6 +505,8 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
                 }
               : {}),
             notes: typeof payload.summary === 'string' ? payload.summary : undefined,
+            // buildPayload only sets appointmentType to an enum-valid value.
+            appointmentType: payload.appointmentType as AppointmentTypeValue | undefined,
             createdBy: context.userId,
             holdPendingApproval: true,
             holdExpiryAt,
