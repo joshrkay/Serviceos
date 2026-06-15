@@ -4,9 +4,10 @@ import {
   updateEstimate,
   transitionEstimateStatus,
   validateEstimateInput,
+  isEstimateCatalogGrounded,
   InMemoryEstimateRepository,
 } from '../../src/estimates/estimate';
-import { buildLineItem } from '../../src/shared/billing-engine';
+import { buildLineItem, LineItem, PricingSource } from '../../src/shared/billing-engine';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 
 describe('P1-009 — Estimate entity + shared line-item schema', () => {
@@ -150,5 +151,66 @@ describe('P1-009 — Estimate entity + shared line-item schema', () => {
 
     expect(estimate.totals.subtotalCents).toBe(11250);
     expect(Number.isInteger(estimate.totals.taxCents)).toBe(true);
+  });
+});
+
+describe('P2-036 V2 (U-G) — isEstimateCatalogGrounded', () => {
+  // Build a priced line ($75) carrying a given pricingSource (or none).
+  function pricedLine(id: string, source?: PricingSource): LineItem {
+    const li = buildLineItem(id, 'Service line', 1, 7500, 1, true, 'labor');
+    return source === undefined ? li : { ...li, pricingSource: source };
+  }
+
+  it('all lines catalog-sourced → grounded (true)', () => {
+    const lineItems = [pricedLine('a', 'catalog'), pricedLine('b', 'catalog')];
+    expect(isEstimateCatalogGrounded({ lineItems })).toBe(true);
+  });
+
+  it('all lines manual-sourced → grounded (true)', () => {
+    const lineItems = [pricedLine('a', 'manual'), pricedLine('b', 'manual')];
+    expect(isEstimateCatalogGrounded({ lineItems })).toBe(true);
+  });
+
+  it('mixed catalog + manual → grounded (true)', () => {
+    const lineItems = [pricedLine('a', 'catalog'), pricedLine('b', 'manual')];
+    expect(isEstimateCatalogGrounded({ lineItems })).toBe(true);
+  });
+
+  it('any uncatalogued priced line → NOT grounded (false)', () => {
+    const lineItems = [pricedLine('a', 'catalog'), pricedLine('b', 'uncatalogued')];
+    expect(isEstimateCatalogGrounded({ lineItems })).toBe(false);
+  });
+
+  it('any ambiguous priced line → NOT grounded (false)', () => {
+    const lineItems = [pricedLine('a', 'catalog'), pricedLine('b', 'ambiguous')];
+    expect(isEstimateCatalogGrounded({ lineItems })).toBe(false);
+  });
+
+  it('any priced line with undefined pricingSource (legacy/manual-without-signal) → NOT grounded (false)', () => {
+    const lineItems = [pricedLine('a', 'catalog'), pricedLine('b', undefined)];
+    expect(isEstimateCatalogGrounded({ lineItems })).toBe(false);
+  });
+
+  it('any priced line with null pricingSource (DB NULL round-trip) → NOT grounded (false)', () => {
+    // A row persisted with pricing_source = NULL maps back to null/undefined;
+    // pin null explicitly since the column is nullable.
+    const nullLine = { ...pricedLine('b'), pricingSource: null as unknown as PricingSource };
+    const lineItems = [pricedLine('a', 'catalog'), nullLine];
+    expect(isEstimateCatalogGrounded({ lineItems })).toBe(false);
+  });
+
+  it('empty estimate (no priced lines) → NOT grounded (false) — nothing to vouch for', () => {
+    expect(isEstimateCatalogGrounded({ lineItems: [] })).toBe(false);
+  });
+
+  it('zero-priced lines are skipped — a $0 line without a signal does NOT break grounding', () => {
+    const zeroLine = buildLineItem('free', 'Free consultation', 1, 0, 2, true, 'labor');
+    const lineItems = [pricedLine('a', 'catalog'), zeroLine];
+    expect(isEstimateCatalogGrounded({ lineItems })).toBe(true);
+  });
+
+  it('only zero-priced lines → NOT grounded (false) — no priced line to ground', () => {
+    const zeroLine = buildLineItem('free', 'Free consultation', 1, 0, 1, true, 'labor');
+    expect(isEstimateCatalogGrounded({ lineItems: [zeroLine] })).toBe(false);
   });
 });

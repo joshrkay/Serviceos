@@ -331,6 +331,14 @@ export const updateSettingsSchema = z.object({
   depositPercentageBps: z.number().int().min(0).max(10000).nullable().optional(),
   depositFixedCents: z.number().int().min(0).nullable().optional(),
   depositRequiredAboveCents: z.number().int().min(0).nullable().optional(),
+  // P2-036 V2 (Discount policy — U1) — per-tenant policy bounding AI-proposed
+  // discounts. Mirrors the deposit fields' shape (bps + cents) and the
+  // migration 178 CHECKs. Without these keys in the schema, z.object strips
+  // them and the policy can never be set via the API. null clears the column;
+  // omit to leave untouched. resolveDiscountPolicy fail-closes any absent value.
+  discountMaxBps: z.number().int().min(0).max(10000).nullable().optional(),
+  discountFloorCents: z.number().int().min(0).nullable().optional(),
+  discountNeverBelowCatalog: z.boolean().nullable().optional(),
   // Tier 4 (Deposit rules — PR 3a-extended). Selects whether the
   // customer pays the deposit BEFORE they can approve the estimate
   // ('before_approval') or AFTER ('after_approval'). Default behavior

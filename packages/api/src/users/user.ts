@@ -67,6 +67,14 @@ export interface UserRepository {
    * that mobile on file.
    */
   findByMobileNumber(tenantId: string, e164: string): Promise<User | null>;
+  /**
+   * Set or clear (`null`) a user's mobile number. `e164` MUST already be
+   * normalized via `normalizeMobileE164()`. Tenant-scoped; throws a Postgres
+   * `23505` unique violation when another user in the tenant already holds the
+   * number (the route surfaces that as a 409). Returns the updated row, or
+   * null when the user wasn't found in this tenant.
+   */
+  setMobileNumber(tenantId: string, id: string, e164: string | null): Promise<User | null>;
   update(tenantId: string, id: string, updates: UpdateUserInput): Promise<User | null>;
   /**
    * Tier 4 (Team members — PR 2 follow-up). Atomic role demotion that
@@ -196,6 +204,33 @@ export class InMemoryUserRepository implements UserRepository {
       (u) => u.tenantId === tenantId && u.mobileNumber === e164,
     );
     return match ? { ...match } : null;
+  }
+
+  async setMobileNumber(
+    tenantId: string,
+    id: string,
+    e164: string | null,
+  ): Promise<User | null> {
+    const u = this.users.get(id);
+    if (!u || u.tenantId !== tenantId) return null;
+    if (e164 !== null) {
+      // Mirror the Pg `(tenant_id, mobile_number)` partial-unique index so a
+      // second teammate can't claim a number already on file in this tenant.
+      const clash = Array.from(this.users.values()).find(
+        (other) =>
+          other.tenantId === tenantId && other.id !== id && other.mobileNumber === e164,
+      );
+      if (clash) {
+        const err = new Error('duplicate key value violates unique constraint') as Error & {
+          code: string;
+        };
+        err.code = '23505';
+        throw err;
+      }
+    }
+    const next: User = { ...u, mobileNumber: e164 ?? undefined, updatedAt: new Date() };
+    this.users.set(id, next);
+    return { ...next };
   }
 
   async update(tenantId: string, id: string, updates: UpdateUserInput): Promise<User | null> {

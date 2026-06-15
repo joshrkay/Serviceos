@@ -274,4 +274,109 @@ describe('Postgres integration — estimates', () => {
       expect(reread!.status).toBe('sent');
     });
   });
+
+  // P2-036 V2 (U-G) — per-line catalog-grounding signal (pricing_source)
+  // persists on estimate_line_items. Mocked repos can't prove the column
+  // exists or that the CHECK constraint is enforced; only a real round-trip
+  // (and a raw invalid UPDATE) does — exactly the failure mode CLAUDE.md
+  // calls out (the entity resolver shipped nonexistent columns under a
+  // mocked Pool).
+  describe('U-G — estimate_line_items.pricing_source round-trips and is CHECK-constrained', () => {
+    it('persists every valid pricingSource and reads it back through the repo mapper', async () => {
+      const catalogId = crypto.randomUUID();
+      const manualId = crypto.randomUUID();
+      const uncataloguedId = crypto.randomUUID();
+      const ambiguousId = crypto.randomUUID();
+      const legacyId = crypto.randomUUID();
+
+      const lineItems = [
+        { ...buildLineItem(catalogId, 'Catalog line', 1, 5000, 1, true, 'labor'), pricingSource: 'catalog' as const },
+        { ...buildLineItem(manualId, 'Manual line', 1, 6000, 2, true, 'labor'), pricingSource: 'manual' as const },
+        { ...buildLineItem(uncataloguedId, 'Uncatalogued line', 1, 7000, 3, true, 'material'), pricingSource: 'uncatalogued' as const },
+        { ...buildLineItem(ambiguousId, 'Ambiguous line', 1, 8000, 4, true, 'material'), pricingSource: 'ambiguous' as const },
+        // No pricingSource → must persist as SQL NULL and read back undefined.
+        buildLineItem(legacyId, 'Legacy line', 1, 9000, 5, true, 'other'),
+      ];
+      const totals = calculateDocumentTotals(lineItems, 0, 0);
+      const estimateId = crypto.randomUUID();
+
+      await estimateRepo.create({
+        id: estimateId,
+        tenantId: tenant.tenantId,
+        jobId,
+        estimateNumber: 'EST-UG-PS',
+        status: 'draft',
+        lineItems,
+        totals,
+        version: 1,
+        createdBy: tenant.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      // Repo mapper round-trip (ordered by sort_order).
+      const found = await estimateRepo.findById(tenant.tenantId, estimateId);
+      expect(found).not.toBeNull();
+      const byId = new Map(found!.lineItems.map((li) => [li.id, li]));
+      expect(byId.get(catalogId)!.pricingSource).toBe('catalog');
+      expect(byId.get(manualId)!.pricingSource).toBe('manual');
+      expect(byId.get(uncataloguedId)!.pricingSource).toBe('uncatalogued');
+      expect(byId.get(ambiguousId)!.pricingSource).toBe('ambiguous');
+      // Unset → SQL NULL → undefined (NOT the string 'null', NOT a phantom).
+      expect(byId.get(legacyId)!.pricingSource).toBeUndefined();
+
+      // SQL-level: the unset line is a true SQL NULL.
+      const raw = await pool.query(
+        `SELECT pricing_source FROM estimate_line_items WHERE id = $1 AND tenant_id = $2`,
+        [legacyId, tenant.tenantId],
+      );
+      expect(raw.rows[0].pricing_source).toBeNull();
+    });
+
+    it('the DB CHECK rejects an invalid pricing_source on a raw UPDATE', async () => {
+      const lineItemId = crypto.randomUUID();
+      const lineItems = [
+        { ...buildLineItem(lineItemId, 'Catalog line', 1, 5000, 1, true, 'labor'), pricingSource: 'catalog' as const },
+      ];
+      const totals = calculateDocumentTotals(lineItems, 0, 0);
+      const estimateId = crypto.randomUUID();
+
+      await estimateRepo.create({
+        id: estimateId,
+        tenantId: tenant.tenantId,
+        jobId,
+        estimateNumber: 'EST-UG-CHECK',
+        status: 'draft',
+        lineItems,
+        totals,
+        version: 1,
+        createdBy: tenant.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      // Find the persisted row id (insertLineItems keeps a valid UUID as-is).
+      const rows = await pool.query(
+        `SELECT id FROM estimate_line_items WHERE estimate_id = $1 AND tenant_id = $2`,
+        [estimateId, tenant.tenantId],
+      );
+      const rowId = rows.rows[0].id as string;
+
+      // Postgres CHECK violation = SQLSTATE 23514. A bogus value must be refused.
+      await expect(
+        pool.query(
+          `UPDATE estimate_line_items SET pricing_source = 'bogus' WHERE id = $1 AND tenant_id = $2`,
+          [rowId, tenant.tenantId],
+        ),
+      ).rejects.toMatchObject({ code: '23514' });
+
+      // And NULL is explicitly allowed by the CHECK (additive, no default).
+      await expect(
+        pool.query(
+          `UPDATE estimate_line_items SET pricing_source = NULL WHERE id = $1 AND tenant_id = $2`,
+          [rowId, tenant.tenantId],
+        ),
+      ).resolves.toBeDefined();
+    });
+  });
 });

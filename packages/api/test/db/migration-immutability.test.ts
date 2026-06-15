@@ -260,11 +260,24 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['176_customer_payment_methods', '6fe12975c7999002a67de1722a402a6bd017d0e8db4c84fd70d2d85dad439890'],
   ['177_digest_entries', '8ebc2dc5b5c449bf7b94f2c6a11a17af2c91092e0fff24bdf6e824f0f1af21ac'],
   ['177_customer_payment_methods_stripe_account', '4aac0f8afc6b5e3fb72ec4e866233905e9e7e4ea95699e61705c8da10878ab12'],
-  ['178_customer_b2b_hierarchy', '4c4adc2260d47abaa8a833d59ac20995902f0dd5d5a19d5ab9a25d61a3bd8523'],
-  ['179_ach_payment_processing_state', '866664ba47094254581ef04a5864f8529652c308b309ae11bf1abd5ebb47ec3d'],
-  ['180_correction_lessons', '1b75f1cb10c7754370eb74f2b2b4873375657920429d4839aa372e35ebad8139'],
-  ['181_tenant_settings_labor_rate', 'f650607b44e90ac94e357f83ad46fee1dbe74aef2e19dc8134147ec5901195aa'],
+  // P2-036 V2 (U1): per-tenant discount policy columns (max bps / floor cents /
+  // never-below-catalog), all nullable; resolver fail-closes to V1 posture.
+  ['178_tenant_settings_discount_policy', '91f7884b3b81fbd78cbe0f2d16ac6b8d0d78234358ee788f555ff478204b0760'],
+  // P2-036 V2 (U-G): persist per-line catalog-grounding signal
+  // (pricing_source) on estimate_line_items; nullable, additive, CHECK
+  // admits NULL. NULL reads as not-grounded (conservative).
+  ['179_estimate_line_items_pricing_source', '7ee44a4eb201341367064df3df6dcae61544a1873f88ee4b57d5429aef64f4bd'],
+  // CI fix: B2B account-hierarchy parent_account_id column + index that
+  // pg-customer.ts already used but had no migration for (broke every
+  // customers INSERT against a real DB).
+  ['180_customers_parent_account', '7019b21f41726e45265629443c381175f5cc5ef8e01dd14b8d60fec701d4303b'],
+  // appointment-type feature (from main); migration landed in schema.ts but its
+  // snapshot entry was lost in the auto-merge into this branch.
   ['182_appointment_type', '0dc29a194dbb25f2a19a53a453044362a86afde22a3a29447e1cc99e512547e1'],
+  // CI fix: merged features whose code shipped without their migrations.
+  ['183_customers_account_type_property_manager', 'f373682884c0e1e5b74d1b8a186d44fb302e25c1791595da9814a7b572c453c3'],
+  ['184_tenant_settings_labor_rate', '5552a7d845275663af1ac4f2df1c64897989f11625ffeb6f595153d9305b1355'],
+  ['185_correction_lessons', 'cb361b7505166e97eab2b627e660df67788b446fedd147f918e877d14b8ca8cf'],
 ];
 
 function hashMigration(value: string): string {

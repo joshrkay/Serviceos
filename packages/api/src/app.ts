@@ -13,7 +13,7 @@ import { createIntegrationResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
-import { createBusinessPhoneDispatcherResolver } from './telephony/dispatcher-phone-resolver';
+import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from './telephony/dispatcher-phone-resolver';
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
@@ -472,6 +472,8 @@ import {
 import { createInboundNegotiationHandler } from './sms/negotiation/inbound-negotiation-handler';
 import { PgCustomerNegotiationContextProvider } from './customers/pg-customer-negotiation-context';
 import { normalizePhone } from './customers/dedup';
+import { DefaultCurrentQuoteResolver } from './conversations/negotiation/current-quote-resolver';
+import { evaluateNegotiationDiscount } from './proposals/guardrails/negotiation-guardrail';
 import {
   DroppedCallScheduler,
   PgDroppedCallRecoveryRepository,
@@ -872,6 +874,8 @@ export function createApp(): express.Express {
   const noteRepo           = pool ? new PgNoteRepository(pool)           : new InMemoryNoteRepository();
   const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
   const settingsRepo       = pool ? new PgSettingsRepository(pool)       : new InMemorySettingsRepository();
+  // P2-036 V2 — resolves the customer's current live quote for the discount engine.
+  const negotiationQuoteResolver = new DefaultCurrentQuoteResolver({ jobRepo, estimateRepo });
   // Voice-parity (Feature 7) — call_me_back tasks (failed-transfer callbacks).
   const callMeBackRepo     = pool ? new PgCallMeBackRepository(pool)     : new InMemoryCallMeBackRepository();
   // PR B (Tier 4 / AI approval rules) — shared per-tenant
@@ -1691,6 +1695,10 @@ export function createApp(): express.Express {
     gateway: llmGateway,
     proposalRepo,
     ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
+    // P2-036 V2 — additive discount engine; fail-closed (dormant until a tenant
+    // configures a discount policy via settings).
+    settingsRepo,
+    negotiationQuoteResolver,
     slotConflictChecker,
     availabilityFinder,
     thresholdResolver,
@@ -2240,10 +2248,32 @@ export function createApp(): express.Express {
         return null;
       }
     };
+    // P2-036 V2 — phone → single-match customer → discount evaluation (fail-
+    // closed; null when unconfigured / no quote / unresolved phone).
+    const evaluateNegotiationDiscountForPhone = async (
+      tenantId: string,
+      phoneE164: string,
+      askText: string,
+    ) => {
+      try {
+        const matches = await customerRepo.findByPhoneNormalized(tenantId, normalizePhone(phoneE164));
+        if (matches.length !== 1) return null;
+        return await evaluateNegotiationDiscount({
+          tenantId,
+          customerId: matches[0].id,
+          askText,
+          settingsRepo,
+          quoteResolver: negotiationQuoteResolver,
+        });
+      } catch {
+        return null;
+      }
+    };
     registerNegotiationHandler(
       createInboundNegotiationHandler({
         proposalRepo,
         resolveCustomerContext: resolveNegotiationCustomerContext,
+        evaluateDiscount: evaluateNegotiationDiscountForPhone,
         sendSms: (args: { to: string; body: string }) =>
           messageDelivery.sendSms({ to: args.to, body: args.body }),
         auditRepo,
@@ -2322,10 +2352,14 @@ export function createApp(): express.Express {
     ...(pool ? { pool } : {}),
     proposalRepo,
     ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
+    // P2-036 V2 — live-call discount engine (fail-closed; dormant until a tenant
+    // configures a discount policy). settingsRepo is wired below.
+    negotiationQuoteResolver,
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     callControl: telephonyCallControl,
-    dispatcherPhoneResolver: createBusinessPhoneDispatcherResolver(settingsRepo),
+    dispatcherPhoneResolver: createUserPhoneDispatcherResolver(userRepo),
+    businessPhoneFallbackResolver: createBusinessPhoneFallback(settingsRepo),
     settingsRepo,
     // RV-070 — owner-line recognition: backup supervisor mobile lookup
     // (mirrors the SMS reply transport's approver identity).
@@ -2814,7 +2848,8 @@ export function createApp(): express.Express {
                   callControl: telephonyCallControl,
                   ownerPhoneResolver: createSettingsOwnerPhoneResolver(settingsRepo),
                   onCallRepo: sharedOnCallRepo,
-                  dispatcherPhoneResolver: createBusinessPhoneDispatcherResolver(settingsRepo),
+                  dispatcherPhoneResolver: createUserPhoneDispatcherResolver(userRepo),
+                  businessPhoneFallbackResolver: createBusinessPhoneFallback(settingsRepo),
                   ...(messageDelivery
                     ? {
                         sendSms: (args: { to: string; body: string }) =>

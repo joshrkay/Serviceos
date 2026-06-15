@@ -622,6 +622,14 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
           ...(adapterDeps.auditRepo ? { auditRepo: adapterDeps.auditRepo } : {}),
           callControl: adapterDeps.callControl,
           dispatcherPhoneResolver: adapterDeps.dispatcherPhoneResolver,
+          // Deliberately NOT forwarding businessPhoneFallbackResolver here: this
+          // is the /dial-result CASCADE (the previous dial got no answer). The
+          // business-line fallback is an INITIAL-attempt-only last resort —
+          // re-applying it on every cascade re-invocation would redial the
+          // shared line forever (the fallback never advances the rotation
+          // cursor). Omitting it lets an exhausted/numberless rotation return
+          // escalated:false here, so the cascade falls through to voicemail /
+          // call_me_back (the pre-per-user-number termination behavior).
           callSid: session.callSid ?? callSid,
           dialActionUrl: buildDialResultUrl(deps.publicBaseUrl, sessionId),
         });
