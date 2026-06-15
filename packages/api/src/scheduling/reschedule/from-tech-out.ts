@@ -11,6 +11,7 @@ import {
   createProposal,
 } from '../../proposals/proposal';
 import { rescheduleAppointmentPayloadSchema } from '../../proposals/contracts/reschedule';
+import { ConflictError } from '../../shared/errors';
 import type { ComposeBrandVoiceDeps } from '../../ai/brand-voice/composer';
 import { draftCustomerRescheduleMessage } from './customer-message-draft';
 
@@ -198,10 +199,25 @@ export async function createRescheduleProposalsFromTechOut(
         // APPROVE ALL can't fire a no-op "we've rescheduled you" customer SMS.
         requiresSlotSelection: true,
       },
+      // The proposals table requires a NOT NULL idempotency_key. A deterministic
+      // per-appointment key also dedupes a retry: re-processing the same tech-out
+      // won't mint a duplicate reschedule for an appointment already queued — the
+      // unique (tenant_id, idempotency_key) index catches it (ConflictError,
+      // handled below). Without this, proposalRepo.create hit a NOT NULL
+      // violation that the in-memory repo could not surface (mocked-Pool gap).
+      idempotencyKey: `tech-out-reschedule:${input.technicianId}:${appt.id}`,
       createdBy: input.createdBy,
     });
 
-    const created = await deps.proposalRepo.create(proposal);
+    let created: Proposal;
+    try {
+      created = await deps.proposalRepo.create(proposal);
+    } catch (err) {
+      // A prior (partial) attempt for this tech-out already queued this
+      // appointment's reschedule — idempotent: skip, it's already in the queue.
+      if (err instanceof ConflictError) continue;
+      throw err;
+    }
     // Surface in the owner's review queue. createProposal lands the proposal
     // in 'draft' (no sourceTrustTier ⇒ never auto-approve, per CLAUDE.md). The
     // owner approves from 'ready_for_review' (draft → ready_for_review →
