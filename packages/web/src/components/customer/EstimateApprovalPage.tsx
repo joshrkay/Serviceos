@@ -697,7 +697,7 @@ export function EstimateApprovalPage() {
       }
     }, POLL_MS);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [id, depositPayable]);
+  }, [id, depositPayable, apiView]);
 
   // Good-better-best: seed the customer's selection from the server
   // defaults once the estimate loads. Selectable items (tier options +

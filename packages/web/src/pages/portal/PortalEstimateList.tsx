@@ -45,7 +45,7 @@ export function PortalEstimateList({ token }: { token: string }) {
         // sibling estimates of the same job.
         const depositRemainingCents = Math.max(
           0,
-          e.depositRequiredCents - e.depositPaidCents,
+          (e.depositRequiredCents ?? 0) - (e.depositPaidCents ?? 0),
         );
         const depositPaid =
           e.status === 'accepted' && e.depositStatus === 'paid';
