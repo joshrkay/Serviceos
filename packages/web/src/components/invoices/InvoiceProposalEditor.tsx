@@ -121,7 +121,15 @@ export function InvoiceProposalEditor({
               data-testid={`line-item-price-${index}`}
               type="number"
               value={item.unitPrice ?? item.unitPriceCents ?? 0}
-              onChange={(e) => updateLineItem(index, 'unitPrice', Number(e.target.value))}
+              onChange={(e) =>
+                updateLineItem(
+                  index,
+                  // Invoice-shaped lines carry unitPriceCents; write back to the
+                  // field that's actually present so the edit isn't dropped.
+                  item.unitPriceCents !== undefined ? 'unitPriceCents' : 'unitPrice',
+                  Number(e.target.value),
+                )
+              }
             />
             <button
               data-testid={`remove-line-item-${index}`}

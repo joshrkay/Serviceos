@@ -417,14 +417,25 @@ export async function undoProposal(
     try {
       const lessons = await correctionLoop.lessonRepo.findBySourceProposal(tenantId, proposalId);
       for (const lesson of lessons) {
-        await undoCorrectionLesson(
-          { tenantId, lessonId: lesson.id, ownerId: actorId },
-          { repository: correctionLoop.lessonRepo, ports: correctionLoop.ports, auditRepo },
-        );
+        // Per-lesson failure-soft: one lesson's reversal throwing must not
+        // abort the remaining reversals (a single outer try would skip them).
+        try {
+          await undoCorrectionLesson(
+            { tenantId, lessonId: lesson.id, ownerId: actorId },
+            { repository: correctionLoop.lessonRepo, ports: correctionLoop.ports, auditRepo },
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error('undoProposal: individual undoCorrectionLesson reversal failed', {
+            proposalId,
+            lessonId: lesson.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.error('undoProposal: undoCorrectionLesson reversal failed', {
+      console.error('undoProposal: findBySourceProposal failed', {
         proposalId,
         error: err instanceof Error ? err.message : String(err),
       });
