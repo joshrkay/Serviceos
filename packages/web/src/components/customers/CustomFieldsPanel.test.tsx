@@ -85,6 +85,33 @@ describe('CustomFieldsPanel (U2)', () => {
     );
   });
 
+  it('preserves an unsaved draft in another field while one field saves', async () => {
+    vi.mocked(listCustomFields).mockResolvedValue([
+      field({ fieldDefId: 'f1', label: 'Gate Code', value: null }),
+      field({ fieldDefId: 'f2', label: 'PO Number', value: null }),
+    ] as never);
+    // Server reply for saving f1 — it knows nothing of f2's unsaved draft.
+    vi.mocked(setCustomFieldValue).mockResolvedValue([
+      field({ fieldDefId: 'f1', label: 'Gate Code', value: 'AAA' }),
+      field({ fieldDefId: 'f2', label: 'PO Number', value: null }),
+    ] as never);
+
+    render(<CustomFieldsPanel customerId="1" />);
+
+    const po = (await screen.findByLabelText('PO Number')) as HTMLInputElement;
+    fireEvent.change(po, { target: { value: 'BBB' } }); // unsaved draft in f2
+
+    const gate = screen.getByLabelText('Gate Code');
+    fireEvent.change(gate, { target: { value: 'AAA' } });
+    fireEvent.blur(gate); // saves f1
+
+    await waitFor(() =>
+      expect(vi.mocked(setCustomFieldValue)).toHaveBeenCalledWith('1', 'f1', 'AAA'),
+    );
+    // f1's save must not wipe f2's in-progress edit.
+    expect((screen.getByLabelText('PO Number') as HTMLInputElement).value).toBe('BBB');
+  });
+
   it('sends null when clearing a field', async () => {
     vi.mocked(listCustomFields).mockResolvedValue([field({ value: '1234' })] as never);
     render(<CustomFieldsPanel customerId="1" />);

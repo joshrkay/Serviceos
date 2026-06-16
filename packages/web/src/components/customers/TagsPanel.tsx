@@ -28,6 +28,9 @@ export function TagsPanel({ customerId }: { customerId: string }) {
   }, [customerId]);
 
   useEffect(() => {
+    // Drop the prior customer's tags so a customerId change doesn't flash
+    // stale chips while the new fetch is in flight.
+    setTags([]);
     void load();
   }, [load]);
 
@@ -36,6 +39,11 @@ export function TagsPanel({ customerId }: { customerId: string }) {
       event.preventDefault();
       const tag = draft.trim();
       if (!tag) return;
+      // Skip the round-trip when the tag is already present (case-insensitive).
+      if (tags.some((t) => t.toLowerCase() === tag.toLowerCase())) {
+        toast.error('Tag already added');
+        return;
+      }
       setSaving(true);
       setError(null);
       try {
@@ -49,7 +57,7 @@ export function TagsPanel({ customerId }: { customerId: string }) {
         setSaving(false);
       }
     },
-    [customerId, draft],
+    [customerId, draft, tags],
   );
 
   const handleRemove = useCallback(

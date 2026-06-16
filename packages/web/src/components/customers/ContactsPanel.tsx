@@ -50,6 +50,9 @@ export function ContactsPanel({ customerId }: { customerId: string }) {
   }, [customerId]);
 
   useEffect(() => {
+    // Clear the prior customer's contacts so a customerId change doesn't flash
+    // stale rows while the new fetch is in flight.
+    setContacts([]);
     void load();
   }, [load]);
 

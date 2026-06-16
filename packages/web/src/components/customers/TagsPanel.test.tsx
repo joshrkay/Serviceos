@@ -51,6 +51,17 @@ describe('TagsPanel (U2)', () => {
     await waitFor(() => expect(vi.mocked(removeTag)).toHaveBeenCalledWith('1', 'vip'));
   });
 
+  it('does not re-add an existing tag (case-insensitive)', async () => {
+    vi.mocked(listTags).mockResolvedValue(['vip']);
+    render(<TagsPanel customerId="1" />);
+    await screen.findByText('vip');
+
+    fireEvent.change(screen.getByLabelText('Add a tag'), { target: { value: 'VIP' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add tag' }));
+
+    expect(vi.mocked(addTag)).not.toHaveBeenCalled();
+  });
+
   it('does not submit an empty tag', async () => {
     render(<TagsPanel customerId="1" />);
     await screen.findByText('No tags yet.');

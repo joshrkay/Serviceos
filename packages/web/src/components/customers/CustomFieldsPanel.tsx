@@ -35,6 +35,10 @@ export function CustomFieldsPanel({ customerId }: { customerId: string }) {
   }, [customerId, hydrate]);
 
   useEffect(() => {
+    // Clear the prior customer's fields/drafts so a customerId change doesn't
+    // flash stale data while the new fetch is in flight.
+    setFields([]);
+    setDrafts({});
     void load();
   }, [load]);
 
@@ -43,13 +47,19 @@ export function CustomFieldsPanel({ customerId }: { customerId: string }) {
       const next = raw.trim() === '' ? null : raw;
       if ((field.value ?? '') === (next ?? '')) return; // no-op, avoid churn
       try {
-        hydrate(await setCustomFieldValue(customerId, field.fieldDefId, next));
+        // Refresh field values from the server, but reset only the *saved*
+        // field's draft — rehydrating every draft here would clobber unsaved
+        // edits the user is mid-typing in another field.
+        const updated = await setCustomFieldValue(customerId, field.fieldDefId, next);
+        setFields(updated);
+        const saved = updated.find((f) => f.fieldDefId === field.fieldDefId);
+        setDrafts((prev) => ({ ...prev, [field.fieldDefId]: saved?.value ?? '' }));
         toast.success(`${field.label} saved`);
       } catch (err) {
         toast.error(err instanceof Error ? err.message : 'Failed to save custom field');
       }
     },
-    [customerId, hydrate],
+    [customerId],
   );
 
   if (fields.length === 0) {
