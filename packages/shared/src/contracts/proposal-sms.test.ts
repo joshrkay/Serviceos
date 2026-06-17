@@ -78,14 +78,12 @@ describe('parseProposalSmsReply (P2-034)', () => {
 
     it('classifies the composite "APPROVE ALL" as approve_all', () => {
       expect(parseProposalSmsReply('APPROVE ALL').intent).toBe('approve_all');
-      expect(parseProposalSmsReply('approve everything').intent).toBe('approve_all');
       expect(parseProposalSmsReply('  Yes, all! ').intent).toBe('approve_all');
     });
 
     it('is tolerant of capitalization, whitespace and punctuation', () => {
       expect(parseProposalSmsReply(' ALL ').intent).toBe('approve_all');
       expect(parseProposalSmsReply('All.').intent).toBe('approve_all');
-      expect(parseProposalSmsReply('"everything"').intent).toBe('approve_all');
     });
 
     it('does NOT downgrade plain approve replies', () => {

@@ -1427,36 +1427,6 @@ export function createApp(): express.Express {
     // upgrades the plain START handler to the opt-in-first composite.
     { dncRepo },
   );
-  // P6-028 — register the tech "I'm out today" keyword handler
-  // (OUT|SICK|UNAVAILABLE). Wired here, after the P2-034 reply transport, so
-  // every dependency it needs (proposalRepo, userRepo, settingsRepo,
-  // appointmentRepo, assignmentRepo, jobRepo, customerRepo, unavailableBlockRepo,
-  // llmGateway, auditRepo) is already in scope. A VERIFIED technician's OUT SMS
-  // claims the tenant-local day (tech_status_today idempotency), writes a same-day
-  // unavailable block, and drafts one reschedule_appointment proposal per remaining
-  // appointment for the owner to approve. `overwrite` mirrors the STOP/START
-  // registration so repeat createApp calls across test files re-register cleanly.
-  const techStatusTodayRepo = pool
-    ? new PgTechStatusTodayRepository(pool)
-    : new InMemoryTechStatusTodayRepository();
-  registerTechStatusKeywords(
-    {
-      userRepo,
-      settingsRepo,
-      unavailableBlockRepo,
-      techStatusTodayRepo,
-      rescheduleDeps: {
-        appointmentRepo,
-        assignmentRepo,
-        proposalRepo,
-        jobRepo,
-        customerRepo,
-        brandVoiceDeps: { gateway: llmGateway, settingsRepo },
-      },
-      auditRepo,
-    },
-    { overwrite: true },
-  );
 
   const recordProposalSmsRender = async (args: {
     tenantId: string;
@@ -1623,18 +1593,6 @@ export function createApp(): express.Express {
   let supervisorSpendRecorder:
     | ((tenantId: string, proposalId: string) => Promise<void>)
     | null = null;
-  // N-009 / P2-038 — structured correction-lesson loop. Pool-gated like the
-  // sibling repos: with no pool (in-memory dev) there is nothing to persist
-  // lessons into, so the loop is skipped and the digest falls back to the RAG
-  // chunk-count line. The ports cascade a recorded lesson into the real tenant
-  // config (labor rate + banned phrases on tenant_settings, SKU price on
-  // catalog_items) so the NEXT same-day draft reflects the correction.
-  const correctionLessonRepo = pool ? new PgCorrectionLessonRepository(pool) : null;
-  const correctionConfigPorts = createPgConfigPorts({
-    settingsRepo,
-    catalogRepo,
-    logger: workerLogger,
-  });
   const proposalExecutor = new ProposalExecutor(
     executionHandlers,
     proposalRepo,

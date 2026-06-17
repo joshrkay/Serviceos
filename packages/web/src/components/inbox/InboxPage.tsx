@@ -384,7 +384,6 @@ export function InboxPage() {
             }
             const { row } = item;
             const badge = URGENCY_BADGE[row.urgency];
-            const ambiguousLines = ambiguousLinesFor(row);
             return (
               <li
                 key={row.proposal.id}
