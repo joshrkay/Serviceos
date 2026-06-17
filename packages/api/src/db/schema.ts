@@ -4756,6 +4756,28 @@ export const MIGRATIONS = {
           'digest_approve_all_rendered'
         ));
   `,
+
+  // U6 (CRM Jobber parity, Phase 2 — communication loop): widen the
+  // message_dispatches entity_type CHECK to record owner-authored
+  // conversation replies (free-text SMS/email sent from the unified inbox).
+  // entity_id is the conversations.id the reply belongs to. Mirrors the prior
+  // widenings (092, 125, 164) — kept as its own migration so the constraint
+  // change is independently reviewable/reversible. Reuses the same dispatch
+  // ledger every other outbound send writes to, so DNC suppression and
+  // delivery accounting stay uniform across transactional and conversational
+  // sends.
+  '190_dispatch_entity_conversation_reply': `
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_entity_type_check
+        CHECK (entity_type IN (
+          'estimate', 'invoice', 'appointment_confirmation',
+          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
+          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
+          'daily_digest', 'conversation_reply'
+        ));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
