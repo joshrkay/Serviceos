@@ -287,6 +287,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // U5 (JTBD #7): widen proposal_sms_events kind CHECK for the digest
   // 'digest_approve_all_rendered' anchor (additive, pre-deploy).
   ['189_proposal_sms_events_digest_approve_all_kind', 'e66034b7738726dc1289801770c998c722b7a13c314f410c38d993b6973c296d'],
+  ['190_dispatch_entity_conversation_reply', 'f68dcf4009222fb5f516bb37d914124ba2e6eb761d3469c7c11eee7cc855641a'],
 ];
 
 function hashMigration(value: string): string {

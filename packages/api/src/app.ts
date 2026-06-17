@@ -485,8 +485,10 @@ import {
   registerKeywordHandler,
   registerRecoveryResumeHandler,
   registerNegotiationHandler,
+  registerCaptureHandler,
 } from './sms/inbound-dispatch';
 import { createInboundNegotiationHandler } from './sms/negotiation/inbound-negotiation-handler';
+import { createInboundCaptureHandler } from './sms/inbound-capture';
 import { PgCustomerNegotiationContextProvider } from './customers/pg-customer-negotiation-context';
 import { normalizePhone } from './customers/dedup';
 import { DefaultCurrentQuoteResolver } from './conversations/negotiation/current-quote-resolver';
@@ -2431,6 +2433,21 @@ export function createApp(): express.Express {
     );
   }
 
+  // U4 (CRM Jobber parity, Phase 2) — capture-all inbound SMS. Registered
+  // unconditionally (it never sends, so it doesn't need messageDelivery) and
+  // LAST in the dispatcher chain: any customer text no keyword/fallback/
+  // recovery/negotiation handler claimed is threaded onto the sender's
+  // conversation instead of being dropped, so it surfaces in the unified inbox.
+  registerCaptureHandler(
+    createInboundCaptureHandler({
+      conversationRepo,
+      customerRepo,
+      auditRepo,
+      logger: requestLogger,
+    }),
+    { overwrite: true },
+  );
+
   // RV-130 — consent ledger + recording control. The ledger appends
   // implicit recording consent at disclosure and revocations on a
   // "stop recording" objection; the control pauses the live recording.
@@ -3703,10 +3720,25 @@ export function createApp(): express.Express {
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use(
     '/api/conversations',
-    createConversationRouter(conversationRepo, auditRepo, {
-      gateway: llmGateway,
-      settingsRepo,
-    }),
+    createConversationRouter(
+      conversationRepo,
+      auditRepo,
+      {
+        gateway: llmGateway,
+        settingsRepo,
+      },
+      // U6 — owner reply send path. Only wired when a delivery provider exists
+      // (prod/dev with creds); otherwise POST /:id/reply returns 503.
+      messageDelivery
+        ? {
+            customerRepo,
+            dncRepo,
+            dispatchRepo,
+            delivery: messageDelivery,
+            settingsRepo,
+          }
+        : undefined,
+    ),
   );
   app.use('/api/dnc', createDncRouter({ dncRepo, auditRepo }));
 
