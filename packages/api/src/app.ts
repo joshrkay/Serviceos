@@ -491,6 +491,12 @@ import {
   registerMmsIngestHandler,
   createTwilioMediaFetcher,
 } from './sms/tech-status/mms-ingest';
+// P6-028 — tech "I'm out today" keyword handler (OUT|SICK|UNAVAILABLE).
+import {
+  registerTechStatusKeywords,
+  PgTechStatusTodayRepository,
+  InMemoryTechStatusTodayRepository,
+} from './sms/tech-status';
 import { createMmsIngestWorker } from './workers/mms-ingest-worker';
 import {
   registerProposalReplySms,
@@ -1328,6 +1334,37 @@ export function createApp(): express.Express {
     // upgrades the plain START handler to the opt-in-first composite.
     { dncRepo },
   );
+  // P6-028 — register the tech "I'm out today" keyword handler
+  // (OUT|SICK|UNAVAILABLE). Wired here, after the P2-034 reply transport, so
+  // every dependency it needs (proposalRepo, userRepo, settingsRepo,
+  // appointmentRepo, assignmentRepo, jobRepo, customerRepo, unavailableBlockRepo,
+  // llmGateway, auditRepo) is already in scope. A VERIFIED technician's OUT SMS
+  // claims the tenant-local day (tech_status_today idempotency), writes a same-day
+  // unavailable block, and drafts one reschedule_appointment proposal per remaining
+  // appointment for the owner to approve. `overwrite` mirrors the STOP/START
+  // registration so repeat createApp calls across test files re-register cleanly.
+  const techStatusTodayRepo = pool
+    ? new PgTechStatusTodayRepository(pool)
+    : new InMemoryTechStatusTodayRepository();
+  registerTechStatusKeywords(
+    {
+      userRepo,
+      settingsRepo,
+      unavailableBlockRepo,
+      techStatusTodayRepo,
+      rescheduleDeps: {
+        appointmentRepo,
+        assignmentRepo,
+        proposalRepo,
+        jobRepo,
+        customerRepo,
+        brandVoiceDeps: { gateway: llmGateway, settingsRepo },
+      },
+      auditRepo,
+    },
+    { overwrite: true },
+  );
+
   const recordProposalSmsRender = async (args: {
     tenantId: string;
     proposalId: string;

@@ -36,6 +36,22 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     expect(src).toMatch(ternaryPattern);
   });
 
+  it('TechStatusToday repo wired through pool ternary', () => {
+    // U1 (P6-028) — the "I'm out today" idempotency store.
+    expect(src).toContain('PgTechStatusTodayRepository');
+    expect(src).toContain('InMemoryTechStatusTodayRepository');
+    expect(src).toMatch(
+      /pool\s*\?\s*new\s+PgTechStatusTodayRepository[\s\S]*?:\s*new\s+InMemoryTechStatusTodayRepository/m,
+    );
+  });
+
+  it('tech-status (OUT|SICK|UNAVAILABLE) keyword handler is registered', () => {
+    // U1 (P6-028) — guards against re-regression to "built but never wired":
+    // app.ts MUST call registerTechStatusKeywords or a verified tech's OUT SMS
+    // is silently dropped by the inbound dispatcher.
+    expect(src).toMatch(/registerTechStatusKeywords\(/);
+  });
+
   it('graceful shutdown registers SIGTERM/SIGINT pool drain', () => {
     expect(src).toMatch(/process\.once\(\s*['"]SIGTERM['"]/);
     expect(src).toMatch(/process\.once\(\s*['"]SIGINT['"]/);
