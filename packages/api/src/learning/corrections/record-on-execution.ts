@@ -62,6 +62,28 @@ function messageOf(payload: Record<string, unknown> | undefined): string | undef
 }
 
 /**
+ * computeInvoiceDeltas diffs the INVOICE price field (`unitPriceCents`), but
+ * estimate payloads carry their integer-cents price in `unitPrice`. Without
+ * this normalization an estimate's labor-rate edit produces no `price_changed`
+ * delta (undefined !== undefined), so the extractor sees nothing and the lesson
+ * is silently lost — and estimates are exactly where labor-rate corrections
+ * happen. Surface the cents under `unitPriceCents` for the diff, keeping the
+ * rest of the line (id/category/description) intact for the extractor.
+ */
+function normalizeForDelta(items: LineItem[]): LineItem[] {
+  return items.map((li) => {
+    const rec = li as unknown as Record<string, unknown>;
+    const cents =
+      typeof rec.unitPriceCents === 'number'
+        ? rec.unitPriceCents
+        : typeof rec.unitPrice === 'number'
+          ? rec.unitPrice
+          : undefined;
+    return cents !== undefined ? ({ ...li, unitPriceCents: cents } as LineItem) : li;
+  });
+}
+
+/**
  * Extract + record correction lessons for one succeeded execution. Returns the
  * persisted lessons (empty when the edit had no clear pattern, or the proposal
  * isn't a line-item document).
@@ -87,8 +109,8 @@ export async function recordCorrectionLessonsOnExecution(
   if (draftedItems.length === 0 && executedItems.length === 0) return [];
 
   const deltas = computeInvoiceDeltas(
-    { lineItems: draftedItems, customerMessage: messageOf(drafted) },
-    { lineItems: executedItems, customerMessage: messageOf(executed) },
+    { lineItems: normalizeForDelta(draftedItems), customerMessage: messageOf(drafted) },
+    { lineItems: normalizeForDelta(executedItems), customerMessage: messageOf(executed) },
   );
   if (deltas.length === 0) return [];
 

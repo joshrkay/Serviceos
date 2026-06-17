@@ -291,6 +291,7 @@ export function InboxPage() {
       throw new Error(`HTTP ${res.status}`);
     }
     const updated = (await res.json()) as InboxProposalRow['proposal'];
+    setError(null); // a prior failure shouldn't keep showing after a success
     setRows((prev) =>
       prev.map((r) =>
         r.proposal.id === proposalId

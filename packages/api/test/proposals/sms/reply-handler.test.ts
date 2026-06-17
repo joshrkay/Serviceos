@@ -1324,6 +1324,27 @@ describe('handleProposalSmsReply — approve_all (U5 "ALL" / "APPROVE ALL")', ()
     }
   });
 
+  it('excludes a proposal with an unapplied edit request from ALL (stale-payload guard)', async () => {
+    const h = makeHarness();
+    const a = await seedReady(h, { proposalType: 'create_appointment' });
+    // An unapplied edit_request means the shown payload is stale — the single
+    // approve path blocks it, so ALL must skip it too.
+    await h.smsEventRepo.create(
+      createProposalSmsEvent({
+        tenantId: TENANT,
+        proposalId: a.id,
+        direction: 'inbound',
+        kind: 'edit_request',
+        body: 'push it to next week',
+      }),
+    );
+
+    const result = await handleProposalSmsReply(ctx('ALL'), h.deps);
+
+    expect(result.reason).toBe('approve_all_none');
+    expect((await h.proposalRepo.findById(TENANT, a.id))?.status).toBe('ready_for_review');
+  });
+
   it('ignores a non-owner number (identity guard)', async () => {
     const h = makeHarness();
     await seedReady(h, { proposalType: 'create_appointment' });

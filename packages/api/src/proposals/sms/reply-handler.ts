@@ -257,11 +257,21 @@ async function handleApproveAll(
   ctx: InboundSmsContext,
 ): Promise<HandlerResult> {
   const pending = await deps.proposalRepo.findByStatus(ctx.tenantId, 'ready_for_review');
-  const eligible = pending.filter(
+  const candidates = pending.filter(
     (p) =>
       actionClassForProposalType(p.proposalType) === 'capture' &&
       !confidenceMetaBlocksAutoApprove(p.payload),
   );
+  // Mirror the single-approve path's pending-edit guard: a proposal with an
+  // unapplied edit request still shows its STALE pre-edit payload, so a blanket
+  // ALL must not approve (and execute) it. Excluded here, not failed in the
+  // batch, so the owner gets an honest "approved N" count.
+  const eligible: typeof candidates = [];
+  for (const p of candidates) {
+    // eslint-disable-next-line no-await-in-loop
+    if (await deps.smsEventRepo.hasUnappliedEditRequest(ctx.tenantId, p.id)) continue;
+    eligible.push(p);
+  }
 
   if (eligible.length === 0) {
     await audit(deps, ctx, 'proposal.sms_approve_all_none', '', { pending: pending.length });

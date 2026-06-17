@@ -115,6 +115,29 @@ describe('U7 — recordCorrectionLessonsOnExecution', () => {
     expect(applied).toHaveLength(1);
   });
 
+  it('extracts a labor lesson from an ESTIMATE edit (unitPrice field, not unitPriceCents)', async () => {
+    // Estimate payloads carry integer cents in `unitPrice`; the diff must still
+    // see the change (regression guard: computeInvoiceDeltas only reads
+    // unitPriceCents, so unnormalized estimate edits produced no lesson).
+    const estLine = (cents: number) =>
+      ({ id: 'l1', description: 'Labor', category: 'labor', quantity: 1, unitPrice: cents } as unknown as LineItem);
+    const { deps, ports, lessonRepo } = buildDeps({
+      draftedItems: [estLine(11500)],
+      executedItems: [estLine(13500)],
+      laborRateCents: 11500,
+    });
+
+    const lessons = await recordCorrectionLessonsOnExecution(
+      { tenantId: TENANT, proposalId: PROPOSAL },
+      deps,
+    );
+
+    expect(lessons).toHaveLength(1);
+    expect(lessons[0].lessonType).toBe('labor_rate_changed');
+    expect(ports.laborRateCents).toBe(13500);
+    expect(await lessonRepo.findAppliedForDay(TENANT, '2026-06-15')).toHaveLength(1);
+  });
+
   it('records nothing for a clean execution (no diff)', async () => {
     const { deps, ports } = buildDeps({
       draftedItems: [li({ id: 'l1', unitPriceCents: 11500 })],

@@ -124,6 +124,31 @@ describe('U2 — resolveProposalLine', () => {
     expect(line.totalCents).toBe(9000); // recomputed from qty 2
   });
 
+  it('stamps unitPriceCents (not unitPrice) for a price-less invoice ambiguous line', async () => {
+    // The LLM left this invoice line price-less, so it has NEITHER price field.
+    // The resolver must pick the invoice contract's field (unitPriceCents) from
+    // the proposal type, not default to the estimate field — else the executor
+    // never sees the price.
+    await repo.create(
+      ambiguousProposal({
+        proposalType: 'draft_invoice',
+        payload: {
+          lineItems: [
+            { id: 'l1', description: 'flush valve', quantity: 2, pricingSource: 'ambiguous', needsPricing: true },
+          ],
+          _meta: { overallConfidence: 'low' },
+        },
+      }),
+    );
+
+    const result = await call('cat-a');
+
+    const line = (result.payload.lineItems as Array<Record<string, unknown>>)[0];
+    expect(line.unitPriceCents).toBe(4500);
+    expect(line.unitPrice).toBeUndefined();
+    expect(line.totalCents).toBe(9000); // qty 2
+  });
+
   it('leaves the proposal in draft when other ambiguous lines remain', async () => {
     await repo.create(
       ambiguousProposal({

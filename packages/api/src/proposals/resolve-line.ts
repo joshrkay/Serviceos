@@ -123,7 +123,18 @@ export async function resolveProposalLine(
   // cents price in `unitPrice`; invoice lines in `unitPriceCents` (and a
   // recomputed `totalCents`).
   const line: Record<string, unknown> = { ...lineItems[lineIndex] };
-  const priceField = 'unitPriceCents' in line ? 'unitPriceCents' : 'unitPrice';
+  // Pick the contract's price field. Estimate lines carry integer cents in
+  // `unitPrice`; invoice lines in `unitPriceCents` (+ a recomputed totalCents).
+  // An ambiguous line the LLM left price-less has NEITHER field, so we can't
+  // infer from this line alone — look at sibling lines (an invoice payload
+  // prices its other lines in unitPriceCents) and fall back to the proposal
+  // type. Guessing wrong would strand the resolved price on a field the
+  // executor never reads.
+  const usesCents =
+    'unitPriceCents' in line ||
+    lineItems.some((li) => li && typeof li === 'object' && 'unitPriceCents' in li) ||
+    /invoice/.test(proposal.proposalType);
+  const priceField = usesCents ? 'unitPriceCents' : 'unitPrice';
   line[priceField] = chosen.unitPriceCents;
   line.catalogItemId = chosen.id;
   line.description = chosen.name;
