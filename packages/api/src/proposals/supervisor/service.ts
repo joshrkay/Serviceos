@@ -41,6 +41,7 @@ import type { SupervisorCreationHook, SupervisorCreationHookInput } from './hook
 import {
   DEFAULT_SUPERVISOR_RULES,
   evaluateSupervisorPolicy,
+  PLATFORM_DEFAULT_SUPERVISOR_RULES,
   SupervisorDecision,
   SupervisorRules,
 } from './policy';
@@ -267,7 +268,12 @@ export class SupervisorPolicyService implements SupervisorCreationHook {
           return;
         }
         const active = await this.deps.policies.getActive(tenantId);
-        const rules = active?.rules ?? DEFAULT_SUPERVISOR_RULES;
+        // Tenant-set rules take precedence over the platform default in
+        // their entirety (D-004). With no active version we fall back to the
+        // conservative PLATFORM_DEFAULT_SUPERVISOR_RULES — generous backstop
+        // caps that catch anomalous volume/amounts without disrupting normal
+        // operation — so every enabled tenant gets a real safety net.
+        const rules = active?.rules ?? PLATFORM_DEFAULT_SUPERVISOR_RULES;
         const dayStart = utcDayWindowStart(now);
         const hourStart = utcHourWindowStart(now);
         const [dailySpendCents, autoApprovalsThisHour] = await Promise.all([

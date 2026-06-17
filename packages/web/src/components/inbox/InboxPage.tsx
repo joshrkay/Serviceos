@@ -213,7 +213,7 @@ export function InboxPage() {
       payload?: Record<string, unknown>;
       sourceContext?: Record<string, unknown>;
       status?: string;
-    };
+    } | null;
     setRows((prev) =>
       prev.map((r) =>
         r.proposal.id === proposalId
@@ -221,9 +221,9 @@ export function InboxPage() {
               ...r,
               proposal: {
                 ...r.proposal,
-                payload: updated.payload ?? r.proposal.payload,
-                sourceContext: updated.sourceContext,
-                status: updated.status ?? r.proposal.status,
+                payload: updated?.payload ?? r.proposal.payload,
+                sourceContext: updated?.sourceContext ?? r.proposal.sourceContext,
+                status: updated?.status ?? r.proposal.status,
               },
             }
           : r,

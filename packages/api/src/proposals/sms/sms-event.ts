@@ -43,7 +43,15 @@ export type ProposalSmsEventKind =
   | 'reply_approve'
   | 'reply_reject'
   | 'edit_session_opened'
-  | 'edit_request';
+  | 'edit_request'
+  // U5 (JTBD #7) — the daily digest's "APPROVE ALL" anchor. Recorded
+  // outbound after the digest SMS goes out; `body` holds the day's
+  // batch-approvable proposal ids as JSON. DELIBERATELY EXCLUDED from
+  // OutboundAnchorKind / findRecentOutbound: a plain Y must still target
+  // the latest individual proposal render, never silently "approve all".
+  // The inbound ALL / APPROVE ALL reply resolves it via
+  // findRecentDigestApproveAll and delegates to the P2-035 batch path.
+  | 'digest_approve_all_rendered';
 
 /**
  * The two outbound kinds that anchor the inbound reply transport — the ones
@@ -114,6 +122,37 @@ export function createProposalSmsEvent(
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// U5 (JTBD #7) — digest "APPROVE ALL" anchor id-set encoding
+//
+// proposal_sms_events.proposal_id is NOT NULL (FK to proposals), so the
+// anchor's row uses the FIRST batch-approvable id as proposal_id and stores
+// the FULL ordered id set in `body` as JSON. The reply handler reads it back
+// via `parseDigestApproveAllIds` and delegates the set to the P2-035 batch
+// approve path. Money/comms/low-confidence proposals are excluded UPSTREAM (in
+// the worker's buildApprovalLinks gates) — they never enter this set.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Serialize the digest's batch-approvable proposal ids into the anchor body. */
+export function encodeDigestApproveAllBody(proposalIds: string[]): string {
+  return JSON.stringify({ approveAll: proposalIds });
+}
+
+/**
+ * Parse a `digest_approve_all_rendered` anchor body back into its proposal-id
+ * set. Total + defensive: a malformed/legacy body yields [] so the caller
+ * falls through to the "nothing to approve" path rather than throwing.
+ */
+export function parseDigestApproveAllIds(body: string): string[] {
+  try {
+    const parsed = JSON.parse(body) as { approveAll?: unknown };
+    if (!parsed || !Array.isArray(parsed.approveAll)) return [];
+    return parsed.approveAll.filter((id): id is string => typeof id === 'string');
+  } catch {
+    return [];
+  }
+}
+
 export interface ProposalSmsEventRepository {
   create(event: ProposalSmsEvent): Promise<ProposalSmsEvent>;
   /**
@@ -125,6 +164,14 @@ export interface ProposalSmsEventRepository {
    * away from the latest message they actually received.
    */
   findRecentOutbound(tenantId: string, limit: number): Promise<ProposalSmsEvent[]>;
+  /**
+   * U5 (JTBD #7) — the most recent outbound `digest_approve_all_rendered`
+   * anchor for the tenant, or null. The inbound ALL / APPROVE ALL reply
+   * delegates the anchor's encoded id set to the P2-035 batch approve path.
+   * Deliberately separate from `findRecentOutbound` (which the Y/N transport
+   * uses): a plain Y must target the latest individual render, not the digest.
+   */
+  findRecentDigestApproveAll(tenantId: string): Promise<ProposalSmsEvent | null>;
   /**
    * The open (unexpired, unconsumed) edit session opened by this sender
    * (normalized digits), if any. Sender-scoped so one approver's session
@@ -182,6 +229,18 @@ export class InMemoryProposalSmsEventRepository
       .sort(bySeqDesc)
       .slice(0, limit)
       .map((e) => ({ ...e }));
+  }
+
+  async findRecentDigestApproveAll(tenantId: string): Promise<ProposalSmsEvent | null> {
+    const [latest] = this.events
+      .filter(
+        (e) =>
+          e.tenantId === tenantId &&
+          e.direction === 'outbound' &&
+          e.kind === 'digest_approve_all_rendered',
+      )
+      .sort(bySeqDesc);
+    return latest ? { ...latest } : null;
   }
 
   async findOpenEditSession(
@@ -298,6 +357,22 @@ export class PgProposalSmsEventRepository
         [tenantId, limit],
       );
       return (result.rows as Record<string, unknown>[]).map(mapRow);
+    });
+  }
+
+  async findRecentDigestApproveAll(tenantId: string): Promise<ProposalSmsEvent | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM proposal_sms_events
+          WHERE tenant_id = $1
+            AND direction = 'outbound'
+            AND kind = 'digest_approve_all_rendered'
+          ORDER BY created_at DESC, seq DESC
+          LIMIT 1`,
+        [tenantId],
+      );
+      if (result.rows.length === 0) return null;
+      return mapRow(result.rows[0] as Record<string, unknown>);
     });
   }
 

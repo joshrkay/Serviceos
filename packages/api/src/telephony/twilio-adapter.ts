@@ -1727,6 +1727,8 @@ export class TwilioGatherAdapter {
     const callState = session.machine.currentState;
     if (
       this.deps.vulnerabilityTriageHook &&
+      // DTMF / no-speech Gather turns omit SpeechResult, so guard before trim.
+      opts.speechResult &&
       opts.speechResult.trim().length > 0 &&
       callState !== 'escalating' &&
       callState !== 'terminated'

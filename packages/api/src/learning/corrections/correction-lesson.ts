@@ -46,6 +46,12 @@ export interface CorrectionLessonRepository {
    * (last-writer) when callers fold them in order.
    */
   findAppliedForDay(tenantId: string, localDate: string): Promise<CorrectionLesson[]>;
+  /**
+   * Lessons recorded from a given proposal — the reverse lookup that lets an
+   * undo of that proposal reverse every cascaded config change it produced.
+   * Includes already-reverted lessons (undo is idempotent on each).
+   */
+  findBySourceProposal(tenantId: string, sourceProposalId: string): Promise<CorrectionLesson[]>;
   /** Mark a lesson reverted; returns the updated row or null if not found. */
   markReverted(tenantId: string, id: string, revertedAt: Date): Promise<CorrectionLesson | null>;
 }
@@ -99,6 +105,16 @@ export class InMemoryCorrectionLessonRepository implements CorrectionLessonRepos
       .filter(
         (l) => l.tenantId === tenantId && l.status === 'applied' && l.localDate === localDate,
       )
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+      .map((l) => structuredClone(l));
+  }
+
+  async findBySourceProposal(
+    tenantId: string,
+    sourceProposalId: string,
+  ): Promise<CorrectionLesson[]> {
+    return Array.from(this.lessons.values())
+      .filter((l) => l.tenantId === tenantId && l.sourceProposalId === sourceProposalId)
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
       .map((l) => structuredClone(l));
   }

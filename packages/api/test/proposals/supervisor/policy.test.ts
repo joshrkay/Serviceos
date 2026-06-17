@@ -11,6 +11,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_SUPERVISOR_RULES,
+  PLATFORM_DEFAULT_SUPERVISOR_RULES,
   capInitialStatus,
   evaluateSupervisorPolicy,
   type InitialProposalStatus,
@@ -49,6 +50,88 @@ describe('evaluateSupervisorPolicy — permissive defaults', () => {
   it.each(parityCases)('default rules always allow: %s', (_name, i) => {
     const result = evaluateSupervisorPolicy(i, DEFAULT_SUPERVISOR_RULES);
     expect(result).toEqual({ verdict: 'allow', reasons: [] });
+  });
+});
+
+describe('PLATFORM_DEFAULT_SUPERVISOR_RULES — Unit U3 default-on backstop', () => {
+  it('declares exactly the three generous integer-cent backstop caps', () => {
+    // Pin the platform-default values so any change is forced through this
+    // suite (the comment in policy.ts documents the rationale per value).
+    expect(PLATFORM_DEFAULT_SUPERVISOR_RULES).toEqual({
+      perProposalCapCents: 50_000_00,
+      dailySpendCapCents: 250_000_00,
+      maxAutoApprovalsPerHour: 200,
+    });
+    // No type-level blocks by platform default.
+    expect(PLATFORM_DEFAULT_SUPERVISOR_RULES.blockedProposalTypes).toBeUndefined();
+  });
+
+  it('everyday money proposals well under the caps are left untouched (no disruption)', () => {
+    // A normal field-service invoice ($1,250) with modest counters allows.
+    const result = evaluateSupervisorPolicy(
+      input({
+        proposalType: 'issue_invoice',
+        actionClass: 'money',
+        amountCents: 125_000,
+        counters: { dailySpendCents: 50_000_00, autoApprovalsThisHour: 10 },
+      }),
+      PLATFORM_DEFAULT_SUPERVISOR_RULES,
+    );
+    expect(result).toEqual({ verdict: 'allow', reasons: [] });
+  });
+
+  it('a single money proposal over the $50k per-proposal cap is BLOCKED', () => {
+    const result = evaluateSupervisorPolicy(
+      input({
+        proposalType: 'issue_invoice',
+        actionClass: 'money',
+        amountCents: 50_000_00 + 1,
+      }),
+      PLATFORM_DEFAULT_SUPERVISOR_RULES,
+    );
+    expect(result.verdict).toBe('block');
+    expect(result.reasons[0]).toMatch(/per-proposal cap/);
+  });
+
+  it('projected daily spend over the $250k cap FORCES REVIEW (never blocked outright)', () => {
+    const result = evaluateSupervisorPolicy(
+      input({
+        proposalType: 'issue_invoice',
+        actionClass: 'money',
+        amountCents: 1_00,
+        counters: { dailySpendCents: 250_000_00, autoApprovalsThisHour: 0 },
+      }),
+      PLATFORM_DEFAULT_SUPERVISOR_RULES,
+    );
+    expect(result.verdict).toBe('force_review');
+    expect(result.reasons[0]).toMatch(/daily spend cap/);
+  });
+
+  it('at/over the 200/hour auto-approval budget FORCES REVIEW (class-agnostic)', () => {
+    const result = evaluateSupervisorPolicy(
+      input({ counters: { dailySpendCents: 0, autoApprovalsThisHour: 200 } }),
+      PLATFORM_DEFAULT_SUPERVISOR_RULES,
+    );
+    expect(result.verdict).toBe('force_review');
+    expect(result.reasons[0]).toMatch(/auto-approvals/);
+  });
+
+  it('caps never UPGRADE: the strongest verdict the default can yield is block→draft (downgrade-only)', () => {
+    // Per-proposal cap (block) co-occurring with daily-spend + hourly (review):
+    // block wins, and capInitialStatus drives any baseline down to 'draft'.
+    const result = evaluateSupervisorPolicy(
+      input({
+        proposalType: 'issue_invoice',
+        actionClass: 'money',
+        amountCents: 50_000_00 + 1,
+        counters: { dailySpendCents: 250_000_00, autoApprovalsThisHour: 200 },
+      }),
+      PLATFORM_DEFAULT_SUPERVISOR_RULES,
+    );
+    expect(result.verdict).toBe('block');
+    // The only effect on status is monotone-downgrade — there is no upgrade path.
+    expect(capInitialStatus(result.verdict, 'approved')).toBe('draft');
+    expect(capInitialStatus(result.verdict, 'draft')).toBe('draft');
   });
 });
 

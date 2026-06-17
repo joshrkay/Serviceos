@@ -19,6 +19,7 @@ import {
 } from '../../../src/proposals/proposal';
 import {
   configureSupervisorCreationHook,
+  SUPERVISOR_DISABLED_FLAG,
 } from '../../../src/proposals/supervisor/hook';
 import {
   SUPERVISOR_BLOCKED_EVENT,
@@ -396,6 +397,61 @@ describe('service mechanics', () => {
     // error must NOT have fired (threshold is 3, max consecutive was 2 before reset).
     expect(error).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledTimes(3); // failures 1, 2, and the post-reset 1
+  });
+});
+
+describe('Unit U3 — default-ON with per-tenant opt-out (creation hook path)', () => {
+  /**
+   * The exact inverted opt-out gate app.ts wires at boot: the platform
+   * flag is default-FALSE, so `enabled = !disabled`. A tenant that has set
+   * SUPERVISOR_DISABLED_FLAG=true reads disabled; everyone else is ON.
+   */
+  function bootInvertedGate(disabled: boolean): (tenantId: string) => Promise<boolean> {
+    const isFlagSet = async (_tenantId: string, flagKey: string): Promise<boolean> =>
+      disabled && flagKey === SUPERVISOR_DISABLED_FLAG;
+    return async (tenantId: string) => !(await isFlagSet(tenantId, SUPERVISOR_DISABLED_FLAG));
+  }
+
+  it('NO opt-out flag set → supervisor is ON by default (blocking rule applies)', async () => {
+    await installService(
+      { blockedProposalTypes: ['create_customer'] },
+      { isEnabledForTenant: bootInvertedGate(false) },
+    );
+    const proposal = createProposal(autoApprovableInput());
+    // Default-on: the block downgrades the would-be auto-approval to draft.
+    expect(proposal.status).toBe('draft');
+    expect(JSON.stringify(proposal.payload._meta ?? {})).toMatch(/blocked by tenant policy/);
+  });
+
+  it('opted-OUT tenant (SUPERVISOR_DISABLED_FLAG=true) → supervisor inert even with a blocking rule', async () => {
+    await installService(
+      { blockedProposalTypes: ['create_customer'] },
+      { isEnabledForTenant: bootInvertedGate(true) },
+    );
+    const input = autoApprovableInput();
+    const proposal = createProposal(input);
+    // Inverted gate yields enabled=false → permissive parity, byte-identical.
+    expect(proposal.status).toBe('approved');
+    expect(proposal.payload).toBe(input.payload);
+    expect(proposal.payload._meta).toBeUndefined();
+  });
+
+  it('unprovisioned tenant gets the PLATFORM-DEFAULT caps when no active policy version exists', async () => {
+    // No active version (rules=null) but the supervisor is ON by default:
+    // the service falls back to PLATFORM_DEFAULT_SUPERVISOR_RULES, so a money
+    // proposal over the $50k per-proposal cap is blocked to draft.
+    await installService(null, { isEnabledForTenant: bootInvertedGate(false) });
+    const over = createProposal(
+      baseInput({ proposalType: 'issue_invoice', payload: { totalCents: 50_000_00 + 1 } }),
+    );
+    expect(over.status).toBe('draft');
+    expect(JSON.stringify(over.payload._meta ?? {})).toMatch(/per-proposal cap/);
+
+    // A normal-sized money proposal under the cap carries no per-proposal-cap marker.
+    const under = createProposal(
+      baseInput({ proposalType: 'issue_invoice', payload: { totalCents: 125_000 } }),
+    );
+    expect(JSON.stringify(under.payload._meta ?? {})).not.toMatch(/per-proposal cap/);
   });
 });
 
