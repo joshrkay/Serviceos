@@ -78,6 +78,8 @@ import type {
   SideEffect,
 } from '../ai/agents/customer-calling/types';
 import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
+import type { VulnerabilityTriageHook } from '../ai/agents/customer-calling/vulnerability-triage-hook';
+import { extractPriorTurns } from '../ai/agents/customer-calling/transcript-turns';
 // Aliased to avoid name collision with the private `deriveCallOutcome` method
 // on this class — see line 1828. The imported function takes the typed
 // options object (DeriveOutcomeInput); the instance method takes a
@@ -147,6 +149,15 @@ function isOwnerLookupIntent(intentType: string): boolean {
 export interface TwilioAdapterDeps {
   store: VoiceSessionStore;
   gateway: LLMGateway;
+  /**
+   * U4 — per-turn vulnerability triage on the Gather/PSTN path. Fired
+   * fire-and-forget after the deterministic safety scan, symmetric to the
+   * media-streams adapter. Gated inside the hook by the per-tenant
+   * `voice_vulnerability_triage` flag (fail-closed). When undefined, the
+   * Gather path simply doesn't grade — the same additive, safe default the
+   * media-streams transport has.
+   */
+  vulnerabilityTriageHook?: VulnerabilityTriageHook;
   /** Postgres pool — passed to identifyCaller and summarizeSession. */
   pool?: Pool;
   /** Repos used to persist side-effect rows (audit/proposal/escalation). */
@@ -1707,6 +1718,33 @@ export class TwilioGatherAdapter {
       return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
     }
 
+    // U4 — per-turn vulnerability triage on the Gather path, fire-and-forget
+    // behind the per-tenant flag (gated inside the hook). Symmetric to the
+    // media-streams adapter (RV-122): runs AFTER the deterministic safety scan
+    // (RV-140, above) and only on a real, non-empty caller utterance. Skip an
+    // already escalating/terminated call — wasted LLM spend the FSM no-ops
+    // anyway. The current utterance is already on session.transcript (appended
+    // above), so priorTurns carries it as context exactly like streaming.
+    if (
+      this.deps.vulnerabilityTriageHook &&
+      currentState !== 'escalating' &&
+      currentState !== 'terminated'
+    ) {
+      void this.deps
+        .vulnerabilityTriageHook({
+          session,
+          transcript: opts.speechResult,
+          priorTurns: extractPriorTurns(session.transcript, 4),
+          tenantId: opts.tenantId,
+        })
+        .catch((err) =>
+          logger.warn('vulnerability triage hook failed (gather)', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: opts.sessionId,
+          }),
+        );
+    }
+
     // 2. Branch on FSM state.
     if (currentState === 'intent_confirm') {
       // confirm_intent: caller is responding to a yes/no readback.
@@ -2660,6 +2698,17 @@ export class TwilioGatherAdapter {
    */
   setPendingTransferTwiml(sessionId: string, twiml: string): void {
     this.pendingTransferTwiml.set(sessionId, twiml);
+  }
+
+  /**
+   * U4 — late-bind the per-turn vulnerability triage hook. The hook's
+   * `onPatchOwner` closure references THIS adapter (getCallerPhone /
+   * setPendingTransferTwiml), so it can only be built after the adapter
+   * exists. This setter lets app.ts inject the same hook the media-streams
+   * server uses, so a Gather-mode turn grades identically to a streaming turn.
+   */
+  setVulnerabilityTriageHook(hook: VulnerabilityTriageHook): void {
+    this.deps.vulnerabilityTriageHook = hook;
   }
 
   /**

@@ -2936,6 +2936,16 @@ export function createApp(): express.Express {
           })
         : undefined;
 
+      // U4 — give the SAME hook to the Gather/PSTN adapter so a Gather-mode
+      // turn grades identically to a streaming turn (the hook was previously
+      // only handed to the media-streams server below). Late-bound because the
+      // hook's onPatchOwner closure references twilioAdapter, which is built
+      // earlier. Fires fire-and-forget, gated inside the hook by the per-tenant
+      // voice_vulnerability_triage flag.
+      if (vulnerabilityTriageHookDep) {
+        twilioAdapter.setVulnerabilityTriageHook(vulnerabilityTriageHookDep);
+      }
+
       const origListen = app.listen.bind(app);
       // Wrap listen() so the WS upgrade handler is attached the moment
       // the http.Server exists. Fire-and-forget; errors during attach
