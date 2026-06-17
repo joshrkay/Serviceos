@@ -167,7 +167,14 @@ export class PgConversationRepository extends PgBaseRepository implements Conver
             lm.content AS last_content,
             lm.created_at AS last_created_at,
             mc.message_count,
-            cust.display_name AS customer_name,
+            -- Display name for the thread's contact: customers by display_name,
+            -- leads by their name (else company). Compared on text so non-UUID
+            -- unmatched entity_ids (E.164 phones) never hit a uuid cast.
+            COALESCE(
+              cust.display_name,
+              NULLIF(TRIM(COALESCE(ld.first_name, '') || ' ' || COALESCE(ld.last_name, '')), ''),
+              ld.company_name
+            ) AS customer_name,
             COALESCE(
               lm.metadata->>'direction',
               CASE WHEN lm.sender_role = 'customer' THEN 'inbound' ELSE 'outbound' END
@@ -189,6 +196,10 @@ export class PgConversationRepository extends PgBaseRepository implements Conver
             ON cust.tenant_id = c.tenant_id
             AND c.entity_type = 'customer'
             AND cust.id::text = c.entity_id
+          LEFT JOIN leads ld
+            ON ld.tenant_id = c.tenant_id
+            AND c.entity_type = 'lead'
+            AND ld.id::text = c.entity_id
           WHERE c.tenant_id = $1
             AND c.entity_type = ANY($2)
             ${statusClause}

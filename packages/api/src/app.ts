@@ -2467,6 +2467,7 @@ export function createApp(): express.Express {
     createInboundCaptureHandler({
       conversationRepo,
       customerRepo,
+      leadRepo,
       auditRepo,
       logger: requestLogger,
     }),
@@ -3757,6 +3758,7 @@ export function createApp(): express.Express {
       messageDelivery
         ? {
             customerRepo,
+            leadRepo,
             dncRepo,
             dispatchRepo,
             delivery: messageDelivery,

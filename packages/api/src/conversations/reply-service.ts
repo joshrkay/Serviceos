@@ -31,6 +31,7 @@ import {
 } from '../notifications/dispatch-repository';
 import { MessageDeliveryProvider } from '../notifications/delivery-provider';
 import type { Customer } from '../customers/customer';
+import type { Lead } from '../leads/lead';
 import { UNMATCHED_SMS_ENTITY_TYPE } from '../sms/inbound-capture';
 import type {
   ConversationRepository,
@@ -59,6 +60,9 @@ export class ConversationReplyError extends Error {
 export interface ConversationReplyDeps {
   conversationRepo: Pick<ConversationRepository, 'findById' | 'addMessage'>;
   customerRepo: { findById(tenantId: string, id: string): Promise<Customer | null> };
+  /** Lead lookup — required to reply to a lead-linked thread (unknown-caller
+   *  captures). Optional: without it, lead threads resolve to no_recipient. */
+  leadRepo?: { findById(tenantId: string, id: string): Promise<Lead | null> };
   dncRepo: Pick<DncRepository, 'isOnDnc'>;
   dispatchRepo: Pick<DispatchRepository, 'create'>;
   delivery: MessageDeliveryProvider;
@@ -106,6 +110,32 @@ async function resolveTarget(
 ): Promise<ResolvedTarget> {
   if (entityType === UNMATCHED_SMS_ENTITY_TYPE && entityId) {
     return { channel: 'sms', recipient: entityId };
+  }
+
+  if (entityType === 'lead' && entityId) {
+    if (!deps.leadRepo) {
+      throw new ConversationReplyError(
+        'no_recipient',
+        'Lead replies are not configured',
+      );
+    }
+    const lead = await deps.leadRepo.findById(input.tenantId, entityId);
+    if (!lead) {
+      throw new ConversationReplyError('no_recipient', 'Conversation lead no longer exists');
+    }
+    const phone = lead.primaryPhone?.trim() || undefined;
+    const email = lead.email?.trim() || undefined;
+    // Leads carry no channel preference; default to SMS (the capture channel),
+    // honouring an explicit override and falling back to whatever address exists.
+    const preferred: ReplyChannel = input.channel ?? 'sms';
+    if (preferred === 'email' && email) return { channel: 'email', recipient: email };
+    if (preferred === 'sms' && phone) return { channel: 'sms', recipient: phone };
+    if (phone) return { channel: 'sms', recipient: phone };
+    if (email) return { channel: 'email', recipient: email };
+    throw new ConversationReplyError(
+      'no_recipient',
+      'Lead has no phone or email on file to reply to',
+    );
   }
 
   if (entityType === 'customer' && entityId) {

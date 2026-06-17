@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import {
   Home, MessageSquare, Briefcase, Calendar,
   Users, FileText, Receipt, Settings, Zap, Bell, Layers, TrendingUp, LogOut,
-  Wrench,
+  Wrench, Mail,
 } from 'lucide-react';
 import { useUser, useClerk } from '@clerk/clerk-react';
 import { Toaster, toast } from 'sonner';
@@ -52,6 +52,7 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/technician/day', label: 'Today',     icon: Wrench   },
         { to: '/jobs',           label: 'My jobs',   icon: Briefcase },
         { to: '/customers',      label: 'Customers', icon: Users    },
+        { to: '/comms-inbox',    label: 'Messages',  icon: Mail     },
         { to: '/estimates',      label: 'Estimates', icon: FileText },
         { to: '/invoices',       label: 'Invoices',  icon: Receipt  },
         { to: '/inbox',          label: 'Inbox',     icon: Bell     },
@@ -74,9 +75,9 @@ function getNav(mode: Mode): NavItem[] {
       ];
     case 'supervisor':
     default:
-      // Mirrors the Figma reference's 10 desktop items exactly. Dispatch,
-      // Inbox, and Money intentionally live off the sidebar to keep the
-      // surface calm: Dispatch/Money are reachable by URL (and surfaced in
+      // The 10 Figma desktop items plus Messages (the unified comms inbox).
+      // Dispatch, Inbox, and Money intentionally live off the sidebar to keep
+      // the surface calm: Dispatch/Money are reachable by URL (and surfaced in
       // Schedule/Home), and pending approvals stay one click away via the
       // proposal badge on the Rivet logo, which links to /inbox.
       return [
@@ -85,6 +86,7 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/jobs',          label: 'Jobs',         icon: Briefcase     },
         { to: '/schedule',      label: 'Schedule',     icon: Calendar      },
         { to: '/customers',     label: 'Customers',    icon: Users         },
+        { to: '/comms-inbox',   label: 'Messages',     icon: Mail          },
         { to: '/leads',         label: 'Leads',        icon: TrendingUp    },
         { to: '/estimates',     label: 'Estimates',    icon: FileText      },
         { to: '/invoices',      label: 'Invoices',     icon: Receipt       },
