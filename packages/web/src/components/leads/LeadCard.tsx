@@ -24,6 +24,18 @@ function sourceIcon(source: string): string {
   return SOURCE_ICONS[source] ?? '•'; // bullet fallback
 }
 
+/**
+ * Display label per source. Most sources render their raw enum value; `sms`
+ * is shown as the upper-cased acronym ("SMS") so the kanban tag reads cleanly.
+ */
+const SOURCE_LABELS: Record<string, string> = {
+  sms: 'SMS',
+};
+
+function sourceLabel(source: string): string {
+  return SOURCE_LABELS[source] ?? source;
+}
+
 export interface LeadCardData {
   id: string;
   firstName?: string;
@@ -90,7 +102,7 @@ export function LeadCard({ lead, onClick, onDragStart }: LeadCardProps) {
           data-testid={`lead-source-${lead.source}`}
         >
           <span aria-hidden="true" className="mr-1">{sourceIcon(lead.source)}</span>
-          {lead.source}
+          {sourceLabel(lead.source)}
         </span>
         {lead.sourceDetail && <span className="truncate">{lead.sourceDetail}</span>}
       </div>

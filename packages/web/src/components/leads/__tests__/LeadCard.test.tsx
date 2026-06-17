@@ -51,7 +51,8 @@ describe('Leads — LeadCard (P9-001)', () => {
     render(<LeadCard lead={smsLead} />);
     const sourceBadge = screen.getByTestId('lead-source-sms');
     expect(sourceBadge).toBeInTheDocument();
-    expect(sourceBadge.textContent).toContain('sms');
+    // Rendered as the upper-cased acronym, not the raw 'sms' enum value.
+    expect(sourceBadge.textContent).toContain('SMS');
     // Speech-balloon glyph (U+1F4AC) — distinct from the phone_call tag.
     expect(sourceBadge.textContent).toContain('\u{1F4AC}');
   });
