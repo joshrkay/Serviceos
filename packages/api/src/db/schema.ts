@@ -4812,6 +4812,34 @@ export const MIGRATIONS = {
     ALTER TABLE vertical_training_assets ADD CONSTRAINT vertical_training_assets_vertical_type_check
       CHECK (vertical_type IN ('hvac', 'plumbing', 'electrical', 'painting'));
   `,
+
+  // Post-job thank-you SMS (PRD §7.2 demo moment). Adds:
+  //   - jobs.completed_at: explicit completion timestamp written by
+  //     transitionJobStatus. updated_at moves on any write so we can't
+  //     derive "when did this job finish" from it reliably.
+  //   - jobs.thank_you_sms_sent_at: per-job idempotency stamp. Sweep
+  //     skips any job where this is non-null. Suppressed reasons (no
+  //     phone / opted out / permanent SMS failure) also set this so
+  //     the sweep won't re-check forever.
+  //   - tenant_settings.send_thank_you_sms: opt-out per tenant. Default
+  //     ON to match the PRD's "built-in, included" framing.
+  // Backfill: any pre-existing 'completed' job gets completed_at and
+  // thank_you_sms_sent_at = updated_at, so the first sweep after deploy
+  // doesn't blast everyone with a thanks for jobs they finished months
+  // ago.
+  '194_thank_you_sms': `
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS thank_you_sms_sent_at TIMESTAMPTZ;
+    ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS send_thank_you_sms BOOLEAN NOT NULL DEFAULT TRUE;
+    UPDATE jobs
+      SET completed_at = updated_at,
+          thank_you_sms_sent_at = updated_at
+      WHERE status = 'completed'
+        AND completed_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_jobs_thank_you_eligibility
+      ON jobs (tenant_id, completed_at)
+      WHERE thank_you_sms_sent_at IS NULL AND completed_at IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

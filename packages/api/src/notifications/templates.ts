@@ -277,6 +277,24 @@ export interface InvoiceOverdueContext {
   language?: Language;
 }
 
+export interface ThankYouMessageContext {
+  businessName: string;
+  language?: Language;
+}
+
+/**
+ * Post-job thank-you SMS rendered by the thank-you-sms sweep worker
+ * (~2hr after job.completed). Intentionally no URL / no ask — the
+ * Google-review proposal at +24hr and the feedback-request link sent
+ * via the feedback_send worker on completion carry the asks.
+ */
+export function renderThankYouSms(ctx: ThankYouMessageContext): RenderedSms {
+  const lang = ctx.language ?? 'en';
+  return {
+    body: tn('sms.thank_you.line1', lang, { business: ctx.businessName }),
+  };
+}
+
 export function renderInvoiceOverdueSms(ctx: InvoiceOverdueContext): RenderedSms {
   const lang = ctx.language ?? 'en';
   const due = ctx.dueDateIso ? tn('sms.invoice_overdue.due_suffix', lang, { date: ctx.dueDateIso.slice(0, 10) }) : '';

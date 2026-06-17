@@ -51,6 +51,9 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     autoApplyInternalUpdates: row.auto_apply_internal_updates as boolean | undefined,
     autoSendAppointmentReminders: row.auto_send_appointment_reminders as boolean | undefined,
     autoInvoiceOnCompletion: row.auto_invoice_on_completion as boolean | undefined,
+    // Migration 194 — DEFAULT TRUE at the column level so legacy rows
+    // surface as `true` (matches the "built-in, included" framing).
+    sendThankYouSms: row.send_thank_you_sms as boolean | undefined,
     billLaborFromTimeEntries: row.bill_labor_from_time_entries as boolean | undefined,
     batchInvoiceEnabled: row.batch_invoice_enabled as boolean | undefined,
     milestoneBillingEnabled: row.milestone_billing_enabled as boolean | undefined,
@@ -289,6 +292,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         autoApplyInternalUpdates: 'auto_apply_internal_updates',
         autoSendAppointmentReminders: 'auto_send_appointment_reminders',
         autoInvoiceOnCompletion: 'auto_invoice_on_completion',
+        // Migration 194.
+        sendThankYouSms: 'send_thank_you_sms',
         billLaborFromTimeEntries: 'bill_labor_from_time_entries',
         batchInvoiceEnabled: 'batch_invoice_enabled',
         milestoneBillingEnabled: 'milestone_billing_enabled',

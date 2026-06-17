@@ -68,9 +68,13 @@ export async function transitionJobStatus(
   }
 
   const oldStatus = job.status;
+  const now = new Date();
   const updated = await jobRepo.update(tenantId, jobId, {
     status: newStatus,
-    updatedAt: new Date(),
+    updatedAt: now,
+    // Stamp the explicit completion time exactly once. JOB_STATUS_TRANSITIONS
+    // forbids leaving 'completed', so this never gets cleared post-write.
+    ...(newStatus === 'completed' ? { completedAt: now } : {}),
   });
 
   const entry: JobTimelineEntry = {

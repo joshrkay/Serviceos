@@ -325,6 +325,7 @@ import {
   InMemoryHfcrWeeklySendRepository,
 } from './metrics/hfcr-weekly-send';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
+import { runThankYouSmsSweep } from './workers/thank-you-sms-worker';
 import { PgReviewRepository } from './reputation/pg-review';
 import { PgReviewPollStateRepository } from './reputation/poll-state';
 import { PgServiceCreditRepository } from './reputation/pg-service-credit';
@@ -1753,6 +1754,7 @@ export function createApp(): express.Express {
     // (U5) so the key is now unique to hfcrWeeklySend.
     hfcrWeeklySend: 590014,
     holdReaper: 590015,
+    thankYouSms: 590016,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -4453,6 +4455,32 @@ export function createApp(): express.Express {
       });
     });
   }, 15 * 60_000));
+
+  // Post-job thank-you SMS sweep (PRD §7.2). Same P0-009 sweep idiom as
+  // google-reviews / overdue-invoice / appointment-reminder. The pool
+  // guard inside the worker no-ops cleanly when running in-memory.
+  const thankYouSmsLogger = createLogger({
+    service: 'thank-you-sms-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.thankYouSms, async () => {
+      await runThankYouSmsSweep({
+        pool: pool ?? null,
+        jobRepo,
+        customerRepo,
+        settingsRepo,
+        dncRepo,
+        dispatcher: feedbackDispatcher,
+        auditRepo,
+        logger: thankYouSmsLogger,
+      });
+    }).catch((err) => {
+      thankYouSmsLogger.error('Thank-you SMS sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 10 * 60_000));
 
   // U5 — the redundant P5-020 hourly digest worker was removed; the daily
   // digest (RV-063 runDailyDigestSweep, scheduled above on the dailyDigest

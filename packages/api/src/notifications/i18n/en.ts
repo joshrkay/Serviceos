@@ -49,6 +49,14 @@ export const en = {
   'sms.feedback.request':
     "Thanks for choosing {{business}}. We'd love your feedback: {{url}}",
 
+  // ── Post-job thank-you SMS ────────────────────────────────────────────
+  // Fires 2hr after job.completed via the thank-you-sms sweep worker. No
+  // URL on purpose — this is gratitude, not an ask. The Google-review
+  // proposal at +24hr (and the feedback-request link via the
+  // feedback_send worker on completion) carry the asks.
+  'sms.thank_you.line1':
+    'Thanks for choosing {{business}}! It was a pleasure working with you.',
+
   // ── Shared email fragments ───────────────────────────────────────────
   'email.common.intro': 'Hi {{name}},',
   'email.common.signature': '— {{business}}',
