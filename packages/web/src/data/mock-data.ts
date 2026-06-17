@@ -147,6 +147,49 @@ export interface AIProposal {
    * suppresses any voice-approval listener.
    */
   voiceApprovable?: boolean;
+  /**
+   * P2-035 (U2) — the backend's payload `_meta` confidence fragment,
+   * carried through to the review card so it can render the 4-tier
+   * confidence bar and the "what I wasn't sure about" markers. Absent
+   * on legacy/non-AI proposals — the card falls back to the coarse
+   * `confidence` bar (`ProposalConfidence`) when this is undefined.
+   */
+  meta?: ProposalConfidenceMeta;
+  /**
+   * P2-035 (U2) — per-line catalog-grounding signal from the proposal
+   * payload (`pricingSource`). Drives the per-line source badges
+   * (catalog / ambiguous / uncatalogued; 'manual' is not badged).
+   * Undefined for proposal types that carry no line items.
+   */
+  lineItems?: ProposalLineMarker[];
+}
+
+/**
+ * P2-035 (U2) — the 4-tier confidence vocabulary the backend stamps on
+ * `payload._meta.overallConfidence` (mirrors the API's CONFIDENCE_LEVELS).
+ */
+export type ProposalConfidenceLevel = 'high' | 'medium' | 'low' | 'very_low';
+
+/**
+ * P2-035 (U2) — UI-shaped projection of the backend's
+ * `proposalConfidenceMetaSchema` (`_meta`). Only the fields the review
+ * card renders are carried; additive-only.
+ */
+export interface ProposalConfidenceMeta {
+  overallConfidence: ProposalConfidenceLevel;
+  fieldConfidence?: Record<string, ProposalConfidenceLevel>;
+  /** "What I wasn't sure about" callouts the card surfaces. */
+  markers?: { path: string; reason: string }[];
+}
+
+/**
+ * P2-035 (U2) — the per-line subset the review card needs to render the
+ * catalog-grounding badge. The backend stamps `pricingSource` on each
+ * estimate/invoice line; 'manual' is operator-entered and not badged.
+ */
+export interface ProposalLineMarker {
+  description: string;
+  pricingSource?: 'catalog' | 'ambiguous' | 'uncatalogued' | 'manual';
 }
 
 export interface Message {

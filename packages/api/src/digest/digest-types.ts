@@ -1,8 +1,10 @@
 /**
- * P5-020 — End-of-day digest: types (api-local copy).
+ * End-of-day digest: source-data + section types (api-local copy).
  *
  * These mirror packages/shared/src/contracts/digest.ts; kept local to
  * avoid crossing the packages/api rootDir boundary in tsconfig.build.json.
+ * Consumed by the digest builder (digest/digest-builder.ts) on the RV-061
+ * daily-digest-worker path.
  */
 export interface DigestSourceData {
   completedJobIds: string[];

@@ -36,6 +36,7 @@ import { MoneyDashboardPage } from './components/reports/MoneyDashboardPage';
 import { DigestPage } from './pages/digest/DigestPage';
 import { RevenueBySourcePage } from './components/reports/RevenueBySourcePage';
 import { InboxPage } from './components/inbox/InboxPage';
+import { CommsInboxPage } from './pages/conversations/CommsInboxPage';
 import { PortalShell } from './pages/portal/PortalShell';
 import { Showcase } from './pages/design/Showcase';
 import { InvoiceCreate } from './pages/invoices/InvoiceCreate';
@@ -179,6 +180,7 @@ export const router = createBrowserRouter([
       { path: 'contracts',      Component: MaintenanceContractsPage },
       { path: 'contracts/:id',  Component: ContractDetailPage },
       { path: 'inbox',          Component: InboxPage        },
+      { path: 'comms-inbox',    Component: CommsInboxPage   },
       { path: 'interactions',   Component: InteractionsPage },
       { path: 'interactions/dispatch', Component: DispatchLogPage },
       { path: 'settings',       Component: SettingsPage    },

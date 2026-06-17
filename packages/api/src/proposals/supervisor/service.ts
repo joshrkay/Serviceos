@@ -41,6 +41,7 @@ import type { SupervisorCreationHook, SupervisorCreationHookInput } from './hook
 import {
   DEFAULT_SUPERVISOR_RULES,
   evaluateSupervisorPolicy,
+  PLATFORM_DEFAULT_SUPERVISOR_RULES,
   SupervisorDecision,
   SupervisorRules,
 } from './policy';

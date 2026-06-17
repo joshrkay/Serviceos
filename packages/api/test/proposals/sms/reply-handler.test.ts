@@ -19,6 +19,7 @@ import {
 import {
   InMemoryProposalSmsEventRepository,
   createProposalSmsEvent,
+  encodeDigestApproveAllBody,
 } from '../../../src/proposals/sms/sms-event';
 import {
   InMemoryProposalRepository,

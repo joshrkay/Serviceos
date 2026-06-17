@@ -19,6 +19,7 @@ import {
 } from '../../../src/proposals/proposal';
 import {
   configureSupervisorCreationHook,
+  SUPERVISOR_DISABLED_FLAG,
 } from '../../../src/proposals/supervisor/hook';
 import {
   SUPERVISOR_BLOCKED_EVENT,

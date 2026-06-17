@@ -77,6 +77,9 @@ const INTENT_BY_TOKEN: ReadonlyMap<string, ProposalSmsReplyIntent> = new Map([
   ...EDIT_TOKENS.map((t) => [t, 'edit'] as const),
 ]);
 
+const APPROVE_TOKEN_SET: ReadonlySet<string> = new Set(APPROVE_TOKENS);
+const APPROVE_ALL_TOKEN_SET: ReadonlySet<string> = new Set(APPROVE_ALL_TOKENS);
+
 export const ProposalSmsReplySchema = z.object({
   intent: z.enum(PROPOSAL_SMS_REPLY_INTENTS),
   /**

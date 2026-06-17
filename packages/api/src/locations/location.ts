@@ -8,6 +8,17 @@ import {
 } from './dedup';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 
+/**
+ * U3 (CRM Jobber parity) — distinguishes a service property from the
+ * billing/mailing address. `both` marks a property that is also where invoices
+ * should be mailed. Kept in lockstep with `service_locations.address_type`
+ * (migration 188). Defaults to `service`, so existing rows and most properties
+ * are unaffected.
+ */
+export type ServiceLocationAddressType = 'service' | 'billing' | 'both';
+
+export const ADDRESS_TYPES: readonly ServiceLocationAddressType[] = ['service', 'billing', 'both'];
+
 export interface ServiceLocation {
   id: string;
   tenantId: string;
@@ -23,6 +34,8 @@ export interface ServiceLocation {
   longitude?: number;
   accessNotes?: string;
   isPrimary: boolean;
+  /** U3 — service vs billing classification. Defaults to 'service'. */
+  addressType: ServiceLocationAddressType;
   isArchived: boolean;
   archivedAt?: Date;
   createdAt: Date;
@@ -43,6 +56,7 @@ export interface CreateLocationInput {
   longitude?: number;
   accessNotes?: string;
   isPrimary?: boolean;
+  addressType?: ServiceLocationAddressType;
 }
 
 export interface UpdateLocationInput {
@@ -56,6 +70,7 @@ export interface UpdateLocationInput {
   latitude?: number;
   longitude?: number;
   accessNotes?: string;
+  addressType?: ServiceLocationAddressType;
 }
 
 export interface LocationRepository {
@@ -153,6 +168,7 @@ export async function createLocation(
     longitude: input.longitude,
     accessNotes: input.accessNotes,
     isPrimary: input.isPrimary ?? false,
+    addressType: input.addressType ?? 'service',
     isArchived: false,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -280,6 +296,43 @@ export async function listByCustomer(
 ): Promise<ServiceLocation[]> {
   const locations = await repository.findByCustomer(tenantId, customerId);
   return locations.filter((l) => !l.isArchived);
+}
+
+/**
+ * U3 (CRM Jobber parity) — pick the address invoices/estimates should be
+ * mailed to, from a customer's locations. Preference order, active rows only:
+ *   1. an explicit `billing` address,
+ *   2. a `both` (service + billing) address,
+ *   3. the primary service location (the historical default),
+ *   4. any remaining active location.
+ * Returns null when the customer has no active locations. Pure so it can be
+ * unit-tested without a DB and reused by the notification recipient/address
+ * resolution path.
+ */
+export function resolveBillingLocation(
+  locations: ServiceLocation[]
+): ServiceLocation | null {
+  const active = locations.filter((l) => !l.isArchived);
+  if (active.length === 0) return null;
+  return (
+    active.find((l) => l.addressType === 'billing') ??
+    active.find((l) => l.addressType === 'both') ??
+    active.find((l) => l.isPrimary) ??
+    active[0]
+  );
+}
+
+/**
+ * Repo-backed convenience over `resolveBillingLocation` for callers that only
+ * have a customer id (e.g. invoice rendering). tenant-scoped via the repo.
+ */
+export async function getBillingLocation(
+  tenantId: string,
+  customerId: string,
+  repository: LocationRepository
+): Promise<ServiceLocation | null> {
+  const locations = await repository.findByCustomer(tenantId, customerId);
+  return resolveBillingLocation(locations);
 }
 
 export async function setPrimary(

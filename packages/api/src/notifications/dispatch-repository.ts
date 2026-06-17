@@ -22,7 +22,10 @@ export type DispatchEntityType =
   | 'delay_notice'
   | 'appointment_en_route'
   // RV-061 — owner end-of-day digest SMS (entity_id = daily_digests.id).
-  | 'daily_digest';
+  | 'daily_digest'
+  // U6 (CRM Jobber parity, Phase 2) — owner-authored conversation reply
+  // (free-text SMS/email from the unified inbox; entity_id = conversations.id).
+  | 'conversation_reply';
 export type DispatchChannel = 'sms' | 'email';
 export type DispatchStatus = 'sent' | 'delivered' | 'failed' | 'bounced';
 

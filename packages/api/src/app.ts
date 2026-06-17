@@ -139,6 +139,13 @@ import { initSentry, setSentryClient } from './monitoring/sentry';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
+import { InMemoryContactRepository } from './customers/contact';
+import { PgContactRepository } from './customers/pg-contact';
+import { InMemoryTagRepository } from './customers/tag';
+import { PgTagRepository } from './customers/pg-tag';
+import { InMemoryCustomFieldRepository } from './customers/custom-field';
+import { PgCustomFieldRepository } from './customers/pg-custom-field';
+import { createCustomerCustomFieldRouter } from './routes/customer-custom-fields';
 import { InMemoryLeadRepository } from './leads/lead';
 import { InMemoryLocationRepository } from './locations/location';
 import { InMemoryJobRepository } from './jobs/job';
@@ -415,7 +422,10 @@ import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation'
 import { InMemoryProposalRepository, createProposal as buildProposalRow } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy hook + advisory annotator).
-import { configureSupervisorCreationHook } from './proposals/supervisor/hook';
+import {
+  configureSupervisorCreationHook,
+  SUPERVISOR_DISABLED_FLAG,
+} from './proposals/supervisor/hook';
 import {
   SupervisorPolicyService,
   recordExecutedProposalSpend,
@@ -446,6 +456,7 @@ import { resolveEstimateDeliveryProvider } from './proposals/execution/estimate-
 import { InMemoryWorkingHoursRepository } from './availability/working-hours';
 import { PgWorkingHoursRepository } from './availability/pg-working-hours';
 import { InMemoryUnavailableBlockRepository } from './availability/unavailable-block';
+import { PgUnavailableBlockRepository } from './availability/pg-unavailable-block';
 import { createTravelTimeProvider } from './scheduling/travel-time/factory';
 import { StubSkillMatcher } from './scheduling/skill-matcher';
 import { createSchedulingRouter } from './scheduling/routes';
@@ -476,8 +487,10 @@ import {
   registerKeywordHandler,
   registerRecoveryResumeHandler,
   registerNegotiationHandler,
+  registerCaptureHandler,
 } from './sms/inbound-dispatch';
 import { createInboundNegotiationHandler } from './sms/negotiation/inbound-negotiation-handler';
+import { createInboundCaptureHandler } from './sms/inbound-capture';
 import { PgCustomerNegotiationContextProvider } from './customers/pg-customer-negotiation-context';
 import { normalizePhone } from './customers/dedup';
 import { DefaultCurrentQuoteResolver } from './conversations/negotiation/current-quote-resolver';
@@ -511,6 +524,7 @@ import {
   PgProposalSmsEventRepository,
   InMemoryProposalSmsEventRepository,
   createProposalSmsEvent,
+  encodeDigestApproveAllBody,
   createLlmEditInterpreter,
   type OutboundAnchorKind,
 } from './proposals/sms';
@@ -842,6 +856,11 @@ export function createApp(): express.Express {
   }
 
   const customerRepo       = pool ? new PgCustomerRepository(pool)       : new InMemoryCustomerRepository();
+  // U1 (CRM Jobber parity) — multiple contacts per customer.
+  const customerContactRepo = pool ? new PgContactRepository(pool)       : new InMemoryContactRepository();
+  // U2 (CRM Jobber parity) — customer tags + tenant-defined custom fields.
+  const customerTagRepo     = pool ? new PgTagRepository(pool)           : new InMemoryTagRepository();
+  const customerCustomFieldRepo = pool ? new PgCustomFieldRepository(pool) : new InMemoryCustomFieldRepository();
   // N-003 (P2-036) — caller LTV/recency for the negotiation guardrail callback.
   const customerNegotiationContextProvider = pool
     ? new PgCustomerNegotiationContextProvider(pool)
@@ -859,11 +878,12 @@ export function createApp(): express.Express {
   // Working hours are now Pg-backed in production (migration 137 added
   // technician_working_hours), so the dispatch feasibility composer and the
   // inbound-AI availability search enforce real working-hours rows instead of
-  // treating missing rows as no-conflict. The unavailable-block repo stays
-  // InMemory for now — wiring its Pg variant (table from migration 116) is a
-  // separate, out-of-scope change. InMemory variants stay for tests / no-pool.
+  // treating missing rows as no-conflict. The unavailable-block repo is now
+  // Pg-backed too (migration 116 `tech_unavailable_blocks`) so the P6-028
+  // tech "I'm out" handler persists real same-day blocks the feasibility
+  // composer reads. InMemory variants stay for tests / no-pool.
   const workingHoursRepo       = pool ? new PgWorkingHoursRepository(pool)     : new InMemoryWorkingHoursRepository();
-  const unavailableBlockRepo   = new InMemoryUnavailableBlockRepository();
+  const unavailableBlockRepo   = pool ? new PgUnavailableBlockRepository(pool) : new InMemoryUnavailableBlockRepository();
   const travelTimeProvider     = createTravelTimeProvider(process.env);
   const skillMatcher           = new StubSkillMatcher();
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
@@ -1343,6 +1363,44 @@ export function createApp(): express.Express {
     }
   }
 
+  // ── P6-028 wiring — tech "I'm out today" keyword handler ─────────────────
+  // Registers the OUT|SICK|UNAVAILABLE inbound-SMS keywords with the P2-034
+  // dispatcher so a verified technician's "OUT" text marks the day unavailable
+  // and drafts owner-gated reschedule proposals end-to-end. Placed HERE,
+  // AFTER proposalRepo (the last-declared dep), because the reschedule path
+  // also needs userRepo (852), settingsRepo (885), unavailableBlockRepo (861),
+  // appointmentRepo (848), assignmentRepo (849), jobRepo (739), customerRepo
+  // (838), auditRepo (914) and the LLM gateway (1043) — all already constructed
+  // above. The keyword registry is module-global, so registration order within
+  // createApp() is free as long as every dep exists. `overwrite: true` mirrors
+  // the STOP/START registrations so re-running createApp() (across test files /
+  // multiple bootstraps in one process) re-registers without tripping the
+  // duplicate-keyword guard.
+  const techStatusTodayRepo = pool
+    ? new PgTechStatusTodayRepository(pool)
+    : new InMemoryTechStatusTodayRepository();
+  registerTechStatusKeywords(
+    {
+      userRepo,
+      settingsRepo,
+      unavailableBlockRepo,
+      techStatusTodayRepo,
+      auditRepo,
+      rescheduleDeps: {
+        appointmentRepo,
+        assignmentRepo,
+        proposalRepo,
+        jobRepo,
+        customerRepo,
+        // Brand-voice customer SMS drafts route through the shared LLM gateway
+        // (CLAUDE.md: all AI calls go through the gateway); tone is read from
+        // tenant_settings via settingsRepo.
+        brandVoiceDeps: { gateway: llmGateway, settingsRepo },
+      },
+    },
+    { overwrite: true },
+  );
+
   // ── P2-034 wiring — SMS approval transport ───────────────────────────────
   // Outbound: the unsupervised queue_and_sms body now carries reply tokens
   // (Y / N / EDIT) and each render is persisted to proposal_sms_events.
@@ -1565,6 +1623,18 @@ export function createApp(): express.Express {
   let supervisorSpendRecorder:
     | ((tenantId: string, proposalId: string) => Promise<void>)
     | null = null;
+  // N-009 / P2-038 — structured correction-lesson loop. Pool-gated like the
+  // sibling repos: with no pool (in-memory dev) there is nothing to persist
+  // lessons into, so the loop is skipped and the digest falls back to the RAG
+  // chunk-count line. The ports cascade a recorded lesson into the real tenant
+  // config (labor rate + banned phrases on tenant_settings, SKU price on
+  // catalog_items) so the NEXT same-day draft reflects the correction.
+  const correctionLessonRepo = pool ? new PgCorrectionLessonRepository(pool) : null;
+  const correctionConfigPorts = createPgConfigPorts({
+    settingsRepo,
+    catalogRepo,
+    logger: workerLogger,
+  });
   const proposalExecutor = new ProposalExecutor(
     executionHandlers,
     proposalRepo,
@@ -2388,6 +2458,21 @@ export function createApp(): express.Express {
     );
   }
 
+  // U4 (CRM Jobber parity, Phase 2) — capture-all inbound SMS. Registered
+  // unconditionally (it never sends, so it doesn't need messageDelivery) and
+  // LAST in the dispatcher chain: any customer text no keyword/fallback/
+  // recovery/negotiation handler claimed is threaded onto the sender's
+  // conversation instead of being dropped, so it surfaces in the unified inbox.
+  registerCaptureHandler(
+    createInboundCaptureHandler({
+      conversationRepo,
+      customerRepo,
+      auditRepo,
+      logger: requestLogger,
+    }),
+    { overwrite: true },
+  );
+
   // RV-130 — consent ledger + recording control. The ledger appends
   // implicit recording consent at disclosure and revocations on a
   // "stop recording" objection; the control pauses the live recording.
@@ -3209,7 +3294,21 @@ export function createApp(): express.Express {
   }
 
   // Mount API routes
-  app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
+  app.use(
+    '/api/customers',
+    createCustomerRouter(
+      customerRepo,
+      auditRepo,
+      undefined,
+      customerContactRepo,
+      customerTagRepo,
+      customerCustomFieldRepo
+    )
+  );
+  app.use(
+    '/api/customer-custom-fields',
+    createCustomerCustomFieldRouter(customerCustomFieldRepo, auditRepo)
+  );
   app.use('/api/time-entries', createTimeEntriesRouter(timeEntryRepo, auditRepo));
   // P10-001: portal session creation/revocation. Mounted at
   // `/api/portal-sessions` (NOT `/api/customers/:id/portal-session`)
@@ -3646,10 +3745,25 @@ export function createApp(): express.Express {
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use(
     '/api/conversations',
-    createConversationRouter(conversationRepo, auditRepo, {
-      gateway: llmGateway,
-      settingsRepo,
-    }),
+    createConversationRouter(
+      conversationRepo,
+      auditRepo,
+      {
+        gateway: llmGateway,
+        settingsRepo,
+      },
+      // U6 — owner reply send path. Only wired when a delivery provider exists
+      // (prod/dev with creds); otherwise POST /:id/reply returns 503.
+      messageDelivery
+        ? {
+            customerRepo,
+            dncRepo,
+            dispatchRepo,
+            delivery: messageDelivery,
+            settingsRepo,
+          }
+        : undefined,
+    ),
   );
   app.use('/api/dnc', createDncRouter({ dncRepo, auditRepo }));
 
@@ -3734,7 +3848,20 @@ export function createApp(): express.Express {
   );
   // D2-1c — audit-log proposal approve / reject / edit / undo.
   app.use('/api/dispatch', createSchedulingRouter(feasibilityDeps, userRepo));
-  app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo, auditRepo, feasibilityDeps));
+  app.use(
+    '/api/proposals',
+    createProposalsRouter(
+      proposalRepo,
+      appointmentRepo,
+      auditRepo,
+      feasibilityDeps,
+      // N-009 / P2-038 — undoing a proposal reverses the structured correction
+      // lessons it recorded. Pool-gated: only present when lessons can persist.
+      correctionLessonRepo
+        ? { lessonRepo: correctionLessonRepo, ports: correctionConfigPorts }
+        : undefined,
+    ),
+  );
   if (pool) {
     app.use('/api/interactions', createInteractionsRouter({ pool }));
   }
@@ -4050,6 +4177,25 @@ export function createApp(): express.Express {
         buildApproveUrl: (token: string) =>
           `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
         publicBaseUrl,
+        // U5 (JTBD #7) — record the "APPROVE ALL" anchor over the P2-034
+        // transport. proposal_id is NOT NULL (FK), so the row uses the first
+        // batch-approvable id as its representative; the full ordered set is
+        // encoded in the body and read back by the reply handler.
+        recordApproveAllAnchor: async ({ tenantId, proposalIds, body }) => {
+          await proposalSmsEventRepo.create(
+            createProposalSmsEvent({
+              tenantId,
+              proposalId: proposalIds[0]!,
+              direction: 'outbound',
+              kind: 'digest_approve_all_rendered',
+              body: encodeDigestApproveAllBody(proposalIds),
+            }),
+          );
+          // `body` is the rendered digest SMS; intentionally not stored on the
+          // anchor (the id set is what the reply path needs, and the dispatch
+          // row already records the send). Referenced to satisfy the seam.
+          void body;
+        },
         logger: dailyDigestLogger,
       });
     }).catch((err) => {
@@ -4494,9 +4640,13 @@ export function createApp(): express.Express {
       proposalId,
       logger: supervisorLogger,
     });
-  // Advisory annotator sweep — only with a REAL LLM provider (the mock
-  // gateway's canned JSON must never be written into proposal payloads as
-  // a "risk note"), and per-tenant flag-gated inside the sweep itself.
+  // Advisory annotator sweep — scheduled whenever a REAL LLM provider is
+  // configured (the mock gateway's canned JSON must never be written into
+  // proposal payloads as a "risk note"). It runs for every NON-opted-out
+  // tenant by default: the same inverted opt-out gate as the creation hook
+  // is passed through, so a tenant with no flag set is swept and only an
+  // explicitly opted-out tenant is skipped. Stays advisory — never a status
+  // change.
   if (config.AI_PROVIDER_API_KEY) {
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.supervisorAnnotate, async () => {

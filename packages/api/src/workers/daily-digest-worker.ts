@@ -187,6 +187,19 @@ export interface DailyDigestWorkerDeps {
   buildApproveUrl?: (token: string) => string;
   /** Web origin for the `/digest/<date>` deep link. */
   publicBaseUrl: string;
+  /**
+   * U5 (JTBD #7) — record the digest's "APPROVE ALL" anchor over the P2-034
+   * transport after the SMS goes out. The reply handler resolves an inbound
+   * ALL / APPROVE ALL against it and delegates the ids to the batch-approve
+   * path. Optional — absent (no smsEventRepo wired) means the digest still
+   * sends with its per-item one-tap links, just no batch reply. Called only
+   * after a SUCCESSFUL send and only when there is ≥1 batch-approvable id.
+   */
+  recordApproveAllAnchor?: (input: {
+    tenantId: string;
+    proposalIds: string[];
+    body: string;
+  }) => Promise<void>;
   logger: Logger;
   /** Injectable clock — defaults to `() => new Date()`. */
   now?: () => Date;
@@ -473,7 +486,60 @@ async function sendDigestSms(
       digestDate: record.digestDate,
     });
   }
+
+  // U5 (JTBD #7) — anchor the day's batch-approvable ids over the P2-034
+  // transport so an inbound "APPROVE ALL" can delegate to batch-approve.
+  // Only the inserter that actually claimed the dispatch records the anchor
+  // (claimedNew), keeping it 1:1 with the single SMS that went out — a
+  // retry/loser sweep must not append a second, stale anchor.
+  if (deps.recordApproveAllAnchor && claimedNew) {
+    const approveAllIds = batchApprovableProposalIds(record.payload);
+    if (approveAllIds.length > 0) {
+      try {
+        await deps.recordApproveAllAnchor({
+          tenantId,
+          proposalIds: approveAllIds,
+          body,
+        });
+      } catch (anchorErr) {
+        // Best-effort: the digest already sent. A missing anchor only means
+        // the owner must approve per-item (one-tap) instead of via ALL.
+        deps.logger.warn('Daily-digest sweep: failed to record APPROVE ALL anchor', {
+          tenantId,
+          digestDate: record.digestDate,
+          error: anchorErr instanceof Error ? anchorErr.message : String(anchorErr),
+        });
+      }
+    }
+  }
+
   return 'sent';
+}
+
+/**
+ * Track-E gating shared by the per-item one-tap links and the U5 "APPROVE
+ * ALL" anchor: a proposal is single-tap / batch approvable ONLY when its
+ * confidence isn't blocking AND its action class is `capture`. Money / comms /
+ * irreversible (non-capture) and low/very_low-confidence proposals still
+ * surface in the digest deep link for in-app review, but never carry a bare
+ * approve affordance — mirroring the chain-send `suppressApproveLink`
+ * invariant and the SMS Y-reply class refusal. Unknown class fails closed.
+ */
+function isBatchApprovable(approval: DailyDigestPayload['pendingApprovals']['top'][number]): boolean {
+  if (isBlockingConfidence(approval.overallConfidence)) return false;
+  return actionClassForProposalType(approval.proposalType as ProposalType) === 'capture';
+}
+
+/**
+ * U5 (JTBD #7) — the proposal ids the "APPROVE ALL" reply may batch-approve:
+ * exactly the ones that pass the one-tap gates above. Computed independently
+ * of the one-tap secret (the anchor records the set even when no links were
+ * minted) so the reply transport and the rendered links never diverge.
+ */
+export function batchApprovableProposalIds(payload: DailyDigestPayload): string[] {
+  return payload.pendingApprovals.top
+    .filter(isBatchApprovable)
+    .map((approval) => approval.proposalId);
 }
 
 export function buildApprovalLinks(
@@ -486,21 +552,7 @@ export function buildApprovalLinks(
   const secret = deps.oneTapSecret;
   const links: DigestSmsApprovalLink[] = [];
   for (const approval of payload.pendingApprovals.top) {
-    // Proposals with low/very_low confidence must NOT get a one-tap link —
-    // they require in-app review (reviewInApp is set). The digest deep link
-    // covers them.  Absent _meta (overallConfidence undefined) → allowed.
-    if (isBlockingConfidence(approval.overallConfidence)) {
-      continue;
-    }
-    // Track-E money-gating: a one-tap link approves with a SINGLE tap and no
-    // second factor, so it is minted ONLY for capture-class proposals. Money /
-    // comms / irreversible proposals still surface in the digest (via the deep
-    // link) for in-app review, but never carry a bare approve link — mirroring
-    // the chain-send `suppressApproveLink` invariant and the SMS Y-reply class
-    // refusal. A non-capture (or unknown) class fails closed: no link.
-    if (actionClassForProposalType(approval.proposalType as ProposalType) !== 'capture') {
-      continue;
-    }
+    if (!isBatchApprovable(approval)) continue;
     // TTL is clamped to ≤30 min inside createOneTapApproveToken.
     const { token } = createOneTapApproveToken({
       proposalId: approval.proposalId,

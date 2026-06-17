@@ -21,6 +21,7 @@ import {
 } from '../../src/learning/corrections/apply-undo';
 import type { ConfigPorts } from '../../src/learning/corrections/lesson-applicator';
 import { extractCorrectionLessons } from '../../src/learning/corrections/correction-extractor';
+import { buildCorrectionLessonDrafts } from '../../src/learning/corrections/build-correction-drafts';
 import {
   PgCatalogItemRepository,
 } from '../../src/catalog/pg-catalog-item';
@@ -170,5 +171,104 @@ describe('Postgres integration — correction loop (migration 180)', () => {
     const other = await createTestTenant(pool);
     expect(await lessonRepo.findById(other.tenantId, lesson.id)).toBeNull();
     expect(await lessonRepo.findAppliedForDay(other.tenantId, '2026-06-14')).toHaveLength(0);
+  });
+
+  it('executor path: a drafted-vs-executed payload edit cascades, and the next same-day draft reflects it', async () => {
+    // Mirrors the app.ts onExecuted wiring: the structured drafts come from the
+    // SHARED bridge over the immutable drafted payload vs. the as-executed
+    // payload — not from a hand-built delta. This is the production seam.
+    const labor = createCatalogItem({
+      tenantId: tenant.tenantId,
+      name: 'Bridge Labor',
+      category: 'Labor',
+      unit: 'hour',
+      unitPriceCents: 12000,
+    });
+    await catalogRepo.create(labor);
+
+    const draftedPayload = {
+      lineItems: [
+        { id: 'li-1', description: 'Bridge Labor', category: 'labor', quantity: 1, unitPriceCents: 12000, totalCents: 12000, sortOrder: 0, taxable: true },
+      ],
+    };
+    const executedPayload = {
+      lineItems: [
+        { id: 'li-1', description: 'Bridge Labor', category: 'labor', quantity: 1, unitPriceCents: 14000, totalCents: 14000, sortOrder: 0, taxable: true },
+      ],
+    };
+
+    const drafts = buildCorrectionLessonDrafts(
+      { drafted: draftedPayload, executed: executedPayload },
+      { laborRateCents: 12000, skuPriceCents: {}, bannedPhrases: [], templateWeights: {} },
+    );
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0].lessonType).toBe('labor_rate_changed');
+
+    const ports = makePorts(catalogRepo, labor.id);
+    const sourceProposalId = crypto.randomUUID();
+    const [lesson] = await recordCorrectionLessons(
+      {
+        tenantId: tenant.tenantId,
+        sourceProposalId,
+        ownerId: tenant.userId,
+        localDate: '2026-06-14',
+        drafts,
+      },
+      { repository: lessonRepo, ports, auditRepo },
+    );
+
+    // The NEXT same-day draft grounding "Bridge Labor" now resolves $140.
+    const activeItems = await catalogRepo.listByTenant(tenant.tenantId);
+    const resolution = resolveLineItemToCatalog('Bridge Labor', activeItems);
+    expect(resolution.match?.unitPriceCents).toBe(14000);
+
+    // Undo via the source-proposal reverse lookup (the undoProposal wiring).
+    const linked = await lessonRepo.findBySourceProposal(tenant.tenantId, sourceProposalId);
+    expect(linked.map((l) => l.id)).toContain(lesson.id);
+    for (const l of linked) {
+      await undoCorrectionLesson(
+        { tenantId: tenant.tenantId, lessonId: l.id, ownerId: tenant.userId },
+        { repository: lessonRepo, ports, auditRepo },
+      );
+    }
+    const afterUndo = await catalogRepo.listByTenant(tenant.tenantId);
+    expect(afterUndo.find((i) => i.id === labor.id)!.unitPriceCents).toBe(12000);
+    expect(await lessonRepo.findAppliedForDay(tenant.tenantId, '2026-06-14')).not.toContain(
+      lesson.id,
+    );
+  });
+
+  it('findBySourceProposal returns every lesson a proposal recorded (drives undo)', async () => {
+    const sourceProposalId = crypto.randomUUID();
+    const drafts = buildCorrectionLessonDrafts(
+      {
+        drafted: { lineItems: [{ id: 'li-1', description: 'L', category: 'labor', quantity: 1, unitPriceCents: 10000, totalCents: 10000, sortOrder: 0, taxable: true }], customerMessage: 'Hi — cheapest in town guaranteed' },
+        executed: { lineItems: [{ id: 'li-1', description: 'L', category: 'labor', quantity: 1, unitPriceCents: 11000, totalCents: 11000, sortOrder: 0, taxable: true }], customerMessage: 'Hi' },
+      },
+      { laborRateCents: 10000, skuPriceCents: {}, bannedPhrases: [], templateWeights: {} },
+    );
+    // Two distinct lessons from one edit: labor rate + banned phrase.
+    expect(drafts.length).toBe(2);
+
+    const ports = makePorts(catalogRepo, crypto.randomUUID());
+    await recordCorrectionLessons(
+      {
+        tenantId: tenant.tenantId,
+        sourceProposalId,
+        ownerId: tenant.userId,
+        localDate: '2026-06-14',
+        drafts,
+      },
+      { repository: lessonRepo, ports, auditRepo },
+    );
+
+    const linked = await lessonRepo.findBySourceProposal(tenant.tenantId, sourceProposalId);
+    expect(linked).toHaveLength(2);
+    expect(new Set(linked.map((l) => l.lessonType))).toEqual(
+      new Set(['labor_rate_changed', 'banned_phrase']),
+    );
+    // Cross-tenant isolation on the reverse lookup too.
+    const other = await createTestTenant(pool);
+    expect(await lessonRepo.findBySourceProposal(other.tenantId, sourceProposalId)).toHaveLength(0);
   });
 });

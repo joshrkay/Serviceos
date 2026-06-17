@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { createLogger } from '../../logging/logger';
 import {
   InboundSmsContext,
   HandlerResult,
@@ -39,6 +40,11 @@ import {
  */
 
 const DEFAULT_TIMEZONE = 'America/New_York';
+
+const logger = createLogger({
+  service: 'tech-status',
+  environment: process.env.NODE_ENV || 'dev',
+});
 
 export interface TechStatusHandlerDeps {
   userRepo: UserRepository;
@@ -172,6 +178,18 @@ export async function handleTechStatusSms(
       deps.rescheduleDeps,
     ));
   } catch (err) {
+    // Log the underlying cause (with stack) — previously the failure was only
+    // written to an audit row, so a processing failure was invisible in logs
+    // and CI. The stack pinpoints whether the block insert or the reschedule
+    // proposal creation threw.
+    logger.error('tech-status processing failed', {
+      tenantId: ctx.tenantId,
+      technicianId: user.id,
+      localDate,
+      status,
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
     await deps.techStatusTodayRepo.releaseToday(ctx.tenantId, user.id, localDate);
     await audit(deps, ctx, 'tech_status.processing_failed', user.id, {
       localDate,

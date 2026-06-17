@@ -13,6 +13,17 @@ vi.mock('../../utils/api-fetch', () => ({
 vi.mock('../../components/customers/CommunicationTimeline', () => ({
   CommunicationTimeline: () => <div>Timeline</div>,
 }));
+// U1/U2 panels are self-contained (they fetch their own data); mock them here
+// so this suite stays focused on CustomerDetail and its locations fetch order.
+vi.mock('../../components/customers/ContactsPanel', () => ({
+  ContactsPanel: () => <div>ContactsPanel</div>,
+}));
+vi.mock('../../components/customers/TagsPanel', () => ({
+  TagsPanel: () => <div>TagsPanel</div>,
+}));
+vi.mock('../../components/customers/CustomFieldsPanel', () => ({
+  CustomFieldsPanel: () => <div>CustomFieldsPanel</div>,
+}));
 
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { apiFetch } from '../../utils/api-fetch';
@@ -133,6 +144,51 @@ describe('CustomerDetail', () => {
       expect(screen.getByText(/100 Main St/)).toBeInTheDocument();
       expect(screen.getByText(/200 Rental Rd/)).toBeInTheDocument();
       expect(screen.getByText('Primary')).toBeInTheDocument();
+    });
+  });
+
+  it('marks a service location as the billing address (U3)', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url, init) => {
+      if (String(url).startsWith('/api/locations?')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            {
+              id: 'loc-1',
+              label: 'Home',
+              street1: '100 Main St',
+              city: 'Austin',
+              state: 'TX',
+              postalCode: '78701',
+              isPrimary: true,
+              addressType: 'service',
+            },
+          ],
+        } as unknown as Response;
+      }
+      if (String(url) === '/api/locations/loc-1' && (init as RequestInit)?.method === 'PUT') {
+        return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+      }
+      return { ok: true, status: 200, json: async () => ({ data: [], total: 0 }) } as unknown as Response;
+    });
+
+    renderCustomerDetail();
+
+    const billingBtn = await screen.findByRole('button', { name: 'Set as billing' });
+    fireEvent.click(billingBtn);
+
+    await waitFor(() => {
+      const putCall = vi
+        .mocked(apiFetch)
+        .mock.calls.find(
+          (call) =>
+            String(call[0]) === '/api/locations/loc-1' &&
+            (call[1] as RequestInit | undefined)?.method === 'PUT',
+        );
+      expect(putCall).toBeDefined();
+      const body = JSON.parse((putCall![1] as RequestInit).body as string);
+      expect(body.addressType).toBe('billing');
     });
   });
 

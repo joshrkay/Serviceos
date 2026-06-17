@@ -278,6 +278,16 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['183_customers_account_type_property_manager', 'f373682884c0e1e5b74d1b8a186d44fb302e25c1791595da9814a7b572c453c3'],
   ['184_tenant_settings_labor_rate', '5552a7d845275663af1ac4f2df1c64897989f11625ffeb6f595153d9305b1355'],
   ['185_correction_lessons', 'cb361b7505166e97eab2b627e660df67788b446fedd147f918e877d14b8ca8cf'],
+  // U1 (CRM Jobber parity): multiple contacts per customer.
+  ['186_customer_contacts', 'c8fdfca6951000919fbe3eeb24b11be47415c486c2fcd564d47fb5f15641daa9'],
+  // U2 (CRM Jobber parity): customer tags + tenant-defined custom fields.
+  ['187_customer_tags_custom_fields', 'b1f86f9b3a0073f5d82cfeb0d3b2d7e5c288c37a206d91a8e2506f03449d9ad4'],
+  // U3 (CRM Jobber parity): billing vs service address on service_locations.
+  ['188_service_location_address_type', '0595b37bf8f98f5663ab0b55c50834f6d38e5124c05768ff18bde6ad88db62d2'],
+  // U5 (JTBD #7): widen proposal_sms_events kind CHECK for the digest
+  // 'digest_approve_all_rendered' anchor (additive, pre-deploy).
+  ['189_proposal_sms_events_digest_approve_all_kind', 'e66034b7738726dc1289801770c998c722b7a13c314f410c38d993b6973c296d'],
+  ['190_dispatch_entity_conversation_reply', 'f68dcf4009222fb5f516bb37d914124ba2e6eb761d3469c7c11eee7cc855641a'],
 ];
 
 function hashMigration(value: string): string {

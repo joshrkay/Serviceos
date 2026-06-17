@@ -7,7 +7,9 @@
  *   - already-annotated / stale / non-ready proposals are skipped;
  *   - LLM failures and garbage output skip silently (advisory);
  *   - per-tenant failure isolation (tenant A blowing up never stops B);
- *   - the per-tenant 'supervisor_agent' flag gates the gateway spend.
+ *   - default-ON (Unit U3): a tenant with NO flag set is still swept;
+ *   - the per-tenant opt-out flag (SUPERVISOR_DISABLED_FLAG, inverted at
+ *     boot) disables the sweep for an opted-out tenant only.
  */
 import { describe, it, expect, vi } from 'vitest';
 import type { LLMRequest, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -23,12 +25,30 @@ import {
   type SupervisorAnnotationSweepDeps,
 } from '../../src/workers/supervisor-review-worker';
 import { hasSupervisorAnnotation } from '../../src/proposals/supervisor/marker';
+import { SUPERVISOR_DISABLED_FLAG } from '../../src/proposals/supervisor/hook';
 
 const TENANT_A = '11111111-1111-1111-1111-111111111111';
 const TENANT_B = '22222222-2222-2222-2222-222222222222';
 const NOW = new Date('2026-06-11T12:00:00.000Z');
 
 const silentLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+/**
+ * The exact inverted opt-out gate the app wires at boot (app.ts): the
+ * platform feature flag is default-FALSE, so `enabled = !disabled`. A
+ * tenant present in `disabledTenants` has explicitly set
+ * SUPERVISOR_DISABLED_FLAG=true; everyone else is enabled by default.
+ */
+function bootInvertedGate(disabledTenants: Set<string>): (tenantId: string) => Promise<boolean> {
+  const flagStore: Record<string, Record<string, boolean>> = {};
+  for (const t of disabledTenants) {
+    flagStore[t] = { [SUPERVISOR_DISABLED_FLAG]: true };
+  }
+  // Mirror PgTenantFeatureFlagRepository.isEnabledForTenant: unset ⇒ false.
+  const isFlagSet = async (tenantId: string, flagKey: string): Promise<boolean> =>
+    flagStore[tenantId]?.[flagKey] ?? false;
+  return async (tenantId: string) => !(await isFlagSet(tenantId, SUPERVISOR_DISABLED_FLAG));
+}
 
 function okResponse(content: string): LLMResponse {
   return {
@@ -79,7 +99,10 @@ function makeDeps(
     gateway: { complete },
     logger: silentLogger,
     now: () => NOW,
-    complete,
+    // vitest's Mock is invariant in its arg tuple; the typed mock above is a
+    // subtype of the loose `ReturnType<typeof vi.fn>` exposed for assertions,
+    // so cast at this single boundary (the precise type stays on `gateway`).
+    complete: complete as unknown as ReturnType<typeof vi.fn>,
     ...overrides,
   };
 }
@@ -194,7 +217,7 @@ describe('runSupervisorAnnotationSweep', () => {
     );
   });
 
-  it("the per-tenant 'supervisor_agent' flag gates the sweep (no gateway spend when off)", async () => {
+  it("the per-tenant enabled gate gates the sweep (no gateway spend when off)", async () => {
     const repo = new InMemoryProposalRepository();
     await seedReadyProposal(repo, TENANT_A);
     await seedReadyProposal(repo, TENANT_B);
@@ -207,6 +230,43 @@ describe('runSupervisorAnnotationSweep', () => {
     expect(result.annotated).toBe(1);
     expect(deps.complete).toHaveBeenCalledTimes(1);
     expect((deps.complete.mock.calls[0][0] as LLMRequest).tenantId).toBe(TENANT_B);
+  });
+
+  it('default-ON (Unit U3): a tenant with NO opt-out flag set is STILL annotated', async () => {
+    // No tenant has opted out → the inverted boot gate returns enabled for
+    // BOTH tenants, so both are swept with no flag rows provisioned.
+    const repo = new InMemoryProposalRepository();
+    const a = await seedReadyProposal(repo, TENANT_A);
+    const b = await seedReadyProposal(repo, TENANT_B);
+    const deps = makeDeps(repo, {
+      listTenantIds: async () => [TENANT_A, TENANT_B],
+      isEnabledForTenant: bootInvertedGate(new Set()),
+    });
+    const result = await runSupervisorAnnotationSweep(deps);
+    expect(result.tenantsSwept).toBe(2);
+    expect(result.annotated).toBe(2);
+    expect(hasSupervisorAnnotation((await repo.findById(TENANT_A, a.id))!.payload)).toBe(true);
+    expect(hasSupervisorAnnotation((await repo.findById(TENANT_B, b.id))!.payload)).toBe(true);
+  });
+
+  it('opt-OUT: setting SUPERVISOR_DISABLED_FLAG disables the sweep for that tenant only', async () => {
+    // Tenant A opts out (flag=true ⇒ inverted gate enabled=false); tenant B
+    // never set the flag ⇒ default-ON and still swept.
+    const repo = new InMemoryProposalRepository();
+    const a = await seedReadyProposal(repo, TENANT_A);
+    const b = await seedReadyProposal(repo, TENANT_B);
+    const deps = makeDeps(repo, {
+      listTenantIds: async () => [TENANT_A, TENANT_B],
+      isEnabledForTenant: bootInvertedGate(new Set([TENANT_A])),
+    });
+    const result = await runSupervisorAnnotationSweep(deps);
+    expect(result.tenantsSwept).toBe(1); // only B
+    expect(result.annotated).toBe(1);
+    expect(deps.complete).toHaveBeenCalledTimes(1);
+    expect((deps.complete.mock.calls[0][0] as LLMRequest).tenantId).toBe(TENANT_B);
+    // Opted-out A got NO gateway spend and NO annotation.
+    expect(hasSupervisorAnnotation((await repo.findById(TENANT_A, a.id))!.payload)).toBe(false);
+    expect(hasSupervisorAnnotation((await repo.findById(TENANT_B, b.id))!.payload)).toBe(true);
   });
 
   it('respects the per-tenant per-sweep budget', async () => {

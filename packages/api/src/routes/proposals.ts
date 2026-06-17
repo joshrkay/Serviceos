@@ -17,6 +17,7 @@ import {
   rejectProposal,
   editProposal,
   undoProposal,
+  type UndoCorrectionLoopDeps,
 } from '../proposals/actions';
 import { resolveProposalLine } from '../proposals/resolve-line';
 import {
@@ -26,6 +27,7 @@ import {
 } from '../proposals/proposal-contracts';
 import { FeasibilityDependencies } from '../scheduling/feasibility-types';
 import { createSchedulingProposal } from '../proposals/create-scheduling';
+import { resolveProposalLine } from '../proposals/resolve-line';
 
 // P2-035 — Batch approval body schema. Lives inline rather than in
 // proposal-contracts.ts so this story stays within its allowed-files
@@ -49,6 +51,9 @@ export function createProposalsRouter(
   appointmentRepo?: AppointmentRepository,
   auditRepo?: AuditRepository,
   feasibilityDeps?: FeasibilityDependencies,
+  // N-009 / P2-038 — when supplied, undoing a proposal also reverses the
+  // structured correction lessons it recorded (and the config each cascaded).
+  undoCorrectionLoop?: UndoCorrectionLoopDeps,
 ): Router {
   const router = Router();
 
@@ -296,6 +301,35 @@ export function createProposalsRouter(
     }
   );
 
+  // P2-035 (U2) — resolve ONE ambiguous catalog line by picking a
+  // resolver-surfaced candidate. Same RBAC as approve/reject; mirrors
+  // their shape. The service patches the draft and stops at
+  // 'ready_for_review' — it NEVER approves or executes (D-004).
+  router.post(
+    '/:id/resolve-line',
+    requireAuth,
+    requireTenant,
+    requirePermission('proposals:approve'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const parsed = validate(resolveLineBodySchema, req.body);
+        const result = await resolveProposalLine(
+          proposalRepo,
+          req.auth!.tenantId,
+          req.params.id,
+          req.auth!.userId,
+          req.auth!.role as Role,
+          parsed,
+          auditRepo,
+        );
+        res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
   router.post(
     '/:id/undo',
     requireAuth,
@@ -310,6 +344,7 @@ export function createProposalsRouter(
           req.auth!.userId,
           req.auth!.role as Role,
           auditRepo,
+          undoCorrectionLoop,
         );
         res.json(result);
       } catch (err) {

@@ -23,7 +23,7 @@ function calculateTotals(
   taxRateBps: number
 ): { subtotalCents: number; taxCents: number; totalCents: number } {
   const subtotalCents = lineItems.reduce(
-    (sum, item) => sum + Math.round(item.quantity * item.unitPrice),
+    (sum, item) => sum + Math.round(item.quantity * (item.unitPrice ?? item.unitPriceCents ?? 0)),
     0
   );
   const taxableAmount = Math.max(0, subtotalCents - discountCents);
@@ -120,8 +120,16 @@ export function InvoiceProposalEditor({
             <input
               data-testid={`line-item-price-${index}`}
               type="number"
-              value={item.unitPrice}
-              onChange={(e) => updateLineItem(index, 'unitPrice', Number(e.target.value))}
+              value={item.unitPrice ?? item.unitPriceCents ?? 0}
+              onChange={(e) =>
+                updateLineItem(
+                  index,
+                  // Invoice-shaped lines carry unitPriceCents; write back to the
+                  // field that's actually present so the edit isn't dropped.
+                  item.unitPriceCents !== undefined ? 'unitPriceCents' : 'unitPrice',
+                  Number(e.target.value),
+                )
+              }
             />
             <button
               data-testid={`remove-line-item-${index}`}

@@ -20,6 +20,30 @@ import {
   type CustomerTimelineDeps,
 } from '../customers/timeline-service';
 import { timelineQuerySchema } from '../customers/timeline';
+import {
+  ContactRepository,
+  createContact,
+  listContacts,
+  updateContact,
+  archiveContact,
+} from '../customers/contact';
+import {
+  TagRepository,
+  addCustomerTag,
+  removeCustomerTag,
+  listCustomerTags,
+} from '../customers/tag';
+import {
+  CustomFieldRepository,
+  setCustomFieldValue,
+  listResolvedCustomFields,
+} from '../customers/custom-field';
+import {
+  createCustomerContactSchema,
+  updateCustomerContactSchema,
+  addCustomerTagSchema,
+  setCustomFieldValueSchema,
+} from '../shared/contracts';
 
 /**
  * P9-002 — Optional dependencies for the customer timeline endpoint.
@@ -31,9 +55,33 @@ export type CustomerRouterTimelineDeps = CustomerTimelineDeps;
 export function createCustomerRouter(
   customerRepo: CustomerRepository,
   auditRepo: AuditRepository,
-  timelineDeps?: CustomerRouterTimelineDeps
+  timelineDeps?: CustomerRouterTimelineDeps,
+  // U1 (CRM Jobber parity) — when provided, mounts the nested
+  // /:id/contacts CRUD. Optional so existing call sites/tests that don't
+  // wire a contact repo keep the routes quietly 404 (same pattern as
+  // timelineDeps above).
+  contactRepo?: ContactRepository,
+  // U2 (CRM Jobber parity) — customer tags + per-customer custom-field values.
+  // Optional, same quietly-404 pattern.
+  tagRepo?: TagRepository,
+  customFieldRepo?: CustomFieldRepository
 ): Router {
   const router = Router();
+
+  // Shared by the nested CRM sub-resource routes (contacts, tags, custom
+  // fields): confirm the parent customer exists within the tenant so a
+  // cross-tenant or bogus customerId 404s before any child write.
+  const loadCustomerOr404 = async (
+    req: AuthenticatedRequest,
+    res: Response
+  ): Promise<boolean> => {
+    const customer = await getCustomer(req.auth!.tenantId, req.params.id, customerRepo);
+    if (!customer) {
+      res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
+      return false;
+    }
+    return true;
+  };
 
   router.post(
     '/',
@@ -231,6 +279,248 @@ export function createCustomerRouter(
             }
           );
           res.json(result);
+        } catch (err) {
+          const { statusCode, body } = toErrorResponse(err);
+          res.status(statusCode).json(body);
+        }
+      }
+    );
+  }
+
+  // U1 (CRM Jobber parity) — nested customer-contacts CRUD. Every handler
+  // first confirms the parent customer exists within the tenant (so a
+  // cross-tenant or bogus customerId 404s before any contact write), then
+  // delegates to the tenant-scoped contact repo.
+  if (contactRepo) {
+    router.get(
+      '/:id/contacts',
+      requireAuth,
+      requireTenant,
+      requirePermission('customers:view'),
+      async (req: AuthenticatedRequest, res: Response) => {
+        try {
+          if (!(await loadCustomerOr404(req, res))) return;
+          const includeArchived = req.query.includeArchived === 'true';
+          const contacts = await listContacts(
+            req.auth!.tenantId,
+            req.params.id,
+            contactRepo,
+            includeArchived
+          );
+          res.json(contacts);
+        } catch (err) {
+          const { statusCode, body } = toErrorResponse(err);
+          res.status(statusCode).json(body);
+        }
+      }
+    );
+
+    router.post(
+      '/:id/contacts',
+      requireAuth,
+      requireTenant,
+      requirePermission('customers:update'),
+      async (req: AuthenticatedRequest, res: Response) => {
+        try {
+          if (!(await loadCustomerOr404(req, res))) return;
+          const parsed = createCustomerContactSchema.parse(req.body);
+          const contact = await createContact(
+            {
+              ...parsed,
+              tenantId: req.auth!.tenantId,
+              customerId: req.params.id,
+              createdBy: req.auth!.userId,
+              actorRole: req.auth!.role,
+            },
+            contactRepo,
+            auditRepo
+          );
+          res.status(201).json(contact);
+        } catch (err) {
+          const { statusCode, body } = toErrorResponse(err);
+          res.status(statusCode).json(body);
+        }
+      }
+    );
+
+    router.put(
+      '/:id/contacts/:contactId',
+      requireAuth,
+      requireTenant,
+      requirePermission('customers:update'),
+      async (req: AuthenticatedRequest, res: Response) => {
+        try {
+          if (!(await loadCustomerOr404(req, res))) return;
+          const parsed = updateCustomerContactSchema.parse(req.body);
+          const existing = await contactRepo.findById(req.auth!.tenantId, req.params.contactId);
+          if (!existing || existing.customerId !== req.params.id) {
+            res.status(404).json({ error: 'NOT_FOUND', message: 'Contact not found' });
+            return;
+          }
+          const updated = await updateContact(
+            req.auth!.tenantId,
+            req.params.contactId,
+            parsed,
+            contactRepo,
+            req.auth!.userId,
+            auditRepo
+          );
+          res.json(updated);
+        } catch (err) {
+          const { statusCode, body } = toErrorResponse(err);
+          res.status(statusCode).json(body);
+        }
+      }
+    );
+
+    router.post(
+      '/:id/contacts/:contactId/archive',
+      requireAuth,
+      requireTenant,
+      requirePermission('customers:update'),
+      async (req: AuthenticatedRequest, res: Response) => {
+        try {
+          if (!(await loadCustomerOr404(req, res))) return;
+          const existing = await contactRepo.findById(req.auth!.tenantId, req.params.contactId);
+          if (!existing || existing.customerId !== req.params.id) {
+            res.status(404).json({ error: 'NOT_FOUND', message: 'Contact not found' });
+            return;
+          }
+          const archived = await archiveContact(
+            req.auth!.tenantId,
+            req.params.contactId,
+            contactRepo,
+            req.auth!.userId,
+            auditRepo
+          );
+          res.json(archived);
+        } catch (err) {
+          const { statusCode, body } = toErrorResponse(err);
+          res.status(statusCode).json(body);
+        }
+      }
+    );
+  }
+
+  // U2 (CRM Jobber parity) — customer tags.
+  if (tagRepo) {
+    router.get(
+      '/:id/tags',
+      requireAuth,
+      requireTenant,
+      requirePermission('customers:view'),
+      async (req: AuthenticatedRequest, res: Response) => {
+        try {
+          if (!(await loadCustomerOr404(req, res))) return;
+          const tags = await listCustomerTags(req.auth!.tenantId, req.params.id, tagRepo);
+          res.json(tags);
+        } catch (err) {
+          const { statusCode, body } = toErrorResponse(err);
+          res.status(statusCode).json(body);
+        }
+      }
+    );
+
+    router.post(
+      '/:id/tags',
+      requireAuth,
+      requireTenant,
+      requirePermission('customers:update'),
+      async (req: AuthenticatedRequest, res: Response) => {
+        try {
+          if (!(await loadCustomerOr404(req, res))) return;
+          const { tag } = addCustomerTagSchema.parse(req.body);
+          await addCustomerTag(
+            req.auth!.tenantId,
+            req.params.id,
+            tag,
+            tagRepo,
+            req.auth!.userId,
+            auditRepo
+          );
+          const tags = await listCustomerTags(req.auth!.tenantId, req.params.id, tagRepo);
+          res.status(201).json(tags);
+        } catch (err) {
+          const { statusCode, body } = toErrorResponse(err);
+          res.status(statusCode).json(body);
+        }
+      }
+    );
+
+    router.delete(
+      '/:id/tags/:tag',
+      requireAuth,
+      requireTenant,
+      requirePermission('customers:update'),
+      async (req: AuthenticatedRequest, res: Response) => {
+        try {
+          if (!(await loadCustomerOr404(req, res))) return;
+          await removeCustomerTag(
+            req.auth!.tenantId,
+            req.params.id,
+            decodeURIComponent(req.params.tag),
+            tagRepo,
+            req.auth!.userId,
+            auditRepo
+          );
+          const tags = await listCustomerTags(req.auth!.tenantId, req.params.id, tagRepo);
+          res.json(tags);
+        } catch (err) {
+          const { statusCode, body } = toErrorResponse(err);
+          res.status(statusCode).json(body);
+        }
+      }
+    );
+  }
+
+  // U2 (CRM Jobber parity) — per-customer custom-field values (defs are
+  // managed by the tenant-level router at /api/customer-custom-fields).
+  if (customFieldRepo) {
+    router.get(
+      '/:id/custom-fields',
+      requireAuth,
+      requireTenant,
+      requirePermission('customers:view'),
+      async (req: AuthenticatedRequest, res: Response) => {
+        try {
+          if (!(await loadCustomerOr404(req, res))) return;
+          const fields = await listResolvedCustomFields(
+            req.auth!.tenantId,
+            req.params.id,
+            customFieldRepo
+          );
+          res.json(fields);
+        } catch (err) {
+          const { statusCode, body } = toErrorResponse(err);
+          res.status(statusCode).json(body);
+        }
+      }
+    );
+
+    router.put(
+      '/:id/custom-fields/:fieldDefId',
+      requireAuth,
+      requireTenant,
+      requirePermission('customers:update'),
+      async (req: AuthenticatedRequest, res: Response) => {
+        try {
+          if (!(await loadCustomerOr404(req, res))) return;
+          const { value } = setCustomFieldValueSchema.parse(req.body);
+          await setCustomFieldValue(
+            req.auth!.tenantId,
+            req.params.id,
+            req.params.fieldDefId,
+            value,
+            customFieldRepo,
+            req.auth!.userId,
+            auditRepo
+          );
+          const fields = await listResolvedCustomFields(
+            req.auth!.tenantId,
+            req.params.id,
+            customFieldRepo
+          );
+          res.json(fields);
         } catch (err) {
           const { statusCode, body } = toErrorResponse(err);
           res.status(statusCode).json(body);

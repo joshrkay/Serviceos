@@ -592,4 +592,69 @@ describe('runDailyDigestSweep', () => {
   it('exports the 15-minute sweep cadence app.ts drives', () => {
     expect(DIGEST_SWEEP_INTERVAL_MS).toBe(15 * 60 * 1000);
   });
+
+  // U5 (JTBD #7) — APPROVE ALL anchor recording.
+  describe('records the APPROVE ALL anchor over the P2-034 transport', () => {
+    function moneyProposal(id: string): Proposal {
+      return {
+        ...pendingProposal(id),
+        proposalType: 'record_payment',
+        payload: { invoiceId: '6f9619ff-8b86-d011-b42d-00c04fc964ff', amountCents: 20000, paymentMethod: 'cash' },
+        summary: 'Record $200',
+      } as Proposal;
+    }
+
+    it('captures exactly the batch-approvable ids after a successful send', async () => {
+      const anchors: { tenantId: string; proposalIds: string[]; body: string }[] = [];
+      await runDailyDigestSweep(deps({
+        computeDeps: stubComputeDeps(
+          { proposals: [pendingProposal('cap-1'), pendingProposal('cap-2')] },
+          settingsRepo,
+        ),
+        recordApproveAllAnchor: async (input) => { anchors.push(input); },
+      }));
+
+      expect(anchors).toHaveLength(1);
+      expect(anchors[0].tenantId).toBe('t1');
+      // Both draft_estimate (capture-class, high-confidence) proposals qualify.
+      expect(anchors[0].proposalIds).toEqual(['cap-1', 'cap-2']);
+    });
+
+    it('excludes money/comms and low-confidence proposals from the anchor set', async () => {
+      const anchors: { proposalIds: string[] }[] = [];
+      const lowConf = {
+        ...pendingProposal('cap-low'),
+        payload: { totals: { totalCents: 1000 }, customerName: 'X', _meta: { overallConfidence: 'low' } },
+      } as Proposal;
+      await runDailyDigestSweep(deps({
+        computeDeps: stubComputeDeps(
+          { proposals: [pendingProposal('cap-ok'), moneyProposal('money-1'), lowConf] },
+          settingsRepo,
+        ),
+        recordApproveAllAnchor: async (input) => { anchors.push({ proposalIds: input.proposalIds }); },
+      }));
+
+      expect(anchors).toHaveLength(1);
+      // Only the capture-class, non-low-confidence id survives the gates.
+      expect(anchors[0].proposalIds).toEqual(['cap-ok']);
+    });
+
+    it('records NO anchor when nothing is batch-approvable', async () => {
+      const anchors: unknown[] = [];
+      await runDailyDigestSweep(deps({
+        computeDeps: stubComputeDeps({ proposals: [moneyProposal('money-only')] }, settingsRepo),
+        recordApproveAllAnchor: async (input) => { anchors.push(input); },
+      }));
+      expect(anchors).toHaveLength(0);
+    });
+
+    it('an anchor recording failure never fails the send (best-effort)', async () => {
+      const result = await runDailyDigestSweep(deps({
+        computeDeps: stubComputeDeps({ proposals: [pendingProposal('cap-1')] }, settingsRepo),
+        recordApproveAllAnchor: async () => { throw new Error('anchor write exploded'); },
+      }));
+      expect(result.sent).toBe(1);
+      expect(result.failed).toBe(0);
+    });
+  });
 });
