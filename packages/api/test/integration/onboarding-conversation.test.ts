@@ -1,7 +1,32 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgOnboardingSessionRepository } from '../../src/db/onboarding-session-repository';
+
+/**
+ * Cross-tenant isolation is meaningless under the testcontainer's default
+ * SUPERUSER role: superusers bypass RLS unconditionally (FORCE or not). To
+ * actually exercise the policy on `onboarding_session` we mirror
+ * `rls-tenant-isolation.test.ts`'s pattern — connect as the unprivileged
+ * `rls_app_runtime` role (NOBYPASSRLS) and SET LOCAL the tenant GUC.
+ */
+const APP_ROLE = 'rls_app_runtime';
+async function asTenant<T>(
+  pool: Pool,
+  tenantId: string,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    return await fn(client);
+  } finally {
+    await client.query('ROLLBACK').catch(() => undefined);
+    client.release();
+  }
+}
 
 describe('onboarding_session — integration', () => {
   let pool: Pool;
@@ -12,6 +37,16 @@ describe('onboarding_session — integration', () => {
   beforeAll(async () => {
     pool = await getSharedTestDb();
     repo = new PgOnboardingSessionRepository(pool);
+    // Idempotently provision the unprivileged role + grants used by the
+    // RLS test below. Mirrors rls-tenant-isolation.test.ts so the tests
+    // can run in any order against the shared container.
+    await pool.query(`DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${APP_ROLE}') THEN
+        CREATE ROLE ${APP_ROLE} NOLOGIN NOBYPASSRLS;
+      END IF;
+    END $$;`);
+    await pool.query(`GRANT USAGE ON SCHEMA public TO ${APP_ROLE}`);
+    await pool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${APP_ROLE}`);
   });
 
   beforeEach(async () => {
@@ -71,16 +106,47 @@ describe('onboarding_session — integration', () => {
     expect(updated!.turnCount).toBe(1);
   });
 
-  it('RLS prevents cross-tenant reads — tenant B cannot see tenant A session', async () => {
+  it('migration 195 pins ENABLE + FORCE row-level security and the tenant_isolation policy', async () => {
+    // Catches a future in-place edit that quietly drops FORCE or the
+    // policy. The application-layer RLS test below is hidden by the
+    // superuser default — this pg_catalog assertion isn't.
+    const cls = await pool.query<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>(
+      `SELECT relrowsecurity, relforcerowsecurity
+         FROM pg_class WHERE relname = 'onboarding_session'`,
+    );
+    expect(cls.rows[0].relrowsecurity).toBe(true);
+    expect(cls.rows[0].relforcerowsecurity).toBe(true);
+
+    const policies = await pool.query<{ policyname: string; qual: string }>(
+      `SELECT policyname, qual FROM pg_policies WHERE tablename = 'onboarding_session'`,
+    );
+    expect(policies.rows.length).toBeGreaterThan(0);
+    expect(policies.rows[0].policyname).toBe('tenant_isolation_onboarding_session');
+    expect(policies.rows[0].qual).toContain('app.current_tenant_id');
+  });
+
+  it('RLS prevents cross-tenant reads under the unprivileged app role', async () => {
+    // Insert as the superuser (fixture-friendly, bypasses RLS), then
+    // SELECT under the rls_app_runtime role with tenant B's GUC.
     const aSession = await repo.create(tenant.tenantId);
-    // Wrapping the query in the OTHER tenant's withTenant context must
-    // return null. PgBaseRepository.withTenant SETs current_tenant_id,
-    // and the RLS policy on onboarding_session filters by it.
-    const visible = await repo.findById(secondTenant.tenantId, aSession.id);
-    expect(visible).toBeNull();
-    // And the owning tenant still sees the row.
-    const owned = await repo.findById(tenant.tenantId, aSession.id);
-    expect(owned).not.toBeNull();
+
+    const visibleToB = await asTenant(pool, secondTenant.tenantId, async (c) => {
+      const r = await c.query<{ id: string }>(
+        'SELECT id FROM onboarding_session WHERE id = $1',
+        [aSession.id],
+      );
+      return r.rows;
+    });
+    expect(visibleToB).toEqual([]);
+
+    const visibleToA = await asTenant(pool, tenant.tenantId, async (c) => {
+      const r = await c.query<{ id: string }>(
+        'SELECT id FROM onboarding_session WHERE id = $1',
+        [aSession.id],
+      );
+      return r.rows;
+    });
+    expect(visibleToA.length).toBe(1);
   });
 
   it('the partial index supports the cross-tenant created_at DESC ordering used by status listings', async () => {

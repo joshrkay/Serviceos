@@ -87,7 +87,7 @@ describe('thank-you-sms worker — integration', () => {
 
     const locationId = uuidv4();
     await pool.query(
-      `INSERT INTO service_locations (id, tenant_id, customer_id, address_line1, city, state, postal_code, country)
+      `INSERT INTO service_locations (id, tenant_id, customer_id, street1, city, state, postal_code, country)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
       [locationId, tenant.tenantId, customerId, '1 Main St', 'Phoenix', 'AZ', '85001', 'US'],
     );
@@ -189,7 +189,7 @@ describe('thank-you-sms worker — integration', () => {
     );
     const locationId = uuidv4();
     await pool.query(
-      `INSERT INTO service_locations (id, tenant_id, customer_id, address_line1, city, state, postal_code, country)
+      `INSERT INTO service_locations (id, tenant_id, customer_id, street1, city, state, postal_code, country)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
       [locationId, tenant.tenantId, customerId, '1 Main', 'Phoenix', 'AZ', '85001', 'US'],
     );
