@@ -73,15 +73,19 @@ describe('thank-you-sms worker — integration', () => {
     primaryPhone?: string;
     smsConsent?: boolean;
     completedAtAgo: 'four_hours' | 'one_hour';
-  }): Promise<{ customerId: string; jobId: string; locationId: string }> {
+  }): Promise<{ customerId: string; jobId: string; locationId: string; phone: string }> {
     const customerId = uuidv4();
+    // Unique-per-call phone so a test that runs the sweep across all
+    // tenants in the shared container can still scope its dispatcher
+    // assertions to the seed it owns.
+    const phone = opts.primaryPhone ?? `+1555${customerId.replace(/-/g, '').slice(0, 7)}`;
     await pool.query(
       `INSERT INTO customers (id, tenant_id, first_name, last_name, display_name,
         primary_phone, preferred_channel, sms_consent, is_archived, created_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [
         customerId, tenant.tenantId, 'Mary', 'Johnson', 'Mary Johnson',
-        opts.primaryPhone ?? '+15551234567', 'sms', opts.smsConsent ?? true, false, tenant.userId,
+        phone, 'sms', opts.smsConsent ?? true, false, tenant.userId,
       ],
     );
 
@@ -93,16 +97,19 @@ describe('thank-you-sms worker — integration', () => {
     );
 
     const jobId = uuidv4();
+    // jobs has a UNIQUE (tenant_id, job_number) index, so two seeds in
+    // a single test against the same tenant must use distinct numbers.
+    const jobNumber = `JOB-${jobId.slice(0, 8)}`;
     const completedAt =
       opts.completedAtAgo === 'four_hours' ? FOUR_HOURS_AGO : new Date(NOW.getTime() - 60 * 60 * 1000);
     await pool.query(
       `INSERT INTO jobs (id, tenant_id, customer_id, location_id, job_number, summary,
         status, priority, created_by, completed_at, created_at, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,'completed','normal',$7,$8, NOW(), NOW())`,
-      [jobId, tenant.tenantId, customerId, locationId, 'JOB-0001', 'Test job', tenant.userId, completedAt],
+      [jobId, tenant.tenantId, customerId, locationId, jobNumber, 'Test job', tenant.userId, completedAt],
     );
 
-    return { customerId, jobId, locationId };
+    return { customerId, jobId, locationId, phone };
   }
 
   it('selects only jobs whose completed_at is older than the delay and whose tenant has the toggle on', async () => {
@@ -110,19 +117,19 @@ describe('thank-you-sms worker — integration', () => {
     const b = await seedCustomerAndJob({ completedAtAgo: 'one_hour' });
 
     const { dispatcher, calls } = makeCapturingDispatcher();
-    const result = await runThankYouSmsSweep({
+    await runThankYouSmsSweep({
       pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
       now: () => NOW,
     });
 
-    expect(result.candidates).toBe(1);
-    expect(result.sent).toBe(1);
-    expect(result.suppressed).toBe(0);
-    expect(calls.length).toBe(1);
-    expect(calls[0].to).toBe('+15551234567');
-    expect(calls[0].body).toContain('Acme Plumbing');
+    // Tenant-scoped assertions: the sweep iterates every tenant in the
+    // shared container, so other tests' fixtures can ride in the
+    // aggregate counts. Filter dispatcher captures by THIS test's
+    // unique phones and pin column writes on the seeded ids.
+    const ourCalls = calls.filter((c) => c.to === a.phone || c.to === b.phone);
+    expect(ourCalls.map((c) => c.to)).toEqual([a.phone]);
+    expect(ourCalls[0].body).toContain('Acme Plumbing');
 
-    // Verify column writes.
     const aRow = await pool.query(`SELECT thank_you_sms_sent_at FROM jobs WHERE id = $1`, [a.jobId]);
     expect(aRow.rows[0].thank_you_sms_sent_at).not.toBeNull();
     const bRow = await pool.query(`SELECT thank_you_sms_sent_at FROM jobs WHERE id = $1`, [b.jobId]);
@@ -134,36 +141,36 @@ describe('thank-you-sms worker — integration', () => {
       `UPDATE tenant_settings SET send_thank_you_sms = FALSE WHERE tenant_id = $1`,
       [tenant.tenantId],
     );
-    await seedCustomerAndJob({ completedAtAgo: 'four_hours' });
+    const seed = await seedCustomerAndJob({ completedAtAgo: 'four_hours' });
 
     const { dispatcher, calls } = makeCapturingDispatcher();
-    const result = await runThankYouSmsSweep({
+    await runThankYouSmsSweep({
       pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
       now: () => NOW,
     });
 
-    expect(result.candidates).toBe(0);
-    expect(result.sent).toBe(0);
-    expect(calls.length).toBe(0);
+    // Tenant-scoped assertions (see prior test's note).
+    expect(calls.some((c) => c.to === seed.phone)).toBe(false);
+    const row = await pool.query(`SELECT thank_you_sms_sent_at FROM jobs WHERE id = $1`, [seed.jobId]);
+    expect(row.rows[0].thank_you_sms_sent_at).toBeNull();
   });
 
   it('is idempotent — a second sweep on the same data does not re-send', async () => {
-    await seedCustomerAndJob({ completedAtAgo: 'four_hours' });
+    const seed = await seedCustomerAndJob({ completedAtAgo: 'four_hours' });
 
     const { dispatcher, calls } = makeCapturingDispatcher();
-    const first = await runThankYouSmsSweep({
+    await runThankYouSmsSweep({
       pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
       now: () => NOW,
     });
-    expect(first.sent).toBe(1);
+    expect(calls.filter((c) => c.to === seed.phone).length).toBe(1);
 
-    const second = await runThankYouSmsSweep({
+    await runThankYouSmsSweep({
       pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
       now: () => NOW,
     });
-    expect(second.candidates).toBe(0);
-    expect(second.sent).toBe(0);
-    expect(calls.length).toBe(1);
+    // Idempotency: the second sweep must not re-call this tenant's phone.
+    expect(calls.filter((c) => c.to === seed.phone).length).toBe(1);
   });
 
   it('writes a notification.thank_you_sms.sent audit event scoped to the job entity', async () => {
