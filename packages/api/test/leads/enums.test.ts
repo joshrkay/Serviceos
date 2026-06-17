@@ -14,9 +14,16 @@ import {
 
 describe('Leads — LEAD_SOURCES enum (P12-005 customer_portal lead source)', () => {
   it('AC-1: includes customer_portal as the 7th value', () => {
-    expect(LEAD_SOURCES.length).toBe(7);
     expect(LEAD_SOURCES[6]).toBe('customer_portal');
     expect(LEAD_SOURCES).toContain('customer_portal');
+  });
+
+  // CRM two-way comms — leads minted from an inbound text are tagged 'sms'.
+  it('includes sms as the 8th value (text-originated leads)', () => {
+    expect(LEAD_SOURCES.length).toBe(8);
+    expect(LEAD_SOURCES[7]).toBe('sms');
+    expect(LEAD_SOURCES).toContain('sms');
+    expect(() => leadSourceSchema.parse('sms')).not.toThrow();
   });
 
   it('AC-5: keeps the original 6 source values for back-compat', () => {

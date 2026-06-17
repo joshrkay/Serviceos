@@ -45,6 +45,18 @@ describe('Leads — LeadCard (P9-001)', () => {
     expect(sourceBadge.textContent).toContain('\u{1F310}');
   });
 
+  // CRM two-way comms — leads minted from an inbound text are tagged 'sms'.
+  it('renders the sms source with a speech-balloon tag', () => {
+    const smsLead: LeadCardData = { ...lead, source: 'sms' };
+    render(<LeadCard lead={smsLead} />);
+    const sourceBadge = screen.getByTestId('lead-source-sms');
+    expect(sourceBadge).toBeInTheDocument();
+    // Rendered as the upper-cased acronym, not the raw 'sms' enum value.
+    expect(sourceBadge.textContent).toContain('SMS');
+    // Speech-balloon glyph (U+1F4AC) — distinct from the phone_call tag.
+    expect(sourceBadge.textContent).toContain('\u{1F4AC}');
+  });
+
   it('P12-005: falls back to a bullet for unknown source values', () => {
     const oddLead: LeadCardData = { ...lead, source: 'space_aliens' };
     render(<LeadCard lead={oddLead} />);

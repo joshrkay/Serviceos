@@ -15,6 +15,7 @@ import { LLMGateway } from '../ai/gateway/gateway';
 import { SettingsRepository } from '../settings/settings';
 import { SuggestReplyTask } from '../ai/tasks/suggest-reply-task';
 import type { CustomerRepository } from '../customers/customer';
+import type { LeadRepository } from '../leads/lead';
 import type { DncRepository } from '../compliance/dnc';
 import type { DispatchRepository } from '../notifications/dispatch-repository';
 import type { MessageDeliveryProvider } from '../notifications/delivery-provider';
@@ -32,6 +33,7 @@ export interface ConversationRouterAiDeps {
  */
 export interface ConversationReplyRouterDeps {
   customerRepo: Pick<CustomerRepository, 'findById'>;
+  leadRepo?: Pick<LeadRepository, 'findById'>;
   dncRepo: Pick<DncRepository, 'isOnDnc'>;
   dispatchRepo: Pick<DispatchRepository, 'create'>;
   delivery: MessageDeliveryProvider;
@@ -217,6 +219,7 @@ export function createConversationRouter(
           {
             conversationRepo,
             customerRepo: replyDeps.customerRepo,
+            ...(replyDeps.leadRepo ? { leadRepo: replyDeps.leadRepo } : {}),
             dncRepo: replyDeps.dncRepo,
             dispatchRepo: replyDeps.dispatchRepo,
             delivery: replyDeps.delivery,

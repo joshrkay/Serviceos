@@ -134,6 +134,24 @@ describe('U5 — listInboxThreads', () => {
     expect(bSummary.needsReply).toBe(false);
   });
 
+  it('includes lead-linked threads (unknown-caller captures)', async () => {
+    const l = await thread(repo, 'lead', 'lead-1');
+    await repo.addMessage({
+      tenantId: TENANT,
+      conversationId: l.id,
+      messageType: 'text',
+      content: 'do you do drywall?',
+      senderId: '+15555551234',
+      senderRole: 'customer',
+    });
+
+    const threads = await repo.listInboxThreads(TENANT);
+    expect(threads.map((t) => t.conversation.id)).toContain(l.id);
+    const summary = threads.find((t) => t.conversation.id === l.id)!;
+    expect(summary.needsReply).toBe(true);
+    expect(summary.lastMessagePreview).toBe('do you do drywall?');
+  });
+
   it('filters to needs-reply only', async () => {
     const a = await thread(repo, 'customer', 'cust-a');
     await repo.addMessage({

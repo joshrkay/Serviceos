@@ -162,6 +162,27 @@ describe('findOrCreateLeadByPhone', () => {
     expect(result.lead.primaryPhone).toBe(raw);
   });
 
+  it('honors source / channelLabel / auditVia overrides (SMS capture)', async () => {
+    const result = await findOrCreateLeadByPhone({
+      tenantId: TENANT,
+      fromPhone: '+15125550100',
+      leadRepo,
+      auditRepo,
+      systemActorId: 'system:sms-capture',
+      source: 'sms',
+      channelLabel: 'text',
+      auditVia: 'sms_capture',
+    });
+
+    expect(result.status).toBe('created');
+    expect(result.lead.source).toBe('sms');
+    expect(result.lead.sourceDetail).toContain('Inbound text from');
+    expect(result.lead.sourceDetail).not.toContain('Inbound call');
+
+    const audit = auditRepo.getAll()[0];
+    expect(audit.metadata).toMatchObject({ source: 'sms', via: 'sms_capture' });
+  });
+
   it('honors a custom systemActorId override', async () => {
     const result = await findOrCreateLeadByPhone({
       tenantId: TENANT,

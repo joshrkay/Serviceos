@@ -3,7 +3,9 @@ import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgConversationRepository } from '../../src/conversations/pg-conversation';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
+import { PgLeadRepository } from '../../src/leads/pg-lead';
 import type { Customer } from '../../src/customers/customer';
+import type { Lead } from '../../src/leads/lead';
 
 function baseCustomer(
   tenantId: string,
@@ -31,12 +33,14 @@ describe('Postgres integration — U5 inbox thread listing', () => {
   let pool: Pool;
   let conversationRepo: PgConversationRepository;
   let customerRepo: PgCustomerRepository;
+  let leadRepo: PgLeadRepository;
   let tenant: { tenantId: string; userId: string };
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
     conversationRepo = new PgConversationRepository(pool);
     customerRepo = new PgCustomerRepository(pool);
+    leadRepo = new PgLeadRepository(pool);
     tenant = await createTestTenant(pool);
   });
 
@@ -100,6 +104,41 @@ describe('Postgres integration — U5 inbox thread listing', () => {
       metadata: { direction: 'inbound', channel: 'sms' },
     });
 
+    // A lead-linked thread (unknown-caller capture) — the lead's name is
+    // joined into the summary.
+    const now = new Date();
+    const lead: Lead = {
+      id: crypto.randomUUID(),
+      tenantId: tenant.tenantId,
+      firstName: 'Robin',
+      lastName: 'Rivera',
+      primaryPhone: '+15555559500',
+      source: 'phone_call',
+      sourceDetail: 'Inbound text',
+      stage: 'new',
+      createdBy: 'system:sms-capture',
+      createdAt: now,
+      updatedAt: now,
+    };
+    await leadRepo.create(lead);
+    const leadThread = await conversationRepo.createConversation({
+      tenantId: tenant.tenantId,
+      title: 'Robin Rivera',
+      entityType: 'lead',
+      entityId: lead.id,
+      createdBy: 'system:sms-capture',
+    });
+    await conversationRepo.addMessage({
+      tenantId: tenant.tenantId,
+      conversationId: leadThread.id,
+      messageType: 'text',
+      content: 'do you do drywall?',
+      senderId: '+15555559500',
+      senderRole: 'customer',
+      source: 'sms',
+      metadata: { direction: 'inbound', channel: 'sms' },
+    });
+
     // A non-comms (job) conversation — must be excluded.
     const jobThread = await conversationRepo.createConversation({
       tenantId: tenant.tenantId,
@@ -122,6 +161,7 @@ describe('Postgres integration — U5 inbox thread listing', () => {
 
     expect(ids).toContain(custThread.id);
     expect(ids).toContain(unmatched.id);
+    expect(ids).toContain(leadThread.id);
     expect(ids).not.toContain(jobThread.id);
 
     const cust = threads.find((t) => t.conversation.id === custThread.id)!;
@@ -133,6 +173,10 @@ describe('Postgres integration — U5 inbox thread listing', () => {
     const un = threads.find((t) => t.conversation.id === unmatched.id)!;
     expect(un.customerName).toBeUndefined();
     expect(un.needsReply).toBe(true);
+
+    const ld = threads.find((t) => t.conversation.id === leadThread.id)!;
+    expect(ld.customerName).toBe('Robin Rivera');
+    expect(ld.needsReply).toBe(true);
   });
 
   it('does not surface another tenant’s threads', async () => {

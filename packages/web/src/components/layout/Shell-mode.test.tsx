@@ -133,11 +133,13 @@ describe('P12-002 — Shell mode-aware nav + toggle visibility', () => {
     expect(screen.getAllByText('Interactions').length).toBeGreaterThan(0);
   });
 
-  it('keeps the supervisor sidebar at the Figma target of 10 items', () => {
+  it('keeps the supervisor sidebar to the curated set (10 Figma items + Messages)', () => {
     mockMe(buildMe({ current_mode: 'supervisor' }));
     renderShell();
     const sidebarLinks = document.querySelectorAll('aside nav a');
-    expect(sidebarLinks.length).toBe(10);
+    // 10 Figma items + the Messages (unified comms inbox) entry.
+    expect(sidebarLinks.length).toBe(11);
+    expect(screen.getAllByText('Messages').length).toBeGreaterThan(0);
     // Dispatch, Inbox, and Money intentionally live off the sidebar.
     expect(screen.queryByText('Dispatch')).toBeNull();
     expect(screen.queryByText('Money')).toBeNull();
