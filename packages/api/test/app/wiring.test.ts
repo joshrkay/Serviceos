@@ -36,6 +36,55 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     expect(src).toMatch(ternaryPattern);
   });
 
+  it('TechStatusToday repo wired through pool ternary', () => {
+    // U1 (P6-028) — the "I'm out today" idempotency store.
+    expect(src).toContain('PgTechStatusTodayRepository');
+    expect(src).toContain('InMemoryTechStatusTodayRepository');
+    expect(src).toMatch(
+      /pool\s*\?\s*new\s+PgTechStatusTodayRepository[\s\S]*?:\s*new\s+InMemoryTechStatusTodayRepository/m,
+    );
+  });
+
+  it('tech-status (OUT|SICK|UNAVAILABLE) keyword handler is registered', () => {
+    // U1 (P6-028) — guards against re-regression to "built but never wired":
+    // app.ts MUST call registerTechStatusKeywords or a verified tech's OUT SMS
+    // is silently dropped by the inbound dispatcher.
+    expect(src).toMatch(/registerTechStatusKeywords\(/);
+  });
+
+  it('held-slot reaper is scheduled under its own leader lock', () => {
+    // U6 — the reaper must own a distinct SWEEP_LOCK key and run via runAsLeader
+    // so concurrent instances don't double-cancel holds.
+    expect(src).toMatch(/holdReaper:\s*590015/);
+    expect(src).toMatch(/runAsLeader\(SWEEP_LOCK\.holdReaper/);
+    expect(src).toContain('runHoldReaperSweep');
+  });
+
+  it('supervisor agent is wired DEFAULT-ON with platform caps (U3)', () => {
+    // U3 — the gate must resolve supervisor_agent default-TRUE (opt-out kill
+    // switch), and the service must carry platform-default budget caps.
+    expect(src).toMatch(
+      /isEnabledForTenantWithDefault\(\s*tenantId,\s*'supervisor_agent',\s*true\s*\)/,
+    );
+    expect(src).toMatch(/defaultRules:\s*platformDefaultSupervisorRules/);
+  });
+
+  it('exactly one digest path remains; SWEEP_LOCK has no duplicate keys (U5)', () => {
+    // U5 — the redundant P5-020 hourly digest worker was deleted; only the
+    // RV-063 daily digest sweep remains.
+    expect(src).toContain('runDailyDigestSweep');
+    expect(src).not.toContain('runDigestSweep(');
+    expect(src).not.toMatch(/SWEEP_LOCK\.digest\b/);
+    // No two SWEEP_LOCK keys may share an advisory-lock value (the 590014
+    // digest/hfcrWeeklySend collision is resolved).
+    const block = src.slice(src.indexOf('const SWEEP_LOCK = {'));
+    const values = Array.from(block.slice(0, block.indexOf('} as const')).matchAll(/:\s*(\d{6})/g)).map(
+      (m) => m[1],
+    );
+    expect(values.length).toBeGreaterThan(0);
+    expect(new Set(values).size).toBe(values.length);
+  });
+
   it('graceful shutdown registers SIGTERM/SIGINT pool drain', () => {
     expect(src).toMatch(/process\.once\(\s*['"]SIGTERM['"]/);
     expect(src).toMatch(/process\.once\(\s*['"]SIGINT['"]/);

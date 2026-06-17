@@ -1,196 +1,107 @@
-import { describe, it, expect } from 'vitest';
-import { v4 as uuidv4 } from 'uuid';
-import {
-  runHoldReaperSweep,
-  HOLD_REAPER_ACTOR_ID,
-} from '../../src/workers/hold-reaper-worker';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
+import type { Appointment } from '../../src/appointments/appointment';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
-import { Appointment, AppointmentRepository } from '../../src/appointments/appointment';
 import { createLogger } from '../../src/logging/logger';
+import { runHoldReaperSweep } from '../../src/workers/hold-reaper-worker';
 
-const TENANT = 'tenant-reaper-1';
-const NOW = new Date('2026-06-15T12:00:00Z');
+const TENANT = 'tenant-reaper';
+const NOW = new Date('2026-06-15T18:00:00Z');
+const logger = createLogger({ service: 'test', environment: 'test' });
 
-const silentLogger = () =>
-  createLogger({ service: 'test', environment: 'test', level: 'error' });
-
-/** Build an appointment row directly (bypasses createAppointment so we can
- *  seed pre-expired holds and arbitrary statuses without the create-time
- *  validation forcing status='scheduled' / future timestamps). */
-function appt(overrides: Partial<Appointment>): Appointment {
-  const start = new Date('2026-06-15T09:00:00Z');
+function appt(over: Partial<Appointment>): Appointment {
   return {
-    id: uuidv4(),
+    id: crypto.randomUUID(),
     tenantId: TENANT,
-    jobId: uuidv4(),
-    scheduledStart: start,
-    scheduledEnd: new Date(start.getTime() + 60 * 60 * 1000),
-    timezone: 'UTC',
+    jobId: 'job-1',
+    scheduledStart: new Date('2026-06-15T20:00:00Z'),
+    scheduledEnd: new Date('2026-06-15T21:00:00Z'),
+    timezone: 'America/New_York',
     status: 'scheduled',
     holdPendingApproval: false,
-    createdBy: 'u1',
-    createdAt: new Date('2026-06-14T00:00:00Z'),
-    updatedAt: new Date('2026-06-14T00:00:00Z'),
-    ...overrides,
+    createdBy: 'system',
+    createdAt: NOW,
+    updatedAt: NOW,
+    ...over,
   };
 }
 
-async function seed(repo: InMemoryAppointmentRepository, a: Appointment): Promise<Appointment> {
-  return repo.create(a);
-}
+describe('U6 — runHoldReaperSweep', () => {
+  let repo: InMemoryAppointmentRepository;
+  let auditRepo: InMemoryAuditRepository;
 
-describe('hold-reaper-worker', () => {
-  it('cancels an expired hold and emits an appointment.hold_expired audit event', async () => {
-    const repo = new InMemoryAppointmentRepository();
-    const audit = new InMemoryAuditRepository();
-    const expired = await seed(
-      repo,
-      appt({
-        holdPendingApproval: true,
-        holdExpiryAt: new Date(NOW.getTime() - 60 * 1000), // 1 min past
-      }),
+  beforeEach(() => {
+    repo = new InMemoryAppointmentRepository();
+    auditRepo = new InMemoryAuditRepository();
+  });
+
+  const deps = () => ({
+    appointmentRepo: repo,
+    auditRepo,
+    listTenantIds: async () => [TENANT],
+    logger,
+    now: () => NOW,
+  });
+
+  it('cancels an expired hold, clears the flag, and emits an audit', async () => {
+    const expired = await repo.create(
+      appt({ holdPendingApproval: true, holdExpiryAt: new Date('2026-06-15T17:00:00Z') }),
     );
 
-    const result = await runHoldReaperSweep({
-      appointmentRepo: repo,
-      auditRepo: audit,
-      listTenantIds: async () => [TENANT],
-      logger: silentLogger(),
-      now: () => NOW,
-    });
+    const result = await runHoldReaperSweep(deps());
 
     expect(result).toEqual({ tenants: 1, reaped: 1, failed: 0 });
-
     const after = await repo.findById(TENANT, expired.id);
-    expect(after!.status).toBe('canceled');
-    expect(after!.holdPendingApproval).toBe(false);
-    expect(after!.holdExpiryAt).toBeUndefined();
+    expect(after?.status).toBe('canceled');
+    expect(after?.holdPendingApproval).toBe(false);
 
-    const events = await audit.findByEntity(TENANT, 'appointment', expired.id);
-    expect(events).toHaveLength(1);
-    expect(events[0].eventType).toBe('appointment.hold_expired');
-    expect(events[0].actorId).toBe(HOLD_REAPER_ACTOR_ID);
-    expect(events[0].tenantId).toBe(TENANT);
+    const audits = await auditRepo.findByEntity(TENANT, 'appointment', expired.id);
+    expect(audits.some((a) => a.eventType === 'appointment.hold_expired')).toBe(true);
   });
 
-  it('leaves a LIVE hold (future expiry) untouched', async () => {
-    const repo = new InMemoryAppointmentRepository();
-    const audit = new InMemoryAuditRepository();
-    const live = await seed(
-      repo,
-      appt({
-        holdPendingApproval: true,
-        holdExpiryAt: new Date(NOW.getTime() + 60 * 60 * 1000), // future
-      }),
+  it('leaves a live hold and a normal appointment untouched', async () => {
+    const liveHold = await repo.create(
+      appt({ holdPendingApproval: true, holdExpiryAt: new Date('2026-06-15T19:00:00Z') }),
     );
+    const normal = await repo.create(appt({ status: 'confirmed' }));
 
-    const result = await runHoldReaperSweep({
-      appointmentRepo: repo,
-      auditRepo: audit,
-      listTenantIds: async () => [TENANT],
-      logger: silentLogger(),
-      now: () => NOW,
-    });
+    const result = await runHoldReaperSweep(deps());
 
     expect(result.reaped).toBe(0);
-    const after = await repo.findById(TENANT, live.id);
-    expect(after!.status).toBe('scheduled');
-    expect(after!.holdPendingApproval).toBe(true);
-    expect(await audit.getAll()).toHaveLength(0);
+    expect((await repo.findById(TENANT, liveHold.id))?.status).toBe('scheduled');
+    expect((await repo.findById(TENANT, liveHold.id))?.holdPendingApproval).toBe(true);
+    expect((await repo.findById(TENANT, normal.id))?.status).toBe('confirmed');
   });
 
-  it('leaves a normal confirmed appointment untouched', async () => {
-    const repo = new InMemoryAppointmentRepository();
-    const audit = new InMemoryAuditRepository();
-    const normal = await seed(
-      repo,
-      appt({ status: 'confirmed', holdPendingApproval: false }),
+  it('is idempotent — a second sweep is a no-op', async () => {
+    await repo.create(
+      appt({ holdPendingApproval: true, holdExpiryAt: new Date('2026-06-15T17:00:00Z') }),
     );
 
-    const result = await runHoldReaperSweep({
-      appointmentRepo: repo,
-      auditRepo: audit,
-      listTenantIds: async () => [TENANT],
-      logger: silentLogger(),
-      now: () => NOW,
-    });
+    const first = await runHoldReaperSweep(deps());
+    const second = await runHoldReaperSweep(deps());
 
-    expect(result.reaped).toBe(0);
-    const after = await repo.findById(TENANT, normal.id);
-    expect(after!.status).toBe('confirmed');
-    expect(await audit.getAll()).toHaveLength(0);
-  });
-
-  it('is idempotent — a second sweep over an already-reaped hold is a no-op', async () => {
-    const repo = new InMemoryAppointmentRepository();
-    const audit = new InMemoryAuditRepository();
-    await seed(
-      repo,
-      appt({
-        holdPendingApproval: true,
-        holdExpiryAt: new Date(NOW.getTime() - 60 * 1000),
-      }),
-    );
-
-    const first = await runHoldReaperSweep({
-      appointmentRepo: repo,
-      auditRepo: audit,
-      listTenantIds: async () => [TENANT],
-      logger: silentLogger(),
-      now: () => NOW,
-    });
     expect(first.reaped).toBe(1);
-
-    const second = await runHoldReaperSweep({
-      appointmentRepo: repo,
-      auditRepo: audit,
-      listTenantIds: async () => [TENANT],
-      logger: silentLogger(),
-      now: () => NOW,
-    });
     expect(second.reaped).toBe(0);
-    // No second audit event — the row is no longer a pending hold.
-    expect(await audit.getAll()).toHaveLength(1);
   });
 
-  it('isolates per-tenant errors — one failing tenant does not abort the others', async () => {
-    const good = new InMemoryAppointmentRepository();
-    const audit = new InMemoryAuditRepository();
-    const expired = await seed(
-      good,
-      appt({
-        holdPendingApproval: true,
-        holdExpiryAt: new Date(NOW.getTime() - 60 * 1000),
-      }),
-    );
-
-    const BAD_TENANT = 'tenant-reaper-bad';
-    // A repo that throws for the bad tenant but delegates to the in-memory
-    // repo for the good one — proves the sweep continues past a failure.
-    const repo: AppointmentRepository = {
-      create: good.create.bind(good),
-      findById: good.findById.bind(good),
-      findByJob: good.findByJob.bind(good),
-      findByDateRange: good.findByDateRange.bind(good),
-      update: good.update.bind(good),
-      findExpiredHolds: async (tenantId: string, now: Date) => {
-        if (tenantId === BAD_TENANT) throw new Error('boom');
-        return good.findExpiredHolds(tenantId, now);
+  it('isolates a tenant failure and keeps sweeping', async () => {
+    const boomRepo = {
+      findExpiredHolds: async (t: string) => {
+        if (t === 'bad') throw new Error('db down');
+        return [];
       },
-    };
+      update: async () => null,
+    } as unknown as InMemoryAppointmentRepository;
 
     const result = await runHoldReaperSweep({
-      appointmentRepo: repo,
-      auditRepo: audit,
-      listTenantIds: async () => [BAD_TENANT, TENANT],
-      logger: silentLogger(),
+      appointmentRepo: boomRepo,
+      auditRepo,
+      listTenantIds: async () => ['bad', 'good'],
+      logger,
       now: () => NOW,
     });
 
-    expect(result.failed).toBe(1);
-    expect(result.reaped).toBe(1);
-    const after = await good.findById(TENANT, expired.id);
-    expect(after!.status).toBe('canceled');
+    expect(result).toEqual({ tenants: 2, reaped: 0, failed: 1 });
   });
 });

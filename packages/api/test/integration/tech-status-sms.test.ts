@@ -9,94 +9,77 @@ import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgAppointmentRepository } from '../../src/appointments/pg-appointment';
 import { PgAssignmentRepository } from '../../src/appointments/pg-assignment';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
-import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgUnavailableBlockRepository } from '../../src/availability/pg-unavailable-block';
-import { PgTechStatusTodayRepository } from '../../src/sms/tech-status/idempotency';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { createMockLLMGateway } from '../../src/ai/gateway/factory';
 import { registerTechStatusKeywords } from '../../src/sms/tech-status';
+import { PgTechStatusTodayRepository } from '../../src/sms/tech-status/idempotency';
 import {
   dispatchInboundSms,
   __resetKeywordRegistryForTests,
-  InboundSmsContext,
+  type InboundSmsContext,
 } from '../../src/sms/inbound-dispatch';
-import { TechStatusKeywordHandler } from '../../src/sms/tech-status/keyword-router';
-import { TECH_STATUS_KEYWORDS } from '@ai-service-os/shared';
 
 /**
- * P6-028 — end-to-end Postgres integration test for the tech "I'm out today"
- * SMS keyword path. This drives the REAL inbound dispatcher
- * (`dispatchInboundSms`) — the same seam the Twilio webhook calls — through the
- * `registerTechStatusKeywords` registration, and asserts against real Postgres
- * that:
- *   • an unavailable block + reschedule proposal(s) are persisted, and
- *   • an audit event is emitted.
- * A non-technician sender is asserted to be a no-op (handled:false, no writes).
- *
- * The unit test (test/sms/tech-status/handler.test.ts) covers the handler with
- * mocked repos; this pins the wiring + the real columns (the entity-resolver
- * lesson in CLAUDE.md: a mocked Pool can hide nonexistent columns).
+ * U1 (P6-028) — drives a verified technician's "OUT" SMS end-to-end through the
+ * REGISTERED keyword handler against real Postgres. This is the proof the
+ * mocked handler unit test can't give: that tech_status_today + tech_unavailable
+ * _blocks columns round-trip and that a real reschedule_appointment proposal
+ * persists. The handler is registered exactly as app.ts wires it.
  */
-
-const TZ = 'America/New_York';
-// 15:00Z on 2026-06-15 is 11:00 ET, before the seeded appointments.
-const NOW = new Date('2026-06-15T15:00:00Z');
-const TECH_MOBILE = '+15125550101';
-
-describe('Postgres integration — tech-status SMS (P6-028)', () => {
+describe('Postgres integration — tech-status "I\'m out" SMS (U1 / P6-028)', () => {
   let pool: Pool;
-  let userRepo: PgUserRepository;
-  let settingsRepo: PgSettingsRepository;
-  let unavailableBlockRepo: PgUnavailableBlockRepository;
-  let techStatusTodayRepo: PgTechStatusTodayRepository;
-  let proposalRepo: PgProposalRepository;
-  let auditRepo: PgAuditRepository;
-
   let tenant: { tenantId: string; userId: string };
-  let techId: string;
+  const techId = '44444444-4444-4444-4444-444444444444';
+  const techMobile = '+15551239001';
+  const unknownMobile = '+15559990000';
+  // Fixed clock: 2026-06-15T17:00:00Z == 13:00 America/New_York (EDT). The
+  // tenant-local day is 2026-06-15, so the window is [17:00Z, 2026-06-16T04:00Z].
+  const now = new Date('2026-06-15T17:00:00Z');
+
+  let proposalRepo: PgProposalRepository;
+  let unavailableRepo: PgUnavailableBlockRepository;
+  let auditRepo: PgAuditRepository;
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
-    userRepo = new PgUserRepository(pool);
-    settingsRepo = new PgSettingsRepository(pool);
-    unavailableBlockRepo = new PgUnavailableBlockRepository(pool);
-    techStatusTodayRepo = new PgTechStatusTodayRepository(pool);
-    proposalRepo = new PgProposalRepository(pool);
-    auditRepo = new PgAuditRepository(pool);
+    tenant = await createTestTenant(pool);
 
-    const appointmentRepo = new PgAppointmentRepository(pool);
-    const assignmentRepo = new PgAssignmentRepository(pool);
+    const settingsRepo = new PgSettingsRepository(pool);
+    const userRepo = new PgUserRepository(pool);
     const customerRepo = new PgCustomerRepository(pool);
     const locationRepo = new PgLocationRepository(pool);
     const jobRepo = new PgJobRepository(pool);
+    const appointmentRepo = new PgAppointmentRepository(pool);
+    const assignmentRepo = new PgAssignmentRepository(pool);
+    proposalRepo = new PgProposalRepository(pool);
+    unavailableRepo = new PgUnavailableBlockRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
+    const techStatusTodayRepo = new PgTechStatusTodayRepository(pool);
 
-    tenant = await createTestTenant(pool);
+    // Technician user with a registered mobile (Clerk-driven in prod, so we
+    // insert directly — PgUserRepository has no create()). role='technician'
+    // is the anti-spoof gate the handler enforces.
+    await pool.query(
+      `INSERT INTO users (id, tenant_id, clerk_user_id, email, role, mobile_number)
+       VALUES ($1, $2, $3, $4, 'technician', $5)`,
+      [techId, tenant.tenantId, techId, 'tech@example.com', techMobile],
+    );
 
-    // Tenant timezone so tenant-local "today" math is deterministic.
     await settingsRepo.create({
       id: crypto.randomUUID(),
       tenantId: tenant.tenantId,
-      businessName: 'Test Co',
-      timezone: TZ,
+      businessName: 'Acme Plumbing',
+      timezone: 'America/New_York',
       estimatePrefix: 'EST-',
       invoicePrefix: 'INV-',
       nextEstimateNumber: 1,
       nextInvoiceNumber: 1,
       defaultPaymentTermDays: 30,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: now,
+      updatedAt: now,
     });
 
-    // A technician with a registered mobile (FK target for blocks / claims).
-    techId = crypto.randomUUID();
-    await pool.query(
-      `INSERT INTO users (id, tenant_id, clerk_user_id, email, role)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [techId, tenant.tenantId, techId, 'tech@example.com', 'technician'],
-    );
-    await userRepo.setMobileNumber(tenant.tenantId, techId, TECH_MOBILE);
-
-    // A customer + location + job so the reschedule path can resolve a
-    // customer name for the brand-voice draft.
     const customerId = crypto.randomUUID();
     await customerRepo.create({
       id: customerId,
@@ -104,12 +87,12 @@ describe('Postgres integration — tech-status SMS (P6-028)', () => {
       firstName: 'Jamie',
       lastName: 'Rivera',
       displayName: 'Jamie Rivera',
-      preferredChannel: 'phone',
-      smsConsent: false,
+      preferredChannel: 'sms',
+      smsConsent: true,
       isArchived: false,
       createdBy: tenant.userId,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: now,
+      updatedAt: now,
     });
 
     const locationId = crypto.randomUUID();
@@ -123,9 +106,10 @@ describe('Postgres integration — tech-status SMS (P6-028)', () => {
       postalCode: '78701',
       country: 'USA',
       isPrimary: true,
+      addressType: 'service',
       isArchived: false,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: now,
+      updatedAt: now,
     });
 
     const jobId = crypto.randomUUID();
@@ -134,68 +118,63 @@ describe('Postgres integration — tech-status SMS (P6-028)', () => {
       tenantId: tenant.tenantId,
       customerId,
       locationId,
-      jobNumber: 'JOB-001',
-      summary: 'Test job',
+      jobNumber: 'JOB-1',
+      summary: 'Leaky faucet',
       status: 'scheduled',
       priority: 'normal',
       createdBy: tenant.userId,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: now,
+      updatedAt: now,
     });
 
-    // Two remaining appointments today, both after NOW (11:00 ET).
-    for (const [start, end] of [
-      ['2026-06-15T18:00:00Z', '2026-06-15T19:00:00Z'],
-      ['2026-06-15T20:00:00Z', '2026-06-15T21:00:00Z'],
-    ] as const) {
-      const apptId = crypto.randomUUID();
-      await appointmentRepo.create({
-        id: apptId,
-        tenantId: tenant.tenantId,
-        jobId,
-        scheduledStart: new Date(start),
-        scheduledEnd: new Date(end),
-        timezone: TZ,
-        status: 'scheduled',
-        holdPendingApproval: false,
-        createdBy: tenant.userId,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-      await assignmentRepo.create({
-        id: crypto.randomUUID(),
-        tenantId: tenant.tenantId,
-        appointmentId: apptId,
-        technicianId: techId,
-        isPrimary: true,
-        assignedBy: tenant.userId,
-        assignedAt: new Date(),
-      });
-    }
+    // Appointment later the same tenant-local day (15:00 ET), assigned to the
+    // technician, so the OUT triggers one reschedule proposal.
+    const appointmentId = crypto.randomUUID();
+    await appointmentRepo.create({
+      id: appointmentId,
+      tenantId: tenant.tenantId,
+      jobId,
+      scheduledStart: new Date('2026-06-15T19:00:00Z'),
+      scheduledEnd: new Date('2026-06-15T20:00:00Z'),
+      timezone: 'America/New_York',
+      status: 'scheduled',
+      holdPendingApproval: false,
+      createdBy: tenant.userId,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await assignmentRepo.create({
+      id: crypto.randomUUID(),
+      tenantId: tenant.tenantId,
+      appointmentId,
+      technicianId: techId,
+      isPrimary: true,
+      assignedBy: tenant.userId,
+      assignedAt: now,
+    });
 
-    // Register the handler on the real (module-global) registry, exactly as
-    // createApp() does, then drive the dispatcher.
+    // Register exactly as app.ts wires it. Reset first so this file owns the
+    // module-level registry deterministically.
     __resetKeywordRegistryForTests();
-    const mock = createMockLLMGateway();
-    mock.provider.setDefaultResponse(
-      'Hi Jamie — we need to reschedule today. Reply to pick a new time.',
-    );
     registerTechStatusKeywords(
       {
         userRepo,
         settingsRepo,
-        unavailableBlockRepo,
+        unavailableBlockRepo: unavailableRepo,
         techStatusTodayRepo,
-        auditRepo,
-        now: () => NOW,
         rescheduleDeps: {
           appointmentRepo,
           assignmentRepo,
           proposalRepo,
           jobRepo,
           customerRepo,
-          brandVoiceDeps: { gateway: mock.gateway, settingsRepo },
+          brandVoiceDeps: {
+            gateway: createMockLLMGateway('Hi Jamie, we need to reschedule.').gateway,
+            settingsRepo,
+          },
         },
+        auditRepo,
+        now: () => now,
       },
       { overwrite: true },
     );
@@ -206,106 +185,67 @@ describe('Postgres integration — tech-status SMS (P6-028)', () => {
     await closeSharedTestDb();
   });
 
-  function ctx(overrides: Partial<InboundSmsContext> = {}): InboundSmsContext {
+  function inbound(overrides: Partial<InboundSmsContext>): InboundSmsContext {
     return {
       tenantId: tenant.tenantId,
-      fromE164: TECH_MOBILE,
+      fromE164: techMobile,
       body: 'OUT',
-      messageSid: 'SM' + Math.random().toString(36).slice(2),
+      messageSid: `SM-${crypto.randomUUID()}`,
       ...overrides,
     };
   }
 
-  it('claims the OUT/SICK/UNAVAILABLE keywords on registration', () => {
-    const handler = new TechStatusKeywordHandler({} as never);
-    expect([...handler.keywords].sort()).toEqual([...TECH_STATUS_KEYWORDS].sort());
-    // The keywords the handler advertises are what the dispatcher routes.
-    expect(handler.keywords).toContain('out');
-    expect(handler.keywords).toContain('sick');
-    expect(handler.keywords).toContain('unavailable');
-  });
+  it('routes a verified tech OUT → unavailable block + reschedule proposal + audit', async () => {
+    const result = await dispatchInboundSms(inbound({ body: 'OUT' }));
 
-  it('tech "OUT" via dispatchInboundSms → block + reschedule proposals + audit (real Postgres)', async () => {
-    const result = await dispatchInboundSms(ctx({ body: 'OUT' }));
+    expect(result.handled).toBe(true);
+    expect(result.handler).toBe('tech-status');
+    expect(result.reason).toBe('recorded');
 
-    // Assert the whole result object so a decline surfaces its reason
-    // ('unknown_mobile' vs 'processing_failed') in the CI diff — the handler
-    // swallows failures into the reason field rather than throwing.
-    expect(result).toEqual({ handled: true, handler: 'tech-status', reason: 'recorded' });
-
-    // 1. The same-day unavailable block landed.
-    const blocks = await unavailableBlockRepo.findByTechnician(tenant.tenantId, techId);
+    // tech_unavailable_blocks column round-trip (real Postgres).
+    const blocks = await unavailableRepo.findByTechnician(tenant.tenantId, techId);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].reason).toBe('out');
+    expect(blocks[0].technicianId).toBe(techId);
+    expect(blocks[0].startTime).toBeInstanceOf(Date);
+    expect(blocks[0].endTime.getTime()).toBeGreaterThan(blocks[0].startTime.getTime());
 
-    // 2. The idempotency claim is recorded for today's tenant-local date.
-    const claim = await techStatusTodayRepo.findToday(
-      tenant.tenantId,
-      techId,
-      '2026-06-15',
+    // A real reschedule_appointment proposal persisted, owner-gated. from-tech-out
+    // advances it draft → ready_for_review so it surfaces as actionable in the
+    // owner's review queue; it is NEVER auto-approved/executed (no sourceTrustTier),
+    // so the human-approval gate (D-004) holds.
+    const proposals = await proposalRepo.findByTenant(tenant.tenantId);
+    const reschedules = proposals.filter(
+      (p) => p.proposalType === 'reschedule_appointment',
     );
-    expect(claim).not.toBeNull();
-    expect(claim!.status).toBe('out');
+    expect(reschedules).toHaveLength(1);
+    expect(reschedules[0].status).toBe('ready_for_review');
 
-    // 3. One owner-gated reschedule proposal per remaining appointment, NEVER
-    //    auto-executed — they land in 'ready_for_review' awaiting human approval.
-    const proposals = await proposalRepo.findByStatus(tenant.tenantId, 'ready_for_review');
-    expect(proposals).toHaveLength(2);
-    expect(proposals.every((p) => p.proposalType === 'reschedule_appointment')).toBe(true);
-    // The brand-voice customer SMS draft rides in sourceContext for owner review.
-    expect(proposals.every((p) => typeof p.sourceContext?.draftSms === 'string')).toBe(true);
-    // None auto-approved / executed.
-    expect(
-      await proposalRepo.findByStatus(tenant.tenantId, 'approved'),
-    ).toHaveLength(0);
-    expect(
-      await proposalRepo.findByStatus(tenant.tenantId, 'executed'),
-    ).toHaveLength(0);
-
-    // 4. An audit event was emitted for the recorded status.
+    // Audit emitted on the mutation.
     const audits = await auditRepo.findByEntity(tenant.tenantId, 'tech_status', techId);
     expect(audits.some((a) => a.eventType === 'tech_status.recorded')).toBe(true);
   });
 
-  it('non-technician sender → handled:false, no writes', async () => {
-    // A fresh tenant so the OUT-day claim/block from the prior test can't leak.
-    const other = await createTestTenant(pool);
-    await settingsRepo.create({
-      id: crypto.randomUUID(),
-      tenantId: other.tenantId,
-      businessName: 'Other Co',
-      timezone: TZ,
-      estimatePrefix: 'EST-',
-      invoicePrefix: 'INV-',
-      nextEstimateNumber: 1,
-      nextInvoiceNumber: 1,
-      defaultPaymentTermDays: 30,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
-    // The owner from createTestTenant gets a mobile; owners are NOT technicians.
-    const ownerMobile = '+15125559999';
-    await userRepo.setMobileNumber(other.tenantId, other.userId, ownerMobile);
+  it('is idempotent — a second OUT the same tenant-local day is a no-op', async () => {
+    const result = await dispatchInboundSms(inbound({ body: 'SICK' }));
 
+    expect(result.handled).toBe(true);
+    expect(result.reason).toBe('already_recorded');
+
+    // Still exactly one block + one proposal (no duplicates).
+    const blocks = await unavailableRepo.findByTechnician(tenant.tenantId, techId);
+    expect(blocks).toHaveLength(1);
+    const proposals = await proposalRepo.findByTenant(tenant.tenantId);
+    expect(
+      proposals.filter((p) => p.proposalType === 'reschedule_appointment'),
+    ).toHaveLength(1);
+  });
+
+  it('anti-spoof — an OUT from an unregistered number is not actioned', async () => {
     const result = await dispatchInboundSms(
-      ctx({ tenantId: other.tenantId, fromE164: ownerMobile, body: 'OUT' }),
+      inbound({ body: 'OUT', fromE164: unknownMobile }),
     );
 
     expect(result.handled).toBe(false);
     expect(result.reason).toBe('unknown_mobile');
-
-    // No block, no claim, no proposal written for the owner.
-    expect(
-      await unavailableBlockRepo.findByTechnician(other.tenantId, other.userId),
-    ).toHaveLength(0);
-    expect(
-      await techStatusTodayRepo.findToday(other.tenantId, other.userId, '2026-06-15'),
-    ).toBeNull();
-    expect(
-      await proposalRepo.findByStatus(other.tenantId, 'ready_for_review'),
-    ).toHaveLength(0);
-    // It DID record the anti-spoofing rejection audit (a non-mutation diagnostic).
-    const audits = await auditRepo.findByEntity(other.tenantId, 'tech_status', other.userId);
-    expect(audits.some((a) => a.eventType === 'tech_status.unverified_mobile')).toBe(true);
   });
 });

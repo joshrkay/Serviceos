@@ -142,12 +142,9 @@ export class PgAppointmentRepository extends PgBaseRepository implements Appoint
   }
 
   /**
-   * Tenant-scoped lookup of tentative holds past their expiry —
-   * `hold_pending_approval = true AND hold_expiry_at < now`. The WHERE
-   * predicate matches the migration-094 partial index
-   * `idx_appointments_hold_expiry ON appointments(tenant_id, hold_expiry_at)
-   * WHERE hold_pending_approval = true`, so the planner can satisfy the scan
-   * from the index. `now` is compared as a UTC instant (TIMESTAMPTZ).
+   * U6 — expired tentative holds. The predicate exactly matches the partial
+   * index `idx_appointments_hold_expiry (tenant_id, hold_expiry_at) WHERE
+   * hold_pending_approval = true`, so the planner uses it directly.
    */
   async findExpiredHolds(tenantId: string, now: Date): Promise<Appointment[]> {
     return this.withTenant(tenantId, async (client) => {
@@ -155,6 +152,7 @@ export class PgAppointmentRepository extends PgBaseRepository implements Appoint
         `SELECT * FROM appointments
          WHERE tenant_id = $1
            AND hold_pending_approval = true
+           AND hold_expiry_at IS NOT NULL
            AND hold_expiry_at < $2
          ORDER BY hold_expiry_at ASC`,
         [tenantId, now]

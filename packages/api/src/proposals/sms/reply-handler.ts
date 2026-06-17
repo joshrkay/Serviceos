@@ -241,6 +241,78 @@ async function recordInbound(
   );
 }
 
+/**
+ * U5 — bulk approve. Fans out over every ready_for_review proposal that a
+ * single texted Y could approve — capture-class AND not low-confidence — and
+ * delegates to the shared batch-approve path. Money / comms / irreversible /
+ * low-confidence proposals are EXCLUDED (same gates as handleApprove): they
+ * need deliberate in-app review and never slip through a blanket text.
+ *
+ * Scope note: this approves the currently-eligible set rather than an exact
+ * digest snapshot — for a solo owner replying to the digest the two coincide,
+ * and the per-proposal gates keep it safe. Idempotent by construction: an
+ * already-approved proposal leaves ready_for_review, so a repeated ALL (new
+ * MessageSid) re-approves nothing.
+ */
+async function handleApproveAll(
+  deps: ProposalSmsReplyDeps,
+  ctx: InboundSmsContext,
+): Promise<HandlerResult> {
+  const pending = await deps.proposalRepo.findByStatus(ctx.tenantId, 'ready_for_review');
+  const candidates = pending.filter(
+    (p) =>
+      actionClassForProposalType(p.proposalType) === 'capture' &&
+      !confidenceMetaBlocksAutoApprove(p.payload),
+  );
+  // Mirror the single-approve path's pending-edit guard: a proposal with an
+  // unapplied edit request still shows its STALE pre-edit payload, so a blanket
+  // ALL must not approve (and execute) it. Excluded here, not failed in the
+  // batch, so the owner gets an honest "approved N" count. The per-proposal
+  // lookups are parallelized (Promise.all) — the loop has no early exit, so
+  // sequential round-trips would add avoidable latency on the SMS webhook path.
+  const hasUnappliedEdit = await Promise.all(
+    candidates.map((p) => deps.smsEventRepo.hasUnappliedEditRequest(ctx.tenantId, p.id)),
+  );
+  const eligible = candidates.filter((_, idx) => !hasUnappliedEdit[idx]);
+
+  if (eligible.length === 0) {
+    await audit(deps, ctx, 'proposal.sms_approve_all_none', '', { pending: pending.length });
+    await reply(
+      deps,
+      ctx.fromE164,
+      'Nothing is waiting that I can approve in bulk. Open your review queue for anything that needs a closer look.',
+    );
+    return { handled: true, handler: HANDLER_NAME, reason: 'approve_all_none' };
+  }
+
+  const result = await approveProposalsBatch(
+    deps.proposalRepo,
+    ctx.tenantId,
+    eligible.map((p) => p.id),
+    SMS_REPLY_ACTOR_ID,
+    'owner',
+    deps.auditRepo,
+    'sms',
+  );
+
+  await audit(deps, ctx, 'proposal.sms_approved_all', '', {
+    requested: eligible.length,
+    approved: result.approved.length,
+    failed: result.failed.length,
+    excluded: pending.length - eligible.length,
+  });
+
+  const n = result.approved.length;
+  await reply(
+    deps,
+    ctx.fromE164,
+    n === eligible.length
+      ? `Approved all ${n} item${n === 1 ? '' : 's'} that were ready. ✅`
+      : `Approved ${n} of ${eligible.length} — the rest need a closer look. Check your review queue.`,
+  );
+  return { handled: true, handler: HANDLER_NAME, reason: 'approved_all' };
+}
+
 async function handleApprove(
   deps: ProposalSmsReplyDeps,
   ctx: InboundSmsContext,
@@ -375,101 +447,6 @@ function approvalConfirmation(
   );
 }
 
-/**
- * U5 (JTBD #7) — "APPROVE ALL" over the daily-digest transport.
- *
- * Resolves the most-recent outbound `digest_approve_all_rendered` anchor for
- * the tenant; its `body` carries the day's BATCH-APPROVABLE proposal ids
- * (money/comms/low-confidence proposals were excluded UPSTREAM in the
- * worker's buildApprovalLinks gates — they never entered this set). The
- * captured ids are delegated to the EXISTING P2-035 batch-approve path
- * (`approveProposalsBatch`), so every proposal still respects its action
- * class and undo window — no executor bypass, identical to the per-item
- * one-tap and inbox-batch routes.
- *
- * Guards reused from the rest of the transport:
- *   - identity (owner / backup mobile) is verified by the caller before this
- *     runs (`isApprover`);
- *   - idempotency: a duplicate webhook (same MessageSid) is dropped upstream;
- *     a RE-sent ALL (new MessageSid) re-approves nothing because each
- *     already-approved id fails the `approved → approved` transition guard
- *     inside `approveProposal` and is surfaced as `failed`, not re-executed;
- *   - the anchor must be the owner's LATEST outbound message — if an
- *     individual proposal render went out after the digest, an ALL reply is
- *     ambiguous and we decline rather than batch-approve a stale set.
- */
-async function handleApproveAll(
-  deps: ProposalSmsReplyDeps,
-  ctx: InboundSmsContext,
-): Promise<HandlerResult> {
-  const anchor = await deps.smsEventRepo.findRecentDigestApproveAll(ctx.tenantId);
-  if (!anchor) {
-    await audit(deps, ctx, 'proposal.sms_approve_all_no_anchor', '', {});
-    await reply(deps, ctx.fromE164, 'Nothing is waiting for your approval right now.');
-    return { handled: true, handler: HANDLER_NAME, reason: 'approve_all_no_anchor' };
-  }
-
-  // The digest anchor must be the owner's latest outbound message. If a single
-  // proposal render landed after it, "ALL" is ambiguous — decline rather than
-  // approve a stale day's set.
-  const [latestRender] = await deps.smsEventRepo.findRecentOutbound(ctx.tenantId, 1);
-  if (latestRender && isNewerThan(latestRender, anchor)) {
-    await audit(deps, ctx, 'proposal.sms_approve_all_superseded', anchor.proposalId, {
-      supersededByProposalId: latestRender.proposalId,
-    });
-    await reply(
-      deps,
-      ctx.fromE164,
-      'There’s a newer item waiting — reply Y to approve that one, or open the app to approve the rest.',
-    );
-    return { handled: true, handler: HANDLER_NAME, reason: 'approve_all_superseded' };
-  }
-
-  const ids = parseDigestApproveAllIds(anchor.body);
-  if (ids.length === 0) {
-    await audit(deps, ctx, 'proposal.sms_approve_all_empty', anchor.proposalId, {});
-    await reply(deps, ctx.fromE164, 'Nothing is waiting for your approval right now.');
-    return { handled: true, handler: HANDLER_NAME, reason: 'approve_all_empty' };
-  }
-
-  // Record the inbound decision for audit + transport history. proposal_id is
-  // the anchor's representative id (NOT NULL FK); the full set lives in the
-  // outbound anchor body.
-  await recordInbound(deps, ctx, anchor.proposalId, 'reply_approve');
-
-  // Delegate to the EXISTING batch path. No cross-proposal transaction:
-  // partial success is desired (each capture-class id the owner can approve
-  // is approved; anything already handled surfaces as `failed`).
-  const result = await approveProposalsBatch(
-    deps.proposalRepo,
-    ctx.tenantId,
-    ids,
-    SMS_REPLY_ACTOR_ID,
-    'owner',
-    deps.auditRepo,
-    'sms', // RV-073 — inbound SMS reply approval
-  );
-
-  const approvedCount = result.approved.length;
-  const failedCount = result.failed.length;
-  const confirmation =
-    approvedCount === 0
-      ? 'Those were already handled — nothing changed. Check your review queue for anything else.'
-      : failedCount > 0
-        ? `Approved ${approvedCount} — ${failedCount} were already handled or need the app.`
-        : `Approved all ${approvedCount} — they’ll run shortly.`;
-
-  await notifyBestEffort(
-    deps,
-    ctx,
-    anchor.proposalId,
-    'proposal.sms_approved_all',
-    { requested: ids.length, approvedCount, failedCount },
-    confirmation,
-  );
-
-  return { handled: true, handler: HANDLER_NAME, reason: 'approved_all' };
-}
 
 /** seq-aware recency: createdAt first, the monotonic seq breaks ms ties. */
 function isNewerThan(a: ProposalSmsEvent, b: ProposalSmsEvent): boolean {
@@ -614,10 +591,8 @@ export async function handleProposalSmsReply(
     return { handled: false, handler: HANDLER_NAME, reason: 'unrecognized_keyword' };
   }
 
-  // U5 (JTBD #7) — "APPROVE ALL" over the daily-digest transport. Resolves
-  // against the digest anchor (NOT a single proposal render) and delegates
-  // the captured batch-approvable ids to the P2-035 batch path. Handled
-  // before single-proposal targeting because the digest anchor binds a SET.
+  // U5 — "ALL" / "APPROVE ALL" is tenant-wide, not a single-render target, so
+  // it branches BEFORE the most-recent-render resolution.
   if (parsed.intent === 'approve_all') {
     return handleApproveAll(deps, ctx);
   }

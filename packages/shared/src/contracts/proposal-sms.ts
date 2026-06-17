@@ -63,15 +63,13 @@ export const REJECT_TOKENS = [
 export const EDIT_TOKENS = ['edit', 'change', 'modify', 'fix'] as const;
 
 /**
- * U5 (JTBD #7) — "APPROVE ALL" reply over the daily-digest transport. A
- * multi-item digest invites the owner to approve EVERY batch-approvable item
- * at once. Accepted as a bare `ALL`/`EVERYTHING` first token, or as the
- * composite `APPROVE ALL` (an APPROVE_TOKEN followed by `all`/`everything`).
- * The handler only delegates to the batch path when the owner's latest
- * outbound anchor is the digest anchor; otherwise it falls through to the
- * normal single-proposal approve.
+ * U5 — bulk-approve token. "ALL" (alone) or "APPROVE ALL" / "YES ALL" is a
+ * DELIBERATE bulk approval of everything currently one-tap-eligible (the same
+ * capture-class, confident set a single texted Y could approve). Distinct from
+ * `approve` so the handler fans out to the batch-approve path instead of the
+ * single most-recent-render target.
  */
-export const APPROVE_ALL_TOKENS = ['all', 'everything'] as const;
+export const APPROVE_ALL_TOKENS = ['all'] as const;
 
 const INTENT_BY_TOKEN: ReadonlyMap<string, ProposalSmsReplyIntent> = new Map([
   ...APPROVE_TOKENS.map((t) => [t, 'approve'] as const),
@@ -114,24 +112,19 @@ export function parseProposalSmsReply(body: string): ProposalSmsReply {
 
   const [first = '', ...rest] = trimmed.split(/\s+/);
   const token = bareToken(first.toLowerCase());
+  const restFirst = rest.length > 0 ? bareToken(rest[0].toLowerCase()) : '';
 
-  // U5 — bare `ALL` / `EVERYTHING`.
-  if (APPROVE_ALL_TOKEN_SET.has(token)) {
+  // Bulk approve: "ALL" alone, or an approve token followed by "all"
+  // ("APPROVE ALL", "YES ALL"). Checked before the single-intent lookup so the
+  // trailing "all" isn't mistaken for a one-proposal approve with remainder.
+  if (token === 'all') {
     return { intent: 'approve_all', remainder: rest.join(' ').trim() };
   }
-
-  // U5 — composite `APPROVE ALL` (an approve token immediately followed by
-  // `all`/`everything`). The bare-approve case (e.g. "APPROVE this") still
-  // resolves to plain `approve` below.
-  if (APPROVE_TOKEN_SET.has(token)) {
-    const second = bareToken((rest[0] ?? '').toLowerCase());
-    if (APPROVE_ALL_TOKEN_SET.has(second)) {
-      return { intent: 'approve_all', remainder: rest.slice(1).join(' ').trim() };
-    }
+  const firstIntent = INTENT_BY_TOKEN.get(token);
+  if (firstIntent === 'approve' && restFirst === 'all') {
+    return { intent: 'approve_all', remainder: rest.slice(1).join(' ').trim() };
   }
+  if (!firstIntent) return { intent: 'unrecognized', remainder: trimmed };
 
-  const intent = INTENT_BY_TOKEN.get(token);
-  if (!intent) return { intent: 'unrecognized', remainder: trimmed };
-
-  return { intent, remainder: rest.join(' ').trim() };
+  return { intent: firstIntent, remainder: rest.join(' ').trim() };
 }

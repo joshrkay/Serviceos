@@ -1,32 +1,28 @@
-import { Proposal, ProposalRepository, missingFieldsFor } from './proposal';
-import { transitionProposal } from './lifecycle';
-import { Role, hasPermission } from '../auth/rbac';
-import { ForbiddenError, ValidationError, NotFoundError } from '../shared/errors';
-import { AuditRepository, createAuditEvent } from '../audit/audit';
-import type { ConfidenceLevel } from '../ai/guardrails/confidence';
-import { lineItemConfidenceSignals } from '../ai/resolution/catalog-resolver';
-
 /**
- * P2-035 (U2) — resolve ONE ambiguous catalog line on a proposal by
- * picking a candidate the catalog resolver already surfaced.
+ * U2 (P2-035) — resolve an ambiguous catalog line.
  *
- * The catalog resolver (ai/resolution/catalog-resolver.ts) stamps an
- * 'ambiguous' line with `pricingSource:'ambiguous'`, adds
- * `lineItems[idx].catalogItemId` to the proposal's `missingFields`, and
- * stores the top candidates under `sourceContext.catalogResolution[idx]`
- * (`{ id, name, unitPriceCents, score }`, max 3). An uncertain match must
- * never silently set a price, so the operator picks the right item here.
+ * When the catalog resolver can't ground a drafted line to a single tenant SKU
+ * it marks the line `pricingSource: 'ambiguous'`, records the candidate SKUs
+ * under `sourceContext.catalogResolution[lineIndex]`, and adds
+ * `lineItems[i].catalogItemId` to `sourceContext.missingFields` — which keeps
+ * the proposal in `draft`. This service is the owner's one-tap resolution: it
+ * stamps the CHOSEN catalog item's price onto the line and, when nothing
+ * ambiguous remains, moves the proposal to `ready_for_review`.
  *
- * Catalog-grounding invariant (CLAUDE.md): only a candidate the resolver
- * surfaced is acceptable. A `catalogItemId` not in that list is rejected
- * (400) — we never accept an off-catalog price.
- *
- * This service patches the draft and stops at `ready_for_review`. It MUST
- * NOT approve or execute — D-004, human approval is still required.
+ * Invariants:
+ *  - Catalog grounding: the chosen `catalogItemId` MUST be one of the line's
+ *    own candidates — never an arbitrary off-catalog price (rejected 400).
+ *  - No auto-execute (D-004): resolution caps at `ready_for_review`; it never
+ *    approves or executes. Money proposals still need a deliberate approval.
+ *  - Integer cents: the stamped price is the catalog item's `unitPriceCents`.
+ *  - Audited: every resolution emits `proposal.line_resolved`.
  */
+import { Role, hasPermission } from '../auth/rbac';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { ForbiddenError, NotFoundError, ValidationError } from '../shared/errors';
+import { Proposal, ProposalRepository } from './proposal';
 
-/** The per-line candidate shape stored under `sourceContext.catalogResolution`. */
-interface StoredCatalogCandidate {
+interface CatalogCandidate {
   id: string;
   name: string;
   unitPriceCents: number;
@@ -34,208 +30,166 @@ interface StoredCatalogCandidate {
 }
 
 export interface ResolveLineInput {
+  tenantId: string;
+  proposalId: string;
   lineIndex: number;
   catalogItemId: string;
+  actorId: string;
+  actorRole: Role;
 }
 
-type CatalogResolutionMap = Record<string, StoredCatalogCandidate[]>;
-
-/** Read the per-line candidate list, tolerating the JSONB string/number key. */
-function candidatesForLine(
-  proposal: Proposal,
-  lineIndex: number,
-): StoredCatalogCandidate[] | undefined {
-  const ctx = proposal.sourceContext as Record<string, unknown> | undefined;
-  const resolution = ctx?.catalogResolution as CatalogResolutionMap | undefined;
-  if (!resolution || typeof resolution !== 'object') return undefined;
-  // catalogResolution is keyed by line index; JSON object keys are strings,
-  // so look up by both forms to be robust to how the row was serialized.
-  const byNum = resolution[lineIndex as unknown as keyof CatalogResolutionMap];
-  const byStr = resolution[String(lineIndex)];
-  const list = byNum ?? byStr;
-  return Array.isArray(list) ? list : undefined;
+export interface ResolveLineDeps {
+  proposalRepo: ProposalRepository;
+  auditRepo?: AuditRepository;
 }
 
-/**
- * Which price field this proposal's line items carry. The estimate
- * contract uses `unitPrice` (integer cents); the invoice contract
- * normalizes to `unitPriceCents` and carries `totalCents` per line.
- */
-function priceFieldFor(proposalType: string): 'unitPrice' | 'unitPriceCents' {
-  return proposalType === 'draft_invoice' || proposalType === 'update_invoice'
-    ? 'unitPriceCents'
-    : 'unitPrice';
+function asRecord(v: unknown): Record<string, unknown> {
+  return v !== null && typeof v === 'object' ? (v as Record<string, unknown>) : {};
 }
 
-/**
- * Recompute the payload `_meta` after a line is resolved: re-derive the
- * per-field signals / markers from the (mutated) line items via the same
- * `lineItemConfidenceSignals` the AI task uses (single source of truth —
- * the resolved ambiguity drops out automatically). `overallConfidence` is
- * downgraded to 'low' while any low-certainty line remains but is never
- * UPGRADED here — resolving a line removes uncertainty, it does not raise
- * the underlying model score, so we fall back to the prior overall level.
- */
-function recomputeMeta(
-  lineItems: Array<Record<string, unknown>>,
-  priceField: 'unitPrice' | 'unitPriceCents',
-  priorOverall: ConfidenceLevel | undefined,
-): {
-  overallConfidence: ConfidenceLevel;
-  fieldConfidence?: Record<string, ConfidenceLevel>;
-  markers?: Array<{ path: string; reason: string }>;
-} {
-  const { fieldConfidence, markers } = lineItemConfidenceSignals(lineItems, priceField);
-
-  // Any remaining low-certainty line keeps the proposal at 'low'. With none
-  // left, fall back to the prior overall level (resolving a line never
-  // *raises* the underlying model confidence). Default 'medium' when unknown.
-  const overallConfidence: ConfidenceLevel =
-    markers.length > 0 ? 'low' : (priorOverall ?? 'medium');
-
-  return {
-    overallConfidence,
-    ...(Object.keys(fieldConfidence).length > 0 ? { fieldConfidence } : {}),
-    ...(markers.length > 0 ? { markers } : {}),
-  };
+/** Drop the resolved line's marker from `_meta.markers`, leaving the rest. */
+function recomputeMeta(meta: unknown, lineIndex: number): Record<string, unknown> | undefined {
+  if (meta === null || typeof meta !== 'object') return undefined;
+  const m = { ...(meta as Record<string, unknown>) };
+  const markers = m.markers;
+  if (Array.isArray(markers)) {
+    const prefix = `lineItems[${lineIndex}]`;
+    m.markers = markers.filter((mk) => {
+      const path = asRecord(mk).path;
+      return typeof path !== 'string' || !path.startsWith(prefix);
+    });
+  }
+  return m;
 }
 
-/**
- * Resolve a single ambiguous catalog line, stamping the chosen candidate's
- * price (integer cents, never a float) and moving the proposal to
- * `ready_for_review` once no required fields remain. Never approves.
- */
 export async function resolveProposalLine(
-  proposalRepo: ProposalRepository,
-  tenantId: string,
-  proposalId: string,
-  actorId: string,
-  actorRole: Role,
   input: ResolveLineInput,
-  auditRepo?: AuditRepository,
+  deps: ResolveLineDeps,
 ): Promise<Proposal> {
+  const { tenantId, proposalId, lineIndex, catalogItemId, actorId, actorRole } = input;
+
+  // Same authority as approving — resolving a line patches a draft the owner
+  // will then approve.
   if (!hasPermission(actorRole, 'proposals:approve')) {
     throw new ForbiddenError();
   }
+  if (!Number.isInteger(lineIndex) || lineIndex < 0) {
+    throw new ValidationError('lineIndex must be a non-negative integer');
+  }
+  if (typeof catalogItemId !== 'string' || catalogItemId.length === 0) {
+    throw new ValidationError('catalogItemId is required');
+  }
 
-  const { lineIndex, catalogItemId } = input;
-
-  const proposal = await proposalRepo.findById(tenantId, proposalId);
+  const proposal = await deps.proposalRepo.findById(tenantId, proposalId);
   if (!proposal) {
     throw new NotFoundError('Proposal', proposalId);
   }
-
-  const lineItems = proposal.payload.lineItems;
-  if (!Array.isArray(lineItems) || lineIndex < 0 || lineIndex >= lineItems.length) {
-    throw new ValidationError(`Invalid lineIndex ${lineIndex} for proposal ${proposalId}`);
-  }
-
-  // Catalog-grounding guard: the chosen item MUST be one the resolver
-  // surfaced for this line. Without candidates there is nothing to resolve;
-  // a catalogItemId outside the list would accept an off-catalog price.
-  const candidates = candidatesForLine(proposal, lineIndex);
-  if (!candidates || candidates.length === 0) {
+  // Only a proposal still under review can be patched — never one already
+  // approved/executed (that would mutate an in-flight or committed action).
+  if (proposal.status !== 'draft' && proposal.status !== 'ready_for_review') {
     throw new ValidationError(
-      `Line ${lineIndex} has no ambiguous catalog candidates to resolve`,
+      `Cannot resolve a line on a proposal in '${proposal.status}' status`,
     );
   }
+
+  const payload = asRecord(proposal.payload);
+  const lineItems = Array.isArray(payload.lineItems)
+    ? [...(payload.lineItems as Array<Record<string, unknown>>)]
+    : [];
+  if (lineIndex >= lineItems.length) {
+    throw new ValidationError(`lineIndex ${lineIndex} is out of range`);
+  }
+
+  const sourceContext = asRecord(proposal.sourceContext);
+  const catalogResolution = asRecord(sourceContext.catalogResolution) as Record<
+    string,
+    CatalogCandidate[]
+  >;
+  const candidates = catalogResolution[String(lineIndex)];
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    throw new ValidationError(`Line ${lineIndex} is not awaiting a catalog choice`);
+  }
+
+  // Catalog-grounding invariant: the choice must be one of THIS line's
+  // candidates — never an arbitrary off-catalog price.
   const chosen = candidates.find((c) => c.id === catalogItemId);
   if (!chosen) {
     throw new ValidationError(
-      `catalogItemId '${catalogItemId}' is not among the candidates for line ${lineIndex}`,
-      { candidateIds: candidates.map((c) => c.id) },
+      'catalogItemId is not among this line’s candidates',
     );
   }
 
-  const priceField = priceFieldFor(proposal.proposalType);
-
-  // Stamp the catalog price (integer cents) onto the chosen line and mark
-  // it catalog-grounded. Clone so we never mutate the stored payload object.
-  const nextLineItems = lineItems.map((li, idx) => {
-    if (idx !== lineIndex) return li as Record<string, unknown>;
-    const line = li as Record<string, unknown>;
-    const next: Record<string, unknown> = {
-      ...line,
-      description: chosen.name,
-      [priceField]: chosen.unitPriceCents,
-      catalogItemId: chosen.id,
-      pricingSource: 'catalog',
-      needsPricing: false,
-    };
-    if (priceField === 'unitPriceCents') {
-      const qty = Number(line.quantity ?? 1) || 1;
-      next.totalCents = Math.round(chosen.unitPriceCents * qty);
-    }
-    return next;
-  });
-
-  // Clear THIS line's missingField entry (other unresolved lines stay).
-  const resolvedField = `lineItems[${lineIndex}].catalogItemId`;
-  const remainingMissing = missingFieldsFor(proposal).filter((f) => f !== resolvedField);
-
-  // Drop this line from the stored candidate map so the UI no longer offers
-  // a picker for an already-resolved line.
-  const ctx = (proposal.sourceContext ?? {}) as Record<string, unknown>;
-  const priorResolution = (ctx.catalogResolution ?? {}) as CatalogResolutionMap;
-  const nextResolution: CatalogResolutionMap = {};
-  for (const [key, value] of Object.entries(priorResolution)) {
-    if (key !== String(lineIndex)) nextResolution[key] = value;
+  // Stamp the catalog item onto the line. Estimate lines carry the integer-
+  // cents price in `unitPrice`; invoice lines in `unitPriceCents` (and a
+  // recomputed `totalCents`).
+  const line: Record<string, unknown> = { ...lineItems[lineIndex] };
+  // Pick the contract's price field. Estimate lines carry integer cents in
+  // `unitPrice`; invoice lines in `unitPriceCents` (+ a recomputed totalCents).
+  // An ambiguous line the LLM left price-less has NEITHER field, so we can't
+  // infer from this line alone — look at sibling lines (an invoice payload
+  // prices its other lines in unitPriceCents) and fall back to the proposal
+  // type. Guessing wrong would strand the resolved price on a field the
+  // executor never reads.
+  const usesCents =
+    'unitPriceCents' in line ||
+    lineItems.some((li) => li && typeof li === 'object' && 'unitPriceCents' in li) ||
+    /invoice/.test(proposal.proposalType);
+  const priceField = usesCents ? 'unitPriceCents' : 'unitPrice';
+  line[priceField] = chosen.unitPriceCents;
+  line.catalogItemId = chosen.id;
+  line.description = chosen.name;
+  line.pricingSource = 'catalog';
+  line.needsPricing = false;
+  if (priceField === 'unitPriceCents') {
+    // Guard NaN/missing without rebounding a legitimate quantity of 0 to 1
+    // (which `Number(...) || 1` would do, mispricing a zero-qty line).
+    const parsedQty = Number(line.quantity ?? 1);
+    const qty = Number.isNaN(parsedQty) ? 1 : parsedQty;
+    line.totalCents = Math.round(chosen.unitPriceCents * qty);
   }
+  lineItems[lineIndex] = line;
 
-  // Recompute `_meta` from the mutated lines — the resolved ambiguity drops
-  // out, and overallConfidence is re-derived from what remains.
-  const priorMeta = proposal.payload._meta as
-    | { overallConfidence?: ConfidenceLevel }
-    | undefined;
-  const nextMeta = recomputeMeta(
-    nextLineItems as Array<Record<string, unknown>>,
-    priceField,
-    priorMeta?.overallConfidence,
-  );
+  // Drop this line's missingField + its candidate set (it's resolved now).
+  const remainingMissing = (
+    Array.isArray(sourceContext.missingFields)
+      ? (sourceContext.missingFields as string[])
+      : []
+  ).filter((f) => f !== `lineItems[${lineIndex}].catalogItemId`);
+  const nextCatalogResolution = { ...catalogResolution };
+  delete nextCatalogResolution[String(lineIndex)];
 
-  const nextSourceContext: Record<string, unknown> = {
-    ...ctx,
-    ...(remainingMissing.length > 0 ? { missingFields: remainingMissing } : {}),
-    ...(Object.keys(nextResolution).length > 0
-      ? { catalogResolution: nextResolution }
-      : {}),
-  };
-  // Strip emptied keys so a fully-resolved proposal carries no stale signal.
-  if (remainingMissing.length === 0) delete nextSourceContext.missingFields;
-  if (Object.keys(nextResolution).length === 0) delete nextSourceContext.catalogResolution;
-
+  const nextMeta = recomputeMeta(payload._meta, lineIndex);
   const nextPayload: Record<string, unknown> = {
-    ...proposal.payload,
-    lineItems: nextLineItems,
-    _meta: nextMeta,
+    ...payload,
+    lineItems,
+    ...(nextMeta ? { _meta: nextMeta } : {}),
+  };
+  const nextSourceContext: Record<string, unknown> = {
+    ...sourceContext,
+    missingFields: remainingMissing,
+    catalogResolution: nextCatalogResolution,
   };
 
-  const updated = await proposalRepo.update(tenantId, proposalId, {
+  await deps.proposalRepo.update(tenantId, proposalId, {
     payload: nextPayload,
     sourceContext: nextSourceContext,
   });
-  if (!updated) {
-    throw new NotFoundError('Proposal', proposalId);
-  }
 
-  // Move to ready_for_review IFF nothing is still missing AND we're in
-  // 'draft'. NEVER approve/execute — D-004, a human still confirms. A
-  // proposal already in 'ready_for_review' stays there; other statuses are
-  // left untouched (this path only resolves draftable proposals).
-  let finalProposal = updated;
-  if (remainingMissing.length === 0 && updated.status === 'draft') {
-    const transitioned = transitionProposal(updated, 'ready_for_review', actorId);
-    const promoted = await proposalRepo.updateStatus(
+  // Once nothing ambiguous remains, surface it for approval — but NEVER
+  // approve/execute it (D-004). A money proposal still waits for a deliberate
+  // tap.
+  let finalProposal: Proposal | null = null;
+  if (remainingMissing.length === 0 && proposal.status === 'draft') {
+    finalProposal = await deps.proposalRepo.updateStatus(
       tenantId,
       proposalId,
       'ready_for_review',
+      {},
     );
-    // transitioned drives the in-memory shape; updateStatus persists it.
-    finalProposal = promoted ?? { ...updated, status: transitioned.status };
   }
 
-  if (auditRepo) {
-    await auditRepo.create(
+  if (deps.auditRepo) {
+    await deps.auditRepo.create(
       createAuditEvent({
         tenantId,
         actorId,
@@ -244,16 +198,19 @@ export async function resolveProposalLine(
         entityType: 'proposal',
         entityId: proposalId,
         metadata: {
-          proposalType: finalProposal.proposalType,
-          status: finalProposal.status,
           lineIndex,
           catalogItemId,
           unitPriceCents: chosen.unitPriceCents,
-          remainingMissingFields: remainingMissing,
+          remainingMissingFields: remainingMissing.length,
+          movedToReview: finalProposal !== null,
         },
       }),
     );
   }
 
-  return finalProposal;
+  // Re-read so the response reflects both the payload patch and any status
+  // transition (the updateStatus result above only fires on the draft→review
+  // path).
+  const fresh = await deps.proposalRepo.findById(tenantId, proposalId);
+  return fresh ?? finalProposal ?? proposal;
 }

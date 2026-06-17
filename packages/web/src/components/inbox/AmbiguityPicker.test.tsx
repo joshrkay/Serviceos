@@ -1,58 +1,64 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { AmbiguityPicker, AmbiguityCandidate } from './AmbiguityPicker';
+import { AmbiguityPicker, type AmbiguityCandidate } from './AmbiguityPicker';
 
 const candidates: AmbiguityCandidate[] = [
-  { id: 'item-1', name: '50-gal Water Heater', unitPriceCents: 120000, score: 0.74 },
-  { id: 'item-2', name: '40-gal Water Heater', unitPriceCents: 95000, score: 0.71 },
+  { id: 'cat-a', name: 'Flush valve (standard)', unitPriceCents: 4500, score: 0.7 },
+  { id: 'cat-b', name: 'Flush valve (premium)', unitPriceCents: 8200, score: 0.6 },
 ];
 
-function renderPicker(onResolve: AmbiguityPickerProps['onResolve']) {
-  return render(
-    <AmbiguityPicker
-      lineIndex={0}
-      description="water heater"
-      candidates={candidates}
-      onResolve={onResolve}
-    />,
-  );
-}
-type AmbiguityPickerProps = Parameters<typeof AmbiguityPicker>[0];
-
-describe('P2-035 (U2) AmbiguityPicker', () => {
-  it('renders one chip per candidate with its catalog price', () => {
-    renderPicker(vi.fn().mockResolvedValue(undefined));
-    expect(screen.getByTestId('ambiguity-candidate-item-1')).toHaveTextContent('50-gal Water Heater');
-    expect(screen.getByTestId('ambiguity-candidate-item-1')).toHaveTextContent('$1,200.00');
-    expect(screen.getByTestId('ambiguity-candidate-item-2')).toHaveTextContent('$950.00');
+describe('AmbiguityPicker (U2)', () => {
+  it('renders each candidate as a one-tap chip with its formatted price', () => {
+    render(
+      <AmbiguityPicker lineDescription="flush valve" candidates={candidates} onPick={vi.fn()} />,
+    );
+    expect(screen.getByText(/Which item for/)).toHaveTextContent('flush valve');
+    const options = screen.getAllByTestId('ambiguity-option');
+    expect(options).toHaveLength(2);
+    expect(options[0]).toHaveTextContent('Flush valve (standard)');
+    expect(options[0]).toHaveTextContent('$45.00');
+    expect(options[1]).toHaveTextContent('$82.00');
   });
 
-  it('fires onResolve with the line index + chosen catalogItemId on pick', async () => {
-    const onResolve = vi.fn().mockResolvedValue(undefined);
-    renderPicker(onResolve);
-    fireEvent.click(screen.getByTestId('ambiguity-candidate-item-2'));
-    await waitFor(() => expect(onResolve).toHaveBeenCalledWith(0, 'item-2'));
+  it('class contract — each option is a ≥44px tap target that cannot overflow at 320px', () => {
+    render(
+      <AmbiguityPicker lineDescription="flush valve" candidates={candidates} onPick={vi.fn()} />,
+    );
+    for (const option of screen.getAllByTestId('ambiguity-option')) {
+      // 44px minimum height (min-h-11) is the mobile tap-target floor.
+      expect(option.className).toContain('min-h-11');
+      // w-full + a truncating label keep the row inside a 320px viewport.
+      expect(option.className).toContain('w-full');
+    }
+    expect(screen.getByText('Flush valve (standard)').className).toContain('truncate');
   });
 
-  it('reverts (no stuck state, shows error) when the resolve fails', async () => {
-    const onResolve = vi.fn().mockRejectedValue(new Error('HTTP 500'));
-    renderPicker(onResolve);
-    fireEvent.click(screen.getByTestId('ambiguity-candidate-item-1'));
-
-    // Error surfaces and the chips are interactive again (not disabled),
-    // so the operator can retry — the optimistic pick was reverted.
-    await waitFor(() => expect(screen.getByTestId('ambiguity-picker-error')).toBeInTheDocument());
-    expect(screen.getByTestId('ambiguity-candidate-item-1')).not.toBeDisabled();
-    expect(screen.getByTestId('ambiguity-candidate-item-2')).not.toBeDisabled();
-
-    // A retry can fire again.
-    fireEvent.click(screen.getByTestId('ambiguity-candidate-item-2'));
-    await waitFor(() => expect(onResolve).toHaveBeenCalledTimes(2));
+  it('invokes onPick with the chosen catalog item id', async () => {
+    const onPick = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AmbiguityPicker lineDescription="flush valve" candidates={candidates} onPick={onPick} />,
+    );
+    fireEvent.click(screen.getByText('Flush valve (premium)'));
+    await waitFor(() => expect(onPick).toHaveBeenCalledWith('cat-b'));
   });
 
-  it('uses ≥44px (min-h-11) tap targets on the candidate chips', () => {
-    renderPicker(vi.fn().mockResolvedValue(undefined));
-    expect(screen.getByTestId('ambiguity-candidate-item-1').className).toContain('min-h-11');
-    expect(screen.getByTestId('ambiguity-candidate-item-2').className).toContain('min-h-11');
+  it('disables every option while a pick is in flight, then re-enables on failure', async () => {
+    let reject!: (e: Error) => void;
+    const onPick = vi.fn().mockReturnValue(new Promise((_res, rej) => { reject = rej; }));
+    render(
+      <AmbiguityPicker lineDescription="flush valve" candidates={candidates} onPick={onPick} />,
+    );
+    fireEvent.click(screen.getByText('Flush valve (standard)'));
+    await waitFor(() => {
+      for (const o of screen.getAllByTestId('ambiguity-option')) {
+        expect(o).toBeDisabled();
+      }
+    });
+    reject(new Error('boom'));
+    await waitFor(() => {
+      for (const o of screen.getAllByTestId('ambiguity-option')) {
+        expect(o).not.toBeDisabled();
+      }
+    });
   });
 });

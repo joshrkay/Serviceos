@@ -1268,157 +1268,115 @@ describe('Track E — SMS edit refused when the delta touches an unresolved chai
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// U5 (JTBD #7) — "APPROVE ALL" over the daily-digest transport.
-//
-// The digest worker records a `digest_approve_all_rendered` anchor whose body
-// encodes the day's batch-approvable proposal ids. An inbound ALL / APPROVE
-// ALL from a verified approver delegates the SET to the P2-035 batch path
-// (each id still goes through approveProposal — no executor bypass). A
-// non-owner is ignored; a re-sent ALL re-executes nothing.
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('handleProposalSmsReply — APPROVE ALL (U5)', () => {
-  async function seedDigestApproveAllAnchor(
+describe('handleProposalSmsReply — approve_all (U5 "ALL" / "APPROVE ALL")', () => {
+  async function seedReady(
     h: Harness,
-    count: number,
-    renderedAt?: Date,
-  ): Promise<Proposal[]> {
-    const proposals: Proposal[] = [];
-    for (let i = 0; i < count; i++) {
-      const base = createProposal({
-        tenantId: TENANT,
-        proposalType: 'create_appointment',
-        payload: {
-          jobId: '6f9619ff-8b86-d011-b42d-00c04fc964ff',
-          customerName: `Customer ${i}`,
-          scheduledStart: '2026-06-16T19:00:00Z',
-          scheduledEnd: '2026-06-16T20:00:00Z',
-        },
-        summary: `Book Customer ${i}`,
-        confidenceScore: 0.97,
-        createdBy: 'voice',
-      });
-      proposals.push(await h.proposalRepo.create({ ...base, status: 'ready_for_review' }));
-    }
-    const ids = proposals.map((p) => p.id);
-    await h.smsEventRepo.create(
-      createProposalSmsEvent({
-        tenantId: TENANT,
-        proposalId: ids[0],
-        direction: 'outbound',
-        kind: 'digest_approve_all_rendered',
-        body: encodeDigestApproveAllBody(ids),
-        ...(renderedAt ? { now: renderedAt } : {}),
-      }),
-    );
-    return proposals;
+    overrides: Partial<Parameters<typeof createProposal>[0]>,
+    metaOverride?: Record<string, unknown>,
+  ): Promise<Proposal> {
+    const base = createProposal({
+      tenantId: TENANT,
+      proposalType: 'create_appointment',
+      payload: { jobId: '6f9619ff-8b86-d011-b42d-00c04fc964ff', customerName: 'A' },
+      summary: 'seed',
+      confidenceScore: 0.97,
+      createdBy: 'voice',
+      ...overrides,
+    });
+    const payload = metaOverride
+      ? { ...(base.payload as Record<string, unknown>), _meta: metaOverride }
+      : base.payload;
+    return h.proposalRepo.create({ ...base, status: 'ready_for_review', payload });
   }
 
-  it.each(['ALL', 'all', 'APPROVE ALL', 'approve everything', 'Yes, all!'])(
-    'approves every batch-approvable proposal on %s',
-    async (token) => {
-      const h = makeHarness();
-      const proposals = await seedDigestApproveAllAnchor(h, 3);
-
-      const result = await handleProposalSmsReply(ctx(token), h.deps);
-
-      expect(result).toMatchObject({ handled: true, reason: 'approved_all' });
-      for (const p of proposals) {
-        const updated = await h.proposalRepo.findById(TENANT, p.id);
-        expect(updated?.status).toBe('approved');
-        expect(updated?.approvedAt).toBeInstanceOf(Date);
-      }
-      // One confirmation SMS, naming the count.
-      expect(h.sent).toHaveLength(1);
-      expect(h.sent[0].to).toBe(OWNER_PHONE);
-      expect(h.sent[0].body).toContain('Approved all 3');
-      // Each approval went through the standard path → channel 'sms'.
-      const approvedEvents = h.auditRepo.getAll().filter((e) => e.eventType === 'proposal.approved');
-      expect(approvedEvents).toHaveLength(3);
-      expect(approvedEvents.every((e) => (e.metadata as { channel?: string }).channel === 'sms')).toBe(true);
-      expect(h.auditRepo.getAll().map((e) => e.eventType)).toContain('proposal.sms_approved_all');
-    },
-  );
-
-  it('ignores APPROVE ALL from an unknown mobile (anti-spoofing)', async () => {
+  it('approves every eligible capture-class proposal; excludes money + low-confidence', async () => {
     const h = makeHarness();
-    const proposals = await seedDigestApproveAllAnchor(h, 2);
-
-    const result = await handleProposalSmsReply(
-      ctx('ALL', { fromE164: '+15125559999' }),
-      h.deps,
+    const a = await seedReady(h, { proposalType: 'create_appointment' });
+    const b = await seedReady(h, { proposalType: 'create_customer', payload: { name: 'B' } });
+    const money = await seedReady(h, {
+      proposalType: 'issue_invoice',
+      payload: { invoiceId: 'i-1', totalCents: 50_000 },
+    });
+    const lowConf = await seedReady(
+      h,
+      { proposalType: 'create_appointment' },
+      { overallConfidence: 'low' },
     );
-
-    expect(result).toMatchObject({ handled: false, reason: 'unknown_mobile' });
-    for (const p of proposals) {
-      expect((await h.proposalRepo.findById(TENANT, p.id))?.status).toBe('ready_for_review');
-    }
-    expect(h.sent).toHaveLength(0);
-    expect(h.auditRepo.getAll().map((e) => e.eventType)).not.toContain('proposal.approved');
-  });
-
-  it('a re-sent APPROVE ALL (new sid) re-executes nothing', async () => {
-    const h = makeHarness();
-    const proposals = await seedDigestApproveAllAnchor(h, 2);
-
-    const first = await handleProposalSmsReply(ctx('ALL'), h.deps);
-    expect(first).toMatchObject({ handled: true, reason: 'approved_all' });
-    const firstApprovals = h.auditRepo.getAll().filter((e) => e.eventType === 'proposal.approved');
-    expect(firstApprovals).toHaveLength(2);
-
-    // Second ALL with a fresh MessageSid: nothing transitions again.
-    const second = await handleProposalSmsReply(ctx('ALL'), h.deps);
-    expect(second).toMatchObject({ handled: true, reason: 'approved_all' });
-    // No NEW proposal.approved events — the status guard fails closed.
-    const totalApprovals = h.auditRepo.getAll().filter((e) => e.eventType === 'proposal.approved');
-    expect(totalApprovals).toHaveLength(2);
-    // Truthful "already handled" confirmation on the re-send.
-    expect(h.sent[1].body).toContain('already handled');
-  });
-
-  it('declines (no approval) when the digest anchor is not the latest outbound message', async () => {
-    const h = makeHarness();
-    // Digest anchor at T0; a newer individual proposal render at T1.
-    const batch = await seedDigestApproveAllAnchor(h, 2, new Date('2026-06-11T15:00:00Z'));
-    const newer = await seedPendingProposal(h, TENANT, {}, new Date('2026-06-11T15:05:00Z'));
-
-    const result = await handleProposalSmsReply(ctx('ALL'), h.deps);
-
-    expect(result).toMatchObject({ handled: true, reason: 'approve_all_superseded' });
-    // Nothing approved — the digest set is stale and the newer item is ambiguous.
-    for (const p of batch) {
-      expect((await h.proposalRepo.findById(TENANT, p.id))?.status).toBe('ready_for_review');
-    }
-    expect((await h.proposalRepo.findById(TENANT, newer.id))?.status).toBe('ready_for_review');
-    expect(h.auditRepo.getAll().map((e) => e.eventType)).not.toContain('proposal.approved');
-    expect(h.auditRepo.getAll().map((e) => e.eventType)).toContain('proposal.sms_approve_all_superseded');
-  });
-
-  it('replies "nothing waiting" when there is no digest anchor', async () => {
-    const h = makeHarness();
-
-    const result = await handleProposalSmsReply(ctx('ALL'), h.deps);
-
-    expect(result).toMatchObject({ handled: true, reason: 'approve_all_no_anchor' });
-    expect(h.sent).toHaveLength(1);
-    expect(h.sent[0].body).toContain('Nothing is waiting');
-  });
-
-  it('surfaces a partial result when some ids were already handled', async () => {
-    const h = makeHarness();
-    const proposals = await seedDigestApproveAllAnchor(h, 3);
-    // One proposal is rejected out-of-band before the ALL reply arrives.
-    await h.proposalRepo.updateStatus(TENANT, proposals[1].id, 'rejected', {});
 
     const result = await handleProposalSmsReply(ctx('ALL'), h.deps);
 
     expect(result).toMatchObject({ handled: true, reason: 'approved_all' });
-    expect((await h.proposalRepo.findById(TENANT, proposals[0].id))?.status).toBe('approved');
-    expect((await h.proposalRepo.findById(TENANT, proposals[1].id))?.status).toBe('rejected');
-    expect((await h.proposalRepo.findById(TENANT, proposals[2].id))?.status).toBe('approved');
-    // Confirmation owns up to the partial outcome.
-    expect(h.sent[0].body).toContain('Approved 2');
-    expect(h.sent[0].body).toMatch(/already handled|need the app/);
+    expect((await h.proposalRepo.findById(TENANT, a.id))?.status).toBe('approved');
+    expect((await h.proposalRepo.findById(TENANT, b.id))?.status).toBe('approved');
+    // Money + low-confidence are untouched — they need in-app review.
+    expect((await h.proposalRepo.findById(TENANT, money.id))?.status).toBe('ready_for_review');
+    expect((await h.proposalRepo.findById(TENANT, lowConf.id))?.status).toBe('ready_for_review');
+    expect(h.sent[0].body).toContain('Approved all 2');
+    expect(h.auditRepo.getAll().map((e) => e.eventType)).toContain('proposal.sms_approved_all');
+  });
+
+  it('"APPROVE ALL" (and "YES ALL") also route to bulk approve', async () => {
+    for (const body of ['APPROVE ALL', 'YES ALL']) {
+      const h = makeHarness();
+      const a = await seedReady(h, { proposalType: 'create_appointment' });
+      const result = await handleProposalSmsReply(ctx(body), h.deps);
+      expect(result).toMatchObject({ handled: true, reason: 'approved_all' });
+      expect((await h.proposalRepo.findById(TENANT, a.id))?.status).toBe('approved');
+    }
+  });
+
+  it('excludes a proposal with an unapplied edit request from ALL (stale-payload guard)', async () => {
+    const h = makeHarness();
+    const a = await seedReady(h, { proposalType: 'create_appointment' });
+    // An unapplied edit_request means the shown payload is stale — the single
+    // approve path blocks it, so ALL must skip it too.
+    await h.smsEventRepo.create(
+      createProposalSmsEvent({
+        tenantId: TENANT,
+        proposalId: a.id,
+        direction: 'inbound',
+        kind: 'edit_request',
+        body: 'push it to next week',
+      }),
+    );
+
+    const result = await handleProposalSmsReply(ctx('ALL'), h.deps);
+
+    expect(result.reason).toBe('approve_all_none');
+    expect((await h.proposalRepo.findById(TENANT, a.id))?.status).toBe('ready_for_review');
+  });
+
+  it('ignores a non-owner number (identity guard)', async () => {
+    const h = makeHarness();
+    await seedReady(h, { proposalType: 'create_appointment' });
+    const result = await handleProposalSmsReply(
+      ctx('ALL', { fromE164: '+15559990000' }),
+      h.deps,
+    );
+    expect(result).toMatchObject({ handled: false, reason: 'unknown_mobile' });
+  });
+
+  it('is idempotent — a repeated ALL approves nothing the second time', async () => {
+    const h = makeHarness();
+    await seedReady(h, { proposalType: 'create_appointment' });
+    await seedReady(h, { proposalType: 'create_customer', payload: { name: 'B' } });
+
+    const first = await handleProposalSmsReply(ctx('ALL'), h.deps);
+    const second = await handleProposalSmsReply(ctx('ALL'), h.deps);
+
+    expect(first).toMatchObject({ reason: 'approved_all' });
+    // Everything already approved → nothing eligible left.
+    expect(second).toMatchObject({ reason: 'approve_all_none' });
+  });
+
+  it('replies helpfully when nothing is eligible', async () => {
+    const h = makeHarness();
+    await seedReady(h, {
+      proposalType: 'issue_invoice',
+      payload: { invoiceId: 'i-1', totalCents: 50_000 },
+    });
+    const result = await handleProposalSmsReply(ctx('ALL'), h.deps);
+    expect(result).toMatchObject({ handled: true, reason: 'approve_all_none' });
+    expect(h.sent[0].body).toContain('Nothing is waiting');
   });
 });

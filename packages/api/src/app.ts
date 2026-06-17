@@ -362,12 +362,13 @@ import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
 import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
+// U7 — structured correction-lesson loop (record on execution, undo on undo).
+import {
+  InMemoryCorrectionLessonRepository,
+} from './learning/corrections/correction-lesson';
 import { PgCorrectionLessonRepository } from './learning/corrections/pg-correction-lesson';
-import { createPgConfigPorts } from './learning/corrections/pg-config-ports';
-import { recordCorrectionLessons } from './learning/corrections/apply-undo';
-import { buildCorrectionLessonDrafts } from './learning/corrections/build-correction-drafts';
-import { localDateFor } from './learning/corrections/correction-lesson';
-import type { ExtractorConfigSnapshot } from './learning/corrections/correction-extractor';
+import type { ConfigPorts } from './learning/corrections/lesson-applicator';
+import { recordCorrectionLessonsOnExecution } from './learning/corrections/record-on-execution';
 import {
   runRecordingRetentionSweep,
   PgRecordingRetentionRepository,
@@ -429,6 +430,7 @@ import {
   SupervisorPolicyService,
   recordExecutedProposalSpend,
 } from './proposals/supervisor/service';
+import type { SupervisorRules } from './proposals/supervisor/policy';
 import {
   InMemorySupervisorPolicyRepository,
   PgSupervisorPolicyRepository,
@@ -510,13 +512,12 @@ import {
   registerMmsIngestHandler,
   createTwilioMediaFetcher,
 } from './sms/tech-status/mms-ingest';
-// P6-028 — tech "I'm out" keyword handler (OUT|SICK|UNAVAILABLE) registration
-// + its tenant-local daily idempotency store.
-import { registerTechStatusKeywords } from './sms/tech-status';
+// P6-028 — tech "I'm out today" keyword handler (OUT|SICK|UNAVAILABLE).
 import {
+  registerTechStatusKeywords,
   PgTechStatusTodayRepository,
   InMemoryTechStatusTodayRepository,
-} from './sms/tech-status/idempotency';
+} from './sms/tech-status';
 import { createMmsIngestWorker } from './workers/mms-ingest-worker';
 import {
   registerProposalReplySms,
@@ -1086,6 +1087,33 @@ export function createApp(): express.Express {
   const proposalExecutionRepo = pool
     ? new PgProposalExecutionRepository(pool)
     : new InMemoryProposalExecutionRepository();
+  // U7 — structured correction-lesson loop. The repo + ConfigPorts back the
+  // recordCorrectionLessonsOnExecution call in the executor's onExecuted seam
+  // (and the undo path in proposal actions). Ports cascade a distilled lesson
+  // into real tenant config: labor rate (tenant_settings.labor_rate_cents_per
+  // _hour), SKU price (catalog item), banned phrases (brand-voice negative
+  // prompt). setTemplateWeight is a no-op — no template-weight store exists yet,
+  // so scope_reclassified lessons aren't produced (no resolveTemplate passed).
+  const correctionLessonRepo = pool
+    ? new PgCorrectionLessonRepository(pool)
+    : new InMemoryCorrectionLessonRepository();
+  const correctionConfigPorts: ConfigPorts = {
+    async setLaborRateCents(tenantId, cents) {
+      await settingsRepo.update(tenantId, { laborRateCentsPerHour: cents });
+    },
+    async setSkuPriceCents(tenantId, catalogItemId, cents) {
+      await catalogRepo.update(tenantId, catalogItemId, { unitPriceCents: cents });
+    },
+    async setBannedPhrases(tenantId, phrases) {
+      const current = await settingsRepo.findByTenant(tenantId);
+      await settingsRepo.update(tenantId, {
+        brandVoice: { ...(current?.brandVoice ?? {}), banned_phrases: phrases },
+      });
+    },
+    async setTemplateWeight() {
+      /* No template-weight store yet; scope_reclassified lessons aren't produced. */
+    },
+  };
   const retrievalEvalRunRepo = pool
     ? new PgRetrievalEvalRunRepository(pool)
     : new InMemoryRetrievalEvalRunRepository();
@@ -1399,6 +1427,7 @@ export function createApp(): express.Express {
     // upgrades the plain START handler to the opt-in-first composite.
     { dncRepo },
   );
+
   const recordProposalSmsRender = async (args: {
     tenantId: string;
     proposalId: string;
@@ -1564,18 +1593,6 @@ export function createApp(): express.Express {
   let supervisorSpendRecorder:
     | ((tenantId: string, proposalId: string) => Promise<void>)
     | null = null;
-  // N-009 / P2-038 — structured correction-lesson loop. Pool-gated like the
-  // sibling repos: with no pool (in-memory dev) there is nothing to persist
-  // lessons into, so the loop is skipped and the digest falls back to the RAG
-  // chunk-count line. The ports cascade a recorded lesson into the real tenant
-  // config (labor rate + banned phrases on tenant_settings, SKU price on
-  // catalog_items) so the NEXT same-day draft reflects the correction.
-  const correctionLessonRepo = pool ? new PgCorrectionLessonRepository(pool) : null;
-  const correctionConfigPorts = createPgConfigPorts({
-    settingsRepo,
-    catalogRepo,
-    logger: workerLogger,
-  });
   const proposalExecutor = new ProposalExecutor(
     executionHandlers,
     proposalRepo,
@@ -1610,66 +1627,29 @@ export function createApp(): express.Express {
             error: err instanceof Error ? err.message : String(err),
           });
         }
-
-        // N-009 / P2-038 — record STRUCTURED correction lessons alongside the
-        // RAG chunk above. This is the deterministic config cascade (labor
-        // rate / SKU / banned phrase), NOT embeddings, so it runs whenever a
-        // pool + lesson repo exist — independent of `embeddingProvider`. The
-        // proposal is already executed (human-approved); recording a lesson
-        // adds no new auto-execution. Fully failure-soft: a throw here must
-        // never break the executor's invariants.
-        if (correctionLessonRepo) {
-          try {
-            const proposal = await proposalRepo.findById(event.tenantId, event.proposalId);
-            const execution = await proposalExecutionRepo.findLatestByProposal(
-              event.tenantId,
-              event.proposalId,
-            );
-            if (proposal && execution && execution.executedPayload) {
-              // Current tenant config the cascade reverses against. Labor rate +
-              // banned phrases live on tenant_settings; SKU prices are read per
-              // catalog item by the extractor only when a line carries its
-              // catalogItemId, so an empty map here is the conservative default.
-              const settings = await settingsRepo.findByTenant(event.tenantId);
-              const config: ExtractorConfigSnapshot = {
-                laborRateCents: settings?.laborRateCentsPerHour ?? null,
-                skuPriceCents: {},
-                bannedPhrases: settings?.brandVoice?.banned_phrases ?? [],
-                templateWeights: {},
-              };
-              const drafts = buildCorrectionLessonDrafts(
-                {
-                  drafted: (proposal.payload ?? {}) as Record<string, unknown>,
-                  executed: execution.executedPayload as Record<string, unknown>,
-                },
-                config,
-              );
-              if (drafts.length > 0) {
-                const timezone = settings?.timezone ?? 'UTC';
-                const localDate = localDateFor(execution.executedAt ?? new Date(), timezone);
-                await recordCorrectionLessons(
-                  {
-                    tenantId: event.tenantId,
-                    sourceProposalId: event.proposalId,
-                    ownerId: proposal.executedBy ?? proposal.createdBy,
-                    localDate,
-                    drafts,
-                  },
-                  {
-                    repository: correctionLessonRepo,
-                    ports: correctionConfigPorts,
-                    auditRepo,
-                  },
-                );
-              }
-            }
-          } catch (err) {
-            // eslint-disable-next-line no-console
-            console.error('app: recordCorrectionLessons failed', {
-              proposalId: event.proposalId,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
+        // U7 — record structured correction lessons (labor rate / banned
+        // phrase) from the drafted-vs-executed diff, cascading the change
+        // forward within the day so the digest "what I learned" is real and
+        // the next same-day draft reflects it. Failure-soft: a lesson error
+        // must never break execution.
+        try {
+          await recordCorrectionLessonsOnExecution(
+            { tenantId: event.tenantId, proposalId: event.proposalId },
+            {
+              proposalRepo,
+              proposalExecutionRepo,
+              settingsRepo,
+              lessonRepo: correctionLessonRepo,
+              ports: correctionConfigPorts,
+              auditRepo,
+            },
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error('app: failed to record correction lessons', {
+            proposalId: event.proposalId,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
       },
     },
@@ -1767,6 +1747,9 @@ export function createApp(): express.Express {
     recordingRetention: 590011,
     supervisorAnnotate: 590012,
     accountingSync: 590013,
+    // 590014 was shared by the removed P5-020 `digest` sweep and
+    // `hfcrWeeklySend` (an advisory-lock collision); the dead worker is gone
+    // (U5) so the key is now unique to hfcrWeeklySend.
     hfcrWeeklySend: 590014,
     holdReaper: 590015,
   } as const;
@@ -3059,12 +3042,12 @@ export function createApp(): express.Express {
           })
         : undefined;
 
-      // RV-122 — attach the per-turn vulnerability triage hook to the Gather
-      // (legacy/PSTN) adapter too, not only the media-streams server below.
-      // The hook is built after `twilioAdapter` (its patch-owner action closes
-      // over the adapter), so it is injected post-construction via the setter.
-      // The SAME hook instance is passed to the media-streams server further
-      // down — one hook, both transports.
+      // U4 — give the SAME hook to the Gather/PSTN adapter so a Gather-mode
+      // turn grades identically to a streaming turn (the hook was previously
+      // only handed to the media-streams server below). Late-bound because the
+      // hook's onPatchOwner closure references twilioAdapter, which is built
+      // earlier. Fires fire-and-forget, gated inside the hook by the per-tenant
+      // voice_vulnerability_triage flag.
       if (vulnerabilityTriageHookDep) {
         twilioAdapter.setVulnerabilityTriageHook(vulnerabilityTriageHookDep);
       }
@@ -4311,11 +4294,9 @@ export function createApp(): express.Express {
     }, 60 * 60_000));
   }
 
-  // Held-slot reaper (JTBD #3) — durably cancels tentative AI-placed holds
-  // whose `hold_expiry_at` has passed. Without it, expired holds rot as
-  // `scheduled` rows with `hold_pending_approval = true` (only lazily skipped
-  // on the scheduling read paths), polluting any raw appointment list/report.
-  // Runs every 15 minutes, leader-gated like the other tenant-wide sweeps.
+  // U6 — held-slot reaper. Every 15 minutes, cancel tentative holds whose
+  // hold_expiry_at has passed so the stale rows leave raw appointment reads.
+  // Leader-locked + idempotent (only acts on rows still hold_pending_approval).
   const holdReaperLogger = createLogger({
     service: 'hold-reaper-worker',
     environment: process.env.NODE_ENV || 'development',
@@ -4471,6 +4452,12 @@ export function createApp(): express.Express {
     });
   }, 15 * 60_000));
 
+  // U5 — the redundant P5-020 hourly digest worker was removed; the daily
+  // digest (RV-063 runDailyDigestSweep, scheduled above on the dailyDigest
+  // lock) is the single digest path. Removing it also resolved the advisory-
+  // lock collision where the old digest sweep and hfcrWeeklySend both held
+  // 590014.
+
   // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
   // unified TTS provider, and the existing proposal/audit/oncall repos.
   // The voiceSessionStore is shared with the Twilio adapter (created above).
@@ -4554,31 +4541,36 @@ export function createApp(): express.Express {
   // (b) the advisory annotator sweep that adds LLM risk notes to
   // ready_for_review proposals.
   //
-  // Unit U3 (decision D-004): the supervisor runs BY DEFAULT for every
-  // tenant — the post-hoc advisory review and the conservative budget
-  // backstop now apply unless a tenant explicitly opts OUT. The platform
-  // feature-flag API (`isEnabledForTenant`) is a plain default-FALSE
-  // boolean (tenant override → platform flag → false; see
-  // pg-tenant-feature-flags.ts) with no per-flag default-true or tri-state,
-  // so a default-ON gate cannot be expressed as an "enable" flag. We
-  // therefore invert to the explicit OPT-OUT flag SUPERVISOR_DISABLED_FLAG
-  // ('supervisor_agent_disabled'): unset ⇒ reads false ⇒ "not disabled" ⇒
-  // supervisor ON; a tenant turns it OFF by setting that flag to true. The
-  // gate below resolves `enabled = !disabled` and feeds BOTH the creation
-  // hook (SupervisorPolicyService.isEnabledForTenant) and the annotator
-  // sweep, so the two halves stay consistent on this single key. With NO
-  // flag repo (in-memory dev), the gate is undefined and the service's
-  // "absent gate ⇒ enabled" default keeps the supervisor ON. Routes/settings
-  // exposure for policy versions is deferred to a follow-up track.
+  // U3 — the supervisor is now DEFAULT-ON (D-011): the per-tenant
+  // 'supervisor_agent' flag resolves tenant_feature_flags override → platform
+  // flag → DEFAULT TRUE. So the trust mechanism is on for everyone, and the
+  // per-tenant override (enabled=false) is an explicit opt-OUT kill switch for
+  // incidents. The policy engine is monotone-downgrade only (capInitialStatus),
+  // so default-on can never UPGRADE a proposal to auto-approval (D-004) — the
+  // worst case is "more proposals held for review". Routes/settings exposure
+  // for policy versions is deferred to a follow-up track.
   //
   // Merge note: this reuses the single shared PgTenantFeatureFlagRepository
   // constructed in the RV-122 wiring block above (`tenantFeatureFlags`) —
   // one instance serves both the per-tenant triage/voice flag resolution
-  // and the supervisor gate (its 30s cache is per-instance only).
+  // and the supervisor gate (its 30s cache is per-instance only). With no pool
+  // (tests/dev) the gate is undefined → the service defaults enabled=true, so
+  // default-on holds in every environment.
   const supervisorFlagGate = tenantFeatureFlags
-    ? async (tenantId: string) =>
-        !(await tenantFeatureFlags.isEnabledForTenant(tenantId, SUPERVISOR_DISABLED_FLAG))
+    ? (tenantId: string) =>
+        tenantFeatureFlags.isEnabledForTenantWithDefault(tenantId, 'supervisor_agent', true)
     : undefined;
+  // U3 — conservative platform-default budget caps for tenants without a
+  // provisioned supervisor_policies row. Env-overridable for ops tuning; the
+  // caps only ADD review friction (force_review / block), never remove safety.
+  const platformDefaultSupervisorRules: SupervisorRules = {
+    perProposalCapCents:
+      Number(process.env.SUPERVISOR_DEFAULT_PER_PROPOSAL_CAP_CENTS) || 250_000,
+    dailySpendCapCents:
+      Number(process.env.SUPERVISOR_DEFAULT_DAILY_SPEND_CAP_CENTS) || 1_000_000,
+    maxAutoApprovalsPerHour:
+      Number(process.env.SUPERVISOR_DEFAULT_MAX_AUTO_APPROVALS_PER_HOUR) || 30,
+  };
   const supervisorLogger = createLogger({
     service: 'supervisor-agent',
     environment: process.env.NODE_ENV || 'development',
@@ -4592,6 +4584,7 @@ export function createApp(): express.Express {
       : new InMemoryTenantBudgetCounterRepository(),
     auditRepo,
     ...(supervisorFlagGate ? { isEnabledForTenant: supervisorFlagGate } : {}),
+    defaultRules: platformDefaultSupervisorRules,
     logger: supervisorLogger,
   });
   // Process-global hook: second createApp() in one process re-binds (last-wins).
