@@ -265,13 +265,13 @@ async function handleApproveAll(
   // Mirror the single-approve path's pending-edit guard: a proposal with an
   // unapplied edit request still shows its STALE pre-edit payload, so a blanket
   // ALL must not approve (and execute) it. Excluded here, not failed in the
-  // batch, so the owner gets an honest "approved N" count.
-  const eligible: typeof candidates = [];
-  for (const p of candidates) {
-    // eslint-disable-next-line no-await-in-loop
-    if (await deps.smsEventRepo.hasUnappliedEditRequest(ctx.tenantId, p.id)) continue;
-    eligible.push(p);
-  }
+  // batch, so the owner gets an honest "approved N" count. The per-proposal
+  // lookups are parallelized (Promise.all) — the loop has no early exit, so
+  // sequential round-trips would add avoidable latency on the SMS webhook path.
+  const hasUnappliedEdit = await Promise.all(
+    candidates.map((p) => deps.smsEventRepo.hasUnappliedEditRequest(ctx.tenantId, p.id)),
+  );
+  const eligible = candidates.filter((_, idx) => !hasUnappliedEdit[idx]);
 
   if (eligible.length === 0) {
     await audit(deps, ctx, 'proposal.sms_approve_all_none', '', { pending: pending.length });

@@ -141,7 +141,10 @@ export async function resolveProposalLine(
   line.pricingSource = 'catalog';
   line.needsPricing = false;
   if (priceField === 'unitPriceCents') {
-    const qty = Number(line.quantity ?? 1) || 1;
+    // Guard NaN/missing without rebounding a legitimate quantity of 0 to 1
+    // (which `Number(...) || 1` would do, mispricing a zero-qty line).
+    const parsedQty = Number(line.quantity ?? 1);
+    const qty = Number.isNaN(parsedQty) ? 1 : parsedQty;
     line.totalCents = Math.round(chosen.unitPriceCents * qty);
   }
   lineItems[lineIndex] = line;
