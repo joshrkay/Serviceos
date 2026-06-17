@@ -292,6 +292,15 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['191_extend_leads_source_check_sms', 'a255c4625c8fd00f4f0e1b4335d001f518bc20616e3c60af87ac2d87d836aef2'],
   // Add the missing tenant_dnc_list.source column (DNC UI used it without a migration).
   ['192_tenant_dnc_list_source', '9272eec111ff95e052be82cdc677a792e4ad2f8570d9b3b21f737dee1732cd3b'],
+  // U3 (PRD gap closure): widen vertical_training_assets vertical_type CHECK for 'painting'.
+  ['193_extend_vertical_training_assets_painting', 'b05549a1922233695dfe170e22c9ebcad87c583495a21e9e15ac7b347e892d68'],
+  // U2 (PRD gap closure): 2hr post-job thank-you SMS — jobs.completed_at,
+  // jobs.thank_you_sms_sent_at, tenant_settings.send_thank_you_sms, backfill,
+  // partial index on the sweep-eligibility predicate.
+  ['194_thank_you_sms', '2a1b55639fd1e9f78b69ceb0074bdddb1ba702a812a7b3a71292457f27ed0552'],
+  // U1 (PRD gap closure): onboarding_session table for the conversational
+  // FSM (ENABLE + FORCE RLS per gemini-code-assist review on PR #594).
+  ['195_onboarding_session', '4ca725aa5bd1d9e3c516282f67349e3fc5f47f0228bdc0a5e2ee6ed995d2834d'],
 ];
 
 function hashMigration(value: string): string {

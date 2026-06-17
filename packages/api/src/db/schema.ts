@@ -4840,6 +4840,38 @@ export const MIGRATIONS = {
       ON jobs (tenant_id, completed_at)
       WHERE thank_you_sms_sent_at IS NULL AND completed_at IS NOT NULL;
   `,
+
+  // U1 — Onboarding Agent multi-turn session table. The FSM lives in
+  // src/ai/agents/onboarding; this is its durable backing store so a
+  // conversation resumes after a browser close. ENABLE + FORCE RLS
+  // matches the precedent set by every other tenant-scoped table
+  // (jobs/audit_events/users) — the FORCE bit is non-negotiable because
+  // the app role would otherwise bypass the tenant_isolation policy on
+  // queries that forget to set current_tenant_id (gemini-code-assist
+  // flagged this on PR #594).
+  '195_onboarding_session': `
+    CREATE TABLE IF NOT EXISTS onboarding_session (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      fsm_state TEXT NOT NULL DEFAULT 'profile_capture',
+      transcript_turns JSONB NOT NULL DEFAULT '[]',
+      pending_clarifications JSONB NOT NULL DEFAULT '[]',
+      clarification_count_by_state JSONB NOT NULL DEFAULT '{}',
+      extraction_state JSONB NOT NULL DEFAULT '{}',
+      turn_count INTEGER NOT NULL DEFAULT 0,
+      proposal_batch_ids JSONB NOT NULL DEFAULT '[]',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_onboarding_session_tenant
+      ON onboarding_session (tenant_id, created_at DESC);
+    ALTER TABLE onboarding_session ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE onboarding_session FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_onboarding_session ON onboarding_session;
+    CREATE POLICY tenant_isolation_onboarding_session ON onboarding_session
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
