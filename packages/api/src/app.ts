@@ -103,6 +103,12 @@ import { checkAndFireUpgradeNudge } from './voice/check-upgrade-nudge';
 import { maybeAutoGoLiveOnInboundEnd } from './voice/go-live';
 import { maybeFireFirstRealCallActivation } from './voice/activation';
 import { createOnboardingRouter } from './routes/onboarding';
+import { createOnboardingConversationRouter } from './routes/onboarding-conversation';
+import { OnboardingConversationOrchestrator } from './ai/orchestration/onboarding-conversation';
+import {
+  InMemoryOnboardingSessionRepository,
+  PgOnboardingSessionRepository,
+} from './db/onboarding-session-repository';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
 import { createTechnicianLocationRouter } from './routes/technician-location';
@@ -3778,6 +3784,25 @@ export function createApp(): express.Express {
       billingService,
       queue,
       packSeedDeps: { catalogRepo, templateRepo },
+    }),
+  );
+
+  // U1 — conversational onboarding lane. Mounted as a sub-path of the
+  // existing V2 onboarding routes so the web client can post turns to
+  // POST /api/onboarding/conversation/turn while the form-based
+  // wizard's other endpoints stay unchanged.
+  const onboardingSessionRepo = pool
+    ? new PgOnboardingSessionRepository(pool)
+    : new InMemoryOnboardingSessionRepository();
+  app.use(
+    '/api/onboarding/conversation',
+    createOnboardingConversationRouter({
+      orchestrator: new OnboardingConversationOrchestrator({
+        gateway: llmGateway,
+        sessionRepo: onboardingSessionRepo,
+        proposalRepo,
+        auditRepo,
+      }),
     }),
   );
   app.use(

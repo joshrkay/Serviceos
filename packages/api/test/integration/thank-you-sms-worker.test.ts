@@ -77,11 +77,11 @@ describe('thank-you-sms worker — integration', () => {
     const customerId = uuidv4();
     await pool.query(
       `INSERT INTO customers (id, tenant_id, first_name, last_name, display_name,
-        primary_phone, preferred_channel, sms_consent, is_archived)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        primary_phone, preferred_channel, sms_consent, is_archived, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [
         customerId, tenant.tenantId, 'Mary', 'Johnson', 'Mary Johnson',
-        opts.primaryPhone ?? '+15551234567', 'sms', opts.smsConsent ?? true, false,
+        opts.primaryPhone ?? '+15551234567', 'sms', opts.smsConsent ?? true, false, tenant.userId,
       ],
     );
 
@@ -183,9 +183,9 @@ describe('thank-you-sms worker — integration', () => {
     // Insert a fresh non-completed job (skipping the completed_at backfill path).
     const customerId = uuidv4();
     await pool.query(
-      `INSERT INTO customers (id, tenant_id, first_name, last_name, display_name, preferred_channel, sms_consent, is_archived)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-      [customerId, tenant.tenantId, 'A', 'B', 'A B', 'sms', true, false],
+      `INSERT INTO customers (id, tenant_id, first_name, last_name, display_name, preferred_channel, sms_consent, is_archived, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [customerId, tenant.tenantId, 'A', 'B', 'A B', 'sms', true, false, tenant.userId],
     );
     const locationId = uuidv4();
     await pool.query(
