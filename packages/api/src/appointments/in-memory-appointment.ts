@@ -70,6 +70,19 @@ export class InMemoryAppointmentRepository implements AppointmentRepository {
       .map((a) => ({ ...a }));
   }
 
+  async findExpiredHolds(tenantId: string, now: Date): Promise<Appointment[]> {
+    const cutoff = now.getTime();
+    return Array.from(this.appointments.values())
+      .filter(
+        (a) =>
+          a.tenantId === tenantId &&
+          a.holdPendingApproval === true &&
+          a.holdExpiryAt !== undefined &&
+          a.holdExpiryAt.getTime() < cutoff
+      )
+      .map((a) => ({ ...a }));
+  }
+
   async listWithMeta(
     tenantId: string,
     options?: AppointmentListOptions

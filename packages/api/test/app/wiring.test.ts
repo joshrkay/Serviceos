@@ -52,6 +52,14 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     expect(src).toMatch(/registerTechStatusKeywords\(/);
   });
 
+  it('held-slot reaper is scheduled under its own leader lock', () => {
+    // U6 — the reaper must own a distinct SWEEP_LOCK key and run via runAsLeader
+    // so concurrent instances don't double-cancel holds.
+    expect(src).toMatch(/holdReaper:\s*590015/);
+    expect(src).toMatch(/runAsLeader\(SWEEP_LOCK\.holdReaper/);
+    expect(src).toContain('runHoldReaperSweep');
+  });
+
   it('graceful shutdown registers SIGTERM/SIGINT pool drain', () => {
     expect(src).toMatch(/process\.once\(\s*['"]SIGTERM['"]/);
     expect(src).toMatch(/process\.once\(\s*['"]SIGINT['"]/);

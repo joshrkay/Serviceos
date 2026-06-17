@@ -137,6 +137,13 @@ export interface AppointmentRepository {
   findByJob(tenantId: string, jobId: string): Promise<Appointment[]>;
   findByDateRange(tenantId: string, start: Date, end: Date): Promise<Appointment[]>;
   /**
+   * U6 — tentative holds whose `hold_expiry_at` has passed (and that are still
+   * `hold_pending_approval`). Backs the hold-reaper sweep that cancels expired
+   * holds so they stop polluting raw appointment reads. Pg uses the partial
+   * index `idx_appointments_hold_expiry`.
+   */
+  findExpiredHolds(tenantId: string, now: Date): Promise<Appointment[]>;
+  /**
    * P1-018: paginated `{ data, total }` form for list UIs. Filters by date
    * range / status / technician and supports optional `limit` / `offset`.
    * Optional so older repos still satisfy the type — falls back to in-memory
