@@ -4,8 +4,6 @@
  * These mirror packages/shared/src/contracts/digest.ts; kept local to
  * avoid crossing the packages/api rootDir boundary in tsconfig.build.json.
  */
-export type DigestStatus = 'pending' | 'delivered' | 'failed' | 'acked';
-
 export interface DigestSourceData {
   completedJobIds: string[];
   sentEstimateIds: string[];
@@ -24,18 +22,4 @@ export interface DigestSourceData {
 export interface DigestSection {
   label: string;
   lines: string[];
-}
-
-export interface DigestEntry {
-  id: string;
-  tenantId: string;
-  date: string; // YYYY-MM-DD
-  status: DigestStatus;
-  attemptCount: number;
-  renderedText: string;
-  sourceData: DigestSourceData;
-  deliveredAt?: Date;
-  ownerReply?: string;
-  createdAt: Date;
-  updatedAt: Date;
 }

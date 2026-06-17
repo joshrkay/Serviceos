@@ -307,7 +307,6 @@ import { createOneTapApproveRouter } from './routes/one-tap-approve';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
 import { runDailyDigestSweep, DIGEST_SWEEP_INTERVAL_MS } from './workers/daily-digest-worker';
-import { runDigestSweep, PgDigestEntryRepository } from './workers/digest-worker';
 import { PgDailyDigestRepository } from './digest/pg-daily-digest';
 import { InMemoryDailyDigestRepository, type DailyDigestPayload } from './digest/digest-service';
 import { composeBrandVoiceMessage } from './ai/brand-voice/composer';
@@ -1720,7 +1719,9 @@ export function createApp(): express.Express {
     recordingRetention: 590011,
     supervisorAnnotate: 590012,
     accountingSync: 590013,
-    digest: 590014,
+    // 590014 was shared by the removed P5-020 `digest` sweep and
+    // `hfcrWeeklySend` (an advisory-lock collision); the dead worker is gone
+    // (U5) so the key is now unique to hfcrWeeklySend.
     hfcrWeeklySend: 590014,
     holdReaper: 590015,
   } as const;
@@ -4345,40 +4346,11 @@ export function createApp(): express.Express {
     });
   }, 15 * 60_000));
 
-  // P5-020 — end-of-day digest sweep. Runs hourly; tenants in the 6–9pm
-  // local delivery window get their digest built and sent via SMS.
-  // Idempotency: UNIQUE(tenant_id, date) on digest_entries; up to 3 retries.
-  const digestSweepLogger = createLogger({
-    service: 'digest-worker',
-    environment: process.env.NODE_ENV || 'development',
-  });
-  const digestEntryRepo = pool ? new PgDigestEntryRepository(pool) : null;
-  registerInterval(setInterval(() => {
-    if (!digestEntryRepo) return;
-    void runAsLeader(SWEEP_LOCK.digest, async () => {
-      await runDigestSweep({
-        digestEntryRepo,
-        settingsRepo,
-        pool,
-        ...(messageDelivery
-          ? {
-              sendSms: (args: { to: string; body: string }) =>
-                messageDelivery.sendSms({ to: args.to, body: args.body }),
-            }
-          : {}),
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        logger: digestSweepLogger,
-      });
-    }).catch((err) => {
-      digestSweepLogger.error('Digest sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, 60 * 60_000));
+  // U5 — the redundant P5-020 hourly digest worker was removed; the daily
+  // digest (RV-063 runDailyDigestSweep, scheduled above on the dailyDigest
+  // lock) is the single digest path. Removing it also resolved the advisory-
+  // lock collision where the old digest sweep and hfcrWeeklySend both held
+  // 590014.
 
   // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
   // unified TTS provider, and the existing proposal/audit/oncall repos.

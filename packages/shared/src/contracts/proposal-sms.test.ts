@@ -51,6 +51,17 @@ describe('parseProposalSmsReply (P2-034)', () => {
     expect(parseProposalSmsReply('   ')).toEqual({ intent: 'unrecognized', remainder: '' });
   });
 
+  it('classifies bulk approve: "ALL", "APPROVE ALL", "YES ALL" → approve_all (U5)', () => {
+    for (const body of ['ALL', 'all', 'all!', 'APPROVE ALL', 'approve all', 'YES ALL', 'ok all']) {
+      expect(parseProposalSmsReply(body).intent).toBe('approve_all');
+    }
+  });
+
+  it('a single approve token without a trailing "all" stays a single approve', () => {
+    expect(parseProposalSmsReply('approve').intent).toBe('approve');
+    expect(parseProposalSmsReply('yes go ahead').intent).toBe('approve');
+  });
+
   it('does not collide with other registered inbound keywords', () => {
     // STOP/START (compliance) and OUT/SICK/UNAVAILABLE (tech status) must
     // stay routable to their own handlers.

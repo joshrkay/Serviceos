@@ -69,6 +69,22 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     expect(src).toMatch(/defaultRules:\s*platformDefaultSupervisorRules/);
   });
 
+  it('exactly one digest path remains; SWEEP_LOCK has no duplicate keys (U5)', () => {
+    // U5 — the redundant P5-020 hourly digest worker was deleted; only the
+    // RV-063 daily digest sweep remains.
+    expect(src).toContain('runDailyDigestSweep');
+    expect(src).not.toContain('runDigestSweep(');
+    expect(src).not.toMatch(/SWEEP_LOCK\.digest\b/);
+    // No two SWEEP_LOCK keys may share an advisory-lock value (the 590014
+    // digest/hfcrWeeklySend collision is resolved).
+    const block = src.slice(src.indexOf('const SWEEP_LOCK = {'));
+    const values = Array.from(block.slice(0, block.indexOf('} as const')).matchAll(/:\s*(\d{6})/g)).map(
+      (m) => m[1],
+    );
+    expect(values.length).toBeGreaterThan(0);
+    expect(new Set(values).size).toBe(values.length);
+  });
+
   it('graceful shutdown registers SIGTERM/SIGINT pool drain', () => {
     expect(src).toMatch(/process\.once\(\s*['"]SIGTERM['"]/);
     expect(src).toMatch(/process\.once\(\s*['"]SIGINT['"]/);
