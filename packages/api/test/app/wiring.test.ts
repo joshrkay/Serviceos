@@ -60,6 +60,15 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     expect(src).toContain('runHoldReaperSweep');
   });
 
+  it('supervisor agent is wired DEFAULT-ON with platform caps (U3)', () => {
+    // U3 — the gate must resolve supervisor_agent default-TRUE (opt-out kill
+    // switch), and the service must carry platform-default budget caps.
+    expect(src).toMatch(
+      /isEnabledForTenantWithDefault\(\s*tenantId,\s*'supervisor_agent',\s*true\s*\)/,
+    );
+    expect(src).toMatch(/defaultRules:\s*platformDefaultSupervisorRules/);
+  });
+
   it('graceful shutdown registers SIGTERM/SIGINT pool drain', () => {
     expect(src).toMatch(/process\.once\(\s*['"]SIGTERM['"]/);
     expect(src).toMatch(/process\.once\(\s*['"]SIGINT['"]/);

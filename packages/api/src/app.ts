@@ -421,6 +421,7 @@ import {
   SupervisorPolicyService,
   recordExecutedProposalSpend,
 } from './proposals/supervisor/service';
+import type { SupervisorRules } from './proposals/supervisor/policy';
 import {
   InMemorySupervisorPolicyRepository,
   PgSupervisorPolicyRepository,
@@ -4460,19 +4461,38 @@ export function createApp(): express.Express {
   // the injection rationale — createProposal is a sync pure builder with
   // 50+ call sites, so a repo dep can't be threaded through them), and
   // (b) the advisory annotator sweep that adds LLM risk notes to
-  // ready_for_review proposals. Both are gated per tenant by the
-  // 'supervisor_agent' flag (tenant_feature_flags override → platform
-  // flag → false), so the supervisor is INERT for every tenant until the
-  // flag is turned on. Routes/settings exposure for policy versions is
-  // deferred to a follow-up track.
+  // ready_for_review proposals.
+  //
+  // U3 — the supervisor is now DEFAULT-ON (D-011): the per-tenant
+  // 'supervisor_agent' flag resolves tenant_feature_flags override → platform
+  // flag → DEFAULT TRUE. So the trust mechanism is on for everyone, and the
+  // per-tenant override (enabled=false) is an explicit opt-OUT kill switch for
+  // incidents. The policy engine is monotone-downgrade only (capInitialStatus),
+  // so default-on can never UPGRADE a proposal to auto-approval (D-004) — the
+  // worst case is "more proposals held for review". Routes/settings exposure
+  // for policy versions is deferred to a follow-up track.
   //
   // Merge note: this reuses the single shared PgTenantFeatureFlagRepository
   // constructed in the RV-122 wiring block above (`tenantFeatureFlags`) —
   // one instance serves both the per-tenant triage/voice flag resolution
-  // and the supervisor gate (its 30s cache is per-instance only).
+  // and the supervisor gate (its 30s cache is per-instance only). With no pool
+  // (tests/dev) the gate is undefined → the service defaults enabled=true, so
+  // default-on holds in every environment.
   const supervisorFlagGate = tenantFeatureFlags
-    ? (tenantId: string) => tenantFeatureFlags.isEnabledForTenant(tenantId, 'supervisor_agent')
+    ? (tenantId: string) =>
+        tenantFeatureFlags.isEnabledForTenantWithDefault(tenantId, 'supervisor_agent', true)
     : undefined;
+  // U3 — conservative platform-default budget caps for tenants without a
+  // provisioned supervisor_policies row. Env-overridable for ops tuning; the
+  // caps only ADD review friction (force_review / block), never remove safety.
+  const platformDefaultSupervisorRules: SupervisorRules = {
+    perProposalCapCents:
+      Number(process.env.SUPERVISOR_DEFAULT_PER_PROPOSAL_CAP_CENTS) || 250_000,
+    dailySpendCapCents:
+      Number(process.env.SUPERVISOR_DEFAULT_DAILY_SPEND_CAP_CENTS) || 1_000_000,
+    maxAutoApprovalsPerHour:
+      Number(process.env.SUPERVISOR_DEFAULT_MAX_AUTO_APPROVALS_PER_HOUR) || 30,
+  };
   const supervisorLogger = createLogger({
     service: 'supervisor-agent',
     environment: process.env.NODE_ENV || 'development',
@@ -4486,6 +4506,7 @@ export function createApp(): express.Express {
       : new InMemoryTenantBudgetCounterRepository(),
     auditRepo,
     ...(supervisorFlagGate ? { isEnabledForTenant: supervisorFlagGate } : {}),
+    defaultRules: platformDefaultSupervisorRules,
     logger: supervisorLogger,
   });
   // Process-global hook: second createApp() in one process re-binds (last-wins).
