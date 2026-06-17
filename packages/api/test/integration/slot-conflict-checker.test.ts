@@ -66,6 +66,7 @@ describe('Postgres integration — slot conflict checker (U6)', () => {
       postalCode: '78701',
       country: 'USA',
       isPrimary: true,
+      addressType: 'service',
       isArchived: false,
       createdAt: new Date(),
       updatedAt: new Date(),

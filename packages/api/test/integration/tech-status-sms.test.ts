@@ -106,6 +106,7 @@ describe('Postgres integration — tech-status "I\'m out" SMS (U1 / P6-028)', ()
       postalCode: '78701',
       country: 'USA',
       isPrimary: true,
+      addressType: 'service',
       isArchived: false,
       createdAt: now,
       updatedAt: now,
@@ -208,13 +209,16 @@ describe('Postgres integration — tech-status "I\'m out" SMS (U1 / P6-028)', ()
     expect(blocks[0].startTime).toBeInstanceOf(Date);
     expect(blocks[0].endTime.getTime()).toBeGreaterThan(blocks[0].startTime.getTime());
 
-    // A real reschedule_appointment proposal persisted, gated in 'draft'.
+    // A real reschedule_appointment proposal persisted, owner-gated. from-tech-out
+    // advances it draft → ready_for_review so it surfaces as actionable in the
+    // owner's review queue; it is NEVER auto-approved/executed (no sourceTrustTier),
+    // so the human-approval gate (D-004) holds.
     const proposals = await proposalRepo.findByTenant(tenant.tenantId);
     const reschedules = proposals.filter(
       (p) => p.proposalType === 'reschedule_appointment',
     );
     expect(reschedules).toHaveLength(1);
-    expect(reschedules[0].status).toBe('draft');
+    expect(reschedules[0].status).toBe('ready_for_review');
 
     // Audit emitted on the mutation.
     const audits = await auditRepo.findByEntity(tenant.tenantId, 'tech_status', techId);

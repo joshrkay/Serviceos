@@ -61,6 +61,7 @@ describe('Postgres integration — held-slot reaper (U6)', () => {
       postalCode: '78701',
       country: 'USA',
       isPrimary: true,
+      addressType: 'service',
       isArchived: false,
       createdAt: now,
       updatedAt: now,
