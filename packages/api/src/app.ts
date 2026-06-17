@@ -356,6 +356,13 @@ import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
 import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
+// U7 — structured correction-lesson loop (record on execution, undo on undo).
+import {
+  InMemoryCorrectionLessonRepository,
+} from './learning/corrections/correction-lesson';
+import { PgCorrectionLessonRepository } from './learning/corrections/pg-correction-lesson';
+import type { ConfigPorts } from './learning/corrections/lesson-applicator';
+import { recordCorrectionLessonsOnExecution } from './learning/corrections/record-on-execution';
 import {
   runRecordingRetentionSweep,
   PgRecordingRetentionRepository,
@@ -1060,6 +1067,33 @@ export function createApp(): express.Express {
   const proposalExecutionRepo = pool
     ? new PgProposalExecutionRepository(pool)
     : new InMemoryProposalExecutionRepository();
+  // U7 — structured correction-lesson loop. The repo + ConfigPorts back the
+  // recordCorrectionLessonsOnExecution call in the executor's onExecuted seam
+  // (and the undo path in proposal actions). Ports cascade a distilled lesson
+  // into real tenant config: labor rate (tenant_settings.labor_rate_cents_per
+  // _hour), SKU price (catalog item), banned phrases (brand-voice negative
+  // prompt). setTemplateWeight is a no-op — no template-weight store exists yet,
+  // so scope_reclassified lessons aren't produced (no resolveTemplate passed).
+  const correctionLessonRepo = pool
+    ? new PgCorrectionLessonRepository(pool)
+    : new InMemoryCorrectionLessonRepository();
+  const correctionConfigPorts: ConfigPorts = {
+    async setLaborRateCents(tenantId, cents) {
+      await settingsRepo.update(tenantId, { laborRateCentsPerHour: cents });
+    },
+    async setSkuPriceCents(tenantId, catalogItemId, cents) {
+      await catalogRepo.update(tenantId, catalogItemId, { unitPriceCents: cents });
+    },
+    async setBannedPhrases(tenantId, phrases) {
+      const current = await settingsRepo.findByTenant(tenantId);
+      await settingsRepo.update(tenantId, {
+        brandVoice: { ...(current?.brandVoice ?? {}), banned_phrases: phrases },
+      });
+    },
+    async setTemplateWeight() {
+      /* No template-weight store yet; scope_reclassified lessons aren't produced. */
+    },
+  };
   const retrievalEvalRunRepo = pool
     ? new PgRetrievalEvalRunRepository(pool)
     : new InMemoryRetrievalEvalRunRepository();
@@ -1561,6 +1595,30 @@ export function createApp(): express.Express {
           // noticing in both places.
           // eslint-disable-next-line no-console
           console.error('app: failed to enqueue proposal_correction', {
+            proposalId: event.proposalId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        // U7 — record structured correction lessons (labor rate / banned
+        // phrase) from the drafted-vs-executed diff, cascading the change
+        // forward within the day so the digest "what I learned" is real and
+        // the next same-day draft reflects it. Failure-soft: a lesson error
+        // must never break execution.
+        try {
+          await recordCorrectionLessonsOnExecution(
+            { tenantId: event.tenantId, proposalId: event.proposalId },
+            {
+              proposalRepo,
+              proposalExecutionRepo,
+              settingsRepo,
+              lessonRepo: correctionLessonRepo,
+              ports: correctionConfigPorts,
+              auditRepo,
+            },
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error('app: failed to record correction lessons', {
             proposalId: event.proposalId,
             error: err instanceof Error ? err.message : String(err),
           });
