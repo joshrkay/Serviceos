@@ -4801,6 +4801,17 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_dnc_list ADD COLUMN IF NOT EXISTS source TEXT;
     ALTER TABLE tenant_dnc_list ALTER COLUMN added_by DROP NOT NULL;
   `,
+
+  // Extend the inline vertical_type CHECK on vertical_training_assets to
+  // accept 'painting' so the painting-v1 canonical pack can persist
+  // training assets like the other packs (HVAC / plumbing / electrical).
+  // Drop IF EXISTS by the inline constraint name (fresh DBs may differ)
+  // and re-add with the four-vertical value list.
+  '193_extend_vertical_training_assets_painting': `
+    ALTER TABLE vertical_training_assets DROP CONSTRAINT IF EXISTS vertical_training_assets_vertical_type_check;
+    ALTER TABLE vertical_training_assets ADD CONSTRAINT vertical_training_assets_vertical_type_check
+      CHECK (vertical_type IN ('hvac', 'plumbing', 'electrical', 'painting'));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

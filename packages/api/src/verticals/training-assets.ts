@@ -53,7 +53,7 @@ export const trainingAssetProvenanceSchema = z.object({
 export type TrainingAssetProvenance = z.infer<typeof trainingAssetProvenanceSchema>;
 
 export const trainingAssetInputSchema = z.object({
-  verticalType: z.enum(['hvac', 'plumbing', 'electrical']),
+  verticalType: z.enum(['hvac', 'plumbing', 'electrical', 'painting']),
   assetKind: trainingAssetKindSchema,
   title: z.string().min(3).max(160),
   rawText: z.string().min(1).max(12000),
@@ -120,6 +120,7 @@ const VERTICAL_LABELS: Record<VerticalType, string> = {
   hvac: 'HVAC',
   plumbing: 'Plumbing',
   electrical: 'Electrical',
+  painting: 'Painting',
 };
 
 export const MAX_PROMPT_ASSETS = 5;

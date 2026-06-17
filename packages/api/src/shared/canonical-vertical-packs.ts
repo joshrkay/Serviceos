@@ -3,6 +3,7 @@ import { VerticalPackRegistry, VerticalPack } from './vertical-pack-registry';
 import { createHvacPack } from '../verticals/packs/hvac';
 import { createPlumbingPack } from '../verticals/packs/plumbing';
 import { createElectricalPack } from '../verticals/packs/electrical';
+import { createPaintingPack } from '../verticals/packs/painting';
 
 /**
  * Adapt a rich pack (from `verticals/packs/{hvac,plumbing,electrical}.ts`) into
@@ -21,7 +22,8 @@ import { createElectricalPack } from '../verticals/packs/electrical';
 type RichCanonicalPack =
   | ReturnType<typeof createHvacPack>
   | ReturnType<typeof createPlumbingPack>
-  | ReturnType<typeof createElectricalPack>;
+  | ReturnType<typeof createElectricalPack>
+  | ReturnType<typeof createPaintingPack>;
 
 function adaptToCanonical(packId: string, rich: RichCanonicalPack): VerticalPack {
   const now = new Date();
@@ -55,6 +57,9 @@ export async function seedCanonicalVerticalPacks(registry: VerticalPackRegistry)
     }),
     registry.register(adaptToCanonical('electrical-v1', createElectricalPack())).catch((err) => {
       process.stderr.write(`[seed] Failed to register electrical-v1 pack: ${err instanceof Error ? err.message : String(err)}\n`);
+    }),
+    registry.register(adaptToCanonical('painting-v1', createPaintingPack())).catch((err) => {
+      process.stderr.write(`[seed] Failed to register painting-v1 pack: ${err instanceof Error ? err.message : String(err)}\n`);
     }),
   ]);
 }

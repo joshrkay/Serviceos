@@ -24,6 +24,15 @@ function getVerticalCategories(verticalType: VerticalType) {
         sortOrder: index + 1,
         typicalLineItems: [] as string[],
       }));
+    case 'painting':
+      return getServiceCategories('painting').map((category, index) => ({
+        id: category,
+        name: titleCaseCategory(category),
+        description: `Painting ${category} service`,
+        parentId: undefined,
+        sortOrder: index + 1,
+        typicalLineItems: [] as string[],
+      }));
   }
 }
 
@@ -35,6 +44,8 @@ function getVerticalTerminology(verticalType: VerticalType) {
       return PLUMBING_TERMINOLOGY;
     case 'electrical':
       return getElectricalTerminology();
+    case 'painting':
+      return getPaintingTerminology();
   }
 }
 
@@ -53,6 +64,20 @@ function getElectricalTerminology(): TerminologyMap {
         canonical: category,
         displayLabel: titleCaseCategory(category),
         promptHint: `Electrical ${category} service`,
+        aliases: [category],
+      },
+    ])
+  );
+}
+
+function getPaintingTerminology(): TerminologyMap {
+  return Object.fromEntries(
+    getServiceCategories('painting').map((category) => [
+      category,
+      {
+        canonical: category,
+        displayLabel: titleCaseCategory(category),
+        promptHint: `Painting ${category} service`,
         aliases: [category],
       },
     ])

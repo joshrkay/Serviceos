@@ -224,6 +224,7 @@ import { buildMarkCustomerVulnerablePayload } from './ai/agents/customer-calling
 import { createHvacPack } from './verticals/packs/hvac';
 import { createPlumbingPack } from './verticals/packs/plumbing';
 import { createElectricalPack } from './verticals/packs/electrical';
+import { createPaintingPack } from './verticals/packs/painting';
 import { isValidVerticalType } from './shared/vertical-types';
 import {
   buildCallerPlanContext,
@@ -2310,6 +2311,7 @@ export function createApp(): express.Express {
     ['hvac', createHvacPack()],
     ['plumbing', createPlumbingPack()],
     ['electrical', createElectricalPack()],
+    ['painting', createPaintingPack()],
   ]);
   const repairTemplatesResolver = async (tenantId: string): Promise<ReadonlyArray<import('./verticals/registry').RepairTemplate>> => {
     const activations = await packActivationRepo.findByTenant(tenantId);

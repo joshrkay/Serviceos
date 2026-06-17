@@ -129,6 +129,10 @@ function electricalCategoryDescription(category: ServiceCategory): string {
   return `Electrical ${category} service`;
 }
 
+function paintingCategoryDescription(category: ServiceCategory): string {
+  return `Painting ${category} service`;
+}
+
 function getTerminology(verticalType: VerticalType): TerminologyMap {
   switch (verticalType) {
     case 'hvac':
@@ -136,6 +140,8 @@ function getTerminology(verticalType: VerticalType): TerminologyMap {
     case 'plumbing':
       return PLUMBING_TERMINOLOGY;
     case 'electrical':
+      return {};
+    case 'painting':
       return {};
     default: {
       const _exhaustive: never = verticalType;
@@ -167,6 +173,14 @@ function getCategories(verticalType: VerticalType): VerticalPackConfig['categori
         id: category,
         name: titleCaseCategory(category),
         description: electricalCategoryDescription(category),
+        sortOrder: index + 1,
+        typicalLineItems: [],
+      }));
+    case 'painting':
+      return getServiceCategories('painting').map((category, index) => ({
+        id: category,
+        name: titleCaseCategory(category),
+        description: paintingCategoryDescription(category),
         sortOrder: index + 1,
         typicalLineItems: [],
       }));
@@ -213,6 +227,8 @@ function getTemplates(verticalType: VerticalType): VerticalTemplateConfig[] {
       ];
     case 'electrical':
       return [];
+    case 'painting':
+      return [];
     default: {
       const _exhaustive: never = verticalType;
       throw new Error(`Unknown vertical type: ${verticalType}`);
@@ -243,6 +259,12 @@ function getIntakeConfig(verticalType: VerticalType): VerticalIntakeConfig {
         ],
       };
     case 'electrical':
+      return {
+        requiredFields: [],
+        optionalFields: [],
+        followUpQuestions: [],
+      };
+    case 'painting':
       return {
         requiredFields: [],
         optionalFields: [],

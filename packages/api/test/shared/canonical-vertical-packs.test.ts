@@ -122,4 +122,48 @@ describe('seedCanonicalVerticalPacks (§3B/3D/3E P1 fix)', () => {
     expect(meta.canonical).toBe(true);
     expect(meta.seededBy).toBe('createApp');
   });
+
+  it('seeds painting-v1 with second-class canonical training metadata', async () => {
+    const registry = new InMemoryVerticalPackRegistry();
+
+    await seedCanonicalVerticalPacks(registry);
+
+    const painting = await registry.getByPackId('painting-v1');
+    expect(painting).not.toBeNull();
+    expect(painting!.verticalType).toBe('painting');
+    expect(painting!.status).toBe('active');
+
+    const meta = painting!.metadata as Record<string, unknown>;
+    // Same four-key contract the resolver depends on (terminology /
+    // categories / intake_questions / objection_scripts).
+    expect(meta.terminology).toBeDefined();
+    expect(Object.keys(meta.terminology as Record<string, unknown>).length).toBeGreaterThan(0);
+    expect(Array.isArray(meta.categories)).toBe(true);
+    expect((meta.categories as unknown[]).length).toBeGreaterThanOrEqual(7);
+    expect(Array.isArray(meta.intake_questions)).toBe(true);
+    expect((meta.intake_questions as unknown[]).length).toBeGreaterThan(0);
+    expect(Array.isArray(meta.objection_scripts)).toBe(true);
+    expect((meta.objection_scripts as unknown[]).length).toBeGreaterThan(0);
+
+    expect(meta.training_tier).toBe('second_class');
+    expect(meta.training_assets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          assetKind: 'intake_question',
+          title: 'Pre-1978 lead-paint check',
+        }),
+      ]),
+    );
+    expect(meta.canonical).toBe(true);
+    expect(meta.seededBy).toBe('createApp');
+  });
+
+  it('findByVertical("painting") surfaces the seeded painting-v1 pack', async () => {
+    const registry = new InMemoryVerticalPackRegistry();
+    seedCanonicalVerticalPacks(registry);
+    await new Promise((r) => setImmediate(r));
+    const paintingPacks = await registry.findByVertical('painting');
+    expect(paintingPacks.length).toBeGreaterThan(0);
+    expect(paintingPacks[0].packId).toBe('painting-v1');
+  });
 });
