@@ -120,7 +120,9 @@ describe('Postgres integration — U4 inbound SMS capture', () => {
     });
     expect(first.handled).toBe(true);
 
-    const lead = await leadRepo.findByPhoneNormalized(tenant.tenantId, '15555559999');
+    // normalizePhone (and the leads phone_normalized generated column) strip the
+    // leading country-code '1' from an 11-digit number: +15555559999 → 5555559999.
+    const lead = await leadRepo.findByPhoneNormalized(tenant.tenantId, '5555559999');
     expect(lead).not.toBeNull();
     expect(lead!.primaryPhone).toBe('+15555559999');
     // Tagged 'sms' (distinct from call-origin leads) — pins the leads_source_check
