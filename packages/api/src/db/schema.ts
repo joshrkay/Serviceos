@@ -4778,6 +4778,17 @@ export const MIGRATIONS = {
           'daily_digest', 'conversation_reply'
         ));
   `,
+
+  // CRM two-way comms follow-up: an inbound text from an unknown number
+  // find-or-creates a lead stamped source='sms' (distinct from 'phone_call'
+  // so it carries its own tag in the kanban). Extend the inline CHECK on
+  // leads.source — drop IF EXISTS (fresh DBs may lack the inline name) and
+  // re-add with 'sms' appended to the 069 value list.
+  '191_extend_leads_source_check_sms': `
+    ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_source_check;
+    ALTER TABLE leads ADD CONSTRAINT leads_source_check
+      CHECK (source IN ('web_form','phone_call','referral','walk_in','marketplace','other','customer_portal','sms'));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -130,6 +130,7 @@ async function resolveThreadTarget(
       leadRepo: deps.leadRepo,
       auditRepo: deps.auditRepo,
       systemActorId: 'system:sms-capture',
+      source: 'sms',
       channelLabel: 'text',
       auditVia: 'sms_capture',
     });

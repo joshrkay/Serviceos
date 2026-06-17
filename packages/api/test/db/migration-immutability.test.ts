@@ -288,6 +288,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // 'digest_approve_all_rendered' anchor (additive, pre-deploy).
   ['189_proposal_sms_events_digest_approve_all_kind', 'e66034b7738726dc1289801770c998c722b7a13c314f410c38d993b6973c296d'],
   ['190_dispatch_entity_conversation_reply', 'f68dcf4009222fb5f516bb37d914124ba2e6eb761d3469c7c11eee7cc855641a'],
+  // CRM two-way comms: extend leads_source_check to admit 'sms' (text-origin leads).
+  ['191_extend_leads_source_check_sms', 'a255c4625c8fd00f4f0e1b4335d001f518bc20616e3c60af87ac2d87d836aef2'],
 ];
 
 function hashMigration(value: string): string {

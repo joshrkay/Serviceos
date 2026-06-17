@@ -143,9 +143,12 @@ describe('U4 — inbound SMS capture handler', () => {
     expect(result.handled).toBe(true);
     expect(leadRepo.create).toHaveBeenCalledTimes(1);
 
-    // The new lead carries the originating phone, and its id keys the thread.
+    // The new lead carries the originating phone + the 'sms' source tag, and
+    // its id keys the thread.
     const createdLead = leadRepo.create.mock.calls[0][0] as Lead;
     expect(createdLead.primaryPhone).toBe('+15555550123');
+    expect(createdLead.source).toBe('sms');
+    expect(createdLead.sourceDetail).toContain('Inbound text from');
     const threads = await conversationRepo.findByEntity(TENANT, 'lead', createdLead.id);
     expect(threads).toHaveLength(1);
 

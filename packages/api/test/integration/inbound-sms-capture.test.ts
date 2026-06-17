@@ -123,6 +123,9 @@ describe('Postgres integration — U4 inbound SMS capture', () => {
     const lead = await leadRepo.findByPhoneNormalized(tenant.tenantId, '15555559999');
     expect(lead).not.toBeNull();
     expect(lead!.primaryPhone).toBe('+15555559999');
+    // Tagged 'sms' (distinct from call-origin leads) — pins the leads_source_check
+    // migration accepts the value at the DB layer.
+    expect(lead!.source).toBe('sms');
 
     const threads = await conversationRepo.findByEntity(tenant.tenantId, 'lead', lead!.id);
     expect(threads).toHaveLength(1);

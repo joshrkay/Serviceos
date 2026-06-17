@@ -75,9 +75,9 @@ function getNav(mode: Mode): NavItem[] {
       ];
     case 'supervisor':
     default:
-      // Mirrors the Figma reference's 10 desktop items exactly. Dispatch,
-      // Inbox, and Money intentionally live off the sidebar to keep the
-      // surface calm: Dispatch/Money are reachable by URL (and surfaced in
+      // The 10 Figma desktop items plus Messages (the unified comms inbox).
+      // Dispatch, Inbox, and Money intentionally live off the sidebar to keep
+      // the surface calm: Dispatch/Money are reachable by URL (and surfaced in
       // Schedule/Home), and pending approvals stay one click away via the
       // proposal badge on the Rivet logo, which links to /inbox.
       return [

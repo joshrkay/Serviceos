@@ -17,6 +17,10 @@ export const LEAD_SOURCES = [
   // self-serve portal. Previously these were stamped as 'web_form' with
   // sourceDetail='Customer Portal' as a workaround.
   'customer_portal',
+  // CRM two-way comms — leads minted from an inbound text by an unknown
+  // sender (sms-capture). Distinct from 'phone_call' so the kanban tags
+  // text-originated leads. Backed by leads_source_check (migration 191).
+  'sms',
 ] as const;
 export type LeadSource = (typeof LEAD_SOURCES)[number];
 

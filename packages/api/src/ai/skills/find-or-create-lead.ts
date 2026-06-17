@@ -27,10 +27,11 @@ export type FindOrCreateLeadResult =
   | { status: 'created'; leadId: string; lead: Lead };
 
 /**
- * Look up an existing open lead by phone, or create a new `phone_call`
- * lead for an unknown caller. Used by the inbound-call adapter so the
- * AI receptionist's "unknown caller" branch lands in the CRM kanban
- * automatically.
+ * Look up an existing open lead by phone, or create a new lead for an
+ * unknown contact. The source/channelLabel/auditVia default to a
+ * `phone_call` lead for the inbound-call adapter (so the AI receptionist's
+ * "unknown caller" branch lands in the CRM kanban automatically); SMS
+ * capture overrides them to mint a `source='sms'` lead ("Inbound text …").
  *
  * Idempotency: races between two concurrent calls to this skill (or
  * between a SELECT and a manual insert) are caught by the partial
