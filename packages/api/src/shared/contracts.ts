@@ -470,7 +470,7 @@ export const conversationAccessSchema = z.object({
 
 // Phase 4 — Vertical Packs + Estimate Intelligence
 
-export const verticalTypeSchema = z.enum(['hvac', 'plumbing', 'electrical']);
+export const verticalTypeSchema = z.enum(['hvac', 'plumbing', 'electrical', 'painting']);
 
 const lineItemTemplateSchema = z.object({
   description: z.string().min(1),

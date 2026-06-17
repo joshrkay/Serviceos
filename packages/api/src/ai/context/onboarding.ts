@@ -19,6 +19,7 @@ export function buildOnboardingContext(
     hvac: getServiceCategories('hvac').map(String),
     plumbing: getServiceCategories('plumbing').map(String),
     electrical: getServiceCategories('electrical').map(String),
+    painting: getServiceCategories('painting').map(String),
   };
 
   return {

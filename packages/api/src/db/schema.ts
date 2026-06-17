@@ -4801,6 +4801,77 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_dnc_list ADD COLUMN IF NOT EXISTS source TEXT;
     ALTER TABLE tenant_dnc_list ALTER COLUMN added_by DROP NOT NULL;
   `,
+
+  // Extend the inline vertical_type CHECK on vertical_training_assets to
+  // accept 'painting' so the painting-v1 canonical pack can persist
+  // training assets like the other packs (HVAC / plumbing / electrical).
+  // Drop IF EXISTS by the inline constraint name (fresh DBs may differ)
+  // and re-add with the four-vertical value list.
+  '193_extend_vertical_training_assets_painting': `
+    ALTER TABLE vertical_training_assets DROP CONSTRAINT IF EXISTS vertical_training_assets_vertical_type_check;
+    ALTER TABLE vertical_training_assets ADD CONSTRAINT vertical_training_assets_vertical_type_check
+      CHECK (vertical_type IN ('hvac', 'plumbing', 'electrical', 'painting'));
+  `,
+
+  // Post-job thank-you SMS (PRD §7.2 demo moment). Adds:
+  //   - jobs.completed_at: explicit completion timestamp written by
+  //     transitionJobStatus. updated_at moves on any write so we can't
+  //     derive "when did this job finish" from it reliably.
+  //   - jobs.thank_you_sms_sent_at: per-job idempotency stamp. Sweep
+  //     skips any job where this is non-null. Suppressed reasons (no
+  //     phone / opted out / permanent SMS failure) also set this so
+  //     the sweep won't re-check forever.
+  //   - tenant_settings.send_thank_you_sms: opt-out per tenant. Default
+  //     ON to match the PRD's "built-in, included" framing.
+  // Backfill: any pre-existing 'completed' job gets completed_at and
+  // thank_you_sms_sent_at = updated_at, so the first sweep after deploy
+  // doesn't blast everyone with a thanks for jobs they finished months
+  // ago.
+  '194_thank_you_sms': `
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS thank_you_sms_sent_at TIMESTAMPTZ;
+    ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS send_thank_you_sms BOOLEAN NOT NULL DEFAULT TRUE;
+    UPDATE jobs
+      SET completed_at = updated_at,
+          thank_you_sms_sent_at = updated_at
+      WHERE status = 'completed'
+        AND completed_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_jobs_thank_you_eligibility
+      ON jobs (tenant_id, completed_at)
+      WHERE thank_you_sms_sent_at IS NULL AND completed_at IS NOT NULL;
+  `,
+
+  // U1 — Onboarding Agent multi-turn session table. The FSM lives in
+  // src/ai/agents/onboarding; this is its durable backing store so a
+  // conversation resumes after a browser close. ENABLE + FORCE RLS
+  // matches the precedent set by every other tenant-scoped table
+  // (jobs/audit_events/users) — the FORCE bit is non-negotiable because
+  // the app role would otherwise bypass the tenant_isolation policy on
+  // queries that forget to set current_tenant_id (gemini-code-assist
+  // flagged this on PR #594).
+  '195_onboarding_session': `
+    CREATE TABLE IF NOT EXISTS onboarding_session (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      fsm_state TEXT NOT NULL DEFAULT 'profile_capture',
+      transcript_turns JSONB NOT NULL DEFAULT '[]',
+      pending_clarifications JSONB NOT NULL DEFAULT '[]',
+      clarification_count_by_state JSONB NOT NULL DEFAULT '{}',
+      extraction_state JSONB NOT NULL DEFAULT '{}',
+      turn_count INTEGER NOT NULL DEFAULT 0,
+      proposal_batch_ids JSONB NOT NULL DEFAULT '[]',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_onboarding_session_tenant
+      ON onboarding_session (tenant_id, created_at DESC);
+    ALTER TABLE onboarding_session ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE onboarding_session FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_onboarding_session ON onboarding_session;
+    CREATE POLICY tenant_isolation_onboarding_session ON onboarding_session
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

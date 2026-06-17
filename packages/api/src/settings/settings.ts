@@ -209,6 +209,14 @@ export interface TenantSettings {
    */
   autoInvoiceOnCompletion?: boolean;
   /**
+   * Post-job thank-you SMS. When true (default), the thank-you-sms sweep
+   * worker sends a single "thanks for choosing X" SMS ~2 hours after a
+   * job transitions to 'completed'. Idempotent on
+   * `jobs.thank_you_sms_sent_at`. PRD §7.2 (the "Johnson job is done"
+   * demo moment).
+   */
+  sendThankYouSms?: boolean;
+  /**
    * Feature (launch) — when true, an auto-drafted invoice recomputes its labor
    * line from ACTUAL logged time entries instead of the estimated hours.
    * Default false (opt-in); with no tracked time the estimate is billed as-is.
@@ -458,6 +466,8 @@ export interface UpdateSettingsInput {
   autoSendAppointmentReminders?: boolean;
   /** P20-001 — auto-draft an invoice (as a proposal) on job completion. */
   autoInvoiceOnCompletion?: boolean;
+  /** Post-job 2hr thank-you SMS. Default true. */
+  sendThankYouSms?: boolean;
   /** Feature (launch) — recompute auto-invoice labor from actual time entries. */
   billLaborFromTimeEntries?: boolean;
   /** P21-003 — opt into the daily batch-invoice proposal sweep. */

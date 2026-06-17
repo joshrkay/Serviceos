@@ -103,6 +103,12 @@ import { checkAndFireUpgradeNudge } from './voice/check-upgrade-nudge';
 import { maybeAutoGoLiveOnInboundEnd } from './voice/go-live';
 import { maybeFireFirstRealCallActivation } from './voice/activation';
 import { createOnboardingRouter } from './routes/onboarding';
+import { createOnboardingConversationRouter } from './routes/onboarding-conversation';
+import { OnboardingConversationOrchestrator } from './ai/orchestration/onboarding-conversation';
+import {
+  InMemoryOnboardingSessionRepository,
+  PgOnboardingSessionRepository,
+} from './db/onboarding-session-repository';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
 import { createTechnicianLocationRouter } from './routes/technician-location';
@@ -224,6 +230,7 @@ import { buildMarkCustomerVulnerablePayload } from './ai/agents/customer-calling
 import { createHvacPack } from './verticals/packs/hvac';
 import { createPlumbingPack } from './verticals/packs/plumbing';
 import { createElectricalPack } from './verticals/packs/electrical';
+import { createPaintingPack } from './verticals/packs/painting';
 import { isValidVerticalType } from './shared/vertical-types';
 import {
   buildCallerPlanContext,
@@ -324,6 +331,7 @@ import {
   InMemoryHfcrWeeklySendRepository,
 } from './metrics/hfcr-weekly-send';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
+import { runThankYouSmsSweep } from './workers/thank-you-sms-worker';
 import { PgReviewRepository } from './reputation/pg-review';
 import { PgReviewPollStateRepository } from './reputation/poll-state';
 import { PgServiceCreditRepository } from './reputation/pg-service-credit';
@@ -1752,6 +1760,7 @@ export function createApp(): express.Express {
     // (U5) so the key is now unique to hfcrWeeklySend.
     hfcrWeeklySend: 590014,
     holdReaper: 590015,
+    thankYouSms: 590016,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -2310,6 +2319,7 @@ export function createApp(): express.Express {
     ['hvac', createHvacPack()],
     ['plumbing', createPlumbingPack()],
     ['electrical', createElectricalPack()],
+    ['painting', createPaintingPack()],
   ]);
   const repairTemplatesResolver = async (tenantId: string): Promise<ReadonlyArray<import('./verticals/registry').RepairTemplate>> => {
     const activations = await packActivationRepo.findByTenant(tenantId);
@@ -3776,6 +3786,25 @@ export function createApp(): express.Express {
       packSeedDeps: { catalogRepo, templateRepo },
     }),
   );
+
+  // U1 — conversational onboarding lane. Mounted as a sub-path of the
+  // existing V2 onboarding routes so the web client can post turns to
+  // POST /api/onboarding/conversation/turn while the form-based
+  // wizard's other endpoints stay unchanged.
+  const onboardingSessionRepo = pool
+    ? new PgOnboardingSessionRepository(pool)
+    : new InMemoryOnboardingSessionRepository();
+  app.use(
+    '/api/onboarding/conversation',
+    createOnboardingConversationRouter({
+      orchestrator: new OnboardingConversationOrchestrator({
+        gateway: llmGateway,
+        sessionRepo: onboardingSessionRepo,
+        proposalRepo,
+        auditRepo,
+      }),
+    }),
+  );
   app.use(
     '/api/technician-location',
     createTechnicianLocationRouter({
@@ -4451,6 +4480,32 @@ export function createApp(): express.Express {
       });
     });
   }, 15 * 60_000));
+
+  // Post-job thank-you SMS sweep (PRD §7.2). Same P0-009 sweep idiom as
+  // google-reviews / overdue-invoice / appointment-reminder. The pool
+  // guard inside the worker no-ops cleanly when running in-memory.
+  const thankYouSmsLogger = createLogger({
+    service: 'thank-you-sms-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.thankYouSms, async () => {
+      await runThankYouSmsSweep({
+        pool: pool ?? null,
+        jobRepo,
+        customerRepo,
+        settingsRepo,
+        dncRepo,
+        dispatcher: feedbackDispatcher,
+        auditRepo,
+        logger: thankYouSmsLogger,
+      });
+    }).catch((err) => {
+      thankYouSmsLogger.error('Thank-you SMS sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 10 * 60_000));
 
   // U5 — the redundant P5-020 hourly digest worker was removed; the daily
   // digest (RV-063 runDailyDigestSweep, scheduled above on the dailyDigest

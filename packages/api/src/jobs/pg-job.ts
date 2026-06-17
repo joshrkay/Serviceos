@@ -45,6 +45,12 @@ function mapRow(row: Record<string, unknown>): Job {
       (row.deposit_credited_to_invoice_id as string | null) ?? undefined,
     // §6 Time-to-Cash. Migration 095; DEFAULT 'no_estimate' for legacy rows.
     moneyState: (row.money_state as JobMoneyState | null) ?? 'no_estimate',
+    // Migration 194 — explicit completion + thank-you idempotency stamps.
+    // Both nullable; legacy rows backfilled in the migration.
+    completedAt: row.completed_at ? new Date(row.completed_at as string) : undefined,
+    thankYouSmsSentAt: row.thank_you_sms_sent_at
+      ? new Date(row.thank_you_sms_sent_at as string)
+      : undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -231,6 +237,11 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
         depositCreditedToInvoiceId: 'deposit_credited_to_invoice_id',
         // §6 Time-to-Cash. Migration 095.
         moneyState: 'money_state',
+        // Migration 194 — thank-you SMS columns. completedAt is stamped
+        // by transitionJobStatus; thankYouSmsSentAt is stamped by the
+        // sweep worker once the SMS has been handled (sent or suppressed).
+        completedAt: 'completed_at',
+        thankYouSmsSentAt: 'thank_you_sms_sent_at',
         updatedAt: 'updated_at',
       };
 

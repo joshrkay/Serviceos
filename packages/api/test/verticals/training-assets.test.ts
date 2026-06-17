@@ -39,7 +39,7 @@ function buildActiveTrainingAsset(
 
 describe('vertical type support', () => {
   it('treats electrical as supported but second-class', () => {
-    expect(VALID_VERTICAL_TYPES).toEqual(['hvac', 'plumbing', 'electrical']);
+    expect(VALID_VERTICAL_TYPES).toEqual(['hvac', 'plumbing', 'electrical', 'painting']);
     expect(isValidVerticalType('electrical')).toBe(true);
     expect(getServiceCategories('electrical')).toEqual([
       'diagnostic',
