@@ -18,6 +18,7 @@ import {
   editProposal,
   undoProposal,
 } from '../proposals/actions';
+import { resolveProposalLine } from '../proposals/resolve-line';
 import {
   proposalFilterSchema,
   rejectProposalBodySchema,
@@ -34,6 +35,13 @@ import { createSchedulingProposal } from '../proposals/create-scheduling';
 // scripted caller flood approval audit rows.
 const approveBatchBodySchema = z.object({
   proposalIds: z.array(z.string().uuid()).min(1).max(50),
+});
+
+// U2 (P2-035) — resolve an ambiguous catalog line by picking one of the
+// line's surfaced candidates. Patches the draft; never approves (D-004).
+const resolveLineBodySchema = z.object({
+  lineIndex: z.number().int().min(0),
+  catalogItemId: z.string().min(1),
 });
 
 export function createProposalsRouter(
@@ -224,6 +232,33 @@ export function createProposalsRouter(
           req.auth!.role as Role,
           auditRepo,
           'ui', // RV-073 — dashboard screen-tap approval
+        );
+        res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  router.post(
+    '/:id/resolve-line',
+    requireAuth,
+    requireTenant,
+    requirePermission('proposals:approve'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const parsed = validate(resolveLineBodySchema, req.body);
+        const result = await resolveProposalLine(
+          {
+            tenantId: req.auth!.tenantId,
+            proposalId: req.params.id,
+            lineIndex: parsed.lineIndex,
+            catalogItemId: parsed.catalogItemId,
+            actorId: req.auth!.userId,
+            actorRole: req.auth!.role as Role,
+          },
+          { proposalRepo, ...(auditRepo ? { auditRepo } : {}) },
         );
         res.json(result);
       } catch (err) {
