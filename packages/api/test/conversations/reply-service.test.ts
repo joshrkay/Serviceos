@@ -34,6 +34,7 @@ interface Harness {
   dncRepo: { isOnDnc: ReturnType<typeof vi.fn> };
   auditRepo: { create: ReturnType<typeof vi.fn> };
   customerRepo: { findById: ReturnType<typeof vi.fn> };
+  leadRepo: { findById: ReturnType<typeof vi.fn> };
 }
 
 function harness(over: { customer?: Customer | null } = {}): Harness {
@@ -54,10 +55,13 @@ function harness(over: { customer?: Customer | null } = {}): Harness {
   const customerRepo = {
     findById: vi.fn().mockResolvedValue('customer' in over ? over.customer : customer()),
   };
+  const leadRepo = { findById: vi.fn().mockResolvedValue(null) };
   const deps: ConversationReplyDeps = {
     conversationRepo,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     customerRepo: customerRepo as any,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    leadRepo: leadRepo as any,
     dncRepo,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     dispatchRepo: dispatchRepo as any,
@@ -67,7 +71,7 @@ function harness(over: { customer?: Customer | null } = {}): Harness {
     businessName: 'Acme Plumbing',
     now: () => new Date('2026-06-17T12:00:00Z'),
   };
-  return { deps, conversationRepo, delivery, dispatchRepo, dncRepo, auditRepo, customerRepo };
+  return { deps, conversationRepo, delivery, dispatchRepo, dncRepo, auditRepo, customerRepo, leadRepo };
 }
 
 async function customerThread(
@@ -258,6 +262,42 @@ describe('U6 — sendConversationReply', () => {
     expect(h.customerRepo.findById).not.toHaveBeenCalled();
     expect(result.channel).toBe('sms');
     expect(h.delivery.sendSms.mock.calls[0][0].to).toBe('+15555559999');
+  });
+
+  it('replies to a lead-linked thread by SMS to the lead phone', async () => {
+    h = harness();
+    h.leadRepo.findById.mockResolvedValue({
+      id: 'lead-1',
+      tenantId: TENANT,
+      firstName: 'Pat',
+      lastName: 'Prospect',
+      primaryPhone: '+15555551234',
+      source: 'phone_call',
+      stage: 'new',
+      createdBy: 'x',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const id = await customerThread(h.conversationRepo, {
+      entityType: 'lead',
+      entityId: 'lead-1',
+    });
+
+    const result = await sendConversationReply(h.deps, {
+      tenantId: TENANT,
+      conversationId: id,
+      body: 'Thanks for reaching out!',
+      actorId: 'owner-1',
+      actorRole: 'owner',
+    });
+
+    expect(h.leadRepo.findById).toHaveBeenCalledWith(TENANT, 'lead-1');
+    expect(result.channel).toBe('sms');
+    expect(h.delivery.sendSms.mock.calls[0][0].to).toBe('+15555551234');
+    expect(h.dispatchRepo.create.mock.calls[0][0]).toMatchObject({
+      entityType: 'conversation_reply',
+      entityId: id,
+    });
   });
 
   it('throws not_found for an unknown conversation', async () => {

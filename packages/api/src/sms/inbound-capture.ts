@@ -27,6 +27,8 @@
 import { createAuditEvent, AuditRepository } from '../audit/audit';
 import type { Customer } from '../customers/customer';
 import { normalizePhone } from '../customers/dedup';
+import type { LeadRepository } from '../leads/lead';
+import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
 import type {
   Conversation,
   ConversationRepository,
@@ -35,8 +37,9 @@ import type { FallbackHandler, InboundSmsContext, HandlerResult } from './inboun
 import type { Logger } from '../logging/logger';
 
 /** Conversation entity type used for inbound texts we could not pin to a
- *  single customer. Keyed by the digits-only sender phone so the same unknown
- *  number always reuses one thread. */
+ *  single customer (and could not land on a lead — e.g. ambiguous existing
+ *  customers, or no lead repo wired). Keyed by the full E.164 sender phone so
+ *  the same unknown number always reuses one thread. */
 export const UNMATCHED_SMS_ENTITY_TYPE = 'sms_unmatched';
 
 export interface InboundCaptureDeps {
@@ -45,13 +48,18 @@ export interface InboundCaptureDeps {
     'createConversation' | 'findByEntity' | 'addMessage'
   >;
   /** Phone→customer resolver. Optional method on the repo; when absent (or it
-   *  returns ≠1 match) the text threads as unmatched rather than guessing. */
+   *  returns ≠1 match) the text does not become a customer thread. */
   customerRepo: {
     findByPhoneNormalized?(
       tenantId: string,
       phoneNormalized: string,
     ): Promise<Customer[]>;
   };
+  /** Lead pipeline. When wired, an inbound text from a number that matches NO
+   *  existing customer find-or-creates a lead (deduped by phone) and threads the
+   *  conversation onto it, so unknown senders land in the CRM pipeline instead
+   *  of a loose phone-keyed thread. */
+  leadRepo?: LeadRepository;
   auditRepo?: Pick<AuditRepository, 'create'>;
   logger?: Logger;
 }
@@ -61,12 +69,22 @@ interface ThreadTarget {
   entityId: string;
   title: string;
   customerId?: string;
+  leadId?: string;
+}
+
+function leadName(firstName: string, lastName: string, companyName?: string): string {
+  const full = `${firstName} ${lastName}`.trim();
+  return full || companyName || '';
 }
 
 /**
- * Resolve which conversation a text belongs to. Exactly one customer match →
- * that customer's thread; zero or many → a phone-keyed unmatched thread (never
- * a silent guess between multiple customers).
+ * Resolve which conversation a text belongs to:
+ *   • exactly one customer match → that customer's thread;
+ *   • multiple matches (ambiguous existing customers) → a phone-keyed unmatched
+ *     thread (never a silent guess, and not a new lead — they're already known);
+ *   • no customer match → find-or-create a CRM lead (deduped by phone) and
+ *     thread onto it; fall back to an unmatched thread if no lead repo is wired
+ *     or lead creation fails, so a text is never dropped.
  */
 async function resolveThreadTarget(
   ctx: InboundSmsContext,
@@ -88,16 +106,48 @@ async function resolveThreadTarget(
     ctx.tenantId,
     phoneNormalized,
   );
-  if (matches.length !== 1) {
+  if (matches.length === 1) {
+    const customer = matches[0];
+    return {
+      entityType: 'customer',
+      entityId: customer.id,
+      title: customer.displayName || `SMS from ${ctx.fromE164}`,
+      customerId: customer.id,
+    };
+  }
+  if (matches.length > 1) {
+    // Ambiguous: multiple existing customers share this number. Don't guess and
+    // don't mint a lead — keep an unmatched thread for the owner to disambiguate.
     return unmatched;
   }
-  const customer = matches[0];
-  return {
-    entityType: 'customer',
-    entityId: customer.id,
-    title: customer.displayName || `SMS from ${ctx.fromE164}`,
-    customerId: customer.id,
-  };
+
+  // Zero customer matches → a genuinely new contact. Land it in the pipeline.
+  if (!deps.leadRepo) return unmatched;
+  try {
+    const result = await findOrCreateLeadByPhone({
+      tenantId: ctx.tenantId,
+      fromPhone: ctx.fromE164,
+      leadRepo: deps.leadRepo,
+      auditRepo: deps.auditRepo,
+      systemActorId: 'system:sms-capture',
+      channelLabel: 'text',
+      auditVia: 'sms_capture',
+    });
+    const lead = result.lead;
+    return {
+      entityType: 'lead',
+      entityId: lead.id,
+      title: leadName(lead.firstName, lead.lastName, lead.companyName) || `SMS from ${ctx.fromE164}`,
+      leadId: lead.id,
+    };
+  } catch (err) {
+    deps.logger?.warn('Inbound SMS capture: lead find-or-create failed; threading unmatched', {
+      tenantId: ctx.tenantId,
+      messageSid: ctx.messageSid,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return unmatched;
+  }
 }
 
 /** Most-recent OPEN conversation for the target, or open a fresh one. */
@@ -156,7 +206,9 @@ export function createInboundCaptureHandler(
             channel: 'sms',
             messageSid: ctx.messageSid,
             fromE164: ctx.fromE164,
-            ...(target.customerId ? {} : { unmatched: true }),
+            ...(target.customerId ? { customerId: target.customerId } : {}),
+            ...(target.leadId ? { leadId: target.leadId } : {}),
+            ...(target.customerId || target.leadId ? {} : { unmatched: true }),
           },
         });
 
@@ -174,7 +226,9 @@ export function createInboundCaptureHandler(
                   messageSid: ctx.messageSid,
                   fromE164: ctx.fromE164,
                   matched: Boolean(target.customerId),
+                  linkedTo: target.customerId ? 'customer' : target.leadId ? 'lead' : 'unmatched',
                   ...(target.customerId ? { customerId: target.customerId } : {}),
+                  ...(target.leadId ? { leadId: target.leadId } : {}),
                 },
               }),
             );

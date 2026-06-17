@@ -69,10 +69,11 @@ export interface InboxThreadSummary {
   customerName?: string;
 }
 
-/** Entity types surfaced in the comms inbox (customer threads + phone-keyed
- *  unmatched threads). Other conversation kinds (voice/proposal internals) are
- *  excluded. Kept here so the repo and any caller agree on the scope. */
-export const INBOX_ENTITY_TYPES = ['customer', 'sms_unmatched'] as const;
+/** Entity types surfaced in the comms inbox: customer threads, lead threads
+ *  (unknown-caller captures), and phone-keyed unmatched threads. Other
+ *  conversation kinds (voice/proposal internals) are excluded. Kept here so the
+ *  repo and any caller agree on the scope. */
+export const INBOX_ENTITY_TYPES = ['customer', 'lead', 'sms_unmatched'] as const;
 
 export interface ListInboxThreadsOptions {
   status?: ConversationStatus;

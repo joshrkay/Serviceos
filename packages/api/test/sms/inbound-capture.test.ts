@@ -5,6 +5,7 @@ import {
 } from '../../src/sms/inbound-capture';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
 import type { Customer } from '../../src/customers/customer';
+import type { Lead, LeadRepository } from '../../src/leads/lead';
 import {
   __resetKeywordRegistryForTests,
   registerKeywordHandler,
@@ -37,6 +38,22 @@ function customer(overrides: Partial<Customer> = {}): Customer {
     isArchived: false,
     ...overrides,
   } as Customer;
+}
+
+/** Mock LeadRepository whose find-or-create yields a brand-new lead (echoing
+ *  whatever the skill builds), unless `existing` is supplied. */
+function makeLeadRepo(existing: Lead | null = null) {
+  return {
+    findByPhoneNormalized: vi.fn().mockResolvedValue(existing),
+    create: vi.fn().mockImplementation(async (lead: Lead) => lead),
+    findById: vi.fn(),
+    findByTenant: vi.fn(),
+    listWithMeta: vi.fn(),
+    update: vi.fn(),
+  } as unknown as LeadRepository & {
+    findByPhoneNormalized: ReturnType<typeof vi.fn>;
+    create: ReturnType<typeof vi.fn>;
+  };
 }
 
 describe('U4 — inbound SMS capture handler', () => {
@@ -113,7 +130,62 @@ describe('U4 — inbound SMS capture handler', () => {
     expect(messages.map((m) => m.content)).toEqual(['first', 'second']);
   });
 
-  it('threads an unknown number under a phone-keyed unmatched conversation (no lead, no guess)', async () => {
+  it('find-or-creates a lead for an unknown number and threads onto it', async () => {
+    const leadRepo = makeLeadRepo();
+    const handler = createInboundCaptureHandler({
+      conversationRepo,
+      customerRepo: { findByPhoneNormalized: vi.fn().mockResolvedValue([]) },
+      leadRepo,
+      auditRepo,
+    });
+
+    const result = await handler.handle(ctx());
+    expect(result.handled).toBe(true);
+    expect(leadRepo.create).toHaveBeenCalledTimes(1);
+
+    // The new lead carries the originating phone, and its id keys the thread.
+    const createdLead = leadRepo.create.mock.calls[0][0] as Lead;
+    expect(createdLead.primaryPhone).toBe('+15555550123');
+    const threads = await conversationRepo.findByEntity(TENANT, 'lead', createdLead.id);
+    expect(threads).toHaveLength(1);
+
+    const messages = await conversationRepo.getMessages(TENANT, threads[0].id);
+    expect(messages[0].metadata).toMatchObject({ leadId: createdLead.id });
+    expect(messages[0].metadata).not.toHaveProperty('unmatched');
+
+    const event = auditRepo.create.mock.calls.at(-1)?.[0];
+    expect(event.metadata).toMatchObject({ matched: false, linkedTo: 'lead', leadId: createdLead.id });
+  });
+
+  it('reuses an existing lead (deduped by phone) for repeat texts', async () => {
+    const existing = {
+      id: 'lead-existing',
+      tenantId: TENANT,
+      firstName: 'Pat',
+      lastName: 'Prospect',
+      primaryPhone: '+15555550123',
+      source: 'phone_call',
+      stage: 'new',
+      createdBy: 'x',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as Lead;
+    const leadRepo = makeLeadRepo(existing);
+    const handler = createInboundCaptureHandler({
+      conversationRepo,
+      customerRepo: { findByPhoneNormalized: vi.fn().mockResolvedValue([]) },
+      leadRepo,
+      auditRepo,
+    });
+
+    await handler.handle(ctx());
+    expect(leadRepo.create).not.toHaveBeenCalled();
+    const threads = await conversationRepo.findByEntity(TENANT, 'lead', 'lead-existing');
+    expect(threads).toHaveLength(1);
+    expect(threads[0].title).toBe('Pat Prospect');
+  });
+
+  it('threads as unmatched when no lead repo is wired (unknown number)', async () => {
     const handler = createInboundCaptureHandler({
       conversationRepo,
       customerRepo: { findByPhoneNormalized: vi.fn().mockResolvedValue([]) },
@@ -122,21 +194,39 @@ describe('U4 — inbound SMS capture handler', () => {
 
     const result = await handler.handle(ctx());
     expect(result.handled).toBe(true);
-
     const threads = await conversationRepo.findByEntity(
       TENANT,
       UNMATCHED_SMS_ENTITY_TYPE,
       '+15555550123',
     );
     expect(threads).toHaveLength(1);
-    expect(threads[0].title).toBe('SMS from +15555550123');
     const messages = await conversationRepo.getMessages(TENANT, threads[0].id);
     expect(messages[0].metadata).toMatchObject({ unmatched: true });
-    const event = auditRepo.create.mock.calls[0][0];
-    expect(event.metadata).toMatchObject({ matched: false });
   });
 
-  it('does not guess between multiple customer matches — threads as unmatched', async () => {
+  it('falls back to an unmatched thread when lead creation fails (never drops)', async () => {
+    const leadRepo = makeLeadRepo();
+    leadRepo.create.mockRejectedValue(new Error('db down'));
+    const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+    const handler = createInboundCaptureHandler({
+      conversationRepo,
+      customerRepo: { findByPhoneNormalized: vi.fn().mockResolvedValue([]) },
+      leadRepo,
+      auditRepo,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      logger: logger as any,
+    });
+
+    const result = await handler.handle(ctx());
+    expect(result.handled).toBe(true);
+    expect(
+      await conversationRepo.findByEntity(TENANT, UNMATCHED_SMS_ENTITY_TYPE, '+15555550123'),
+    ).toHaveLength(1);
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it('does not guess (or mint a lead) between multiple customer matches — threads as unmatched', async () => {
+    const leadRepo = makeLeadRepo();
     const handler = createInboundCaptureHandler({
       conversationRepo,
       customerRepo: {
@@ -144,11 +234,13 @@ describe('U4 — inbound SMS capture handler', () => {
           .fn()
           .mockResolvedValue([customer({ id: 'a' }), customer({ id: 'b' })]),
       },
+      leadRepo,
       auditRepo,
     });
 
     await handler.handle(ctx());
 
+    expect(leadRepo.create).not.toHaveBeenCalled();
     expect(await conversationRepo.findByEntity(TENANT, 'customer', 'a')).toHaveLength(0);
     expect(
       await conversationRepo.findByEntity(TENANT, UNMATCHED_SMS_ENTITY_TYPE, '+15555550123'),
@@ -156,14 +248,17 @@ describe('U4 — inbound SMS capture handler', () => {
   });
 
   it('threads as unmatched when the resolver method is unavailable', async () => {
+    const leadRepo = makeLeadRepo();
     const handler = createInboundCaptureHandler({
       conversationRepo,
       customerRepo: {},
+      leadRepo,
       auditRepo,
     });
 
     const result = await handler.handle(ctx());
     expect(result.handled).toBe(true);
+    expect(leadRepo.create).not.toHaveBeenCalled();
     expect(
       await conversationRepo.findByEntity(TENANT, UNMATCHED_SMS_ENTITY_TYPE, '+15555550123'),
     ).toHaveLength(1);

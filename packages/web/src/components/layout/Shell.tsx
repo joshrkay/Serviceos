@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import {
   Home, MessageSquare, Briefcase, Calendar,
   Users, FileText, Receipt, Settings, Zap, Bell, Layers, TrendingUp, LogOut,
-  Wrench,
+  Wrench, Mail,
 } from 'lucide-react';
 import { useUser, useClerk } from '@clerk/clerk-react';
 import { Toaster, toast } from 'sonner';
@@ -52,6 +52,7 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/technician/day', label: 'Today',     icon: Wrench   },
         { to: '/jobs',           label: 'My jobs',   icon: Briefcase },
         { to: '/customers',      label: 'Customers', icon: Users    },
+        { to: '/comms-inbox',    label: 'Messages',  icon: Mail     },
         { to: '/estimates',      label: 'Estimates', icon: FileText },
         { to: '/invoices',       label: 'Invoices',  icon: Receipt  },
         { to: '/inbox',          label: 'Inbox',     icon: Bell     },
@@ -85,6 +86,7 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/jobs',          label: 'Jobs',         icon: Briefcase     },
         { to: '/schedule',      label: 'Schedule',     icon: Calendar      },
         { to: '/customers',     label: 'Customers',    icon: Users         },
+        { to: '/comms-inbox',   label: 'Messages',     icon: Mail          },
         { to: '/leads',         label: 'Leads',        icon: TrendingUp    },
         { to: '/estimates',     label: 'Estimates',    icon: FileText      },
         { to: '/invoices',      label: 'Invoices',     icon: Receipt       },

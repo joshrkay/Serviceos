@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgConversationRepository } from '../../src/conversations/pg-conversation';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
+import { PgLeadRepository } from '../../src/leads/pg-lead';
 import type { Customer } from '../../src/customers/customer';
 import {
   createInboundCaptureHandler,
@@ -35,12 +36,14 @@ describe('Postgres integration — U4 inbound SMS capture', () => {
   let pool: Pool;
   let conversationRepo: PgConversationRepository;
   let customerRepo: PgCustomerRepository;
+  let leadRepo: PgLeadRepository;
   let tenant: { tenantId: string; userId: string };
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
     conversationRepo = new PgConversationRepository(pool);
     customerRepo = new PgCustomerRepository(pool);
+    leadRepo = new PgLeadRepository(pool);
     tenant = await createTestTenant(pool);
   });
 
@@ -107,20 +110,49 @@ describe('Postgres integration — U4 inbound SMS capture', () => {
     expect(messages.map((m) => m.content)).toEqual(['first', 'second']);
   });
 
-  it('threads an unknown number under a phone-keyed unmatched conversation', async () => {
-    const handler = createInboundCaptureHandler({ conversationRepo, customerRepo });
-    const result = await handler.handle({
+  it('find-or-creates a lead for an unknown number and threads onto it (deduped on repeat)', async () => {
+    const handler = createInboundCaptureHandler({ conversationRepo, customerRepo, leadRepo });
+    const first = await handler.handle({
       tenantId: tenant.tenantId,
       fromE164: '+15555559999',
       body: 'hello?',
-      messageSid: 'SM-int-3',
+      messageSid: 'SM-int-3a',
+    });
+    expect(first.handled).toBe(true);
+
+    const lead = await leadRepo.findByPhoneNormalized(tenant.tenantId, '15555559999');
+    expect(lead).not.toBeNull();
+    expect(lead!.primaryPhone).toBe('+15555559999');
+
+    const threads = await conversationRepo.findByEntity(tenant.tenantId, 'lead', lead!.id);
+    expect(threads).toHaveLength(1);
+
+    // A second text dedupes onto the same lead + thread.
+    await handler.handle({
+      tenantId: tenant.tenantId,
+      fromE164: '+15555559999',
+      body: 'still there?',
+      messageSid: 'SM-int-3b',
+    });
+    const after = await conversationRepo.findByEntity(tenant.tenantId, 'lead', lead!.id);
+    expect(after).toHaveLength(1);
+    const messages = await conversationRepo.getMessages(tenant.tenantId, after[0].id);
+    expect(messages.map((m) => m.content)).toEqual(['hello?', 'still there?']);
+  });
+
+  it('threads as unmatched when no lead repo is wired', async () => {
+    const handler = createInboundCaptureHandler({ conversationRepo, customerRepo });
+    const result = await handler.handle({
+      tenantId: tenant.tenantId,
+      fromE164: '+15555558888',
+      body: 'anyone?',
+      messageSid: 'SM-int-3c',
     });
     expect(result.handled).toBe(true);
-
     const threads = await conversationRepo.findByEntity(
       tenant.tenantId,
       UNMATCHED_SMS_ENTITY_TYPE,
-      '+15555559999',
+      '+15555558888',
     );
     expect(threads).toHaveLength(1);
   });
