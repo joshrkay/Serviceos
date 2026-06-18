@@ -4467,6 +4467,33 @@ export const MIGRATIONS = {
     ALTER TABLE customer_payment_methods
       ADD COLUMN IF NOT EXISTS stripe_account_id TEXT;
   `,
+
+  // Mobile push notifications (Capacitor app). One row per (tenant, device
+  // token). Tenant isolation is RLS on token selection — push credentials are
+  // app-global (one Firebase service account), never per-tenant. UNIQUE
+  // (tenant_id, token) makes registration an upsert; the mobile client DELETEs
+  // its token on logout so a device that switches tenants stops receiving the
+  // prior tenant's pushes. FORCE RLS so the worker's owner connection is still
+  // policy-bound (a missing GUC fails closed).
+  '178_create_device_tokens': `
+    CREATE TABLE IF NOT EXISTS device_tokens (
+      id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id    UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      user_id      TEXT NOT NULL,
+      platform     TEXT NOT NULL CHECK (platform IN ('ios','android')),
+      token        TEXT NOT NULL,
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, token)
+    );
+    CREATE INDEX IF NOT EXISTS idx_device_tokens_tenant ON device_tokens(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_device_tokens_tenant_user ON device_tokens(tenant_id, user_id);
+    ALTER TABLE device_tokens ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE device_tokens FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_device_tokens ON device_tokens
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
