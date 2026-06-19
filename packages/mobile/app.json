@@ -19,7 +19,13 @@
       "package": "com.serviceos.app"
     },
     "plugins": [
-      "expo-router"
+      "expo-router",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow ServiceOS to use the microphone to capture voice actions."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
