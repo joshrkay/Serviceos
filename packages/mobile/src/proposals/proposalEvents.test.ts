@@ -3,7 +3,7 @@ import {
   CRITICAL_WINDOW_MS,
   computeProposalEvents,
   isCriticalProposal,
-  mapListResponse,
+  mapInboxResponse,
   type PendingProposalSummary,
 } from './proposalEvents';
 
@@ -28,10 +28,20 @@ describe('isCriticalProposal', () => {
   });
 });
 
-describe('mapListResponse', () => {
-  it('maps `data` and normalizes dates to ISO strings', () => {
-    const list = mapListResponse({
-      data: [{ id: 'x', summary: 's', proposalType: 'draft_invoice', createdAt: NOW, expiresAt: NOW + 1000 }],
+describe('mapInboxResponse', () => {
+  it('unwraps the prioritized `{ proposal }` envelope and normalizes dates', () => {
+    const list = mapInboxResponse({
+      data: [
+        {
+          proposal: {
+            id: 'x',
+            summary: 's',
+            proposalType: 'draft_invoice',
+            createdAt: NOW,
+            expiresAt: NOW + 1000,
+          },
+        },
+      ],
     });
     expect(list).toEqual([
       {
@@ -44,8 +54,21 @@ describe('mapListResponse', () => {
     ]);
   });
 
+  it('surfaces draft proposals (the inbox merges draft + ready_for_review)', () => {
+    // A voice-created proposal lands in 'draft' but is still actionable. The
+    // mapper carries it through regardless of status — the endpoint, not the
+    // client, decides which statuses are in the inbox.
+    const list = mapInboxResponse({
+      data: [
+        { proposal: { id: 'd', summary: 'voice draft', proposalType: 'draft_invoice', createdAt: NOW } },
+      ],
+    });
+    expect(list.map((p) => p.id)).toEqual(['d']);
+    expect(list[0].expiresAt).toBeUndefined();
+  });
+
   it('handles a missing `data` field', () => {
-    expect(mapListResponse({})).toEqual([]);
+    expect(mapInboxResponse({})).toEqual([]);
   });
 });
 

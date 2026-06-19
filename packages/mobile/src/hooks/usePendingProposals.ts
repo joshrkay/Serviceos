@@ -3,7 +3,7 @@ import { AppState } from 'react-native';
 import { useApiClient } from '../lib/useApiClient';
 import {
   computeProposalEvents,
-  mapListResponse,
+  mapInboxResponse,
   type PendingProposalSummary,
 } from '../proposals/proposalEvents';
 
@@ -31,10 +31,13 @@ export interface UsePendingProposalsResult {
 const DEFAULT_POLL_MS = 30_000;
 
 /**
- * Polls GET /api/proposals?status=ready_for_review for the approvals list +
- * badge. RN port of web's usePendingProposals: pauses when the app
- * backgrounds (AppState) and one-shot-refreshes on foreground; the
- * baseline/diff logic lives in the tested proposalEvents module.
+ * Polls GET /api/proposals/inbox for the approvals list + badge. The inbox
+ * endpoint merges 'draft' + 'ready_for_review' server-side, so voice-created
+ * drafts and chained dependents (which stay 'draft' while awaiting action)
+ * are surfaced — a 'ready_for_review'-only poll would hide them. RN port of
+ * web's usePendingProposals: pauses when the app backgrounds (AppState) and
+ * one-shot-refreshes on foreground; the baseline/diff logic lives in the
+ * tested proposalEvents module.
  */
 export function usePendingProposals(
   options: UsePendingProposalsOptions = {},
@@ -72,9 +75,9 @@ export function usePendingProposals(
     setIsLoading(true);
     setError(null);
     try {
-      const res = await apiRef.current('/api/proposals?status=ready_for_review&limit=100');
+      const res = await apiRef.current('/api/proposals/inbox');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const list = mapListResponse(await res.json());
+      const list = mapInboxResponse(await res.json());
       const diff = computeProposalEvents(knownIdsRef.current, criticalIdsRef.current, list);
       knownIdsRef.current = diff.nextIds;
       criticalIdsRef.current = diff.nextCritical;

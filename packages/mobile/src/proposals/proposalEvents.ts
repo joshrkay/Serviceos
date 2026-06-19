@@ -28,9 +28,13 @@ interface RawProposal {
   expiresAt?: string | number | Date;
 }
 
-/** Normalize the `{ data: [...] }` list response to string-dated summaries. */
-export function mapListResponse(body: { data?: RawProposal[] }): PendingProposalSummary[] {
-  return (body.data ?? []).map((p) => ({
+/** `GET /api/proposals/inbox` wraps each proposal in a prioritized envelope. */
+interface RawInboxItem {
+  proposal: RawProposal;
+}
+
+function toSummary(p: RawProposal): PendingProposalSummary {
+  return {
     id: p.id,
     summary: p.summary,
     proposalType: p.proposalType,
@@ -41,7 +45,21 @@ export function mapListResponse(body: { data?: RawProposal[] }): PendingProposal
         : typeof p.expiresAt === 'string'
           ? p.expiresAt
           : new Date(p.expiresAt).toISOString(),
-  }));
+  };
+}
+
+/**
+ * Normalize `GET /api/proposals/inbox`'s `{ data: [{ proposal, urgency }] }`
+ * to string-dated summaries. The inbox endpoint is used (not `?status=`)
+ * because it merges 'draft' AND 'ready_for_review' server-side: voice
+ * proposals and chained dependents land in 'draft' while still awaiting
+ * operator action, so a 'ready_for_review'-only poll would hide them.
+ */
+export function mapInboxResponse(body: { data?: RawInboxItem[] }): PendingProposalSummary[] {
+  return (body.data ?? [])
+    .map((item) => item?.proposal)
+    .filter((p): p is RawProposal => Boolean(p))
+    .map(toSummary);
 }
 
 export interface ProposalDiff {
