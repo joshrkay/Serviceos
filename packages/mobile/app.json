@@ -7,10 +7,6 @@
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
-    "icon": "./assets/icon.png",
-    "splash": {
-      "backgroundColor": "#030213"
-    },
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.serviceos.app"
