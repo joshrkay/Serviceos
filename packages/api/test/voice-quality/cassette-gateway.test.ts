@@ -109,6 +109,162 @@ describe('VQ-005 — CassetteLLMGateway', () => {
     );
   });
 
+  it('drift fallback — system-prompt extension misses hash but recovers via user-content match', async () => {
+    // Record a cassette under the OLD system prompt.
+    const scriptId = 'drift-system-extended';
+    const { gateway: realGateway, provider } = createMockLLMGateway();
+    provider.setDefaultResponse('{"intentType":"create_appointment","confidence":0.9}');
+    const recorder = new CassetteLLMGateway({
+      scriptId,
+      cassettesDir: tempDir,
+      mode: 'record',
+      realGateway,
+    });
+    await recorder.complete(
+      makeRequest({
+        messages: [
+          { role: 'system', content: 'You are an intent classifier for ServiceOS.' },
+          { role: 'user', content: 'I want to schedule an appointment for next Tuesday at 2pm.' },
+        ],
+      }),
+    );
+
+    // Replay with an EXTENDED system prompt (same transcript) — hash misses
+    // but the fallback should return the recorded response.
+    const replayer = new CassetteLLMGateway({
+      scriptId,
+      cassettesDir: tempDir,
+      mode: 'replay',
+    });
+    const driftedRequest = makeRequest({
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are an intent classifier for ServiceOS. Supported intents: …(many new intents added since recording)…',
+        },
+        { role: 'user', content: 'I want to schedule an appointment for next Tuesday at 2pm.' },
+      ],
+    });
+    const response = await replayer.complete(driftedRequest);
+    expect(response.content).toBe('{"intentType":"create_appointment","confidence":0.9}');
+  });
+
+  it('drift fallback — system-prompt fingerprint differentiates classifier vs slot extractor', async () => {
+    const scriptId = 'drift-system-fp-disambiguates';
+    const { gateway: realGateway, provider } = createMockLLMGateway();
+
+    // Record TWO entries with the SAME schema + same user transcript but
+    // different system prompts. This is the realistic shape: intent
+    // classifier + slot extractor both fire on one user utterance.
+    const transcript = 'Reschedule the Davis appointment to next Monday at 3pm.';
+    provider.setDefaultResponse('{"intentType":"reschedule_appointment"}');
+    const recorder = new CassetteLLMGateway({
+      scriptId,
+      cassettesDir: tempDir,
+      mode: 'record',
+      realGateway,
+    });
+    await recorder.complete(
+      makeRequest({
+        messages: [
+          { role: 'system', content: 'You are an intent classifier for ServiceOS.' },
+          { role: 'user', content: transcript },
+        ],
+      }),
+    );
+    provider.setDefaultResponse(
+      '{"newScheduledStart":"2026-06-22T20:00:00.000Z","newScheduledEnd":"2026-06-22T21:00:00.000Z"}',
+    );
+    await recorder.complete(
+      makeRequest({
+        messages: [
+          { role: 'system', content: 'You are an appointment scheduling assistant for ServiceOS.' },
+          { role: 'user', content: transcript },
+        ],
+      }),
+    );
+
+    // Replay with drifted system prompts. The slot-extractor fallback
+    // must return the SLOT response, not the intent response, even
+    // though both entries share the user transcript + schema.
+    const replayer = new CassetteLLMGateway({
+      scriptId,
+      cassettesDir: tempDir,
+      mode: 'replay',
+    });
+    const slotRequest = makeRequest({
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are an appointment scheduling assistant for ServiceOS. New rule appended after recording: never assume the current year.',
+        },
+        { role: 'user', content: transcript },
+      ],
+    });
+    const response = await replayer.complete(slotRequest);
+    expect(response.content).toContain('newScheduledStart');
+    expect(response.content).not.toContain('intentType');
+  });
+
+  it('drift fallback — multiple matches with same fingerprint walk in recorded order', async () => {
+    const scriptId = 'drift-fallback-counter';
+    const { gateway: realGateway, provider } = createMockLLMGateway();
+
+    // Record three classifier calls with the same system+user — modeling
+    // a multi-turn script that re-classifies. Each recorded response is
+    // distinct so we can prove the Nth replay returns the Nth recording.
+    const recorder = new CassetteLLMGateway({
+      scriptId,
+      cassettesDir: tempDir,
+      mode: 'record',
+      realGateway,
+    });
+    // Vary the model each round so the recorded hashes are distinct
+    // (the cassette dedups on hash collision); the fallback ignores
+    // model entirely so all three entries still match the same
+    // (schema, system-fp, user) key.
+    for (const [tag, model] of [
+      ['first', 'm1'],
+      ['second', 'm2'],
+      ['third', 'm3'],
+    ] as const) {
+      provider.setDefaultResponse(`{"tag":"${tag}"}`);
+      await recorder.complete(
+        makeRequest({
+          model,
+          messages: [
+            { role: 'system', content: 'You are an intent classifier.' },
+            { role: 'user', content: 'classify me' },
+          ],
+        }),
+      );
+    }
+
+    // Replay each fallback hit in turn and assert the order.
+    const replayer = new CassetteLLMGateway({
+      scriptId,
+      cassettesDir: tempDir,
+      mode: 'replay',
+    });
+    const driftedRequest = makeRequest({
+      messages: [
+        {
+          role: 'system',
+          content: 'You are an intent classifier. NEW: extra paragraph added after recording.',
+        },
+        { role: 'user', content: 'classify me' },
+      ],
+    });
+    const a = await replayer.complete(driftedRequest);
+    const b = await replayer.complete(driftedRequest);
+    const c = await replayer.complete(driftedRequest);
+    expect(JSON.parse(a.content)).toEqual({ tag: 'first' });
+    expect(JSON.parse(b.content)).toEqual({ tag: 'second' });
+    expect(JSON.parse(c.content)).toEqual({ tag: 'third' });
+  });
+
   it('VQ-005 — replay mode raises a clear error if cassette file exists but the request hash is not in it', async () => {
     const scriptId = 'partial-cassette';
     writeCassette(tempDir, scriptId, {
