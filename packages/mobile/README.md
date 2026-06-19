@@ -71,10 +71,13 @@ The app renders via React-Native-Web (approximates iOS, not pixel-identical).
 Prereqs: an **Apple Developer Program** membership ($99/yr) and a free **Expo** account.
 ```
 npx eas-cli login
-npx eas-cli build --platform ios --profile preview   # EAS cloud-builds the .ipa + manages signing
-npx eas-cli submit --platform ios                    # uploads to App Store Connect → TestFlight
+npx eas-cli build --platform ios --profile production   # store-distribution build (required for TestFlight)
+npx eas-cli submit --platform ios                       # uploads to App Store Connect → TestFlight
 ```
-Fill in the `submit.production.ios` placeholders in `eas.json` (Apple ID, ASC app id, team
-id). The build runs on Expo's servers — trigger it from your machine or a CI job with an
-`EXPO_TOKEN`, not from this repo's cloud env. Replace `assets/icon.png` (a solid-brand
-placeholder) with real branding before shipping.
+TestFlight/App Store submission requires a **store-distribution** build, which is the
+`production` profile in `eas.json`. The `preview` profile (`distribution: internal`) is
+for ad-hoc installs on registered devices *without* TestFlight — `eas submit` rejects an
+internal build. Fill in the `submit.production.ios` placeholders in `eas.json` (Apple ID,
+ASC app id, team id). The build runs on Expo's servers — trigger it from your machine or a
+CI job with an `EXPO_TOKEN`, not from this repo's cloud env. Replace `assets/icon.png` (a
+solid-brand placeholder) with real branding before shipping.
