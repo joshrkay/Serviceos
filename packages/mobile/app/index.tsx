@@ -47,6 +47,15 @@ export default function Home() {
         <Text className="text-base font-semibold text-primaryForeground">Speak an action</Text>
       </Pressable>
 
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Approvals"
+        onPress={() => router.push('/approvals')}
+        className="mt-3 min-h-11 items-center justify-center rounded-md border border-border px-4 py-3"
+      >
+        <Text className="text-base text-foreground">Approvals</Text>
+      </Pressable>
+
       <View className="mt-4 rounded-lg border border-border p-4">
         <Text className="text-base text-foreground">Role: {me?.role}</Text>
         <Text className="mt-1 text-base text-foreground">Mode: {me?.current_mode}</Text>
