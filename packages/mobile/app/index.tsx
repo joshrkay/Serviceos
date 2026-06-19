@@ -1,4 +1,5 @@
 import { useAuth } from '@clerk/clerk-expo';
+import { useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { useMe, type Mode } from '../src/hooks/useMe';
 
@@ -10,6 +11,7 @@ const MODES: Mode[] = ['supervisor', 'both', 'tech'];
 export default function Home() {
   const { signOut } = useAuth();
   const { me, isLoading, error, switchMode } = useMe();
+  const [modeError, setModeError] = useState<string | null>(null);
 
   if (isLoading) {
     return (
@@ -50,7 +52,10 @@ export default function Home() {
               accessibilityRole="button"
               accessibilityLabel={`Switch to ${m} mode`}
               onPress={() => {
-                void switchMode(m).catch(() => {});
+                setModeError(null);
+                void switchMode(m).catch((e) =>
+                  setModeError(e instanceof Error ? e.message : 'Could not switch mode.'),
+                );
               }}
               className={`min-h-11 flex-1 items-center justify-center rounded-md px-3 py-2 ${
                 active ? 'bg-primary' : 'bg-secondary'
@@ -63,6 +68,9 @@ export default function Home() {
           );
         })}
       </View>
+      {modeError ? (
+        <Text className="mt-2 text-base text-destructive">{modeError}</Text>
+      ) : null}
 
       <Pressable
         accessibilityRole="button"
