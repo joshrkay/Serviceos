@@ -14,7 +14,7 @@
  * follow-ups in the same gap list.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgRevenueBySourceRepository } from '../../src/reports/revenue-by-source';
@@ -27,6 +27,44 @@ interface SeedWorld {
   customerId: string;
   jobId: string;
   invoiceId: string;
+}
+
+/**
+ * Unprivileged role + GUC pattern mirrored from rls-tenant-isolation.test.ts.
+ * `PgRevenueBySourceRepository.query` runs under withTenant and filters its
+ * CTE with `WHERE i.tenant_id = $1`, so an isolation assertion that goes
+ * through the repo (or runs as the testcontainer superuser) cannot
+ * distinguish working RLS from normal SQL filtering. Querying through
+ * asTenant under this NOBYPASSRLS role without a tenant_id predicate makes
+ * the policy itself the only thing gating cross-tenant reads.
+ */
+const APP_ROLE = 'rls_app_runtime';
+
+async function ensureRlsAppRole(pool: Pool): Promise<void> {
+  await pool.query(`DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${APP_ROLE}') THEN
+      CREATE ROLE ${APP_ROLE} NOLOGIN NOBYPASSRLS;
+    END IF;
+  END $$;`);
+  await pool.query(`GRANT USAGE ON SCHEMA public TO ${APP_ROLE}`);
+  await pool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${APP_ROLE}`);
+}
+
+async function asTenant<T>(
+  pool: Pool,
+  tenantId: string,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    return await fn(client);
+  } finally {
+    await client.query('ROLLBACK').catch(() => undefined);
+    client.release();
+  }
 }
 
 describe('Postgres integration — reports endpoints', () => {
@@ -45,6 +83,7 @@ describe('Postgres integration — reports endpoints', () => {
     dashboardRepo = new PgMoneyDashboardRepository(invoiceRepo, paymentRepo, expenseRepo);
     tenant = await createTestTenant(pool);
     other = await createTestTenant(pool);
+    await ensureRlsAppRole(pool);
   });
 
   afterAll(async () => {
@@ -159,21 +198,44 @@ describe('Postgres integration — reports endpoints', () => {
   });
 
   it('revenue-by-source does not leak revenue across tenants (RLS guard)', async () => {
-    // Seed a fully-paid invoice on `other` only.
+    // Seed a fully-paid invoice on `other` only — a high-value sentinel
+    // we can spot if it leaks into tenant's view.
     const otherWorld = await seedWorld(other, {
       totalCents: 99_999_00,
       invoiceNumber: `INV-${uuidv4().slice(0, 8)}`,
     });
     await seedPayment(other, { invoiceId: otherWorld.invoiceId, amountCents: 99_999_00 });
 
-    // Query as `tenant`. The other tenant's 99_999.00 revenue must not
-    // appear in any row — the only paid amounts we should see are from
-    // the prior test's seeding on `tenant`.
-    const rows = await revenueRepo.query(tenant.tenantId, {});
-    for (const row of rows) {
-      expect(row.paidCents).toBeLessThan(99_999_00);
-      expect(row.invoicedCents).toBeLessThan(99_999_00);
-    }
+    // Seed a small local invoice on `tenant` so this test's RLS guard
+    // doesn't pass vacuously when run in isolation (i.e. when the prior
+    // test's `tenant` fixtures aren't already present in the shared DB).
+    const tenantWorld = await seedWorld(tenant, {
+      totalCents: 10_00,
+      invoiceNumber: `INV-${uuidv4().slice(0, 8)}`,
+    });
+    await seedPayment(tenant, { invoiceId: tenantWorld.invoiceId, amountCents: 10_00 });
+
+    // RLS proof: under tenant's GUC and the unprivileged role, enumerate
+    // the underlying invoices/payments tables WITHOUT a tenant_id
+    // predicate. Only the policies on those tables can gate this read
+    // — if either were dropped, the sentinel 99_999_00 row would appear.
+    const visibleInvoiceTotals = await asTenant(pool, tenant.tenantId, (client) =>
+      client.query(
+        `SELECT total_cents FROM invoices`,
+      ).then((r) => r.rows.map((row: { total_cents: string | number }) => Number(row.total_cents))),
+    );
+    const visiblePaymentAmounts = await asTenant(pool, tenant.tenantId, (client) =>
+      client.query(
+        `SELECT amount_cents FROM payments`,
+      ).then((r) => r.rows.map((row: { amount_cents: string | number }) => Number(row.amount_cents))),
+    );
+    // Tenant sees its own seed.
+    expect(visibleInvoiceTotals).toContain(10_00);
+    expect(visiblePaymentAmounts).toContain(10_00);
+    // But NOT the sibling tenant's high-value sentinel — only the RLS
+    // policies on invoices/payments can be enforcing this.
+    expect(visibleInvoiceTotals).not.toContain(99_999_00);
+    expect(visiblePaymentAmounts).not.toContain(99_999_00);
   });
 
   // ─── /money-dashboard ────────────────────────────────────────────────
@@ -192,18 +254,8 @@ describe('Postgres integration — reports endpoints', () => {
       paidAt: new Date('2026-06-01T03:30:00.000Z'),
     });
 
-    // Snapshot June revenue BEFORE the late-month payment lands so the
-    // delta-style assertions below work even when prior tests have left
-    // unrelated payments in this tenant's history.
-    const juneBefore = await dashboardRepo.query(
-      tenant.tenantId,
-      '2026-06',
-      new Date('2026-07-15T12:00:00.000Z'),
-      'America/New_York',
-    );
-
     // `now` is sometime in June so the report knows May is a closed month.
-    const may = await dashboardRepo.query(
+    const mayNY = await dashboardRepo.query(
       tenant.tenantId,
       '2026-05',
       new Date('2026-06-15T12:00:00.000Z'),
@@ -211,16 +263,30 @@ describe('Postgres integration — reports endpoints', () => {
     );
     // The May bucket contains at least the seeded $456 (NET revenue,
     // i.e. completed payments minus refunds, for this tenant in May).
-    expect(may.revenueCents).toBeGreaterThanOrEqual(456_00);
+    expect(mayNY.revenueCents).toBeGreaterThanOrEqual(456_00);
 
-    // And June must NOT include it (proves the tenant-tz boundary is
-    // real — without it the 03:30Z payment would land in June UTC).
-    const juneAfter = await dashboardRepo.query(
+    // Prove the timezone boundary is real by querying the SAME June month
+    // in TWO different timezones. In UTC the 03:30Z payment is in June; in
+    // America/New_York it is in May. So:
+    //
+    //   juneUTC.revenueCents - juneNY.revenueCents == $456 (the seeded payment)
+    //
+    // A determinism-only check (`juneAfter == juneBefore` with same tz) would
+    // pass even if the dashboard were silently bucketing this payment into
+    // June for the NY tenant, because BOTH calls would include it. The
+    // UTC-vs-NY delta is the assertion that catches a regression.
+    const juneNY = await dashboardRepo.query(
       tenant.tenantId,
       '2026-06',
       new Date('2026-07-15T12:00:00.000Z'),
       'America/New_York',
     );
-    expect(juneAfter.revenueCents).toBe(juneBefore.revenueCents);
+    const juneUTC = await dashboardRepo.query(
+      tenant.tenantId,
+      '2026-06',
+      new Date('2026-07-15T12:00:00.000Z'),
+      'UTC',
+    );
+    expect(juneUTC.revenueCents - juneNY.revenueCents).toBe(456_00);
   });
 });

@@ -22,7 +22,7 @@
  * so the SQL the worker actually executes is pinned end-to-end.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
 import { runDroppedCallRecoverySweep } from '../../src/workers/dropped-call-worker';
@@ -141,6 +141,43 @@ async function scheduleRow(
   return voiceSessionId;
 }
 
+/**
+ * Unprivileged role + GUC pattern mirrored from rls-tenant-isolation.test.ts.
+ * The testcontainer's default user is a SUPERUSER (bypasses RLS), so any
+ * isolation assertion that runs as the default user is testing the
+ * application's WHERE-clause, not the policy. Running through asTenant under
+ * this unprivileged NOBYPASSRLS role makes the policy itself the only thing
+ * gating cross-tenant reads — if the policy were dropped, the assertion fails.
+ */
+const APP_ROLE = 'rls_app_runtime';
+
+async function ensureRlsAppRole(pool: Pool): Promise<void> {
+  await pool.query(`DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${APP_ROLE}') THEN
+      CREATE ROLE ${APP_ROLE} NOLOGIN NOBYPASSRLS;
+    END IF;
+  END $$;`);
+  await pool.query(`GRANT USAGE ON SCHEMA public TO ${APP_ROLE}`);
+  await pool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${APP_ROLE}`);
+}
+
+async function asTenant<T>(
+  pool: Pool,
+  tenantId: string,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    return await fn(client);
+  } finally {
+    await client.query('ROLLBACK').catch(() => undefined);
+    client.release();
+  }
+}
+
 describe('dropped-call recovery worker — integration', () => {
   let pool: Pool;
   let repo: PgDroppedCallRecoveryRepository;
@@ -151,6 +188,7 @@ describe('dropped-call recovery worker — integration', () => {
     pool = await getSharedTestDb();
     repo = new PgDroppedCallRecoveryRepository(pool);
     audit = new PgAuditRepository(pool);
+    await ensureRlsAppRole(pool);
   });
 
   beforeEach(async () => {
@@ -334,21 +372,27 @@ describe('dropped-call recovery worker — integration', () => {
     expect(dbB.rows[0].sent_at).not.toBeNull();
     expect(dbA.rows[0].sms_message_sid).not.toBe(dbB.rows[0].sms_message_sid);
 
-    // Audit rows are isolated by RLS — each tenant sees only its own.
-    const auditA = await pool.query(
-      `SELECT entity_id FROM audit_events
-        WHERE tenant_id = $1 AND event_type = 'dropped_call_recovery.sent'`,
-      [tenantA.tenantId],
+    // Audit rows are isolated by RLS. Query under the unprivileged
+    // rls_app_runtime role with `app.current_tenant_id` set, and OMIT the
+    // tenant_id predicate from the SQL — only the policy can scope these
+    // results, so a dropped policy would fail this assertion (whereas a
+    // `WHERE tenant_id = $1` query would still pass).
+    const auditA = await asTenant(pool, tenantA.tenantId, (client) =>
+      client.query(
+        `SELECT entity_id FROM audit_events
+          WHERE event_type = 'dropped_call_recovery.sent'`,
+      ).then((r) => r.rows),
     );
-    const auditB = await pool.query(
-      `SELECT entity_id FROM audit_events
-        WHERE tenant_id = $1 AND event_type = 'dropped_call_recovery.sent'`,
-      [tenantB.tenantId],
+    const auditB = await asTenant(pool, tenantB.tenantId, (client) =>
+      client.query(
+        `SELECT entity_id FROM audit_events
+          WHERE event_type = 'dropped_call_recovery.sent'`,
+      ).then((r) => r.rows),
     );
-    expect(auditA.rows.map((r) => r.entity_id)).toContain(sessionA);
-    expect(auditA.rows.map((r) => r.entity_id)).not.toContain(sessionB);
-    expect(auditB.rows.map((r) => r.entity_id)).toContain(sessionB);
-    expect(auditB.rows.map((r) => r.entity_id)).not.toContain(sessionA);
+    expect(auditA.map((r: { entity_id: string }) => r.entity_id)).toContain(sessionA);
+    expect(auditA.map((r: { entity_id: string }) => r.entity_id)).not.toContain(sessionB);
+    expect(auditB.map((r: { entity_id: string }) => r.entity_id)).toContain(sessionB);
+    expect(auditB.map((r: { entity_id: string }) => r.entity_id)).not.toContain(sessionA);
   });
 
   it('send failure leaves the row pending so the next sweep retries — and no rate-limit token is burned', async () => {

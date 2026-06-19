@@ -20,7 +20,7 @@
  *      cross-tenant reads under an unprivileged role.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
 import {
   CalendarSyncService,
@@ -73,6 +73,43 @@ function makeGoogleFetch(
   }) as GoogleFetch;
 }
 
+/**
+ * Unprivileged role + GUC pattern mirrored from rls-tenant-isolation.test.ts.
+ * The testcontainer's default user is a SUPERUSER (bypasses RLS), so a
+ * cross-tenant `findByAppointment` lookup is filtered by the repo's
+ * `WHERE tenant_id = $1 AND appointment_id = $2` predicate, NOT by the
+ * policy. Running through asTenant under this NOBYPASSRLS role with no
+ * tenant predicate makes the policy itself the only thing gating the read.
+ */
+const APP_ROLE = 'rls_app_runtime';
+
+async function ensureRlsAppRole(pool: Pool): Promise<void> {
+  await pool.query(`DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${APP_ROLE}') THEN
+      CREATE ROLE ${APP_ROLE} NOLOGIN NOBYPASSRLS;
+    END IF;
+  END $$;`);
+  await pool.query(`GRANT USAGE ON SCHEMA public TO ${APP_ROLE}`);
+  await pool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${APP_ROLE}`);
+}
+
+async function asTenant<T>(
+  pool: Pool,
+  tenantId: string,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    return await fn(client);
+  } finally {
+    await client.query('ROLLBACK').catch(() => undefined);
+    client.release();
+  }
+}
+
 describe('Google Calendar sync — integration', () => {
   let pool: Pool;
   let integrationRepo: PgCalendarIntegrationRepository;
@@ -92,6 +129,7 @@ describe('Google Calendar sync — integration', () => {
     customerRepo = new PgCustomerRepository(pool);
     locationRepo = new PgLocationRepository(pool);
     jobRepo = new PgJobRepository(pool);
+    await ensureRlsAppRole(pool);
   });
 
   beforeEach(async () => {
@@ -376,9 +414,17 @@ describe('Google Calendar sync — integration', () => {
     expect(bRows).toHaveLength(1);
     expect(aRows[0].externalEventId).not.toBe(bRows[0].externalEventId);
 
-    // Querying tenant B's appointment under tenant A's GUC returns NOTHING.
-    const aLookingForB = await eventRepo.findByAppointment(tenantA.tenantId, apptB);
-    expect(aLookingForB).toHaveLength(0);
+    // RLS proof: under tenant A's GUC, query appointment_calendar_events
+    // WITHOUT a `tenant_id = ...` predicate. Only the policy gates this read,
+    // so tenant B's row must be invisible. Filtering by appointment_id only
+    // means a dropped policy would surface tenant B's row and fail the test.
+    const apptIdsUnderA = await asTenant(pool, tenantA.tenantId, (client) =>
+      client.query(
+        `SELECT appointment_id FROM appointment_calendar_events`,
+      ).then((r) => r.rows.map((row: { appointment_id: string }) => row.appointment_id)),
+    );
+    expect(apptIdsUnderA).toContain(apptA);
+    expect(apptIdsUnderA).not.toContain(apptB);
   });
 
   it('pushForTechnicians: a batch with one connected tech and one without yields pushedFor=1 + skipped=1', async () => {

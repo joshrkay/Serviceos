@@ -22,7 +22,7 @@
 import express from 'express';
 import request from 'supertest';
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
 import { createPublicIntakeRouter } from '../../src/routes/public-intake';
 import { PgLeadRepository } from '../../src/leads/pg-lead';
@@ -66,6 +66,43 @@ async function countLeads(pool: Pool, tenantId: string): Promise<number> {
   return rows[0].n;
 }
 
+/**
+ * Unprivileged role + GUC pattern mirrored from rls-tenant-isolation.test.ts.
+ * `leadRepo.findByTenant(tenantB)` scopes the query to tenant B via
+ * `WHERE tenant_id = $1` before any policy could matter, so the
+ * cross-tenant guard below could pass even with leads RLS removed. Querying
+ * through asTenant under this NOBYPASSRLS role without a tenant_id predicate
+ * makes the policy itself the only thing gating cross-tenant reads.
+ */
+const APP_ROLE = 'rls_app_runtime';
+
+async function ensureRlsAppRole(pool: Pool): Promise<void> {
+  await pool.query(`DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${APP_ROLE}') THEN
+      CREATE ROLE ${APP_ROLE} NOLOGIN NOBYPASSRLS;
+    END IF;
+  END $$;`);
+  await pool.query(`GRANT USAGE ON SCHEMA public TO ${APP_ROLE}`);
+  await pool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${APP_ROLE}`);
+}
+
+async function asTenant<T>(
+  pool: Pool,
+  tenantId: string,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    return await fn(client);
+  } finally {
+    await client.query('ROLLBACK').catch(() => undefined);
+    client.release();
+  }
+}
+
 describe('public intake POST /:tenantId/leads — integration', () => {
   let pool: Pool;
   let leadRepo: PgLeadRepository;
@@ -76,6 +113,7 @@ describe('public intake POST /:tenantId/leads — integration', () => {
     pool = await getSharedTestDb();
     leadRepo = new PgLeadRepository(pool);
     app = buildApp(pool);
+    await ensureRlsAppRole(pool);
   });
 
   beforeEach(async () => {
@@ -193,10 +231,21 @@ describe('public intake POST /:tenantId/leads — integration', () => {
       });
     expect(res.status).toBe(201);
 
-    // Lead is owned by tenant A; tenant B's RLS-scoped read returns nothing.
-    const aLeads = await leadRepo.findByTenant(tenantA.tenantId);
-    const bLeads = await leadRepo.findByTenant(tenantB.tenantId);
-    expect(aLeads.some((l) => l.id === res.body.leadId)).toBe(true);
-    expect(bLeads.some((l) => l.id === res.body.leadId)).toBe(false);
+    // RLS proof: query the leads table under each tenant's GUC and the
+    // unprivileged role, WITHOUT a tenant_id predicate. Only the policy
+    // can gate this read - if the leads RLS were dropped, tenant B would
+    // see tenant A's lead and the assertion would fail.
+    const leadIdsUnderA = await asTenant(pool, tenantA.tenantId, (client) =>
+      client.query(`SELECT id FROM leads`).then((r) =>
+        r.rows.map((row: { id: string }) => row.id),
+      ),
+    );
+    const leadIdsUnderB = await asTenant(pool, tenantB.tenantId, (client) =>
+      client.query(`SELECT id FROM leads`).then((r) =>
+        r.rows.map((row: { id: string }) => row.id),
+      ),
+    );
+    expect(leadIdsUnderA).toContain(res.body.leadId);
+    expect(leadIdsUnderB).not.toContain(res.body.leadId);
   });
 });

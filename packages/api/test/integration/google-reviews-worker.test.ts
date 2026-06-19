@@ -22,7 +22,7 @@
  * pinning any additional SQL.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
 import { runGoogleReviewsSweep } from '../../src/workers/google-reviews';
 import { PgReviewRepository } from '../../src/reputation/pg-review';
@@ -141,6 +141,44 @@ function makeCredentialResolver(
   };
 }
 
+/**
+ * Unprivileged role + GUC pattern mirrored from rls-tenant-isolation.test.ts.
+ * The testcontainer's default user is a SUPERUSER (bypasses RLS), so
+ * `reviewRepo.findByExternalId(tenantA, externalIdB)` is filtered by
+ * `WHERE tenant_id = $1 AND external_review_id = $2` whether RLS exists
+ * or not. Querying through asTenant under this NOBYPASSRLS role without
+ * a `tenant_id` predicate makes the policy itself the only thing gating
+ * cross-tenant reads.
+ */
+const APP_ROLE = 'rls_app_runtime';
+
+async function ensureRlsAppRole(pool: Pool): Promise<void> {
+  await pool.query(`DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${APP_ROLE}') THEN
+      CREATE ROLE ${APP_ROLE} NOLOGIN NOBYPASSRLS;
+    END IF;
+  END $$;`);
+  await pool.query(`GRANT USAGE ON SCHEMA public TO ${APP_ROLE}`);
+  await pool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${APP_ROLE}`);
+}
+
+async function asTenant<T>(
+  pool: Pool,
+  tenantId: string,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    return await fn(client);
+  } finally {
+    await client.query('ROLLBACK').catch(() => undefined);
+    client.release();
+  }
+}
+
 describe('Google Reviews worker — integration', () => {
   let pool: Pool;
   let reviewRepo: PgReviewRepository;
@@ -151,6 +189,7 @@ describe('Google Reviews worker — integration', () => {
     pool = await getSharedTestDb();
     reviewRepo = new PgReviewRepository(pool);
     pollStateRepo = new PgReviewPollStateRepository(pool);
+    await ensureRlsAppRole(pool);
   });
 
   beforeEach(async () => {
@@ -388,18 +427,22 @@ describe('Google Reviews worker — integration', () => {
     expect(aSees).not.toBeNull();
     expect(bSees).not.toBeNull();
 
-    // The cross-tenant lookups MUST return null — RLS proven via the
-    // production withTenant path (the policy itself is what gates this,
-    // not just an app-layer WHERE clause).
-    const aSeesB = await reviewRepo.findByExternalId(
-      tenantA.tenantId,
-      'accounts/789/locations/012/reviews/iso_b',
+    // RLS proof: under each tenant's GUC and the unprivileged role,
+    // enumerate google_reviews WITHOUT a `tenant_id` predicate. Only the
+    // policy can gate this read — if it were dropped, the assertion fails.
+    const externalIdsUnderA = await asTenant(pool, tenantA.tenantId, (client) =>
+      client.query(`SELECT external_review_id FROM google_reviews`).then((r) =>
+        r.rows.map((row: { external_review_id: string }) => row.external_review_id),
+      ),
     );
-    const bSeesA = await reviewRepo.findByExternalId(
-      tenantB.tenantId,
-      'accounts/123/locations/456/reviews/iso_a',
+    const externalIdsUnderB = await asTenant(pool, tenantB.tenantId, (client) =>
+      client.query(`SELECT external_review_id FROM google_reviews`).then((r) =>
+        r.rows.map((row: { external_review_id: string }) => row.external_review_id),
+      ),
     );
-    expect(aSeesB).toBeNull();
-    expect(bSeesA).toBeNull();
+    expect(externalIdsUnderA).toContain('accounts/123/locations/456/reviews/iso_a');
+    expect(externalIdsUnderA).not.toContain('accounts/789/locations/012/reviews/iso_b');
+    expect(externalIdsUnderB).toContain('accounts/789/locations/012/reviews/iso_b');
+    expect(externalIdsUnderB).not.toContain('accounts/123/locations/456/reviews/iso_a');
   });
 });

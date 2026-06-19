@@ -20,7 +20,7 @@
  *      cross-tenant lookup.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
 import { runAccountingSyncSweep } from '../../src/workers/accounting-sync-worker';
 import {
@@ -121,6 +121,43 @@ function makeQboFetch(opts?: {
   return { fetchFn, calls };
 }
 
+/**
+ * Unprivileged role + GUC pattern mirrored from rls-tenant-isolation.test.ts.
+ * `syncLogRepo.listRecent` adds both `WHERE tenant_id = $1` AND
+ * `integration_id = $2`, so tenant B's row would be filtered even with the
+ * accounting_sync_log policy dropped. Querying through asTenant under this
+ * NOBYPASSRLS role without tenant/integration predicates makes the policy
+ * itself the only thing gating cross-tenant reads.
+ */
+const APP_ROLE = 'rls_app_runtime';
+
+async function ensureRlsAppRole(pool: Pool): Promise<void> {
+  await pool.query(`DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${APP_ROLE}') THEN
+      CREATE ROLE ${APP_ROLE} NOLOGIN NOBYPASSRLS;
+    END IF;
+  END $$;`);
+  await pool.query(`GRANT USAGE ON SCHEMA public TO ${APP_ROLE}`);
+  await pool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${APP_ROLE}`);
+}
+
+async function asTenant<T>(
+  pool: Pool,
+  tenantId: string,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    return await fn(client);
+  } finally {
+    await client.query('ROLLBACK').catch(() => undefined);
+    client.release();
+  }
+}
+
 describe('QuickBooks accounting sync — integration', () => {
   let pool: Pool;
   let integrationRepo: PgAccountingIntegrationRepository;
@@ -140,6 +177,7 @@ describe('QuickBooks accounting sync — integration', () => {
     jobRepo = new PgJobRepository(pool);
     customerRepo = new PgCustomerRepository(pool);
     locationRepo = new PgLocationRepository(pool);
+    await ensureRlsAppRole(pool);
   });
 
   beforeEach(async () => {
@@ -387,20 +425,24 @@ describe('QuickBooks accounting sync — integration', () => {
     });
     expect(result.pushed).toBeGreaterThanOrEqual(2);
 
-    // Tenant A's listRecent (run under tenant A's GUC) sees invoice A
-    // but NOT invoice B. RLS is what proves this — listRecent passes
-    // through withTenant and the policy gates the read.
-    const aRecent = await syncLogRepo.listRecent(tenantA.tenantId, integrationA, 100);
-    const aLogsForA = aRecent.filter((l) => l.entityType === 'invoice' && l.entityId === invoiceA);
-    const aLogsForB = aRecent.filter((l) => l.entityType === 'invoice' && l.entityId === invoiceB);
-    expect(aLogsForA.some((l) => l.status === 'success')).toBe(true);
-    expect(aLogsForB).toHaveLength(0);
-
-    // Symmetric check from tenant B.
-    const bRecent = await syncLogRepo.listRecent(tenantB.tenantId, integrationB, 100);
-    const bLogsForB = bRecent.filter((l) => l.entityType === 'invoice' && l.entityId === invoiceB);
-    const bLogsForA = bRecent.filter((l) => l.entityType === 'invoice' && l.entityId === invoiceA);
-    expect(bLogsForB.some((l) => l.status === 'success')).toBe(true);
-    expect(bLogsForA).toHaveLength(0);
+    // RLS proof: under each tenant's GUC and the unprivileged role,
+    // enumerate accounting_sync_log entityIds for invoices WITHOUT any
+    // tenant_id / integration_id predicate. Only the policy gates this
+    // read, so a dropped policy would surface the sibling tenant's rows
+    // and fail the assertion.
+    const entityIdsUnderA = await asTenant(pool, tenantA.tenantId, (client) =>
+      client.query(
+        `SELECT entity_id FROM accounting_sync_log WHERE entity_type = 'invoice'`,
+      ).then((r) => r.rows.map((row: { entity_id: string }) => row.entity_id)),
+    );
+    const entityIdsUnderB = await asTenant(pool, tenantB.tenantId, (client) =>
+      client.query(
+        `SELECT entity_id FROM accounting_sync_log WHERE entity_type = 'invoice'`,
+      ).then((r) => r.rows.map((row: { entity_id: string }) => row.entity_id)),
+    );
+    expect(entityIdsUnderA).toContain(invoiceA);
+    expect(entityIdsUnderA).not.toContain(invoiceB);
+    expect(entityIdsUnderB).toContain(invoiceB);
+    expect(entityIdsUnderB).not.toContain(invoiceA);
   });
 });

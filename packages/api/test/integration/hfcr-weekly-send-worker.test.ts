@@ -19,7 +19,7 @@
  * events the way the real money-loop tests do.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
 import {
@@ -115,6 +115,42 @@ function makeCapturingSendSms(): {
   };
 }
 
+/**
+ * Unprivileged role + GUC pattern mirrored from rls-tenant-isolation.test.ts.
+ * `hfcrSendRepo.findByWeek` includes `WHERE tenant_id = $1`, so the
+ * cross-tenant null check below could pass with the policy dropped.
+ * Querying through asTenant under the NOBYPASSRLS role without a tenant_id
+ * predicate makes the policy itself the only thing gating cross-tenant reads.
+ */
+const APP_ROLE = 'rls_app_runtime';
+
+async function ensureRlsAppRole(pool: Pool): Promise<void> {
+  await pool.query(`DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${APP_ROLE}') THEN
+      CREATE ROLE ${APP_ROLE} NOLOGIN NOBYPASSRLS;
+    END IF;
+  END $$;`);
+  await pool.query(`GRANT USAGE ON SCHEMA public TO ${APP_ROLE}`);
+  await pool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${APP_ROLE}`);
+}
+
+async function asTenant<T>(
+  pool: Pool,
+  tenantId: string,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    return await fn(client);
+  } finally {
+    await client.query('ROLLBACK').catch(() => undefined);
+    client.release();
+  }
+}
+
 describe('HFCR weekly send worker — integration', () => {
   let pool: Pool;
   let hfcrSendRepo: PgHfcrWeeklySendRepository;
@@ -123,6 +159,7 @@ describe('HFCR weekly send worker — integration', () => {
   beforeAll(async () => {
     pool = await getSharedTestDb();
     hfcrSendRepo = new PgHfcrWeeklySendRepository(pool);
+    await ensureRlsAppRole(pool);
   });
 
   beforeEach(async () => {
@@ -287,8 +324,25 @@ describe('HFCR weekly send worker — integration', () => {
     });
 
     const aRow = await hfcrSendRepo.findByWeek(tenantA.tenantId, SUMMARIZED_WEEK_KEY);
-    const bRowForA = await hfcrSendRepo.findByWeek(tenantB.tenantId, SUMMARIZED_WEEK_KEY);
     expect(aRow).not.toBeNull();
-    expect(bRowForA).toBeNull();
+
+    // RLS proof: under each tenant's GUC and the unprivileged role,
+    // enumerate hfcr_weekly_sends rows for the summarized week WITHOUT
+    // a tenant_id predicate. Only the policy gates this read.
+    const tenantIdsUnderA = await asTenant(pool, tenantA.tenantId, (client) =>
+      client.query(
+        `SELECT tenant_id FROM hfcr_weekly_sends WHERE week_starting_date = $1`,
+        [SUMMARIZED_WEEK_KEY],
+      ).then((r) => r.rows.map((row: { tenant_id: string }) => row.tenant_id)),
+    );
+    const tenantIdsUnderB = await asTenant(pool, tenantB.tenantId, (client) =>
+      client.query(
+        `SELECT tenant_id FROM hfcr_weekly_sends WHERE week_starting_date = $1`,
+        [SUMMARIZED_WEEK_KEY],
+      ).then((r) => r.rows.map((row: { tenant_id: string }) => row.tenant_id)),
+    );
+    expect(tenantIdsUnderA).toContain(tenantA.tenantId);
+    expect(tenantIdsUnderA).not.toContain(tenantB.tenantId);
+    expect(tenantIdsUnderB).not.toContain(tenantA.tenantId);
   });
 });
