@@ -15,11 +15,13 @@ export default defineConfig({
     include: ['src/**/*.test.ts'],
     environment: 'node',
     // tsconfigRaw above disables esbuild's tsconfig path resolution, so map the
-    // project aliases explicitly here for tests that import via them. Shared
-    // points at its built `dist` (matches metro.config.js / tsconfig.json).
+    // project aliases explicitly here for tests that import via them. Shared is
+    // resolved from source (matches metro.config.js / tsconfig.json). Current
+    // tests only type-import shared (erased at runtime); a future value import
+    // would need a .js→.ts resolver here too.
     alias: {
       '@': path.resolve(__dirname, './src'),
-      '@ai-service-os/shared': path.resolve(__dirname, '../shared/dist/index.js'),
+      '@ai-service-os/shared': path.resolve(__dirname, '../shared/src/index.ts'),
     },
   },
 });

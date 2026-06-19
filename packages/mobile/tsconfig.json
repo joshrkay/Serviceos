@@ -2,11 +2,12 @@
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
     "strict": true,
+    "moduleResolution": "bundler",
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"],
-      "@ai-service-os/shared": ["../shared/dist/index.d.ts"],
-      "@ai-service-os/shared/*": ["../shared/dist/*"]
+      "@ai-service-os/shared": ["../shared/src/index.ts"],
+      "@ai-service-os/shared/*": ["../shared/src/*"]
     }
   },
   "include": [
