@@ -22,6 +22,7 @@ import {
   WHISPER_MAX_BYTES,
   createWhisperTranscriptionProvider,
   DevNoopTranscriptionProvider,
+  whisperUploadFilename,
 } from '../../src/voice/transcription-providers';
 
 function audioOk(sizeBytes = 1024, type = 'audio/webm'): Response {
@@ -44,6 +45,25 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('whisperUploadFilename', () => {
+  it('maps each accepted Content-Type to the extension Whisper decodes', () => {
+    expect(whisperUploadFilename('audio/mp4')).toBe('audio.m4a');
+    expect(whisperUploadFilename('audio/x-m4a')).toBe('audio.m4a');
+    expect(whisperUploadFilename('audio/mp4;codecs=mp4a.40.2')).toBe('audio.m4a');
+    expect(whisperUploadFilename('audio/wav')).toBe('audio.wav');
+    expect(whisperUploadFilename('audio/ogg')).toBe('audio.ogg');
+    expect(whisperUploadFilename('audio/mpeg')).toBe('audio.mp3');
+    expect(whisperUploadFilename('audio/flac')).toBe('audio.flac');
+    expect(whisperUploadFilename('audio/webm;codecs=opus')).toBe('audio.webm');
+  });
+
+  it('falls back to webm when the type is missing or unrecognized', () => {
+    expect(whisperUploadFilename(undefined)).toBe('audio.webm');
+    expect(whisperUploadFilename('')).toBe('audio.webm');
+    expect(whisperUploadFilename('application/octet-stream')).toBe('audio.webm');
+  });
 });
 
 describe('P0-027 WhisperTranscriptionProvider', () => {
@@ -74,6 +94,26 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
       const fd = whisperInit.body as FormData;
       expect(fd.get('model')).toBe('whisper-1');
       expect(fd.get('file')).toBeInstanceOf(Blob);
+      // Web records webm; the upload filename must match so Whisper decodes it.
+      expect((fd.get('file') as File).name).toBe('audio.webm');
+    });
+
+    it('names the upload by the audio Content-Type so Whisper decodes m4a', () => {
+      // Native mobile (expo-audio) records AAC-in-MP4 → `audio/mp4`. Uploading
+      // those bytes as `audio.webm` makes Whisper fail to decode, so the
+      // filename extension must follow the fetched blob's type.
+      return (async () => {
+        const fetchMock = vi
+          .fn<Parameters<typeof fetch>, ReturnType<typeof fetch>>()
+          .mockResolvedValueOnce(audioOk(2048, 'audio/mp4'))
+          .mockResolvedValueOnce(jsonRes({ text: 'reschedule the Tuesday job' }));
+
+        const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+        await provider.transcribe('https://cdn.example/voice.m4a');
+
+        const fd = (fetchMock.mock.calls[1] as [string, RequestInit])[1].body as FormData;
+        expect((fd.get('file') as File).name).toBe('audio.m4a');
+      })();
     });
 
     it('honours the configurable model and forwards a language hint when provided', async () => {
