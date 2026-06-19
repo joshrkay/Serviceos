@@ -21,9 +21,13 @@ mobile isolated makes the Railway api/web build provably unaffected.
 Consequences:
 - Install/run from inside this directory: `cd packages/mobile && npm install`.
 - It has its own `node_modules` and `package-lock.json`.
-- `@ai-service-os/shared` (pure Zod) is resolved from source via Metro
-  (`metro.config.js` `extraNodeModules`) and TypeScript path aliases
-  (`tsconfig.json`) — no build step, no npm dependency on it.
+- `@ai-service-os/shared` (pure Zod) is resolved from its **built `dist`** via
+  Metro (`metro.config.js` `extraNodeModules` → the package root, honoring
+  `package.json` `main`) and TypeScript path aliases (`tsconfig.json` →
+  `../shared/dist`). This matches how `packages/web`/`packages/api` consume it.
+  Rebuild shared after changing it: `npm run build --workspace=packages/shared`
+  (the monorepo root install already builds it via `prepare`). It is not an npm
+  dependency of this package.
 
 ## Stack notes
 - **Expo SDK 52** (React 18.3.1, RN 0.76) — React aligned with `packages/web`.

@@ -5,8 +5,8 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"],
-      "@ai-service-os/shared": ["../shared/src/index.ts"],
-      "@ai-service-os/shared/*": ["../shared/src/*"]
+      "@ai-service-os/shared": ["../shared/dist/index.d.ts"],
+      "@ai-service-os/shared/*": ["../shared/dist/*"]
     }
   },
   "include": [

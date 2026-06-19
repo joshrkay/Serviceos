@@ -42,6 +42,14 @@ jobs:
       - name: Unit tests
         run: npm test -- --reporter=verbose
 
+      # packages/mobile is an isolated project (not a root workspace), so the
+      # `npm test` sweep above skips it. Run its pure-logic Vitest suite with
+      # the root-hoisted vitest (no Expo install needed; vitest.config.ts is
+      # self-contained). RN component tests (jest-expo) are intentionally not
+      # gated here — they'd require the full Expo/RN install.
+      - name: Mobile unit tests
+        run: npx vitest run --root packages/mobile
+
       - name: Pre-pull Postgres test image
         run: docker pull pgvector/pgvector:pg16
 
