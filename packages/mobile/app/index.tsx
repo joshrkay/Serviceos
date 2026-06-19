@@ -1,4 +1,5 @@
 import { useAuth } from '@clerk/clerk-expo';
+import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { useMe, type Mode } from '../src/hooks/useMe';
@@ -10,6 +11,7 @@ const MODES: Mode[] = ['supervisor', 'both', 'tech'];
 // (money loop, approvals) arrives in later units.
 export default function Home() {
   const { signOut } = useAuth();
+  const router = useRouter();
   const { me, isLoading, error, switchMode } = useMe();
   const [modeError, setModeError] = useState<string | null>(null);
 
@@ -36,7 +38,16 @@ export default function Home() {
         You learned the trade. We&apos;ll run the business.
       </Text>
 
-      <View className="mt-6 rounded-lg border border-border p-4">
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Speak an action"
+        onPress={() => router.push('/voice')}
+        className="mt-6 min-h-11 items-center justify-center rounded-md bg-primary px-4 py-3"
+      >
+        <Text className="text-base font-semibold text-primaryForeground">Speak an action</Text>
+      </Pressable>
+
+      <View className="mt-4 rounded-lg border border-border p-4">
         <Text className="text-base text-foreground">Role: {me?.role}</Text>
         <Text className="mt-1 text-base text-foreground">Mode: {me?.current_mode}</Text>
         <Text className="mt-1 text-base text-mutedForeground">Tenant: {me?.tenant_id}</Text>
