@@ -39,9 +39,42 @@ Consequences:
   `npm test` (or, from the repo root, `npx vitest run --root packages/mobile`).
 - React Native component-render tests use **jest-expo**: `npm run test:rn`.
 
-## Run
+## Running & viewing the app
+
+All commands run from inside `packages/mobile`.
+
+### Dev (Metro)
 ```
 cp .env.example .env   # set EXPO_PUBLIC_API_URL + Clerk key
 npm install
 npm start
 ```
+
+### On your iPhone (Expo Go) — fastest, free, no Apple account
+1. Install **Expo Go** from the App Store.
+2. `npm install && npx expo start` (add `--tunnel` if your phone isn't on the same Wi-Fi).
+3. Scan the QR with the Camera app → it opens in Expo Go with live reload.
+
+All current deps (expo-router, nativewind, reanimated, screens, safe-area-context,
+gesture-handler) are Expo SDK 52 modules supported by Expo Go, so no custom dev build is
+needed yet.
+
+### Web preview / screenshot (no device)
+```
+npm install
+npx expo export --platform web --output-dir web-dist
+npx serve web-dist            # or any static server, then open in a browser
+```
+The app renders via React-Native-Web (approximates iOS, not pixel-identical).
+
+### TestFlight (real iOS beta) — via EAS Build
+Prereqs: an **Apple Developer Program** membership ($99/yr) and a free **Expo** account.
+```
+npx eas-cli login
+npx eas-cli build --platform ios --profile preview   # EAS cloud-builds the .ipa + manages signing
+npx eas-cli submit --platform ios                    # uploads to App Store Connect → TestFlight
+```
+Fill in the `submit.production.ios` placeholders in `eas.json` (Apple ID, ASC app id, team
+id). The build runs on Expo's servers — trigger it from your machine or a CI job with an
+`EXPO_TOKEN`, not from this repo's cloud env. Replace `assets/icon.png` (a solid-brand
+placeholder) with real branding before shipping.

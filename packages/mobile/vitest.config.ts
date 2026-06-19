@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import path from 'node:path';
 
 // Pure-logic tests (design tokens, formatters, hooks that don't render RN)
 // run under Vitest — the repo's standard test tool — so they need no Expo/RN
@@ -13,5 +14,12 @@ export default defineConfig({
   test: {
     include: ['src/**/*.test.ts'],
     environment: 'node',
+    // tsconfigRaw above disables esbuild's tsconfig path resolution, so map the
+    // project aliases explicitly here for tests that import via them. Shared
+    // points at its built `dist` (matches metro.config.js / tsconfig.json).
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+      '@ai-service-os/shared': path.resolve(__dirname, '../shared/dist/index.js'),
+    },
   },
 });

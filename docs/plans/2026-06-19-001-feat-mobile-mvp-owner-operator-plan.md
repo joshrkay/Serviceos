@@ -133,8 +133,9 @@ dispatcher, seam wiring) and client registration/deep-linking.
 ## Implementation Units
 
 ### U1. Scaffold `packages/mobile` Expo workspace (monorepo + CI guard)
-- **Goal:** A runnable Expo app added as a 4th workspace that does not enter the api/web
-  Docker image or break CI; NativeWind wired to a token module extracted from web.
+- **Goal:** A runnable Expo app added as an **isolated project (NOT a root npm
+  workspace)** that does not enter the api/web Docker image or break CI; NativeWind
+  wired to a token module extracted from web.
 - **Requirements:** R1, R6.
 - **Dependencies:** none.
 - **Files:**
@@ -147,19 +148,19 @@ dispatcher, seam wiring) and client registration/deep-linking.
     `packages/web/src/index.css`; light + dark).
   - `packages/mobile/app/_layout.tsx`, `packages/mobile/app/index.tsx` (placeholder
     home so the app renders).
-  - Modify root `package.json` `workspaces` → add `packages/mobile`.
+  - Do **not** add `packages/mobile` to root `package.json` `workspaces` — keep it an
+    isolated project (own `node_modules`/lockfile). Adding it would break the Docker
+    `npm ci` (the workspace isn't COPYed into the image) or pull the Expo/RN tree into
+    the api image. Metro resolves `@ai-service-os/shared` from `../shared/dist`.
   - Modify `.dockerignore` → add `packages/mobile`.
   - Modify `Dockerfile` → **no** new `COPY packages/mobile` line (explicit COPYs already
     exclude it); add a comment noting mobile is intentionally excluded.
-  - Modify `.github/workflows/pr-checks.yml` → ensure the workspace sweeps
-    (`npm run build --workspaces`, `npm test -- ...`, `npm run lint --workspaces`) do not
-    fail on mobile: give mobile no `build`/`lint` scripts and a `test` script that is a
-    jest-expo no-op-safe runner, **or** convert those root steps to explicit
-    `--workspace=packages/{api,web,shared}` (decision: explicit per-workspace in CI —
-    least surprising, documented in the plan's KTD).
+  - Modify `.github/workflows/pr-checks.yml` → because mobile is not a workspace, the
+    root `--workspaces` sweeps already skip it; add a dedicated "Mobile unit tests" step
+    (`npx vitest run --root packages/mobile`) so its pure-logic tests still gate PRs.
 - **Approach:** Use Expo's monorepo metro preset: `watchFolders: [workspaceRoot]`,
   `resolver.nodeModulesPaths` for both `packages/mobile/node_modules` and root; point
-  `@ai-service-os/shared` at `packages/shared/src` to avoid the unbuilt-`dist`/ESM issue.
+  `@ai-service-os/shared` at `packages/shared` (built `dist`, via package.json `main`).
   `tokens.ts` feeds `tailwind.config.js theme.extend.colors`/`borderRadius`; define a
   `min-h-11`/≥44pt utility. Verify `npm ci` at root still resolves and api/web build.
 - **Patterns to follow:** root `package.json` workspaces/scripts; `Dockerfile` explicit
