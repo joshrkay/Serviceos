@@ -36,15 +36,17 @@ export function _resetMeCacheForTests(): void {
 }
 
 export function useMe(): UseMeResult {
-  const { userId } = useAuth();
+  const { userId, orgId } = useAuth();
   const client = useApiClient() as AuthedFetch;
   const [me, setMe] = useState<MeResponse | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<Error | null>(null);
 
-  // Key the cache by the Clerk user id so a different session never reuses the
-  // prior user's payload. `anon` covers the signed-out gap.
-  const cacheKey = userId ?? 'anon';
+  // Key the cache by Clerk identity AND active org: the same Clerk subject can
+  // belong to multiple tenants (the API's tenant boundary is tenant+user), so
+  // switching org/tenant in the same runtime must not reuse the prior tenant's
+  // payload. `anon` covers the signed-out gap.
+  const cacheKey = `${userId ?? 'anon'}:${orgId ?? ''}`;
 
   const load = useCallback(
     async (forceRefresh = false) => {

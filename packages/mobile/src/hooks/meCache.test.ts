@@ -45,6 +45,16 @@ describe('getOrLoadMe', () => {
     expect(second.user_id).toBe('u2');
   });
 
+  it('reloads when the tenant/org segment of the key changes (same user)', async () => {
+    // useMe keys by `${userId}:${orgId}` — a tenant/org switch is a new key.
+    const load = vi.fn().mockResolvedValueOnce(me('u1')).mockResolvedValueOnce(me('u1'));
+
+    await getOrLoadMe('u1:orgA', load);
+    await getOrLoadMe('u1:orgB', load);
+
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
   it('clears the cache on error so the next read retries', async () => {
     const load = vi
       .fn()
