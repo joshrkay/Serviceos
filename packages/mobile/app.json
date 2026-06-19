@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "ServiceOS",
+    "slug": "serviceos-mobile",
+    "scheme": "serviceos",
+    "version": "0.0.1",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "icon": "./assets/icon.png",
+    "splash": {
+      "backgroundColor": "#030213"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.serviceos.app"
+    },
+    "android": {
+      "package": "com.serviceos.app"
+    },
+    "plugins": [
+      "expo-router"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

@@ -6,3 +6,5 @@ coverage
 *.md
 .env
 .env.*
+# packages/mobile is an isolated Expo app, never part of the api/web image.
+packages/mobile
