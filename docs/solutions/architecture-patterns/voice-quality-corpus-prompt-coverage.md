@@ -1,21 +1,27 @@
 ---
 title: "Voice-quality cassettes cover the intent classifier, not the appointment-task prompt"
 date: 2026-06-15
+last_updated: 2026-06-19
 track: knowledge
 problem_type: architecture-patterns
 module: "packages/api/src/ai/voice-quality, packages/api/src/ai/tasks/create-appointment-task.ts, packages/api/src/workers/voice-action-router.ts"
 tags: ["voice", "voice-quality", "cassettes", "testing", "llm-prompts", "create_appointment"]
-related: ["docs/solutions/logic-errors/escalation-per-user-phone-fallback-loop.md"]
+related: ["docs/solutions/logic-errors/escalation-per-user-phone-fallback-loop.md", "docs/solutions/test-failures/voice-quality-cassette-drift-serves-stale-response.md"]
 ---
 
 ## Context
 Before editing an LLM prompt on the voice path, the natural worry is: "will this
 break the voice-quality launch-gate cassettes?" The cassette replay
 (`ai/voice-quality/cassette-gateway.ts`) keys each call by
-`sha256({model, canonicalized messages, schema})` and THROWS "cassette stale,
-refresh needed" on a request-hash miss — so a prompt edit that the corpus
-actually drives fails the gate until the cassette is re-recorded (which needs
-live-LLM access).
+`sha256({model, canonicalized messages, schema})`. On a request-hash miss it no
+longer throws: since `a6a480cb` it falls back to a `(schema, system-prompt
+first-sentence, last user message)` match and serves the recorded response
+(emitting a `cassette drift` warning). A prompt edit the corpus drives therefore
+keeps the gate green as long as the recorded *content* is still correct — but a
+changed response contract silently serves a stale, wrong response (see the
+cross-referenced test-failures doc). Re-recording is **offline** via the in-repo
+`ScriptAwareMockGateway` (`voice-quality:refresh`); it does **not** need
+live-LLM access.
 
 ## Guidance
 **The Layer-1 voice-quality corpus only exercises the intent CLASSIFIER call —
