@@ -2,11 +2,12 @@
  * `useMe` — single source of truth for the authenticated user, tenant, role,
  * and current mode. Ported from `packages/web/src/hooks/useMe.ts`.
  *
- * Module-level cache: the first mount kicks off the fetch and stores the
- * in-flight promise; subsequent mounts reuse it. `switchMode` invalidates the
- * cache so the next read hits the server. The cache is cleared on error so a
- * retry actually re-fetches.
+ * The `/api/me` cache is keyed by Clerk identity (see meCache.ts): unlike web,
+ * the RN JS runtime survives sign-out/sign-in, so a module cache that ignored
+ * identity would render the previous user's tenant/role until a manual
+ * refetch. `switchMode` invalidates the cache so the next read hits the server.
  */
+import { useAuth } from '@clerk/clerk-expo';
 import { useCallback, useEffect, useState } from 'react';
 import { useApiClient } from '../lib/useApiClient';
 import {
@@ -16,6 +17,7 @@ import {
   type Mode,
   type MeResponse,
 } from '../api/me';
+import { getOrLoadMe, invalidateMeCache } from './meCache';
 
 export type { Mode, MeResponse };
 
@@ -28,43 +30,36 @@ export interface UseMeResult {
   refetch: () => Promise<void>;
 }
 
-let cachedMePromise: Promise<MeResponse> | null = null;
-
-function loadOrReuse(client: AuthedFetch): Promise<MeResponse> {
-  if (!cachedMePromise) {
-    cachedMePromise = fetchMe(client).catch((err) => {
-      cachedMePromise = null; // don't poison the cache on transient failures
-      throw err;
-    });
-  }
-  return cachedMePromise;
-}
-
 /** Test-only: drop the module cache so cases don't bleed into each other. */
 export function _resetMeCacheForTests(): void {
-  cachedMePromise = null;
+  invalidateMeCache();
 }
 
 export function useMe(): UseMeResult {
+  const { userId } = useAuth();
   const client = useApiClient() as AuthedFetch;
   const [me, setMe] = useState<MeResponse | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<Error | null>(null);
+
+  // Key the cache by the Clerk user id so a different session never reuses the
+  // prior user's payload. `anon` covers the signed-out gap.
+  const cacheKey = userId ?? 'anon';
 
   const load = useCallback(
     async (forceRefresh = false) => {
       setIsLoading(true);
       setError(null);
       try {
-        if (forceRefresh) cachedMePromise = null;
-        setMe(await loadOrReuse(client));
+        if (forceRefresh) invalidateMeCache();
+        setMe(await getOrLoadMe(cacheKey, () => fetchMe(client)));
       } catch (err) {
         setError(err instanceof Error ? err : new Error(String(err)));
       } finally {
         setIsLoading(false);
       }
     },
-    [client],
+    [client, cacheKey],
   );
 
   useEffect(() => {
@@ -74,7 +69,7 @@ export function useMe(): UseMeResult {
   const switchMode = useCallback(
     async (next: Mode) => {
       await postModeSwitch(client, next);
-      cachedMePromise = null;
+      invalidateMeCache();
       await load(true);
     },
     [client, load],
