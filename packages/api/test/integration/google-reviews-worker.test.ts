@@ -36,8 +36,12 @@ import { createLogger } from '../../src/logging/logger';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 
-const ACCOUNT_ID = 'accounts/123';
-const LOCATION_ID = 'locations/456';
+// Bare GBP IDs — listReviews builds /accounts/${accountId}/locations/${locationId}/reviews,
+// so passing the path prefix here would double it. Full Google resource paths
+// (accounts/{a}/locations/{l}/reviews/{r}) are used below as external_review_id values
+// because that IS what Google's `name` field carries on each review.
+const ACCOUNT_ID = '123';
+const LOCATION_ID = '456';
 
 interface GoogleReviewFixture {
   externalReviewId: string;
@@ -372,7 +376,7 @@ describe('Google Reviews worker — integration', () => {
     const credentialResolver = makeCredentialResolver(
       new Map([
         [tenantA.tenantId, { accountId: ACCOUNT_ID, locationId: LOCATION_ID }],
-        [tenantB.tenantId, { accountId: 'accounts/789', locationId: 'locations/012' }],
+        [tenantB.tenantId, { accountId: '789', locationId: '012' }],
       ]),
     );
     // One review per tenant — disambiguated by their accountId in the URL.
