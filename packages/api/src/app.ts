@@ -81,6 +81,7 @@ import { InMemoryDeviceTokenRepository } from './push/device-token-service';
 import { PgDeviceTokenRepository } from './push/pg-device-token-repository';
 import { ExpoPushDeliveryProvider } from './notifications/expo-push-service';
 import {
+  approverUserIdsResolver,
   notifyExecuted as notifyExecutedPush_,
   notifyNeedsApproval as notifyNeedsApprovalPush_,
 } from './notifications/proposal-push-notifier';
@@ -3755,13 +3756,19 @@ export function createApp(): express.Express {
   // U7 — bind the push notifiers into the late-bound slots now that the
   // device-token repo exists.
   const expoPushProvider = new ExpoPushDeliveryProvider(fetch, process.env.EXPO_ACCESS_TOKEN);
+  // Only the approver/owner devices should receive proposal pushes — never a
+  // technician who happens to have signed into the app.
+  const resolveApproverUserIds = approverUserIdsResolver(userRepo);
   notifyExecutedPush = (tenantId, proposalId) =>
     notifyExecutedPush_(
-      { deviceTokenRepo, provider: expoPushProvider },
+      { deviceTokenRepo, provider: expoPushProvider, resolveApproverUserIds },
       { tenantId, proposalId },
     );
   notifyNeedsApprovalPush = (args) =>
-    notifyNeedsApprovalPush_({ deviceTokenRepo, provider: expoPushProvider }, args);
+    notifyNeedsApprovalPush_(
+      { deviceTokenRepo, provider: expoPushProvider, resolveApproverUserIds },
+      args,
+    );
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use(
     '/api/conversations',

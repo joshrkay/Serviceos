@@ -2,10 +2,12 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { InMemoryDeviceTokenRepository } from '../../src/push/device-token-service';
 import { InMemoryPushDeliveryProvider } from '../../src/notifications/push-delivery-provider';
 import {
+  approverUserIdsResolver,
   notifyExecuted,
   notifyNeedsApproval,
   type ProposalPushNotifierDeps,
 } from '../../src/notifications/proposal-push-notifier';
+import type { User } from '../../src/users/user';
 
 const TENANT = 'tenant-1';
 
@@ -58,6 +60,29 @@ describe('proposal-push-notifier', () => {
     expect(remaining.map((t) => t.expoPushToken)).toEqual(['ExponentPushToken[live]']);
   });
 
+  it('with resolveApproverUserIds, only approver devices receive the push', async () => {
+    await repo.register({ tenantId: TENANT, userId: 'owner-1', expoPushToken: 'ExponentPushToken[owner]', platform: 'ios' });
+    await repo.register({ tenantId: TENANT, userId: 'tech-1', expoPushToken: 'ExponentPushToken[tech]', platform: 'android' });
+    const filtered: ProposalPushNotifierDeps = {
+      deviceTokenRepo: repo,
+      provider,
+      resolveApproverUserIds: async () => new Set(['owner-1']),
+    };
+    await notifyNeedsApproval(filtered, { tenantId: TENANT, proposal: { id: 'p1', summary: 's' } });
+    expect(provider.sent.map((m) => m.to)).toEqual(['ExponentPushToken[owner]']);
+  });
+
+  it('no approver devices in the tenant → no send', async () => {
+    await repo.register({ tenantId: TENANT, userId: 'tech-1', expoPushToken: 'ExponentPushToken[tech]', platform: 'android' });
+    const filtered: ProposalPushNotifierDeps = {
+      deviceTokenRepo: repo,
+      provider,
+      resolveApproverUserIds: async () => new Set<string>(),
+    };
+    await notifyExecuted(filtered, { tenantId: TENANT, proposalId: 'p1' });
+    expect(provider.sent).toHaveLength(0);
+  });
+
   it('swallows provider errors (never breaks routing/execution)', async () => {
     await seedTokens(repo, ['ExponentPushToken[a]']);
     const throwing: ProposalPushNotifierDeps = {
@@ -71,5 +96,32 @@ describe('proposal-push-notifier', () => {
     await expect(
       notifyExecuted(throwing, { tenantId: TENANT, proposalId: 'p1' }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe('approverUserIdsResolver', () => {
+  const user = (clerkUserId: string | null, role: User['role']): User =>
+    ({
+      id: `id-${clerkUserId}`,
+      tenantId: TENANT,
+      clerkUserId,
+      email: 'x@y.test',
+      role,
+      canFieldServe: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }) as User;
+
+  it('returns only the Clerk ids of roles that can approve proposals', async () => {
+    const userRepo = {
+      findByTenant: async () => [
+        user('owner-c', 'owner'),
+        user('disp-c', 'dispatcher'),
+        user('tech-c', 'technician'), // technician cannot approve → excluded
+        user(null, 'owner'), // invited owner, no Clerk id yet → excluded
+      ],
+    };
+    const ids = await approverUserIdsResolver(userRepo)(TENANT);
+    expect([...ids].sort()).toEqual(['disp-c', 'owner-c']);
   });
 });
