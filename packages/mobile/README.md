@@ -60,10 +60,30 @@ needed yet.
 ### Web preview / screenshot (no device)
 ```
 npm install
-npx expo export --platform web --output-dir web-dist
-npx serve web-dist            # or any static server, then open in a browser
+cp .env.example .env          # EXPO_PUBLIC_API_URL + Clerk publishable key
+# Inline env at export time — Expo bakes EXPO_PUBLIC_* into the bundle:
+EXPO_PUBLIC_API_URL=https://your-api.example.com \
+EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_... \
+  npx expo export --platform web --output-dir web-dist
+npx serve web-dist -s -l 8788  # -s = SPA fallback (required for /messages etc.)
 ```
 The app renders via React-Native-Web (approximates iOS, not pixel-identical).
+
+### QA against a live API (Railway preview)
+
+Signed-in flows need a Clerk user **with tenant bootstrap** (`tenant_id` in JWT
+`public_metadata`). API-created users skip the `user.created` webhook, so run:
+
+```
+DATABASE_URL='postgres://...' \
+CLERK_SECRET_KEY='sk_test_...' \
+  npx ts-node packages/api/scripts/bootstrap-mobile-qa-user.ts \
+    --email 'mobile-qa+clerk_test@serviceos-test.com' \
+    --password 'MobileQATest!123'
+```
+
+Use a `+clerk_test` email (Clerk testing mode) and re-export the web bundle
+pointing at the preview API. Sign in with the printed credentials.
 
 ### TestFlight (real iOS beta) — via EAS Build
 Prereqs: an **Apple Developer Program** membership ($99/yr) and a free **Expo** account.
