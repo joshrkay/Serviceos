@@ -31,8 +31,8 @@ export interface UseVoiceCaptureResult {
  * Hold-to-talk has a race: a release (onPressOut) can fire before
  * startRecording()'s async permission/prepare resolves. We track the real
  * recorder state in a ref and a deferred-stop flag so a too-early release
- * either cancels the start or stops the just-started recording — never leaves
- * the mic recording with no matching stop.
+ * either cancels the start (before record()) or, once recording, takes the
+ * normal stop path — never leaves the mic recording with no matching stop.
  */
 export function useVoiceCapture(): UseVoiceCaptureResult {
   const api = useApiClient();
@@ -104,17 +104,12 @@ export function useVoiceCapture(): UseVoiceCaptureResult {
       recorder.record();
       recStateRef.current = 'recording';
       setPhase('listening');
-
-      if (stopRequestedRef.current) {
-        // Released in the tiny window right after record() — stop now.
-        await doStop();
-      }
     } catch {
       recStateRef.current = 'idle';
       setError('Could not start recording. Please retry.');
       setPhase('error');
     }
-  }, [recorder, doStop]);
+  }, [recorder]);
 
   const stopAndTranscribe = useCallback(async () => {
     if (recStateRef.current === 'starting') {
@@ -127,10 +122,21 @@ export function useVoiceCapture(): UseVoiceCaptureResult {
   }, [doStop]);
 
   const reset = useCallback(() => {
+    // reset() must be safe mid-capture: the machine is otherwise only advanced
+    // by press-in/release, so without this a reset during an in-flight start
+    // could later resume into a live mic. Abort a pending start via the
+    // deferred-stop flag (startRecording cancels before record()); stop and
+    // discard an active recording (no transcribe).
+    if (recStateRef.current === 'starting') {
+      stopRequestedRef.current = true;
+    } else if (recStateRef.current === 'recording') {
+      recStateRef.current = 'idle';
+      void recorder.stop().catch(() => {});
+    }
     setPhase('idle');
     setTranscript('');
     setError(null);
-  }, []);
+  }, [recorder]);
 
   return { phase, transcript, error, startRecording, stopAndTranscribe, reset };
 }

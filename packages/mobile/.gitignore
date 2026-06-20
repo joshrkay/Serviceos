@@ -13,3 +13,4 @@ android/
 # hand-authored declaration files this app needs committed.
 !nativewind-env.d.ts
 !src/theme/tokens.d.ts
+!types/react-test-renderer.d.ts
