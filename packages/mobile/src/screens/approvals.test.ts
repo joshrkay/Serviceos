@@ -6,6 +6,7 @@ import type { PendingProposalSummary } from '../proposals/proposalEvents';
 
 const h = vi.hoisted(() => ({
   back: vi.fn(),
+  push: vi.fn(),
   refresh: vi.fn(),
   proposals: [] as PendingProposalSummary[],
   count: 0,
@@ -14,7 +15,7 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('expo-router', () => ({
-  useRouter: () => ({ back: h.back, push: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ back: h.back, push: h.push, replace: vi.fn() }),
 }));
 vi.mock('../hooks/usePendingProposals', () => ({
   usePendingProposals: () => ({
@@ -67,5 +68,19 @@ describe('Approvals screen', () => {
     // Friendly type labels, not raw enum values.
     expect(getByText('Invoice')).toBeTruthy();
     expect(getByText('Payment')).toBeTruthy();
+  });
+
+  it('opens the review screen when a proposal card is tapped', () => {
+    h.proposals = [
+      { id: 'prop-1', summary: 'Invoice #12 for Acme', proposalType: 'draft_invoice', createdAt: '2026-06-20T00:00:00Z' },
+    ];
+    h.count = 1;
+    const { getByText, container } = render(createElement(Approvals));
+    const card = getByText('Invoice #12 for Acme').closest('button')!;
+    expect(card.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(card);
+    expect(h.push).toHaveBeenCalledWith('/proposals/prop-1');
+    // The Back control plus one card button.
+    expect(container.querySelectorAll('button')).toHaveLength(2);
   });
 });
