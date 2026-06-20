@@ -78,6 +78,8 @@ import { createNoteRouter } from './routes/notes';
 import { createDevicesRouter } from './routes/devices';
 import { InMemoryDeviceTokenRepository } from './push/device-token-service';
 import { PgDeviceTokenRepository } from './push/pg-device-token-repository';
+import { ExpoPushDeliveryProvider } from './notifications/expo-push-service';
+import { notifyExecuted as notifyExecutedPush_ } from './notifications/proposal-push-notifier';
 import {
   createMeRouter,
   DEFAULT_TENANT_TIMEZONE,
@@ -1604,6 +1606,13 @@ export function createApp(): express.Express {
   let supervisorSpendRecorder:
     | ((tenantId: string, proposalId: string) => Promise<void>)
     | null = null;
+  // U7 — push the owner a "done" notification when an approved proposal
+  // executes. Late-bound: the device-token repo + push provider are built
+  // further down. Null until then, and the notifier swallows its own errors,
+  // so this can never break the execution path.
+  let notifyExecutedPush:
+    | ((tenantId: string, proposalId: string) => Promise<void>)
+    | null = null;
   const proposalExecutor = new ProposalExecutor(
     executionHandlers,
     proposalRepo,
@@ -1617,6 +1626,11 @@ export function createApp(): express.Express {
         // never throws, and the executor's onExecuted is failure-soft.
         if (supervisorSpendRecorder) {
           await supervisorSpendRecorder(event.tenantId, event.proposalId);
+        }
+        // U7 — "done" push to the owner's devices. The notifier is
+        // failure-isolated internally; onExecuted is failure-soft too.
+        if (notifyExecutedPush) {
+          await notifyExecutedPush(event.tenantId, event.proposalId);
         }
         try {
           await queue.send(
@@ -3722,6 +3736,14 @@ export function createApp(): express.Express {
     ? new PgDeviceTokenRepository(pool)
     : new InMemoryDeviceTokenRepository();
   app.use('/api/devices', createDevicesRouter(deviceTokenRepo, auditRepo));
+
+  // U7 — bind the executed-proposal push into the executor's late-bound slot.
+  const expoPushProvider = new ExpoPushDeliveryProvider(fetch, process.env.EXPO_ACCESS_TOKEN);
+  notifyExecutedPush = (tenantId, proposalId) =>
+    notifyExecutedPush_(
+      { deviceTokenRepo, provider: expoPushProvider },
+      { tenantId, proposalId },
+    );
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use(
     '/api/conversations',
