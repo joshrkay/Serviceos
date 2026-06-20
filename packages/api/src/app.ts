@@ -2885,9 +2885,15 @@ export function createApp(): express.Express {
     whisperRouter({ whisperCache: sharedWhisperCache }),
   );
 
-  // Owner→customer click-to-call. Deps are enabled only when Twilio is
-  // configured (global env or per-tenant creds); without them POST /api/calls
-  // returns 503. The bridge TwiML callback is mounted HERE — before the global
+  // Owner→customer click-to-call. The authed POST /api/calls is wired only when
+  // the structural prerequisites are present — a Postgres pool (per-tenant cred
+  // + repo access) and PUBLIC_API_URL; without them POST /api/calls returns 503.
+  // We do NOT gate on a global TWILIO_ACCOUNT_SID: Twilio creds are resolved
+  // per-tenant at call time by getTenantTwilioCreds, which fails closed (→ 503
+  // not_configured) for a tenant with no active integration. Prod multi-tenant
+  // deployments use per-tenant tenant_integrations and often have NO global SID,
+  // so gating on it left click-to-call dark for every tenant on that path.
+  // The bridge TwiML callback is mounted HERE — before the global
   // /api Clerk-auth chain — because Twilio carries no Clerk JWT (same reason the
   // telephony webhooks above are). The authed POST /api/calls is mounted after
   // auth, further down. Both share these deps.
@@ -2896,9 +2902,7 @@ export function createApp(): express.Express {
   // origin (APP_PUBLIC_URL), which doesn't serve /api/calls/bridge, so the call
   // would ring the owner but never connect. Gate the feature on it instead.
   const callDeps =
-    pool &&
-    process.env.PUBLIC_API_URL &&
-    (process.env.TWILIO_ACCOUNT_SID || process.env.NODE_ENV !== 'production')
+    pool && process.env.PUBLIC_API_URL
       ? {
           customerRepo,
           conversationRepo,

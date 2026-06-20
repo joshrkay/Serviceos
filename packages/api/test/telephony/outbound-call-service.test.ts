@@ -124,6 +124,19 @@ describe('initiateOutboundCall', () => {
     expect(e.fetchMock).not.toHaveBeenCalled();
   });
 
+  it('reports not_configured (fails closed) when getCreds throws — tenant has no active integration', async () => {
+    // The /api/calls gate intentionally no longer requires a global
+    // TWILIO_ACCOUNT_SID: in per-tenant prod the route is wired and
+    // getTenantTwilioCreds throws for a tenant without a provisioned row.
+    // That per-tenant failure must surface as not_configured (→ 503), never a
+    // 500, and must never reach Twilio.
+    const e = buildDeps({
+      getCreds: vi.fn().mockRejectedValue(new Error('No active Twilio integration for tenant')),
+    });
+    await expect(initiateOutboundCall(e.deps, input)).rejects.toMatchObject({ code: 'not_configured' });
+    expect(e.fetchMock).not.toHaveBeenCalled();
+  });
+
   it('marks the message failed and throws provider_failed on a Twilio error', async () => {
     const e = buildDeps();
     e.fetchMock.mockResolvedValue({ ok: false, status: 400, text: async () => 'bad request', json: async () => ({}) });
