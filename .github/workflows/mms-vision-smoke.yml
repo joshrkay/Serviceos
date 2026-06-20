@@ -28,6 +28,12 @@ jobs:
         env:
           MMS_VISION_SMOKE: '1'
           AI_PROVIDER_API_KEY: ${{ secrets.AI_PROVIDER_API_KEY }}
+          # mms_estimate routes to the COMPLEX tier, which defaults to
+          # claude-sonnet-4-6. The smoke uses the default OpenAI-compatible
+          # provider (AI_PROVIDER_API_KEY), so without this it would send a
+          # Claude model name to OpenAI. Pin the complex tier to a real,
+          # vision-capable OpenAI model so the smoke actually exercises vision.
+          AI_COMPLEX_MODEL: gpt-4o
       - name: Notify Slack on failure
         if: failure()
         uses: slackapi/slack-github-action@v1.27.0

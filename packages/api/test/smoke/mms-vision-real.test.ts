@@ -11,6 +11,11 @@
  * `mms-vision-smoke` workflow). It needs a REAL repair photo at
  * `MMS_VISION_SMOKE_IMAGE` (default `test/fixtures/mms-smoke.jpg`) — a tiny
  * synthetic image yields no line items and would (correctly) fail the assert.
+ *
+ * `mms_estimate` routes to the COMPLEX tier (default `claude-sonnet-4-6`); set
+ * `AI_COMPLEX_MODEL` to a vision-capable model matching your provider (the
+ * workflow pins `gpt-4o` for the default OpenAI-compatible endpoint) so the
+ * gateway doesn't send a Claude model name to OpenAI.
  */
 import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
