@@ -252,19 +252,13 @@ export class CassetteLLMGateway extends LLMGateway {
       else return null; // matches exist but none with right fp — give up
     }
 
-    // Stage 3 — among the fingerprint matches, replay the recording whose
-    // request prompt is CLOSEST to the live one. Cassette drift is almost
-    // always a system prompt that GREW since recording (new intents/rules
-    // appended over the corpus's life), so the live prompt shares the
-    // longest leading run with the NEWEST matching recording — the one
-    // carrying current behavior. The previous positional walk returned
-    // matches[0] (the OLDEST entry by file order), which could replay a
-    // stale response that conflicts with the rest of the refreshed pipeline
-    // (e.g. a vague extracted entity the slot resolver then disagrees with,
-    // failing the hard-slot disposition check non-deterministically). The
-    // pick is a pure function of (live prompt, matches) — no per-instance
-    // counter — so repeated calls and reused gateways resolve identically.
-    return pickClosestByPrompt(matches, snapshotRequest(request).prompt);
+    // Stage 3 — the match set is now the refresh history of a single
+    // logical call (same schema + system fingerprint + last user message);
+    // replay the most recently recorded entry, which carries current
+    // behavior. See pickNewestRecording for why `recordedAt` — not a
+    // prompt-prefix proxy or implicit file order — is the robust,
+    // drift-shape-independent key.
+    return pickNewestRecording(matches);
   }
 
   private async recordOrRefresh(
@@ -524,47 +518,37 @@ function lastUserContentFromPromptString(prompt: string): string | null {
 }
 
 /**
- * Length of the shared leading run of two strings. A cheap, deterministic
- * proxy for "how close are these two serialized prompts": when a system
- * prompt drifts by appending intents/rules, the live prompt shares the
- * longest common prefix with the closest (newest) recording.
+ * Deterministically pick the most recently recorded entry among fallback
+ * matches.
+ *
+ * By the time we reach here the match set has already been narrowed to a
+ * single logical call — same schema, same system-prompt fingerprint, same
+ * last user message (see {@link CassetteLLMGateway.findFallbackEntry}
+ * stages 1-2). Multiple entries for that one call are refresh history
+ * accreted over the cassette's life as the system prompt grew or was
+ * re-recorded; the newest carries current behavior.
+ *
+ * Ranking by `recordedAt` is drift-shape-independent: `recordedAt` is an
+ * ISO-8601 instant from `Date.toISOString()` (fixed-width UTC, so a
+ * lexicographic `>=` is also chronological — verified across the corpus),
+ * and it stays correct whether drift was a suffix append, a head/middle
+ * edit, or an in-place refresh (which keeps the array index but bumps the
+ * timestamp). A prompt-prefix/length proxy, by contrast, silently degrades
+ * the moment drift is not a pure append. On an equal timestamp
+ * (same-millisecond batch record) the later array entry wins, so the result
+ * is a pure function of the match set: identical input always yields the
+ * same entry, on every call and across reused gateway instances.
+ *
+ * `matches` is non-empty by construction at the call site.
  */
-function commonPrefixLength(a: string, b: string): number {
-  const n = Math.min(a.length, b.length);
-  let i = 0;
-  while (i < n && a.charCodeAt(i) === b.charCodeAt(i)) i++;
-  return i;
-}
-
-/**
- * Deterministically pick the cassette entry whose recorded request prompt
- * is closest to `livePrompt`. Ranks by (1) longest common prefix, then
- * (2) smallest length difference, then (3) latest entry (file/record order
- * = newest) on a full tie. Pure: identical inputs always yield the same
- * entry, so a drifted request resolves to the same recording on every call
- * and across reused gateway instances. `matches` is non-empty by
- * construction at the call site.
- */
-function pickClosestByPrompt(
-  matches: CassetteEntry[],
-  livePrompt: string,
-): CassetteEntry {
+export function pickNewestRecording(matches: CassetteEntry[]): CassetteEntry {
   let best = matches[0]!;
-  let bestPrefix = commonPrefixLength(best.request.prompt, livePrompt);
-  let bestDelta = Math.abs(best.request.prompt.length - livePrompt.length);
   for (let i = 1; i < matches.length; i++) {
     const candidate = matches[i]!;
-    const prefix = commonPrefixLength(candidate.request.prompt, livePrompt);
-    const delta = Math.abs(candidate.request.prompt.length - livePrompt.length);
-    const better =
-      prefix > bestPrefix ||
-      (prefix === bestPrefix && delta < bestDelta) ||
-      // full tie → prefer the later (newer) recording
-      (prefix === bestPrefix && delta === bestDelta);
-    if (better) {
+    // `>=` so that on an equal recordedAt the later (higher-index, i.e.
+    // appended/refreshed later) entry wins — a deterministic tie-break.
+    if (candidate.recordedAt >= best.recordedAt) {
       best = candidate;
-      bestPrefix = prefix;
-      bestDelta = delta;
     }
   }
   return best;
