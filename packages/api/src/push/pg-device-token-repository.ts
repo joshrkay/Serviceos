@@ -35,7 +35,7 @@ export class PgDeviceTokenRepository extends PgBaseRepository implements DeviceT
   }
 
   async register(input: RegisterDeviceTokenInput): Promise<DeviceToken> {
-    return this.withTenant(input.tenantId, async (client) => {
+    const token = await this.withTenant(input.tenantId, async (client) => {
       const res = await client.query<DeviceTokenRow>(
         `INSERT INTO device_tokens (tenant_id, user_id, expo_push_token, platform)
          VALUES ($1, $2, $3, $4)
@@ -47,6 +47,34 @@ export class PgDeviceTokenRepository extends PgBaseRepository implements DeviceT
         [input.tenantId, input.userId, input.expoPushToken, input.platform],
       );
       return mapRow(res.rows[0]);
+    });
+    // Token-exclusive ownership: a physical device belongs to exactly one tenant
+    // at a time. Drop this token from any OTHER tenant so a later sign-out (a
+    // single tenant-scoped DELETE) can't leave a stale row that keeps pushing
+    // the former tenant's notifications to a signed-out device.
+    await this.removeFromOtherTenants(input.tenantId, input.expoPushToken);
+    return token;
+  }
+
+  /**
+   * Cross-tenant delete of an Expo token under every tenant except `tenantId`.
+   * Runs under `app.system_lookup = 'true'` (migration 197) in a LOCAL-scoped
+   * transaction so the GUC cannot leak to other pooled connections.
+   */
+  private async removeFromOtherTenants(tenantId: string, expoPushToken: string): Promise<void> {
+    await this.withClient(async (client) => {
+      await client.query('BEGIN');
+      try {
+        await client.query("SELECT set_config('app.system_lookup', 'true', true)");
+        await client.query(
+          `DELETE FROM device_tokens WHERE expo_push_token = $1 AND tenant_id <> $2`,
+          [expoPushToken, tenantId],
+        );
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      }
     });
   }
 

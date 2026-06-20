@@ -81,6 +81,14 @@ export class InMemoryDeviceTokenRepository implements DeviceTokenRepository {
           updatedAt: now,
         };
     this.tokens.set(key, record);
+    // Token-exclusive ownership (mirrors PgDeviceTokenRepository): the same
+    // physical token may belong to only one tenant at a time, so drop it from
+    // any other tenant on (re-)register.
+    for (const [k, t] of this.tokens) {
+      if (t.expoPushToken === input.expoPushToken && t.tenantId !== input.tenantId) {
+        this.tokens.delete(k);
+      }
+    }
     return { ...record };
   }
 

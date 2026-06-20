@@ -4896,6 +4896,32 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_device_tokens ON device_tokens
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+  // A physical device's Expo push token belongs to exactly one tenant at a
+  // time. When the app re-registers a token under a newly active tenant, the
+  // repo deletes the token's rows under OTHER tenants (a cross-tenant op) so a
+  // later sign-out — a single tenant-scoped DELETE — can't leave a stale row
+  // that keeps pushing the former tenant's notifications to a signed-out
+  // device. Widen the RLS policy with the same app.system_lookup escape hatch
+  // used by migration 074 so that scoped cleanup is permitted.
+  '197_device_tokens_system_lookup_rls': `
+    DROP POLICY IF EXISTS tenant_isolation_device_tokens ON device_tokens;
+    CREATE POLICY tenant_isolation_device_tokens ON device_tokens
+      USING (
+        tenant_id = current_setting('app.current_tenant_id')::UUID
+        OR current_setting('app.system_lookup', true) = 'true'
+      );
+  `,
+  // Idempotency for the customer get-or-create thread path: at most ONE active
+  // (non-archived) conversation per (tenant, entity). Without this a Message
+  // tap racing the outbound-call logger could both read zero rows and both
+  // insert, splitting later messages/calls across duplicate customer threads.
+  // Partial so archived threads (intentionally multiple per entity) are exempt,
+  // and entity-less conversations are unconstrained.
+  '198_conversations_one_active_thread_per_entity': `
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_conversations_active_entity
+      ON conversations (tenant_id, entity_type, entity_id)
+      WHERE status <> 'archived' AND entity_type IS NOT NULL AND entity_id IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

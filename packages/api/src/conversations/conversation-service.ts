@@ -139,6 +139,19 @@ export async function createConversationWithAudit(
 }
 
 /**
+ * True for a Postgres unique-violation (SQLSTATE 23505). Used to recover from a
+ * lost get-or-create race against the partial unique index on active threads.
+ * Pure + exported so the recovery path is unit-tested without a database.
+ */
+export function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { code?: unknown }).code === '23505'
+  );
+}
+
+/**
  * Return the customer's existing comms thread, or create one. Used by the
  * "Message this customer" mobile action and the outbound-call logger so a
  * customer with no prior inbound text still has a single thread to attach to
@@ -153,19 +166,32 @@ export async function getOrCreateCustomerConversation(
   const existing = await repository.findByEntity(input.tenantId, 'customer', input.customerId);
   const open = existing.find((c) => c.status !== 'archived') ?? existing[0];
   if (open) return { conversation: open, created: false };
-  const conversation = await createConversationWithAudit(
-    {
-      tenantId: input.tenantId,
-      entityType: 'customer',
-      entityId: input.customerId,
-      createdBy: input.createdBy,
-      ...(input.title ? { title: input.title } : {}),
-    },
-    repository,
-    auditRepo,
-    input.actorRole,
-  );
-  return { conversation, created: true };
+  try {
+    const conversation = await createConversationWithAudit(
+      {
+        tenantId: input.tenantId,
+        entityType: 'customer',
+        entityId: input.customerId,
+        createdBy: input.createdBy,
+        ...(input.title ? { title: input.title } : {}),
+      },
+      repository,
+      auditRepo,
+      input.actorRole,
+    );
+    return { conversation, created: true };
+  } catch (err) {
+    // Lost a concurrent get-or-create race: another request created the active
+    // thread between our findByEntity and this INSERT. The partial unique index
+    // (migration 198 — one active thread per entity) rejects the duplicate with
+    // 23505. Re-read and return the winner rather than surfacing the error or
+    // splitting later messages/calls across duplicate customer threads.
+    if (!isUniqueViolation(err)) throw err;
+    const after = await repository.findByEntity(input.tenantId, 'customer', input.customerId);
+    const winner = after.find((c) => c.status !== 'archived') ?? after[0];
+    if (winner) return { conversation: winner, created: false };
+    throw err;
+  }
 }
 
 export function validateCreateMessage(input: CreateMessageInput): string[] {
