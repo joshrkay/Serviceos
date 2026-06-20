@@ -155,7 +155,30 @@ existing approval transport), never applied silently.
   for 1:1 cardinality. `tenant_settings` columns mirror the deposit-rules
   precedent.
 
-### D-013: [Template — copy for new decisions]
+### D-013: §5 status correction — QuickBooks sync and Correction loop are Built
+**Date:** 2026-06-20
+**Decision:** Reconcile two §5 parity-map rows in `docs/PRD-v3.md` from 📋 Specced to
+✅ Built after verifying both against the canonical `/packages` codebase:
+- **QuickBooks sync** → "✅ Built (one-way)". One-way push of paid invoices is wired:
+  `app.ts` imports and runs `workers/accounting-sync-worker` under a leader-elected sweep
+  (`runAsLeader(SWEEP_LOCK.accountingSync, …)`) with an `accounting_sync_log` repo. Two-way
+  reconciliation remains out of scope (hence the "(one-way)" qualifier).
+- **Correction loop** → "✅ Built". `learning/corrections/*` (lesson extraction,
+  `lesson-applicator`, `record-on-execution`, `apply-undo`) is wired into
+  `proposals/actions.ts` and surfaced in `digest-builder.ts` ("what I learned today").
+**Rationale:** Both shipped ahead of their roadmap slots (QuickBooks under the F17 / P15-001
+work, not the P23 label; the correction loop under N-009 / P2-038), so the §5 status lagged
+the code. The 2026-06-14 reconciliation pass missed both. The parity map is the sales/strategy
+source of truth — a false "not built" understates the product.
+**Story:** Status reconciliation — see `docs/prd-v3-code-status.md` (2026-06-20).
+**Alternatives rejected:**
+- Leave both as 📋 Specced. Rejected: keeps the canonical comparison wrong.
+- Mark QuickBooks plain "✅ Built". Rejected: it is one-way only; the qualifier prevents
+  over-claiming two-way reconciliation (still Wave 3+).
+**Follow-up:** §6.5, §6.12, and §8 (P23) still call QuickBooks "Wave 3" — refresh for
+internal consistency in a later pass.
+
+### D-014: [Template — copy for new decisions]
 **Date:** YYYY-MM-DD
 **Decision:** [What was decided]
 **Rationale:** [Why this choice over alternatives]
