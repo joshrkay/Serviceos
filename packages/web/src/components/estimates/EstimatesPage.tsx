@@ -19,6 +19,7 @@ import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNorma
 import { StatusBadge } from '../shared/StatusBadge';
 import { NewEstimateFlow } from './NewEstimateFlow';
 import { ConvertToInvoiceSheet } from './ConvertToInvoiceSheet';
+import { ConvertToJobSheet } from './ConvertToJobSheet';
 import { AttachmentSection } from '../attachments/AttachmentSection';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
@@ -740,6 +741,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   const [previewOpen,  setPreviewOpen]  = useState(false);
   const [wasSent,      setWasSent]      = useState(false);
   const [convertOpen,  setConvertOpen]  = useState(false);
+  const [convertJobOpen, setConvertJobOpen] = useState(false);
   const [actionBusy,   setActionBusy]   = useState(false);
   const [actionError,  setActionError]  = useState<string | null>(null);
 
@@ -1071,6 +1073,14 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                      status === 'Sent'  ? 'Send follow-up'   : 'Send reminder'}
                   </button>
                 )}
+                {(status === 'Sent' || status === 'Viewed') && est.jobId && (
+                  <button
+                    onClick={() => setConvertJobOpen(true)}
+                    className="flex items-center justify-center gap-2 rounded-xl bg-slate-900 text-white py-3 text-sm hover:bg-slate-800 transition-colors"
+                  >
+                    <Briefcase size={14} /> Convert to job
+                  </button>
+                )}
                 {status === 'Approved' && (
                   <button
                     onClick={() => setConvertOpen(true)}
@@ -1166,6 +1176,21 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
           est={estCompat}
           lineItems={uiLineItems}
           onClose={() => setPreviewOpen(false)}
+        />
+      )}
+      {convertJobOpen && est && (
+        <ConvertToJobSheet
+          input={{
+            estimateId: est.id,
+            estimateNumber: est.estimateNumber,
+            customerName: estCompat.customer,
+            description: estCompat.description,
+          }}
+          onClose={() => setConvertJobOpen(false)}
+          onConverted={(jobId) => {
+            setConvertJobOpen(false);
+            navigate(`/jobs/${jobId}`);
+          }}
         />
       )}
       {convertOpen && est.jobId && (
