@@ -138,6 +138,36 @@ export async function createConversationWithAudit(
   return created;
 }
 
+/**
+ * Return the customer's existing comms thread, or create one. Used by the
+ * "Message this customer" mobile action and the outbound-call logger so a
+ * customer with no prior inbound text still has a single thread to attach to
+ * (vs. client-side create-then-reply, which would race into duplicate threads).
+ * Prefers a non-archived thread; falls back to the newest existing one.
+ */
+export async function getOrCreateCustomerConversation(
+  repository: ConversationRepository,
+  input: { tenantId: string; customerId: string; createdBy: string; actorRole?: string; title?: string },
+  auditRepo?: AuditRepository,
+): Promise<{ conversation: Conversation; created: boolean }> {
+  const existing = await repository.findByEntity(input.tenantId, 'customer', input.customerId);
+  const open = existing.find((c) => c.status !== 'archived') ?? existing[0];
+  if (open) return { conversation: open, created: false };
+  const conversation = await createConversationWithAudit(
+    {
+      tenantId: input.tenantId,
+      entityType: 'customer',
+      entityId: input.customerId,
+      createdBy: input.createdBy,
+      ...(input.title ? { title: input.title } : {}),
+    },
+    repository,
+    auditRepo,
+    input.actorRole,
+  );
+  return { conversation, created: true };
+}
+
 export function validateCreateMessage(input: CreateMessageInput): string[] {
   const errors: string[] = [];
   if (!input.tenantId) errors.push('tenantId is required');

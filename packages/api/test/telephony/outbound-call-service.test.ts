@@ -1,0 +1,152 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import {
+  initiateOutboundCall,
+  OutboundCallError,
+  buildBridgeTwiml,
+  buildHangupTwiml,
+  type OutboundCallDeps,
+} from '../../src/telephony/outbound-call-service';
+import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
+import { InMemoryDncRepository } from '../../src/compliance/dnc';
+
+const TENANT = 'tenant-call-1';
+const CUSTOMER = 'cust-1';
+const CUSTOMER_PHONE = '+15551234567';
+const AGENT_PHONE = '+15559990000';
+const BUSINESS_NUMBER = '+15557778888';
+
+// `customer: undefined` → default customer with a phone; pass `null` for
+// not-found, or `{ primaryPhone: undefined }` for a customer with no number.
+function buildDeps(
+  overrides: Partial<OutboundCallDeps> & { customer?: { id: string; primaryPhone?: string } | null } = {},
+): { deps: OutboundCallDeps; conversationRepo: InMemoryConversationRepository; dncRepo: InMemoryDncRepository; fetchMock: ReturnType<typeof vi.fn> } {
+  const conversationRepo = new InMemoryConversationRepository();
+  const dncRepo = new InMemoryDncRepository();
+  const fetchMock = vi.fn().mockResolvedValue({
+    ok: true,
+    status: 201,
+    json: async () => ({ sid: 'CA123', status: 'queued' }),
+    text: async () => '',
+  });
+  const customer =
+    'customer' in overrides ? overrides.customer : { id: CUSTOMER, primaryPhone: CUSTOMER_PHONE };
+  const { customer: _omit, ...depOverrides } = overrides;
+  const deps: OutboundCallDeps = {
+    customerRepo: { findById: vi.fn().mockResolvedValue(customer) },
+    conversationRepo,
+    dncRepo,
+    getCreds: vi.fn().mockResolvedValue({
+      accountSid: 'ACxxx',
+      authToken: 'tok',
+      messagingServiceSid: null,
+      phoneE164: BUSINESS_NUMBER,
+      credentialVersion: 1,
+    }),
+    publicApiUrl: 'https://api.example.com',
+    fetchImpl: fetchMock as unknown as typeof fetch,
+    apiBaseUrl: 'https://twilio.test/2010-04-01',
+    ...depOverrides,
+  };
+  return { deps, conversationRepo, dncRepo, fetchMock };
+}
+
+const input = {
+  tenantId: TENANT,
+  customerId: CUSTOMER,
+  agentPhone: AGENT_PHONE,
+  actorId: 'owner-1',
+  actorRole: 'owner',
+};
+
+describe('initiateOutboundCall', () => {
+  let env: ReturnType<typeof buildDeps>;
+  beforeEach(() => {
+    env = buildDeps();
+  });
+
+  it('creates a Twilio call (owner→business→customer) and logs it on the timeline', async () => {
+    const result = await initiateOutboundCall(env.deps, input);
+
+    expect(result.callSid).toBe('CA123');
+    // POSTed to Calls.json with the owner as To and the business number as From.
+    expect(env.fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = env.fetchMock.mock.calls[0];
+    expect(url).toBe('https://twilio.test/2010-04-01/Accounts/ACxxx/Calls.json');
+    const body = new URLSearchParams((options as { body: string }).body);
+    expect(body.get('To')).toBe(AGENT_PHONE);
+    expect(body.get('From')).toBe(BUSINESS_NUMBER);
+    expect(body.get('Url')).toContain('/api/calls/bridge');
+    expect(body.get('Url')).toContain(`messageId=${encodeURIComponent(result.messageId)}`);
+
+    // A call_outbound message was threaded onto the customer's conversation.
+    const msgs = await env.conversationRepo.getMessages(TENANT, result.conversationId);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].source).toBe('outbound_call');
+    expect(msgs[0].metadata).toMatchObject({
+      direction: 'outbound',
+      channel: 'call',
+      status: 'ringing',
+      callSid: 'CA123',
+      target: CUSTOMER_PHONE,
+      callerId: BUSINESS_NUMBER,
+    });
+  });
+
+  it('blocks a DNC-listed customer and never calls Twilio', async () => {
+    env.dncRepo.add(TENANT, '15551234567');
+    await expect(initiateOutboundCall(env.deps, input)).rejects.toMatchObject({ code: 'dnc_blocked' });
+    expect(env.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a customer with no phone (no_recipient)', async () => {
+    const e = buildDeps({ customer: { id: CUSTOMER, primaryPhone: undefined } });
+    await expect(initiateOutboundCall(e.deps, input)).rejects.toMatchObject({ code: 'no_recipient' });
+    expect(e.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('404s an unknown customer (not_found)', async () => {
+    const e = buildDeps({ customer: null });
+    await expect(initiateOutboundCall(e.deps, input)).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  it('reports not_configured when the tenant has no voice number', async () => {
+    const e = buildDeps({
+      getCreds: vi.fn().mockResolvedValue({
+        accountSid: 'ACxxx',
+        authToken: 'tok',
+        messagingServiceSid: null,
+        phoneE164: null,
+        credentialVersion: 1,
+      }),
+    });
+    await expect(initiateOutboundCall(e.deps, input)).rejects.toMatchObject({ code: 'not_configured' });
+    expect(e.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('marks the message failed and throws provider_failed on a Twilio error', async () => {
+    const e = buildDeps();
+    e.fetchMock.mockResolvedValue({ ok: false, status: 400, text: async () => 'bad request', json: async () => ({}) });
+    await expect(initiateOutboundCall(e.deps, input)).rejects.toMatchObject({ code: 'provider_failed' });
+    // The logged message reflects the failure (status: 'failed').
+    const convs = await e.conversationRepo.findByEntity(TENANT, 'customer', CUSTOMER);
+    const msgs = await e.conversationRepo.getMessages(TENANT, convs[0].id);
+    expect(msgs[0].metadata).toMatchObject({ status: 'failed' });
+  });
+
+  it('throws OutboundCallError instances', async () => {
+    const e = buildDeps({ customer: null });
+    await expect(initiateOutboundCall(e.deps, input)).rejects.toBeInstanceOf(OutboundCallError);
+  });
+});
+
+describe('bridge TwiML builders', () => {
+  it('dials the customer with the business caller-ID, escaping XML', async () => {
+    const xml = buildBridgeTwiml({ customerPhone: '+15551234567', callerId: '+15557778888' });
+    expect(xml).toContain('<Dial callerId="+15557778888">');
+    expect(xml).toContain('<Number>+15551234567</Number>');
+  });
+
+  it('produces a polite hangup when the target is unresolved', () => {
+    expect(buildHangupTwiml()).toContain('<Hangup/>');
+  });
+});

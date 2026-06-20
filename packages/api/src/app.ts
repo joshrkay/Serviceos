@@ -11,6 +11,7 @@ import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
 import { createIntegrationResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
+import { createCallsRouter } from './routes/calls';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
 import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from './telephony/dispatcher-phone-resolver';
@@ -347,7 +348,7 @@ import { PgGoogleBusinessReplyResolver } from './reputation/pg-google-business-r
 import { MessageDeliveryReviewPrivateMessageSender } from './reputation/private-message-sender-adapter';
 import { NoopBrandVoiceLoader } from './reputation/brand-voice';
 import { PgCustomerLoader } from './reputation/match-customer';
-import { createCredentialResolver } from './integrations/credentials';
+import { createCredentialResolver, getTenantTwilioCreds } from './integrations/credentials';
 import { InMemoryAgreementRepository } from './agreements/agreement';
 import { PgAgreementRepository } from './agreements/pg-agreement';
 import { InMemoryCustomerPaymentMethodRepository } from './payments/customer-payment-method';
@@ -3783,9 +3784,35 @@ export function createApp(): express.Express {
             settingsRepo,
           }
         : undefined,
+      // Lets POST /customer/:customerId 404 unknown customers before creating.
+      customerRepo,
     ),
   );
   app.use('/api/dnc', createDncRouter({ dncRepo, auditRepo }));
+
+  // Owner→customer click-to-call (Twilio bridge). The POST path is enabled only
+  // when a Twilio account is configured (global env or per-tenant creds); the
+  // signature-verified /bridge TwiML callback is always mounted so Twilio's
+  // callback resolves. Without creds, POST /api/calls returns 503.
+  app.use(
+    '/api/calls',
+    createCallsRouter({
+      ...(pool && (process.env.TWILIO_ACCOUNT_SID || process.env.NODE_ENV !== 'production')
+        ? {
+            callDeps: {
+              customerRepo,
+              conversationRepo,
+              dncRepo,
+              auditRepo,
+              getCreds: (tid: string) => getTenantTwilioCreds(tid, pool),
+              publicApiUrl: process.env.PUBLIC_API_URL ?? publicBaseUrl,
+            },
+          }
+        : {}),
+      twilioAuthTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+      ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
+    }),
+  );
 
   app.use(
     '/api/settings',

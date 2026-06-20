@@ -4,7 +4,11 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createConversationSchema, createMessageSchema } from '../shared/contracts';
-import { createConversationWithAudit, ConversationRepository } from '../conversations/conversation-service';
+import {
+  createConversationWithAudit,
+  getOrCreateCustomerConversation,
+  ConversationRepository,
+} from '../conversations/conversation-service';
 import {
   sendConversationReply,
   ConversationReplyError,
@@ -68,8 +72,38 @@ export function createConversationRouter(
   auditRepo?: AuditRepository,
   aiDeps?: ConversationRouterAiDeps,
   replyDeps?: ConversationReplyRouterDeps,
+  // When present, the get-or-create customer-thread route verifies the
+  // customer exists (404s otherwise); omitted ⇒ the route still creates.
+  customerLookup?: Pick<CustomerRepository, 'findById'>,
 ): Router {
   const router = Router();
+
+  // Open (or lazily create) a customer's comms thread so the mobile app can
+  // start texting a customer who has never messaged in. Idempotent: reuses the
+  // existing thread, returning the same conversation on repeat taps.
+  router.post(
+    '/customer/:customerId',
+    requireAuth,
+    requireTenant,
+    requirePermission('conversations:view'),
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const tenantId = req.auth!.tenantId;
+      const customerId = req.params.customerId;
+      if (customerLookup) {
+        const customer = await customerLookup.findById(tenantId, customerId);
+        if (!customer) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
+          return;
+        }
+      }
+      const { conversation } = await getOrCreateCustomerConversation(
+        conversationRepo,
+        { tenantId, customerId, createdBy: req.auth!.userId, actorRole: req.auth!.role },
+        auditRepo,
+      );
+      res.status(200).json({ conversation });
+    }),
+  );
 
   router.post(
     '/',
