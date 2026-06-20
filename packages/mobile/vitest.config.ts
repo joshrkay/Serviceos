@@ -32,6 +32,7 @@ export default defineConfig({
       exclude: [
         '**/*.test.ts',
         'src/voice/nativeVoiceDeps.ts',
+        'src/push/nativePushDeps.ts',
         'src/lib/env.ts',
         'src/lib/tokenCache.ts',
         'src/theme/tokens.d.ts',

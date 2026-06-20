@@ -5,12 +5,16 @@ import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 import { CLERK_PUBLISHABLE_KEY } from '../src/lib/env';
 import { tokenCache } from '../src/lib/tokenCache';
+import { usePushRegistration } from '../src/hooks/usePushRegistration';
 
 // Redirect between the auth flow and the app based on Clerk's session state.
 function AuthGate() {
   const { isLoaded, isSignedIn } = useAuth();
   const segments = useSegments();
   const router = useRouter();
+
+  // Register this device for push once signed in (best-effort, fire-and-forget).
+  usePushRegistration(Boolean(isSignedIn));
 
   useEffect(() => {
     if (!isLoaded) return;

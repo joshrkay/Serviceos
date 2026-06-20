@@ -75,6 +75,9 @@ import { StripeConnectService } from './billing/stripe-connect';
 import { BillingService } from './billing/subscription';
 import { createPaymentRouter } from './routes/payments';
 import { createNoteRouter } from './routes/notes';
+import { createDevicesRouter } from './routes/devices';
+import { InMemoryDeviceTokenRepository } from './push/device-token-service';
+import { PgDeviceTokenRepository } from './push/pg-device-token-repository';
 import {
   createMeRouter,
   DEFAULT_TENANT_TIMEZONE,
@@ -3711,6 +3714,14 @@ export function createApp(): express.Express {
   }
 
   app.use('/api/me', createMeRouter(userModeService, auditRepo));
+
+  // Mobile push-token registration (POST/DELETE /api/devices). Pg-backed when
+  // a DB is configured; in-memory otherwise. Feeds the proposal-execution
+  // notify path.
+  const deviceTokenRepo = pool
+    ? new PgDeviceTokenRepository(pool)
+    : new InMemoryDeviceTokenRepository();
+  app.use('/api/devices', createDevicesRouter(deviceTokenRepo, auditRepo));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use(
     '/api/conversations',

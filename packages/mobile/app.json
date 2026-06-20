@@ -25,7 +25,8 @@
         {
           "microphonePermission": "Allow ServiceOS to use the microphone to capture voice actions."
         }
-      ]
+      ],
+      "expo-notifications"
     ],
     "experiments": {
       "typedRoutes": true

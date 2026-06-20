@@ -4872,6 +4872,30 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_onboarding_session ON onboarding_session
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // Mobile push registration — one row per (tenant, device token). The app
+  // upserts on sign-in (ON CONFLICT updates user/platform); the notify path
+  // lists by tenant. user_id is the Clerk subject (TEXT, like other user_id
+  // columns here), not an FK. RLS-isolated by tenant.
+  '196_create_device_tokens': `
+    CREATE TABLE IF NOT EXISTS device_tokens (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      expo_push_token TEXT NOT NULL,
+      platform TEXT NOT NULL CHECK (platform IN ('ios', 'android')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, expo_push_token)
+    );
+    CREATE INDEX IF NOT EXISTS idx_device_tokens_tenant ON device_tokens (tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens (tenant_id, user_id);
+    ALTER TABLE device_tokens ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE device_tokens FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_device_tokens ON device_tokens;
+    CREATE POLICY tenant_isolation_device_tokens ON device_tokens
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
