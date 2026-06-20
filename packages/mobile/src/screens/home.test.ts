@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   push: vi.fn(),
-  signOut: vi.fn(),
   switchMode: vi.fn().mockResolvedValue(undefined),
   me: {
     user_id: 'u',
@@ -24,7 +23,6 @@ const h = vi.hoisted(() => ({
   error: null as Error | null,
 }));
 
-vi.mock('../push/useSignOut', () => ({ useSignOut: () => h.signOut }));
 vi.mock('expo-router', () => ({
   useRouter: () => ({ push: h.push, back: vi.fn(), replace: vi.fn() }),
 }));
@@ -60,7 +58,7 @@ describe('Home screen', () => {
   it('renders every tap target at the >=44px contract (min-h-11)', () => {
     const { container } = render(createElement(Home));
     const buttons = Array.from(container.querySelectorAll('button'));
-    expect(buttons.length).toBeGreaterThanOrEqual(5); // 3 modes + speak + approvals + sign out
+    expect(buttons.length).toBeGreaterThanOrEqual(5); // speak + 7 nav tiles + 3 modes
     for (const b of buttons) {
       expect(b.className).toMatch(/\bmin-h-11\b/);
     }
@@ -74,6 +72,14 @@ describe('Home screen', () => {
   it('navigates to the approvals inbox', () => {
     clickText('Approvals');
     expect(h.push).toHaveBeenCalledWith('/approvals');
+  });
+
+  it('navigates to the read screens and settings', () => {
+    const { getByText } = render(createElement(Home));
+    fireEvent.click(getByText('Customers').closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/customers');
+    fireEvent.click(getByText('Settings').closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/settings');
   });
 
   it('shows a loading spinner and no actions while /api/me is loading', () => {

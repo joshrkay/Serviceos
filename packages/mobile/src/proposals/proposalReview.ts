@@ -1,6 +1,7 @@
 // Pure (RN-free) helpers for the proposal review + 5-second-undo screen:
 // formatting the payload into review rows and the undo-window countdown math.
 // Kept pure so it unit-tests without a renderer.
+import { formatMoneyCents } from '../lib/format';
 
 /** The 5s human-approval undo window — mirrors the API's UNDO_WINDOW_MS. */
 export const UNDO_WINDOW_MS = 5000;
@@ -50,11 +51,7 @@ export function humanizeKey(key: string): string {
 }
 
 /** Money is stored in integer cents; render it as dollars, never float math. */
-export function formatCents(cents: number): string {
-  const sign = cents < 0 ? '-' : '';
-  const abs = Math.abs(Math.trunc(cents));
-  return `${sign}$${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, '0')}`;
-}
+export { formatMoneyCents as formatCents } from '../lib/format';
 
 function isCentsKey(key: string): boolean {
   return /cents$/i.test(key);
@@ -62,7 +59,7 @@ function isCentsKey(key: string): boolean {
 
 function formatValue(key: string, value: string | number | boolean): string {
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-  if (typeof value === 'number' && isCentsKey(key)) return formatCents(value);
+  if (typeof value === 'number' && isCentsKey(key)) return formatMoneyCents(value);
   return String(value);
 }
 
