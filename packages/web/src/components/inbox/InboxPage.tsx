@@ -12,11 +12,28 @@ type Urgency = 'critical' | 'high' | 'normal' | 'low';
 // inbox on the serialized proposal but were never rendered.
 type ConfidenceLevel = 'high' | 'medium' | 'low' | 'very_low';
 type PricingSource = 'catalog' | 'ambiguous' | 'uncatalogued' | 'manual';
+// §6.4-B severity tier (same scale as voice triage) — set on MMS photo drafts.
+type ProposalSeverity =
+  | 'TIER_1_EVACUATE'
+  | 'TIER_2_EMERGENCY_DISPATCH'
+  | 'TIER_3_SAME_DAY_URGENT'
+  | 'TIER_4_SCHEDULE';
 
 interface ProposalMeta {
   overallConfidence?: ConfidenceLevel;
+  severity?: ProposalSeverity;
   markers?: Array<{ path: string; reason: string }>;
 }
+
+// §6.4-B (U5) — compact severity badge for the inbox review row. The inbox (not
+// AIProposalCard) is where customer-MMS drafts are reviewed, so the urgency
+// marker must surface here too. Mirrors the assistant-card badge.
+const SEVERITY_CONFIG: Record<ProposalSeverity, { label: string; classes: string }> = {
+  TIER_1_EVACUATE:           { label: 'Evacuate',        classes: 'border-red-300 bg-red-100 text-red-800' },
+  TIER_2_EMERGENCY_DISPATCH: { label: 'Emergency',       classes: 'border-red-200 bg-red-50 text-red-700' },
+  TIER_3_SAME_DAY_URGENT:    { label: 'Same-day urgent', classes: 'border-amber-200 bg-amber-50 text-amber-700' },
+  TIER_4_SCHEDULE:           { label: 'Routine',         classes: 'border-slate-200 bg-slate-100 text-slate-600' },
+};
 
 interface LineItemView {
   id?: string;
@@ -166,11 +183,12 @@ function ProposalMarkers({
   const lineItems = row.proposal.payload?.lineItems ?? [];
   const catalogResolution = row.proposal.sourceContext?.catalogResolution ?? {};
   const markers = meta?.markers ?? [];
+  const severity = meta?.severity;
   const flagged = lineItems
     .map((li, idx) => ({ li, idx }))
     .filter(({ li }) => li.pricingSource && li.pricingSource !== 'catalog');
 
-  if (!conf && flagged.length === 0 && markers.length === 0) return null;
+  if (!conf && flagged.length === 0 && markers.length === 0 && !severity) return null;
 
   return (
     <div className="mt-2 space-y-1.5" data-testid="proposal-markers">
@@ -181,6 +199,15 @@ function ProposalMarkers({
           </div>
           <span className={`text-xs ${conf.labelColor}`}>{conf.label}</span>
         </div>
+      )}
+
+      {severity && SEVERITY_CONFIG[severity] && (
+        <span
+          data-testid="severity-badge"
+          className={`inline-flex w-fit items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${SEVERITY_CONFIG[severity].classes}`}
+        >
+          {SEVERITY_CONFIG[severity].label}
+        </span>
       )}
 
       {flagged.length > 0 && (

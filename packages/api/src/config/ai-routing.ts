@@ -43,6 +43,11 @@ export const DEFAULT_AI_ROUTING_CONFIG: AIRoutingConfig = {
     'draft_estimate': 'complex',
     'update_estimate': 'complex',
     'multi_entity_proposal': 'complex',
+    // Vision (MMS-to-quote): MUST stay on a vision-capable tier. Unmapped it
+    // falls through to `standard`, which only works while that tier's model is
+    // vision-capable — an AI_STANDARD_MODEL override to a text model would trip
+    // the gateway's vision failfast. Pinning to complex removes that footgun.
+    'mms_estimate': 'complex',
   },
 };
 

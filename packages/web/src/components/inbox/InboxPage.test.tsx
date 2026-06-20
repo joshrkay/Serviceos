@@ -128,6 +128,38 @@ describe('InboxPage', () => {
     expect(screen.getAllByTestId('ambiguity-option')).toHaveLength(2);
   });
 
+  it('surfaces the §6.4-B severity badge on an MMS photo draft in the inbox (U5)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            proposal: {
+              id: 'p-mms',
+              proposalType: 'draft_estimate',
+              summary: 'Photo quote for the Ruiz job',
+              status: 'draft',
+              createdAt: new Date().toISOString(),
+              payload: {
+                _meta: { overallConfidence: 'medium', severity: 'TIER_2_EMERGENCY_DISPATCH' },
+                lineItems: [{ id: 'l1', description: 'Burst pipe repair', pricingSource: 'catalog' }],
+              },
+              sourceContext: { source: 'customer_mms' },
+            },
+            urgency: 'high',
+            reason: 'Awaiting review',
+          },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 1, normalCount: 0, lowCount: 0, truncated: false },
+      }),
+    );
+
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByText('Photo quote for the Ruiz job'));
+    // The urgency badge must appear where MMS drafts are actually reviewed.
+    expect(screen.getByTestId('severity-badge')).toHaveTextContent('Emergency');
+  });
+
   it('resolving an ambiguous line POSTs resolve-line and merges the returned proposal (U2)', async () => {
     apiFetch.mockResolvedValueOnce(
       jsonResponse({
