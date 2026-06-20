@@ -2,7 +2,7 @@
 // thin and RN-coupled so registerForPush.ts stays pure and testable.
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
-import type { PushPermission } from './registerForPush';
+import { classifyExpoTokenError, type ExpoTokenResult, type PushPermission } from './registerForPush';
 
 export async function getPermission(): Promise<PushPermission> {
   const p = await Notifications.getPermissionsAsync();
@@ -27,13 +27,16 @@ export async function ensureAndroidChannel(): Promise<void> {
   });
 }
 
-export async function getExpoPushToken(): Promise<string | null> {
+export async function getExpoPushToken(): Promise<ExpoTokenResult> {
   try {
     const token = await Notifications.getExpoPushTokenAsync();
-    return token.data ?? null;
-  } catch {
-    // No projectId / not a real device / no network — treat as unsupported.
-    return null;
+    return token.data ? { status: 'ok', token: token.data } : { status: 'unsupported' };
+  } catch (err) {
+    // expo-notifications throws on simulators / devices without push hardware
+    // (permanent → 'unsupported') AND on transient failures such as no network
+    // or a projectId-fetch timeout at launch (→ 'error', so the caller retries
+    // instead of latching the device out of push for the whole session).
+    return { status: classifyExpoTokenError(err) };
   }
 }
 

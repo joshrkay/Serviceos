@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   api: vi.fn().mockResolvedValue({ ok: true, status: 204 }),
   signOut: vi.fn().mockResolvedValue(undefined),
-  getExpoPushToken: vi.fn().mockResolvedValue('ExponentPushToken[x]'),
+  getExpoPushToken: vi.fn().mockResolvedValue({ status: 'ok', token: 'ExponentPushToken[x]' }),
 }));
 
 vi.mock('../lib/useApiClient', () => ({ useApiClient: () => h.api }));
@@ -18,7 +18,7 @@ import { useSignOut } from './useSignOut';
 beforeEach(() => {
   vi.clearAllMocks();
   h.api.mockResolvedValue({ ok: true, status: 204 });
-  h.getExpoPushToken.mockResolvedValue('ExponentPushToken[x]');
+  h.getExpoPushToken.mockResolvedValue({ status: 'ok', token: 'ExponentPushToken[x]' });
 });
 
 afterEach(() => cleanup());

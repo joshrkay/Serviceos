@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  classifyExpoTokenError,
+  pushRegistrationKey,
   registerForPush,
   unregisterForPush,
   type RegisterPushDeps,
@@ -10,7 +12,7 @@ function makeDeps(over: Partial<RegisterPushDeps> = {}): RegisterPushDeps {
   return {
     getPermission: vi.fn().mockResolvedValue({ granted: true, canAskAgain: true }),
     requestPermission: vi.fn().mockResolvedValue({ granted: true }),
-    getExpoPushToken: vi.fn().mockResolvedValue('ExponentPushToken[abc]'),
+    getExpoPushToken: vi.fn().mockResolvedValue({ status: 'ok', token: 'ExponentPushToken[abc]' }),
     api: vi.fn().mockResolvedValue({ ok: true, status: 201 }) as unknown as RegisterPushDeps['api'],
     platform: 'ios',
     ...over,
@@ -61,8 +63,17 @@ describe('registerForPush', () => {
   });
 
   it('returns "unsupported" when no token is available (e.g. simulator)', async () => {
-    deps = makeDeps({ getExpoPushToken: vi.fn().mockResolvedValue(null) });
+    deps = makeDeps({ getExpoPushToken: vi.fn().mockResolvedValue({ status: 'unsupported' }) });
     expect(await registerForPush(deps)).toBe('unsupported');
+    expect(deps.api).not.toHaveBeenCalled();
+  });
+
+  it('returns "error" (retryable) on a transient token failure, without calling the API', async () => {
+    // The whole point of the discriminated token result: a transient offline /
+    // timeout failure must surface as 'error' (caller unlatches + retries), not
+    // 'unsupported' (permanent latch). Regression guard for the latch bug.
+    deps = makeDeps({ getExpoPushToken: vi.fn().mockResolvedValue({ status: 'error' }) });
+    expect(await registerForPush(deps)).toBe('error');
     expect(deps.api).not.toHaveBeenCalled();
   });
 
@@ -77,7 +88,7 @@ describe('registerForPush', () => {
       }),
       getExpoPushToken: vi.fn().mockImplementation(async () => {
         order.push('token');
-        return 'ExponentPushToken[abc]';
+        return { status: 'ok', token: 'ExponentPushToken[abc]' };
       }),
     });
     expect(await registerForPush(deps)).toBe('registered');
@@ -109,7 +120,7 @@ describe('registerForPush', () => {
 describe('unregisterForPush', () => {
   function deps(over: Partial<UnregisterPushDeps> = {}): UnregisterPushDeps {
     return {
-      getExpoPushToken: vi.fn().mockResolvedValue('ExponentPushToken[abc]'),
+      getExpoPushToken: vi.fn().mockResolvedValue({ status: 'ok', token: 'ExponentPushToken[abc]' }),
       api: vi.fn().mockResolvedValue({ ok: true, status: 204 }) as unknown as UnregisterPushDeps['api'],
       ...over,
     };
@@ -126,7 +137,7 @@ describe('unregisterForPush', () => {
   });
 
   it('no token → no call', async () => {
-    const d = deps({ getExpoPushToken: vi.fn().mockResolvedValue(null) });
+    const d = deps({ getExpoPushToken: vi.fn().mockResolvedValue({ status: 'unsupported' }) });
     await unregisterForPush(d);
     expect(d.api).not.toHaveBeenCalled();
   });
@@ -134,5 +145,44 @@ describe('unregisterForPush', () => {
   it('swallows errors (never blocks sign-out)', async () => {
     const d = deps({ api: vi.fn().mockRejectedValue(new Error('network')) as never });
     await expect(unregisterForPush(d)).resolves.toBeUndefined();
+  });
+});
+
+describe('classifyExpoTokenError', () => {
+  it('treats the unsupported-device error code as permanent', () => {
+    expect(classifyExpoTokenError({ code: 'ERR_NOTIFICATIONS_DEVICE_NOT_SUPPORTED' })).toBe(
+      'unsupported',
+    );
+    expect(classifyExpoTokenError({ code: 'E_DEVICE_NOT_SUPPORTED' })).toBe('unsupported');
+  });
+
+  it('treats the "must use a physical device" message as permanent', () => {
+    expect(classifyExpoTokenError(new Error('Must use physical device for push notifications'))).toBe(
+      'unsupported',
+    );
+  });
+
+  it('treats network/timeout errors as transient (retryable)', () => {
+    expect(classifyExpoTokenError(new Error('Network request failed'))).toBe('error');
+    expect(classifyExpoTokenError(new Error('timeout fetching projectId'))).toBe('error');
+    expect(classifyExpoTokenError(undefined)).toBe('error');
+  });
+});
+
+describe('pushRegistrationKey', () => {
+  it('is null when signed out so a later sign-in re-registers', () => {
+    expect(pushRegistrationKey(false, 'org_123')).toBeNull();
+    expect(pushRegistrationKey(false, null)).toBeNull();
+  });
+
+  it('keys by active org so an in-session tenant switch re-registers', () => {
+    expect(pushRegistrationKey(true, 'org_a')).toBe('org_a');
+    expect(pushRegistrationKey(true, 'org_b')).toBe('org_b');
+    expect(pushRegistrationKey(true, 'org_a')).not.toBe(pushRegistrationKey(true, 'org_b'));
+  });
+
+  it('falls back to a stable personal key when there is no active org', () => {
+    expect(pushRegistrationKey(true, null)).toBe('personal');
+    expect(pushRegistrationKey(true, undefined)).toBe('personal');
   });
 });

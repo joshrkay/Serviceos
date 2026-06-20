@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
+import { useAuth } from '@clerk/clerk-expo';
 import { useApiClient } from '../lib/useApiClient';
-import { registerForPush } from '../push/registerForPush';
+import { pushRegistrationKey, registerForPush } from '../push/registerForPush';
 import {
   devicePlatform,
   ensureAndroidChannel,
@@ -11,28 +12,33 @@ import {
 
 /**
  * Registers this device for push once the owner is signed in (best-effort,
- * fire-and-forget). Runs a single time per signed-in session; the API upserts
- * by token, so a later re-register is harmless. Wired from the root layout's
- * auth gate.
+ * fire-and-forget). Runs once per active tenant/session; the API upserts by
+ * token, so a later re-register is harmless. Wired from the root layout's auth
+ * gate.
  */
 export function usePushRegistration(enabled: boolean): void {
   const api = useApiClient();
-  const doneRef = useRef(false);
+  const { orgId } = useAuth();
+  // Latch keyed by the ACTIVE org/tenant, not just the signed-in boolean.
+  // Switching orgs in-session (without sign-out) changes the key, so the device
+  // re-registers its token under the new auth.tenantId — /api/devices stores
+  // tokens tenant-scoped, so a stale latch would drop pushes for the newly
+  // active tenant until a remount. Sign-out (key === null) clears it so a
+  // re-sign-in re-registers.
+  const registeredKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    // Sign-out: clear the guard so a re-sign-in (without remounting the root
-    // layout) re-registers. useSignOut revokes the token on sign-out, so
-    // leaving doneRef latched would silently drop pushes until an app restart.
-    if (!enabled) {
-      doneRef.current = false;
+    const key = pushRegistrationKey(enabled, orgId);
+    if (key === null) {
+      registeredKeyRef.current = null;
       return;
     }
-    if (doneRef.current) return;
+    if (registeredKeyRef.current === key) return;
     // Latch up front to prevent concurrent runs, but only *keep* it latched on a
-    // terminal result. A transient failure (offline / API blip at launch)
-    // returns 'error' → unlatch so the next render (e.g. token refresh) retries,
-    // instead of leaving the owner without pushes for the whole session.
-    doneRef.current = true;
+    // terminal result for THIS key. A transient failure ('error': offline / API
+    // blip at launch) unlatches so the next render retries; 'registered' /
+    // 'denied' / 'unsupported' stay latched.
+    registeredKeyRef.current = key;
     void registerForPush({
       ensureAndroidChannel,
       getPermission,
@@ -41,7 +47,9 @@ export function usePushRegistration(enabled: boolean): void {
       api,
       platform: devicePlatform,
     }).then((result) => {
-      if (result === 'error') doneRef.current = false;
+      if (result === 'error' && registeredKeyRef.current === key) {
+        registeredKeyRef.current = null;
+      }
     });
-  }, [enabled, api]);
+  }, [enabled, api, orgId]);
 }
