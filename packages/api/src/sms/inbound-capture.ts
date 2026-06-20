@@ -176,12 +176,14 @@ async function openOrAppendConversation(
       createdBy: 'system:sms-capture',
     });
   } catch (err) {
-    // For customer targets, the one-open-thread-per-customer unique index
-    // (migration 198) rejects a concurrent insert with 23505 — another inbound
-    // text or a Message-tap opened the thread first. Re-read and reuse the
-    // winner so the inbound message threads onto it instead of erroring (which
-    // would bounce the Twilio webhook). Other entity types aren't indexed, so
-    // this only triggers for the customer race.
+    // The one-open-thread partial unique indexes — uq_conversations_open_customer
+    // (migration 198) and uq_conversations_open_noncustomer (migration 200,
+    // covering 'lead' and 'sms_unmatched') — reject a concurrent insert with
+    // 23505 when another inbound text or a Message-tap opened the thread first.
+    // Re-read and reuse the winner so the inbound message threads onto it
+    // instead of erroring (which would bounce the Twilio webhook). Every SMS
+    // capture target type is now indexed, so this recovery is atomic for all of
+    // them, not just customer.
     if (!isUniqueViolation(err)) throw err;
     const after = await deps.conversationRepo.findByEntity(
       ctx.tenantId,

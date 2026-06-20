@@ -311,6 +311,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // Null-safe (missing_ok) device_tokens system-lookup policy — avoids a UUID
   // cast error on a connection with no app.current_tenant_id set.
   ['199_device_tokens_system_lookup_null_safe', '23cd9a92fdccdc0bca9367833c2f1ce66463b60db925a49e73af0cdfabbf345a'],
+  // Extend the one-open-thread guarantee to 'lead' and 'sms_unmatched' so the
+  // inbound-capture 23505 recovery is atomic for every SMS target type, not
+  // just customer (migration 198).
+  ['200_conversations_one_open_thread_noncustomer', '9af90c1b55544fe8451246c42a6c7cd80dd8ed6fae054050bcc070548e253a0f'],
 ];
 
 function hashMigration(value: string): string {

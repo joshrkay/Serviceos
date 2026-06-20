@@ -140,7 +140,7 @@ describe('U6 — sendConversationReply', () => {
     });
   });
 
-  it('passes a stable idempotency key (conversation + channel + minute) to the provider', async () => {
+  it('passes a stable idempotency key (conversation + channel + minute + body) to the provider', async () => {
     const id = await customerThread(h.conversationRepo, {
       entityType: 'customer',
       entityId: 'cust-1',
@@ -155,6 +155,53 @@ describe('U6 — sendConversationReply', () => {
     const key = h.delivery.sendSms.mock.calls[0][0].idempotencyKey as string;
     expect(key).toContain(`conversation_reply:${id}:sms:`);
     expect(h.dispatchRepo.create.mock.calls[0][0].idempotencyKey).toBe(key);
+  });
+
+  it('an exact re-tap of the same reply text in the same minute dedupes (identical key)', async () => {
+    const id = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    const send = () =>
+      sendConversationReply(h.deps, {
+        tenantId: TENANT,
+        conversationId: id,
+        body: 'On our way!',
+        actorId: 'owner-1',
+        actorRole: 'owner',
+      });
+    await send();
+    await send();
+    const k1 = h.delivery.sendSms.mock.calls[0][0].idempotencyKey;
+    const k2 = h.delivery.sendSms.mock.calls[1][0].idempotencyKey;
+    expect(k1).toBe(k2); // double-tap collapses at the provider/ledger
+  });
+
+  it('two DIFFERENT replies in the same minute get distinct keys (no dispatch-unique collision)', async () => {
+    const id = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    await sendConversationReply(h.deps, {
+      tenantId: TENANT,
+      conversationId: id,
+      body: 'On our way!',
+      actorId: 'owner-1',
+      actorRole: 'owner',
+    });
+    await sendConversationReply(h.deps, {
+      tenantId: TENANT,
+      conversationId: id,
+      body: 'Actually, running 10 min late.',
+      actorId: 'owner-1',
+      actorRole: 'owner',
+    });
+    const k1 = h.delivery.sendSms.mock.calls[0][0].idempotencyKey;
+    const k2 = h.delivery.sendSms.mock.calls[1][0].idempotencyKey;
+    // Both fall in the same 1-minute window (mocked `now`), but the body hash
+    // separates them so the second send does not collide on the dispatch
+    // unique (tenant_id, idempotency_key) and get dropped/mis-threaded.
+    expect(k1).not.toBe(k2);
   });
 
   it('sends by email when the customer prefers email', async () => {

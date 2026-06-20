@@ -4956,6 +4956,37 @@ export const MIGRATIONS = {
         OR current_setting('app.system_lookup', true) = 'true'
       );
   `,
+  // Extend the one-open-thread guarantee (migration 198, customer-only) to the
+  // other inbound-SMS capture targets — 'lead' and 'sms_unmatched'. Without it,
+  // openOrAppendConversation's 23505 recovery (inbound-capture.ts) could only
+  // ever fire for customer threads, so two concurrent texts from the same
+  // unknown number (or the same new lead) could each lose the open-thread race
+  // and split into two parallel open conversations. entity_type is part of the
+  // key here (unlike 198, whose predicate already pins it to 'customer') so a
+  // lead and an sms_unmatched thread can never collide on a shared entity_id.
+  // The pre-index dedup collapses any existing duplicate open threads for these
+  // types (keep the most recent, mark the rest 'closed' — non-destructive) so
+  // the build can't fail on live data; it is a no-op once the index holds.
+  '200_conversations_one_open_thread_noncustomer': `
+    WITH ranked AS (
+      SELECT id,
+             row_number() OVER (
+               PARTITION BY tenant_id, entity_type, entity_id
+               ORDER BY updated_at DESC, created_at DESC, id
+             ) AS rn
+      FROM conversations
+      WHERE entity_type IN ('lead', 'sms_unmatched')
+        AND status = 'open' AND entity_id IS NOT NULL
+    )
+    UPDATE conversations c
+    SET status = 'closed', updated_at = NOW()
+    FROM ranked r
+    WHERE c.id = r.id AND r.rn > 1;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_conversations_open_noncustomer
+      ON conversations (tenant_id, entity_type, entity_id)
+      WHERE entity_type IN ('lead', 'sms_unmatched')
+        AND status = 'open' AND entity_id IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

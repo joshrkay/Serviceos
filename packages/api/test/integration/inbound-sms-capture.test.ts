@@ -162,6 +162,48 @@ describe('Postgres integration — U4 inbound SMS capture', () => {
     expect(threads).toHaveLength(1);
   });
 
+  it('collapses concurrent unmatched-number captures to one open thread (migration 200 index)', async () => {
+    // Two texts from the same unknown number arrive at once. Without migration
+    // 200's uq_conversations_open_noncustomer index (and the 23505 recovery in
+    // openOrAppendConversation), each could lose the open-thread race and split
+    // into two parallel sms_unmatched threads. They must collapse to one.
+    const handler = createInboundCaptureHandler({ conversationRepo, customerRepo });
+    const from = '+15555557777';
+    const results = await Promise.all([
+      handler.handle({ tenantId: tenant.tenantId, fromE164: from, body: 'a', messageSid: 'SM-int-5a' }),
+      handler.handle({ tenantId: tenant.tenantId, fromE164: from, body: 'b', messageSid: 'SM-int-5b' }),
+    ]);
+    expect(results.every((r) => r.handled)).toBe(true);
+
+    const threads = await conversationRepo.findByEntity(
+      tenant.tenantId,
+      UNMATCHED_SMS_ENTITY_TYPE,
+      from,
+    );
+    const open = threads.filter((t) => t.status === 'open');
+    expect(open).toHaveLength(1);
+    const messages = await conversationRepo.getMessages(tenant.tenantId, open[0].id);
+    expect(messages.map((m) => m.content).sort()).toEqual(['a', 'b']);
+  });
+
+  it('collapses concurrent new-lead captures to one open thread (migration 200 index)', async () => {
+    // Same race for a brand-new lead: two simultaneous texts find-or-create the
+    // lead and then both try to open its thread. Migration 200 covers 'lead'
+    // too, so the recovery re-reads the winner and both texts land on it.
+    const handler = createInboundCaptureHandler({ conversationRepo, customerRepo, leadRepo });
+    const from = '+15555556666';
+    await Promise.all([
+      handler.handle({ tenantId: tenant.tenantId, fromE164: from, body: 'x', messageSid: 'SM-int-6a' }),
+      handler.handle({ tenantId: tenant.tenantId, fromE164: from, body: 'y', messageSid: 'SM-int-6b' }),
+    ]);
+
+    const lead = await leadRepo.findByPhoneNormalized(tenant.tenantId, '5555556666');
+    expect(lead).not.toBeNull();
+    const threads = await conversationRepo.findByEntity(tenant.tenantId, 'lead', lead!.id);
+    const open = threads.filter((t) => t.status === 'open');
+    expect(open).toHaveLength(1);
+  });
+
   it('does not bleed a captured thread across tenants', async () => {
     const other = await createTestTenant(pool);
     const customer = await customerRepo.create(
