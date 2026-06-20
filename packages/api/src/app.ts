@@ -79,7 +79,10 @@ import { createDevicesRouter } from './routes/devices';
 import { InMemoryDeviceTokenRepository } from './push/device-token-service';
 import { PgDeviceTokenRepository } from './push/pg-device-token-repository';
 import { ExpoPushDeliveryProvider } from './notifications/expo-push-service';
-import { notifyExecuted as notifyExecutedPush_ } from './notifications/proposal-push-notifier';
+import {
+  notifyExecuted as notifyExecutedPush_,
+  notifyNeedsApproval as notifyNeedsApprovalPush_,
+} from './notifications/proposal-push-notifier';
 import {
   createMeRouter,
   DEFAULT_TENANT_TIMEZONE,
@@ -1613,6 +1616,12 @@ export function createApp(): express.Express {
   let notifyExecutedPush:
     | ((tenantId: string, proposalId: string) => Promise<void>)
     | null = null;
+  // U7 — "needs approval" push, wired into the voice-action-router worker's
+  // unsupervised-routing deps (built above the device-token repo). Same
+  // late-bound pattern; the worker reads it through a stable wrapper.
+  let notifyNeedsApprovalPush:
+    | ((args: { tenantId: string; proposal: { id: string; summary: string } }) => Promise<void>)
+    | null = null;
   const proposalExecutor = new ProposalExecutor(
     executionHandlers,
     proposalRepo,
@@ -1890,6 +1899,11 @@ export function createApp(): express.Express {
     unsupervisedRouting: {
       auditRepo,
       ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
+      // U7 — stable wrapper reads the late-bound notifier at call time (the
+      // device-token repo + push provider are built further down).
+      notifyPush: async (args) => {
+        await notifyNeedsApprovalPush?.(args);
+      },
       ...(oneTapSecret ? { secret: oneTapSecret } : {}),
       buildApproveUrl: (token: string) =>
         `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
@@ -3737,13 +3751,16 @@ export function createApp(): express.Express {
     : new InMemoryDeviceTokenRepository();
   app.use('/api/devices', createDevicesRouter(deviceTokenRepo, auditRepo));
 
-  // U7 — bind the executed-proposal push into the executor's late-bound slot.
+  // U7 — bind the push notifiers into the late-bound slots now that the
+  // device-token repo exists.
   const expoPushProvider = new ExpoPushDeliveryProvider(fetch, process.env.EXPO_ACCESS_TOKEN);
   notifyExecutedPush = (tenantId, proposalId) =>
     notifyExecutedPush_(
       { deviceTokenRepo, provider: expoPushProvider },
       { tenantId, proposalId },
     );
+  notifyNeedsApprovalPush = (args) =>
+    notifyNeedsApprovalPush_({ deviceTokenRepo, provider: expoPushProvider }, args);
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use(
     '/api/conversations',
