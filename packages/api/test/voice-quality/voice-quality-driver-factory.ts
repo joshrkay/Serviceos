@@ -215,15 +215,6 @@ function appointmentJsonForTurn(script: VoiceQualityScript, turnIndex: number): 
   return JSON.stringify(out);
 }
 
-/** Reschedule-extraction JSON: new ISO datetimes from the turn's expected slots. */
-function rescheduleJsonForTurn(script: VoiceQualityScript, turnIndex: number): string {
-  const slots = (script.turns[turnIndex].expected.slots ?? {}) as Record<string, unknown>;
-  const out: Record<string, unknown> = { confidence_score: 0.95 };
-  if (typeof slots.newScheduledStart === 'string') out.newScheduledStart = slots.newScheduledStart;
-  if (typeof slots.newScheduledEnd === 'string') out.newScheduledEnd = slots.newScheduledEnd;
-  return JSON.stringify(out);
-}
-
 /**
  * Mock gateway that returns script-appropriate classifier + judge JSON.
  * Used as the "real" gateway inside `CassetteLLMGateway` record mode.
@@ -264,18 +255,6 @@ export class ScriptAwareMockGateway extends LLMGateway {
       const idx = turnIndexForUserMessage(this.script, userLine);
       return {
         content: appointmentJsonForTurn(this.script, idx),
-        model: request.model ?? 'mock-model',
-        provider: 'mock',
-        latencyMs: 1,
-        tokenUsage: { input: 10, output: 10, total: 20 },
-      };
-    }
-
-    if (request.taskType === 'reschedule_appointment') {
-      const userLine = request.messages.find((m) => m.role === 'user')?.content ?? '';
-      const idx = turnIndexForUserMessage(this.script, userLine);
-      return {
-        content: rescheduleJsonForTurn(this.script, idx),
         model: request.model ?? 'mock-model',
         provider: 'mock',
         latencyMs: 1,
