@@ -83,10 +83,15 @@ export function useProposalReview(id: string): UseProposalReviewResult {
     try {
       const res = await api(`/api/proposals/${id}/approve`, { method: 'POST' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const body = (await res.json()) as { approved?: Record<string, unknown>[] };
-      const approved = body.approved?.[0];
-      if (!approved) throw new Error('This proposal could not be approved.');
-      const p = normalize(approved);
+      // POST /:id/approve returns the approved Proposal directly (res.json of
+      // approveProposal's result). Support a { approved: [...] } wrapper too in
+      // case a chained/batch path is ever routed here.
+      const body = (await res.json()) as Record<string, unknown>;
+      const approvedRaw = Array.isArray(body.approved) ? body.approved[0] : body;
+      if (!approvedRaw || typeof approvedRaw !== 'object') {
+        throw new Error('This proposal could not be approved.');
+      }
+      const p = normalize(approvedRaw as Record<string, unknown>);
       setProposal(p);
       approvedAtRef.current = p.approvedAt ?? new Date().toISOString();
       setPhase('approved');

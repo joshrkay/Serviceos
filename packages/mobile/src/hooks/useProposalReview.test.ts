@@ -62,7 +62,7 @@ describe('useProposalReview', () => {
     h.api.mockImplementation((url: string) => {
       if (url === '/api/proposals/p1/approve') {
         return Promise.resolve(
-          okJson({ approved: [proposal({ status: 'approved', approvedAt: new Date(T0).toISOString() })] }),
+          okJson(proposal({ status: 'approved', approvedAt: new Date(T0).toISOString() })),
         );
       }
       return Promise.resolve(okJson(proposal()));
@@ -93,7 +93,7 @@ describe('useProposalReview', () => {
     h.api.mockImplementation((url: string) => {
       if (url === '/api/proposals/p1/approve') {
         return Promise.resolve(
-          okJson({ approved: [proposal({ status: 'approved', approvedAt: new Date(T0).toISOString() })] }),
+          okJson(proposal({ status: 'approved', approvedAt: new Date(T0).toISOString() })),
         );
       }
       if (url === '/api/proposals/p1/undo') {
@@ -118,7 +118,7 @@ describe('useProposalReview', () => {
     h.api.mockImplementation((url: string) => {
       if (url === '/api/proposals/p1/approve') {
         return Promise.resolve(
-          okJson({ approved: [proposal({ status: 'approved', approvedAt: new Date(T0).toISOString() })] }),
+          okJson(proposal({ status: 'approved', approvedAt: new Date(T0).toISOString() })),
         );
       }
       if (url === '/api/proposals/p1/undo') return Promise.resolve(err(409));
