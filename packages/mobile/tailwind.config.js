@@ -1,7 +1,8 @@
 // NativeWind v4 Tailwind config. The palette + radii + tap-target come from the
 // single token source (src/theme/tokens.js), which mirrors the web theme
 // (packages/web/src/index.css). Keep colors in tokens.js, not here.
-const { colors, radii, tapTarget } = require('./src/theme/tokens');
+const plugin = require('tailwindcss/plugin');
+const { colors, radii, tapTarget, cssVars, colorVars } = require('./src/theme/tokens');
 
 /** @type {import('tailwindcss').Config} */
 module.exports = {
@@ -10,7 +11,10 @@ module.exports = {
   darkMode: 'class',
   theme: {
     extend: {
-      colors: colors.light,
+      // Colors point at CSS variables; the plugin below emits the light/dark
+      // values, so `bg-background` etc. follow the active color scheme instead
+      // of being frozen to the light palette.
+      colors: colorVars(colors.light),
       borderRadius: {
         sm: radii.sm,
         md: radii.md,
@@ -23,5 +27,12 @@ module.exports = {
       spacing: { 11: tapTarget },
     },
   },
-  plugins: [],
+  plugins: [
+    plugin(({ addBase }) => {
+      addBase({
+        ':root': cssVars(colors.light),
+        '.dark': cssVars(colors.dark),
+      });
+    }),
+  ],
 };

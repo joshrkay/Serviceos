@@ -79,4 +79,25 @@ const tapTarget = 44;
 
 const colors = { light, dark };
 
-module.exports = { colors, light, dark, radii, tapTarget };
+// Dark-mode wiring (mirrors how the web theme uses CSS variables). Rather than
+// baking one palette into the Tailwind config — which made `dark:` classes
+// resolve to light values — the config points each color at a CSS variable and
+// emits both palettes (`:root` = light, `.dark` = dark). NativeWind swaps the
+// active scope, so `bg-background`/`text-foreground` become theme-aware with no
+// per-class `dark:` prefixes, and tokens.js stays the single source.
+
+/** CSS custom-property declarations for a palette: { '--background': '#fff', … }. */
+function cssVars(palette) {
+  const out = {};
+  for (const [key, value] of Object.entries(palette)) out[`--${key}`] = value;
+  return out;
+}
+
+/** Tailwind color map pointing at the CSS variables: { background: 'var(--background)', … }. */
+function colorVars(palette) {
+  const out = {};
+  for (const key of Object.keys(palette)) out[key] = `var(--${key})`;
+  return out;
+}
+
+module.exports = { colors, light, dark, radii, tapTarget, cssVars, colorVars };

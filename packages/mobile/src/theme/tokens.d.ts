@@ -40,3 +40,8 @@ export const dark: Palette;
 export const colors: { light: Palette; dark: Palette };
 export const radii: Radii;
 export const tapTarget: number;
+
+/** CSS custom-property declarations for a palette (`{ '--background': '#fff', … }`). */
+export function cssVars(palette: Palette): Record<string, string>;
+/** Tailwind color map pointing at the CSS variables (`{ background: 'var(--background)', … }`). */
+export function colorVars(palette: Palette): Record<ColorToken, string>;
