@@ -46,6 +46,32 @@ function message(e: unknown): string {
 }
 
 /**
+ * Initial phase for a freshly-fetched proposal. A terminal proposal (already
+ * approved/executed/undone/rejected) — e.g. opened via the "Done" push deep-link
+ * — must NOT render as 'review', or the owner sees an Approve button that just
+ * re-posts an approve the API rejects.
+ */
+export function phaseForStatus(
+  status: string,
+  approvedAt: string | null,
+  now: number = Date.now(),
+): ReviewPhase {
+  switch (status) {
+    case 'approved':
+      // Still inside the undo window → show the countdown; past it → committed.
+      return undoSecondsLeft(approvedAt, now) > 0 ? 'approved' : 'committed';
+    case 'executed':
+      return 'committed';
+    case 'undone':
+    case 'rejected':
+    case 'expired':
+      return 'undone'; // terminal, nothing executed / reverted
+    default:
+      return 'review'; // draft, ready_for_review (the normal inbox cases)
+  }
+}
+
+/**
  * Drives the proposal review + 5-second-undo screen: GET the proposal, POST
  * approve, then a countdown over the server's `approvedAt` during which POST
  * undo can reverse it. After the window the action commits (the worker executes
@@ -65,8 +91,12 @@ export function useProposalReview(id: string): UseProposalReviewResult {
     try {
       const res = await api(`/api/proposals/${id}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setProposal(normalize(await res.json()));
-      setPhase('review');
+      const p = normalize(await res.json());
+      setProposal(p);
+      const initial = phaseForStatus(p.status, p.approvedAt ?? null);
+      // Keep the undo countdown anchored when we land mid-window.
+      if (initial === 'approved') approvedAtRef.current = p.approvedAt ?? null;
+      setPhase(initial);
     } catch (e) {
       setError(message(e));
       setPhase('error');

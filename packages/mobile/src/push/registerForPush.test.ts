@@ -66,6 +66,32 @@ describe('registerForPush', () => {
     expect(deps.api).not.toHaveBeenCalled();
   });
 
+  it('creates the Android channel before the permission/token flow', async () => {
+    const order: string[] = [];
+    deps = makeDeps({
+      platform: 'android',
+      ensureAndroidChannel: vi.fn().mockImplementation(async () => void order.push('channel')),
+      getPermission: vi.fn().mockImplementation(async () => {
+        order.push('permission');
+        return { granted: true, canAskAgain: true };
+      }),
+      getExpoPushToken: vi.fn().mockImplementation(async () => {
+        order.push('token');
+        return 'ExponentPushToken[abc]';
+      }),
+    });
+    expect(await registerForPush(deps)).toBe('registered');
+    expect(deps.ensureAndroidChannel).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['channel', 'permission', 'token']);
+  });
+
+  it('does not create a channel on iOS', async () => {
+    const ensureAndroidChannel = vi.fn();
+    deps = makeDeps({ platform: 'ios', ensureAndroidChannel });
+    await registerForPush(deps);
+    expect(ensureAndroidChannel).not.toHaveBeenCalled();
+  });
+
   it('returns "error" on a non-ok API response or a thrown error', async () => {
     expect(
       await registerForPush(

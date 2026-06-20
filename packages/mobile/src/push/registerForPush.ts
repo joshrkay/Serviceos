@@ -12,6 +12,9 @@ export interface PushPermission {
 }
 
 export interface RegisterPushDeps {
+  /** Android-only: create the notification channel before the permission/token
+   *  flow (required on Android 13+). No-op/absent on iOS. */
+  ensureAndroidChannel?: () => Promise<void>;
   getPermission: () => Promise<PushPermission>;
   requestPermission: () => Promise<{ granted: boolean }>;
   getExpoPushToken: () => Promise<string | null>;
@@ -45,6 +48,10 @@ export async function unregisterForPush(deps: UnregisterPushDeps): Promise<void>
 
 export async function registerForPush(deps: RegisterPushDeps): Promise<RegisterPushResult> {
   try {
+    // Android 13+: the channel must exist before the permission prompt and
+    // token lookup, or the owner ends up with no token and misses all pushes.
+    if (deps.platform === 'android') await deps.ensureAndroidChannel?.();
+
     const current = await deps.getPermission();
     if (!current.granted) {
       if (!current.canAskAgain) return 'denied';

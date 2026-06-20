@@ -3,6 +3,7 @@ import { useApiClient } from '../lib/useApiClient';
 import { registerForPush } from '../push/registerForPush';
 import {
   devicePlatform,
+  ensureAndroidChannel,
   getExpoPushToken,
   getPermission,
   requestPermission,
@@ -27,13 +28,20 @@ export function usePushRegistration(enabled: boolean): void {
       return;
     }
     if (doneRef.current) return;
+    // Latch up front to prevent concurrent runs, but only *keep* it latched on a
+    // terminal result. A transient failure (offline / API blip at launch)
+    // returns 'error' → unlatch so the next render (e.g. token refresh) retries,
+    // instead of leaving the owner without pushes for the whole session.
     doneRef.current = true;
     void registerForPush({
+      ensureAndroidChannel,
       getPermission,
       requestPermission,
       getExpoPushToken,
       api,
       platform: devicePlatform,
+    }).then((result) => {
+      if (result === 'error') doneRef.current = false;
     });
   }, [enabled, api]);
 }

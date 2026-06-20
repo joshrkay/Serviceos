@@ -14,6 +14,19 @@ export async function requestPermission(): Promise<{ granted: boolean }> {
   return { granted: p.granted };
 }
 
+/**
+ * Android 13+ requires a notification channel to exist before the permission
+ * prompt will appear and before getExpoPushTokenAsync works (per Expo's
+ * notifications docs). No-op on iOS. Best-effort — callers swallow failures.
+ */
+export async function ensureAndroidChannel(): Promise<void> {
+  if (Platform.OS !== 'android') return;
+  await Notifications.setNotificationChannelAsync('default', {
+    name: 'Default',
+    importance: Notifications.AndroidImportance.MAX,
+  });
+}
+
 export async function getExpoPushToken(): Promise<string | null> {
   try {
     const token = await Notifications.getExpoPushTokenAsync();

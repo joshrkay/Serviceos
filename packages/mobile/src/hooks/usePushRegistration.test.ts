@@ -17,6 +17,7 @@ vi.mock('../push/nativePushDeps', () => ({
   getPermission: h.getPermission,
   requestPermission: h.requestPermission,
   getExpoPushToken: h.getExpoPushToken,
+  ensureAndroidChannel: vi.fn().mockResolvedValue(undefined),
   devicePlatform: 'ios',
 }));
 
@@ -53,6 +54,20 @@ describe('usePushRegistration', () => {
     renderHook(() => usePushRegistration(false));
     await new Promise((r) => setTimeout(r, 0));
     expect(h.api).not.toHaveBeenCalled();
+  });
+
+  it('retries on the next render after a transient failure (does not latch on error)', async () => {
+    h.api = vi.fn().mockResolvedValue({ ok: false, status: 503 }); // transient blip
+    const { rerender } = renderHook(() => usePushRegistration(true));
+    await waitFor(() => expect(h.api).toHaveBeenCalledTimes(1));
+    const failed = h.api;
+
+    // A new api identity (e.g. Clerk refreshed the token) re-runs the effect;
+    // because the prior attempt was transient, it retries instead of latching.
+    h.api = vi.fn().mockResolvedValue({ ok: true, status: 201 });
+    rerender();
+    await waitFor(() => expect(h.api).toHaveBeenCalledTimes(1));
+    expect(failed).toHaveBeenCalledTimes(1);
   });
 
   it('re-registers after a sign-out → sign-in cycle without a remount', async () => {
