@@ -175,9 +175,18 @@ export type ProposalConfidenceLevel = 'high' | 'medium' | 'low' | 'very_low';
  * `proposalConfidenceMetaSchema` (`_meta`). Only the fields the review
  * card renders are carried; additive-only.
  */
+/** §6.4-B severity tiers (same scale as voice triage) — MMS photo drafts. */
+export type ProposalSeverity =
+  | 'TIER_1_EVACUATE'
+  | 'TIER_2_EMERGENCY_DISPATCH'
+  | 'TIER_3_SAME_DAY_URGENT'
+  | 'TIER_4_SCHEDULE';
+
 export interface ProposalConfidenceMeta {
   overallConfidence: ProposalConfidenceLevel;
   fieldConfidence?: Record<string, ProposalConfidenceLevel>;
+  /** §6.4-B urgency of the visible problem (set on MMS photo drafts). */
+  severity?: ProposalSeverity;
   /** "What I wasn't sure about" callouts the card surfaces. */
   markers?: { path: string; reason: string }[];
 }
