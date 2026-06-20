@@ -1453,6 +1453,9 @@ export class TwilioGatherAdapter {
     // the create_customer voice flow can use it as the new customer's
     // primaryPhone without re-prompting.
     this.callerIdBySession.set(session.id, opts.from ?? '');
+    // Also pin it on the session so the voice-turn processor's ask_caller wire
+    // can find-or-create a CUSTOMER by phone for an unknown caller who books.
+    if (opts.from) session.callerPhone = opts.from;
 
     // P11-002: resolve spoken language + TTS voice (tenant default) and pin
     // them on the session so the greeting, disclosure, and every TwiML build
