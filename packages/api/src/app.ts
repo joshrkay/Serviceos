@@ -11,7 +11,7 @@ import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
 import { createIntegrationResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
-import { createCallsRouter } from './routes/calls';
+import { createCallsRouter, createCallBridgeRouter } from './routes/calls';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
 import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from './telephony/dispatcher-phone-resolver';
@@ -2885,6 +2885,32 @@ export function createApp(): express.Express {
     whisperRouter({ whisperCache: sharedWhisperCache }),
   );
 
+  // Owner→customer click-to-call. Deps are enabled only when Twilio is
+  // configured (global env or per-tenant creds); without them POST /api/calls
+  // returns 503. The bridge TwiML callback is mounted HERE — before the global
+  // /api Clerk-auth chain — because Twilio carries no Clerk JWT (same reason the
+  // telephony webhooks above are). The authed POST /api/calls is mounted after
+  // auth, further down. Both share these deps.
+  const callDeps =
+    pool && (process.env.TWILIO_ACCOUNT_SID || process.env.NODE_ENV !== 'production')
+      ? {
+          customerRepo,
+          conversationRepo,
+          dncRepo,
+          auditRepo,
+          getCreds: (tid: string) => getTenantTwilioCreds(tid, pool),
+          publicApiUrl: process.env.PUBLIC_API_URL ?? publicBaseUrl,
+        }
+      : undefined;
+  app.use(
+    '/api/calls',
+    createCallBridgeRouter({
+      ...(callDeps ? { callDeps } : {}),
+      twilioAuthTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+      ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
+    }),
+  );
+
   // P8-012: attach the Media Streams WebSocketServer to the http.Server
   // returned by app.listen(). We override `app.listen` so the bare
   // `index.ts` entry point doesn't need any new wiring — when the
@@ -3797,29 +3823,10 @@ export function createApp(): express.Express {
   );
   app.use('/api/dnc', createDncRouter({ dncRepo, auditRepo }));
 
-  // Owner→customer click-to-call (Twilio bridge). The POST path is enabled only
-  // when a Twilio account is configured (global env or per-tenant creds); the
-  // signature-verified /bridge TwiML callback is always mounted so Twilio's
-  // callback resolves. Without creds, POST /api/calls returns 503.
-  app.use(
-    '/api/calls',
-    createCallsRouter({
-      ...(pool && (process.env.TWILIO_ACCOUNT_SID || process.env.NODE_ENV !== 'production')
-        ? {
-            callDeps: {
-              customerRepo,
-              conversationRepo,
-              dncRepo,
-              auditRepo,
-              getCreds: (tid: string) => getTenantTwilioCreds(tid, pool),
-              publicApiUrl: process.env.PUBLIC_API_URL ?? publicBaseUrl,
-            },
-          }
-        : {}),
-      twilioAuthTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
-      ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
-    }),
-  );
+  // Owner→customer click-to-call (authed POST). Mounted after the global /api
+  // auth chain; the unauthenticated Twilio /bridge callback was mounted earlier
+  // (before auth). Shares callDeps built above; 503 when Twilio is unconfigured.
+  app.use('/api/calls', createCallsRouter(callDeps ? { callDeps } : {}));
 
   app.use(
     '/api/settings',

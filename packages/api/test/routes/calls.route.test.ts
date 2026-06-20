@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import express, { Express, Request, Response, NextFunction } from 'express';
 import request from 'supertest';
-import { createCallsRouter } from '../../src/routes/calls';
+import { createCallsRouter, createCallBridgeRouter } from '../../src/routes/calls';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
 import { InMemoryDncRepository } from '../../src/compliance/dnc';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
@@ -56,14 +56,8 @@ function buildApp(
     };
     next();
   });
-  app.use(
-    '/api/calls',
-    createCallsRouter({
-      ...(opts.configured ? { callDeps } : {}),
-      twilioAuthTokenGetter: () => 'tok',
-    }),
-  );
-  return { app, dncRepo, fetchMock };
+  app.use('/api/calls', createCallsRouter(opts.configured ? { callDeps } : {}));
+  return { app, dncRepo, fetchMock, callDeps };
 }
 
 describe('POST /api/calls', () => {
@@ -98,5 +92,21 @@ describe('POST /api/calls', () => {
     const { app } = buildApp({ configured: true, noPhone: true });
     const res = await request(app).post('/api/calls').send({ customerId: 'cust-1', agentPhone: '+15559990000' });
     expect(res.status).toBe(422);
+  });
+});
+
+describe('POST /api/calls/bridge (Twilio callback)', () => {
+  it('rejects an unsigned request (403) — the signature gate guards the bridge', async () => {
+    // Mounted with NO Clerk auth in front (mirrors app.ts mounting it before
+    // the /api auth chain); only the Twilio signature gates it.
+    const app: Express = express();
+    app.use(
+      '/api/calls',
+      createCallBridgeRouter({ twilioAuthTokenGetter: () => 'tok' }),
+    );
+    const res = await request(app)
+      .post('/api/calls/bridge?tenantId=t&conversationId=c&messageId=m')
+      .send('From=%2B15551234567');
+    expect(res.status).toBe(403);
   });
 });

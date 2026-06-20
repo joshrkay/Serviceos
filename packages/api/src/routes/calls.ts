@@ -31,6 +31,10 @@ const CALL_ERROR_STATUS: Record<OutboundCallErrorCode, number> = {
 export interface CallsRouterDeps {
   /** Present only when telephony is configured; absent ⇒ POST / returns 503. */
   callDeps?: OutboundCallDeps;
+}
+
+export interface CallBridgeRouterDeps {
+  callDeps?: OutboundCallDeps;
   /** Per-request Twilio auth token (by AccountSid) for bridge signature checks. */
   twilioAuthTokenGetter: (opts: {
     accountSid?: string;
@@ -39,10 +43,9 @@ export interface CallsRouterDeps {
 }
 
 /**
- * Owner→customer click-to-call.
- * - `POST /api/calls` (owner, Clerk-authed): start a bridged call.
- * - `POST /api/calls/bridge` (Twilio, signature-verified): TwiML that <Dial>s
- *   the customer once the owner answers.
+ * Owner→customer click-to-call (authed). `POST /api/calls` starts a bridged
+ * call. Mount AFTER the global `/api` auth chain. The Twilio `/bridge` callback
+ * lives in {@link createCallBridgeRouter}, mounted before auth.
  */
 export function createCallsRouter(deps: CallsRouterDeps): Router {
   const router = Router();
@@ -79,8 +82,20 @@ export function createCallsRouter(deps: CallsRouterDeps): Router {
     }),
   );
 
-  // Twilio posts form-encoded; parse it here (route-scoped) so the signature
-  // middleware sees req.body, then return the <Dial> bridge TwiML.
+  return router;
+}
+
+/**
+ * Twilio bridge callback (unauthenticated, signature-verified). Returns the
+ * <Dial> TwiML that connects the owner to the customer once the owner answers.
+ * MUST be mounted BEFORE the global `/api` Clerk-auth chain (like the inbound
+ * telephony webhooks) — Twilio carries no Clerk JWT, so otherwise requireAuth
+ * rejects it before requireTwilioSignature runs and the call never connects.
+ * Non-matching paths (e.g. the authed `POST /`) fall through to the next router.
+ */
+export function createCallBridgeRouter(deps: CallBridgeRouterDeps): Router {
+  const router = Router();
+
   router.post(
     '/bridge',
     express.urlencoded({ extended: false }),
