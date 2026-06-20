@@ -527,6 +527,12 @@ import {
   InMemoryTechStatusTodayRepository,
 } from './sms/tech-status';
 import { createMmsIngestWorker } from './workers/mms-ingest-worker';
+import { PhoneRateLimiter } from './shared/rate-limit/phone-rate-limit';
+import {
+  CUSTOMER_MMS_RATE_SCOPE,
+  CUSTOMER_MMS_RATE_LIMIT,
+  CUSTOMER_MMS_RATE_WINDOW_MS,
+} from './sms/customer-mms/customer-mms-intake';
 import {
   registerProposalReplySms,
   PgProposalSmsEventRepository,
@@ -3360,6 +3366,9 @@ export function createApp(): express.Express {
   // by the worker through the same MessageDelivery transport. Webhook
   // latency stays in the ms; failures ride the queue retry/DLQ semantics.
   registerMmsIngestHandler({ queue }, { overwrite: true });
+  // U6 — inbound MMS cost/abuse guard (per-sender photo-quote cap). One limiter
+  // instance reused across calls; absent without a pool (dev/in-memory).
+  const customerMmsRateLimiter = pool ? new PhoneRateLimiter(pool) : undefined;
   const mmsIngestWorker = createMmsIngestWorker({
     userRepo,
     timeEntries: new TimeEntryService(timeEntryRepo, auditRepo),
@@ -3438,6 +3447,18 @@ export function createApp(): express.Express {
                 await messageDelivery!.sendSms({ to: ownerPhone, body, tenantId });
               }
             },
+          }
+        : {}),
+      ...(customerMmsRateLimiter
+        ? {
+            checkRateLimit: (tenantId: string, fromPhone: string) =>
+              customerMmsRateLimiter.tryConsume(
+                tenantId,
+                CUSTOMER_MMS_RATE_SCOPE,
+                fromPhone,
+                CUSTOMER_MMS_RATE_LIMIT,
+                CUSTOMER_MMS_RATE_WINDOW_MS,
+              ),
           }
         : {}),
     },
