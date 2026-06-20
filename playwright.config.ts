@@ -37,6 +37,9 @@ const includeQaMatrix = process.env.QA_MATRIX === '1';
 // Opt-in to avoid running it on every PR; it visits every authenticated route
 // and requires a real running stack (or E2E_BASE_URL pointing at one).
 const includeCoverageSweep = process.env.COVERAGE_SWEEP === '1';
+// UI flow capture — screenshots every screen for docs/ui-flows. Opt-in via
+// UI_FLOW=1 (set by `npm run ui-flow:capture`) so the default e2e run skips it.
+const includeUiFlow = !!process.env.UI_FLOW;
 
 export default defineConfig({
   testDir: './e2e',
@@ -71,7 +74,7 @@ export default defineConfig({
       // Exclude both the qa-matrix specs (their own project) and the
       // coverage-sweep spec (opt-in via the dedicated project below) so
       // the default `npm run e2e` does not run them.
-      testIgnore: ['**/qa-matrix/**', '**/coverage-sweep.spec.ts'],
+      testIgnore: ['**/qa-matrix/**', '**/coverage-sweep.spec.ts', '**/ui-flow-capture*.spec.ts'],
       use: {
         ...devices['Desktop Chrome'],
         // Same escape hatch the qa-matrix project has: runners whose
@@ -158,6 +161,19 @@ export default defineConfig({
             name: 'coverage-sweep',
             testDir: './e2e',
             testMatch: ['coverage-sweep.spec.ts'],
+            testIgnore: [],
+            use: { ...devices['Desktop Chrome'] },
+          },
+        ]
+      : []),
+    ...(includeUiFlow
+      ? [
+          {
+            // UI flow capture — screenshots every screen into docs/ui-flows.
+            // Opt-in via UI_FLOW=1 (`npm run ui-flow:capture`).
+            name: 'ui-flow',
+            testDir: './e2e',
+            testMatch: ['ui-flow-capture.spec.ts', 'ui-flow-capture-mobile.spec.ts'],
             testIgnore: [],
             use: { ...devices['Desktop Chrome'] },
           },
