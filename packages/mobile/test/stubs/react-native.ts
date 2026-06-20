@@ -1,0 +1,77 @@
+// Resolve-time stub for react-native under the jsdom test env. RN's package
+// entry doesn't resolve in the root-only CI lane, and we only need the host
+// primitives + AppState for class-contract/hook tests — not the native
+// runtime. Each primitive maps to a DOM element so @testing-library/react can
+// render screens and assert the NativeWind `className` tap-target contract.
+import { createElement, type ReactNode } from 'react';
+
+type Props = Record<string, unknown> & { children?: ReactNode };
+
+// Pass only DOM-meaningful props through to keep `className` assertions intact
+// while avoiding React "unknown prop" warnings for RN-only props
+// (accessibilityRole/Label, testID, etc.) — so real warnings stay visible.
+const host =
+  (tag: string) =>
+  ({ children, className }: Props) =>
+    createElement(tag, { className }, children as ReactNode);
+
+export const View = host('div');
+export const Text = host('span');
+export const ScrollView = host('div');
+export const ActivityIndicator = host('div');
+export const RefreshControl = host('div');
+
+export const TextInput = ({ onChangeText, value, className, placeholder }: Props) =>
+  createElement('input', {
+    className,
+    placeholder,
+    value: value ?? '',
+    onChange: (e: { target: { value: string } }) =>
+      typeof onChangeText === 'function' ? (onChangeText as (t: string) => void)(e.target.value) : undefined,
+  });
+
+export const Pressable = ({ children, onPress, onPressIn, onPressOut, disabled, className }: Props) => {
+  const resolved =
+    typeof children === 'function'
+      ? (children as (s: { pressed: boolean }) => ReactNode)({ pressed: false })
+      : children;
+  return createElement(
+    'button',
+    { className, disabled, onClick: onPress, onMouseDown: onPressIn, onMouseUp: onPressOut },
+    resolved as ReactNode,
+  );
+};
+
+export function FlatList({ data, renderItem, keyExtractor, ListEmptyComponent }: Props) {
+  const rows = Array.isArray(data) ? (data as unknown[]) : [];
+  const children = rows.length
+    ? rows.map((item, index) =>
+        createElement(
+          'div',
+          { key: typeof keyExtractor === 'function' ? (keyExtractor as (i: unknown, n: number) => string)(item, index) : index },
+          (renderItem as (a: { item: unknown; index: number }) => ReactNode)({ item, index }),
+        ),
+      )
+    : typeof ListEmptyComponent === 'function'
+      ? createElement(ListEmptyComponent as () => ReactNode)
+      : (ListEmptyComponent as ReactNode);
+  return createElement('div', null, children);
+}
+
+// Minimal AppState used by usePendingProposals. Tests can drive transitions
+// through the registered listeners via the exported test helper.
+type AppStateListener = (state: string) => void;
+const listeners = new Set<AppStateListener>();
+export const AppState = {
+  currentState: 'active' as string,
+  addEventListener: (_type: string, cb: AppStateListener) => {
+    listeners.add(cb);
+    return { remove: () => listeners.delete(cb) };
+  },
+};
+
+/** Test-only: drive an AppState transition (e.g. background/active). */
+export function __emitAppState(state: string): void {
+  AppState.currentState = state;
+  for (const cb of listeners) cb(state);
+}

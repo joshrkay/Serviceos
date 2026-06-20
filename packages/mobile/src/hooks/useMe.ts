@@ -36,17 +36,20 @@ export function _resetMeCacheForTests(): void {
 }
 
 export function useMe(): UseMeResult {
-  const { userId, orgId } = useAuth();
+  const { userId, orgId, sessionId } = useAuth();
   const client = useApiClient() as AuthedFetch;
   const [me, setMe] = useState<MeResponse | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<Error | null>(null);
 
-  // Key the cache by Clerk identity AND active org: the same Clerk subject can
-  // belong to multiple tenants (the API's tenant boundary is tenant+user), so
-  // switching org/tenant in the same runtime must not reuse the prior tenant's
-  // payload. `anon` covers the signed-out gap.
-  const cacheKey = `${userId ?? 'anon'}:${orgId ?? ''}`;
+  // Key the cache by the full Clerk identity. The API's tenant boundary is the
+  // JWT `tenant_id` claim (from public_metadata — see
+  // packages/api/src/auth/clerk.ts), NOT Clerk's org, and `orgId` can be null
+  // in deployments that don't use Clerk Organizations. So include `sessionId`:
+  // a sign-out/sign-in (the case where the same RN runtime would otherwise
+  // serve the prior tenant's payload) starts a new session and a fresh key.
+  // `orgId` still distinguishes org switches; `anon` covers the signed-out gap.
+  const cacheKey = `${userId ?? 'anon'}:${orgId ?? ''}:${sessionId ?? ''}`;
 
   // Monotonic request id: an identity switch (or refetch) starts a newer load,
   // so a slower in-flight request for the prior identity must not commit its

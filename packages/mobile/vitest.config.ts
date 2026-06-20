@@ -12,10 +12,36 @@ export default defineConfig({
     // expo/tsconfig.base, which only exists after `npm install` in this
     // isolated project. Pure-logic tests don't need the Expo TS settings.
     tsconfigRaw: '{}',
+    // Screen tests render .tsx with no explicit React import (the screens use
+    // the automatic runtime via babel-preset-expo); use it here too so esbuild
+    // emits react/jsx-runtime calls instead of bare React.createElement.
+    jsx: 'automatic',
   },
   test: {
+    // Tests live under src/ only — never under app/, where expo-router's
+    // file-based routing would treat them as routes and Metro would bundle
+    // vitest into the app. Screen tests under src/screens import from ../../app.
     include: ['src/**/*.test.ts'],
     environment: 'node',
+    coverage: {
+      provider: 'v8',
+      // Gate the testable surface: screens + logic. Exclude thin native
+      // wrappers that only run on a device (no logic to assert), generated
+      // tokens, the root layout (providers), test stubs, and tests themselves.
+      include: ['src/**/*.ts', 'app/**/*.tsx'],
+      exclude: [
+        '**/*.test.ts',
+        'src/voice/nativeVoiceDeps.ts',
+        'src/lib/env.ts',
+        'src/lib/tokenCache.ts',
+        'src/theme/tokens.d.ts',
+        'app/_layout.tsx',
+      ],
+      // Floors sit a few points under current coverage (stmts/lines ~96%,
+      // funcs ~93%, branches ~76%) so routine churn passes but dropped tests
+      // or untested new code fail the lane.
+      thresholds: { statements: 92, branches: 72, functions: 88, lines: 92 },
+    },
     // tsconfigRaw above disables esbuild's tsconfig path resolution, so map the
     // project aliases explicitly here for tests that import via them. Shared is
     // resolved from source (matches metro.config.js / tsconfig.json). Current
@@ -38,6 +64,10 @@ export default defineConfig({
       'expo-audio': path.resolve(__dirname, './test/stubs/expo-audio.ts'),
       'expo-file-system': path.resolve(__dirname, './test/stubs/expo-file-system.ts'),
       '@clerk/clerk-expo': path.resolve(__dirname, './test/stubs/clerk-clerk-expo.ts'),
+      // react-native + expo-router don't resolve under jsdom in the root-only
+      // lane. Screen tests render against host-DOM stubs (and mock useRouter).
+      'react-native': path.resolve(__dirname, './test/stubs/react-native.ts'),
+      'expo-router': path.resolve(__dirname, './test/stubs/expo-router.ts'),
     },
   },
 });

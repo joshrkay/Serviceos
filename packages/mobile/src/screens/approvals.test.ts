@@ -1,0 +1,71 @@
+// @vitest-environment jsdom
+import { cleanup, fireEvent, render } from '@testing-library/react';
+import { createElement } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { PendingProposalSummary } from '../proposals/proposalEvents';
+
+const h = vi.hoisted(() => ({
+  back: vi.fn(),
+  refresh: vi.fn(),
+  proposals: [] as PendingProposalSummary[],
+  count: 0,
+  isLoading: false,
+  error: null as string | null,
+}));
+
+vi.mock('expo-router', () => ({
+  useRouter: () => ({ back: h.back, push: vi.fn(), replace: vi.fn() }),
+}));
+vi.mock('../hooks/usePendingProposals', () => ({
+  usePendingProposals: () => ({
+    proposals: h.proposals,
+    count: h.count,
+    isLoading: h.isLoading,
+    error: h.error,
+    refresh: h.refresh,
+  }),
+}));
+
+// eslint-disable-next-line import/first
+import Approvals from '../../app/approvals';
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  h.proposals = [];
+  h.count = 0;
+  h.isLoading = false;
+  h.error = null;
+});
+
+afterEach(() => cleanup());
+
+describe('Approvals screen', () => {
+  it('Back is a >=44px tap target and returns to the prior screen', () => {
+    const { getByText } = render(createElement(Approvals));
+    const back = getByText('‹ Back').closest('button')!;
+    expect(back.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(back);
+    expect(h.back).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the empty state when nothing is waiting', () => {
+    const { getByText } = render(createElement(Approvals));
+    expect(getByText('Nothing waiting')).toBeTruthy();
+    expect(getByText(/your drafts will appear here/i)).toBeTruthy();
+  });
+
+  it('renders the live count and one card per pending proposal', () => {
+    h.proposals = [
+      { id: 'a', summary: 'Invoice #12 for Acme', proposalType: 'draft_invoice', createdAt: '2026-06-20T00:00:00Z' },
+      { id: 'b', summary: 'Record $200 payment', proposalType: 'record_payment', createdAt: '2026-06-20T00:00:00Z' },
+    ];
+    h.count = 2;
+    const { getByText } = render(createElement(Approvals));
+    expect(getByText('2 waiting for you')).toBeTruthy();
+    expect(getByText('Invoice #12 for Acme')).toBeTruthy();
+    expect(getByText('Record $200 payment')).toBeTruthy();
+    // Friendly type labels, not raw enum values.
+    expect(getByText('Invoice')).toBeTruthy();
+    expect(getByText('Payment')).toBeTruthy();
+  });
+});

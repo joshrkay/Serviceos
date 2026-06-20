@@ -7,7 +7,11 @@ import type { MeResponse } from '@ai-service-os/shared';
 // in the root-only CI lane; @clerk/clerk-expo + the api/me + useApiClient
 // modules are mocked, so their mobile-only transitive deps never load.
 const h = vi.hoisted(() => ({
-  auth: { userId: null as string | null, orgId: null as string | null },
+  auth: {
+    userId: null as string | null,
+    orgId: null as string | null,
+    sessionId: null as string | null,
+  },
   fetchMe: vi.fn(),
   postModeSwitch: vi.fn(),
   apiFn: vi.fn(),
@@ -41,7 +45,7 @@ function makeMe(over: Partial<MeResponse>): MeResponse {
 beforeEach(() => {
   vi.clearAllMocks();
   _resetMeCacheForTests();
-  h.auth = { userId: 'userA', orgId: 'orgA' };
+  h.auth = { userId: 'userA', orgId: 'orgA', sessionId: 'sessA' };
 });
 
 afterEach(() => {
@@ -61,6 +65,30 @@ describe('useMe', () => {
     expect(result.current.isLoading).toBe(false);
   });
 
+  it('refetches when the Clerk session changes even if userId/orgId are unchanged', async () => {
+    // tenant_id (the API's real tenant boundary) rides the session token, and
+    // orgId can be null, so a sign-out/sign-in (new sessionId) must re-key the
+    // cache rather than serve the prior tenant's payload.
+    h.fetchMe
+      .mockResolvedValueOnce(makeMe({ tenant_id: 'tA' }))
+      .mockResolvedValueOnce(makeMe({ tenant_id: 'tB' }));
+
+    const { result, rerender } = renderHook(() => useMe());
+    await act(async () => {
+      await flush();
+    });
+    expect(result.current.me?.tenant_id).toBe('tA');
+
+    await act(async () => {
+      h.auth = { userId: 'userA', orgId: 'orgA', sessionId: 'sessB' }; // same user/org, new session
+      rerender();
+      await flush();
+    });
+
+    expect(h.fetchMe).toHaveBeenCalledTimes(2);
+    expect(result.current.me?.tenant_id).toBe('tB');
+  });
+
   it('ignores a slow prior-identity response that resolves after an identity switch', async () => {
     // fetchMe hands back a fresh deferred per call: [0] = identity A, [1] = B.
     const resolvers: Array<(m: MeResponse) => void> = [];
@@ -75,7 +103,7 @@ describe('useMe', () => {
 
     // Identity switches before A resolves.
     await act(async () => {
-      h.auth = { userId: 'userB', orgId: 'orgB' };
+      h.auth = { userId: 'userB', orgId: 'orgB', sessionId: 'sessB' };
       rerender();
       await flush(); // load B in flight (resolvers[1])
     });
