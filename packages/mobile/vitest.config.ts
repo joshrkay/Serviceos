@@ -36,6 +36,7 @@ export default defineConfig({
         'src/push/nativeNotificationDeps.ts',
         'src/lib/env.ts',
         'src/lib/tokenCache.ts',
+        'src/calls/callbackStorage.ts',
         'src/theme/tokens.d.ts',
         'app/_layout.tsx',
       ],
@@ -65,6 +66,7 @@ export default defineConfig({
       // mocked per test, so alias them to resolve-time stubs.
       'expo-audio': path.resolve(__dirname, './test/stubs/expo-audio.ts'),
       'expo-file-system': path.resolve(__dirname, './test/stubs/expo-file-system.ts'),
+      'expo-secure-store': path.resolve(__dirname, './test/stubs/expo-secure-store.ts'),
       '@clerk/clerk-expo': path.resolve(__dirname, './test/stubs/clerk-clerk-expo.ts'),
       // react-native + expo-router don't resolve under jsdom in the root-only
       // lane. Screen tests render against host-DOM stubs (and mock useRouter).

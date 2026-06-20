@@ -12,6 +12,7 @@ const MODES: Mode[] = ['supervisor', 'both', 'tech'];
 // Secondary destinations — the approval inbox + money are surfaced as hero
 // cards above, so the grid is the remaining read screens.
 const NAV: Array<{ label: string; route: Href }> = [
+  { label: 'Messages', route: '/messages' },
   { label: 'Customers', route: '/customers' },
   { label: 'Schedule', route: '/schedule' },
   { label: 'Estimates', route: '/estimates' },

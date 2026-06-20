@@ -2,13 +2,12 @@ import { EntityList } from '../src/components/EntityList';
 import { useListQuery } from '../src/hooks/useListQuery';
 import { formatMoneyCents, formatShortDate } from '../src/lib/format';
 
+// Matches GET /api/invoices: invoiceNumber + nested totals.totalCents.
 interface Invoice {
   id: string;
-  number?: string;
-  total_cents?: number;
-  totalCents?: number;
+  invoiceNumber?: string;
+  totals?: { totalCents?: number };
   status?: string;
-  due_date?: string;
   dueDate?: string;
 }
 
@@ -24,12 +23,13 @@ export default function Invoices() {
       onRefresh={() => void refetch()}
       keyOf={(inv) => inv.id}
       renderRow={(inv) => {
-        const cents = inv.totalCents ?? inv.total_cents ?? 0;
-        const due = inv.dueDate ?? inv.due_date;
+        const cents = inv.totals?.totalCents ?? 0;
         const status = inv.status ? inv.status[0].toUpperCase() + inv.status.slice(1) : undefined;
         return {
-          primary: `${inv.number ?? `#${inv.id.slice(0, 8)}`} · ${formatMoneyCents(cents)}`,
-          secondary: [status, due ? `due ${formatShortDate(due)}` : undefined].filter(Boolean).join(' · '),
+          primary: `${inv.invoiceNumber ?? `#${inv.id.slice(0, 8)}`} · ${formatMoneyCents(cents)}`,
+          secondary: [status, inv.dueDate ? `due ${formatShortDate(inv.dueDate)}` : undefined]
+            .filter(Boolean)
+            .join(' · '),
         };
       }}
       emptyText="No invoices yet."

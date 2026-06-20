@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render } from '@testing-library/react';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -19,6 +19,8 @@ const h = vi.hoisted(() => ({
   } as unknown,
   isLoading: false,
   error: null as Error | null,
+  getCallbackNumber: vi.fn().mockResolvedValue(null),
+  saveCallbackNumber: vi.fn(),
 }));
 
 vi.mock('expo-router', () => ({
@@ -28,6 +30,10 @@ vi.mock('../hooks/useMe', () => ({
   useMe: () => ({ me: h.me, isLoading: h.isLoading, error: h.error, switchMode: vi.fn(), refetch: vi.fn() }),
 }));
 vi.mock('../push/useSignOut', () => ({ useSignOut: () => h.signOut }));
+vi.mock('../calls/callbackStorage', () => ({
+  getCallbackNumber: h.getCallbackNumber,
+  saveCallbackNumber: h.saveCallbackNumber,
+}));
 
 // eslint-disable-next-line import/first
 import Settings from '../../app/settings';
@@ -64,5 +70,22 @@ describe('Settings screen', () => {
     expect(back.className).toMatch(/\bmin-h-11\b/);
     fireEvent.click(back);
     expect(h.back).toHaveBeenCalledTimes(1);
+  });
+
+  it('saves a valid callback number for click-to-call', async () => {
+    h.saveCallbackNumber.mockResolvedValue('+15551234567');
+    const { getByPlaceholderText, getByText, findByText } = render(createElement(Settings));
+    fireEvent.change(getByPlaceholderText('+1 555 123 4567'), { target: { value: '555 123 4567' } });
+    fireEvent.click(getByText('Save').closest('button')!);
+    await waitFor(() => expect(h.saveCallbackNumber).toHaveBeenCalledWith('555 123 4567'));
+    expect(await findByText('Saved.')).toBeTruthy();
+  });
+
+  it('rejects an invalid callback number', async () => {
+    h.saveCallbackNumber.mockResolvedValue(null);
+    const { getByPlaceholderText, getByText, findByText } = render(createElement(Settings));
+    fireEvent.change(getByPlaceholderText('+1 555 123 4567'), { target: { value: 'nope' } });
+    fireEvent.click(getByText('Save').closest('button')!);
+    expect(await findByText('Enter a valid phone number.')).toBeTruthy();
   });
 });

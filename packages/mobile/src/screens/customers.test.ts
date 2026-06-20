@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 interface Customer {
   id: string;
-  name?: string;
-  phone?: string;
+  displayName?: string;
+  firstName?: string;
+  lastName?: string;
+  primaryPhone?: string;
   email?: string;
 }
 
@@ -60,12 +62,13 @@ describe('Customers screen', () => {
 
   it('renders one tappable row per customer and opens the detail screen', () => {
     h.data = [
-      { id: 'c1', name: 'Acme Plumbing', phone: '555-0100' },
-      { id: 'c2', name: 'Beta Builders', email: 'beta@example.com' },
+      { id: 'c1', displayName: 'Acme Plumbing', primaryPhone: '555-0100' },
+      { id: 'c2', firstName: 'Beta', lastName: 'Builders', email: 'beta@example.com' },
     ];
     const { getByText, container } = render(createElement(Customers));
     expect(getByText('Acme Plumbing')).toBeTruthy();
-    expect(getByText('555-0100')).toBeTruthy(); // phone preferred as secondary
+    expect(getByText('Beta Builders')).toBeTruthy(); // derived from first/last name
+    expect(getByText('555-0100')).toBeTruthy(); // primaryPhone preferred as secondary
     expect(getByText('beta@example.com')).toBeTruthy(); // email fallback
 
     const row = getByText('Acme Plumbing').closest('button')!;

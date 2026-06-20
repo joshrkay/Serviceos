@@ -4,9 +4,15 @@ import { useListQuery } from '../src/hooks/useListQuery';
 
 interface Customer {
   id: string;
-  name?: string;
-  phone?: string;
+  displayName?: string;
+  firstName?: string;
+  lastName?: string;
+  primaryPhone?: string;
   email?: string;
+}
+
+function customerName(c: Customer): string {
+  return c.displayName || [c.firstName, c.lastName].filter(Boolean).join(' ') || 'Unnamed customer';
 }
 
 export default function Customers() {
@@ -21,7 +27,7 @@ export default function Customers() {
       error={error}
       onRefresh={() => void refetch()}
       keyOf={(c) => c.id}
-      renderRow={(c) => ({ primary: c.name ?? 'Unnamed customer', secondary: c.phone ?? c.email })}
+      renderRow={(c) => ({ primary: customerName(c), secondary: c.primaryPhone ?? c.email })}
       onPressRow={(c) => router.push(`/customers/${c.id}`)}
       emptyText="No customers yet."
     />
