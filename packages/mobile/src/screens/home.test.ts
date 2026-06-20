@@ -4,6 +4,7 @@
 import { cleanup, fireEvent, render } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { MoneySummary } from '../hooks/useMoneyDashboard';
 
 const h = vi.hoisted(() => ({
   push: vi.fn(),
@@ -21,6 +22,20 @@ const h = vi.hoisted(() => ({
   } as unknown,
   isLoading: false,
   error: null as Error | null,
+  // approvals
+  approvalsCount: 0,
+  approvalsLoading: false,
+  // money
+  summary: {
+    month: '2026-06',
+    revenueCents: 1_250_000,
+    outstandingCents: 340_000,
+    overdueCents: 50_000,
+    revenueTrendCents: 120_000,
+  } as MoneySummary | null,
+  moneyLoading: false,
+  moneyError: null as string | null,
+  notConfigured: false,
 }));
 
 vi.mock('expo-router', () => ({
@@ -35,6 +50,23 @@ vi.mock('../hooks/useMe', () => ({
     refetch: vi.fn(),
   }),
 }));
+vi.mock('../hooks/usePendingProposals', () => ({
+  usePendingProposals: () => ({
+    count: h.approvalsCount,
+    proposals: [],
+    isLoading: h.approvalsLoading,
+    error: null,
+    refresh: vi.fn(),
+  }),
+}));
+vi.mock('../hooks/useMoneyDashboard', () => ({
+  useMoneyDashboard: () => ({
+    summary: h.summary,
+    isLoading: h.moneyLoading,
+    error: h.moneyError,
+    notConfigured: h.notConfigured,
+  }),
+}));
 
 // eslint-disable-next-line import/first
 import Home from '../../app/index';
@@ -44,34 +76,84 @@ beforeEach(() => {
   h.isLoading = false;
   h.error = null;
   h.switchMode = vi.fn().mockResolvedValue(undefined);
+  h.approvalsCount = 0;
+  h.approvalsLoading = false;
+  h.summary = {
+    month: '2026-06',
+    revenueCents: 1_250_000,
+    outstandingCents: 340_000,
+    overdueCents: 50_000,
+    revenueTrendCents: 120_000,
+  };
+  h.moneyLoading = false;
+  h.moneyError = null;
+  h.notConfigured = false;
 });
 
 afterEach(() => cleanup());
 
-function clickText(text: string): void {
-  const node = render(createElement(Home)).getByText(text).closest('button');
-  if (!node) throw new Error(`no button wrapping "${text}"`);
-  fireEvent.click(node);
-}
+describe('Home / Today dashboard', () => {
+  it('greets by time of day with the date', () => {
+    const { getByText } = render(createElement(Home));
+    expect(getByText(/^Good (morning|afternoon|evening)$/)).toBeTruthy();
+  });
 
-describe('Home screen', () => {
   it('renders every tap target at the >=44px contract (min-h-11)', () => {
     const { container } = render(createElement(Home));
     const buttons = Array.from(container.querySelectorAll('button'));
-    expect(buttons.length).toBeGreaterThanOrEqual(5); // speak + 7 nav tiles + 3 modes
+    // speak + approvals + money + 3 modes + 6 nav tiles
+    expect(buttons.length).toBeGreaterThanOrEqual(8);
     for (const b of buttons) {
       expect(b.className).toMatch(/\bmin-h-11\b/);
     }
   });
 
   it('navigates to the voice screen from "Speak an action"', () => {
-    clickText('Speak an action');
+    fireEvent.click(render(createElement(Home)).getByText('Speak an action').closest('button')!);
     expect(h.push).toHaveBeenCalledWith('/voice');
   });
 
-  it('navigates to the approvals inbox', () => {
-    clickText('Approvals');
+  it('shows the live approval count and opens the inbox', () => {
+    h.approvalsCount = 3;
+    const { getByText } = render(createElement(Home));
+    expect(getByText('3 waiting for your tap')).toBeTruthy();
+    expect(getByText('3')).toBeTruthy(); // badge
+    fireEvent.click(getByText('Approval inbox').closest('button')!);
     expect(h.push).toHaveBeenCalledWith('/approvals');
+  });
+
+  it('shows the caught-up state with no badge when nothing is waiting', () => {
+    h.approvalsCount = 0;
+    const { getByText, queryByText } = render(createElement(Home));
+    expect(getByText(/caught up/)).toBeTruthy();
+    expect(queryByText('0')).toBeNull(); // no badge at zero
+  });
+
+  it('caps the badge at 9+', () => {
+    h.approvalsCount = 12;
+    const { getByText } = render(createElement(Home));
+    expect(getByText('9+')).toBeTruthy();
+  });
+
+  it('renders this month money (rounded dollars + trend) and opens invoices', () => {
+    const { getByText } = render(createElement(Home));
+    expect(getByText(/\$12,500 collected \(\+\$1,200 vs last month\)/)).toBeTruthy();
+    expect(getByText(/\$3,400 outstanding.*\$500 overdue/)).toBeTruthy();
+    fireEvent.click(getByText('This month').closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/invoices');
+  });
+
+  it('hides the money card entirely when the report is not configured', () => {
+    h.notConfigured = true;
+    const { queryByText } = render(createElement(Home));
+    expect(queryByText('This month')).toBeNull();
+  });
+
+  it('surfaces a money load failure without breaking the screen', () => {
+    h.summary = null;
+    h.moneyError = 'HTTP 500';
+    const { getByText } = render(createElement(Home));
+    expect(getByText(/Couldn.t load money summary/)).toBeTruthy();
   });
 
   it('navigates to the read screens and settings', () => {

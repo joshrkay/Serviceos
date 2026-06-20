@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatMoneyCents, formatShortDate } from './format';
+import { formatMoneyCents, formatMoneyShort, formatShortDate, formatWeekdayDate } from './format';
 
 describe('formatMoneyCents', () => {
   it('renders integer cents as dollars with thousands separators', () => {
@@ -8,6 +8,27 @@ describe('formatMoneyCents', () => {
     expect(formatMoneyCents(12345)).toBe('$123.45');
     expect(formatMoneyCents(123456789)).toBe('$1,234,567.89');
     expect(formatMoneyCents(-2000)).toBe('-$20.00');
+  });
+});
+
+describe('formatMoneyShort', () => {
+  it('rounds integer cents to whole dollars for dashboard figures', () => {
+    expect(formatMoneyShort(0)).toBe('$0');
+    expect(formatMoneyShort(12345)).toBe('$123'); // 123.45 → 123
+    expect(formatMoneyShort(12999)).toBe('$130'); // rounds up
+    expect(formatMoneyShort(123456789)).toBe('$1,234,568');
+    expect(formatMoneyShort(-20000)).toBe('-$200');
+  });
+});
+
+describe('formatWeekdayDate', () => {
+  it('renders a long weekday + short date in the given timezone', () => {
+    expect(formatWeekdayDate('2026-06-20T12:00:00Z', 'UTC')).toBe('Saturday, Jun 20');
+  });
+
+  it('returns empty for null/invalid input', () => {
+    expect(formatWeekdayDate(null)).toBe('');
+    expect(formatWeekdayDate('not-a-date')).toBe('');
   });
 });
 
