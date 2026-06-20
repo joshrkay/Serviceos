@@ -54,4 +54,18 @@ describe('usePushRegistration', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(h.api).not.toHaveBeenCalled();
   });
+
+  it('re-registers after a sign-out → sign-in cycle without a remount', async () => {
+    const { rerender } = renderHook(({ enabled }) => usePushRegistration(enabled), {
+      initialProps: { enabled: true },
+    });
+    await waitFor(() => expect(h.api).toHaveBeenCalledTimes(1));
+
+    // Sign out (token revoked elsewhere) then sign back in on the same mount.
+    rerender({ enabled: false });
+    await Promise.resolve();
+    rerender({ enabled: true });
+
+    await waitFor(() => expect(h.api).toHaveBeenCalledTimes(2));
+  });
 });
