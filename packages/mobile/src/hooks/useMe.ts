@@ -8,7 +8,7 @@
  * refetch. `switchMode` invalidates the cache so the next read hits the server.
  */
 import { useAuth } from '@clerk/clerk-expo';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiClient } from '../lib/useApiClient';
 import {
   fetchMe,
@@ -48,17 +48,28 @@ export function useMe(): UseMeResult {
   // payload. `anon` covers the signed-out gap.
   const cacheKey = `${userId ?? 'anon'}:${orgId ?? ''}`;
 
+  // Monotonic request id: an identity switch (or refetch) starts a newer load,
+  // so a slower in-flight request for the prior identity must not commit its
+  // result last. Each load tags itself and only writes state while it is still
+  // the latest — otherwise a sign-out/sign-in or org-switch race could render
+  // the previous tenant/role/mode. The ref is shared across all load closures.
+  const requestIdRef = useRef(0);
+
   const load = useCallback(
     async (forceRefresh = false) => {
+      const requestId = ++requestIdRef.current;
       setIsLoading(true);
       setError(null);
       try {
         if (forceRefresh) invalidateMeCache();
-        setMe(await getOrLoadMe(cacheKey, () => fetchMe(client)));
+        const result = await getOrLoadMe(cacheKey, () => fetchMe(client));
+        if (requestId !== requestIdRef.current) return; // superseded by a newer load
+        setMe(result);
       } catch (err) {
+        if (requestId !== requestIdRef.current) return;
         setError(err instanceof Error ? err : new Error(String(err)));
       } finally {
-        setIsLoading(false);
+        if (requestId === requestIdRef.current) setIsLoading(false);
       }
     },
     [client, cacheKey],

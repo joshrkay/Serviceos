@@ -37,6 +37,7 @@ export default defineConfig({
       // mocked per test, so alias them to resolve-time stubs.
       'expo-audio': path.resolve(__dirname, './test/stubs/expo-audio.ts'),
       'expo-file-system': path.resolve(__dirname, './test/stubs/expo-file-system.ts'),
+      '@clerk/clerk-expo': path.resolve(__dirname, './test/stubs/clerk-clerk-expo.ts'),
     },
   },
 });
