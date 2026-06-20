@@ -18,41 +18,86 @@ usually UI wiring, a trigger, or config — unconfirmed or incomplete in a time-
 ❌ Missing/Deferred. Note: 🟡 is deliberately conservative — some 🟡 items are fully done and
 some are genuinely half-wired; treat it as "needs a closer look," not "half the work remains."
 
+**Two lenses.** The per-epic tables measure *literal* implementation (is the story built as
+written). The **Divergence reclassification** section below adds a second lens for PRD lines the
+team *deliberately* did not follow — whether the underlying problem is still solved (usually it
+is). So a ❌ in a table can be SUPERSEDED in the reclassification (e.g., n8n, Invoice Ninja, the
+0.5% fee).
+
 ---
 
 ## Scorecard
 
 | Scope | ✅ Built | 🟡 Partial | ❌ Missing | Total |
 |---|---|---|---|---|
-| **All stories** | **68 (46%)** | **61 (41%)** | **20 (13%)** | 149 |
-| **P0 / MVP only** | **55 (62%)** | **29 (33%)** | **5 (6%)** | 89 |
+| **All stories** | **68 (46%)** | **62 (42%)** | **19 (13%)** | 149 |
+| **P0 / MVP only** | **55 (62%)** | **30 (34%)** | **4 (4%)** | 89 |
 
 - **Strict** (fully verified end-to-end): **46%** of the PRD.
-- **Built-or-substantial** (✅+🟡): **87%** overall, **94%** of P0/MVP.
+- **Built-or-substantial** (✅+🟡): **87%** overall, **96%** of P0/MVP.
 - **Not started / deferred:** **13%** overall — concentrated in P1/P2 (Inventory, vision-tier integrations).
 
-Per-epic ✅/🟡/❌: E1 5/3/0 · E2 0/8/2 · E3 9/3/0 · E4 5/4/0 · E5 4/5/1 · E6 7/2/0 ·
+Per-epic ✅/🟡/❌: E1 5/3/0 · E2 0/9/1 · E3 9/3/0 · E4 5/4/0 · E5 4/5/1 · E6 7/2/0 ·
 E7 7/2/1 · E8 6/3/1 · E9 8/3/1 · E10 4/4/1 · E11 0/2/6 · E12 0/8/1 · E13 2/1/4 ·
 E14 6/2/0 · E15 2/5/2 · E16 3/6/0.
 
 ---
 
-## The genuine P0/MVP gaps (5 of 89)
+## The genuine P0/MVP gaps (2 of 89)
 
-| Story | Pri | What's missing | Note |
-|---|---|---|---|
-| **8.7 0.5% platform fee** | P0 | No fee applied to Stripe payments | Monetization — see PRD's open pricing decision |
-| **9.12 Metered voice minutes** | P0 | Duration stored; no bucket / overage / billing | Monetization — the other half of the pricing question |
-| **5.5 48h schedule-proposal expiry** | P0 | No TTL on job/message proposals | |
-| **2.4 Templates reshape via conversation** | P0 | Onboarding is linear step-based, not agent-driven | |
-| **13.4 n8n orchestration** | P0 | No n8n | **Built differently** — custom Postgres queue + workers; capability exists |
+Applying the decision lens (see *Divergence reclassification* below), three of the five items
+first flagged as P0 gaps are not gaps:
 
-Everything else P0 is ✅ or 🟡. The two monetization stories (8.7, 9.12) are the most
-strategically notable — they are exactly the levers the PRD left "open" on pricing.
+| Story | State | Verdict |
+|---|---|---|
+| **9.12 Metered voice minutes** | only trial gating (100-min cap); no post-trial overage billing | **GENUINELY-OPEN** — the one revenue-relevant gap; the GTM model still charges $0.30/min over 500 |
+| **5.5 48h proposal expiry** | `expiresAt` field + expiry-check exist; no creation path sets 48h | **GENUINELY-OPEN** — cheap to close, plumbing present |
+| ~~8.7 0.5% platform fee~~ | no fee on payments | **SUPERSEDED** — flat $297/mo subscription replaces it |
+| ~~13.4 n8n~~ | no n8n | **SUPERSEDED** — ADR `p0-028-queue-choice.md`; Postgres queue + workers |
+| ~~2.4 Conversational onboarding~~ | — | **BUILT** — backend FSM agent `ai/agents/onboarding`; audit error corrected |
 
 The largest ❌ cluster is **Epic 11 Inventory** (6 of 8) — but every inventory story is P1/P2,
 so this tracks PRD priority rather than a miss. **Epic 12 Dashboard** and **Epic 16 field-docs
 polish** are mostly 🟡: schema/backend present, UI thin.
+
+---
+
+## Divergence reclassification — superseded vs solved-differently vs open
+
+For PRD lines the team *deliberately* did not follow literally, the question isn't "is it built?"
+but "is the underlying problem solved another way?" Sources: `docs/decisions/p0-028-queue-choice.md`,
+`docs/decisions/production-readiness-scope.md`, `docs/decisions.md` (D-001/D-005),
+`docs/superpowers/plans/2026-06-11-rivet-architect-plan.md` (D16), `docs/launch/2026-06-03-rivet-gtm-brief.md`.
+
+### SUPERSEDED — PRD line obsolete; problem solved another way
+| PRD line | Problem it solved | Now solved by | Decision record |
+|---|---|---|---|
+| 13.3 Invoice Ninja | "use my existing billing tool" | Native invoicing + **Stripe Connect** (owns the cash funnel) + QuickBooks push | Deprioritized P1/Wave 3; zero IN refs |
+| 13.4 n8n | maintainable orchestration (scheduled+triggered, retry) | `queues/pg-queue.ts` + ~27 workers + leader-locked sweeps + DLQ | **ADR `p0-028-queue-choice.md`** |
+| Supabase | Postgres + RLS + pg_trgm | raw `pg` + in-code migrations + RLS GUC + pg_trgm | `production-readiness-scope.md`; D-001 |
+| Next.js / Vercel | web SPA + hosting | React + Vite on Railway | Implicit (D-001; prototype quarantined) |
+| LangGraph / FastAPI | AI agent runtime | TS gateway (`ai/gateway/*`) | Implicit (D-005 provider-agnostic; Python prototype defective) |
+| Vapi or Retell | managed inbound voice | **native Twilio FSM** (Vapi legacy) | **D16** (confirm w/ owner) |
+| 8.7 0.5% payment fee | fund the platform on payments | **flat $297/mo subscription** (`billing/subscription.ts`) | GTM brief — *confirm locked* |
+
+### SOLVED-DIFFERENTLY — different mechanism, intent met
+| PRD line | Problem | Solved by |
+|---|---|---|
+| §7 $99/mo subscription (no story) | collect the platform fee | `billing/subscription.ts` trial+checkout+portal; price via `STRIPE_PRICE_ID` (now $297) |
+| 2.4 Conversational onboarding | adaptive setup, no empty product | `ai/agents/onboarding` FSM + orchestrator (confidence-gated re-prompts) |
+| 12.6 Weekly feedback email | weekly owner "advisor" summary | `hfcr-weekly` + LLM-narrated `daily-digest` via **SMS** |
+| 13.2 QuickBooks two-way | reconcile both ways | one-way push of *paid* invoices (pull/conflict reserved) — sufficient for MVP |
+
+### GENUINELY-OPEN — problem actually unsolved
+| PRD line | Problem | State |
+|---|---|---|
+| 9.12 Metered voice minutes | charge voice overage | only trial gating; **GTM still charges $0.30/min over 500** |
+| 5.5 48h proposal expiry | stale proposals expire | field + check exist; no 48h set on create |
+| Epic 11 inventory stock | quantity-on-hand | no stock columns — deferred *by design* (all P1/P2) |
+
+**Bottom line:** none of the architecture/integration divergences are real gaps — all are
+deliberate decisions (n8n has a full ADR) that solve the same problem, several *better*. Genuine
+P0 gaps reduce to **two**: 9.12 (voice-overage metering) and 5.5 (proposal expiry).
 
 ---
 
@@ -70,19 +115,24 @@ polish** are mostly 🟡: schema/backend present, UI thin.
 |1.7 Audit log|P1|✅|`audit_events` actor/entity/before-after/correlation|
 |1.8 Tenant settings shell|P1|✅|`tenant_settings` + web settings pages|
 
-### Epic 2 — Onboarding & Living Templates (0/8/2)
+### Epic 2 — Onboarding & Living Templates (0/9/1)
 | Story | Pri | St | Evidence |
 |---|---|---|---|
 |2.1 Onboarding Agent intro|P0|🟡|`onboarding/v2/OnboardingShell.tsx` sidebar-step, not conversational|
 |2.2 Skippable onboarding|P0|🟡|Polls `/onboarding/status`; skip/resume mechanics unconfirmed|
 |2.3 Vertical template selection|P0|🟡|`onboarding/v2/steps/PackStep.tsx` hvac/plumbing; generator role unclear|
-|2.4 Templates reshape via convo|P0|❌|Linear steps; no dynamic reshaping|
+|2.4 Templates reshape via convo|P0|🟡|**Backend FSM** `ai/agents/onboarding/transitions.ts` + `onboarding-conversation.ts`, confidence-gated re-prompts — *solved-differently, not missing*|
 |2.5 Terminology capture|P0|🟡|`terminology_preferences` JSONB; capture UI unconfirmed|
 |2.6 Service catalog seeding|P1|❌|No agent seeding flow|
 |2.7 Business hours & area|P0|🟡|`onboarding/contracts.ts` schemas; capture + out-of-area flag unconfirmed|
 |2.8 Team/tech seeding|P1|🟡|Invites exist; onboarding seeding UI unconfirmed|
 |2.9 Pricing & labor rates|P1|🟡|`hourlyRateCents` captured; estimate wiring unconfirmed|
-|2.10 Completion & resume|P0|🟡|`onboarding/derive-status.ts`; step-based, not per-exchange|
+|2.10 Completion & resume|P0|🟡|`onboarding/derive-status.ts`; FSM persists session per turn|
+
+> **Epic 2 caveat:** the first pass searched only the web layer and under-counted this epic. A
+> backend conversational onboarding agent exists (`ai/agents/onboarding/transitions.ts` 6-state FSM
+> + `ai/orchestration/onboarding-conversation.ts`, `MAX_TURNS=15`, confidence-gated re-prompts);
+> several 🟡s here are likely ✅ and warrant a focused re-audit.
 
 ### Epic 3 — Conversational AI Core (9/3/0)
 | Story | Pri | St | Evidence |
@@ -286,12 +336,17 @@ public launch 2026-06-03 (`packages/web/index.html`, `docs/launch/2026-06-03-riv
 | LangGraph + FastAPI (Python) | TypeScript / Express + AI gateway |
 | n8n Cloud | Postgres queue + ~27 workers |
 | Supabase | raw Postgres + in-code migrations |
-| Vapi *or* Retell | Vapi only |
+| Vapi *or* Retell | Vapi → **native Twilio FSM** (Vapi now legacy — D16) |
 | QuickBooks + Invoice Ninja | QuickBooks only (+ Xero stub) |
 | Combined classify+extract | separate classify → extract |
 
 Extra providers not in the PRD: Whisper (async STT), ElevenLabs (TTS), SendGrid (email),
 OpenRouter (LLM fallback), Stripe Connect (tenant payouts).
+
+**Pricing moved off the PRD entirely.** The PRD's $99/mo + 0.5% payment fee (with a metered-vs-flat
+"open decision") became, per the GTM brief, a **flat $297/mo + 500 voice minutes + $0.30/min overage**.
+This supersedes the 0.5% fee (8.7); the per-minute overage is exactly why voice metering (9.12)
+remains genuinely open.
 
 **Product modules beyond the 16 epics:** subscription billing (the $99/mo SaaS side — note this
 is *not* the 8.7 fee or 9.12 metering) · agreements / memberships · customer self-service portal ·
@@ -307,9 +362,10 @@ an execution backlog of ~309 P-/U-numbered stories vs the PRD's 149.
 ---
 
 ## Recommended follow-ups
-1. Decide the pricing model, then close **8.7** (0.5% fee) and **9.12** (metered minutes) — the
-   only P0 monetization gaps.
-2. Draft a **PRD v4.2 addendum** capturing the Rivet rebrand, the re-platform, and the
-   out-of-PRD modules so the canonical doc matches reality.
-3. Treat the remaining 🟡 P0 items (2.x onboarding conversational flow, 5.5 expiry, 15.2
-   speed-to-lead trigger) as a short MVP-hardening list.
+1. **Confirm pricing is locked** (flat $297/mo + $0.30/min overage). If so, 8.7 (0.5% fee) is
+   permanently obsolete and **9.12 voice-overage metering is the only monetization work left**.
+2. **Record two ADRs** this archaeology exposed: a **pricing ADR** (settles 8.7) and a
+   **tech-stack-rejection ADR** for Next.js/Python (today only in `/experiments` READMEs).
+3. Draft a **PRD v4.2 addendum** capturing the rebrand, the re-platform, the pricing change, and
+   the out-of-PRD modules so the canonical doc matches reality.
+4. Close the 2 real P0 gaps (9.12 metering, 5.5 expiry); treat remaining 🟡 P0 items as MVP-hardening.
