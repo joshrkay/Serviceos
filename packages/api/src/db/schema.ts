@@ -4941,6 +4941,21 @@ export const MIGRATIONS = {
       ON conversations (tenant_id, entity_id)
       WHERE entity_type = 'customer' AND status = 'open' AND entity_id IS NOT NULL;
   `,
+  // Harden migration 197's device_tokens policy: the cross-tenant cleanup in
+  // register() runs a DELETE that must reach the app.system_lookup escape
+  // hatch, but the original USING evaluated current_setting('app.current_tenant_id')::UUID
+  // WITHOUT missing_ok, so a connection where that GUC is unset/RESET raised on
+  // the cast before the escape hatch could apply (500 on POST /api/devices).
+  // Use the null-safe missing_ok=true form (matching migration 074) so an
+  // absent GUC yields NULL (no match) and falls through to system_lookup.
+  '199_device_tokens_system_lookup_null_safe': `
+    DROP POLICY IF EXISTS tenant_isolation_device_tokens ON device_tokens;
+    CREATE POLICY tenant_isolation_device_tokens ON device_tokens
+      USING (
+        tenant_id = current_setting('app.current_tenant_id', true)::UUID
+        OR current_setting('app.system_lookup', true) = 'true'
+      );
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

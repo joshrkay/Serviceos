@@ -35,7 +35,14 @@ export class PgDeviceTokenRepository extends PgBaseRepository implements DeviceT
   }
 
   async register(input: RegisterDeviceTokenInput): Promise<DeviceToken> {
-    const token = await this.withTenant(input.tenantId, async (client) => {
+    // Both the upsert and the token-exclusive cross-tenant cleanup run on ONE
+    // request-scoped transaction/client. Using a second pool checkout (the old
+    // withClient path) deadlocked at DB_MAX_CONNECTIONS=1 — the request already
+    // holds its client until res.finish, so the second connect() never
+    // resolves. withTenantTransaction reuses the request client when present
+    // (and sets app.current_tenant_id, so the RLS policy's UUID cast never sees
+    // an empty GUC).
+    return this.withTenantTransaction(input.tenantId, async (client) => {
       const res = await client.query<DeviceTokenRow>(
         `INSERT INTO device_tokens (tenant_id, user_id, expo_push_token, platform)
          VALUES ($1, $2, $3, $4)
@@ -46,35 +53,25 @@ export class PgDeviceTokenRepository extends PgBaseRepository implements DeviceT
          RETURNING *`,
         [input.tenantId, input.userId, input.expoPushToken, input.platform],
       );
-      return mapRow(res.rows[0]);
-    });
-    // Token-exclusive ownership: a physical device belongs to exactly one tenant
-    // at a time. Drop this token from any OTHER tenant so a later sign-out (a
-    // single tenant-scoped DELETE) can't leave a stale row that keeps pushing
-    // the former tenant's notifications to a signed-out device.
-    await this.removeFromOtherTenants(input.tenantId, input.expoPushToken);
-    return token;
-  }
-
-  /**
-   * Cross-tenant delete of an Expo token under every tenant except `tenantId`.
-   * Runs under `app.system_lookup = 'true'` (migration 197) in a LOCAL-scoped
-   * transaction so the GUC cannot leak to other pooled connections.
-   */
-  private async removeFromOtherTenants(tenantId: string, expoPushToken: string): Promise<void> {
-    await this.withClient(async (client) => {
-      await client.query('BEGIN');
+      // Token-exclusive ownership: a physical device belongs to exactly one
+      // tenant at a time, so drop this token from every OTHER tenant — otherwise
+      // a later sign-out (a single tenant-scoped DELETE) leaves a stale row that
+      // keeps pushing the former tenant's notifications to a signed-out device.
+      // app.system_lookup (transaction-local) opens the cross-tenant DELETE via
+      // the device_tokens RLS escape hatch and is auto-cleared at COMMIT; the
+      // explicit reset keeps the rest of the request transaction tenant-scoped.
+      await client.query("SELECT set_config('app.system_lookup', 'true', true)");
       try {
-        await client.query("SELECT set_config('app.system_lookup', 'true', true)");
         await client.query(
           `DELETE FROM device_tokens WHERE expo_push_token = $1 AND tenant_id <> $2`,
-          [expoPushToken, tenantId],
+          [input.expoPushToken, input.tenantId],
         );
-        await client.query('COMMIT');
-      } catch (err) {
-        await client.query('ROLLBACK');
-        throw err;
+      } finally {
+        await client
+          .query("SELECT set_config('app.system_lookup', '', true)")
+          .catch(() => undefined);
       }
+      return mapRow(res.rows[0]);
     });
   }
 

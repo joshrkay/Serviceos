@@ -308,6 +308,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // One OPEN conversation per (tenant, customer): pre-index dedup + partial
   // unique index that makes the customer get-or-create thread path race-safe.
   ['198_conversations_one_open_thread_per_customer', '88e49474bf50962a612e2a2294d1901c91c0d2267430447e30c9315d22953ddc'],
+  // Null-safe (missing_ok) device_tokens system-lookup policy — avoids a UUID
+  // cast error on a connection with no app.current_tenant_id set.
+  ['199_device_tokens_system_lookup_null_safe', '23cd9a92fdccdc0bca9367833c2f1ce66463b60db925a49e73af0cdfabbf345a'],
 ];
 
 function hashMigration(value: string): string {
