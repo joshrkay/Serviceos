@@ -301,6 +301,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // U1 (PRD gap closure): onboarding_session table for the conversational
   // FSM (ENABLE + FORCE RLS per gemini-code-assist review on PR #594).
   ['195_onboarding_session', '4ca725aa5bd1d9e3c516282f67349e3fc5f47f0228bdc0a5e2ee6ed995d2834d'],
+  ['196_create_device_tokens', '5bfc2853156c6d14fcc313d8ad51c0b010499a205838a042c19941ae8d61b29a'],
 ];
 
 function hashMigration(value: string): string {
