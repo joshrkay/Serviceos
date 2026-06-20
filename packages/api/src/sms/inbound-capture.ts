@@ -33,6 +33,7 @@ import type {
   Conversation,
   ConversationRepository,
 } from '../conversations/conversation-service';
+import { isUniqueViolation } from '../conversations/conversation-service';
 import type { FallbackHandler, InboundSmsContext, HandlerResult } from './inbound-dispatch';
 import type { Logger } from '../logging/logger';
 
@@ -166,13 +167,31 @@ async function openOrAppendConversation(
   // back-and-forth lands on one conversation instead of spawning one per text.
   const openThread = existing.find((c) => c.status === 'open');
   if (openThread) return openThread;
-  return deps.conversationRepo.createConversation({
-    tenantId: ctx.tenantId,
-    title: target.title,
-    entityType: target.entityType,
-    entityId: target.entityId,
-    createdBy: 'system:sms-capture',
-  });
+  try {
+    return await deps.conversationRepo.createConversation({
+      tenantId: ctx.tenantId,
+      title: target.title,
+      entityType: target.entityType,
+      entityId: target.entityId,
+      createdBy: 'system:sms-capture',
+    });
+  } catch (err) {
+    // For customer targets, the one-open-thread-per-customer unique index
+    // (migration 198) rejects a concurrent insert with 23505 — another inbound
+    // text or a Message-tap opened the thread first. Re-read and reuse the
+    // winner so the inbound message threads onto it instead of erroring (which
+    // would bounce the Twilio webhook). Other entity types aren't indexed, so
+    // this only triggers for the customer race.
+    if (!isUniqueViolation(err)) throw err;
+    const after = await deps.conversationRepo.findByEntity(
+      ctx.tenantId,
+      target.entityType,
+      target.entityId,
+    );
+    const winner = after.find((c) => c.status === 'open');
+    if (winner) return winner;
+    throw err;
+  }
 }
 
 export function createInboundCaptureHandler(

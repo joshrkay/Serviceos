@@ -302,6 +302,12 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // FSM (ENABLE + FORCE RLS per gemini-code-assist review on PR #594).
   ['195_onboarding_session', '4ca725aa5bd1d9e3c516282f67349e3fc5f47f0228bdc0a5e2ee6ed995d2834d'],
   ['196_create_device_tokens', '5bfc2853156c6d14fcc313d8ad51c0b010499a205838a042c19941ae8d61b29a'],
+  // Token-exclusive device ownership: widen device_tokens RLS with the
+  // app.system_lookup escape hatch so register() can cross-tenant-delete a token.
+  ['197_device_tokens_system_lookup_rls', '2aff868a1307b6afe4398eb50141fa60fdf55a682fe8eb08c2d26bc854a20ba2'],
+  // One OPEN conversation per (tenant, customer): pre-index dedup + partial
+  // unique index that makes the customer get-or-create thread path race-safe.
+  ['198_conversations_one_open_thread_per_customer', '88e49474bf50962a612e2a2294d1901c91c0d2267430447e30c9315d22953ddc'],
 ];
 
 function hashMigration(value: string): string {

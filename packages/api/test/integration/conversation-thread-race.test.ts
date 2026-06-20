@@ -1,11 +1,11 @@
 /**
  * Postgres integration — customer thread get-or-create is race-safe.
  *
- * Pins migration 198's partial unique index (one active thread per
- * tenant+entity) plus getOrCreateCustomerConversation's 23505 recovery: many
- * concurrent opens for the same customer (a Message tap racing the outbound-call
- * logger) must collapse to a SINGLE active thread, never duplicates. The unit
- * test cannot prove this — it needs the real unique index to reject the losers.
+ * Pins migration 198's partial unique index (one OPEN thread per tenant+customer)
+ * plus getOrCreateCustomerConversation's 23505 recovery: many concurrent opens
+ * for the same customer (a Message tap racing the outbound-call logger) must
+ * collapse to a SINGLE open thread, never duplicates. The unit test cannot prove
+ * this — it needs the real unique index to reject the losers.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';

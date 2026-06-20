@@ -4911,16 +4911,35 @@ export const MIGRATIONS = {
         OR current_setting('app.system_lookup', true) = 'true'
       );
   `,
-  // Idempotency for the customer get-or-create thread path: at most ONE active
-  // (non-archived) conversation per (tenant, entity). Without this a Message
-  // tap racing the outbound-call logger could both read zero rows and both
-  // insert, splitting later messages/calls across duplicate customer threads.
-  // Partial so archived threads (intentionally multiple per entity) are exempt,
-  // and entity-less conversations are unconstrained.
-  '198_conversations_one_active_thread_per_entity': `
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_conversations_active_entity
-      ON conversations (tenant_id, entity_type, entity_id)
-      WHERE status <> 'archived' AND entity_type IS NOT NULL AND entity_id IS NOT NULL;
+  // Idempotency for the customer get-or-create thread path: at most ONE OPEN
+  // conversation per (tenant, customer). Without it a Message tap racing the
+  // outbound-call logger (or a concurrent inbound SMS) could both read zero
+  // open threads and both insert, splitting later messages/calls across
+  // duplicate threads. Deliberately scoped to entity_type = 'customer' AND
+  // status = 'open': both get-or-create flows key on the OPEN customer thread,
+  // while 'closed' threads (a finished conversation that inbound SMS may sit
+  // beside with a fresh open one) and other entity types (lead, etc.) are
+  // intentionally unconstrained. The pre-index dedup collapses any existing
+  // duplicate open customer threads (keep the most recent, mark the rest
+  // 'closed' — non-destructive) so the index build can't fail on live data;
+  // it is a no-op once the index holds.
+  '198_conversations_one_open_thread_per_customer': `
+    WITH ranked AS (
+      SELECT id,
+             row_number() OVER (
+               PARTITION BY tenant_id, entity_id
+               ORDER BY updated_at DESC, created_at DESC, id
+             ) AS rn
+      FROM conversations
+      WHERE entity_type = 'customer' AND status = 'open' AND entity_id IS NOT NULL
+    )
+    UPDATE conversations c
+    SET status = 'closed', updated_at = NOW()
+    FROM ranked r
+    WHERE c.id = r.id AND r.rn > 1;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_conversations_open_customer
+      ON conversations (tenant_id, entity_id)
+      WHERE entity_type = 'customer' AND status = 'open' AND entity_id IS NOT NULL;
   `,
 };
 

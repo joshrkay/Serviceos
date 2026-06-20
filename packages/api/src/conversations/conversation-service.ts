@@ -181,9 +181,9 @@ export async function getOrCreateCustomerConversation(
     );
     return { conversation, created: true };
   } catch (err) {
-    // Lost a concurrent get-or-create race: another request created the active
+    // Lost a concurrent get-or-create race: another request created the open
     // thread between our findByEntity and this INSERT. The partial unique index
-    // (migration 198 — one active thread per entity) rejects the duplicate with
+    // (migration 198 — one open thread per customer) rejects the duplicate with
     // 23505. Re-read and return the winner rather than surfacing the error or
     // splitting later messages/calls across duplicate customer threads.
     if (!isUniqueViolation(err)) throw err;
