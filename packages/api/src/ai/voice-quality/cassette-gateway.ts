@@ -137,15 +137,6 @@ export class CassetteLLMGateway extends LLMGateway {
   private readonly rubricVersion: string;
   /** Throttle the drift warning to once per gateway instance. */
   private driftWarned = false;
-  /**
-   * Per-(schema, system-fp, user) consumption counter — when the
-   * fingerprint key has N matching cassette entries, the Kth fallback
-   * hit returns the Kth entry in recorded order rather than always
-   * the first. Preserves call-order semantics for scripts that issue
-   * the same logical request multiple times across turns (e.g. an
-   * intent classifier called once per user turn).
-   */
-  private fallbackCounts: Map<string, number> = new Map();
 
   constructor(opts: CassetteLLMGatewayOptions) {
     // We never call into the parent's provider machinery — `complete()` is
@@ -261,14 +252,19 @@ export class CassetteLLMGateway extends LLMGateway {
       else return null; // matches exist but none with right fp — give up
     }
 
-    // Stage 3 — walk the matches in recorded order. The Kth fallback
-    // for the same (schema, system-fp, user) triple returns the Kth
-    // recorded entry; if we run out, repeat the last one (degrades but
-    // never crashes).
-    const key = `${liveSchema}::${liveSystemFp ?? ''}::${liveUser}`;
-    const prevCount = this.fallbackCounts.get(key) ?? 0;
-    this.fallbackCounts.set(key, prevCount + 1);
-    return matches[Math.min(prevCount, matches.length - 1)];
+    // Stage 3 — among the fingerprint matches, replay the recording whose
+    // request prompt is CLOSEST to the live one. Cassette drift is almost
+    // always a system prompt that GREW since recording (new intents/rules
+    // appended over the corpus's life), so the live prompt shares the
+    // longest leading run with the NEWEST matching recording — the one
+    // carrying current behavior. The previous positional walk returned
+    // matches[0] (the OLDEST entry by file order), which could replay a
+    // stale response that conflicts with the rest of the refreshed pipeline
+    // (e.g. a vague extracted entity the slot resolver then disagrees with,
+    // failing the hard-slot disposition check non-deterministically). The
+    // pick is a pure function of (live prompt, matches) — no per-instance
+    // counter — so repeated calls and reused gateways resolve identically.
+    return pickClosestByPrompt(matches, snapshotRequest(request).prompt);
   }
 
   private async recordOrRefresh(
@@ -525,6 +521,53 @@ function lastUserContentFromPromptString(prompt: string): string | null {
   return lastUserContentFromMessages(
     parsed as ReadonlyArray<{ role: string; content?: unknown; parts?: unknown }>
   );
+}
+
+/**
+ * Length of the shared leading run of two strings. A cheap, deterministic
+ * proxy for "how close are these two serialized prompts": when a system
+ * prompt drifts by appending intents/rules, the live prompt shares the
+ * longest common prefix with the closest (newest) recording.
+ */
+function commonPrefixLength(a: string, b: string): number {
+  const n = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < n && a.charCodeAt(i) === b.charCodeAt(i)) i++;
+  return i;
+}
+
+/**
+ * Deterministically pick the cassette entry whose recorded request prompt
+ * is closest to `livePrompt`. Ranks by (1) longest common prefix, then
+ * (2) smallest length difference, then (3) latest entry (file/record order
+ * = newest) on a full tie. Pure: identical inputs always yield the same
+ * entry, so a drifted request resolves to the same recording on every call
+ * and across reused gateway instances. `matches` is non-empty by
+ * construction at the call site.
+ */
+function pickClosestByPrompt(
+  matches: CassetteEntry[],
+  livePrompt: string,
+): CassetteEntry {
+  let best = matches[0]!;
+  let bestPrefix = commonPrefixLength(best.request.prompt, livePrompt);
+  let bestDelta = Math.abs(best.request.prompt.length - livePrompt.length);
+  for (let i = 1; i < matches.length; i++) {
+    const candidate = matches[i]!;
+    const prefix = commonPrefixLength(candidate.request.prompt, livePrompt);
+    const delta = Math.abs(candidate.request.prompt.length - livePrompt.length);
+    const better =
+      prefix > bestPrefix ||
+      (prefix === bestPrefix && delta < bestDelta) ||
+      // full tie → prefer the later (newer) recording
+      (prefix === bestPrefix && delta === bestDelta);
+    if (better) {
+      best = candidate;
+      bestPrefix = prefix;
+      bestDelta = delta;
+    }
+  }
+  return best;
 }
 
 function canonicalize(value: unknown): unknown {
