@@ -17,8 +17,9 @@ export function normalizeCallbackNumber(raw: string | null | undefined): string 
   const hasPlus = trimmed.startsWith('+');
   const digits = trimmed.replace(/\D/g, '');
   if (hasPlus) {
-    // E.164: a real country code is 1–3 digits and never starts with 0.
-    return digits.length >= 11 && digits.length <= 15 && !digits.startsWith('0')
+    // Trust an explicit + as E.164: 10–15 digits (some country codes yield a
+    // 10-digit total, e.g. +47), never starting with 0 (country codes don't).
+    return digits.length >= 10 && digits.length <= 15 && !digits.startsWith('0')
       ? `+${digits}`
       : null;
   }

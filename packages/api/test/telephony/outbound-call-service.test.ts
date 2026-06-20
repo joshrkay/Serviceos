@@ -4,6 +4,7 @@ import {
   OutboundCallError,
   buildBridgeTwiml,
   buildHangupTwiml,
+  resolveBridgeTarget,
   type OutboundCallDeps,
 } from '../../src/telephony/outbound-call-service';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
@@ -148,5 +149,33 @@ describe('bridge TwiML builders', () => {
 
   it('produces a polite hangup when the target is unresolved', () => {
     expect(buildHangupTwiml()).toContain('<Hangup/>');
+  });
+});
+
+describe('resolveBridgeTarget', () => {
+  const callMsg = {
+    id: 'm1',
+    source: 'outbound_call',
+    metadata: { target: '+15551234567', callerId: '+15557778888' },
+  };
+
+  it('returns the customer phone + caller-id for an outbound_call log', () => {
+    expect(resolveBridgeTarget([callMsg], 'm1')).toEqual({
+      customerPhone: '+15551234567',
+      callerId: '+15557778888',
+    });
+  });
+
+  it('returns null for a missing message id', () => {
+    expect(resolveBridgeTarget([callMsg], 'nope')).toBeNull();
+  });
+
+  it('returns null when the message is not an outbound_call log (never dials a stray target)', () => {
+    const textMsg = { id: 'm2', source: 'sms', metadata: { target: '+19998887777', callerId: '+1' } };
+    expect(resolveBridgeTarget([textMsg], 'm2')).toBeNull();
+  });
+
+  it('returns null when target/callerId metadata is absent', () => {
+    expect(resolveBridgeTarget([{ id: 'm3', source: 'outbound_call', metadata: {} }], 'm3')).toBeNull();
   });
 });

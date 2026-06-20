@@ -43,21 +43,20 @@ export function useMoneyDashboard(): MoneyDashboardResult {
     const myVersion = ++versionRef.current;
     setIsLoading(true);
     setError(null);
+    // Reset per-load so a stale 503 can't leave the card hidden once the report
+    // repo comes online — even if this load ends in the error path.
+    setNotConfigured(false);
     try {
       const res = await api(`/api/reports/money-dashboard?month=${currentMonth()}`);
       if (myVersion !== versionRef.current) return;
       if (res.status === 503) {
-        // Clear any prior summary so a later config-removal can't leave stale data.
-        setSummary(null);
+        setSummary(null); // drop any prior summary; the report is unconfigured
         setNotConfigured(true);
         return;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as { data?: MoneySummary };
       if (myVersion !== versionRef.current) return;
-      // A successful load clears a stale notConfigured from an earlier 503 so the
-      // card doesn't stay hidden once the report repo comes online.
-      setNotConfigured(false);
       setSummary(body.data ?? null);
     } catch (err) {
       if (myVersion !== versionRef.current) return;

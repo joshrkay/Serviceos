@@ -2891,15 +2891,22 @@ export function createApp(): express.Express {
   // /api Clerk-auth chain — because Twilio carries no Clerk JWT (same reason the
   // telephony webhooks above are). The authed POST /api/calls is mounted after
   // auth, further down. Both share these deps.
+  // Click-to-call requires PUBLIC_API_URL: it is the host Twilio calls back for
+  // the bridge TwiML. Without it we'd build the callback against the frontend
+  // origin (APP_PUBLIC_URL), which doesn't serve /api/calls/bridge, so the call
+  // would ring the owner but never connect. Gate the feature on it instead.
   const callDeps =
-    pool && (process.env.TWILIO_ACCOUNT_SID || process.env.NODE_ENV !== 'production')
+    pool &&
+    process.env.PUBLIC_API_URL &&
+    (process.env.TWILIO_ACCOUNT_SID || process.env.NODE_ENV !== 'production')
       ? {
           customerRepo,
           conversationRepo,
           dncRepo,
           auditRepo,
+          logger: requestLogger,
           getCreds: (tid: string) => getTenantTwilioCreds(tid, pool),
-          publicApiUrl: process.env.PUBLIC_API_URL ?? publicBaseUrl,
+          publicApiUrl: process.env.PUBLIC_API_URL,
         }
       : undefined;
   app.use(

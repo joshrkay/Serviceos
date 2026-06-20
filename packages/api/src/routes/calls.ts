@@ -9,6 +9,7 @@ import {
   OutboundCallError,
   buildBridgeTwiml,
   buildHangupTwiml,
+  resolveBridgeTarget,
   type OutboundCallDeps,
   type OutboundCallErrorCode,
 } from '../telephony/outbound-call-service';
@@ -113,19 +114,16 @@ export function createCallBridgeRouter(deps: CallBridgeRouterDeps): Router {
         return;
       }
       const messages = await deps.callDeps.conversationRepo.getMessages(tenantId, conversationId);
-      const msg = messages.find((m) => m.id === messageId);
-      const target = msg?.metadata?.['target'];
-      const callerId = msg?.metadata?.['callerId'];
-      // Only bridge an actual outbound-call log — never dial a `target` that
-      // happens to sit in some other message's metadata.
-      if (msg?.source !== 'outbound_call' || typeof target !== 'string' || typeof callerId !== 'string') {
+      const resolved = resolveBridgeTarget(messages, messageId);
+      if (!resolved) {
         res.status(200).send(buildHangupTwiml());
         return;
       }
+      // JSONB-merge just the status; the repo preserves the rest of the metadata.
       await deps.callDeps.conversationRepo
-        .updateMessageMetadata(tenantId, messageId, { ...(msg?.metadata ?? {}), status: 'bridged' })
+        .updateMessageMetadata(tenantId, messageId, { status: 'bridged' })
         .catch(() => undefined);
-      res.status(200).send(buildBridgeTwiml({ customerPhone: target, callerId }));
+      res.status(200).send(buildBridgeTwiml(resolved));
     }),
   );
 

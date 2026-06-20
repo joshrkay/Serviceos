@@ -22,7 +22,7 @@ describe('useConversationThread', () => {
     h.api.mockResolvedValue(
       ok([{ id: 'm1', conversationId: 'c1', messageType: 'text', content: 'Hi', senderId: 'cust', senderRole: 'customer', createdAt: 't' }]),
     );
-    const { result } = renderHook(() => useConversationThread('c1'));
+    const { result } = renderHook(() => useConversationThread('c1', { pollIntervalMs: 1_000_000 }));
     await waitFor(() => expect(result.current.messages).toHaveLength(1));
     expect(h.api).toHaveBeenCalledWith('/api/conversations/c1/messages');
   });
@@ -35,7 +35,7 @@ describe('useConversationThread', () => {
 
   it('surfaces a non-ok response as an error', async () => {
     h.api.mockResolvedValue({ ok: false, status: 404, json: async () => ({}) });
-    const { result } = renderHook(() => useConversationThread('c1'));
+    const { result } = renderHook(() => useConversationThread('c1', { pollIntervalMs: 1_000_000 }));
     await waitFor(() => expect(result.current.error).toBe('HTTP 404'));
   });
 });

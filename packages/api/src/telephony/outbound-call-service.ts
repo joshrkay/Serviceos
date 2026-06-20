@@ -10,6 +10,7 @@
  * is no users.phone column. DNC is enforced exactly as it is for SMS.
  */
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { type Logger } from '../logging/logger';
 import { DncRepository, normalizePhone } from '../compliance/dnc';
 import type { CustomerRepository } from '../customers/customer';
 import {
@@ -49,6 +50,7 @@ export interface OutboundCallDeps {
   fetchImpl?: typeof fetch;
   /** Override Twilio REST host for tests. */
   apiBaseUrl?: string;
+  logger?: Logger;
 }
 
 export interface InitiateOutboundCallInput {
@@ -218,8 +220,15 @@ export async function initiateOutboundCall(
         }),
       );
     }
-  } catch {
-    // Swallow: the call is live; losing the status/audit write must not 500.
+  } catch (err) {
+    // Swallow: the call is live; losing the status/audit write must not 500 —
+    // but log it so the lost audit/status is diagnosable (audit-event invariant).
+    deps.logger?.warn('outbound call post-success bookkeeping failed', {
+      tenantId: input.tenantId,
+      callSid: data.sid,
+      messageId: message.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 
   return {
@@ -240,6 +249,25 @@ export function buildBridgeTwiml(args: { customerPhone: string; callerId: string
     `<Response><Dial callerId="${xmlEscape(args.callerId)}">` +
     `<Number>${xmlEscape(args.customerPhone)}</Number></Dial></Response>`
   );
+}
+
+/**
+ * Resolve the bridge target for a TwiML callback: the customer phone + business
+ * caller-id stamped on the outbound-call log message. Returns null (→ hangup)
+ * unless the message exists, is actually an `outbound_call` log, and carries
+ * both string fields — so the bridge never dials a `target` that happens to sit
+ * in some other message's metadata. Pure, so it's unit-tested without HTTP.
+ */
+export function resolveBridgeTarget(
+  messages: Array<Pick<Message, 'id' | 'source' | 'metadata'>>,
+  messageId: string,
+): { customerPhone: string; callerId: string } | null {
+  const msg = messages.find((m) => m.id === messageId);
+  if (!msg || msg.source !== 'outbound_call') return null;
+  const target = msg.metadata?.['target'];
+  const callerId = msg.metadata?.['callerId'];
+  if (typeof target !== 'string' || typeof callerId !== 'string') return null;
+  return { customerPhone: target, callerId };
 }
 
 /** Polite hangup when the bridge target can't be resolved. */

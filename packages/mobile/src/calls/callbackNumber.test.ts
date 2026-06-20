@@ -7,9 +7,10 @@ describe('normalizeCallbackNumber', () => {
     expect(normalizeCallbackNumber('(555) 123-4567')).toBe('+15551234567');
   });
 
-  it('keeps an already-E.164 number', () => {
+  it('keeps an already-E.164 number, including short (10-digit) country formats', () => {
     expect(normalizeCallbackNumber('+15551234567')).toBe('+15551234567');
     expect(normalizeCallbackNumber('+44 20 7946 0958')).toBe('+442079460958');
+    expect(normalizeCallbackNumber('+47 123 45 678')).toBe('+4712345678'); // 10 digits, valid
   });
 
   it('treats an 11-digit US number (leading 1) as E.164', () => {
@@ -23,7 +24,7 @@ describe('normalizeCallbackNumber', () => {
   });
 
   it('rejects a +-prefixed number that is too short or starts with 0', () => {
-    expect(normalizeCallbackNumber('+5551234567')).toBeNull(); // 10 digits — no valid country code
+    expect(normalizeCallbackNumber('+123456789')).toBeNull(); // 9 digits — below the E.164 floor
     expect(normalizeCallbackNumber('+0123456789')).toBeNull(); // country code can't start with 0
   });
 
