@@ -346,6 +346,27 @@ export async function ingestCustomerMms(
     }
   }
 
+  // U3 — surface the draft to the owner. The proposal lands in the review
+  // queue regardless, but a customer-initiated photo quote warrants a proactive
+  // heads-up (the in-app/voice paths already SMS their proposals; this path did
+  // not). Best-effort and idempotent: the mms_ingest queue dedupes on
+  // messageSid, so intake runs once per inbound MMS — one notice per draft.
+  if (deps.notifyOwner) {
+    try {
+      const who = customer.displayName || customer.companyName || ctx.fromE164;
+      await deps.notifyOwner(
+        ctx.tenantId,
+        `New photo quote ready to review${who ? ` — from ${who}` : ''}. Open the app to approve, edit, or reject.`,
+      );
+    } catch (err) {
+      logger.warn('customer MMS: owner draft-ready notice failed', {
+        tenantId: ctx.tenantId,
+        messageSid: ctx.messageSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   return {
     outcome: 'drafted',
     proposalId: stored.id,
