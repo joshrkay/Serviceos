@@ -95,8 +95,16 @@ export function useVoiceCapture(): UseVoiceCaptureResult {
       await recorder.prepareToRecordAsync();
 
       if (stopRequestedRef.current) {
-        // Released before we finished starting — never actually record.
+        // Released before we finished starting — never record. The recorder is
+        // already prepared, though, so reset it; otherwise the next press calls
+        // prepareToRecordAsync() on a still-prepared recorder and hold-to-talk
+        // sticks on "Could not start recording" until a remount.
         recStateRef.current = 'idle';
+        try {
+          await recorder.stop();
+        } catch {
+          // wasn't recording — nothing to stop
+        }
         setPhase('idle');
         return;
       }

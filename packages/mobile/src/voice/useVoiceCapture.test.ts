@@ -117,9 +117,19 @@ describe('useVoiceCapture', () => {
     });
 
     expect(h.record).not.toHaveBeenCalled();
-    expect(h.stop).not.toHaveBeenCalled();
+    // The prepared recorder is reset (stop) so a later press can prepare again,
+    // but nothing is transcribed.
+    expect(h.stop).toHaveBeenCalledTimes(1);
     expect(h.upload).not.toHaveBeenCalled();
     expect(result.current.phase).toBe('idle');
+
+    // A second press must succeed (no "stuck on prepared recorder").
+    h.prepare.mockResolvedValueOnce(undefined);
+    await act(async () => {
+      await result.current.startRecording();
+    });
+    expect(h.record).toHaveBeenCalledTimes(1);
+    expect(result.current.phase).toBe('listening');
   });
 
   it('reset while recording — stops and discards the mic without transcribing', async () => {
