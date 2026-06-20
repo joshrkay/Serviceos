@@ -2588,6 +2588,9 @@ export function createApp(): express.Express {
     invoiceRepo,
     estimateRepo,
     customerRepo,
+    // Inbound-call timeline logging — an identified caller's call is threaded
+    // onto their conversation, mirroring the outbound click-to-call log.
+    conversationRepo,
     agreementRepo,
     moneyDashboardRepo,
     catalogRepo,

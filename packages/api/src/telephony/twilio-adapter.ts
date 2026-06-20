@@ -64,6 +64,8 @@ import { discloseRecording } from '../ai/skills/disclose-recording';
 import { t, type Language } from '../ai/i18n/i18n';
 import { identifyCaller } from '../ai/skills/identify-caller';
 import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
+import type { ConversationRepository } from '../conversations/conversation-service';
+import { logInboundCallOnCustomerTimeline } from './inbound-call-log';
 import { assembleB2bAccountContext } from '../ai/agents/customer-calling/b2b-account-context';
 import { confirmIntent } from '../ai/skills/confirm-intent';
 import { summarizeSession } from '../ai/skills/summarize-session';
@@ -227,6 +229,13 @@ export interface TwilioAdapterDeps {
   agreementRepo?: AgreementRepository;
   /** VQ-006: read-only customer + estimate lookups. */
   customerRepo?: CustomerRepository;
+  /**
+   * When wired, an identified inbound caller's call is logged on their
+   * conversation timeline (channel=call, direction=inbound) — the inbound
+   * mirror of the outbound click-to-call log, so the customer's history shows
+   * both directions. Best-effort: a logging failure never fails the call.
+   */
+  conversationRepo?: ConversationRepository;
   /**
    * N-003 (P2-036) — threaded through to the voice-turn processor so a live-call
    * negotiation callback can carry the caller's LTV/recency.
@@ -1535,6 +1544,27 @@ export class TwilioGatherAdapter {
 
     if (callerKnown) {
       session.customerId = callerKnown.customerId;
+      // Log the inbound call on the customer's timeline (best-effort) so it
+      // shows up in their conversation history / unified inbox alongside the
+      // outbound click-to-call log. Never let a logging failure fail the call.
+      if (this.deps.conversationRepo) {
+        try {
+          await logInboundCallOnCustomerTimeline({
+            conversationRepo: this.deps.conversationRepo,
+            tenantId: opts.tenantId,
+            customerId: callerKnown.customerId,
+            fromPhone: opts.from,
+            callSid: opts.callSid,
+            actorId: this.deps.systemActorId ?? 'system:inbound-call',
+            ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+          });
+        } catch (err) {
+          logger.error('inbound call timeline log failed', {
+            callSid: opts.callSid,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       // U4 — assemble B2B priority routing context for a business / property-
       // manager caller before driving the FSM forward.
       await this.loadB2bAccountContext(session, opts.tenantId, callerKnown.customerId);

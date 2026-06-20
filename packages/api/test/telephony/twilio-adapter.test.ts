@@ -27,6 +27,8 @@ import { InMemoryEstimateRepository, type Estimate } from '../../src/estimates/e
 import { InMemoryInvoiceRepository, type Invoice } from '../../src/invoices/invoice';
 import type { DocumentTotals } from '../../src/shared/billing-engine';
 import { InMemoryDroppedCallRecoveryRepository } from '../../src/sms/recovery/scheduler';
+import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
+import type { Pool } from 'pg';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -49,6 +51,8 @@ function makeAdapter(opts: {
   store?: VoiceSessionStore;
   leadRepo?: InMemoryLeadRepository;
   auditRepo?: InMemoryAuditRepository;
+  pool?: Pool;
+  conversationRepo?: InMemoryConversationRepository;
 } = {}) {
   const store = opts.store ?? new VoiceSessionStore();
   const gateway =
@@ -63,8 +67,21 @@ function makeAdapter(opts: {
     publicBaseUrl: 'https://example.com',
     ...(leadRepo ? { leadRepo } : {}),
     ...(auditRepo ? { auditRepo } : {}),
+    ...(opts.pool ? { pool: opts.pool } : {}),
+    ...(opts.conversationRepo ? { conversationRepo: opts.conversationRepo } : {}),
   });
   return { adapter, store, gateway, leadRepo, auditRepo };
+}
+
+/** Fake pool whose only query — identifyCaller's customers lookup — returns one
+ *  matched customer, so handleInbound takes the known-caller branch. */
+function matchedCallerPool(customerId: string, displayName: string): Pool {
+  return {
+    query: async (sql: string) =>
+      typeof sql === 'string' && sql.includes('FROM customers')
+        ? { rows: [{ id: customerId, display_name: displayName }] }
+        : { rows: [] },
+  } as unknown as Pool;
 }
 
 // ─── xmlEscape ───────────────────────────────────────────────────────────────
@@ -232,6 +249,42 @@ describe('TwilioGatherAdapter.handleInbound', () => {
     expect(xml).toMatch(/recorded/i);
     expect(xml).toContain('<Gather input="speech"');
     expect(xml).toContain('action="https://example.com/api/telephony/gather?sid=');
+  });
+
+  it('logs an identified inbound caller on their conversation timeline', async () => {
+    const conversationRepo = new InMemoryConversationRepository();
+    const { adapter } = makeAdapter({
+      pool: matchedCallerPool('cust-known', 'Jane Smith'),
+      conversationRepo,
+    });
+
+    await adapter.handleInbound({
+      callSid: 'CA-known',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+
+    const threads = await conversationRepo.findByEntity('tenant-abc', 'customer', 'cust-known');
+    expect(threads).toHaveLength(1);
+    const msgs = await conversationRepo.getMessages('tenant-abc', threads[0].id);
+    const callLog = msgs.find((m) => m.source === 'inbound_call');
+    expect(callLog).toBeTruthy();
+    expect(callLog!.metadata).toMatchObject({ direction: 'inbound', channel: 'call', callSid: 'CA-known' });
+    expect(callLog!.content).toMatch(/^Inbound call from/);
+  });
+
+  it('does not log a call timeline for an unknown caller', async () => {
+    const conversationRepo = new InMemoryConversationRepository();
+    const { adapter } = makeAdapter({ conversationRepo }); // no pool → caller unknown
+    await adapter.handleInbound({
+      callSid: 'CA-unknown',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    const threads = await conversationRepo.findByEntity('tenant-abc', 'customer', 'cust-known');
+    expect(threads).toHaveLength(0);
   });
 
   it('P8-014: handleInbound emits <Start><Record/></Start> when recordingCallbackPath is set', async () => {
