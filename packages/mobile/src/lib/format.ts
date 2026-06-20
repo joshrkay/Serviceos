@@ -16,8 +16,9 @@ export function formatMoneyCents(cents: number): string {
  * dashboard altitude); the detail screens use {@link formatMoneyCents}.
  */
 export function formatMoneyShort(cents: number): string {
-  const sign = cents < 0 ? '-' : '';
   const dollars = Math.round(Math.abs(cents) / 100);
+  // No sign when the magnitude rounds to $0 — otherwise -$0.40 renders "-$0".
+  const sign = cents < 0 && dollars !== 0 ? '-' : '';
   return `${sign}$${dollars.toLocaleString('en-US')}`;
 }
 

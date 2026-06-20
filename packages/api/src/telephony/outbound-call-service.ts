@@ -194,27 +194,32 @@ export async function initiateOutboundCall(
     throw new OutboundCallError('provider_failed', 'Call provider rejected the call');
   }
 
-  await deps.conversationRepo.updateMessageMetadata(input.tenantId, message.id, {
-    direction: 'outbound',
-    channel: 'call',
-    status: 'ringing',
-    target: customerPhone,
-    callerId: businessNumber,
-    callSid: data.sid,
-  });
-
-  if (deps.auditRepo) {
-    await deps.auditRepo.create(
-      createAuditEvent({
-        tenantId: input.tenantId,
-        actorId: input.actorId,
-        actorRole: input.actorRole,
-        eventType: 'call.initiated',
-        entityType: 'customer',
-        entityId: input.customerId,
-        metadata: { callSid: data.sid, conversationId: conversation.id, messageId: message.id },
-      }),
-    );
+  // The call is already placed at Twilio — the post-success bookkeeping below
+  // must never turn a connected call into a 500. Best-effort, like markFailed.
+  try {
+    await deps.conversationRepo.updateMessageMetadata(input.tenantId, message.id, {
+      direction: 'outbound',
+      channel: 'call',
+      status: 'ringing',
+      target: customerPhone,
+      callerId: businessNumber,
+      callSid: data.sid,
+    });
+    if (deps.auditRepo) {
+      await deps.auditRepo.create(
+        createAuditEvent({
+          tenantId: input.tenantId,
+          actorId: input.actorId,
+          actorRole: input.actorRole,
+          eventType: 'call.initiated',
+          entityType: 'customer',
+          entityId: input.customerId,
+          metadata: { callSid: data.sid, conversationId: conversation.id, messageId: message.id },
+        }),
+      );
+    }
+  } catch {
+    // Swallow: the call is live; losing the status/audit write must not 500.
   }
 
   return {

@@ -7,7 +7,9 @@ export const CALLBACK_NUMBER_KEY = 'serviceos.callbackNumber';
 /**
  * Normalize a typed phone to a callable form, or null when it can't be one.
  * Accepts US-style 10-digit input (prefixes +1) and already-E.164 input; keeps a
- * leading `+`, strips other punctuation, and requires 10–15 digits.
+ * leading `+`, strips other punctuation. Without a `+`, only US-style input is
+ * accepted (10 digits, or 11 starting with country code 1) — international
+ * numbers must be entered in `+` E.164 form so we never guess a country code.
  */
 export function normalizeCallbackNumber(raw: string | null | undefined): string | null {
   if (!raw) return null;
@@ -15,10 +17,13 @@ export function normalizeCallbackNumber(raw: string | null | undefined): string 
   const hasPlus = trimmed.startsWith('+');
   const digits = trimmed.replace(/\D/g, '');
   if (hasPlus) {
-    return digits.length >= 10 && digits.length <= 15 ? `+${digits}` : null;
+    // E.164: a real country code is 1–3 digits and never starts with 0.
+    return digits.length >= 11 && digits.length <= 15 && !digits.startsWith('0')
+      ? `+${digits}`
+      : null;
   }
   if (digits.length === 10) return `+1${digits}`; // bare US number
-  if (digits.length >= 11 && digits.length <= 15) return `+${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`; // US with country code
   return null;
 }
 

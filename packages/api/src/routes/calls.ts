@@ -73,7 +73,7 @@ export function createCallsRouter(deps: CallsRouterDeps): Router {
       } catch (err) {
         if (err instanceof OutboundCallError) {
           res
-            .status(CALL_ERROR_STATUS[err.code])
+            .status(CALL_ERROR_STATUS[err.code] ?? 500)
             .json({ error: err.code.toUpperCase(), message: err.message });
           return;
         }
@@ -116,7 +116,9 @@ export function createCallBridgeRouter(deps: CallBridgeRouterDeps): Router {
       const msg = messages.find((m) => m.id === messageId);
       const target = msg?.metadata?.['target'];
       const callerId = msg?.metadata?.['callerId'];
-      if (typeof target !== 'string' || typeof callerId !== 'string') {
+      // Only bridge an actual outbound-call log — never dial a `target` that
+      // happens to sit in some other message's metadata.
+      if (msg?.source !== 'outbound_call' || typeof target !== 'string' || typeof callerId !== 'string') {
         res.status(200).send(buildHangupTwiml());
         return;
       }

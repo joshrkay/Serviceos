@@ -85,7 +85,9 @@ export function createConversationRouter(
     '/customer/:customerId',
     requireAuth,
     requireTenant,
-    requirePermission('conversations:view'),
+    // Lazily creates a conversation when none exists, so gate on the write
+    // permission (matches POST /), not the read-only conversations:view.
+    requirePermission('conversations:create'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
       const customerId = req.params.customerId;

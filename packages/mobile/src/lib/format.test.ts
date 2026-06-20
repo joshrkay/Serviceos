@@ -18,6 +18,8 @@ describe('formatMoneyShort', () => {
     expect(formatMoneyShort(12999)).toBe('$130'); // rounds up
     expect(formatMoneyShort(123456789)).toBe('$1,234,568');
     expect(formatMoneyShort(-20000)).toBe('-$200');
+    expect(formatMoneyShort(-40)).toBe('$0'); // sub-dollar: no "-$0"
+    expect(formatMoneyShort(40)).toBe('$0');
   });
 });
 

@@ -12,8 +12,19 @@ describe('normalizeCallbackNumber', () => {
     expect(normalizeCallbackNumber('+44 20 7946 0958')).toBe('+442079460958');
   });
 
-  it('treats an 11-digit national number as E.164', () => {
+  it('treats an 11-digit US number (leading 1) as E.164', () => {
     expect(normalizeCallbackNumber('15551234567')).toBe('+15551234567');
+  });
+
+  it('rejects a no-plus 11-digit non-US number instead of guessing +0…', () => {
+    // UK mobile typed without +; must not become "+07911123456".
+    expect(normalizeCallbackNumber('07911 123456')).toBeNull();
+    expect(normalizeCallbackNumber('25551234567')).toBeNull();
+  });
+
+  it('rejects a +-prefixed number that is too short or starts with 0', () => {
+    expect(normalizeCallbackNumber('+5551234567')).toBeNull(); // 10 digits — no valid country code
+    expect(normalizeCallbackNumber('+0123456789')).toBeNull(); // country code can't start with 0
   });
 
   it('rejects too-short / empty / junk input', () => {

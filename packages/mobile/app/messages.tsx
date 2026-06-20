@@ -1,14 +1,26 @@
 import { useRouter } from 'expo-router';
+import { useState } from 'react';
 import { ActivityIndicator, FlatList, Pressable, RefreshControl, Text, View } from 'react-native';
 import { useConversations, type InboxThread } from '../src/messaging/useConversations';
 
 function threadName(t: InboxThread): string {
-  return t.customerName ?? t.conversation.entityId ?? t.conversation.title ?? 'Conversation';
+  // A friendly title wins; for unmatched-SMS threads the entityId is the phone.
+  return t.customerName ?? t.conversation.title ?? t.conversation.entityId ?? 'Conversation';
 }
 
 export default function Messages() {
   const router = useRouter();
   const { threads, isLoading, error, refetch } = useConversations();
+  const [refreshing, setRefreshing] = useState(false);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await refetch();
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const open = (t: InboxThread) => {
     router.push({
@@ -36,7 +48,7 @@ export default function Messages() {
         data={threads}
         keyExtractor={(t) => t.conversation.id}
         contentContainerStyle={{ padding: 24 }}
-        refreshControl={<RefreshControl refreshing={isLoading} onRefresh={() => void refetch()} />}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void onRefresh()} />}
         ListEmptyComponent={
           isLoading ? (
             <ActivityIndicator />

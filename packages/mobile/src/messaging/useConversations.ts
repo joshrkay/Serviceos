@@ -44,6 +44,7 @@ export function useConversations(
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const versionRef = useRef(0);
+  const hasLoadedRef = useRef(false);
   const apiRef = useRef(api);
   useEffect(() => {
     apiRef.current = api;
@@ -55,7 +56,9 @@ export function useConversations(
       return;
     }
     const myVersion = ++versionRef.current;
-    setIsLoading(true);
+    // Only surface loading on the first load; background polls refresh silently
+    // so a poll never blinks the pull-to-refresh / empty-state spinner.
+    if (!hasLoadedRef.current) setIsLoading(true);
     setError(null);
     try {
       const res = await apiRef.current('/api/conversations');
@@ -64,6 +67,7 @@ export function useConversations(
       const body = (await res.json()) as { threads?: InboxThread[] };
       if (myVersion !== versionRef.current) return;
       setThreads(Array.isArray(body.threads) ? body.threads : []);
+      hasLoadedRef.current = true;
     } catch (err) {
       if (myVersion !== versionRef.current) return;
       if (err instanceof Error && err.name === 'AbortError') return;

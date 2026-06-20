@@ -2907,7 +2907,11 @@ export function createApp(): express.Express {
     createCallBridgeRouter({
       ...(callDeps ? { callDeps } : {}),
       twilioAuthTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
-      ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
+      // Verify the signature against the SAME base the bridge URL is built from
+      // (outbound-call-service uses PUBLIC_API_URL ?? publicBaseUrl); otherwise
+      // the signed URL and the reconstructed URL diverge when PUBLIC_API_URL is
+      // unset and every callback 403s.
+      publicBaseUrl: process.env.PUBLIC_API_URL ?? publicBaseUrl,
     }),
   );
 
