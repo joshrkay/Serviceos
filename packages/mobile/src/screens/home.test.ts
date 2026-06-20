@@ -24,7 +24,7 @@ const h = vi.hoisted(() => ({
   error: null as Error | null,
 }));
 
-vi.mock('@clerk/clerk-expo', () => ({ useAuth: () => ({ signOut: h.signOut }) }));
+vi.mock('../push/useSignOut', () => ({ useSignOut: () => h.signOut }));
 vi.mock('expo-router', () => ({
   useRouter: () => ({ push: h.push, back: vi.fn(), replace: vi.fn() }),
 }));

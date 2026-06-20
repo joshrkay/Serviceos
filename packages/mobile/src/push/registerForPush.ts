@@ -19,6 +19,30 @@ export interface RegisterPushDeps {
   platform: 'ios' | 'android';
 }
 
+export interface UnregisterPushDeps {
+  getExpoPushToken: () => Promise<string | null>;
+  api: ApiFetch;
+}
+
+/**
+ * Revoke this device's push token on sign-out (DELETE /api/devices) so a
+ * signed-out install stops receiving the tenant's pushes. Best-effort — must
+ * run before the Clerk session is torn down (the API call needs the JWT).
+ */
+export async function unregisterForPush(deps: UnregisterPushDeps): Promise<void> {
+  try {
+    const token = await deps.getExpoPushToken();
+    if (!token) return;
+    await deps.api('/api/devices', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expoPushToken: token }),
+    });
+  } catch {
+    // best-effort; the server also prunes dead tokens
+  }
+}
+
 export async function registerForPush(deps: RegisterPushDeps): Promise<RegisterPushResult> {
   try {
     const current = await deps.getPermission();

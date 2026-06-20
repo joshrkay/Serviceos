@@ -1,8 +1,8 @@
-import { useAuth } from '@clerk/clerk-expo';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { useMe, type Mode } from '../src/hooks/useMe';
+import { useSignOut } from '../src/push/useSignOut';
 
 const MODES: Mode[] = ['supervisor', 'both', 'tech'];
 
@@ -10,7 +10,7 @@ const MODES: Mode[] = ['supervisor', 'both', 'tech'];
 // and lets the owner switch mode (POST /api/me/mode). Real Home/Today content
 // (money loop, approvals) arrives in later units.
 export default function Home() {
-  const { signOut } = useAuth();
+  const signOut = useSignOut();
   const router = useRouter();
   const { me, isLoading, error, switchMode } = useMe();
   const [modeError, setModeError] = useState<string | null>(null);

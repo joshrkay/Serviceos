@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { registerForPush, type RegisterPushDeps } from './registerForPush';
+import {
+  registerForPush,
+  unregisterForPush,
+  type RegisterPushDeps,
+  type UnregisterPushDeps,
+} from './registerForPush';
 
 function makeDeps(over: Partial<RegisterPushDeps> = {}): RegisterPushDeps {
   return {
@@ -72,5 +77,36 @@ describe('registerForPush', () => {
         makeDeps({ getExpoPushToken: vi.fn().mockRejectedValue(new Error('boom')) }),
       ),
     ).toBe('error');
+  });
+});
+
+describe('unregisterForPush', () => {
+  function deps(over: Partial<UnregisterPushDeps> = {}): UnregisterPushDeps {
+    return {
+      getExpoPushToken: vi.fn().mockResolvedValue('ExponentPushToken[abc]'),
+      api: vi.fn().mockResolvedValue({ ok: true, status: 204 }) as unknown as UnregisterPushDeps['api'],
+      ...over,
+    };
+  }
+
+  it('DELETEs the token from /api/devices', async () => {
+    const d = deps();
+    await unregisterForPush(d);
+    expect(d.api).toHaveBeenCalledWith('/api/devices', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expoPushToken: 'ExponentPushToken[abc]' }),
+    });
+  });
+
+  it('no token → no call', async () => {
+    const d = deps({ getExpoPushToken: vi.fn().mockResolvedValue(null) });
+    await unregisterForPush(d);
+    expect(d.api).not.toHaveBeenCalled();
+  });
+
+  it('swallows errors (never blocks sign-out)', async () => {
+    const d = deps({ api: vi.fn().mockRejectedValue(new Error('network')) as never });
+    await expect(unregisterForPush(d)).resolves.toBeUndefined();
   });
 });

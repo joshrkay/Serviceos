@@ -6,6 +6,7 @@ import { useEffect } from 'react';
 import { CLERK_PUBLISHABLE_KEY } from '../src/lib/env';
 import { tokenCache } from '../src/lib/tokenCache';
 import { usePushRegistration } from '../src/hooks/usePushRegistration';
+import { useNotificationRouter } from '../src/push/useNotificationRouter';
 
 // Redirect between the auth flow and the app based on Clerk's session state.
 function AuthGate() {
@@ -15,6 +16,8 @@ function AuthGate() {
 
   // Register this device for push once signed in (best-effort, fire-and-forget).
   usePushRegistration(Boolean(isSignedIn));
+  // Deep-link a tapped push into the proposal review screen.
+  useNotificationRouter();
 
   useEffect(() => {
     if (!isLoaded) return;
