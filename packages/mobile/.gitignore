@@ -2,6 +2,8 @@ node_modules/
 .expo/
 dist/
 web-build/
+.e2e-web/
+.e2e-results/
 *.log
 .env
 .env*.local

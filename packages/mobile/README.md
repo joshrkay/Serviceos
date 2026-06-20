@@ -79,3 +79,18 @@ internal build. Fill in the `submit.production.ios` placeholders in `eas.json` (
 ASC app id, team id). The build runs on Expo's servers — trigger it from your machine or a
 CI job with an `EXPO_TOKEN`, not from this repo's cloud env. Replace `assets/icon.png` (a
 solid-brand placeholder) with real branding before shipping.
+
+## Testing
+
+- **Unit / hook / screen** — `npm test` (root-hoisted Vitest). Pure logic, hooks,
+  and jsdom screen contract tests (tap targets, navigation). Runs in PR CI; see
+  `vitest.config.ts`. Coverage is gated (`--coverage`).
+- **Viewport (Playwright)** — `npm run e2e:viewport`. Builds the web export to
+  `.e2e-web` and runs `e2e/mobile-viewport.spec.ts` against it: the CLAUDE.md
+  "no horizontal overflow at 320px" invariant that jsdom can't measure, plus
+  ≥44px tap targets against real layout. The app is Clerk-gated, so the
+  tap-target checks only run when `EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY` points at a
+  reachable Clerk instance (provided in CI); without it the export serves a blank
+  shell and those checks skip while the no-overflow invariant still asserts. In a
+  sandbox without Playwright's bundled browser, set `PW_EXECUTABLE_PATH` to a
+  chromium binary.

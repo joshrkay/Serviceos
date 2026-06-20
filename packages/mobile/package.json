@@ -12,7 +12,9 @@
     "test": "vitest run",
     "test:rn": "jest",
     "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "export:web": "expo export --platform web --output-dir .e2e-web",
+    "e2e:viewport": "npm run export:web && playwright test --config playwright.config.ts"
   },
   "dependencies": {
     "@clerk/clerk-expo": "^2.19.0",
