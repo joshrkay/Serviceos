@@ -49,12 +49,13 @@ export function Walkthrough({ open, steps, tourId, onComplete, onDismiss }: Walk
 
   const step = steps[index];
 
-  // Track each step as it becomes visible.
+  // Track each step as it becomes visible. Depend on step?.id (not the step
+  // object) so a recreated steps array can't refire duplicate events.
   useEffect(() => {
     if (open && step) {
       track('tour_step_viewed', { tourId, stepId: step.id, stepIndex: index });
     }
-  }, [open, tourId, step, index]);
+  }, [open, tourId, step?.id, index]);
 
   if (!open || !step) return null;
 

@@ -15,11 +15,13 @@ import { getRuntimeConfigValue } from '../../lib/runtimeConfig';
 const FALLBACK = '/download';
 
 export function appStoreUrl(): string {
-  return getRuntimeConfigValue('VITE_APP_STORE_URL') ?? FALLBACK;
+  // `||` (not `??`) so an empty/whitespace value also falls back, even though
+  // getRuntimeConfigValue already normalizes empty strings to undefined.
+  return getRuntimeConfigValue('VITE_APP_STORE_URL') || FALLBACK;
 }
 
 export function playStoreUrl(): string {
-  return getRuntimeConfigValue('VITE_PLAY_STORE_URL') ?? FALLBACK;
+  return getRuntimeConfigValue('VITE_PLAY_STORE_URL') || FALLBACK;
 }
 
 /** True once at least one real store URL is configured. */

@@ -1,3 +1,4 @@
+import { Link } from 'react-router';
 import { Apple, Play } from 'lucide-react';
 import { track } from '../../lib/analytics';
 import { appStoreUrl, playStoreUrl } from './storeLinks';
@@ -51,22 +52,40 @@ function StoreBadge({
   name: string;
 }) {
   const isExternal = href.startsWith('http');
+  const className =
+    'inline-flex min-h-11 items-center gap-3 rounded-xl bg-slate-900 px-5 py-2.5 text-white transition-colors hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 focus-visible:ring-offset-1';
+  const onClick = () => track('download_app_clicked', { store });
+  const label = `${kicker} ${name}`;
+  const content = (
+    <>
+      <Icon size={22} className="shrink-0" />
+      <span className="flex flex-col leading-tight text-left">
+        <span className="text-[10px] uppercase tracking-wide text-slate-300">{kicker}</span>
+        <span className="text-sm font-medium">{name}</span>
+      </span>
+    </>
+  );
+
+  // Internal fallback (/download until the listings are live) routes through
+  // React Router so it doesn't trigger a full-page reload; real store URLs
+  // open in a new tab.
+  if (!isExternal) {
+    return (
+      <Link to={href} onClick={onClick} aria-label={label} className={className}>
+        {content}
+      </Link>
+    );
+  }
   return (
     <a
       href={href}
-      onClick={() => track('download_app_clicked', { store })}
-      aria-label={`${kicker} ${name}`}
-      target={isExternal ? '_blank' : undefined}
-      rel={isExternal ? 'noreferrer' : undefined}
-      className="inline-flex min-h-11 items-center gap-3 rounded-xl bg-slate-900 px-5 py-2.5 text-white transition-colors hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 focus-visible:ring-offset-1"
+      onClick={onClick}
+      aria-label={label}
+      target="_blank"
+      rel="noreferrer"
+      className={className}
     >
-      <Icon size={22} className="shrink-0" />
-      <span className="flex flex-col leading-tight text-left">
-        <span className="text-[10px] uppercase tracking-wide text-slate-300">
-          {kicker}
-        </span>
-        <span className="text-sm font-medium">{name}</span>
-      </span>
+      {content}
     </a>
   );
 }
