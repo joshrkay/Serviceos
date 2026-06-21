@@ -1,0 +1,45 @@
+# E2E Workflows (WF-01 … WF-50)
+
+Scheduled / manual run of the 50-workflow Playwright catalog.
+
+Maps each workflow ID to a test in `e2e/workflows/`. UI-surface checks run when
+Clerk is configured; matrix-backed rows skip with a pointer to `e2e:qa-matrix`.
+
+name: E2E Workflows
+
+on:
+  schedule:
+    - cron: '0 3 * * 1' # Mondays 03:00 UTC
+  workflow_dispatch:
+
+jobs:
+  workflows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Run workflow catalog (API + UI surface)
+        run: npm run e2e:workflows
+        env:
+          E2E_CLERK_PUBLISHABLE_KEY: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY }}
+          E2E_CLERK_SECRET_KEY: ${{ secrets.E2E_CLERK_SECRET_KEY }}
+          VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY }}
+          E2E_CLERK_HMAC_SECRET: ${{ secrets.E2E_CLERK_HMAC_SECRET }}
+          E2E_TENANT_A_ID: ${{ secrets.E2E_TENANT_A_ID }}
+          E2E_TENANT_B_ID: ${{ secrets.E2E_TENANT_B_ID }}
+          E2E_TENANT_B_CUSTOMER_ID: ${{ secrets.E2E_TENANT_B_CUSTOMER_ID }}
+        continue-on-error: true
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-workflows-report
+          path: |
+            playwright-report/
+            test-results/

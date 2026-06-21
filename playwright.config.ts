@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
+import { OWNER_AUTH_FILE } from './e2e/helpers/clerk-session';
 
 /**
  * Playwright config for ServiceOS E2E tests.
@@ -40,6 +41,14 @@ const includeCoverageSweep = process.env.COVERAGE_SWEEP === '1';
 // UI flow capture — screenshots every screen for docs/ui-flows. Opt-in via
 // UI_FLOW=1 (set by `npm run ui-flow:capture`) so the default e2e run skips it.
 const includeUiFlow = !!process.env.UI_FLOW;
+// 50-workflow catalog — opt-in via WORKFLOWS=1 (set by `npm run e2e:workflows`).
+const includeWorkflows = process.env.WORKFLOWS === '1';
+const hasClerkForAuthed =
+  !!(
+    process.env.E2E_CLERK_PUBLISHABLE_KEY ||
+    process.env.CLERK_PUBLISHABLE_KEY ||
+    process.env.VITE_CLERK_PUBLISHABLE_KEY
+  ) && !!(process.env.E2E_CLERK_SECRET_KEY || process.env.CLERK_SECRET_KEY);
 
 export default defineConfig({
   testDir: './e2e',
@@ -68,13 +77,21 @@ export default defineConfig({
   },
 
   projects: [
+    ...(hasClerkForAuthed && (includeUiFlow || includeWorkflows)
+      ? [
+          {
+            name: 'setup',
+            testMatch: /auth\.setup\.ts/,
+          },
+        ]
+      : []),
     {
       name: 'chromium',
       testDir: './e2e',
       // Exclude both the qa-matrix specs (their own project) and the
       // coverage-sweep spec (opt-in via the dedicated project below) so
       // the default `npm run e2e` does not run them.
-      testIgnore: ['**/qa-matrix/**', '**/coverage-sweep.spec.ts', '**/ui-flow-capture*.spec.ts'],
+      testIgnore: ['**/qa-matrix/**', '**/coverage-sweep.spec.ts', '**/ui-flow-capture*.spec.ts', '**/workflows/**'],
       use: {
         ...devices['Desktop Chrome'],
         // Same escape hatch the qa-matrix project has: runners whose
@@ -177,6 +194,55 @@ export default defineConfig({
             testIgnore: [],
             use: { ...devices['Desktop Chrome'] },
           },
+          ...(hasClerkForAuthed
+            ? [
+                {
+                  // Authenticated UI flow capture — uses Clerk storageState +
+                  // API mocks so list/detail screens render without Postgres.
+                  name: 'ui-flow-authed',
+                  dependencies: ['setup'],
+                  testDir: './e2e',
+                  testMatch: [
+                    'ui-flow-capture-authed.spec.ts',
+                    'ui-flow-capture-mobile-authed.spec.ts',
+                  ],
+                  testIgnore: [],
+                  use: {
+                    ...devices['Desktop Chrome'],
+                    storageState: OWNER_AUTH_FILE,
+                  },
+                },
+              ]
+            : []),
+        ]
+      : []),
+    ...(includeWorkflows
+      ? [
+          {
+            // 50-workflow UI catalog — maps WF-01…WF-50 to Playwright tests.
+            // Opt-in via WORKFLOWS=1 (`npm run e2e:workflows`).
+            name: 'workflows',
+            testDir: './e2e/workflows',
+            testMatch: ['**/*.spec.ts'],
+            testIgnore: ['**/07-authed-create-actions.spec.ts'],
+            use: { ...devices['Desktop Chrome'] },
+          },
+          ...(hasClerkForAuthed
+            ? [
+                {
+                  // Signed-in owner session — create-action + deeper P0 UI checks.
+                  name: 'workflows-authed',
+                  dependencies: ['setup'],
+                  testDir: './e2e/workflows',
+                  testMatch: ['06-p0-ui-deep.spec.ts', '04-money.spec.ts', '07-authed-create-actions.spec.ts'],
+                  testIgnore: [],
+                  use: {
+                    ...devices['Desktop Chrome'],
+                    storageState: OWNER_AUTH_FILE,
+                  },
+                },
+              ]
+            : []),
         ]
       : []),
   ],

@@ -34,6 +34,7 @@ serviceos_training/.pytest_cache/
 # seed-journey-fixtures.ts; consumed by teardown-test-db.ts). Never commit.
 e2e/fixtures/.test-db-state.json
 e2e/fixtures/.journey-fixtures.env
+e2e/fixtures/.auth/
 
 # QA matrix run artifacts (reports folders are kept; transient outputs ignored)
 /qa/artifacts/*
