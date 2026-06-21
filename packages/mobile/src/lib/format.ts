@@ -1,14 +1,10 @@
 // Display formatters shared by the read screens. Money is always integer cents
 // (never float math); dates render in the tenant's timezone per CLAUDE.md.
+import { formatUsdCentsFixed } from '@ai-service-os/shared';
 
-/** Integer cents → "$1,234.56" (or "-$20.00"). */
-export function formatMoneyCents(cents: number): string {
-  const sign = cents < 0 ? '-' : '';
-  const abs = Math.abs(Math.trunc(cents));
-  const dollars = Math.floor(abs / 100).toLocaleString('en-US');
-  const rem = String(abs % 100).padStart(2, '0');
-  return `${sign}$${dollars}.${rem}`;
-}
+/** Integer cents → "$1,234.56" (or "-$20.00"). Delegates to the cross-package
+ *  canonical so detail-screen money matches the web/api rendering exactly. */
+export const formatMoneyCents = formatUsdCentsFixed;
 
 /**
  * Integer cents → whole dollars for at-a-glance dashboard figures, e.g.
