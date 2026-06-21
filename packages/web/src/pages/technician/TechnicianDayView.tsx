@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
+import { TechnicianProfitCard } from '../../components/technician/TechnicianProfitCard';
 
 export interface TechnicianAppointment {
   id: string;
@@ -524,6 +525,9 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
           </button>
         </div>
       </div>
+
+      {/* Manager-only (invoices:view-gated; hides for technicians). */}
+      <TechnicianProfitCard technicianId={technicianId} />
 
       {nextAppointment && (
         <div className="technician-day-view__next" data-testid="technician-day-next-appointment">

@@ -19,8 +19,8 @@ booking + intake, time tracking, expenses, Google reviews, financial reporting,
 |---|---------|--------|------|--------|
 | 1 | Customer source/origin tracking ("How did you hear about us?") | CRM | S | ✅ done |
 | 4 | Customer profitability report | Reporting | S | ✅ done |
+| 3 | Technician profitability report | Reporting | S | ✅ done |
 | 2 | Surcharge / processing-fee pass-through | Payments | S | todo |
-| 3 | Technician profitability report | Reporting | S | todo |
 | 5 | Tip collection at checkout | Payments | S | todo |
 | 6 | Maintenance contracts DB persistence (graduate stub) | Jobs | M | todo |
 | 7 | Payment plan / installment support (expose milestone schedules) | Payments | M | todo |
@@ -41,3 +41,9 @@ fully testable in CI.
   (reuses getJobProfit) + GET /api/reports/customer-profit/:customerId +
   CustomerProfitCard on the customer detail + unit/route/web tests. No schema
   change (read-only).
+- Iteration 3: #3 Technician profitability report — generalized the rollup into
+  src/reports/job-profit-rollup.ts (aggregateJobProfits, shared by customer +
+  technician), getTechnicianProfit + GET /api/reports/technician-profit/:id +
+  shared web ProfitCard (CustomerProfitCard/TechnicianProfitCard wrappers) +
+  TechnicianProfitCard on the technician day view (invoices:view-gated). No
+  schema change.
