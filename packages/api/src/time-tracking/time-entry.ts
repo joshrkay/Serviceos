@@ -83,7 +83,12 @@ export interface TimeEntryRepository {
   findById(tenantId: string, id: string): Promise<TimeEntry | null>;
   findActiveByUser(tenantId: string, userId: string): Promise<TimeEntry | null>;
   findByTenant(tenantId: string, options?: TimeEntryListOptions): Promise<TimeEntry[]>;
-  /** All time entries logged against a job (any user, any entry type). */
+  /**
+   * All time entries logged against a job (any user, any entry type).
+   * Tenant-scoped. Used by per-job profit (jobs/job-profit.ts, P22-005/U7),
+   * which filters to entry_type='job' and sums durationMinutes. Mirrors
+   * InvoiceRepository.findByJob.
+   */
   findByJob(tenantId: string, jobId: string): Promise<TimeEntry[]>;
   /**
    * Closes an entry by id. Returns the updated row or null if no row

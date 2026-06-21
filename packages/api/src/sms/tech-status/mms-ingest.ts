@@ -275,6 +275,14 @@ export interface MmsIngestQueuePayload {
   /** Twilio MessageSid — also drives the idempotency key. */
   messageSid: string;
   mediaItems: InboundSmsMedia[];
+  /**
+   * U2 — the SMS text the customer sent with the photo(s), if any. The tech
+   * path ignores it (photos attach to the active job regardless of body);
+   * the customer MMS-to-quote path feeds it into the vision estimate
+   * context. Optional + forward-compatible: legacy in-flight messages that
+   * pre-date this field decode fine (the worker treats absent as no body).
+   */
+  body?: string;
 }
 
 /**
@@ -313,6 +321,10 @@ export function registerMmsIngestHandler(
         fromPhone: ctx.fromE164,
         messageSid: ctx.messageSid,
         mediaItems: media.map((m) => ({ ...m })),
+        // U2 — carry the customer's accompanying text for the MMS-to-quote
+        // path; only set when non-empty so the tech path's payload is
+        // byte-for-byte unchanged when there's no body.
+        ...(ctx.body && ctx.body.trim().length > 0 ? { body: ctx.body } : {}),
       };
       const messageId = await deps.queue.send(
         MMS_INGEST_QUEUE_TYPE,

@@ -55,6 +55,26 @@ describe('P2-002 — Typed proposal contracts', () => {
     expect(result.errors).toBeUndefined();
   });
 
+  it('create_appointment — accepts a valid appointmentType, rejects out-of-enum', () => {
+    const base = {
+      jobId: validJobId,
+      scheduledStart: '2026-04-01T09:00:00Z',
+      scheduledEnd: '2026-04-01T11:00:00Z',
+    };
+    // valid enum value rides through
+    expect(
+      validateProposalPayload('create_appointment', { ...base, appointmentType: 'install' })
+        .valid,
+    ).toBe(true);
+    // optional — absence is still valid
+    expect(validateProposalPayload('create_appointment', base).valid).toBe(true);
+    // never trust an unconstrained value (urgency is not a type)
+    expect(
+      validateProposalPayload('create_appointment', { ...base, appointmentType: 'emergency' })
+        .valid,
+    ).toBe(false);
+  });
+
   it('happy path — validates draft_estimate payload', () => {
     const result = validateProposalPayload('draft_estimate', {
       customerId: validCustomerId,
@@ -388,6 +408,41 @@ describe('RV-007 — payload _meta confidence marker', () => {
         _meta: { overallConfidence: 'bogus' },
       }),
     ).toThrow(ValidationError);
+  });
+});
+
+// ─── voice_clarification reasons ─────────────────────────────────────────────
+describe('voice_clarification reason enum', () => {
+  it('accepts each existing reason', () => {
+    for (const reason of [
+      'unknown_intent',
+      'low_confidence',
+      'parse_failed',
+      'missing_entities',
+      'ambiguous_entity',
+    ]) {
+      const result = validateProposalPayload('voice_clarification', {
+        transcript: 'I heard something',
+        reason,
+      });
+      expect(result.valid).toBe(true);
+    }
+  });
+
+  it('accepts the P2-036 V2 ambiguous_discount_target reason', () => {
+    const result = validateProposalPayload('voice_clarification', {
+      transcript: 'can you knock some off',
+      reason: 'ambiguous_discount_target',
+    });
+    expect(result.valid).toBe(true);
+  });
+
+  it('rejects an unknown reason', () => {
+    const result = validateProposalPayload('voice_clarification', {
+      transcript: 'hello',
+      reason: 'not_a_real_reason',
+    });
+    expect(result.valid).toBe(false);
   });
 });
 

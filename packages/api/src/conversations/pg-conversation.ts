@@ -6,6 +6,9 @@ import {
   ConversationRepository,
   CreateConversationInput,
   CreateMessageInput,
+  INBOX_ENTITY_TYPES,
+  InboxThreadSummary,
+  ListInboxThreadsOptions,
   Message,
 } from './conversation-service';
 
@@ -133,4 +136,93 @@ export class PgConversationRepository extends PgBaseRepository implements Conver
       return mapMessageRow(result.rows[0]);
     });
   }
+
+  async listInboxThreads(
+    tenantId: string,
+    options: ListInboxThreadsOptions = {},
+  ): Promise<InboxThreadSummary[]> {
+    const limit = options.limit ?? 50;
+    return this.withTenant(tenantId, async (client) => {
+      // $1 tenant, $2 entity-type allow-list; status/limit appended in order.
+      const params: unknown[] = [tenantId, [...INBOX_ENTITY_TYPES]];
+      let statusClause = '';
+      if (options.status) {
+        params.push(options.status);
+        statusClause = `AND c.status = $${params.length}`;
+      }
+      params.push(limit);
+      const limitParam = `$${params.length}`;
+
+      // One row per comms thread, summarised by its newest message (LATERAL
+      // top-1) plus a message count. `customers` is joined only for 'customer'
+      // threads; the id↔entity_id compare is on text so non-UUID unmatched
+      // entity_ids (E.164 phones) never hit a uuid cast. Newest-message
+      // direction (explicit metadata, else sender_role) drives needs-reply
+      // ordering so unanswered customer texts float to the top.
+      const sql = `
+        SELECT * FROM (
+          SELECT
+            c.id, c.tenant_id, c.title, c.entity_type, c.entity_id, c.status,
+            c.created_by, c.created_at, c.updated_at,
+            lm.content AS last_content,
+            lm.created_at AS last_created_at,
+            mc.message_count,
+            -- Display name for the thread's contact: customers by display_name,
+            -- leads by their name (else company). Compared on text so non-UUID
+            -- unmatched entity_ids (E.164 phones) never hit a uuid cast.
+            COALESCE(
+              cust.display_name,
+              NULLIF(TRIM(COALESCE(ld.first_name, '') || ' ' || COALESCE(ld.last_name, '')), ''),
+              ld.company_name
+            ) AS customer_name,
+            COALESCE(
+              lm.metadata->>'direction',
+              CASE WHEN lm.sender_role = 'customer' THEN 'inbound' ELSE 'outbound' END
+            ) AS last_direction
+          FROM conversations c
+          JOIN LATERAL (
+            SELECT m.content, m.created_at, m.sender_role, m.metadata
+            FROM messages m
+            WHERE m.tenant_id = c.tenant_id AND m.conversation_id = c.id
+            ORDER BY m.created_at DESC
+            LIMIT 1
+          ) lm ON true
+          JOIN LATERAL (
+            SELECT count(*)::int AS message_count
+            FROM messages m2
+            WHERE m2.tenant_id = c.tenant_id AND m2.conversation_id = c.id
+          ) mc ON true
+          LEFT JOIN customers cust
+            ON cust.tenant_id = c.tenant_id
+            AND c.entity_type = 'customer'
+            AND cust.id::text = c.entity_id
+          LEFT JOIN leads ld
+            ON ld.tenant_id = c.tenant_id
+            AND c.entity_type = 'lead'
+            AND ld.id::text = c.entity_id
+          WHERE c.tenant_id = $1
+            AND c.entity_type = ANY($2)
+            ${statusClause}
+        ) t
+        ${options.needsReplyOnly ? `WHERE t.last_direction = 'inbound'` : ''}
+        ORDER BY (t.last_direction = 'inbound') DESC, t.last_created_at DESC
+        LIMIT ${limitParam}
+      `;
+      const { rows } = await client.query(sql, params);
+      return rows.map(mapInboxRow);
+    });
+  }
+}
+
+function mapInboxRow(row: Record<string, unknown>): InboxThreadSummary {
+  const direction = row.last_direction === 'inbound' ? 'inbound' : 'outbound';
+  return {
+    conversation: mapConversationRow(row),
+    lastMessageAt: new Date(row.last_created_at as string).toISOString(),
+    lastMessagePreview: ((row.last_content as string | null) ?? '').slice(0, 160),
+    lastMessageDirection: direction,
+    needsReply: direction === 'inbound',
+    messageCount: Number(row.message_count),
+    ...(row.customer_name ? { customerName: row.customer_name as string } : {}),
+  };
 }

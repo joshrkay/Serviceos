@@ -47,6 +47,10 @@ export const es: Record<keyof EnglishNotifications, string> = {
   'sms.feedback.request':
     'Gracias por elegir a {{business}}. Nos encantaría conocer su opinión: {{url}}',
 
+  // ── Post-job thank-you SMS ────────────────────────────────────────────
+  'sms.thank_you.line1':
+    '¡Gracias por elegir a {{business}}! Fue un placer trabajar con usted.',
+
   // ── Shared email fragments ───────────────────────────────────────────
   'email.common.intro': 'Hola {{name}}:',
   'email.common.signature': '— {{business}}',

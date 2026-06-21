@@ -51,6 +51,9 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     autoApplyInternalUpdates: row.auto_apply_internal_updates as boolean | undefined,
     autoSendAppointmentReminders: row.auto_send_appointment_reminders as boolean | undefined,
     autoInvoiceOnCompletion: row.auto_invoice_on_completion as boolean | undefined,
+    // Migration 194 — DEFAULT TRUE at the column level so legacy rows
+    // surface as `true` (matches the "built-in, included" framing).
+    sendThankYouSms: row.send_thank_you_sms as boolean | undefined,
     billLaborFromTimeEntries: row.bill_labor_from_time_entries as boolean | undefined,
     batchInvoiceEnabled: row.batch_invoice_enabled as boolean | undefined,
     milestoneBillingEnabled: row.milestone_billing_enabled as boolean | undefined,
@@ -75,6 +78,14 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     depositFixedCents: (row.deposit_fixed_cents as number | null) ?? undefined,
     depositRequiredAboveCents:
       (row.deposit_required_above_cents as number | null) ?? undefined,
+    // P2-036 V2 (Discount policy — U1) — migration 178. All three columns
+    // are nullable with no DEFAULT; NULL surfaces as undefined to match the
+    // InMemory repo shape. resolveDiscountPolicy fail-closes any absent
+    // value to the V1-identical posture.
+    discountMaxBps: (row.discount_max_bps as number | null) ?? undefined,
+    discountFloorCents: (row.discount_floor_cents as number | null) ?? undefined,
+    discountNeverBelowCatalog:
+      (row.discount_never_below_catalog as boolean | null) ?? undefined,
     // Tier 4 — migration 079. Default 'after_approval' applies at the
     // column level so any row written before this migration reads as
     // the safe pre-existing flow.
@@ -97,6 +108,9 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
       return raw;
     })(),
     jobBufferMinutes: (row.job_buffer_minutes as number | null) ?? undefined,
+    // P22-005 (U7) — migration 181. Billable labor rate (integer cents/hr).
+    laborRateCentsPerHour:
+      (row.labor_rate_cents_per_hour as number | null) ?? undefined,
     // B1 — migration 088. NULL from DB → undefined in TS (same
     // convention as all other nullable optional columns here).
     voiceAgentName: (row.voice_agent_name as string | null) ?? undefined,
@@ -278,6 +292,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         autoApplyInternalUpdates: 'auto_apply_internal_updates',
         autoSendAppointmentReminders: 'auto_send_appointment_reminders',
         autoInvoiceOnCompletion: 'auto_invoice_on_completion',
+        // Migration 194.
+        sendThankYouSms: 'send_thank_you_sms',
         billLaborFromTimeEntries: 'bill_labor_from_time_entries',
         batchInvoiceEnabled: 'batch_invoice_enabled',
         milestoneBillingEnabled: 'milestone_billing_enabled',
@@ -288,10 +304,17 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         depositPercentageBps: 'deposit_percentage_bps',
         depositFixedCents: 'deposit_fixed_cents',
         depositRequiredAboveCents: 'deposit_required_above_cents',
+        // P2-036 V2 (Discount policy — U1) — migration 178. Each accepts an
+        // explicit `null` to clear the value (vs `undefined` = "don't touch").
+        discountMaxBps: 'discount_max_bps',
+        discountFloorCents: 'discount_floor_cents',
+        discountNeverBelowCatalog: 'discount_never_below_catalog',
         // Tier 4 — migration 079.
         depositTimingPolicy: 'deposit_timing_policy',
         // §9 — migration 098.
         hourlyRateCents: 'hourly_rate_cents',
+        // P22-005 (U7) — migration 181.
+        laborRateCentsPerHour: 'labor_rate_cents_per_hour',
         // B1 — migration 088.
         voiceAgentName: 'voice_agent_name',
         voiceGreeting: 'voice_greeting',

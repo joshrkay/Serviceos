@@ -18,15 +18,15 @@ Return valid JSON with this exact shape:
   "city": "<string or null>",
   "state": "<string or null>",
   "verticals": [
-    { "type": "hvac" | "plumbing" | "electrical", "confidence": <0-1>, "source_text": "<quote from transcript>" }
+    { "type": "hvac" | "plumbing" | "electrical" | "painting", "confidence": <0-1>, "source_text": "<quote from transcript>" }
   ],
   "service_descriptions": ["<string>"],
   "confidence_score": <0-1>
 }
 
 Rules:
-- Only identify verticals from this list: hvac, plumbing, electrical.
-- Electrical is supported as a basic second-class vertical; do not infer rich electrical pack details.
+- Only identify verticals from this list: hvac, plumbing, electrical, painting.
+- Electrical and painting are supported as basic second-class verticals; do not infer rich pack details.
 - If the transcript is too vague to identify the vertical, return an empty verticals array.
 - Do NOT guess or fabricate information not present in the transcript.
 - Casual or uncertain mentions ("we sometimes help with plumbing") should get low confidence (< 0.5).

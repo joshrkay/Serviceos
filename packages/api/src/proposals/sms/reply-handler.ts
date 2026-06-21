@@ -30,6 +30,7 @@
 import {
   parseProposalSmsReply,
   APPROVE_TOKENS,
+  APPROVE_ALL_TOKENS,
   REJECT_TOKENS,
   EDIT_TOKENS,
 } from '@ai-service-os/shared';
@@ -43,6 +44,7 @@ import type { Proposal, ProposalRepository } from '../proposal';
 import { actionClassForProposalType } from '../proposal';
 import {
   approveChainSet,
+  approveProposalsBatch,
   editProposal,
   formatChainSetApprovalMessage,
   rejectProposal,
@@ -60,7 +62,9 @@ import { resolveApproverPhones, isApprover } from '../approver-identity';
 import { STOP_KEYWORDS, START_KEYWORDS } from '../../compliance/stop-reply';
 import {
   type ProposalSmsEventRepository,
+  type ProposalSmsEvent,
   createProposalSmsEvent,
+  parseDigestApproveAllIds,
 } from './sms-event';
 import { renderReapprovalSms } from './render';
 
@@ -237,6 +241,78 @@ async function recordInbound(
   );
 }
 
+/**
+ * U5 — bulk approve. Fans out over every ready_for_review proposal that a
+ * single texted Y could approve — capture-class AND not low-confidence — and
+ * delegates to the shared batch-approve path. Money / comms / irreversible /
+ * low-confidence proposals are EXCLUDED (same gates as handleApprove): they
+ * need deliberate in-app review and never slip through a blanket text.
+ *
+ * Scope note: this approves the currently-eligible set rather than an exact
+ * digest snapshot — for a solo owner replying to the digest the two coincide,
+ * and the per-proposal gates keep it safe. Idempotent by construction: an
+ * already-approved proposal leaves ready_for_review, so a repeated ALL (new
+ * MessageSid) re-approves nothing.
+ */
+async function handleApproveAll(
+  deps: ProposalSmsReplyDeps,
+  ctx: InboundSmsContext,
+): Promise<HandlerResult> {
+  const pending = await deps.proposalRepo.findByStatus(ctx.tenantId, 'ready_for_review');
+  const candidates = pending.filter(
+    (p) =>
+      actionClassForProposalType(p.proposalType) === 'capture' &&
+      !confidenceMetaBlocksAutoApprove(p.payload),
+  );
+  // Mirror the single-approve path's pending-edit guard: a proposal with an
+  // unapplied edit request still shows its STALE pre-edit payload, so a blanket
+  // ALL must not approve (and execute) it. Excluded here, not failed in the
+  // batch, so the owner gets an honest "approved N" count. The per-proposal
+  // lookups are parallelized (Promise.all) — the loop has no early exit, so
+  // sequential round-trips would add avoidable latency on the SMS webhook path.
+  const hasUnappliedEdit = await Promise.all(
+    candidates.map((p) => deps.smsEventRepo.hasUnappliedEditRequest(ctx.tenantId, p.id)),
+  );
+  const eligible = candidates.filter((_, idx) => !hasUnappliedEdit[idx]);
+
+  if (eligible.length === 0) {
+    await audit(deps, ctx, 'proposal.sms_approve_all_none', '', { pending: pending.length });
+    await reply(
+      deps,
+      ctx.fromE164,
+      'Nothing is waiting that I can approve in bulk. Open your review queue for anything that needs a closer look.',
+    );
+    return { handled: true, handler: HANDLER_NAME, reason: 'approve_all_none' };
+  }
+
+  const result = await approveProposalsBatch(
+    deps.proposalRepo,
+    ctx.tenantId,
+    eligible.map((p) => p.id),
+    SMS_REPLY_ACTOR_ID,
+    'owner',
+    deps.auditRepo,
+    'sms',
+  );
+
+  await audit(deps, ctx, 'proposal.sms_approved_all', '', {
+    requested: eligible.length,
+    approved: result.approved.length,
+    failed: result.failed.length,
+    excluded: pending.length - eligible.length,
+  });
+
+  const n = result.approved.length;
+  await reply(
+    deps,
+    ctx.fromE164,
+    n === eligible.length
+      ? `Approved all ${n} item${n === 1 ? '' : 's'} that were ready. ✅`
+      : `Approved ${n} of ${eligible.length} — the rest need a closer look. Check your review queue.`,
+  );
+  return { handled: true, handler: HANDLER_NAME, reason: 'approved_all' };
+}
+
 async function handleApprove(
   deps: ProposalSmsReplyDeps,
   ctx: InboundSmsContext,
@@ -369,6 +445,14 @@ function approvalConfirmation(
     summary,
     `Approved — "${fallbackSummary}" will run shortly.`,
   );
+}
+
+
+/** seq-aware recency: createdAt first, the monotonic seq breaks ms ties. */
+function isNewerThan(a: ProposalSmsEvent, b: ProposalSmsEvent): boolean {
+  const byTime = a.createdAt.getTime() - b.createdAt.getTime();
+  if (byTime !== 0) return byTime > 0;
+  return (a.seq ?? 0) > (b.seq ?? 0);
 }
 
 /**
@@ -507,6 +591,12 @@ export async function handleProposalSmsReply(
     return { handled: false, handler: HANDLER_NAME, reason: 'unrecognized_keyword' };
   }
 
+  // U5 — "ALL" / "APPROVE ALL" is tenant-wide, not a single-render target, so
+  // it branches BEFORE the most-recent-render resolution.
+  if (parsed.intent === 'approve_all') {
+    return handleApproveAll(deps, ctx);
+  }
+
   const target = await resolveTargetProposal(deps, ctx.tenantId);
   if (target.kind === 'none') {
     await audit(deps, ctx, 'proposal.sms_reply_no_pending', '', {
@@ -564,6 +654,7 @@ export const COMPLIANCE_RESERVED_TOKENS: ReadonlySet<string> = new Set([
 export class ProposalReplyKeywordHandler implements KeywordHandler {
   readonly keywords: readonly string[] = [
     ...APPROVE_TOKENS,
+    ...APPROVE_ALL_TOKENS,
     ...REJECT_TOKENS,
     ...EDIT_TOKENS,
   ].filter((k) => !COMPLIANCE_RESERVED_TOKENS.has(k));

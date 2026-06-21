@@ -361,8 +361,9 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
         `INSERT INTO estimate_line_items (
           id, tenant_id, estimate_id, description, category,
           quantity, unit_price_cents, total_cents, sort_order, taxable,
-          group_key, group_label, is_optional, is_default_selected
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+          group_key, group_label, is_optional, is_default_selected,
+          pricing_source
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
         [
           rowId,
           tenantId,
@@ -378,6 +379,10 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
           item.groupLabel ?? null,
           item.isOptional ?? false,
           item.isDefaultSelected ?? false,
+          // Catalog-grounding signal threaded from the proposal payload
+          // (set by the catalog resolver). Undefined on legacy/manual
+          // creates → SQL NULL → treated as NOT grounded.
+          item.pricingSource ?? null,
         ],
       );
     }

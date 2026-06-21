@@ -39,37 +39,61 @@ export function PortalEstimateList({ token }: { token: string }) {
 
   return (
     <div className="space-y-3">
-      {estimates.map((e) => (
-        <PortalCard
-          key={e.id}
-          title={e.estimateNumber}
-          subtitle={`Status: ${e.status.replace(/_/g, ' ')}`}
-          trailing={
-            <span className="text-base font-semibold text-slate-900">
-              {formatPortalCents(e.totalCents)}
-            </span>
-          }
-        >
-          <div className="flex items-center justify-between gap-2">
-            <div className="text-xs text-slate-500">
-              Created {new Date(e.createdAt).toLocaleDateString()}
-              {e.validUntil
-                ? ` · valid until ${new Date(e.validUntil).toLocaleDateString()}`
-                : ''}
+      {estimates.map((e) => {
+        // depositPayable is true only for the accepted estimate that still
+        // owes a deposit (server-gated), so the badge/CTA never bleed onto
+        // sibling estimates of the same job.
+        const depositRemainingCents = Math.max(
+          0,
+          (e.depositRequiredCents ?? 0) - (e.depositPaidCents ?? 0),
+        );
+        const depositPaid =
+          e.status === 'accepted' && e.depositStatus === 'paid';
+        return (
+          <PortalCard
+            key={e.id}
+            title={e.estimateNumber}
+            subtitle={`Status: ${e.status.replace(/_/g, ' ')}`}
+            trailing={
+              <div className="text-right">
+                <div className="text-base font-semibold text-slate-900">
+                  {formatPortalCents(e.totalCents)}
+                </div>
+                {e.depositPayable ? (
+                  <div className="text-xs text-rose-600">
+                    {formatPortalCents(depositRemainingCents)} deposit due
+                  </div>
+                ) : depositPaid ? (
+                  <div className="text-xs text-emerald-600">Deposit paid</div>
+                ) : null}
+              </div>
+            }
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0 text-xs text-slate-500">
+                Created {new Date(e.createdAt).toLocaleDateString()}
+                {e.validUntil
+                  ? ` · valid until ${new Date(e.validUntil).toLocaleDateString()}`
+                  : ''}
+              </div>
+              {e.publicViewToken ? (
+                <a
+                  href={`/e/${e.publicViewToken}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={
+                    e.depositPayable
+                      ? 'inline-flex min-h-11 items-center rounded-lg bg-slate-900 px-3 text-sm font-medium text-white hover:bg-slate-800'
+                      : 'inline-flex min-h-11 items-center text-sm font-medium text-slate-900 underline'
+                  }
+                >
+                  {e.depositPayable ? 'Pay deposit' : 'View & respond'}
+                </a>
+              ) : null}
             </div>
-            {e.publicViewToken ? (
-              <a
-                href={`/e/${e.publicViewToken}`}
-                target="_blank"
-                rel="noreferrer"
-                className="text-sm font-medium text-slate-900 underline"
-              >
-                View &amp; respond
-              </a>
-            ) : null}
-          </div>
-        </PortalCard>
-      ))}
+          </PortalCard>
+        );
+      })}
     </div>
   );
 }

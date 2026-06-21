@@ -260,8 +260,47 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['176_customer_payment_methods', '6fe12975c7999002a67de1722a402a6bd017d0e8db4c84fd70d2d85dad439890'],
   ['177_digest_entries', '8ebc2dc5b5c449bf7b94f2c6a11a17af2c91092e0fff24bdf6e824f0f1af21ac'],
   ['177_customer_payment_methods_stripe_account', '4aac0f8afc6b5e3fb72ec4e866233905e9e7e4ea95699e61705c8da10878ab12'],
-  // P-mobile: device_tokens for Capacitor push notifications (RLS-scoped).
-  ['178_create_device_tokens', 'cb706dec8bb1efd2b195174218c03e18b39f026a46d788f5f11f4a1ef3007b85'],
+  // P2-036 V2 (U1): per-tenant discount policy columns (max bps / floor cents /
+  // never-below-catalog), all nullable; resolver fail-closes to V1 posture.
+  ['178_tenant_settings_discount_policy', '91f7884b3b81fbd78cbe0f2d16ac6b8d0d78234358ee788f555ff478204b0760'],
+  // P2-036 V2 (U-G): persist per-line catalog-grounding signal
+  // (pricing_source) on estimate_line_items; nullable, additive, CHECK
+  // admits NULL. NULL reads as not-grounded (conservative).
+  ['179_estimate_line_items_pricing_source', '7ee44a4eb201341367064df3df6dcae61544a1873f88ee4b57d5429aef64f4bd'],
+  // CI fix: B2B account-hierarchy parent_account_id column + index that
+  // pg-customer.ts already used but had no migration for (broke every
+  // customers INSERT against a real DB).
+  ['180_customers_parent_account', '7019b21f41726e45265629443c381175f5cc5ef8e01dd14b8d60fec701d4303b'],
+  // appointment-type feature (from main); migration landed in schema.ts but its
+  // snapshot entry was lost in the auto-merge into this branch.
+  ['182_appointment_type', '0dc29a194dbb25f2a19a53a453044362a86afde22a3a29447e1cc99e512547e1'],
+  // CI fix: merged features whose code shipped without their migrations.
+  ['183_customers_account_type_property_manager', 'f373682884c0e1e5b74d1b8a186d44fb302e25c1791595da9814a7b572c453c3'],
+  ['184_tenant_settings_labor_rate', '5552a7d845275663af1ac4f2df1c64897989f11625ffeb6f595153d9305b1355'],
+  ['185_correction_lessons', 'cb361b7505166e97eab2b627e660df67788b446fedd147f918e877d14b8ca8cf'],
+  // U1 (CRM Jobber parity): multiple contacts per customer.
+  ['186_customer_contacts', 'c8fdfca6951000919fbe3eeb24b11be47415c486c2fcd564d47fb5f15641daa9'],
+  // U2 (CRM Jobber parity): customer tags + tenant-defined custom fields.
+  ['187_customer_tags_custom_fields', 'b1f86f9b3a0073f5d82cfeb0d3b2d7e5c288c37a206d91a8e2506f03449d9ad4'],
+  // U3 (CRM Jobber parity): billing vs service address on service_locations.
+  ['188_service_location_address_type', '0595b37bf8f98f5663ab0b55c50834f6d38e5124c05768ff18bde6ad88db62d2'],
+  // U5 (JTBD #7): widen proposal_sms_events kind CHECK for the digest
+  // 'digest_approve_all_rendered' anchor (additive, pre-deploy).
+  ['189_proposal_sms_events_digest_approve_all_kind', 'e66034b7738726dc1289801770c998c722b7a13c314f410c38d993b6973c296d'],
+  ['190_dispatch_entity_conversation_reply', 'f68dcf4009222fb5f516bb37d914124ba2e6eb761d3469c7c11eee7cc855641a'],
+  // CRM two-way comms: extend leads_source_check to admit 'sms' (text-origin leads).
+  ['191_extend_leads_source_check_sms', 'a255c4625c8fd00f4f0e1b4335d001f518bc20616e3c60af87ac2d87d836aef2'],
+  // Add the missing tenant_dnc_list.source column (DNC UI used it without a migration).
+  ['192_tenant_dnc_list_source', '9272eec111ff95e052be82cdc677a792e4ad2f8570d9b3b21f737dee1732cd3b'],
+  // U3 (PRD gap closure): widen vertical_training_assets vertical_type CHECK for 'painting'.
+  ['193_extend_vertical_training_assets_painting', 'b05549a1922233695dfe170e22c9ebcad87c583495a21e9e15ac7b347e892d68'],
+  // U2 (PRD gap closure): 2hr post-job thank-you SMS — jobs.completed_at,
+  // jobs.thank_you_sms_sent_at, tenant_settings.send_thank_you_sms, backfill,
+  // partial index on the sweep-eligibility predicate.
+  ['194_thank_you_sms', '2a1b55639fd1e9f78b69ceb0074bdddb1ba702a812a7b3a71292457f27ed0552'],
+  // U1 (PRD gap closure): onboarding_session table for the conversational
+  // FSM (ENABLE + FORCE RLS per gemini-code-assist review on PR #594).
+  ['195_onboarding_session', '4ca725aa5bd1d9e3c516282f67349e3fc5f47f0228bdc0a5e2ee6ed995d2834d'],
 ];
 
 function hashMigration(value: string): string {

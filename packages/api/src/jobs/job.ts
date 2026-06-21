@@ -83,6 +83,22 @@ export interface Job {
    * fixtures/tests can omit it; the Pg column DEFAULTs to 'no_estimate'.
    */
   moneyState?: JobMoneyState;
+  /**
+   * Explicit completion timestamp written by transitionJobStatus on the
+   * (in_progress → completed) transition. updated_at moves on any write
+   * so we can't derive "when did this job finish" from it. Drives the
+   * thank-you-sms sweep's eligibility query. Backfilled from updated_at
+   * for pre-existing completed rows by migration 194.
+   */
+  completedAt?: Date;
+  /**
+   * Per-job idempotency stamp for the 2hr-after-completion thank-you SMS
+   * (PRD §7.2). Non-null means "already handled" — covers both successful
+   * sends and suppressed-for-permanent-reason (no phone, opted out,
+   * permanent Twilio failure). Backfilled to updated_at by migration 194
+   * so existing completed rows don't trigger a backlog of texts.
+   */
+  thankYouSmsSentAt?: Date;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;

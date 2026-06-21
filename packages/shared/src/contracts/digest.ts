@@ -10,6 +10,10 @@ export interface DigestSourceData {
   tomorrowAppointmentIds: string[];
   uncertainProposalIds: string[];
   correctionChunkIds: string[];
+  // N-009 / P2-038 — correction-loop lessons applied today (one digest line
+  // each), surfaced in "what I learned today". Optional for back-compat with
+  // digest rows persisted before this field existed.
+  correctionLessonIds?: string[];
 }
 
 export interface DigestSection {

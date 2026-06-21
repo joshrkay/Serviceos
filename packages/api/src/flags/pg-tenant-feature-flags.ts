@@ -74,6 +74,39 @@ export class PgTenantFeatureFlagRepository extends PgBaseRepository {
     return value;
   }
 
+  /**
+   * U3 — like {@link isEnabledForTenant}, but returns `defaultEnabled` when
+   * NEITHER a tenant override NOR a platform flag row exists. This lets a
+   * feature ship default-ON: the per-tenant override (enabled=false) is then an
+   * explicit opt-OUT kill switch, and a platform flag still wins when present.
+   * Not cached — callers (the supervisor gate) already have a snapshot TTL.
+   */
+  async isEnabledForTenantWithDefault(
+    tenantId: string,
+    flagKey: string,
+    defaultEnabled: boolean,
+  ): Promise<boolean> {
+    const tenantOverride = await this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT enabled FROM tenant_feature_flags WHERE tenant_id = $1 AND flag_key = $2`,
+        [tenantId, flagKey],
+      );
+      if (result.rows.length === 0) return null;
+      return result.rows[0].enabled as boolean;
+    });
+    if (tenantOverride !== null) return tenantOverride;
+
+    const platformFlag = await this.platformRepo.get(flagKey);
+    if (platformFlag !== null) {
+      const store = new InMemoryFeatureFlagStore([platformFlag]);
+      return isFeatureEnabled(store, flagKey, {
+        environment: process.env.NODE_ENV ?? 'development',
+        tenantId,
+      });
+    }
+    return defaultEnabled;
+  }
+
   private async _resolve(tenantId: string, flagKey: string): Promise<boolean> {
     // 1. Check tenant override (RLS-scoped, belt-and-braces composite PK lookup)
     const tenantOverride = await this.withTenant(tenantId, async (client) => {

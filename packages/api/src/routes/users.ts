@@ -4,6 +4,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { toErrorResponse, ValidationError } from '../shared/errors';
 import {
+  User,
   UserRepository,
   USER_ROLES,
   listUsers,
@@ -12,6 +13,7 @@ import {
 } from '../users/user';
 import { PendingInvitationRepository } from '../users/pending-invitation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { normalizeMobileE164 } from '../shared/phone/normalize';
 
 const updateUserSchema = z.object({
   role: z.enum(['owner', 'dispatcher', 'technician']).optional(),
@@ -23,6 +25,12 @@ const updateUserSchema = z.object({
 const inviteUserSchema = z.object({
   email: z.string().trim().email().max(320),
   role: z.enum(['owner', 'dispatcher', 'technician']),
+});
+
+const setPhoneSchema = z.object({
+  // Loose at the schema boundary (free-form entry); normalized to E.164 in the
+  // handler. `null` clears the number.
+  mobileNumber: z.string().max(40).nullable(),
 });
 
 /**
@@ -56,6 +64,37 @@ export function createUsersRouter(
   auditRepo?: AuditRepository,
 ): Router {
   const router = Router();
+
+  /**
+   * Resolve the actor + target for the phone endpoints.
+   *
+   * `req.auth.userId` is the Clerk subject (auth/clerk.ts), NOT a `users.id`
+   * UUID — so the phone endpoints (which look users up by internal id) must
+   * (1) map the actor's Clerk id to their internal user row, and (2) reject an
+   * explicit non-UUID `:id` up front so it can never reach a uuid column (a
+   * raw Clerk id would otherwise 500 with "invalid input syntax for type
+   * uuid"). `:id = 'me'` resolves to the actor's own internal id. Returns the
+   * already-fetched tenant user list so the read path needn't re-query.
+   */
+  async function resolvePhoneTarget(
+    req: AuthenticatedRequest,
+  ): Promise<
+    | { ok: true; tenantId: string; actor: User; targetId: string; users: User[] }
+    | { ok: false; status: number; error: string; message: string }
+  > {
+    const tenantId = req.auth!.tenantId;
+    const clerkUserId = req.auth!.userId;
+    if (req.params.id !== 'me' && !z.string().uuid().safeParse(req.params.id).success) {
+      return { ok: false, status: 400, error: 'BAD_REQUEST', message: 'Invalid user id.' };
+    }
+    const users = await userRepo.findByTenant(tenantId);
+    const actor = users.find((u) => u.clerkUserId === clerkUserId);
+    if (!actor) {
+      return { ok: false, status: 404, error: 'NOT_FOUND', message: 'User not found' };
+    }
+    const targetId = req.params.id === 'me' ? actor.id : req.params.id;
+    return { ok: true, tenantId, actor, targetId, users };
+  }
 
   router.get(
     '/',
@@ -113,6 +152,128 @@ export function createUsersRouter(
               entityType: 'user',
               entityId: updated.id,
               metadata: { changedFields: Object.keys(parsed) },
+            }),
+          );
+        }
+
+        res.json(updated);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  /**
+   * Read the current user's escalation number (`:id` = `me` or a userId).
+   * Self-or-owner gated like the PUT below; powers the technician phone sheet.
+   */
+  router.get(
+    '/:id/phone',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const resolved = await resolvePhoneTarget(req);
+        if (!resolved.ok) {
+          res.status(resolved.status).json({ error: resolved.error, message: resolved.message });
+          return;
+        }
+        const { actor, targetId, users } = resolved;
+        if (targetId !== actor.id && req.auth!.role !== 'owner') {
+          res
+            .status(403)
+            .json({ error: 'FORBIDDEN', message: 'You can only view your own phone number.' });
+          return;
+        }
+        const user = targetId === actor.id ? actor : users.find((u) => u.id === targetId);
+        if (!user) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'User not found' });
+          return;
+        }
+        res.json({ mobileNumber: user.mobileNumber ?? null });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  /**
+   * Self-service mobile number for escalation routing. A technician sets
+   * their OWN number (`:id` = `me` or their userId); an owner may set any
+   * teammate's. The on-call escalation path (dispatcher-phone-resolver) dials
+   * this number, so a tradesperson controls where their calls ring. PII-safe
+   * audit: we record that a number changed, never the digits.
+   */
+  router.put(
+    '/:id/phone',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const resolved = await resolvePhoneTarget(req);
+        if (!resolved.ok) {
+          res.status(resolved.status).json({ error: resolved.error, message: resolved.message });
+          return;
+        }
+        const { tenantId, actor, targetId } = resolved;
+
+        // A user may set their own number; only an owner may set someone else's.
+        if (targetId !== actor.id && req.auth!.role !== 'owner') {
+          res
+            .status(403)
+            .json({ error: 'FORBIDDEN', message: 'You can only set your own phone number.' });
+          return;
+        }
+
+        const parsed = setPhoneSchema.parse(req.body ?? {});
+        // Normalize at the boundary; a null/blank value clears the number.
+        let e164: string | null = null;
+        if (parsed.mobileNumber !== null) {
+          const trimmed = parsed.mobileNumber.trim();
+          if (trimmed !== '') {
+            try {
+              e164 = normalizeMobileE164(trimmed);
+            } catch (err) {
+              throw new ValidationError(
+                err instanceof Error ? err.message : 'Invalid mobile number',
+                { field: 'mobileNumber' },
+              );
+            }
+          }
+        }
+
+        let updated;
+        try {
+          updated = await userRepo.setMobileNumber(tenantId, targetId, e164);
+        } catch (err) {
+          // (tenant_id, mobile_number) partial-unique index — two teammates
+          // can't share a number. Surface a clean 409 rather than a 500.
+          if (err && typeof err === 'object' && (err as { code?: string }).code === '23505') {
+            res.status(409).json({
+              error: 'CONFLICT',
+              message: 'That number is already assigned to another teammate.',
+            });
+            return;
+          }
+          throw err;
+        }
+        if (!updated) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'User not found' });
+          return;
+        }
+
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'user.mobile_number.updated',
+              entityType: 'user',
+              entityId: updated.id,
+              metadata: { set: e164 !== null, self: targetId === actor.id },
             }),
           );
         }

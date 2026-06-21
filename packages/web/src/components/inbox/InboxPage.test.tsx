@@ -85,6 +85,136 @@ describe('InboxPage', () => {
     );
   });
 
+  it('renders confidence + pricing-source markers and a one-tap picker for an ambiguous line (U2)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            proposal: {
+              id: 'p-amb',
+              proposalType: 'draft_estimate',
+              summary: 'Estimate for the Lee job',
+              status: 'draft',
+              createdAt: new Date().toISOString(),
+              payload: {
+                _meta: { overallConfidence: 'low', markers: [{ path: 'lineItems[0]', reason: 'Wasn’t sure which flush valve' }] },
+                lineItems: [{ id: 'l1', description: 'flush valve', pricingSource: 'ambiguous' }],
+              },
+              sourceContext: {
+                missingFields: ['lineItems[0].catalogItemId'],
+                catalogResolution: {
+                  0: [
+                    { id: 'cat-a', name: 'Flush valve (standard)', unitPriceCents: 4500, score: 0.7 },
+                    { id: 'cat-b', name: 'Flush valve (premium)', unitPriceCents: 8200, score: 0.6 },
+                  ],
+                },
+              },
+            },
+            urgency: 'normal',
+            reason: 'Awaiting review',
+          },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 1, lowCount: 0, truncated: false },
+      }),
+    );
+
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByText('Estimate for the Lee job'));
+    expect(screen.getByTestId('confidence-signal')).toHaveTextContent('Low confidence');
+    expect(screen.getByTestId('pricing-source-badge')).toHaveTextContent('Needs a pick');
+    expect(screen.getByText(/Wasn’t sure which flush valve/)).toBeInTheDocument();
+    // The picker surfaces the candidates.
+    expect(screen.getAllByTestId('ambiguity-option')).toHaveLength(2);
+  });
+
+  it('surfaces the §6.4-B severity badge on an MMS photo draft in the inbox (U5)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            proposal: {
+              id: 'p-mms',
+              proposalType: 'draft_estimate',
+              summary: 'Photo quote for the Ruiz job',
+              status: 'draft',
+              createdAt: new Date().toISOString(),
+              payload: {
+                _meta: { overallConfidence: 'medium', severity: 'TIER_2_EMERGENCY_DISPATCH' },
+                lineItems: [{ id: 'l1', description: 'Burst pipe repair', pricingSource: 'catalog' }],
+              },
+              sourceContext: { source: 'customer_mms' },
+            },
+            urgency: 'high',
+            reason: 'Awaiting review',
+          },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 1, normalCount: 0, lowCount: 0, truncated: false },
+      }),
+    );
+
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByText('Photo quote for the Ruiz job'));
+    // The urgency badge must appear where MMS drafts are actually reviewed.
+    expect(screen.getByTestId('severity-badge')).toHaveTextContent('Emergency');
+  });
+
+  it('resolving an ambiguous line POSTs resolve-line and merges the returned proposal (U2)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            proposal: {
+              id: 'p-amb',
+              proposalType: 'draft_estimate',
+              summary: 'Estimate for the Lee job',
+              status: 'draft',
+              createdAt: new Date().toISOString(),
+              payload: { lineItems: [{ id: 'l1', description: 'flush valve', pricingSource: 'ambiguous' }] },
+              sourceContext: {
+                missingFields: ['lineItems[0].catalogItemId'],
+                catalogResolution: { 0: [{ id: 'cat-b', name: 'Flush valve (premium)', unitPriceCents: 8200, score: 0.6 }] },
+              },
+            },
+            urgency: 'normal',
+          },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 1, lowCount: 0, truncated: false },
+      }),
+    );
+    // resolve-line returns the patched proposal: line grounded, no candidates left.
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        id: 'p-amb',
+        proposalType: 'draft_estimate',
+        summary: 'Estimate for the Lee job',
+        status: 'ready_for_review',
+        createdAt: new Date().toISOString(),
+        payload: { lineItems: [{ id: 'l1', description: 'Flush valve (premium)', pricingSource: 'catalog' }] },
+        sourceContext: { missingFields: [], catalogResolution: {} },
+      }),
+    );
+
+    render(<InboxPage />);
+    await waitFor(() => screen.getByText('Estimate for the Lee job'));
+    fireEvent.click(screen.getByText('Flush valve (premium)'));
+
+    await waitFor(() => {
+      expect(apiFetch).toHaveBeenCalledWith(
+        '/api/proposals/p-amb/resolve-line',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ lineIndex: 0, catalogItemId: 'cat-b' }),
+        }),
+      );
+    });
+    // After resolution the picker is gone (the line is now catalog-grounded).
+    await waitFor(() => {
+      expect(screen.queryByTestId('ambiguity-picker')).not.toBeInTheDocument();
+    });
+  });
+
   it('rejects a proposal and removes it from the list', async () => {
     apiFetch.mockResolvedValueOnce(
       jsonResponse({

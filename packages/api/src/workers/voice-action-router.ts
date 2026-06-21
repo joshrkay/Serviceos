@@ -9,9 +9,11 @@ import { renderProposalSms, renderChainSms } from '../proposals/sms/render';
 import type { OutboundAnchorKind } from '../proposals/sms/sms-event';
 import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
 import type { AuditRepository } from '../audit/audit';
-import type { UnsupervisedProposalRouting } from '../settings/settings';
+import type { SettingsRepository, UnsupervisedProposalRouting } from '../settings/settings';
+import type { CurrentQuoteResolver } from '../conversations/negotiation/current-quote-resolver';
 import { ConflictError } from '../shared/errors';
 import { voiceProposalIdempotencyKey } from '../voice/voice-audit';
+import type { CustomerNegotiationContextProvider } from '../customers/customer-negotiation-context';
 import {
   classifyIntent,
   isLookupIntent,
@@ -45,6 +47,7 @@ import { AvailabilityFinder } from '../ai/tasks/availability-finder';
 import { AppointmentRepository } from '../appointments/appointment';
 import { JobRepository } from '../jobs/job';
 import { CatalogItemRepository } from '../catalog/catalog-item';
+import { InvoicingQueueDeps } from '../invoices/invoicing-queue';
 import {
   EntityCandidate,
   EntityKind,
@@ -57,9 +60,14 @@ import {
   RescheduleAppointmentTaskHandler,
   CancelAppointmentTaskHandler,
   ReassignAppointmentTaskHandler,
+  AddCrewMemberTaskHandler,
+  RemoveCrewMemberTaskHandler,
   AddNoteTaskHandler,
   SendInvoiceTaskHandler,
   SendEstimateTaskHandler,
+  SendEstimateNudgeTaskHandler,
+  SendPaymentReminderTaskHandler,
+  ApplyLateFeeTaskHandler,
   RecordPaymentTaskHandler,
   CreateJobVoiceTaskHandler,
   EmergencyDispatchTaskHandler,
@@ -72,6 +80,7 @@ import {
   LogTimeEntryTaskHandler,
   NotifyDelayTaskHandler,
   RequestFeedbackTaskHandler,
+  BatchInvoiceTaskHandler,
 } from '../ai/tasks/voice-extended-tasks';
 import { instrument } from '../monitoring/instrumentation';
 import {
@@ -151,6 +160,22 @@ export interface UnsupervisedRoutingDeps extends RouteUnsupervisedProposalDeps {
 export interface VoiceActionRouterDeps {
   gateway: LLMGateway;
   proposalRepo: ProposalRepository;
+  /**
+   * N-003 (P2-036) — when wired, the negotiation guardrail enriches the owner
+   * callback with the caller's LTV/recency (resolved via the verified customerId).
+   */
+  customerNegotiationContextProvider?: CustomerNegotiationContextProvider;
+  /**
+   * U5b (P2-036 V2) — when BOTH this and `negotiationQuoteResolver` are wired
+   * (and a customer is resolved), the negotiation handler additively consults
+   * the discount engine. Absent → the handler is V1-identical. `settingsRepo`
+   * feeds `resolveDiscountPolicy` (fail-closed: unconfigured tenants stay V1).
+   */
+  settingsRepo?: Pick<SettingsRepository, 'findByTenant'>;
+  /** U5b — resolves the customer's current live quote for the discount engine. */
+  negotiationQuoteResolver?: CurrentQuoteResolver;
+  /** U5b — best-effort sink for the `negotiation.discount_evaluated` audit event. */
+  auditRepo?: AuditRepository;
   recentReferents?: RecentReferentProvider;
   /**
    * Optional: pre-draft slot-conflict checker for `create_appointment`
@@ -245,6 +270,14 @@ export interface VoiceActionRouterDeps {
    */
   catalogRepo?: CatalogItemRepository;
   /**
+   * P21-003 — completed-unbilled enumeration for the batch_invoice voice
+   * on-ramp. When wired, BatchInvoiceTaskHandler enumerates the same
+   * candidates the batch sweep + digest use (findJobsRequiringInvoicing) and
+   * mints one batch_invoice proposal; absent → the handler emits a
+   * clarification instead of a draft. Optional so tests can omit it.
+   */
+  invoicingDeps?: InvoicingQueueDeps;
+  /**
    * P8 — "three Bobs" closure. When present, the classifier's free-text
    * customerName / jobReference are resolved to tenant-scoped IDs
    * BEFORE the task handler runs: resolved → verified UUIDs land on the
@@ -291,21 +324,27 @@ export interface VoiceActionRouterDeps {
 // proposal — the Twilio adapter routes them to the lookup-skill family
 // directly. They're omitted from this map; the action router falls back
 // to `voice_clarification` for any IntentType not present here.
-const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, ProposalType>> = {
+export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, ProposalType>> = {
   create_invoice: 'draft_invoice',
   draft_estimate: 'draft_estimate',
   create_appointment: 'create_appointment',
   update_invoice: 'update_invoice',
   update_estimate: 'update_estimate',
   issue_invoice: 'issue_invoice',
+  batch_invoice: 'batch_invoice',
   create_customer: 'create_customer',
   create_job: 'create_job',
   reschedule_appointment: 'reschedule_appointment',
   cancel_appointment: 'cancel_appointment',
   reassign_appointment: 'reassign_appointment',
+  add_crew_member: 'add_crew_member',
+  remove_crew_member: 'remove_crew_member',
   add_note: 'add_note',
   send_invoice: 'send_invoice',
   send_estimate: 'send_estimate',
+  send_estimate_nudge: 'send_estimate_nudge',
+  send_payment_reminder: 'send_payment_reminder',
+  apply_late_fee: 'apply_late_fee',
   record_payment: 'record_payment',
   emergency_dispatch: 'emergency_dispatch',
   update_customer: 'update_customer',
@@ -420,9 +459,14 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
     new CancelAppointmentTaskHandler(deps.appointmentRepo, deps.jobRepo),
   );
   handlers.set('reassign_appointment', new ReassignAppointmentTaskHandler());
+  handlers.set('add_crew_member', new AddCrewMemberTaskHandler());
+  handlers.set('remove_crew_member', new RemoveCrewMemberTaskHandler());
   handlers.set('add_note', new AddNoteTaskHandler());
   handlers.set('send_invoice', new SendInvoiceTaskHandler());
   handlers.set('send_estimate', new SendEstimateTaskHandler());
+  handlers.set('send_estimate_nudge', new SendEstimateNudgeTaskHandler());
+  handlers.set('send_payment_reminder', new SendPaymentReminderTaskHandler());
+  handlers.set('apply_late_fee', new ApplyLateFeeTaskHandler());
   handlers.set('record_payment', new RecordPaymentTaskHandler());
   handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
   handlers.set('update_customer', new UpdateCustomerTaskHandler());
@@ -434,6 +478,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('log_time_entry', new LogTimeEntryTaskHandler());
   handlers.set('notify_delay', new NotifyDelayTaskHandler(deps.appointmentRepo, deps.jobRepo));
   handlers.set('request_feedback', new RequestFeedbackTaskHandler());
+  handlers.set('batch_invoice', new BatchInvoiceTaskHandler(deps.invoicingDeps));
   // RV-080 — complaint uses 'add_note' proposal type but needs its own
   // handler (pinned-prefix note + companion callback). Registered under
   // a synthetic key ('_complaint') so it doesn't collide with the plain
@@ -445,7 +490,18 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   // callback with a recommendation). Registered under a synthetic
   // '_negotiation' key so it doesn't collide with any plain callback handler;
   // processSegment resolves it by intent name, like '_complaint'.
-  handlers.set('_negotiation' as ProposalType, new NegotiationGuardrailTaskHandler());
+  handlers.set(
+    '_negotiation' as ProposalType,
+    new NegotiationGuardrailTaskHandler(deps.customerNegotiationContextProvider, {
+      // U5b — additive discount engine. Only engages when BOTH are wired AND a
+      // customer is resolved; otherwise the handler stays V1-identical.
+      ...(deps.settingsRepo ? { settingsRepo: deps.settingsRepo } : {}),
+      ...(deps.negotiationQuoteResolver
+        ? { quoteResolver: deps.negotiationQuoteResolver }
+        : {}),
+      ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+    }),
+  );
   return handlers;
 }
 

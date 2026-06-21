@@ -4,6 +4,7 @@ import { assertValidAppointmentTransition } from './appointment-lifecycle';
 import { VALID_TIMEZONES } from '../settings/settings';
 import { toUtcDate } from './time';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { AppointmentTypeValue } from '@ai-service-os/shared';
 
 export type AppointmentStatus = 'scheduled' | 'confirmed' | 'in_progress' | 'completed' | 'canceled' | 'no_show';
 
@@ -42,6 +43,11 @@ export interface Appointment {
    */
   idempotencyKey?: string;
   notes?: string;
+  /**
+   * Typed visit kind (estimate/repair/install/maintenance/diagnostic).
+   * Optional — legacy rows and inbound-caller DRAFTs carry none.
+   */
+  appointmentType?: AppointmentTypeValue;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -77,6 +83,8 @@ export interface CreateAppointmentInput {
   /** Display/context timezone only; time fields are persisted as UTC instants. */
   timezone: string;
   notes?: string;
+  /** Typed visit kind emitted enum-validated by the appointment task. Optional. */
+  appointmentType?: AppointmentTypeValue;
   /** Create the appointment as a tentative hold awaiting approval. Defaults to false. */
   holdPendingApproval?: boolean;
   /** When the tentative hold auto-releases. Set when holdPendingApproval is true. */
@@ -128,6 +136,13 @@ export interface AppointmentRepository {
   findById(tenantId: string, id: string): Promise<Appointment | null>;
   findByJob(tenantId: string, jobId: string): Promise<Appointment[]>;
   findByDateRange(tenantId: string, start: Date, end: Date): Promise<Appointment[]>;
+  /**
+   * U6 — tentative holds whose `hold_expiry_at` has passed (and that are still
+   * `hold_pending_approval`). Backs the hold-reaper sweep that cancels expired
+   * holds so they stop polluting raw appointment reads. Pg uses the partial
+   * index `idx_appointments_hold_expiry`.
+   */
+  findExpiredHolds(tenantId: string, now: Date): Promise<Appointment[]>;
   /**
    * P1-018: paginated `{ data, total }` form for list UIs. Filters by date
    * range / status / technician and supports optional `limit` / `offset`.
@@ -209,6 +224,7 @@ export async function createAppointment(
     holdExpiryAt: input.holdExpiryAt,
     idempotencyKey: input.idempotencyKey,
     notes: input.notes,
+    appointmentType: input.appointmentType,
     createdBy: input.createdBy,
     createdAt: new Date(),
     updatedAt: new Date(),

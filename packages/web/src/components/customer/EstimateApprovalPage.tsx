@@ -83,6 +83,12 @@ interface PublicEstimateView {
   depositPaidCents?: number;
   depositStatus?: 'not_required' | 'pending' | 'paid';
   /**
+   * Whether the customer can pay the deposit now (required + unpaid on a
+   * live estimate), policy-agnostic. Drives the Pay-deposit CTA — including
+   * the after_approval case where the deposit is owed after acceptance.
+   */
+  depositPayable?: boolean;
+  /**
    * Tier 4 (Deposit rules — PR 3b). Tenant policy controlling whether
    * the deposit must be paid BEFORE the customer can approve the
    * estimate. The page replaces the Accept CTA with a Pay deposit
@@ -347,12 +353,21 @@ function ApprovalSheet({
 // ─── Success screen ────────────────────────────────────────────────────────
 function SuccessScreen({
   customer, estimateNumber, description, address, total,
+  token, depositPayable, depositDueCents = 0, depositPaid = false,
+  depositCheckoutUrl, depositCheckoutExpiresAt,
 }: {
   customer: string;
   estimateNumber: string;
   description: string;
   address: string;
   total: number;
+  /** Token + deposit context so an after_approval deposit can be paid here. */
+  token?: string;
+  depositPayable?: boolean;
+  depositDueCents?: number;
+  depositPaid?: boolean;
+  depositCheckoutUrl?: string;
+  depositCheckoutExpiresAt?: string;
 }) {
   // Mock auto-created job number
   const jobNumber = 'JOB-1053';
@@ -397,6 +412,42 @@ function SuccessScreen({
             </p>
           </div>
         </div>
+
+        {/* Deposit prompt — Tier 4 (after_approval). The estimate is
+            accepted; if a deposit is still owed, this is the "you'll be
+            prompted to pay after approving" step. Pays via the same Stripe
+            link as before_approval; the settlement poll swaps this for the
+            paid confirmation once the webhook credits it. */}
+        {depositPayable && token && (
+          <div
+            data-testid="success-deposit-prompt"
+            className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4 mb-4"
+            style={{ animation: 'fadeUp 0.4s ease 0.25s both' }}
+          >
+            <p className="text-sm text-amber-900">
+              {depositDueCents > 0
+                ? `Pay your $${fmtUsd(depositDueCents / 100)} deposit to confirm scheduling`
+                : 'Pay your deposit to confirm scheduling'}
+            </p>
+            <p className="text-xs text-amber-800 mt-1 mb-3">
+              We&apos;ll hold your spot as soon as the deposit is received.
+            </p>
+            <PayDepositButton
+              token={token}
+              initialUrl={depositCheckoutUrl}
+              expiresAt={depositCheckoutExpiresAt}
+            />
+          </div>
+        )}
+        {depositPaid && (
+          <div
+            data-testid="success-deposit-paid"
+            className="rounded-2xl border border-green-200 bg-green-50 px-5 py-3 mb-4 flex items-center gap-2"
+          >
+            <CheckCircle2 size={16} className="text-green-600 shrink-0" />
+            <p className="text-sm text-green-800">Deposit paid — thank you!</p>
+          </div>
+        )}
 
         {/* Job card */}
         <div className="rounded-2xl border border-slate-200 overflow-hidden bg-white mb-4"
@@ -624,6 +675,30 @@ export function EstimateApprovalPage() {
     return () => { cancelled = true; clearInterval(timer); };
   }, [id, apiView, accepted, loadedVersion]);
 
+  // Deposit-settlement poll: when a deposit is payable (notably the
+  // after_approval case, where the estimate is already accepted so the
+  // revision poll above bails), the customer pays on Stripe and returns;
+  // the webhook credits the deposit a beat later. Poll until it settles so
+  // the page swaps the Pay-deposit prompt for the paid state without a
+  // manual refresh. Stops as soon as the deposit is no longer payable.
+  const depositPayable = apiView?.depositPayable ?? false;
+  useEffect(() => {
+    if (!id || !depositPayable) return;
+    let cancelled = false;
+    const POLL_MS = 5_000;
+    const timer = setInterval(async () => {
+      try {
+        const res = await apiFetch(`/public/estimates/${encodeURIComponent(id)}`);
+        if (cancelled || !res.ok) return;
+        const next = await res.json() as PublicEstimateView;
+        if (!cancelled) setApiView(next);
+      } catch {
+        // Transient network error — keep polling.
+      }
+    }, POLL_MS);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [id, depositPayable, apiView]);
+
   // Good-better-best: seed the customer's selection from the server
   // defaults once the estimate loads. Selectable items (tier options +
   // add-ons) are chosen by the customer; everything else is always billed.
@@ -771,6 +846,17 @@ export function EstimateApprovalPage() {
       description={description}
       address={customerAddress}
       total={total}
+      token={id}
+      depositPayable={apiView.depositPayable}
+      depositDueCents={Math.max(
+        0,
+        (apiView.depositRequiredCents ?? 0) - (apiView.depositPaidCents ?? 0),
+      )}
+      depositPaid={
+        (apiView.depositRequiredCents ?? 0) > 0 && apiView.depositStatus === 'paid'
+      }
+      depositCheckoutUrl={apiView.depositCheckoutUrl}
+      depositCheckoutExpiresAt={apiView.depositCheckoutExpiresAt}
     />
   );
 
@@ -1040,17 +1126,13 @@ export function EstimateApprovalPage() {
         {(() => {
           if (isExpired || isAlreadyDeclined) return null;
 
-          // Tier 4 (Deposit rules — PR 3b). When the tenant policy is
-          // 'before_approval' and the deposit is still pending, swap
-          // the Accept CTA for a Pay deposit CTA. The backend's
-          // approve() also enforces this gate, so this is a UI guard
-          // that prevents the customer from getting a 409 mid-flow.
-          const blockedByDeposit =
-            apiView?.depositTimingPolicy === 'before_approval' &&
-            (apiView?.depositRequiredCents ?? 0) > 0 &&
-            apiView?.depositStatus !== 'paid';
-
-          if (blockedByDeposit && id) {
+          // Tier 4 (Deposit rules). Show the Pay-deposit CTA whenever the
+          // deposit is payable (policy-agnostic, computed server-side). For
+          // before_approval this is the sent+pending estimate — the Accept
+          // CTA stays hidden until the deposit is paid (the backend's
+          // approve() enforces the same gate). The after_approval accepted
+          // case is handled on the success screen, not here.
+          if (apiView?.depositPayable && id) {
             return (
               <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-5 pb-safe pt-3">
                 <div className="max-w-lg mx-auto">

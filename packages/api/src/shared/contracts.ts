@@ -132,6 +132,48 @@ export const createCustomerSchema = z.object({
   communicationNotes: z.string().optional(),
 });
 
+// U1 (CRM Jobber parity) — request bodies for the nested customer-contacts
+// routes. `customerId` is taken from the URL path, not the body. Mirrors the
+// service-location create/update shape.
+export const createCustomerContactSchema = z.object({
+  name: z.string().min(1).max(200),
+  role: z.enum(['primary', 'billing', 'site', 'other']).optional(),
+  phone: z.string().min(1).optional(),
+  email: z.string().email().optional(),
+  isPrimary: z.boolean().optional(),
+  notes: z.string().optional(),
+});
+
+export const updateCustomerContactSchema = z.object({
+  name: z.string().min(1).max(200).optional(),
+  role: z.enum(['primary', 'billing', 'site', 'other']).optional(),
+  phone: z.string().min(1).optional(),
+  email: z.string().email().optional(),
+  isPrimary: z.boolean().optional(),
+  notes: z.string().optional(),
+});
+
+// U2 (CRM Jobber parity) — tag + custom-field request bodies.
+export const addCustomerTagSchema = z.object({
+  tag: z.string().min(1).max(50),
+});
+
+export const createCustomFieldDefSchema = z.object({
+  key: z
+    .string()
+    .min(1)
+    .max(50)
+    .regex(/^[a-z][a-z0-9_]*$/, 'key must be lowercase alphanumeric/underscore, starting with a letter'),
+  label: z.string().min(1).max(200),
+  fieldType: z.enum(['text', 'number', 'date', 'select']).optional(),
+  options: z.array(z.string().min(1)).optional(),
+  sortOrder: z.number().int().optional(),
+});
+
+export const setCustomFieldValueSchema = z.object({
+  value: z.string().nullable(),
+});
+
 export const createServiceLocationSchema = z.object({
   customerId: z.string().min(1),
   label: z.string().optional(),
@@ -145,6 +187,8 @@ export const createServiceLocationSchema = z.object({
   longitude: z.number().optional(),
   accessNotes: z.string().optional(),
   isPrimary: z.boolean().optional(),
+  // U3 (CRM Jobber parity) — service vs billing/mailing address.
+  addressType: z.enum(['service', 'billing', 'both']).optional(),
 });
 
 export const createJobSchema = z.object({
@@ -331,6 +375,14 @@ export const updateSettingsSchema = z.object({
   depositPercentageBps: z.number().int().min(0).max(10000).nullable().optional(),
   depositFixedCents: z.number().int().min(0).nullable().optional(),
   depositRequiredAboveCents: z.number().int().min(0).nullable().optional(),
+  // P2-036 V2 (Discount policy — U1) — per-tenant policy bounding AI-proposed
+  // discounts. Mirrors the deposit fields' shape (bps + cents) and the
+  // migration 178 CHECKs. Without these keys in the schema, z.object strips
+  // them and the policy can never be set via the API. null clears the column;
+  // omit to leave untouched. resolveDiscountPolicy fail-closes any absent value.
+  discountMaxBps: z.number().int().min(0).max(10000).nullable().optional(),
+  discountFloorCents: z.number().int().min(0).nullable().optional(),
+  discountNeverBelowCatalog: z.boolean().nullable().optional(),
   // Tier 4 (Deposit rules — PR 3a-extended). Selects whether the
   // customer pays the deposit BEFORE they can approve the estimate
   // ('before_approval') or AFTER ('after_approval'). Default behavior
@@ -418,7 +470,7 @@ export const conversationAccessSchema = z.object({
 
 // Phase 4 — Vertical Packs + Estimate Intelligence
 
-export const verticalTypeSchema = z.enum(['hvac', 'plumbing', 'electrical']);
+export const verticalTypeSchema = z.enum(['hvac', 'plumbing', 'electrical', 'painting']);
 
 const lineItemTemplateSchema = z.object({
   description: z.string().min(1),

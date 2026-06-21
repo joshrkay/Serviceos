@@ -32,6 +32,7 @@ import type {
 } from '../../voice/transcription-providers';
 import type { TtsProvider } from '../../ai/tts/tts-provider';
 import type { VoiceSession, VoiceSessionStore } from '../../ai/agents/customer-calling/voice-session-store';
+import { extractPriorTurns } from '../../ai/agents/customer-calling/transcript-turns';
 import type { SideEffect } from '../../ai/agents/customer-calling/types';
 import { escalateWithContextPayloadSchema } from '../../ai/agents/customer-calling/types';
 import {
@@ -912,26 +913,15 @@ export class TwilioMediaStreamAdapter {
   }
 
   /**
-   * Extract the last `n` caller + AI turns from the session transcript
-   * in the format `{ role, text }` the sentiment classifier expects.
-   * The session transcript stores strings like `"caller: text"` and
-   * `"agent: text"`.
+   * Extract the last `n` caller + AI turns from the session transcript in the
+   * `{ role, text }` format the sentiment + vulnerability hooks expect.
+   * Delegates to the shared projection so the Gather path stays in lockstep.
    */
   private extractPriorTurns(
     session: VoiceSession,
     n: number,
   ): ReadonlyArray<{ role: 'caller' | 'ai'; text: string }> {
-    const snapshot = [...session.transcript].slice(-n);
-    return snapshot
-      .map((line) => {
-        const colonIdx = line.indexOf(': ');
-        if (colonIdx === -1) return null;
-        const speaker = line.slice(0, colonIdx);
-        const text = line.slice(colonIdx + 2);
-        const role: 'caller' | 'ai' = speaker === 'caller' ? 'caller' : 'ai';
-        return { role, text };
-      })
-      .filter((t): t is { role: 'caller' | 'ai'; text: string } => t !== null);
+    return extractPriorTurns(session.transcript, n);
   }
 
   // ─── Outbound: TTS → μ-law → media frame ───────────────────────────────────

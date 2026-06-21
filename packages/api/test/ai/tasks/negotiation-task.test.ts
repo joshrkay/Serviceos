@@ -10,6 +10,21 @@ import { NegotiationGuardrailTaskHandler } from '../../../src/ai/tasks/negotiati
 import { NEGOTIATION_GUARDRAIL_MARKER_REASON } from '../../../src/proposals/guardrails/negotiation-guardrail';
 import type { TaskContext } from '../../../src/ai/tasks/task-handlers';
 import { assertValidProposalPayload } from '../../../src/proposals/contracts';
+import type { CustomerNegotiationContextProvider } from '../../../src/customers/customer-negotiation-context';
+import type { CurrentQuoteResolver } from '../../../src/conversations/negotiation/current-quote-resolver';
+import type { TenantSettings } from '../../../src/settings/settings';
+
+const configuredSettingsRepo = (discountMaxBps: number) => ({
+  findByTenant: async () =>
+    ({
+      discountMaxBps,
+      discountFloorCents: 15000,
+      discountNeverBelowCatalog: true,
+    }) as unknown as TenantSettings,
+});
+const groundedQuoteResolver: CurrentQuoteResolver = {
+  resolve: async () => ({ estimateId: 'est-1', quotedCents: 25000, catalogGrounded: true }),
+};
 
 function makeContext(overrides: Partial<TaskContext> = {}): TaskContext {
   return {
@@ -94,5 +109,111 @@ describe('NegotiationGuardrailTaskHandler', () => {
     const handler = new NegotiationGuardrailTaskHandler();
     const { proposal } = await handler.handle(makeContext());
     expect(proposal.idempotencyKey).toBeUndefined();
+  });
+});
+
+describe('NegotiationGuardrailTaskHandler customer context', () => {
+  it('enriches the callback with LTV/recency when a customer is resolved', async () => {
+    const provider: CustomerNegotiationContextProvider = {
+      getContext: async () => ({
+        lifetimeValueCents: 480000,
+        lastSeenAt: new Date(Date.now() - 30 * 86_400_000),
+        jobsCompletedCount: 6,
+      }),
+    };
+    const handler = new NegotiationGuardrailTaskHandler(provider);
+    const { proposal } = await handler.handle(
+      makeContext({ existingEntities: { customerId: 'c-1', customerName: 'Mr. Lee' } }),
+    );
+    const cc = proposal.payload.customerContext as { lifetimeValueCents: number } | null;
+    expect(cc).not.toBeNull();
+    expect(cc?.lifetimeValueCents).toBe(480000);
+    expect(String(proposal.payload.recommendation)).toContain('$4,800');
+    expect(() => assertValidProposalPayload('callback', proposal.payload)).not.toThrow();
+  });
+
+  it('leaves context null when no customer was resolved', async () => {
+    const provider: CustomerNegotiationContextProvider = {
+      getContext: async () => {
+        throw new Error('should not be called without a customerId');
+      },
+    };
+    const handler = new NegotiationGuardrailTaskHandler(provider);
+    const { proposal } = await handler.handle(makeContext({ existingEntities: {} }));
+    expect(proposal.payload.customerContext).toBeNull();
+  });
+
+  it('degrades gracefully when the context read throws', async () => {
+    const provider: CustomerNegotiationContextProvider = {
+      getContext: async () => {
+        throw new Error('db down');
+      },
+    };
+    const handler = new NegotiationGuardrailTaskHandler(provider);
+    const { proposal } = await handler.handle(
+      makeContext({ existingEntities: { customerId: 'c-1' } }),
+    );
+    expect(proposal.payload.customerContext).toBeNull();
+    expect(proposal.proposalType).toBe('callback'); // the callback still ships
+  });
+});
+
+describe('NegotiationGuardrailTaskHandler V2 discount engine', () => {
+  it('ALLOW: an in-policy ask becomes a confidence-capped callback (never auto-approves)', async () => {
+    const handler = new NegotiationGuardrailTaskHandler(undefined, {
+      settingsRepo: configuredSettingsRepo(1000), // 10% cap
+      quoteResolver: groundedQuoteResolver,
+    });
+    const { proposal, taskType } = await handler.handle(
+      makeContext({ message: 'can you do $230?', existingEntities: { customerId: 'c-1' } }),
+    );
+    expect(taskType).toBe('callback');
+    expect(proposal.status).toBe('draft');
+    const meta = proposal.payload._meta as { overallConfidence: string };
+    expect(meta.overallConfidence).toBe('low'); // capped → cannot auto-approve
+    expect(proposal.payload.approvedDiscountBps).toBe(800); // $250→$230 = 8%
+  });
+
+  it('CLARIFY: an ambiguous discount ask becomes a voice_clarification', async () => {
+    const handler = new NegotiationGuardrailTaskHandler(undefined, {
+      settingsRepo: configuredSettingsRepo(1000),
+      quoteResolver: groundedQuoteResolver,
+    });
+    const { proposal, taskType } = await handler.handle(
+      makeContext({ message: 'come on, give me a deal', existingEntities: { customerId: 'c-1' } }),
+    );
+    expect(taskType).toBe('voice_clarification');
+    expect(proposal.proposalType).toBe('voice_clarification');
+    expect(proposal.payload.reason).toBe('ambiguous_discount_target');
+  });
+
+  it('NEEDS_APPROVAL: an over-policy ask becomes an enriched owner callback', async () => {
+    const handler = new NegotiationGuardrailTaskHandler(undefined, {
+      settingsRepo: configuredSettingsRepo(1000),
+      quoteResolver: groundedQuoteResolver,
+    });
+    const { proposal, taskType } = await handler.handle(
+      makeContext({ message: 'knock $50 off', existingEntities: { customerId: 'c-1' } }),
+    );
+    expect(taskType).toBe('callback');
+    expect(proposal.status).toBe('draft');
+    // 20% off exceeds the 10% policy → enriched with the concrete figures.
+    expect(String(proposal.payload.recommendation)).toMatch(/\$250 quote|sign-off/i);
+  });
+
+  it('fail-closed: an unconfigured tenant (maxDiscountBps 0) stays on the V1 callback', async () => {
+    const handler = new NegotiationGuardrailTaskHandler(undefined, {
+      settingsRepo: configuredSettingsRepo(0),
+      quoteResolver: groundedQuoteResolver,
+    });
+    const { proposal, taskType } = await handler.handle(
+      makeContext({
+        message: "that's too expensive, can you do $230?",
+        existingEntities: { customerId: 'c-1' },
+      }),
+    );
+    expect(taskType).toBe('callback');
+    expect(proposal.payload.negotiationAskType).toBe('discount'); // V1 content
+    expect(proposal.payload.approvedDiscountBps).toBeUndefined(); // no ALLOW figures
   });
 });

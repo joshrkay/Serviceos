@@ -52,6 +52,7 @@ function buildDeps(opts: StubOpts = {}): {
     create: vi.fn(),
     findById: vi.fn(),
     findByJob: vi.fn(),
+    findExpiredHolds: vi.fn(async () => []),
     findByDateRange: vi.fn(async (tid: string, from: Date, to: Date) => {
       if (opts.appointmentThrows) throw opts.appointmentThrows;
       return appointments.filter(

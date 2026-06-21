@@ -1,13 +1,24 @@
 import { Router, Response } from 'express';
+import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createConversationSchema, createMessageSchema } from '../shared/contracts';
 import { createConversationWithAudit, ConversationRepository } from '../conversations/conversation-service';
+import {
+  sendConversationReply,
+  ConversationReplyError,
+  type ConversationReplyErrorCode,
+} from '../conversations/reply-service';
 import { AuditRepository } from '../audit/audit';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { SettingsRepository } from '../settings/settings';
 import { SuggestReplyTask } from '../ai/tasks/suggest-reply-task';
+import type { CustomerRepository } from '../customers/customer';
+import type { LeadRepository } from '../leads/lead';
+import type { DncRepository } from '../compliance/dnc';
+import type { DispatchRepository } from '../notifications/dispatch-repository';
+import type { MessageDeliveryProvider } from '../notifications/delivery-provider';
 
 export interface ConversationRouterAiDeps {
   /** When present, enables POST /:id/suggest-reply (AI draft replies). */
@@ -15,10 +26,48 @@ export interface ConversationRouterAiDeps {
   settingsRepo?: SettingsRepository;
 }
 
+/**
+ * U6 — dependencies for the owner-authored outbound reply path. When present,
+ * enables POST /:id/reply (free-text SMS/email send). Omitted (e.g. no delivery
+ * provider configured) makes that route return 503 so the UI can hide it.
+ */
+export interface ConversationReplyRouterDeps {
+  customerRepo: Pick<CustomerRepository, 'findById'>;
+  leadRepo?: Pick<LeadRepository, 'findById'>;
+  dncRepo: Pick<DncRepository, 'isOnDnc'>;
+  dispatchRepo: Pick<DispatchRepository, 'create'>;
+  delivery: MessageDeliveryProvider;
+  settingsRepo?: SettingsRepository;
+}
+
+const replyBodySchema = z.object({
+  body: z.string().min(1).max(5000),
+  channel: z.enum(['sms', 'email']).optional(),
+});
+
+const inboxQuerySchema = z.object({
+  status: z.enum(['open', 'closed', 'archived']).optional(),
+  needsReplyOnly: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => (v === undefined ? undefined : v === 'true')),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+
+/** Map a reply-service failure to an HTTP status the UI can act on. */
+const REPLY_ERROR_STATUS: Record<ConversationReplyErrorCode, number> = {
+  not_found: 404,
+  empty_body: 400,
+  no_recipient: 422,
+  dnc_blocked: 403,
+  delivery_failed: 502,
+};
+
 export function createConversationRouter(
   conversationRepo: ConversationRepository,
   auditRepo?: AuditRepository,
   aiDeps?: ConversationRouterAiDeps,
+  replyDeps?: ConversationReplyRouterDeps,
 ): Router {
   const router = Router();
 
@@ -40,6 +89,24 @@ export function createConversationRouter(
         req.auth!.role,
       );
       res.status(201).json(result);
+    })
+  );
+
+  // U5 — unified inbox: list customer (+ unmatched phone) comms threads,
+  // summarised by their newest message, with unanswered inbound threads first.
+  router.get(
+    '/',
+    requireAuth,
+    requireTenant,
+    requirePermission('conversations:view'),
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const query = inboxQuerySchema.parse(req.query);
+      const threads = await conversationRepo.listInboxThreads(req.auth!.tenantId, {
+        ...(query.status ? { status: query.status } : {}),
+        ...(query.needsReplyOnly !== undefined ? { needsReplyOnly: query.needsReplyOnly } : {}),
+        ...(query.limit !== undefined ? { limit: query.limit } : {}),
+      });
+      res.json({ threads });
     })
   );
 
@@ -123,6 +190,61 @@ export function createConversationRouter(
       });
 
       res.status(200).json({ draft });
+    })
+  );
+
+  // U6 — owner-authored outbound reply. Sends a free-text SMS/email to the
+  // conversation's customer (or the originating number for an unmatched
+  // thread), DNC-gated, and threads the outbound message back. Restricted to
+  // owner/dispatcher (conversations:manage) — a customer-facing send, not an
+  // internal note. Direct human-authored mutation, never a proposal.
+  router.post(
+    '/:id/reply',
+    requireAuth,
+    requireTenant,
+    requirePermission('conversations:manage'),
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      if (!replyDeps) {
+        res
+          .status(503)
+          .json({ error: 'UNAVAILABLE', message: 'Messaging is not configured' });
+        return;
+      }
+      const parsed = replyBodySchema.parse(req.body);
+      const tenantId = req.auth!.tenantId;
+      const settings = await replyDeps.settingsRepo?.findByTenant(tenantId);
+
+      try {
+        const result = await sendConversationReply(
+          {
+            conversationRepo,
+            customerRepo: replyDeps.customerRepo,
+            ...(replyDeps.leadRepo ? { leadRepo: replyDeps.leadRepo } : {}),
+            dncRepo: replyDeps.dncRepo,
+            dispatchRepo: replyDeps.dispatchRepo,
+            delivery: replyDeps.delivery,
+            auditRepo,
+            ...(settings?.businessName ? { businessName: settings.businessName } : {}),
+          },
+          {
+            tenantId,
+            conversationId: req.params.id,
+            body: parsed.body,
+            actorId: req.auth!.userId,
+            actorRole: req.auth!.role,
+            ...(parsed.channel ? { channel: parsed.channel } : {}),
+          },
+        );
+        res.status(201).json(result);
+      } catch (err) {
+        if (err instanceof ConversationReplyError) {
+          res
+            .status(REPLY_ERROR_STATUS[err.code])
+            .json({ error: err.code.toUpperCase(), message: err.message });
+          return;
+        }
+        throw err;
+      }
     })
   );
 

@@ -6,6 +6,9 @@ import { DetailPage } from '../../components/DetailPage';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { CommunicationTimeline } from '../../components/customers/CommunicationTimeline';
 import { LanguageBadge } from '../../components/customers/LanguageBadge';
+import { ContactsPanel } from '../../components/customers/ContactsPanel';
+import { TagsPanel } from '../../components/customers/TagsPanel';
+import { CustomFieldsPanel } from '../../components/customers/CustomFieldsPanel';
 import { apiFetch } from '../../utils/api-fetch';
 import {
   Badge,
@@ -44,6 +47,8 @@ interface ServiceLocation {
   country?: string;
   accessNotes?: string;
   isPrimary: boolean;
+  /** U3 (CRM Jobber parity) — service vs billing/mailing address. */
+  addressType?: 'service' | 'billing' | 'both';
 }
 
 interface LocationFormState {
@@ -216,6 +221,30 @@ export function CustomerDetail({
     [customerId, loadLocations, locationForm],
   );
 
+  // U3 (CRM Jobber parity) — mark a property as the billing/mailing address
+  // (invoices/estimates resolve to it via resolveBillingLocation server-side).
+  const handleSetBilling = useCallback(
+    async (locationId: string) => {
+      try {
+        const res = await apiFetch(`/api/locations/${locationId}`, {
+          method: 'PUT',
+          body: JSON.stringify({ addressType: 'billing' }),
+        });
+        if (!res.ok) {
+          const json = await res.json().catch(() => ({}));
+          throw new Error(json?.message ?? `HTTP ${res.status}`);
+        }
+        toast.success('Billing address updated');
+        await loadLocations();
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : 'Failed to set billing address',
+        );
+      }
+    },
+    [loadLocations],
+  );
+
   const handleArchive = useCallback(async () => {
     const res = await apiFetch(`/api/customers/${customerId}/archive`, {
       method: 'POST',
@@ -302,6 +331,10 @@ export function CustomerDetail({
           ),
         },
         {
+          title: 'Contacts',
+          content: <ContactsPanel customerId={customerId} />,
+        },
+        {
           title: 'Customer Notes',
           content: (
             <div className="flex flex-col gap-3">
@@ -333,6 +366,14 @@ export function CustomerDetail({
           ),
         },
         {
+          title: 'Tags',
+          content: <TagsPanel customerId={customerId} />,
+        },
+        {
+          title: 'Custom Fields',
+          content: <CustomFieldsPanel customerId={customerId} />,
+        },
+        {
           title: 'Service Locations',
           content: (
             <div className="flex flex-col gap-4">
@@ -347,7 +388,7 @@ export function CustomerDetail({
                     key={location.id}
                     className="rounded-xl border border-slate-200 p-3"
                   >
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <MapPin size={13} className="shrink-0 text-slate-400" />
                       <p className="text-sm text-slate-900">
                         {location.label || 'Service location'}
@@ -355,6 +396,21 @@ export function CustomerDetail({
                       {location.isPrimary && (
                         <Badge variant="info">Primary</Badge>
                       )}
+                      {(location.addressType === 'billing' ||
+                        location.addressType === 'both') && (
+                        <Badge variant="success">Billing</Badge>
+                      )}
+                      {location.addressType !== 'billing' &&
+                        location.addressType !== 'both' && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="ml-auto"
+                            onClick={() => handleSetBilling(location.id)}
+                          >
+                            Set as billing
+                          </Button>
+                        )}
                     </div>
                     <p className="mt-1 pl-5 text-sm text-slate-600">
                       {formatLocation(location)}

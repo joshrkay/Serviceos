@@ -5,7 +5,13 @@ import {
   Brain, Receipt, Calendar, MessageCircle, AlertCircle, Copy,
   ArrowUpRight, UserPlus, HelpCircle, StickyNote, DollarSign, Send,
 } from 'lucide-react';
-import type { AIProposal, ProposalType } from '../../data/mock-data';
+import type {
+  AIProposal,
+  ProposalType,
+  ProposalConfidence,
+  ProposalConfidenceLevel,
+  ProposalSeverity,
+} from '../../data/mock-data';
 
 const TYPE_CONFIG: Record<ProposalType, {
   color: string; bg: string; border: string;
@@ -48,9 +54,43 @@ const INTENT_LABELS: Record<string, string> = {
   record_payment: 'Record payment',
 };
 
-const CONFIDENCE_CONFIG = {
-  High:   { bar: 'bg-green-500',  track: 'bg-green-100', width: 'w-full',   label: 'High confidence',     labelColor: 'text-green-700',  pct: '95%' },
-  Medium: { bar: 'bg-amber-400',  track: 'bg-amber-100', width: 'w-3/5',    label: 'Review recommended',  labelColor: 'text-amber-700',  pct: '65%' },
+interface ConfidenceDisplay {
+  bar: string; track: string; width: string;
+  label: string; labelColor: string;
+}
+
+// Coarse 2-tier config — the fallback when a proposal carries no
+// `_meta` (legacy / non-AI proposals keyed by ProposalConfidence).
+const CONFIDENCE_CONFIG: Record<ProposalConfidence, ConfidenceDisplay> = {
+  High:   { bar: 'bg-green-500',  track: 'bg-green-100', width: 'w-full',   label: 'High confidence',     labelColor: 'text-green-700' },
+  Medium: { bar: 'bg-amber-400',  track: 'bg-amber-100', width: 'w-3/5',    label: 'Review recommended',  labelColor: 'text-amber-700' },
+};
+
+// P2-035 (U2) — the 4-tier config sourced from `payload._meta.overallConfidence`.
+// Preferred over the coarse bar above whenever a proposal carries `_meta`.
+const CONFIDENCE_LEVEL_CONFIG: Record<ProposalConfidenceLevel, ConfidenceDisplay> = {
+  high:     { bar: 'bg-green-500',  track: 'bg-green-100', width: 'w-full',   label: 'High confidence',     labelColor: 'text-green-700' },
+  medium:   { bar: 'bg-amber-400',  track: 'bg-amber-100', width: 'w-3/5',    label: 'Review recommended',  labelColor: 'text-amber-700' },
+  low:      { bar: 'bg-orange-500', track: 'bg-orange-100',width: 'w-2/5',    label: 'Low confidence',      labelColor: 'text-orange-700' },
+  very_low: { bar: 'bg-red-500',    track: 'bg-red-100',   width: 'w-1/5',    label: 'Very low confidence', labelColor: 'text-red-700' },
+};
+
+// §6.4-B (U5) — severity badge config, keyed by the backend's urgency tier
+// (`_meta.severity`). Same tier scale voice triage uses, so the owner sees one
+// consistent urgency language across a voice call and a texted photo.
+const SEVERITY_CONFIG: Record<ProposalSeverity, { label: string; classes: string }> = {
+  TIER_1_EVACUATE:           { label: 'Evacuate',        classes: 'border-red-300 bg-red-100 text-red-800' },
+  TIER_2_EMERGENCY_DISPATCH: { label: 'Emergency',       classes: 'border-red-200 bg-red-50 text-red-700' },
+  TIER_3_SAME_DAY_URGENT:    { label: 'Same-day urgent', classes: 'border-amber-200 bg-amber-50 text-amber-700' },
+  TIER_4_SCHEDULE:           { label: 'Routine',         classes: 'border-slate-200 bg-slate-100 text-slate-600' },
+};
+
+// P2-035 (U2) — per-line catalog-grounding badge styling. 'manual' is
+// operator-entered, so it carries no badge (mapped to null below).
+const PRICING_SOURCE_BADGE: Record<'catalog' | 'ambiguous' | 'uncatalogued', { label: string; classes: string }> = {
+  catalog:      { label: 'From catalog',  classes: 'bg-green-50 text-green-700 border-green-200' },
+  ambiguous:    { label: 'Needs a pick',  classes: 'bg-amber-50 text-amber-800 border-amber-200' },
+  uncatalogued: { label: 'AI-estimated',  classes: 'bg-orange-50 text-orange-700 border-orange-200' },
 };
 
 interface Props {
@@ -115,7 +155,23 @@ export function AIProposalCard({ proposal, compact, onApprove, onReject }: Props
 
   const cfg   = TYPE_CONFIG[proposal.type] ?? TYPE_CONFIG.Alert;
   const Icon  = cfg.icon;
-  const conf  = CONFIDENCE_CONFIG[proposal.confidence];
+  // P2-035 (U2) — prefer the backend's 4-tier `_meta.overallConfidence`
+  // when present; otherwise fall back to the coarse 2-tier bar so legacy
+  // proposals (and any with a malformed/absent level) never crash.
+  const metaLevel = proposal.meta?.overallConfidence;
+  const conf =
+    (metaLevel && CONFIDENCE_LEVEL_CONFIG[metaLevel]) ||
+    CONFIDENCE_CONFIG[proposal.confidence] ||
+    CONFIDENCE_CONFIG.Medium;
+  // Per-line catalog-grounding badges (skip 'manual' — operator-entered).
+  const pricingBadges = (proposal.lineItems ?? [])
+    .map((li) => li.pricingSource)
+    .filter(
+      (s): s is 'catalog' | 'ambiguous' | 'uncatalogued' =>
+        s === 'catalog' || s === 'ambiguous' || s === 'uncatalogued',
+    );
+  const markers = proposal.meta?.markers ?? [];
+  const severity = proposal.meta?.severity;
 
   // ── Approved ──────────────────────────────────────────────────
   if (status === 'Approved') {
@@ -223,6 +279,58 @@ export function AIProposalCard({ proposal, compact, onApprove, onReject }: Props
             {proposal.impact && (
               <div className="mt-2 inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1">
                 <span className="text-xs text-slate-600">{proposal.impact}</span>
+              </div>
+            )}
+
+            {/* §6.4-B severity marker (U5) — urgency of the visible problem,
+                from `_meta.severity` (same tier scale as voice triage). Set on
+                MMS photo drafts; absent → not rendered. */}
+            {severity && SEVERITY_CONFIG[severity] && (
+              <div
+                className={`mt-2 ml-2 inline-flex items-center gap-1 rounded-full border px-2.5 py-1 ${SEVERITY_CONFIG[severity].classes}`}
+                data-testid="severity-badge"
+              >
+                <span className="text-xs font-medium">{SEVERITY_CONFIG[severity].label}</span>
+              </div>
+            )}
+
+            {/* P2-035 (U2) — per-line catalog-grounding badges. Shows
+                WHERE each line's price came from (catalog-resolved vs
+                AI-estimated vs needs-a-pick). 'manual' lines are
+                operator-entered and intentionally not badged. */}
+            {pricingBadges.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5" data-testid="pricing-source-badges">
+                {pricingBadges.map((source, i) => {
+                  const badge = PRICING_SOURCE_BADGE[source];
+                  return (
+                    <span
+                      key={`${source}-${i}`}
+                      data-testid={`pricing-source-${source}`}
+                      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${badge.classes}`}
+                    >
+                      {badge.label}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* P2-035 (U2) — "what I wasn't sure about" callouts from
+                `_meta.markers`. Each marker explains a low-certainty
+                field (uncatalogued price, ambiguous catalog match). */}
+            {markers.length > 0 && (
+              <div
+                className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2"
+                data-testid="confidence-markers"
+              >
+                <p className="text-xs font-medium text-amber-900">What I wasn’t sure about</p>
+                <ul className="mt-1 flex flex-col gap-1">
+                  {markers.map((m, i) => (
+                    <li key={`${m.path}-${i}`} className="text-xs text-amber-800">
+                      {m.reason}
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
 

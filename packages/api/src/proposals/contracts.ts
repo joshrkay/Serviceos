@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { appointmentTypeSchema } from '@ai-service-os/shared';
 import { ProposalType } from './proposal';
 import { ValidationError } from '../shared/errors';
 import { reassignAppointmentPayloadSchema } from './contracts/reassignment';
@@ -30,6 +31,11 @@ import { reviewResponseProposalPayloadSchema } from '@ai-service-os/shared';
 // proposal-layer consumers don't reach into src/ai for the type.
 import { CONFIDENCE_LEVELS } from '../ai/guardrails/confidence';
 export type { ConfidenceLevel } from '../ai/guardrails/confidence';
+// RV-MMS (§6.4-B) — severity markers reuse the canonical urgency-tier
+// vocabulary that drives voice triage, so a photo-sourced draft and a voice
+// call speak the same severity language. (proposals already depends on ../ai
+// for the confidence vocabulary above.)
+import { TIER_KEYS } from '../ai/skills/triage-rules.schema';
 
 // ───────────────────────────────────────────────────────────────────────────
 // RV-007 (F-4) — Confidence Marker `_meta` on proposal payloads.
@@ -56,6 +62,12 @@ export const confidenceLevelSchema = z.enum(CONFIDENCE_LEVELS);
 
 export const proposalConfidenceMetaSchema = z.object({
   overallConfidence: confidenceLevelSchema,
+  /**
+   * §6.4-B severity marker — how urgent the visible problem is, on the same
+   * urgency-tier scale as voice triage. Optional; today set by the MMS-to-quote
+   * vision draft and surfaced to the owner in the review UI / SMS.
+   */
+  severity: z.enum(TIER_KEYS).optional(),
   /** Per-field certainty keyed by payload path, e.g. "lineItems[0].unitPrice". */
   fieldConfidence: z.record(confidenceLevelSchema).optional(),
   /** Human-readable callouts the review UI / SMS / voice readback render. */
@@ -125,6 +137,10 @@ export const createAppointmentPayloadSchema = z
     customerId: z.string().optional(),
     customerName: z.string().optional(),
     summary: z.string().optional(),
+    // Typed visit kind (estimate/repair/install/maintenance/diagnostic),
+    // emitted enum-validated by the appointment task. Optional: inbound-caller
+    // DRAFTs built at classify time carry none, and legacy payloads predate it.
+    appointmentType: appointmentTypeSchema.optional(),
   })
   .refine(
     (v) => {
@@ -381,6 +397,10 @@ export const voiceClarificationPayloadSchema = z.object({
     // P8 — intent understood, but an entity reference matched several
     // tenant records ("three Bobs"); candidates carry the picker list.
     'ambiguous_entity',
+    // P2-036 V2 — a discount ask was understood, but the target price /
+    // amount couldn't be parsed ("knock some off"); the discount evaluator
+    // emits this instead of silently guessing a discount.
+    'ambiguous_discount_target',
   ]),
   suggestedIntents: z.array(z.string()).optional(),
   classifierReasoning: z.string().optional(),

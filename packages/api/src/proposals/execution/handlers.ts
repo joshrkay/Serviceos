@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { appointmentTypeSchema, type AppointmentTypeValue } from '@ai-service-os/shared';
 import { Proposal, ProposalType, ProposalRepository } from '../proposal';
 import { CreateInvoiceExecutionHandler } from './invoice-execution-handler';
 import { CreateInvoiceScheduleExecutionHandler } from './invoice-schedule-handler';
@@ -97,6 +98,15 @@ export interface ExecutionResult {
 export interface ExecutionHandler {
   proposalType: ProposalType;
   execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult>;
+  /**
+   * Optional capability signal for the boot-time wiring guard
+   * (proposals/execution/wiring-assertions.ts). Returns false when the
+   * handler is missing a dependency it needs to PERSIST — i.e. it would
+   * fall back to a synthetic-id passthrough that returns success without
+   * saving anything. Handlers that always persist (or have no degraded
+   * path) omit this; the guard treats absence as "fully wired".
+   */
+  isFullyWired?(): boolean;
 }
 
 /**
@@ -170,7 +180,16 @@ export class CreateJobExecutionHandler implements ExecutionHandler {
   constructor(
     private readonly jobRepo?: JobRepository,
     private readonly locationRepo?: LocationRepository,
+    // Without this the executed job persists but emits no job.created
+    // audit event. createJob already forwards it to the audit repo.
+    private readonly auditRepo?: AuditRepository,
   ) {}
+
+  // Degrades to a synthetic-id passthrough (saves nothing) without both
+  // the job repo and the location repo — see execute().
+  isFullyWired(): boolean {
+    return Boolean(this.jobRepo) && Boolean(this.locationRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
@@ -234,6 +253,7 @@ export class CreateJobExecutionHandler implements ExecutionHandler {
           createdBy: context.executedBy,
         },
         this.jobRepo,
+        this.auditRepo,
       );
       return { success: true, resultEntityId: job.id };
     } catch (err) {
@@ -257,6 +277,12 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     // (tenant-scoped) before attaching the appointment to it.
     private readonly jobRepo?: JobRepository,
   ) {}
+
+  // Degrades to a synthetic-id passthrough (saves nothing) without the
+  // appointment repo — see execute().
+  isFullyWired(): boolean {
+    return Boolean(this.appointmentRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
@@ -350,7 +376,23 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
         ? { arrivalWindowStart, arrivalWindowEnd }
         : {}),
       timezone,
-      notes: typeof payload.notes === 'string' ? payload.notes : undefined,
+      // Reason-for-visit persistence: voice proposals carry the spoken work
+      // description in `summary` (the LLM-extracted "one-line description of
+      // the work requested"), while programmatic callers set `notes`. Persist
+      // whichever is present — `notes` wins when both exist — so an inbound
+      // cold-call create_appointment (no jobId → skips the held-slot path that
+      // already maps summary→notes) never drops the caller's reason.
+      notes:
+        typeof payload.notes === 'string'
+          ? payload.notes
+          : typeof payload.summary === 'string'
+            ? payload.summary
+            : undefined,
+      // Typed visit kind — enum-validate before persisting. The payload was
+      // Zod-checked upstream, but never forward a raw value unguarded.
+      appointmentType: appointmentTypeSchema.safeParse(payload.appointmentType).success
+        ? (payload.appointmentType as AppointmentTypeValue)
+        : undefined,
       createdBy: context.executedBy,
     }, this.appointmentRepo);
 
@@ -723,11 +765,11 @@ export function createExecutionHandlerRegistry(deps?: {
   const handlers: ExecutionHandler[] = [
     new CreateCustomerVoiceExecutionHandler(deps?.customerRepo, deps?.auditRepo),
     new UpdateCustomerExecutionHandler(deps?.customerRepo),
-    new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo),
+    new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo, deps?.auditRepo),
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier, deps?.auditRepo, deps?.jobRepo),
     new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
     new DraftEstimateExecutionHandler(deps?.estimateRepo, deps?.settingsRepo),
-    new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
+    new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo, deps?.auditRepo),
     new CreateInvoiceScheduleExecutionHandler(deps?.scheduleRepo, deps?.invoiceRepo, deps?.settingsRepo, deps?.estimateRepo),
     new BatchInvoiceExecutionHandler(deps?.proposalRepo),
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps, deps?.auditRepo),
@@ -793,14 +835,17 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.reviewPrivateMessageSender,
       deps?.auditRepo,
     ),
-    // RV-141 — emergency_dispatch: urgent job + owner SMS page. The
-    // appointment-hold deviation is documented in the handler header.
+    // RV-141 — emergency_dispatch: urgent job + tentative appointment hold on
+    // the soonest feasible slot + owner SMS page. appointmentRepo/assignmentRepo
+    // drive the hold; absent → the handler skips the hold and still pages.
     new EmergencyDispatchExecutionHandler(
       deps?.jobRepo,
       deps?.locationRepo,
       deps?.settingsRepo,
       deps?.emergencySmsSender,
       deps?.auditRepo,
+      deps?.appointmentRepo,
+      deps?.assignmentRepo,
     ),
     // Collections cadence — send_payment_reminder. Comms-class: only runs
     // after owner approval. Sends through the Layer-A transactional-comms

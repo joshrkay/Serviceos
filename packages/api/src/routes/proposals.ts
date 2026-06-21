@@ -17,7 +17,9 @@ import {
   rejectProposal,
   editProposal,
   undoProposal,
+  type UndoCorrectionLoopDeps,
 } from '../proposals/actions';
+import { resolveProposalLine } from '../proposals/resolve-line';
 import {
   proposalFilterSchema,
   rejectProposalBodySchema,
@@ -36,11 +38,21 @@ const approveBatchBodySchema = z.object({
   proposalIds: z.array(z.string().uuid()).min(1).max(50),
 });
 
+// U2 (P2-035) — resolve an ambiguous catalog line by picking one of the
+// line's surfaced candidates. Patches the draft; never approves (D-004).
+const resolveLineBodySchema = z.object({
+  lineIndex: z.number().int().min(0),
+  catalogItemId: z.string().min(1),
+});
+
 export function createProposalsRouter(
   proposalRepo: ProposalRepository,
   appointmentRepo?: AppointmentRepository,
   auditRepo?: AuditRepository,
   feasibilityDeps?: FeasibilityDependencies,
+  // N-009 / P2-038 — when supplied, undoing a proposal also reverses the
+  // structured correction lessons it recorded (and the config each cascaded).
+  undoCorrectionLoop?: UndoCorrectionLoopDeps,
 ): Router {
   const router = Router();
 
@@ -234,6 +246,33 @@ export function createProposalsRouter(
   );
 
   router.post(
+    '/:id/resolve-line',
+    requireAuth,
+    requireTenant,
+    requirePermission('proposals:approve'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const parsed = validate(resolveLineBodySchema, req.body);
+        const result = await resolveProposalLine(
+          {
+            tenantId: req.auth!.tenantId,
+            proposalId: req.params.id,
+            lineIndex: parsed.lineIndex,
+            catalogItemId: parsed.catalogItemId,
+            actorId: req.auth!.userId,
+            actorRole: req.auth!.role as Role,
+          },
+          { proposalRepo, ...(auditRepo ? { auditRepo } : {}) },
+        );
+        res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  router.post(
     '/:id/reject',
     requireAuth,
     requireTenant,
@@ -275,6 +314,7 @@ export function createProposalsRouter(
           req.auth!.userId,
           req.auth!.role as Role,
           auditRepo,
+          undoCorrectionLoop,
         );
         res.json(result);
       } catch (err) {

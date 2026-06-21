@@ -99,4 +99,55 @@ describe('P5-004A InvoiceProposalReview', () => {
     );
     expect(screen.getByTestId('tax')).toBeDefined();
   });
+
+  // P2-035 (U2) — confidence markers + per-line pricing-source badges.
+  it('renders the 4-tier confidence chip from _meta and hides the coarse score', () => {
+    render(
+      <InvoiceProposalReview
+        proposal={makeProposal({
+          confidenceScore: 0.4,
+          meta: { overallConfidence: 'low' },
+        })}
+      />,
+    );
+    const chip = screen.getByTestId('confidence-level');
+    expect(chip.getAttribute('data-level')).toBe('low');
+    expect(chip.textContent).toContain('Low confidence');
+    // The coarse percentage is suppressed once the 4-tier chip renders.
+    expect(screen.queryByTestId('confidence-score')).toBeNull();
+  });
+
+  it('surfaces _meta.markers as "what I wasn\'t sure about" callouts', () => {
+    render(
+      <InvoiceProposalReview
+        proposal={makeProposal({
+          meta: {
+            overallConfidence: 'low',
+            markers: [
+              { path: 'lineItems[0].unitPriceCents', reason: '"Widget" is not in the tenant catalog' },
+            ],
+          },
+        })}
+      />,
+    );
+    const markers = screen.getByTestId('confidence-markers');
+    expect(markers.textContent).toContain('Widget');
+  });
+
+  it('badges an uncatalogued line and skips manual lines', () => {
+    render(
+      <InvoiceProposalReview
+        proposal={makeProposal({
+          lineItems: [
+            { description: 'Mystery part', quantity: 1, unitPrice: 5000, pricingSource: 'uncatalogued' },
+            { description: 'Hand-keyed', quantity: 1, unitPrice: 2000, pricingSource: 'manual' },
+          ],
+          subtotalCents: 7000,
+          totalCents: 7000,
+        })}
+      />,
+    );
+    expect(screen.getByTestId('pricing-source-uncatalogued')).toBeDefined();
+    expect(screen.queryByTestId('pricing-source-manual')).toBeNull();
+  });
 });

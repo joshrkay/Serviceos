@@ -22,6 +22,7 @@ import { z } from 'zod';
 
 export const PROPOSAL_SMS_REPLY_INTENTS = [
   'approve',
+  'approve_all',
   'reject',
   'edit',
   'unrecognized',
@@ -61,11 +62,23 @@ export const REJECT_TOKENS = [
 
 export const EDIT_TOKENS = ['edit', 'change', 'modify', 'fix'] as const;
 
+/**
+ * U5 — bulk-approve token. "ALL" (alone) or "APPROVE ALL" / "YES ALL" is a
+ * DELIBERATE bulk approval of everything currently one-tap-eligible (the same
+ * capture-class, confident set a single texted Y could approve). Distinct from
+ * `approve` so the handler fans out to the batch-approve path instead of the
+ * single most-recent-render target.
+ */
+export const APPROVE_ALL_TOKENS = ['all'] as const;
+
 const INTENT_BY_TOKEN: ReadonlyMap<string, ProposalSmsReplyIntent> = new Map([
   ...APPROVE_TOKENS.map((t) => [t, 'approve'] as const),
   ...REJECT_TOKENS.map((t) => [t, 'reject'] as const),
   ...EDIT_TOKENS.map((t) => [t, 'edit'] as const),
 ]);
+
+const APPROVE_TOKEN_SET: ReadonlySet<string> = new Set(APPROVE_TOKENS);
+const APPROVE_ALL_TOKEN_SET: ReadonlySet<string> = new Set(APPROVE_ALL_TOKENS);
 
 export const ProposalSmsReplySchema = z.object({
   intent: z.enum(PROPOSAL_SMS_REPLY_INTENTS),
@@ -99,8 +112,19 @@ export function parseProposalSmsReply(body: string): ProposalSmsReply {
 
   const [first = '', ...rest] = trimmed.split(/\s+/);
   const token = bareToken(first.toLowerCase());
-  const intent = INTENT_BY_TOKEN.get(token);
-  if (!intent) return { intent: 'unrecognized', remainder: trimmed };
+  const restFirst = rest.length > 0 ? bareToken(rest[0].toLowerCase()) : '';
 
-  return { intent, remainder: rest.join(' ').trim() };
+  // Bulk approve: "ALL" alone, or an approve token followed by "all"
+  // ("APPROVE ALL", "YES ALL"). Checked before the single-intent lookup so the
+  // trailing "all" isn't mistaken for a one-proposal approve with remainder.
+  if (token === 'all') {
+    return { intent: 'approve_all', remainder: rest.join(' ').trim() };
+  }
+  const firstIntent = INTENT_BY_TOKEN.get(token);
+  if (firstIntent === 'approve' && restFirst === 'all') {
+    return { intent: 'approve_all', remainder: rest.slice(1).join(' ').trim() };
+  }
+  if (!firstIntent) return { intent: 'unrecognized', remainder: trimmed };
+
+  return { intent: firstIntent, remainder: rest.join(' ').trim() };
 }

@@ -63,6 +63,53 @@ describe('CreateAppointmentAITaskHandler', () => {
     expect(result.proposal.summary).toContain('2:00');
   });
 
+  it('carries a valid appointmentType from the model onto the proposal payload', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        dateTimePhrase: 'tomorrow at 2pm',
+        summary: 'Furnace not igniting',
+        appointmentType: 'repair',
+        confidence_score: 0.9,
+      })
+    );
+    const handler = new CreateAppointmentAITaskHandler(gateway);
+
+    const result = await handler.handle({
+      tenantId,
+      userId,
+      message: 'Book a repair for the furnace tomorrow at 2pm',
+      timezone: TZ,
+      now: NOW,
+    });
+
+    const payload = result.proposal.payload as Record<string, unknown>;
+    expect(payload.appointmentType).toBe('repair');
+  });
+
+  it('drops an out-of-enum appointmentType the model hallucinates', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        dateTimePhrase: 'tomorrow at 2pm',
+        summary: 'No heat',
+        // urgency is not a type — must not ride onto the payload
+        appointmentType: 'emergency',
+        confidence_score: 0.9,
+      })
+    );
+    const handler = new CreateAppointmentAITaskHandler(gateway);
+
+    const result = await handler.handle({
+      tenantId,
+      userId,
+      message: 'No heat, come tomorrow at 2pm',
+      timezone: TZ,
+      now: NOW,
+    });
+
+    const payload = result.proposal.payload as Record<string, unknown>;
+    expect(payload.appointmentType).toBeUndefined();
+  });
+
   it('carries an arrival window for a daypart phrase', async () => {
     const gateway = mockGateway(
       JSON.stringify({ dateTimePhrase: 'tomorrow morning', summary: 'AC tune-up', confidence_score: 0.8 })

@@ -51,3 +51,29 @@ export function composeNegotiationAcknowledgment(
   }
   return `Good question — let me check with ${person} on that and I'll get right back to you ${window}.`;
 }
+
+/**
+ * Side-effect payload `source` tag the live-call FSM stamps on its fixed
+ * negotiation holding-line `tts_play`, so the settings-aware voice-turn
+ * processor can recognise and brand-voice it. Must match the literal the FSM
+ * emits in `customer-calling/transitions.ts`.
+ */
+export const NEGOTIATION_HOLDING_TTS_SOURCE = 'negotiation_holding';
+
+/**
+ * Rewrite the FSM's fixed negotiation holding-line `tts_play` (tagged
+ * `source: NEGOTIATION_HOLDING_TTS_SOURCE`) in place with the brand-voiced,
+ * deterministic acknowledgment, so the live call sounds like the shop and
+ * matches the SMS channel. Pure: mutates the passed side effects, no I/O, never
+ * LLM. Other `tts_play` effects are left untouched.
+ */
+export function brandVoiceNegotiationTts(
+  sideEffects: ReadonlyArray<{ type: string; payload: Record<string, unknown> }>,
+  brand: NegotiationAcknowledgmentInput,
+): void {
+  for (const fx of sideEffects) {
+    if (fx.type === 'tts_play' && fx.payload?.source === NEGOTIATION_HOLDING_TTS_SOURCE) {
+      fx.payload.text = composeNegotiationAcknowledgment(brand);
+    }
+  }
+}

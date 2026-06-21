@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   parseProposalSmsReply,
   APPROVE_TOKENS,
+  APPROVE_ALL_TOKENS,
   REJECT_TOKENS,
   EDIT_TOKENS,
 } from './proposal-sms.js';
@@ -51,11 +52,52 @@ describe('parseProposalSmsReply (P2-034)', () => {
     expect(parseProposalSmsReply('   ')).toEqual({ intent: 'unrecognized', remainder: '' });
   });
 
+  it('classifies bulk approve: "ALL", "APPROVE ALL", "YES ALL" → approve_all (U5)', () => {
+    for (const body of ['ALL', 'all', 'all!', 'APPROVE ALL', 'approve all', 'YES ALL', 'ok all']) {
+      expect(parseProposalSmsReply(body).intent).toBe('approve_all');
+    }
+  });
+
+  it('a single approve token without a trailing "all" stays a single approve', () => {
+    expect(parseProposalSmsReply('approve').intent).toBe('approve');
+    expect(parseProposalSmsReply('yes go ahead').intent).toBe('approve');
+  });
+
   it('does not collide with other registered inbound keywords', () => {
     // STOP/START (compliance) and OUT/SICK/UNAVAILABLE (tech status) must
     // stay routable to their own handlers.
     for (const reserved of ['stop', 'start', 'out', 'sick', 'unavailable']) {
       expect(parseProposalSmsReply(reserved).intent).toBe('unrecognized');
     }
+  });
+
+  describe('U5 (JTBD #7) — APPROVE ALL', () => {
+    it.each([...APPROVE_ALL_TOKENS])('classifies bare token %s as approve_all', (token) => {
+      expect(parseProposalSmsReply(token).intent).toBe('approve_all');
+    });
+
+    it('classifies the composite "APPROVE ALL" as approve_all', () => {
+      expect(parseProposalSmsReply('APPROVE ALL').intent).toBe('approve_all');
+      expect(parseProposalSmsReply('  Yes, all! ').intent).toBe('approve_all');
+    });
+
+    it('is tolerant of capitalization, whitespace and punctuation', () => {
+      expect(parseProposalSmsReply(' ALL ').intent).toBe('approve_all');
+      expect(parseProposalSmsReply('All.').intent).toBe('approve_all');
+    });
+
+    it('does NOT downgrade plain approve replies', () => {
+      // A bare approve token, or one followed by non-ALL text, stays `approve`.
+      expect(parseProposalSmsReply('yes').intent).toBe('approve');
+      expect(parseProposalSmsReply('approve').intent).toBe('approve');
+      expect(parseProposalSmsReply('yes go ahead').intent).toBe('approve');
+      expect(parseProposalSmsReply('approve this one').intent).toBe('approve');
+    });
+
+    it('drops the consumed ALL token from the remainder', () => {
+      const r = parseProposalSmsReply('approve all of them');
+      expect(r.intent).toBe('approve_all');
+      expect(r.remainder).toBe('of them');
+    });
   });
 });

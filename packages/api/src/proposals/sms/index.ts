@@ -21,6 +21,8 @@ import type { DncRepository } from '../../compliance/dnc';
 export { type ProposalSmsReplyDeps } from './reply-handler';
 export {
   createProposalSmsEvent,
+  encodeDigestApproveAllBody,
+  parseDigestApproveAllIds,
   InMemoryProposalSmsEventRepository,
   PgProposalSmsEventRepository,
   type OutboundAnchorKind,

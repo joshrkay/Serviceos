@@ -41,6 +41,7 @@ import type { SupervisorCreationHook, SupervisorCreationHookInput } from './hook
 import {
   DEFAULT_SUPERVISOR_RULES,
   evaluateSupervisorPolicy,
+  PLATFORM_DEFAULT_SUPERVISOR_RULES,
   SupervisorDecision,
   SupervisorRules,
 } from './policy';
@@ -76,6 +77,13 @@ export interface SupervisorPolicyServiceDeps {
    * Absent → enabled for every tenant (tests / explicit dev wiring).
    */
   isEnabledForTenant?: (tenantId: string) => Promise<boolean>;
+  /**
+   * U3 — platform-default caps applied to tenants with NO provisioned policy
+   * row. Lets the supervisor ship default-on with conservative budget caps for
+   * everyone, while a per-tenant `supervisor_policies` row still overrides.
+   * Absent → the permissive engine default (no caps), preserving prior tests.
+   */
+  defaultRules?: SupervisorRules;
   logger?: SupervisorLogger;
   /** Snapshot TTL; matches the tenant-flag cache order of magnitude. */
   snapshotTtlMs?: number;
@@ -267,7 +275,9 @@ export class SupervisorPolicyService implements SupervisorCreationHook {
           return;
         }
         const active = await this.deps.policies.getActive(tenantId);
-        const rules = active?.rules ?? DEFAULT_SUPERVISOR_RULES;
+        // Precedence: a provisioned tenant policy wins; else the platform
+        // default caps (U3); else the permissive engine default (no caps).
+        const rules = active?.rules ?? this.deps.defaultRules ?? DEFAULT_SUPERVISOR_RULES;
         const dayStart = utcDayWindowStart(now);
         const hourStart = utcHourWindowStart(now);
         const [dailySpendCents, autoApprovalsThisHour] = await Promise.all([

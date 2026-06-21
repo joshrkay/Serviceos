@@ -12,7 +12,13 @@ import { bootstrapTenant, TenantRepository } from '../auth/clerk';
 import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository, recordPayment, PaymentReceiptNotifier, PaymentMethod } from '../invoices/payment';
-import { recordRefund, reversePayment, recordFailedPaymentAttempt } from '../payments/payment-service';
+import {
+  recordRefund,
+  reversePayment,
+  recordFailedPaymentAttempt,
+  recordProcessingPayment,
+  settleProcessingPayment,
+} from '../payments/payment-service';
 import { randomUUID } from 'crypto';
 import { CustomerPaymentMethodRepository } from '../payments/customer-payment-method';
 import { retrievePaymentMethod } from '../payments/stripe-saved-card';
@@ -1068,6 +1074,94 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         }
       }
 
+      // U5 (ACH async lifecycle) — bank debit INITIATED. Stripe fires
+      // `payment_intent.processing` when an ACH / us_bank_account debit is
+      // submitted but funds have not cleared (settlement takes days). We
+      // record an IN-FLIGHT payment ('processing') and credit the invoice
+      // balance now so the owner / AR / digest aren't blind to days-long
+      // settlement — while gross-revenue math (status === 'completed')
+      // still excludes it. The later payment_intent.succeeded settles it
+      // (no re-credit); a payment_intent.payment_failed / ACH return backs
+      // out this credit and reopens the invoice.
+      //
+      // Idempotent: a payment row already existing for this PI (processing
+      // OR completed) means we've already credited — skip. The outer
+      // webhook-event-id dedup is the second line of defense.
+      if (event.type === 'payment_intent.processing') {
+        const pi = event.data.object as {
+          id?: string;
+          amount?: number;
+          amount_received?: number;
+          metadata?: { tenant_id?: string; invoice_id?: string };
+          payment_method_types?: unknown;
+          charges?: { data?: Array<{ payment_method_details?: { type?: string } | null } | null> };
+        };
+
+        const tenantId = pi.metadata?.tenant_id;
+        const invoiceId = pi.metadata?.invoice_id;
+        const piId = pi.id;
+        // For an initiated debit the funds haven't arrived, so
+        // `amount_received` is 0 — the to-be-credited amount is `amount`.
+        const amountCents = pi.amount ?? pi.amount_received;
+
+        if (!tenantId || !invoiceId || !piId || !amountCents || amountCents <= 0) {
+          logger.info('payment_intent.processing missing invoice metadata — skipping', {
+            eventId: event.id, paymentIntentId: piId,
+          });
+          await webhookRepo.updateStatus(webhookEvent.id, 'processed');
+          return res.status(200).json({ received: true, skipped: true });
+        }
+
+        if (!deps.invoiceRepo || !deps.paymentRepo) {
+          logger.error('Invoice/payment repos not wired to Stripe webhook handler');
+          return res.status(500).json({ error: 'Payment processing not configured' });
+        }
+
+        const existing = await deps.paymentRepo.findByProviderReference(tenantId, piId);
+        if (existing && (existing.status === 'processing' || existing.status === 'completed')) {
+          logger.info('payment_intent.processing already recorded — skipping', {
+            tenantId, invoiceId, paymentIntentId: piId, status: existing.status,
+          });
+          await webhookRepo.updateStatus(webhookEvent.id, 'processed');
+          return res.status(200).json({ received: true, duplicate: true });
+        }
+
+        try {
+          await recordProcessingPayment(
+            {
+              tenantId,
+              invoiceId,
+              amountCents,
+              method: mapStripePaymentMethod(pi),
+              providerReference: piId,
+              processedBy: 'stripe_webhook',
+            },
+            deps.invoiceRepo,
+            deps.paymentRepo,
+            buildMoneyStateDeps(deps),
+            deps.auditRepo,
+            { actorRole: 'system', correlationId: piId },
+          );
+          logger.info('Recorded in-flight ACH payment via payment_intent.processing', {
+            tenantId, invoiceId, amountCents, paymentIntentId: piId,
+          });
+        } catch (payErr) {
+          if (
+            payErr instanceof ValidationError &&
+            (payErr.message.includes('status') ||
+              payErr.message.includes('already fully paid'))
+          ) {
+            // Invoice already settled (e.g. a prior card payment cleared
+            // it first) — nothing to credit in-flight. Idempotent success.
+            logger.info('Invoice not creditable, ignoring payment_intent.processing', {
+              tenantId, invoiceId,
+            });
+          } else {
+            throw payErr;
+          }
+        }
+      }
+
       // Invoice-to-cash — async (ACH/bank) settlement success. The
       // checkout.session.completed branch SKIPS sessions with
       // payment_status != 'paid' (bank debits clear later), so for ACH
@@ -1076,6 +1170,13 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       // already recorded the payment (stamping the PI id into
       // provider_reference) — so we dedup on that completed row to avoid
       // double-recording.
+      //
+      // U5 (ACH async lifecycle): when payment_intent.processing already
+      // recorded an IN-FLIGHT row for this PI, we SETTLE it (flip
+      // 'processing' -> 'completed') WITHOUT re-crediting the invoice —
+      // the credit was applied at processing time. Only a PI with no
+      // existing row falls through to recordPayment (the card / first-time
+      // path).
       if (event.type === 'payment_intent.succeeded') {
         const pi = event.data.object as {
           id?: string;
@@ -1111,6 +1212,28 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           });
           await webhookRepo.updateStatus(webhookEvent.id, 'processed');
           return res.status(200).json({ received: true, duplicate: true });
+        }
+
+        // U5 (ACH async lifecycle) — an IN-FLIGHT row exists (recorded at
+        // payment_intent.processing). SETTLE it: flip 'processing' ->
+        // 'completed' WITHOUT re-crediting the invoice (the credit was
+        // applied at processing time). settleProcessingPayment is atomic +
+        // idempotent, so a duplicate succeeded is a clean no-op.
+        if (existing && existing.status === 'processing') {
+          const result = await settleProcessingPayment(
+            {
+              tenantId,
+              paymentId: existing.id,
+              correlationId: piId,
+            },
+            deps.paymentRepo,
+            deps.auditRepo,
+          );
+          logger.info('Settled in-flight ACH payment via payment_intent.succeeded', {
+            tenantId, invoiceId, paymentIntentId: piId, settled: result.settled,
+          });
+          await webhookRepo.updateStatus(webhookEvent.id, 'processed');
+          return res.status(200).json({ received: true, settled: result.settled });
         }
 
         try {
@@ -1193,8 +1316,15 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
 
         const existing = await deps.paymentRepo.findByProviderReference(tenantId, piId);
 
-        if (existing && existing.status === 'completed') {
-          // Post-settlement failure (ACH return / NSF) — reverse it.
+        if (existing && (existing.status === 'completed' || existing.status === 'processing')) {
+          // ACH return / NSF. Two shapes, one effect (reverse the credit +
+          // reopen the invoice), routed by reversePayment:
+          //   - 'completed' -> POST-SETTLEMENT failure: the debit appeared
+          //     to clear, then the bank pulled it back days later.
+          //   - 'processing' (U5) -> the IN-FLIGHT debit was returned
+          //     BEFORE it ever settled; back out the in-flight credit.
+          // reversePayment tries the completed-guarded flip first, then the
+          // in-flight ('processing') flip — both idempotent.
           await reversePayment(
             {
               tenantId,
@@ -1207,8 +1337,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             deps.auditRepo,
             buildMoneyStateDeps(deps),
           );
-          logger.warn('Settled payment reversed via payment_intent.payment_failed (ACH return/NSF)', {
-            tenantId, invoiceId, paymentId: existing.id, paymentIntentId: piId, reason: reasonText,
+          logger.warn('Payment reversed via payment_intent.payment_failed (ACH return/NSF)', {
+            tenantId, invoiceId, paymentId: existing.id, paymentIntentId: piId,
+            priorStatus: existing.status, reason: reasonText,
           });
         } else if (existing && existing.reversedAt) {
           // Already reversed by a prior delivery — no-op.

@@ -25,6 +25,11 @@ export interface PortalEstimate {
   totalCents: number;
   createdAt: string;
   validUntil: string | null;
+  depositRequiredCents: number;
+  depositPaidCents: number;
+  depositStatus: 'not_required' | 'pending' | 'paid';
+  /** True only for the accepted estimate that still owes a deposit. */
+  depositPayable: boolean;
   publicViewToken: string | null;
 }
 

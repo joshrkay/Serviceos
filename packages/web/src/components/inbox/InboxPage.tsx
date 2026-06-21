@@ -4,8 +4,42 @@ import { emitProposalsChanged } from '../../lib/proposal-events';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatInTenantTz } from '../../utils/formatInTenantTz';
 import { ProposalChainCard, ChainRow } from './ProposalChainCard';
+import { AmbiguityPicker, type AmbiguityCandidate } from './AmbiguityPicker';
 
 type Urgency = 'critical' | 'high' | 'normal' | 'low';
+
+// U2 (P2-035) — the "what I wasn't sure about" signals that already ride to the
+// inbox on the serialized proposal but were never rendered.
+type ConfidenceLevel = 'high' | 'medium' | 'low' | 'very_low';
+type PricingSource = 'catalog' | 'ambiguous' | 'uncatalogued' | 'manual';
+// §6.4-B severity tier (same scale as voice triage) — set on MMS photo drafts.
+type ProposalSeverity =
+  | 'TIER_1_EVACUATE'
+  | 'TIER_2_EMERGENCY_DISPATCH'
+  | 'TIER_3_SAME_DAY_URGENT'
+  | 'TIER_4_SCHEDULE';
+
+interface ProposalMeta {
+  overallConfidence?: ConfidenceLevel;
+  severity?: ProposalSeverity;
+  markers?: Array<{ path: string; reason: string }>;
+}
+
+// §6.4-B (U5) — compact severity badge for the inbox review row. The inbox (not
+// AIProposalCard) is where customer-MMS drafts are reviewed, so the urgency
+// marker must surface here too. Mirrors the assistant-card badge.
+const SEVERITY_CONFIG: Record<ProposalSeverity, { label: string; classes: string }> = {
+  TIER_1_EVACUATE:           { label: 'Evacuate',        classes: 'border-red-300 bg-red-100 text-red-800' },
+  TIER_2_EMERGENCY_DISPATCH: { label: 'Emergency',       classes: 'border-red-200 bg-red-50 text-red-700' },
+  TIER_3_SAME_DAY_URGENT:    { label: 'Same-day urgent', classes: 'border-amber-200 bg-amber-50 text-amber-700' },
+  TIER_4_SCHEDULE:           { label: 'Routine',         classes: 'border-slate-200 bg-slate-100 text-slate-600' },
+};
+
+interface LineItemView {
+  id?: string;
+  description?: string;
+  pricingSource?: PricingSource;
+}
 
 interface InboxProposalRow {
   proposal: {
@@ -19,11 +53,38 @@ interface InboxProposalRow {
     // utterance. The inbox serializes the full proposal, so these ride
     // through without an API change.
     chainId?: string;
-    sourceContext?: Record<string, unknown>;
+    // The inbox serializes the FULL proposal, so payload (_meta + lineItems)
+    // and sourceContext (ambiguous-line candidates) are already present — they
+    // were just never read by the UI.
+    payload?: {
+      _meta?: ProposalMeta;
+      lineItems?: LineItemView[];
+    };
+    sourceContext?: {
+      catalogResolution?: Record<string, AmbiguityCandidate[]>;
+      missingFields?: string[];
+    } & Record<string, unknown>;
   };
   urgency: Urgency;
   reason?: string;
 }
+
+const CONFIDENCE_CONFIG: Record<
+  ConfidenceLevel,
+  { label: string; bar: string; track: string; width: string; labelColor: string }
+> = {
+  high: { label: 'High confidence', bar: 'bg-green-500', track: 'bg-green-100', width: 'w-full', labelColor: 'text-green-700' },
+  medium: { label: 'Review recommended', bar: 'bg-amber-400', track: 'bg-amber-100', width: 'w-3/5', labelColor: 'text-amber-700' },
+  low: { label: 'Low confidence', bar: 'bg-orange-500', track: 'bg-orange-100', width: 'w-2/5', labelColor: 'text-orange-700' },
+  very_low: { label: 'Very low — needs review', bar: 'bg-red-500', track: 'bg-red-100', width: 'w-1/5', labelColor: 'text-red-700' },
+};
+
+const PRICING_SOURCE_BADGE: Record<PricingSource, { label: string; classes: string }> = {
+  catalog: { label: 'Catalog price', classes: 'bg-green-50 text-green-700 border-green-200' },
+  ambiguous: { label: 'Needs a pick', classes: 'bg-amber-50 text-amber-800 border-amber-200' },
+  uncatalogued: { label: 'Not in catalog', classes: 'bg-orange-50 text-orange-700 border-orange-200' },
+  manual: { label: 'Manual price', classes: 'bg-slate-50 text-slate-600 border-slate-200' },
+};
 
 /**
  * A feed item is either a standalone proposal or a chain of linked
@@ -103,6 +164,94 @@ const URGENCY_BADGE: Record<Urgency, { label: string; classes: string }> = {
   low: { label: 'Low', classes: 'bg-slate-50 text-slate-500 border-slate-200' },
 };
 
+/**
+ * U2 (P2-035) — renders the per-proposal trust signals the backend already
+ * sends: the 4-tier confidence bar, per-line pricing-source badges, free-text
+ * markers, and a one-tap picker for each ambiguous catalog line. Returns null
+ * when a proposal carries none of these (the common, fully-grounded case), so
+ * simple proposals look exactly as before.
+ */
+function ProposalMarkers({
+  row,
+  onResolveLine,
+}: {
+  row: InboxProposalRow;
+  onResolveLine: (proposalId: string, lineIndex: number, catalogItemId: string) => Promise<void>;
+}) {
+  const meta = row.proposal.payload?._meta;
+  const conf = meta?.overallConfidence ? CONFIDENCE_CONFIG[meta.overallConfidence] : null;
+  const lineItems = row.proposal.payload?.lineItems ?? [];
+  const catalogResolution = row.proposal.sourceContext?.catalogResolution ?? {};
+  const markers = meta?.markers ?? [];
+  const severity = meta?.severity;
+  const flagged = lineItems
+    .map((li, idx) => ({ li, idx }))
+    .filter(({ li }) => li.pricingSource && li.pricingSource !== 'catalog');
+
+  if (!conf && flagged.length === 0 && markers.length === 0 && !severity) return null;
+
+  return (
+    <div className="mt-2 space-y-1.5" data-testid="proposal-markers">
+      {conf && (
+        <div className="flex items-center gap-1.5" data-testid="confidence-signal">
+          <div className={`h-1.5 w-16 overflow-hidden rounded-full ${conf.track}`}>
+            <div className={`h-full rounded-full ${conf.bar} ${conf.width}`} />
+          </div>
+          <span className={`text-xs ${conf.labelColor}`}>{conf.label}</span>
+        </div>
+      )}
+
+      {severity && SEVERITY_CONFIG[severity] && (
+        <span
+          data-testid="severity-badge"
+          className={`inline-flex w-fit items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${SEVERITY_CONFIG[severity].classes}`}
+        >
+          {SEVERITY_CONFIG[severity].label}
+        </span>
+      )}
+
+      {flagged.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {flagged.map(({ li, idx }) => {
+            const badge = PRICING_SOURCE_BADGE[li.pricingSource as PricingSource];
+            return (
+              <span
+                key={li.id ?? idx}
+                data-testid="pricing-source-badge"
+                className={`inline-flex max-w-full items-center truncate rounded-full border px-1.5 py-0.5 text-[10px] ${badge.classes}`}
+              >
+                {badge.label}
+                {li.description ? `: ${li.description}` : ''}
+              </span>
+            );
+          })}
+        </div>
+      )}
+
+      {markers.map((m, i) => (
+        <p key={`${m.path}-${i}`} className="text-xs text-slate-500">
+          {m.reason}
+        </p>
+      ))}
+
+      {flagged
+        .filter(
+          ({ li, idx }) =>
+            li.pricingSource === 'ambiguous' &&
+            (catalogResolution[String(idx)]?.length ?? 0) > 0,
+        )
+        .map(({ li, idx }) => (
+          <AmbiguityPicker
+            key={`picker-${li.id ?? idx}`}
+            lineDescription={li.description ?? `Line ${idx + 1}`}
+            candidates={catalogResolution[String(idx)]}
+            onPick={(catalogItemId) => onResolveLine(row.proposal.id, idx, catalogItemId)}
+          />
+        ))}
+    </div>
+  );
+}
+
 export function InboxPage() {
   const apiFetch = useApiClient();
   const tz = useTenantTimezone();
@@ -146,6 +295,38 @@ export function InboxPage() {
       if (removed) setRows((prev) => [removed, ...prev]);
       setError(err instanceof Error ? err.message : `${action} failed`);
     }
+  }
+
+  /**
+   * U2 — resolve an ambiguous catalog line to one of its candidates. POSTs to
+   * the resolve-line endpoint (which patches the draft and may move it to
+   * ready_for_review, but NEVER approves), then merges the returned proposal
+   * back into the row so the picker disappears and the price shows as grounded.
+   */
+  async function resolveLine(
+    proposalId: string,
+    lineIndex: number,
+    catalogItemId: string,
+  ): Promise<void> {
+    const res = await apiFetch(`/api/proposals/${proposalId}/resolve-line`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ lineIndex, catalogItemId }),
+    });
+    if (!res.ok) {
+      setError(`Couldn't resolve that line (HTTP ${res.status})`);
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const updated = (await res.json()) as InboxProposalRow['proposal'];
+    setError(null); // a prior failure shouldn't keep showing after a success
+    setRows((prev) =>
+      prev.map((r) =>
+        r.proposal.id === proposalId
+          ? { ...r, proposal: { ...r.proposal, ...updated } }
+          : r,
+      ),
+    );
+    emitProposalsChanged();
   }
 
   /**
@@ -249,6 +430,7 @@ export function InboxPage() {
                       <p className="text-xs text-amber-700 mt-0.5">{holdExpiryLine(row, tz)}</p>
                     )}
                     {row.reason && <p className="text-xs text-slate-500 mt-0.5">{row.reason}</p>}
+                    <ProposalMarkers row={row} onResolveLine={resolveLine} />
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <button

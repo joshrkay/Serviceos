@@ -3,9 +3,11 @@ import React from 'react';
 /**
  * Icon glyph per lead source. P12-005 introduces `customer_portal` as a
  * first-class source — represented with a globe glyph since portal leads
- * arrive over the web from authenticated customer sessions. Falls back to
- * a generic dot for unknown sources so the UI never breaks if the backend
- * ships a new value before the web build catches up.
+ * arrive over the web from authenticated customer sessions. `sms` tags leads
+ * minted from an inbound text by an unknown sender (sms-capture), kept
+ * distinct from `phone_call`. Falls back to a generic dot for unknown sources
+ * so the UI never breaks if the backend ships a new value before the web
+ * build catches up.
  */
 const SOURCE_ICONS: Record<string, string> = {
   web_form: 'F',
@@ -15,10 +17,23 @@ const SOURCE_ICONS: Record<string, string> = {
   marketplace: '⌂', // house
   other: '…', // ellipsis
   customer_portal: '\u{1F310}', // globe — portal-over-web
+  sms: '\u{1F4AC}', // speech balloon — inbound text
 };
 
 function sourceIcon(source: string): string {
   return SOURCE_ICONS[source] ?? '•'; // bullet fallback
+}
+
+/**
+ * Display label per source. Most sources render their raw enum value; `sms`
+ * is shown as the upper-cased acronym ("SMS") so the kanban tag reads cleanly.
+ */
+const SOURCE_LABELS: Record<string, string> = {
+  sms: 'SMS',
+};
+
+function sourceLabel(source: string): string {
+  return SOURCE_LABELS[source] ?? source;
 }
 
 export interface LeadCardData {
@@ -87,7 +102,7 @@ export function LeadCard({ lead, onClick, onDragStart }: LeadCardProps) {
           data-testid={`lead-source-${lead.source}`}
         >
           <span aria-hidden="true" className="mr-1">{sourceIcon(lead.source)}</span>
-          {lead.source}
+          {sourceLabel(lead.source)}
         </span>
         {lead.sourceDetail && <span className="truncate">{lead.sourceDetail}</span>}
       </div>

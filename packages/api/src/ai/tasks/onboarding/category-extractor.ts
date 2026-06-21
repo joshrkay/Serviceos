@@ -5,6 +5,7 @@ import {
   HVAC_SERVICE_CATEGORIES,
   PLUMBING_SERVICE_CATEGORIES,
   ELECTRICAL_SERVICE_CATEGORIES,
+  PAINTING_SERVICE_CATEGORIES,
   ServiceCategory,
 } from '../../../shared/vertical-types';
 import {
@@ -23,12 +24,13 @@ You will be given the identified verticals from a prior extraction step. Match t
 HVAC categories: diagnostic, repair, maintenance, install, replacement, emergency
 Plumbing categories: diagnostic, repair, install, replacement, drain, water-heater, emergency
 Electrical categories: diagnostic, repair, install, panel, lighting, safety, emergency
+Painting categories: diagnostic, prep, interior, exterior, specialty, finishing, emergency
 
 Return valid JSON:
 {
   "categories": [
     {
-      "vertical_type": "hvac" | "plumbing" | "electrical",
+      "vertical_type": "hvac" | "plumbing" | "electrical" | "painting",
       "category_id": "<from taxonomy above>",
       "name": "<display name>",
       "confidence": <0-1>,
@@ -53,6 +55,9 @@ function isValidCategory(verticalType: string, categoryId: string): boolean {
   }
   if (verticalType === 'electrical') {
     return (ELECTRICAL_SERVICE_CATEGORIES as readonly string[]).includes(categoryId);
+  }
+  if (verticalType === 'painting') {
+    return (PAINTING_SERVICE_CATEGORIES as readonly string[]).includes(categoryId);
   }
   return false;
 }

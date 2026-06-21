@@ -111,6 +111,17 @@ let mediaHandler: MediaHandler | undefined;
  * Same single-slot `FallbackHandler` shape (name + handle).
  */
 let negotiationHandler: FallbackHandler | undefined;
+/**
+ * U4 (CRM Jobber parity, Phase 2) — capture-all. The absolute last resort:
+ * an inbound customer text that NO keyword, no owner-edit fallback, no
+ * dropped-call recovery, and no negotiation guardrail claimed. Instead of
+ * dropping it on the floor, this handler threads it onto the sender's
+ * conversation so the owner sees it in the unified inbox. It runs AFTER
+ * `negotiationHandler` so it never pre-empts a real feature, and STOP/START
+ * (keyword handlers) short-circuit far upstream, so opt-outs never reach it.
+ * Same single-slot `FallbackHandler` shape (name + handle).
+ */
+let captureHandler: FallbackHandler | undefined;
 
 function normalize(keyword: string): string {
   return keyword.trim().toLowerCase();
@@ -214,6 +225,34 @@ async function runNegotiation(ctx: InboundSmsContext): Promise<HandlerResult | n
   }
 }
 
+/** U4 — register the (single) capture-all handler. */
+export function registerCaptureHandler(
+  handler: FallbackHandler,
+  options: RegisterKeywordHandlerOptions = {},
+): void {
+  if (captureHandler && !options.overwrite) {
+    throw new Error(
+      `duplicate capture-handler registration: '${captureHandler.name}' is already registered`,
+    );
+  }
+  captureHandler = handler;
+}
+
+async function runCapture(ctx: InboundSmsContext): Promise<HandlerResult | null> {
+  if (!captureHandler) return null;
+  try {
+    return await captureHandler.handle({ ...ctx });
+  } catch (err) {
+    logger.error('Inbound SMS capture handler threw', {
+      tenantId: ctx.tenantId,
+      messageSid: ctx.messageSid,
+      handler: captureHandler.name,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { handled: false, handler: captureHandler.name, reason: 'handler_error' };
+  }
+}
+
 /** RV-050 — register the (single) inbound-media handler. */
 export function registerMediaHandler(
   handler: MediaHandler,
@@ -289,6 +328,10 @@ export async function dispatchInboundSms(
     // N-003 — last resort: a customer negotiation ask on an unclaimed message.
     const viaNegotiation = await runNegotiation(ctx);
     if (viaNegotiation?.handled) return viaNegotiation;
+    // U4 — absolute last resort: capture the unclaimed text onto the sender's
+    // conversation so it surfaces in the unified inbox instead of vanishing.
+    const viaCapture = await runCapture(ctx);
+    if (viaCapture?.handled) return viaCapture;
     return { handled: false, reason: 'no_matching_handler' };
   }
 
@@ -323,6 +366,10 @@ export async function dispatchInboundSms(
   // N-003 — last resort: a customer negotiation ask the keyword handler declined.
   const viaNegotiation = await runNegotiation(ctx);
   if (viaNegotiation?.handled) return viaNegotiation;
+  // U4 — absolute last resort: capture the unclaimed text onto the sender's
+  // conversation (e.g. a customer replying free-text a keyword handler declined).
+  const viaCapture = await runCapture(ctx);
+  if (viaCapture?.handled) return viaCapture;
   return keywordResult;
 }
 
@@ -336,4 +383,5 @@ export function __resetKeywordRegistryForTests(): void {
   recoveryResume = undefined;
   mediaHandler = undefined;
   negotiationHandler = undefined;
+  captureHandler = undefined;
 }

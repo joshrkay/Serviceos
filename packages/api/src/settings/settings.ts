@@ -66,6 +66,46 @@ export function resolveEscalationSettings(
 }
 
 /**
+ * P2-036 V2 (Discount-policy engine — U1) — the resolved per-tenant
+ * discount policy consumed by the pure decision engine (U3
+ * `evaluateDiscountAsk`, lands later). All money is integer cents and all
+ * percentages are basis points (bps), per the repo invariants.
+ *
+ *   maxDiscountBps     — ceiling the AI may auto-propose without a full
+ *                        owner callback (0-10000 = 0%-100%). `0` means
+ *                        "no auto-allow": every ask escalates, identical
+ *                        to V1 which blocks discounts entirely.
+ *   absoluteFloorCents — optional hard price floor in cents. `null` = no
+ *                        absolute floor term (the catalog list-minus-cap
+ *                        floor still applies in U3).
+ *   neverBelowCatalog  — when true, an ask is never allowed to land below
+ *                        the catalog list price. Defaults true (stricter).
+ */
+export interface DiscountPolicy {
+  maxDiscountBps: number;
+  absoluteFloorCents: number | null;
+  neverBelowCatalog: boolean;
+}
+
+/**
+ * Resolve the discount policy for a tenant. FAIL-CLOSED: an unconfigured
+ * tenant (no settings row, or any column NULL/undefined) resolves to the
+ * V1-identical posture — `maxDiscountBps: 0` ("no auto-allow", so every
+ * discount ask routes to an owner callback exactly like V1), no absolute
+ * floor, and `neverBelowCatalog: true` (the stricter default). Safe to
+ * call with `null`.
+ */
+export function resolveDiscountPolicy(
+  settings: TenantSettings | null,
+): DiscountPolicy {
+  return {
+    maxDiscountBps: settings?.discountMaxBps ?? 0,
+    absoluteFloorCents: settings?.discountFloorCents ?? null,
+    neverBelowCatalog: settings?.discountNeverBelowCatalog ?? true,
+  };
+}
+
+/**
  * Phase 12 — supervisor-mode-related settings on tenant_settings.
  *
  * Schema lives in migration 063 (P12-001). The repository round-trips
@@ -95,6 +135,13 @@ export interface BrandVoiceSettings {
   pronoun?: 'we' | 'i';
   vibe_words?: string[];
   business_name?: string;
+  /**
+   * N-009 / P2-038 — brand-voice negative prompt. Phrases the AI must never
+   * use in customer-facing copy. Grown by the correction loop when an owner
+   * edit removes a phrase (each addition is a reversible `banned_phrase`
+   * lesson); rendered as a non-overridable "never say" instruction.
+   */
+  banned_phrases?: string[];
 }
 
 /**
@@ -162,6 +209,14 @@ export interface TenantSettings {
    */
   autoInvoiceOnCompletion?: boolean;
   /**
+   * Post-job thank-you SMS. When true (default), the thank-you-sms sweep
+   * worker sends a single "thanks for choosing X" SMS ~2 hours after a
+   * job transitions to 'completed'. Idempotent on
+   * `jobs.thank_you_sms_sent_at`. PRD §7.2 (the "Johnson job is done"
+   * demo moment).
+   */
+  sendThankYouSms?: boolean;
+  /**
    * Feature (launch) — when true, an auto-drafted invoice recomputes its labor
    * line from ACTUAL logged time entries instead of the estimated hours.
    * Default false (opt-in); with no tracked time the estimate is billed as-is.
@@ -216,6 +271,24 @@ export interface TenantSettings {
   depositFixedCents?: number | null;
   depositRequiredAboveCents?: number | null;
   /**
+   * P2-036 V2 (Discount-policy engine — U1: data plane only). Per-tenant
+   * policy bounding AI-proposed discounts. Consumed via
+   * `resolveDiscountPolicy`, which fail-closes any missing value to the
+   * V1-identical posture (see that resolver + migration 178). All
+   * nullable so existing tenants are unaffected and absence reads as
+   * "policy not configured":
+   *   - `discountMaxBps`: ceiling the AI may auto-propose without an
+   *     owner callback (0-10000 = 0%-100%). Absent/`null` → 0 ("no
+   *     auto-allow", identical to V1).
+   *   - `discountFloorCents`: optional absolute price floor (integer
+   *     cents, >= 0). Absent/`null` → no absolute floor term.
+   *   - `discountNeverBelowCatalog`: never let an ask land below the
+   *     catalog list price. Absent/`null` → treated as `true` (stricter).
+   */
+  discountMaxBps?: number | null;
+  discountFloorCents?: number | null;
+  discountNeverBelowCatalog?: boolean | null;
+  /**
    * Tier 4 (Deposit rules — PR 3a-extended). Controls when the
    * customer is prompted to pay the deposit relative to estimate
    * approval. See migration 079 for accepted values. Default
@@ -239,6 +312,16 @@ export interface TenantSettings {
   serviceAreaRadius?: number | null;
   businessHours?: Record<string, { open: string; close: string } | null> | null;
   jobBufferMinutes?: number | null;
+  /**
+   * P22-005 (U7) — the tenant's billable LABOR rate, integer cents per hour.
+   * Used by per-job profit (jobs/job-profit.ts) to cost tracked job minutes.
+   * Distinct from `hourlyRateCents` (the owner's value-of-time figure powering
+   * the Time-Given-Back surface): this is what an hour of field labor COSTS the
+   * business for P&L. Null/undefined = not set; per-job profit then reports
+   * minutes-only with an explicit caveat. Per-tech rates are out of scope —
+   * this is a single tenant-level rate. Migration 181.
+   */
+  laborRateCentsPerHour?: number | null;
   /**
    * B1 — Per-tenant voice persona. When set, the calling agent uses
    * this name in its greeting ("Hi, I'm {voiceAgentName}. How can I
@@ -383,6 +466,8 @@ export interface UpdateSettingsInput {
   autoSendAppointmentReminders?: boolean;
   /** P20-001 — auto-draft an invoice (as a proposal) on job completion. */
   autoInvoiceOnCompletion?: boolean;
+  /** Post-job 2hr thank-you SMS. Default true. */
+  sendThankYouSms?: boolean;
   /** Feature (launch) — recompute auto-invoice labor from actual time entries. */
   billLaborFromTimeEntries?: boolean;
   /** P21-003 — opt into the daily batch-invoice proposal sweep. */
@@ -396,10 +481,16 @@ export interface UpdateSettingsInput {
   depositPercentageBps?: number | null;
   depositFixedCents?: number | null;
   depositRequiredAboveCents?: number | null;
+  /** P2-036 V2 (Discount policy — U1) — see TenantSettings doc; null clears. */
+  discountMaxBps?: number | null;
+  discountFloorCents?: number | null;
+  discountNeverBelowCatalog?: boolean | null;
   /** Tier 4 — when the deposit is collected relative to approval. */
   depositTimingPolicy?: 'before_approval' | 'after_approval';
   /** §9 — owner's effective hourly rate (integer cents); null clears. */
   hourlyRateCents?: number | null;
+  /** P22-005 (U7) — billable labor rate (integer cents/hr); null clears. */
+  laborRateCentsPerHour?: number | null;
   /** B1 — voice persona name; null clears the field. */
   voiceAgentName?: string | null;
   /** B1 — custom greeting text; null clears the field. */
@@ -504,6 +595,9 @@ function validateCommonSettingsFields(
     defaultPaymentTermDays?: number;
     digestTime?: string;
     digestChannel?: string;
+    discountMaxBps?: number | null;
+    discountFloorCents?: number | null;
+    laborRateCentsPerHour?: number | null;
   }
 ): string[] {
   const errors: string[] = [];
@@ -519,6 +613,26 @@ function validateCommonSettingsFields(
   if (input.defaultPaymentTermDays !== undefined && input.defaultPaymentTermDays < 0) {
     errors.push('defaultPaymentTermDays must be non-negative');
   }
+  // P2-036 V2 (Discount policy — U1) — shape guard mirroring the migration
+  // CHECKs. `null` is "clear this column" and is allowed; only present,
+  // non-null values are range-checked. discountMaxBps is basis points
+  // (0-10000 = 0%-100%); discountFloorCents is integer cents (>= 0).
+  if (
+    input.discountMaxBps !== undefined &&
+    input.discountMaxBps !== null &&
+    (!Number.isInteger(input.discountMaxBps) ||
+      input.discountMaxBps < 0 ||
+      input.discountMaxBps > 10000)
+  ) {
+    errors.push('discountMaxBps must be an integer between 0 and 10000');
+  }
+  if (
+    input.discountFloorCents !== undefined &&
+    input.discountFloorCents !== null &&
+    (!Number.isInteger(input.discountFloorCents) || input.discountFloorCents < 0)
+  ) {
+    errors.push('discountFloorCents must be a non-negative integer');
+  }
   // RV-063 — digest delivery fields.
   if (input.digestTime !== undefined && !DIGEST_TIME_RE.test(input.digestTime)) {
     errors.push("digestTime must be 'HH:MM' (24-hour)");
@@ -528,6 +642,14 @@ function validateCommonSettingsFields(
     !DIGEST_CHANNEL_VALUES.includes(input.digestChannel as DigestChannel)
   ) {
     errors.push(`digestChannel must be one of: ${DIGEST_CHANNEL_VALUES.join(', ')}`);
+  }
+  // P22-005 (U7) — labor rate. null = clear (allowed); a present number must be
+  // a non-negative integer of cents (money is always integer cents).
+  if (input.laborRateCentsPerHour !== undefined && input.laborRateCentsPerHour !== null) {
+    const rate = input.laborRateCentsPerHour;
+    if (!Number.isInteger(rate) || rate < 0) {
+      errors.push('laborRateCentsPerHour must be a non-negative integer of cents');
+    }
   }
   return errors;
 }

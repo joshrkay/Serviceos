@@ -64,6 +64,7 @@ import { discloseRecording } from '../ai/skills/disclose-recording';
 import { t, type Language } from '../ai/i18n/i18n';
 import { identifyCaller } from '../ai/skills/identify-caller';
 import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
+import { assembleB2bAccountContext } from '../ai/agents/customer-calling/b2b-account-context';
 import { confirmIntent } from '../ai/skills/confirm-intent';
 import { summarizeSession } from '../ai/skills/summarize-session';
 import {
@@ -77,6 +78,8 @@ import type {
   SideEffect,
 } from '../ai/agents/customer-calling/types';
 import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
+import type { VulnerabilityTriageHook } from '../ai/agents/customer-calling/vulnerability-triage-hook';
+import { extractPriorTurns } from '../ai/agents/customer-calling/transcript-turns';
 // Aliased to avoid name collision with the private `deriveCallOutcome` method
 // on this class — see line 1828. The imported function takes the typed
 // options object (DeriveOutcomeInput); the instance method takes a
@@ -104,6 +107,8 @@ import {
   appendAgentTts,
   type VoiceTurnProcessor,
 } from '../ai/voice-turn';
+import type { CustomerNegotiationContextProvider } from '../customers/customer-negotiation-context';
+import type { CurrentQuoteResolver } from '../conversations/negotiation/current-quote-resolver';
 import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
 import { detectEmergency } from '../ai/agents/customer-calling/emergency-detector';
@@ -144,6 +149,15 @@ function isOwnerLookupIntent(intentType: string): boolean {
 export interface TwilioAdapterDeps {
   store: VoiceSessionStore;
   gateway: LLMGateway;
+  /**
+   * U4 — per-turn vulnerability triage on the Gather/PSTN path. Fired
+   * fire-and-forget after the deterministic safety scan, symmetric to the
+   * media-streams adapter. Gated inside the hook by the per-tenant
+   * `voice_vulnerability_triage` flag (fail-closed). When undefined, the
+   * Gather path simply doesn't grade — the same additive, safe default the
+   * media-streams transport has.
+   */
+  vulnerabilityTriageHook?: VulnerabilityTriageHook;
   /** Postgres pool — passed to identifyCaller and summarizeSession. */
   pool?: Pool;
   /** Repos used to persist side-effect rows (audit/proposal/escalation). */
@@ -179,6 +193,12 @@ export interface TwilioAdapterDeps {
    */
   dispatcherPhoneResolver?: DispatcherPhoneResolver;
   /**
+   * Tenant-level last-resort phone (shared business_phone), dialed only when
+   * the on-call rotation has no per-user mobile. Threaded into escalateToHuman
+   * so the /dial-result cascade can fall back when no tradesperson is reachable.
+   */
+  businessPhoneFallbackResolver?: (tenantId: string) => Promise<string | null>;
+  /**
    * P8-014: when set, the initial inbound TwiML emits a
    * `<Start><Record recordingStatusCallback="..."/></Start>` block so
    * Twilio asynchronously records the entire call and POSTs the
@@ -207,6 +227,13 @@ export interface TwilioAdapterDeps {
   agreementRepo?: AgreementRepository;
   /** VQ-006: read-only customer + estimate lookups. */
   customerRepo?: CustomerRepository;
+  /**
+   * N-003 (P2-036) — threaded through to the voice-turn processor so a live-call
+   * negotiation callback can carry the caller's LTV/recency.
+   */
+  customerNegotiationContextProvider?: CustomerNegotiationContextProvider;
+  /** P2-036 V2 — threaded to the voice-turn processor for the live-call discount engine. */
+  negotiationQuoteResolver?: CurrentQuoteResolver;
   estimateRepo?: EstimateRepository;
   /** Full-app voice coverage: owner-scoped revenue + catalog lookups. */
   moneyDashboardRepo?: MoneyDashboardRepository;
@@ -708,6 +735,47 @@ export class TwilioGatherAdapter {
     }
   }
 
+  /**
+   * U4 — B2B priority routing. After the caller is matched to a customer,
+   * assemble the business-account context (parent + sub-accounts + priority +
+   * occupied-property awareness) and stash it on the session so triage /
+   * booking and the live-call prompt assembly route it with priority. No-op
+   * for residential callers and when no customerRepo is wired. Best-effort:
+   * a lookup failure never strands the call — it simply leaves the context
+   * unset (the caller routes as a normal account).
+   */
+  private async loadB2bAccountContext(
+    session: VoiceSession,
+    tenantId: string,
+    customerId: string,
+  ): Promise<void> {
+    if (!this.deps.customerRepo) return;
+    try {
+      const customer = await this.deps.customerRepo.findById(tenantId, customerId);
+      if (!customer) return;
+      const ctx = await assembleB2bAccountContext({
+        tenantId,
+        customer,
+        repo: this.deps.customerRepo,
+      });
+      if (ctx) {
+        session.b2bAccountContext = ctx;
+        logger.info('inbound call: B2B account context assembled', {
+          sessionId: session.id,
+          accountType: ctx.accountType,
+          hasParent: Boolean(ctx.parentAccount),
+          parentMissing: ctx.parentMissing,
+          subAccountCount: ctx.subAccounts.length,
+        });
+      }
+    } catch (err) {
+      logger.warn('loadB2bAccountContext failed — caller routes as normal account', {
+        sessionId: session.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   private async resolveEscalationTriggers(
     tenantId: string,
   ): Promise<CallingAgentContext['escalationTriggers'] | undefined> {
@@ -927,6 +995,9 @@ export class TwilioGatherAdapter {
 
     if (callerKnown) {
       session.customerId = callerKnown.customerId;
+      // U4 — assemble B2B priority routing context for a business / property-
+      // manager caller before driving the FSM forward.
+      await this.loadB2bAccountContext(session, opts.tenantId, callerKnown.customerId);
       sideEffects.push(
         ...session.machine.dispatch({ type: 'caller_known', customerId: callerKnown.customerId }),
       );
@@ -1464,6 +1535,9 @@ export class TwilioGatherAdapter {
 
     if (callerKnown) {
       session.customerId = callerKnown.customerId;
+      // U4 — assemble B2B priority routing context for a business / property-
+      // manager caller before driving the FSM forward.
+      await this.loadB2bAccountContext(session, opts.tenantId, callerKnown.customerId);
       expanded.push(
         ...session.machine.dispatch({
           type: 'caller_known',
@@ -1642,6 +1716,33 @@ export class TwilioGatherAdapter {
       );
       await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
       return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+    }
+
+    // U4 — per-turn vulnerability triage on the Gather path, fire-and-forget
+    // behind the per-tenant flag (gated inside the hook). Symmetric to the
+    // media-streams adapter (RV-122): runs AFTER the deterministic safety scan
+    // (RV-140, above) and only on a real, non-empty caller utterance. Skip an
+    // already escalating/terminated call — wasted LLM spend the FSM no-ops
+    // anyway. The current utterance is already on session.transcript (appended
+    // above), so priorTurns carries it as context exactly like streaming.
+    if (
+      this.deps.vulnerabilityTriageHook &&
+      currentState !== 'escalating' &&
+      currentState !== 'terminated'
+    ) {
+      void this.deps
+        .vulnerabilityTriageHook({
+          session,
+          transcript: opts.speechResult,
+          priorTurns: extractPriorTurns(session.transcript, 4),
+          tenantId: opts.tenantId,
+        })
+        .catch((err) =>
+          logger.warn('vulnerability triage hook failed (gather)', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: opts.sessionId,
+          }),
+        );
     }
 
     // 2. Branch on FSM state.
@@ -2597,6 +2698,17 @@ export class TwilioGatherAdapter {
    */
   setPendingTransferTwiml(sessionId: string, twiml: string): void {
     this.pendingTransferTwiml.set(sessionId, twiml);
+  }
+
+  /**
+   * U4 — late-bind the per-turn vulnerability triage hook. The hook's
+   * `onPatchOwner` closure references THIS adapter (getCallerPhone /
+   * setPendingTransferTwiml), so it can only be built after the adapter
+   * exists. This setter lets app.ts inject the same hook the media-streams
+   * server uses, so a Gather-mode turn grades identically to a streaming turn.
+   */
+  setVulnerabilityTriageHook(hook: VulnerabilityTriageHook): void {
+    this.deps.vulnerabilityTriageHook = hook;
   }
 
   /**

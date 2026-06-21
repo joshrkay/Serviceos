@@ -39,12 +39,78 @@ export const customerSchema = z.object({
   originatingLeadId: z.string().optional(),
   preferredLanguage: z.string().optional(),
   dateOfBirth: z.string().optional(),
-  accountType: z.enum(['residential', 'b2b']).optional(),
+  accountType: z.enum(['residential', 'b2b', 'property_manager']).optional(),
+  parentAccountId: z.string().optional(),
   createdBy: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
 export type Customer = z.infer<typeof customerSchema>;
+
+/**
+ * U1 (CRM Jobber parity) — a contact attached to a customer. A B2B /
+ * property-manager account separates the decision-maker (`primary`), the
+ * bill-to (`billing`), and the on-site contact (`site`) onto distinct rows.
+ * Kept in lockstep with `customer_contacts.role` (migration 186) and the
+ * server-side `CustomerContactRole` in
+ * `packages/api/src/customers/contact.ts`. Defined as a string-literal enum
+ * (not z.nativeEnum) so it can't silently drift from the persisted set.
+ */
+export const customerContactRoleSchema = z.enum(['primary', 'billing', 'site', 'other']);
+export type CustomerContactRole = z.infer<typeof customerContactRoleSchema>;
+
+export const customerContactSchema = z.object({
+  id: z.string().uuid(),
+  tenantId: z.string().uuid(),
+  customerId: z.string().uuid(),
+  name: z.string(),
+  role: customerContactRoleSchema,
+  phone: z.string().optional(),
+  email: z.string().optional(),
+  isPrimary: z.boolean(),
+  notes: z.string().optional(),
+  isArchived: z.boolean(),
+  archivedAt: z.string().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type CustomerContact = z.infer<typeof customerContactSchema>;
+
+/**
+ * U2 (CRM Jobber parity) — tenant-defined custom fields on customers. The
+ * field type drives both the editor control and the value validation
+ * (`number` must parse, `date` must be ISO, `select` must be one of `options`).
+ * Kept in lockstep with `customer_custom_field_defs.field_type` (migration 187)
+ * and the server-side `CustomFieldType` in
+ * `packages/api/src/customers/custom-field.ts`.
+ */
+export const customerCustomFieldTypeSchema = z.enum(['text', 'number', 'date', 'select']);
+export type CustomerCustomFieldType = z.infer<typeof customerCustomFieldTypeSchema>;
+
+export const customerCustomFieldDefSchema = z.object({
+  id: z.string().uuid(),
+  tenantId: z.string().uuid(),
+  key: z.string(),
+  label: z.string(),
+  fieldType: customerCustomFieldTypeSchema,
+  options: z.array(z.string()),
+  sortOrder: z.number().int(),
+  isArchived: z.boolean(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type CustomerCustomFieldDef = z.infer<typeof customerCustomFieldDefSchema>;
+
+/** A single field value resolved against its definition, for the editor UI. */
+export const customerCustomFieldValueSchema = z.object({
+  fieldDefId: z.string().uuid(),
+  key: z.string(),
+  label: z.string(),
+  fieldType: customerCustomFieldTypeSchema,
+  options: z.array(z.string()),
+  value: z.string().nullable(),
+});
+export type CustomerCustomFieldValue = z.infer<typeof customerCustomFieldValueSchema>;
 
 /**
  * Minimal customer summary embedded in enriched list/detail responses for other

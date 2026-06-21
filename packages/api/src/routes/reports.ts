@@ -12,6 +12,10 @@ import { TimeGivenBackReporter } from '../reports/time-given-back';
 import { ProposalRepository } from '../proposals/proposal';
 import { AuditRepository } from '../audit/audit';
 import { computeHfcrForTenant } from '../metrics/hfcr';
+import { JobRepository } from '../jobs/job';
+import { TimeEntryRepository } from '../time-tracking/time-entry';
+import { SettingsRepository } from '../settings/settings';
+import { getJobProfit, MaterialsResolver } from '../jobs/job-profit';
 
 /**
  * Tenant-scoped reporting endpoints. Add new reports here rather than
@@ -32,6 +36,16 @@ export interface ReportsRouterDeps {
   /** HFCR hero metric — backs GET /hfcr. All three required; 503 when any absent. */
   proposalRepo?: ProposalRepository;
   auditRepo?: AuditRepository;
+  /**
+   * P22-005 (U7) — backs GET /job-profit/:jobId. jobRepo + timeEntryRepo +
+   * settingsRepo + invoiceRepo + expenseRepo are all required for the rollup;
+   * the route 503s if any is absent. `materialsResolver` is optional (P14
+   * job_parts is not built — materials default to 0 without it).
+   */
+  jobRepo?: JobRepository;
+  timeEntryRepo?: TimeEntryRepository;
+  settingsRepo?: SettingsRepository;
+  materialsResolver?: MaterialsResolver;
   /**
    * Returns the tenant's IANA timezone string (e.g. `America/Los_Angeles`).
    * Used to bucket the money dashboard by tenant-local month boundaries —
@@ -288,6 +302,59 @@ export function createReportsRouter(deps: ReportsRouterDeps): Router {
         }
         const summary = await deps.timeGivenBackReporter.query(req.auth!.tenantId, new Date());
         res.json({ data: summary });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  // P22-005 (U7) — per-job profit (P&L) for one job: revenue − labor −
+  // materials − expenses, integer cents. Reuses invoices:view (anyone who can
+  // see a job's invoices can see whether it made money). 404 when the job is
+  // not in this tenant — tenant isolation is enforced both by RLS in the repos
+  // and by the explicit findById tenant scope here.
+  router.get(
+    '/job-profit/:jobId',
+    requireAuth,
+    requireTenant,
+    requirePermission('invoices:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (
+          !deps.jobRepo ||
+          !deps.invoiceRepo ||
+          !deps.timeEntryRepo ||
+          !deps.expenseRepo ||
+          !deps.settingsRepo
+        ) {
+          res.status(503).json({ error: 'NOT_CONFIGURED', message: 'Job profit unavailable' });
+          return;
+        }
+        const tenantId = req.auth!.tenantId;
+        const jobId = req.params.jobId;
+
+        const job = await deps.jobRepo.findById(tenantId, jobId);
+        if (!job) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
+          return;
+        }
+
+        const settings = await deps.settingsRepo.findByTenant(tenantId);
+        const profit = await getJobProfit(
+          {
+            tenantId,
+            jobId,
+            laborRateCentsPerHour: settings?.laborRateCentsPerHour ?? null,
+          },
+          {
+            invoiceRepo: deps.invoiceRepo,
+            timeEntryRepo: deps.timeEntryRepo,
+            expenseRepo: deps.expenseRepo,
+            ...(deps.materialsResolver ? { materialsResolver: deps.materialsResolver } : {}),
+          },
+        );
+        res.json({ data: profit });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
