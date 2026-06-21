@@ -126,6 +126,9 @@ import type { AppointmentRepository } from '../../appointments/appointment';
 import type { InvoiceRepository } from '../../invoices/invoice';
 import type { AgreementRepository } from '../../agreements/agreement';
 import type { CustomerRepository } from '../../customers/customer';
+import type { ConversationRepository } from '../../conversations/conversation-service';
+import { findOrCreateCustomerByPhone } from '../skills/find-or-create-customer';
+import { logInboundCallOnCustomerTimeline } from '../../telephony/inbound-call-log';
 import type { EstimateRepository } from '../../estimates/estimate';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
 import type { LLMGateway } from '../gateway/gateway';
@@ -248,6 +251,14 @@ export interface VoiceTurnProcessorDeps {
   invoiceRepo?: InvoiceRepository;
   agreementRepo?: AgreementRepository;
   customerRepo?: CustomerRepository;
+  /**
+   * When wired (with customerRepo), an unknown inbound caller who gives their
+   * info at `ask_caller` gets a CUSTOMER resolved/created by phone and the call
+   * logged on its timeline, so a booking that follows attaches to a real
+   * customer record (the inbound-booking goal). Without it, unknown callers
+   * fall back to the retry/escalate path.
+   */
+  conversationRepo?: ConversationRepository;
   estimateRepo?: EstimateRepository;
   lookupEvents?: LookupEventService;
   credentialResolver?: TenantCredentialResolver;
@@ -1414,6 +1425,59 @@ export function createVoiceTurnProcessor(
           score: 0,
         }),
       );
+      await executeSideEffects(session, sideEffectsAll, tenantId);
+      return sideEffectsAll;
+    }
+
+    if (currentState === 'ask_caller') {
+      // Unknown caller just gave their info. Resolve (or create) a real CUSTOMER
+      // keyed by their phone so the booking that follows attaches to a customer
+      // record, log the call on that customer's timeline, and advance the FSM
+      // (caller_known) so the agent can take the booking. Without a customerRepo
+      // + phone we fall back to the FSM's existing retry/escalate path.
+      const callerPhone = deps.callerPhoneResolver?.(session) ?? session.callerPhone;
+      if (deps.customerRepo && callerPhone) {
+        try {
+          const resolved = await findOrCreateCustomerByPhone({
+            tenantId,
+            fromPhone: callerPhone,
+            customerRepo: deps.customerRepo,
+            ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+            systemActorId: deps.systemActorId ?? 'system:inbound-call',
+          });
+          session.customerId = resolved.customerId;
+          if (deps.conversationRepo) {
+            try {
+              await logInboundCallOnCustomerTimeline({
+                conversationRepo: deps.conversationRepo,
+                tenantId,
+                customerId: resolved.customerId,
+                fromPhone: callerPhone,
+                ...(session.callSid ? { callSid: session.callSid } : {}),
+                actorId: deps.systemActorId ?? 'system:inbound-call',
+                ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+              });
+            } catch (err) {
+              logger.error('ask_caller: inbound call timeline log failed', {
+                error: err instanceof Error ? err.message : String(err),
+                sessionId: session.id,
+              });
+            }
+          }
+          sideEffectsAll.push(
+            ...session.machine.dispatch({ type: 'caller_known', customerId: resolved.customerId }),
+          );
+        } catch (err) {
+          logger.error('ask_caller: find-or-create customer failed', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: session.id,
+          });
+          sideEffectsAll.push(...session.machine.dispatch({ type: 'unknown_caller' }));
+        }
+      } else {
+        // No customer repo / phone wired — keep the existing retry/escalate path.
+        sideEffectsAll.push(...session.machine.dispatch({ type: 'unknown_caller' }));
+      }
       await executeSideEffects(session, sideEffectsAll, tenantId);
       return sideEffectsAll;
     }

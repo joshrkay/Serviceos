@@ -43,6 +43,32 @@ describe('Postgres integration — customers', () => {
       expect(found!.email).toBe('john@example.com');
     });
 
+    it('round-trips the source (acquisition channel) column — create, read, update', async () => {
+      // Pins the real customers.source column (migration 201) end-to-end: the
+      // INSERT, mapRow, and UPDATE field-map all reference it.
+      const customer = await repo.create({
+        id: crypto.randomUUID(),
+        tenantId: tenant.tenantId,
+        firstName: 'Source',
+        lastName: 'Tester',
+        displayName: 'Source Tester',
+        preferredChannel: 'sms',
+        smsConsent: false,
+        isArchived: false,
+        source: 'referral',
+        createdBy: tenant.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      expect(customer.source).toBe('referral');
+
+      const found = await repo.findById(tenant.tenantId, customer.id);
+      expect(found!.source).toBe('referral');
+
+      const updated = await repo.update(tenant.tenantId, customer.id, { source: 'google' });
+      expect(updated!.source).toBe('google');
+    });
+
     it('updates customer and reflects in findById', async () => {
       const customer = await repo.create({
         id: crypto.randomUUID(),

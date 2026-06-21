@@ -123,4 +123,15 @@ describe('CustomersPage', () => {
     renderPage();
     expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/customers');
   });
+
+  it('offers an acquisition-source selector when adding a customer', () => {
+    renderPage();
+    fireEvent.click(screen.getByText('Add customer')); // open the Add sheet
+    const select = screen.getByLabelText('How did you hear about us?') as HTMLSelectElement;
+    expect(select).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Referral' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Repeat client' })).toBeInTheDocument();
+    fireEvent.change(select, { target: { value: 'referral' } });
+    expect(select.value).toBe('referral');
+  });
 });

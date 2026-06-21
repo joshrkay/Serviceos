@@ -4,6 +4,7 @@ import { Lead, LeadRepository } from '../../leads/lead';
 import { LeadSource } from '../../leads/enums';
 import { normalizePhone } from '../../shared/phone';
 import { maskPhone } from '../../telephony/twilio-call-control';
+import { notifyOwnerLeadCaptured } from '../../leads/lead-service';
 
 export interface FindOrCreateLeadInput {
   tenantId: string;
@@ -133,6 +134,11 @@ async function createNewLead(opts: {
       })
     );
   }
+
+  // U6 — owner `lead_captured` push (best-effort). SUPPRESSED for the inbound
+  // CALL path (source 'phone_call'), which fires `incoming_call` separately;
+  // SMS-capture leads (source 'sms') still surface here.
+  await notifyOwnerLeadCaptured(opts.tenantId, created);
 
   return { status: 'created', leadId: created.id, lead: created };
 }

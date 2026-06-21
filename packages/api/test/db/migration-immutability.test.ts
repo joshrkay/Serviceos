@@ -301,6 +301,26 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // U1 (PRD gap closure): onboarding_session table for the conversational
   // FSM (ENABLE + FORCE RLS per gemini-code-assist review on PR #594).
   ['195_onboarding_session', '4ca725aa5bd1d9e3c516282f67349e3fc5f47f0228bdc0a5e2ee6ed995d2834d'],
+  ['196_create_device_tokens', '5bfc2853156c6d14fcc313d8ad51c0b010499a205838a042c19941ae8d61b29a'],
+  // Token-exclusive device ownership: widen device_tokens RLS with the
+  // app.system_lookup escape hatch so register() can cross-tenant-delete a token.
+  ['197_device_tokens_system_lookup_rls', '2aff868a1307b6afe4398eb50141fa60fdf55a682fe8eb08c2d26bc854a20ba2'],
+  // One OPEN conversation per (tenant, customer): pre-index dedup + partial
+  // unique index that makes the customer get-or-create thread path race-safe.
+  ['198_conversations_one_open_thread_per_customer', '88e49474bf50962a612e2a2294d1901c91c0d2267430447e30c9315d22953ddc'],
+  // Null-safe (missing_ok) device_tokens system-lookup policy — avoids a UUID
+  // cast error on a connection with no app.current_tenant_id set.
+  ['199_device_tokens_system_lookup_null_safe', '23cd9a92fdccdc0bca9367833c2f1ce66463b60db925a49e73af0cdfabbf345a'],
+  // Extend the one-open-thread guarantee to 'lead' and 'sms_unmatched' so the
+  // inbound-capture 23505 recovery is atomic for every SMS target type, not
+  // just customer (migration 198).
+  ['200_conversations_one_open_thread_noncustomer', '9af90c1b55544fe8451246c42a6c7cd80dd8ed6fae054050bcc070548e253a0f'],
+  // Jobber-parity CRM: customer acquisition channel (additive nullable column).
+  ['201_customers_source', '2add8937ddc606a7bfe86b59be879b3dceeb6a9730d6ff414f3798a47c362a05'],
+  // Jobber-parity invoice processing-fee surcharge (additive nullable columns).
+  ['202_invoices_processing_fee', '3f1dd0227fd3b18342e06e1bda51f60e83b8a8ab5057da78d2b72986e4cd72cf'],
+  // Graduate maintenance contracts to a real tenant-scoped table.
+  ['203_create_maintenance_contracts', 'f0f77a5ba2060be02849eccd0f75066a43813c2f0004c3fb591a8a5f76ca78a6'],
 ];
 
 function hashMigration(value: string): string {

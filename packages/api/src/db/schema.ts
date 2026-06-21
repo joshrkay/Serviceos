@@ -4872,6 +4872,164 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_onboarding_session ON onboarding_session
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // Mobile push registration — one row per (tenant, device token). The app
+  // upserts on sign-in (ON CONFLICT updates user/platform); the notify path
+  // lists by tenant. user_id is the Clerk subject (TEXT, like other user_id
+  // columns here), not an FK. RLS-isolated by tenant.
+  '196_create_device_tokens': `
+    CREATE TABLE IF NOT EXISTS device_tokens (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      expo_push_token TEXT NOT NULL,
+      platform TEXT NOT NULL CHECK (platform IN ('ios', 'android')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, expo_push_token)
+    );
+    CREATE INDEX IF NOT EXISTS idx_device_tokens_tenant ON device_tokens (tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens (tenant_id, user_id);
+    ALTER TABLE device_tokens ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE device_tokens FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_device_tokens ON device_tokens;
+    CREATE POLICY tenant_isolation_device_tokens ON device_tokens
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+  // A physical device's Expo push token belongs to exactly one tenant at a
+  // time. When the app re-registers a token under a newly active tenant, the
+  // repo deletes the token's rows under OTHER tenants (a cross-tenant op) so a
+  // later sign-out — a single tenant-scoped DELETE — can't leave a stale row
+  // that keeps pushing the former tenant's notifications to a signed-out
+  // device. Widen the RLS policy with the same app.system_lookup escape hatch
+  // used by migration 074 so that scoped cleanup is permitted.
+  '197_device_tokens_system_lookup_rls': `
+    DROP POLICY IF EXISTS tenant_isolation_device_tokens ON device_tokens;
+    CREATE POLICY tenant_isolation_device_tokens ON device_tokens
+      USING (
+        tenant_id = current_setting('app.current_tenant_id')::UUID
+        OR current_setting('app.system_lookup', true) = 'true'
+      );
+  `,
+  // Idempotency for the customer get-or-create thread path: at most ONE OPEN
+  // conversation per (tenant, customer). Without it a Message tap racing the
+  // outbound-call logger (or a concurrent inbound SMS) could both read zero
+  // open threads and both insert, splitting later messages/calls across
+  // duplicate threads. Deliberately scoped to entity_type = 'customer' AND
+  // status = 'open': both get-or-create flows key on the OPEN customer thread,
+  // while 'closed' threads (a finished conversation that inbound SMS may sit
+  // beside with a fresh open one) and other entity types (lead, etc.) are
+  // intentionally unconstrained. The pre-index dedup collapses any existing
+  // duplicate open customer threads (keep the most recent, mark the rest
+  // 'closed' — non-destructive) so the index build can't fail on live data;
+  // it is a no-op once the index holds.
+  '198_conversations_one_open_thread_per_customer': `
+    WITH ranked AS (
+      SELECT id,
+             row_number() OVER (
+               PARTITION BY tenant_id, entity_id
+               ORDER BY updated_at DESC, created_at DESC, id
+             ) AS rn
+      FROM conversations
+      WHERE entity_type = 'customer' AND status = 'open' AND entity_id IS NOT NULL
+    )
+    UPDATE conversations c
+    SET status = 'closed', updated_at = NOW()
+    FROM ranked r
+    WHERE c.id = r.id AND r.rn > 1;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_conversations_open_customer
+      ON conversations (tenant_id, entity_id)
+      WHERE entity_type = 'customer' AND status = 'open' AND entity_id IS NOT NULL;
+  `,
+  // Harden migration 197's device_tokens policy: the cross-tenant cleanup in
+  // register() runs a DELETE that must reach the app.system_lookup escape
+  // hatch, but the original USING evaluated current_setting('app.current_tenant_id')::UUID
+  // WITHOUT missing_ok, so a connection where that GUC is unset/RESET raised on
+  // the cast before the escape hatch could apply (500 on POST /api/devices).
+  // Use the null-safe missing_ok=true form (matching migration 074) so an
+  // absent GUC yields NULL (no match) and falls through to system_lookup.
+  '199_device_tokens_system_lookup_null_safe': `
+    DROP POLICY IF EXISTS tenant_isolation_device_tokens ON device_tokens;
+    CREATE POLICY tenant_isolation_device_tokens ON device_tokens
+      USING (
+        tenant_id = current_setting('app.current_tenant_id', true)::UUID
+        OR current_setting('app.system_lookup', true) = 'true'
+      );
+  `,
+  // Extend the one-open-thread guarantee (migration 198, customer-only) to the
+  // other inbound-SMS capture targets — 'lead' and 'sms_unmatched'. Without it,
+  // openOrAppendConversation's 23505 recovery (inbound-capture.ts) could only
+  // ever fire for customer threads, so two concurrent texts from the same
+  // unknown number (or the same new lead) could each lose the open-thread race
+  // and split into two parallel open conversations. entity_type is part of the
+  // key here (unlike 198, whose predicate already pins it to 'customer') so a
+  // lead and an sms_unmatched thread can never collide on a shared entity_id.
+  // The pre-index dedup collapses any existing duplicate open threads for these
+  // types (keep the most recent, mark the rest 'closed' — non-destructive) so
+  // the build can't fail on live data; it is a no-op once the index holds.
+  '200_conversations_one_open_thread_noncustomer': `
+    WITH ranked AS (
+      SELECT id,
+             row_number() OVER (
+               PARTITION BY tenant_id, entity_type, entity_id
+               ORDER BY updated_at DESC, created_at DESC, id
+             ) AS rn
+      FROM conversations
+      WHERE entity_type IN ('lead', 'sms_unmatched')
+        AND status = 'open' AND entity_id IS NOT NULL
+    )
+    UPDATE conversations c
+    SET status = 'closed', updated_at = NOW()
+    FROM ranked r
+    WHERE c.id = r.id AND r.rn > 1;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_conversations_open_noncustomer
+      ON conversations (tenant_id, entity_type, entity_id)
+      WHERE entity_type IN ('lead', 'sms_unmatched')
+        AND status = 'open' AND entity_id IS NOT NULL;
+  `,
+  // Jobber-parity CRM: customer acquisition channel ("How did you hear about
+  // us?"). Additive, nullable TEXT (app validates against CUSTOMER_SOURCES);
+  // distinct from originating_lead_id, which links a specific converted lead.
+  '201_customers_source': `
+    ALTER TABLE customers ADD COLUMN IF NOT EXISTS source TEXT;
+  `,
+  // Jobber-parity invoice processing-fee surcharge: pass card/ACH processing
+  // costs through to the customer. Additive nullable INTEGER columns (basis
+  // points + the computed cents, both folded into total_cents). Invoice-only.
+  '202_invoices_processing_fee': `
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS processing_fee_bps INTEGER;
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS processing_fee_cents INTEGER;
+  `,
+  // Graduate maintenance contracts from the in-memory route stub to a real
+  // tenant-scoped table (persistence survives restarts). Free-text customer/
+  // location fields mirror what the Contracts UI sends today; the contract↔CRM
+  // FK link is a separate follow-up. Null-safe RLS (missing_ok) so a connection
+  // with no GUC set doesn't error on the UUID cast (matches migration 199).
+  '203_create_maintenance_contracts': `
+    CREATE TABLE IF NOT EXISTS maintenance_contracts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      title TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'paused', 'cancelled')),
+      customer_display_name TEXT,
+      location_street1 TEXT,
+      cadence TEXT,
+      service_window TEXT,
+      duration TEXT,
+      start_date TEXT,
+      end_date TEXT,
+      default_summary TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_maintenance_contracts_tenant
+      ON maintenance_contracts(tenant_id);
+    ALTER TABLE maintenance_contracts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE maintenance_contracts FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_maintenance_contracts ON maintenance_contracts
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

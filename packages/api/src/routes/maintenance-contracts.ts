@@ -1,17 +1,11 @@
 /**
- * BUG-6 — Maintenance contracts REST router.
+ * Maintenance contracts REST router.
  *
  * The web client (`MaintenanceContractsPage`, `ContractDetailPage`,
  * `CreateContractSheet`) talks to `/api/maintenance-contracts` GET/POST and
- * `/api/maintenance-contracts/:id` GET. Without these handlers the
- * Contracts page surfaces "Failed to load contracts" on render.
- *
- * Backed by an in-process tenant-scoped store. The shape mirrors what
- * the frontend renders — title/customer/location/cadence/etc — and is
- * intentionally distinct from `/api/agreements` (which uses a stricter
- * data model).
- *
- * Production wiring through a real repository is tracked separately.
+ * `/api/maintenance-contracts/:id` GET. Persisted via
+ * PgMaintenanceContractRepository (migration 203) — distinct from
+ * `/api/agreements` (the stricter RRULE recurrence model).
  */
 import { Router, Response } from 'express';
 import { randomUUID } from 'crypto';
@@ -19,35 +13,15 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { toErrorResponse, ValidationError } from '../shared/errors';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import {
+  MaintenanceContract,
+  MaintenanceContractRepository,
+} from '../maintenance-contracts/maintenance-contract';
 
-interface MaintenanceContract {
-  id: string;
-  tenantId: string;
-  title: string;
-  status: 'active' | 'paused' | 'cancelled';
-  customer?: { id?: string; displayName?: string; firstName?: string; lastName?: string };
-  location?: { id?: string; street1?: string };
-  cadence?: string;
-  serviceWindow?: string;
-  duration?: string;
-  startDate?: string;
-  endDate?: string;
-  defaultSummary?: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-const contractsByTenant = new Map<string, MaintenanceContract[]>();
-
-function listForTenant(tenantId: string): MaintenanceContract[] {
-  return contractsByTenant.get(tenantId) ?? [];
-}
-
-function setForTenant(tenantId: string, rows: MaintenanceContract[]): void {
-  contractsByTenant.set(tenantId, rows);
-}
-
-export function createMaintenanceContractsRouter(auditRepo: AuditRepository): Router {
+export function createMaintenanceContractsRouter(
+  repo: MaintenanceContractRepository,
+  auditRepo: AuditRepository,
+): Router {
   const router = Router();
 
   router.get(
@@ -55,10 +29,14 @@ export function createMaintenanceContractsRouter(auditRepo: AuditRepository): Ro
     requireAuth,
     requireTenant,
     requirePermission('customers:view'),
-    (req: AuthenticatedRequest, res: Response) => {
-      const tenantId = req.auth!.tenantId;
-      const data = listForTenant(tenantId);
-      res.json({ data, total: data.length });
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const data = await repo.findByTenant(req.auth!.tenantId);
+        res.json({ data, total: data.length });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
     },
   );
 
@@ -67,14 +45,18 @@ export function createMaintenanceContractsRouter(auditRepo: AuditRepository): Ro
     requireAuth,
     requireTenant,
     requirePermission('customers:view'),
-    (req: AuthenticatedRequest, res: Response) => {
-      const tenantId = req.auth!.tenantId;
-      const found = listForTenant(tenantId).find((c) => c.id === req.params.id);
-      if (!found) {
-        res.status(404).json({ error: 'NOT_FOUND', message: 'Contract not found' });
-        return;
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const found = await repo.findById(req.auth!.tenantId, req.params.id);
+        if (!found) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Contract not found' });
+          return;
+        }
+        res.json(found);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
       }
-      res.json(found);
     },
   );
 
@@ -107,16 +89,15 @@ export function createMaintenanceContractsRouter(auditRepo: AuditRepository): Ro
           serviceWindow: typeof body.serviceWindow === 'string' ? body.serviceWindow : undefined,
           duration: typeof body.duration === 'string' ? body.duration : undefined,
           startDate: typeof body.startDate === 'string' ? body.startDate : undefined,
+          endDate: typeof body.endDate === 'string' ? body.endDate : undefined,
           defaultSummary: typeof body.defaultSummary === 'string' ? body.defaultSummary : undefined,
           createdAt: now,
           updatedAt: now,
         };
 
-        const rows = listForTenant(tenantId);
-        setForTenant(tenantId, [contract, ...rows]);
+        const created = await repo.create(contract);
 
-        // D2-1e — all mutations emit audit events. Forward-compat with the
-        // future-real maintenance_contract repository.
+        // D2-1e — all mutations emit audit events.
         await auditRepo.create(
           createAuditEvent({
             tenantId,
@@ -124,15 +105,15 @@ export function createMaintenanceContractsRouter(auditRepo: AuditRepository): Ro
             actorRole: req.auth!.role ?? 'unknown',
             eventType: 'maintenance_contract.created',
             entityType: 'maintenance_contract',
-            entityId: contract.id,
+            entityId: created.id,
             metadata: {
-              title: contract.title,
-              cadence: contract.cadence,
+              title: created.title,
+              cadence: created.cadence,
             },
           })
         );
 
-        res.status(201).json(contract);
+        res.status(201).json(created);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

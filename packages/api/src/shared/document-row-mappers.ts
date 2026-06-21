@@ -33,6 +33,14 @@ export function mapDocumentTotalsRow(row: Record<string, any>): DocumentTotals {
     discountCents: Number(row.discount_cents),
     taxRateBps: Number(row.tax_rate_bps),
     taxCents: Number(row.tax_cents),
+    // Processing-fee surcharge is invoice-only; estimate rows have no such
+    // column (row.processing_fee_* is undefined there → fields stay unset).
+    ...(row.processing_fee_bps !== undefined && row.processing_fee_bps !== null
+      ? { processingFeeBps: Number(row.processing_fee_bps) }
+      : {}),
+    ...(row.processing_fee_cents !== undefined && row.processing_fee_cents !== null
+      ? { processingFeeCents: Number(row.processing_fee_cents) }
+      : {}),
     totalCents: Number(row.total_cents),
   };
 }
