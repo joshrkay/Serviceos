@@ -24,6 +24,9 @@ function mapRow(row: Record<string, unknown>): Customer {
     email: (row.email as string) ?? undefined,
     preferredChannel: row.preferred_channel as Customer['preferredChannel'],
     smsConsent: row.sms_consent as boolean,
+    consentStatus:
+      (row.consent_status as 'granted' | 'revoked' | 'unknown' | null | undefined) ??
+      undefined,
     communicationNotes: (row.communication_notes as string) ?? undefined,
     source: (row.source as Customer['source']) ?? undefined,
     isArchived: row.is_archived as boolean,

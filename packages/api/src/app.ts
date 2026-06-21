@@ -837,8 +837,9 @@ export function createApp(): express.Express {
   // handlers, which mutate tenant_dnc_list. Suppression at outbound-send
   // time is layered on top in send-service / appointment-confirmation-notifier.
   const dncRepo = pool ? new PgDncRepository(pool) : new InMemoryDncRepository();
-  registerKeywordHandler(buildStopKeywordHandler({ dncRepo }), { overwrite: true });
-  registerKeywordHandler(buildStartKeywordHandler({ dncRepo }), { overwrite: true });
+  // STOP/START handler registration is deferred until the consent ledger and
+  // customer repos exist (Story 10.6 unifies DNC + consent_events + the
+  // customers.consent_status rollup) — see registration below.
 
   // Resolves per-tenant integration credentials for inbound webhook signature
   // verification. Returns null when no row exists or the integration provider
@@ -2496,6 +2497,16 @@ export function createApp(): express.Express {
   const consentEventRepo = pool
     ? new PgConsentEventRepository(pool)
     : new InMemoryConsentEventRepository();
+  // Story 10.6 — register STOP/START now that DNC, the consent ledger, and the
+  // customer repo all exist, so an opt-out updates every store at once.
+  registerKeywordHandler(
+    buildStopKeywordHandler({ dncRepo, consentRepo: consentEventRepo, customerRepo, pool }),
+    { overwrite: true },
+  );
+  registerKeywordHandler(
+    buildStartKeywordHandler({ dncRepo, consentRepo: consentEventRepo, customerRepo, pool }),
+    { overwrite: true },
+  );
   const twilioRecordingControl =
     process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
       ? new TwilioRecordingControl(
