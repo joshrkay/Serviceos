@@ -5035,7 +5035,7 @@ export const MIGRATIONS = {
   // row is written only when a user mutes a category. The `app.system_lookup`
   // escape hatch (same as device_tokens 199) lets the notifier read a user's
   // mute state at send time, when there is no per-request tenant context.
-  '204_create_notification_preferences': `
+  '205_create_notification_preferences': `
     CREATE TABLE IF NOT EXISTS notification_preferences (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -5058,6 +5058,7 @@ export const MIGRATIONS = {
         tenant_id = current_setting('app.current_tenant_id', true)::UUID
         OR current_setting('app.system_lookup', true) = 'true'
       );
+  `,
   // Onboarding email lifecycle (welcome / setup-reminder / trial-ending).
   //   1. tenants.trial_ends_at — cached mirror of the Stripe subscription's
   //      trial_end, written by the customer.subscription.* webhook alongside

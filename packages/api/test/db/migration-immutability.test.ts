@@ -322,7 +322,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // Graduate maintenance contracts to a real tenant-scoped table.
   ['203_create_maintenance_contracts', 'f0f77a5ba2060be02849eccd0f75066a43813c2f0004c3fb591a8a5f76ca78a6'],
   // Per-user owner-notification opt-outs (U10).
-  ['204_create_notification_preferences', 'df14c6514d98aaaadb7b320f9c3834029057841068c7d03ec707300c1f913048'],
+  ['204_lifecycle_emails_and_trial_ends', '1fc6cc3a631858d987771d9db0c268c355995cfe19effa726018d6dd13445f45'],
+  ['205_create_notification_preferences', 'df14c6514d98aaaadb7b320f9c3834029057841068c7d03ec707300c1f913048'],
 ];
 
 function hashMigration(value: string): string {
