@@ -39,6 +39,8 @@ import { InboxPage } from './components/inbox/InboxPage';
 import { CommsInboxPage } from './pages/conversations/CommsInboxPage';
 import { PortalShell } from './pages/portal/PortalShell';
 import { Showcase } from './pages/design/Showcase';
+import { PrivacyPolicy } from './pages/legal/PrivacyPolicy';
+import { TermsOfService } from './pages/legal/TermsOfService';
 import { InvoiceCreate } from './pages/invoices/InvoiceCreate';
 import { EstimateCreate } from './pages/estimates/EstimateCreate';
 import { JobCreate } from './pages/jobs/JobCreate';
@@ -147,6 +149,11 @@ export const router = createBrowserRouter([
   { path: '/book',       Component: BookingPage,          ErrorBoundary: RouteErrorElement },
   { path: '/public/feedback/:token', Component: FeedbackPage, ErrorBoundary: RouteErrorElement },
   { path: '/portal/:token',          Component: PortalShell,  ErrorBoundary: RouteErrorElement },
+
+  // Public legal pages — reachable Privacy Policy URL required for App Store
+  // Connect; both are linked from the marketing footer.
+  { path: '/privacy', Component: PrivacyPolicy,   ErrorBoundary: RouteErrorElement },
+  { path: '/terms',   Component: TermsOfService,  ErrorBoundary: RouteErrorElement },
 
   // ── App (with Shell nav, auth-gated) ───────────────────────────────────
   {

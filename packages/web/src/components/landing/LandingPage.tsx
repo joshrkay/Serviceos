@@ -532,7 +532,10 @@ function Footer() {
           <span className="text-sm tracking-tight text-slate-900">Rivet</span>
         </div>
         <p className="text-xs text-slate-500">
-          &copy; 2026 Rivet &middot; Privacy &middot; Terms
+          &copy; 2026 Rivet &middot;{' '}
+          <a href="/privacy" className="hover:text-slate-900 hover:underline">Privacy</a>{' '}
+          &middot;{' '}
+          <a href="/terms" className="hover:text-slate-900 hover:underline">Terms</a>
         </p>
       </div>
     </footer>
