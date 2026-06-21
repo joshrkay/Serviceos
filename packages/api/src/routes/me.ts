@@ -55,6 +55,13 @@ export interface MeTenantSettings {
    * tenant timezone".
    */
   timezone: string;
+  /**
+   * Entity-label overrides from `tenant_settings.terminology_preferences`
+   * (e.g. `{ estimateTerm: 'Quote', jobTerm: 'Project' }`). Surfaced so
+   * the web client renders the tenant's own vocabulary everywhere via the
+   * shared terminology resolver (story 2.5). Empty object when unset.
+   */
+  terminology_preferences: Record<string, string>;
 }
 
 /** Safe default when tenant_settings is missing a timezone row. */
@@ -133,6 +140,9 @@ export function createMeRouter(
           // in the tenant's local time (appointments, invoice dates,
           // dashboard buckets, etc.).
           timezone: settings.timezone,
+          // Tenant vocabulary (Quote vs Estimate, Project vs Job, …) so
+          // the web renders the owner's own words everywhere (story 2.5).
+          terminology_preferences: settings.terminology_preferences,
           integration_statuses: integrationStatuses.map((s) => ({
             provider: s.provider,
             status: s.status,
@@ -250,6 +260,7 @@ export class InMemoryUserModeService implements UserModeService {
         backup_supervisor_user_id: null,
         unsupervised_proposal_routing: 'queue_and_sms',
         timezone: DEFAULT_TENANT_TIMEZONE,
+        terminology_preferences: {},
       }
     );
   }

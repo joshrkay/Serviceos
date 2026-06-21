@@ -3744,7 +3744,8 @@ export function createApp(): express.Express {
           const r = await pool.query(
             `SELECT backup_supervisor_user_id,
                     COALESCE(unsupervised_proposal_routing, 'queue_and_sms') AS unsupervised_proposal_routing,
-                    COALESCE(timezone, $2) AS timezone
+                    COALESCE(timezone, $2) AS timezone,
+                    COALESCE(terminology_preferences, '{}'::jsonb) AS terminology_preferences
              FROM tenant_settings WHERE tenant_id = $1 LIMIT 1`,
             [tenantId, DEFAULT_TENANT_TIMEZONE],
           );
@@ -3753,9 +3754,11 @@ export function createApp(): express.Express {
               backup_supervisor_user_id: null,
               unsupervised_proposal_routing: 'queue_and_sms',
               timezone: DEFAULT_TENANT_TIMEZONE,
+              terminology_preferences: {},
             } as MeTenantSettings;
           }
           const row = r.rows[0] as Record<string, unknown>;
+          const termPrefs = row.terminology_preferences;
           return {
             backup_supervisor_user_id: row.backup_supervisor_user_id
               ? String(row.backup_supervisor_user_id)
@@ -3763,6 +3766,13 @@ export function createApp(): express.Express {
             unsupervised_proposal_routing:
               row.unsupervised_proposal_routing as MeTenantSettings['unsupervised_proposal_routing'],
             timezone: String(row.timezone),
+            // jsonb column comes back as an already-parsed object via pg;
+            // guard against a stray null/non-object so the contract stays
+            // a plain Record<string,string>.
+            terminology_preferences:
+              termPrefs && typeof termPrefs === 'object'
+                ? (termPrefs as Record<string, string>)
+                : {},
           };
         },
         async getTenantIntegrationStatuses(tenantId) {

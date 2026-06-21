@@ -14,6 +14,7 @@ import { ErrorState } from '../ErrorState';
 import { apiFetch } from '../../utils/api-fetch';
 import { printEstimateDocument } from '../../lib/estimatePdf';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { useEntityLabels } from '../../hooks/useEntityLabels';
 import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
@@ -1242,6 +1243,7 @@ const TABS: { label: string; value: EstimateStatus | 'All' }[] = [
 export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {
   const navigate = useNavigate();
   const tz = useTenantTimezone();
+  const labels = useEntityLabels();
   const [tab,              setTab]           = useState<EstimateStatus | 'All'>('All');
   const [selected,         setSelected]      = useState<string | null>(defaultSelectedId ?? null);
   const [newEstimateOpen,  setNewEstimate]   = useState(false);
@@ -1279,12 +1281,12 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
       <div className="px-4 md:px-6 py-4 md:py-6 max-w-3xl mx-auto">
         <div className="flex items-center justify-between mb-5">
-          <h1 className="text-slate-900">Estimates</h1>
+          <h1 className="text-slate-900">{labels.label('estimateTerm', { plural: true })}</h1>
           <button
             onClick={() => setNewEstimate(true)}
             className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors"
           >
-            <Plus size={14} /> New estimate
+            <Plus size={14} /> New {labels.label('estimateTerm').toLowerCase()}
           </button>
         </div>
 

@@ -9,6 +9,7 @@ import type { ServiceType } from '../../data/mock-data';
 import type { Customer, CustomerListItem } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useMutation } from '../../hooks/useMutation';
+import { useEntityLabels } from '../../hooks/useEntityLabels';
 import { Spinner, EmptyState } from '../ui';
 import { ErrorState } from '../ErrorState';
 import { NewEstimateFlow } from '../estimates/NewEstimateFlow';
@@ -435,6 +436,7 @@ type Filter = 'All' | ServiceType;
 
 export function CustomersPage() {
   const navigate = useNavigate();
+  const labels = useEntityLabels();
   const [filter,       setFilter]       = useState<Filter>('All');
   const [showAdd,      setShowAdd]      = useState(false);
   const [showEstimate, setShowEstimate] = useState(false);
@@ -456,15 +458,15 @@ export function CustomersPage() {
         {/* header */}
         <div className="flex items-center justify-between mb-1">
           <div>
-            <h1 className="text-slate-900">Customers</h1>
+            <h1 className="text-slate-900">{labels.label('customerTerm', { plural: true })}</h1>
             <p className="text-xs text-slate-400 mt-0.5">
-              {total} customers · {totalLocations} locations
+              {total} {labels.label('customerTerm', { plural: true }).toLowerCase()} · {totalLocations} locations
             </p>
           </div>
           <button
             onClick={() => setShowAdd(true)}
             className="flex items-center gap-1.5 rounded-xl bg-slate-900 text-white px-3.5 py-2.5 text-sm hover:bg-slate-700 transition-colors">
-            <Plus size={14} /> Add customer
+            <Plus size={14} /> Add {labels.label('customerTerm').toLowerCase()}
           </button>
         </div>
 
