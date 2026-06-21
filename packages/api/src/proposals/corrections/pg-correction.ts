@@ -27,8 +27,12 @@ function mapRow(row: Record<string, unknown>): Correction {
 }
 
 function parseJsonb(raw: unknown): unknown {
-  if (raw === null || raw === undefined) return null;
-  return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  // node-postgres already parses jsonb columns into JS values (objects, arrays,
+  // strings, numbers, booleans, null) via its default type parser — the rest of
+  // this codebase reads jsonb directly (e.g. mapConversationRow uses row.metadata
+  // as an object). Return the value as-is; re-running JSON.parse on a primitive
+  // jsonb string (e.g. "A" -> JS 'A') would throw "not valid JSON".
+  return raw === undefined ? null : raw;
 }
 
 export class PgCorrectionRepository extends PgBaseRepository implements CorrectionRepository {
