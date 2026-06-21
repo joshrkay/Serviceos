@@ -72,6 +72,44 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'apply_late_fee',
 ];
 
+/**
+ * §5.5 Schedule proposal cards expire after 48 hours. These are the proposal
+ * types that put a specific time on the calendar (the booking/reschedule cards
+ * a contractor reviews) — if not acted on they go stale: the slot may pass or
+ * be taken, so a silently-lingering one could be approved into a conflict.
+ * Every OTHER proposal type persists indefinitely (its `expiresAt` is left
+ * unset). This list is the single source of truth for the expiry policy.
+ *
+ * Note: the product also speaks of "message schedule" proposals, but the live
+ * stack has no distinct scheduled-message proposal type — outbound messages
+ * (send_estimate/send_invoice/etc.) are comms proposals that intentionally
+ * persist until an operator acts. If a scheduled-message type is added later,
+ * add it here.
+ */
+export const SCHEDULE_PROPOSAL_TYPES: readonly ProposalType[] = [
+  'create_appointment',
+  'create_booking',
+  'reschedule_appointment',
+];
+
+/** §5.5 — 48 hours, in milliseconds. */
+export const SCHEDULE_PROPOSAL_EXPIRY_MS = 48 * 60 * 60 * 1000;
+
+export function isScheduleProposalType(type: ProposalType): boolean {
+  return SCHEDULE_PROPOSAL_TYPES.includes(type);
+}
+
+/**
+ * §5.5 Default expiry for a newly created proposal: schedule proposals get a
+ * 48-hour TTL from `now`; everything else persists (returns undefined). An
+ * explicit `expiresAt` supplied by the caller always takes precedence.
+ */
+export function defaultProposalExpiry(type: ProposalType, now: Date): Date | undefined {
+  return isScheduleProposalType(type)
+    ? new Date(now.getTime() + SCHEDULE_PROPOSAL_EXPIRY_MS)
+    : undefined;
+}
+
 export interface Proposal {
   id: string;
   tenantId: string;
@@ -649,7 +687,9 @@ export function createProposal(input: CreateProposalInput): Proposal {
     targetEntityType: input.targetEntityType,
     targetEntityId: input.targetEntityId,
     idempotencyKey: input.idempotencyKey,
-    expiresAt: input.expiresAt,
+    // §5.5 — schedule proposals default to a 48h TTL; an explicit caller
+    // value always wins, and non-schedule types stay unset (persist).
+    expiresAt: input.expiresAt ?? defaultProposalExpiry(input.proposalType, now),
     chainId: input.chainId,
     approvedAt,
     createdBy: input.createdBy,

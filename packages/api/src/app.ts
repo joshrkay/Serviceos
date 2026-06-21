@@ -504,6 +504,7 @@ import { runAppointmentReminderSweep } from './workers/appointment-reminder-work
 import { runHoldReaperSweep } from './workers/hold-reaper-worker';
 import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
 import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
+import { runProposalExpirySweep } from './workers/proposal-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import {
@@ -1800,6 +1801,8 @@ export function createApp(): express.Express {
     hfcrWeeklySend: 590014,
     holdReaper: 590015,
     thankYouSms: 590016,
+    // §5.5 — schedule proposal cards expire after 48h.
+    proposalExpiry: 590017,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -4564,6 +4567,34 @@ export function createApp(): express.Express {
       });
     }).catch((err) => {
       estimateExpiryLogger.error('Estimate-expiry sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 60 * 60_000));
+
+  // §5.5 Proposal-expiry worker — transitions schedule proposal cards
+  // (create_appointment / create_booking / reschedule_appointment) past their
+  // 48h `expiresAt` to 'expired' so stale bookings don't linger in the inbox.
+  // Every other proposal type carries no expiry and is untouched. Hourly; no
+  // SendService dependency (it only changes status).
+  const proposalExpiryLogger = createLogger({
+    service: 'proposal-expiry-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.proposalExpiry, async () => {
+      await runProposalExpirySweep({
+        proposalRepo,
+        auditRepo,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        logger: proposalExpiryLogger,
+      });
+    }).catch((err) => {
+      proposalExpiryLogger.error('Proposal-expiry sweep failed', {
         error: err instanceof Error ? err.message : String(err),
       });
     });

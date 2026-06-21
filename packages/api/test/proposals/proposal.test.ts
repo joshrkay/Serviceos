@@ -628,3 +628,52 @@ describe('InMemoryProposalRepository.findByRecordingId — voice dedup lookup', 
     expect(await repo.findByRecordingId(TENANT, 'rec-4', 'voice:rec-4')).toBeNull();
   });
 });
+
+describe('§5.5 — schedule proposals carry a 48h expiry at creation', () => {
+  const FORTY_EIGHT_H_MS = 48 * 60 * 60 * 1000;
+
+  it.each(['create_appointment', 'create_booking', 'reschedule_appointment'] as const)(
+    'defaults expiresAt to ~48h for %s',
+    (proposalType) => {
+      const before = Date.now();
+      const p = createProposal({
+        tenantId: 'tenant-1',
+        proposalType,
+        payload: {},
+        summary: 's',
+        createdBy: 'u1',
+      });
+      expect(p.expiresAt).toBeInstanceOf(Date);
+      const delta = p.expiresAt!.getTime() - before;
+      // generous window to absorb test-clock jitter
+      expect(delta).toBeGreaterThanOrEqual(FORTY_EIGHT_H_MS - 5000);
+      expect(delta).toBeLessThanOrEqual(FORTY_EIGHT_H_MS + 5000);
+    },
+  );
+
+  it('leaves expiresAt unset for non-schedule proposal types (they persist)', () => {
+    for (const proposalType of ['draft_estimate', 'send_invoice', 'create_customer', 'record_payment'] as const) {
+      const p = createProposal({
+        tenantId: 'tenant-1',
+        proposalType,
+        payload: {},
+        summary: 's',
+        createdBy: 'u1',
+      });
+      expect(p.expiresAt, `${proposalType} should persist`).toBeUndefined();
+    }
+  });
+
+  it('honors an explicit expiresAt over the 48h default', () => {
+    const explicit = new Date('2030-01-01T00:00:00Z');
+    const p = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'create_appointment',
+      payload: {},
+      summary: 's',
+      createdBy: 'u1',
+      expiresAt: explicit,
+    });
+    expect(p.expiresAt).toEqual(explicit);
+  });
+});
