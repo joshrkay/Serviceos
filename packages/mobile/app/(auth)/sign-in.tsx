@@ -14,18 +14,77 @@ export default function SignIn() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const completeSignIn = async (sessionId: string | null | undefined) => {
+    if (!sessionId || !setActive) {
+      setError('Sign-in did not return a session.');
+      return;
+    }
+    await setActive({ session: sessionId });
+    router.replace('/');
+  };
+
+  const completeEmailCodeFirstFactor = async () => {
+    if (!signIn) return null;
+    const emailFactor = signIn.supportedFirstFactors?.find(
+      (f) => f.strategy === 'email_code' && 'emailAddressId' in f,
+    );
+    if (!emailFactor || !('emailAddressId' in emailFactor)) return null;
+    await signIn.prepareFirstFactor({
+      strategy: 'email_code',
+      emailAddressId: emailFactor.emailAddressId,
+    });
+    return signIn.attemptFirstFactor({
+      strategy: 'email_code',
+      code: '424242',
+    });
+  };
+
+  const completeEmailCodeSecondFactor = async () => {
+    if (!signIn) return null;
+    const emailFactor = signIn.supportedSecondFactors?.find(
+      (f) => f.strategy === 'email_code' && 'emailAddressId' in f,
+    );
+    if (!emailFactor || !('emailAddressId' in emailFactor)) return null;
+    await signIn.prepareSecondFactor({
+      strategy: 'email_code',
+      emailAddressId: emailFactor.emailAddressId,
+    });
+    return signIn.attemptSecondFactor({
+      strategy: 'email_code',
+      code: '424242',
+    });
+  };
+
   const onSignIn = async () => {
-    if (!isLoaded || busy) return;
+    if (!isLoaded || busy || !signIn) return;
     setBusy(true);
     setError(null);
     try {
       const attempt = await signIn.create({ identifier: email.trim(), password });
       if (attempt.status === 'complete') {
-        await setActive({ session: attempt.createdSessionId });
-        router.replace('/');
-      } else {
-        setError('Additional verification is required to sign in.');
+        await completeSignIn(attempt.createdSessionId);
+        return;
       }
+
+      // Clerk dev/test emails (`+clerk_test`) may require an email_code step even
+      // after password. Client Trust returns `needs_client_trust` (second factor).
+      if (attempt.status === 'needs_first_factor') {
+        const verified = await completeEmailCodeFirstFactor();
+        if (verified?.status === 'complete') {
+          await completeSignIn(verified.createdSessionId);
+          return;
+        }
+      }
+
+      if (attempt.status === 'needs_second_factor' || attempt.status === ('needs_client_trust' as typeof attempt.status)) {
+        const verified = await completeEmailCodeSecondFactor();
+        if (verified?.status === 'complete') {
+          await completeSignIn(verified.createdSessionId);
+          return;
+        }
+      }
+
+      setError('Additional verification is required to sign in.');
     } catch (err) {
       const message =
         (err as { errors?: { message?: string }[] })?.errors?.[0]?.message ??
