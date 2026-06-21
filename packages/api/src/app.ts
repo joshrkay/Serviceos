@@ -1753,6 +1753,8 @@ export function createApp(): express.Express {
     queue,
     new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
     delayNoticeStateRepo,
+    undefined, // internalAlertSink — keep the default no-op sink
+    dncRepo, // Story 10.3 — DNC suppression on the SMS delay/en-route path
   );
   const delayNotificationWorker = createDelayNotificationWorker({
     service: delayNotificationService,
