@@ -164,6 +164,8 @@ import { InMemoryTagRepository } from './customers/tag';
 import { PgTagRepository } from './customers/pg-tag';
 import { InMemoryCustomFieldRepository } from './customers/custom-field';
 import { PgCustomFieldRepository } from './customers/pg-custom-field';
+import { InMemoryCustomerMergeRepository } from './customers/merge';
+import { PgCustomerMergeRepository } from './customers/pg-merge';
 import { createCustomerCustomFieldRouter } from './routes/customer-custom-fields';
 import { InMemoryLeadRepository } from './leads/lead';
 import { InMemoryLocationRepository } from './locations/location';
@@ -890,6 +892,11 @@ export function createApp(): express.Express {
   // U2 (CRM Jobber parity) — customer tags + tenant-defined custom fields.
   const customerTagRepo     = pool ? new PgTagRepository(pool)           : new InMemoryTagRepository();
   const customerCustomFieldRepo = pool ? new PgCustomFieldRepository(pool) : new InMemoryCustomFieldRepository();
+  // Story 4.6 — customer merge. Pg re-parents child rows + archives the loser
+  // in one transaction; the no-DB dev path only archives (no child tables).
+  const customerMergeRepo = pool
+    ? new PgCustomerMergeRepository(pool)
+    : new InMemoryCustomerMergeRepository(customerRepo);
   // N-003 (P2-036) — caller LTV/recency for the negotiation guardrail callback.
   const customerNegotiationContextProvider = pool
     ? new PgCustomerNegotiationContextProvider(pool)
@@ -3356,10 +3363,23 @@ export function createApp(): express.Express {
     createCustomerRouter(
       customerRepo,
       auditRepo,
-      undefined,
+      // P9-002 / Story 4.9 — wire the unified customer timeline so
+      // GET /api/customers/:id/timeline (consumed by the web
+      // CommunicationTimeline) resolves instead of quietly 404ing.
+      {
+        noteRepo,
+        jobRepo,
+        jobTimelineRepo: timelineRepo,
+        estimateRepo,
+        invoiceRepo,
+        paymentRepo,
+        conversationRepo,
+        appointmentRepo,
+      },
       customerContactRepo,
       customerTagRepo,
-      customerCustomFieldRepo
+      customerCustomFieldRepo,
+      customerMergeRepo
     )
   );
   app.use(

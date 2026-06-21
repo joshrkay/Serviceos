@@ -17,6 +17,7 @@ import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryJobRepository } from '../../src/jobs/job';
 import { InMemoryJobTimelineRepository } from '../../src/jobs/job-lifecycle';
 import { InMemoryCustomerRepository } from '../../src/customers/customer';
+import { InMemoryCustomerMergeRepository } from '../../src/customers/merge';
 import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
 import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
 import { InMemoryPaymentRepository } from '../../src/invoices/payment';
@@ -100,7 +101,18 @@ export async function buildTestApp(): Promise<TestApp> {
   const ownership = permissiveTenantOwnership();
 
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, new InMemoryQueue(), new NoopFeedbackDispatcher()));
-  app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
+  app.use(
+    '/api/customers',
+    createCustomerRouter(
+      customerRepo,
+      auditRepo,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      new InMemoryCustomerMergeRepository(customerRepo),
+    ),
+  );
   app.use(
     '/api/estimates',
     createEstimateRouter(

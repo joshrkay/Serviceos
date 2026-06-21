@@ -38,6 +38,7 @@ import {
   setCustomFieldValue,
   listResolvedCustomFields,
 } from '../customers/custom-field';
+import { CustomerMergeRepository, mergeCustomers } from '../customers/merge';
 import {
   createCustomerContactSchema,
   updateCustomerContactSchema,
@@ -64,7 +65,9 @@ export function createCustomerRouter(
   // U2 (CRM Jobber parity) — customer tags + per-customer custom-field values.
   // Optional, same quietly-404 pattern.
   tagRepo?: TagRepository,
-  customFieldRepo?: CustomFieldRepository
+  customFieldRepo?: CustomFieldRepository,
+  // Story 4.6 — customer merge. Optional, same quietly-404 pattern.
+  mergeRepo?: CustomerMergeRepository
 ): Router {
   const router = Router();
 
@@ -248,6 +251,46 @@ export function createCustomerRouter(
       }
     }
   );
+
+  // Story 4.6 — merge a duplicate (the losing record) into this customer
+  // (the survivor, :id). The survivor is chosen explicitly by the URL; the
+  // loser rides in the body. Re-parents jobs/invoices/conversations/etc.
+  // onto the survivor, archives the loser, and records a `customer.merged`
+  // audit event. Quietly 404s when no merge repo is wired.
+  if (mergeRepo) {
+    router.post(
+      '/:id/merge',
+      requireAuth,
+      requireTenant,
+      requirePermission('customers:update'),
+      async (req: AuthenticatedRequest, res: Response) => {
+        try {
+          const losingId = (req.body?.losingId ?? '') as string;
+          if (typeof losingId !== 'string' || losingId.trim() === '') {
+            res.status(400).json({
+              error: 'VALIDATION_ERROR',
+              message: 'losingId is required',
+            });
+            return;
+          }
+          const result = await mergeCustomers(
+            req.auth!.tenantId,
+            {
+              survivingId: req.params.id,
+              losingId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+            },
+            { customerRepo, mergeRepo, auditRepo }
+          );
+          res.json(result);
+        } catch (err) {
+          const { statusCode, body } = toErrorResponse(err);
+          res.status(statusCode).json(body);
+        }
+      }
+    );
+  }
 
   // P9-002 — Unified communication timeline. Read-only aggregator across
   // notes, jobs, estimates, invoices, payments, conversations, and
