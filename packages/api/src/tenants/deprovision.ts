@@ -12,6 +12,7 @@ const IDENT_REGEX = /^[a-z_][a-z0-9_]*$/;
 
 export type DeprovisionReason =
   | 'manual_admin'
+  | 'owner_self_serve'
   | 'stripe_subscription_deleted'
   | 'stripe_subscription_canceled';
 

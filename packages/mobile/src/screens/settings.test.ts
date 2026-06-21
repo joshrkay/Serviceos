@@ -21,6 +21,8 @@ const h = vi.hoisted(() => ({
   error: null as Error | null,
   getCallbackNumber: vi.fn().mockResolvedValue(null),
   saveCallbackNumber: vi.fn(),
+  deleteAccount: vi.fn().mockResolvedValue(true),
+  deleteError: null as string | null,
 }));
 
 vi.mock('expo-router', () => ({
@@ -30,6 +32,9 @@ vi.mock('../hooks/useMe', () => ({
   useMe: () => ({ me: h.me, isLoading: h.isLoading, error: h.error, switchMode: vi.fn(), refetch: vi.fn() }),
 }));
 vi.mock('../push/useSignOut', () => ({ useSignOut: () => h.signOut }));
+vi.mock('../hooks/useDeleteAccount', () => ({
+  useDeleteAccount: () => ({ phase: 'idle', error: h.deleteError, deleteAccount: h.deleteAccount }),
+}));
 vi.mock('../calls/callbackStorage', () => ({
   getCallbackNumber: h.getCallbackNumber,
   saveCallbackNumber: h.saveCallbackNumber,
@@ -42,7 +47,19 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.isLoading = false;
   h.error = null;
+  h.deleteError = null;
+  h.deleteAccount.mockResolvedValue(true);
 });
+
+/** The destructive "Delete account" control is the one rendered inside a button
+ * (the section heading shares the text but is a plain label). */
+function deleteTrigger(getAllByText: (t: string) => HTMLElement[]): HTMLButtonElement {
+  const btn = getAllByText('Delete account')
+    .map((el) => el.closest('button'))
+    .find(Boolean);
+  if (!btn) throw new Error('Delete account button not found');
+  return btn as HTMLButtonElement;
+}
 
 afterEach(() => cleanup());
 
@@ -87,5 +104,42 @@ describe('Settings screen', () => {
     fireEvent.change(getByPlaceholderText('+1 555 123 4567'), { target: { value: 'nope' } });
     fireEvent.click(getByText('Save').closest('button')!);
     expect(await findByText('Enter a valid phone number.')).toBeTruthy();
+  });
+
+  it('exposes a Delete account control on a >=44px tap target (Apple 5.1.1(v))', () => {
+    const { getAllByText } = render(createElement(Settings));
+    const trigger = deleteTrigger(getAllByText);
+    expect(trigger.className).toMatch(/\bmin-h-11\b/);
+  });
+
+  it('requires an explicit confirm before deleting', () => {
+    const { getAllByText, queryByText } = render(createElement(Settings));
+    // The destructive action is not present until the owner confirms intent.
+    expect(queryByText('Yes, delete everything')).toBeNull();
+    fireEvent.click(deleteTrigger(getAllByText));
+    expect(queryByText('Yes, delete everything')).toBeTruthy();
+  });
+
+  it('deletes the account then signs out on success', async () => {
+    const { getAllByText, findByText } = render(createElement(Settings));
+    fireEvent.click(deleteTrigger(getAllByText));
+    fireEvent.click((await findByText('Yes, delete everything')).closest('button')!);
+    await waitFor(() => expect(h.deleteAccount).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(h.signOut).toHaveBeenCalledTimes(1));
+  });
+
+  it('does not sign out when deletion fails', async () => {
+    h.deleteAccount.mockResolvedValue(false);
+    const { getAllByText, findByText } = render(createElement(Settings));
+    fireEvent.click(deleteTrigger(getAllByText));
+    fireEvent.click((await findByText('Yes, delete everything')).closest('button')!);
+    await waitFor(() => expect(h.deleteAccount).toHaveBeenCalledTimes(1));
+    expect(h.signOut).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a deletion error from the hook', () => {
+    h.deleteError = 'Only the owner can delete the account.';
+    const { getByText } = render(createElement(Settings));
+    expect(getByText('Only the owner can delete the account.')).toBeTruthy();
   });
 });

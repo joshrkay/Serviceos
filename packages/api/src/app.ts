@@ -215,6 +215,7 @@ import { PgFeatureFlagRepository } from './flags/pg-feature-flags';
 import { PgTenantFeatureFlagRepository } from './flags/pg-tenant-feature-flags';
 import { createFeatureFlagsRouter } from './routes/feature-flags';
 import { createAdminTenantsRouter } from './routes/admin-tenants';
+import { createAccountRouter } from './routes/account';
 import { InMemoryTechnicianLocationPingRepository } from './telemetry/technician-location-ping';
 import {
   InMemoryTechnicianLocationAuthorizer,
@@ -4748,6 +4749,9 @@ export function createApp(): express.Express {
   // DB pool; the queue is always present (Pg- or in-memory).
   if (pool) {
     app.use('/api/admin/tenants', createAdminTenantsRouter({ pool, queue }));
+    // Self-serve account deletion (Apple App Store Guideline 5.1.1(v)). Owner
+    // deletes their own tenant; reuses the deprovision job above.
+    app.use('/api/account', createAccountRouter({ pool, queue }));
   }
 
   // ── Rivet P2 F-1: Supervisor Agent v1 ─────────────────────────────────────
