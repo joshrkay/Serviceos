@@ -22,6 +22,7 @@ import { HfcrHeroCard } from './HfcrHeroCard';
 import { VoiceRoiCard } from './VoiceRoiCard';
 import { CoreKpisCard } from './CoreKpisCard';
 import { PendingProposalsCard } from './PendingProposalsCard';
+import { ActivityFeedCard } from './ActivityFeedCard';
 import { ErrorState } from '../ErrorState';
 import { EmptyState } from '../EmptyState';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
@@ -697,6 +698,9 @@ export function HomePage() {
                 ))}
               </div>
             </section>
+
+            {/* Recent activity feed (Epic 12.7) */}
+            <ActivityFeedCard />
 
             {/* All clear */}
             {attentionItems.length === 0 && unpaidInvs.length === 0 && pendingEsts.length === 0 && !jobsQuery.isLoading && !estimatesQuery.isLoading && !invoicesQuery.isLoading && !jobsQuery.error && !estimatesQuery.error && !invoicesQuery.error && (

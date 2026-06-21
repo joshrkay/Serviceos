@@ -147,6 +147,8 @@ import { RepoBackedVoiceRoiReporter } from './analytics/voice-roi';
 import { createVoiceRoiRouter } from './analytics/voice-roi-router';
 import { PgJobsBookedReporter } from './analytics/jobs-booked';
 import { createJobsBookedRouter } from './analytics/jobs-booked-router';
+import { RepoBackedActivityFeedReporter } from './analytics/activity-feed';
+import { createActivityFeedRouter } from './analytics/activity-feed-router';
 import { loadTenantBusinessHours } from './telephony/business-hours-loader';
 import { createTimeEntriesRouter } from './routes/time-entries';
 import { InMemoryTimeEntryRepository } from './time-tracking/time-entry';
@@ -3709,6 +3711,11 @@ export function createApp(): express.Express {
   // counts; left unwired (→ 503) on the in-memory boot path that has no pool.
   const jobsBookedReporter = pool ? new PgJobsBookedReporter(pool) : undefined;
   app.use('/api/analytics/jobs-booked', createJobsBookedRouter({ jobsBookedReporter }));
+
+  // Epic 12.7 — tenant-wide activity feed over the audit log (both the Pg and
+  // in-memory audit repos support findRecentByTenant).
+  const activityFeedReporter = new RepoBackedActivityFeedReporter(auditRepo);
+  app.use('/api/analytics/activity', createActivityFeedRouter({ activityFeedReporter }));
 
   // RV-062 — end-of-day digest web view (SMS deep link target).
   app.use('/api/digests', createDigestsRouter({ digestRepo: dailyDigestRepo }));
