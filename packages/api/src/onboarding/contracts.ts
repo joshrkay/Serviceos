@@ -109,5 +109,8 @@ export const OnboardingStatusResponseSchema = z.object({
   /** ISO-8601 timestamp of the activation milestone (first real inbound call).
    * Drives the one-time celebration banner. Absent until activation fires. */
   activatedAt: z.string().datetime().optional(),
+  /** ISO-8601 timestamp of tenants.created_at. Lets the client tell a brand-new
+   * account (welcome tour) from an established user (what's-new changelog). */
+  accountCreatedAt: z.string().datetime().optional(),
 });
 export type OnboardingStatusResponse = z.infer<typeof OnboardingStatusResponseSchema>;

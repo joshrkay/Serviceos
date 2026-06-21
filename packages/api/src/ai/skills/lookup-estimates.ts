@@ -7,6 +7,7 @@
  * this codebase. Returns count, total dollar amount, and a per-estimate
  * list (id, status, total, sentAt/createdAt) for TTS readback.
  */
+import { formatCents } from './spoken-format';
 import type { JobRepository } from '../../jobs/job';
 import type {
   Estimate,
@@ -60,10 +61,6 @@ export interface LookupEstimatesDeps {
   lookupEvents?: LookupEventService;
 }
 
-function formatCents(cents: number): string {
-  const dollars = (cents / 100).toFixed(2);
-  return `$${dollars}`;
-}
 
 function humanizeStatus(s: EstimateStatus): string {
   switch (s) {

@@ -1,8 +1,8 @@
 import { Pool } from 'pg';
 import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
+import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant } from '../middleware/auth';
-import { toErrorResponse } from '../shared/errors';
 
 export interface InteractionsRouterDeps {
   pool: Pool;
@@ -38,7 +38,7 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
   const { pool } = deps;
   const router = Router();
 
-  router.get('/', requireAuth, requireTenant, async (req: AuthenticatedRequest, res: Response) => {
+  router.get('/', requireAuth, requireTenant, asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
     const rawLimit = req.query.limit as string | undefined;
     const rawOffset = req.query.offset as string | undefined;
     const limit = rawLimit !== undefined ? parseInt(rawLimit, 10) : 50;
@@ -96,15 +96,12 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
       });
 
       res.json({ data, total, limit, offset });
-    } catch (err) {
-      const { statusCode, body } = toErrorResponse(err);
-      res.status(statusCode).json(body);
     } finally {
       client.release();
     }
-  });
+  }));
 
-  router.get('/:id', requireAuth, requireTenant, async (req: AuthenticatedRequest, res: Response) => {
+  router.get('/:id', requireAuth, requireTenant, asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
     const client = await pool.connect();
     try {
       const tenantId = req.auth!.tenantId;
@@ -140,13 +137,10 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
         transcript,
         customer: toCustomer(row as Record<string, unknown>),
       });
-    } catch (err) {
-      const { statusCode, body } = toErrorResponse(err);
-      res.status(statusCode).json(body);
     } finally {
       client.release();
     }
-  });
+  }));
 
   return router;
 }

@@ -325,6 +325,13 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['204_create_message_templates', 'a38dc2fba90473aec17537126a25c71fbf8461b012531c94ea55c858aa85f71d'],
   // Story 10.2 — tenant-configurable reminder cadence (offsets).
   ['205_tenant_settings_reminder_offsets', '7043e4a221b59d530abd0a9d74ac8dd1a7f13379eeefb9b1749cc2b98368442a'],
+  ['204_lifecycle_emails_and_trial_ends', '1fc6cc3a631858d987771d9db0c268c355995cfe19effa726018d6dd13445f45'],
+  // Story 15.2 — speed-to-lead first-response opt-in settings (renumbered 204→205 on main-merge collision).
+  ['205_tenant_settings_speed_to_lead', '571411ab97bf29e4992cf08bb54555d0916e35fd1bc60f5f1c0f783b227bac21'],
+  // Add tenant_integrations.auth_token_{primary,secondary}_enc, never created on
+  // fresh DBs because a duplicate 070 CREATE shadowed the _enc definition (the
+  // column all provisioning/webhook code uses). Additive ALTER, no-op on prod.
+  ['206_tenant_integrations_auth_token_enc_columns', '21416ab18ca77cd08ca4f1d76d2f13f756f586b36fe90f1dd7adb2b9041fff28'],
 ];
 
 function hashMigration(value: string): string {

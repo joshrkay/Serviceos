@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { toErrorResponse } from '../shared/errors';
+import { asyncRoute } from '../middleware/async-route';
 import { AuditRepository } from '../audit/audit';
 import { CustomerRepository } from '../customers/customer';
 import {
@@ -40,25 +40,20 @@ export function createLeadsRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:create'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = createLeadSchema.parse(req.body);
-        const lead = await createLead(
-          {
-            ...parsed,
-            tenantId: req.auth!.tenantId,
-            createdBy: req.auth!.userId,
-            actorRole: req.auth!.role,
-          },
-          leadRepo,
-          auditRepo
-        );
-        res.status(201).json(lead);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = createLeadSchema.parse(req.body);
+      const lead = await createLead(
+        {
+          ...parsed,
+          tenantId: req.auth!.tenantId,
+          createdBy: req.auth!.userId,
+          actorRole: req.auth!.role,
+        },
+        leadRepo,
+        auditRepo
+      );
+      res.status(201).json(lead);
+    })
   );
 
   router.get(
@@ -66,58 +61,53 @@ export function createLeadsRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const stageRaw = req.query.stage as string | undefined;
-        const sourceRaw = req.query.source as string | undefined;
-        const assignedRaw = req.query.assignedUserId as string | undefined;
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const stageRaw = req.query.stage as string | undefined;
+      const sourceRaw = req.query.source as string | undefined;
+      const assignedRaw = req.query.assignedUserId as string | undefined;
 
-        if (stageRaw && !(LEAD_STAGES as readonly string[]).includes(stageRaw)) {
-          res.status(400).json({ error: 'VALIDATION_ERROR', message: `Invalid stage: ${stageRaw}` });
-          return;
-        }
-        if (sourceRaw && !(LEAD_SOURCES as readonly string[]).includes(sourceRaw)) {
-          res.status(400).json({ error: 'VALIDATION_ERROR', message: `Invalid source: ${sourceRaw}` });
-          return;
-        }
-
-        const limitRaw = req.query.limit as string | undefined;
-        const offsetRaw = req.query.offset as string | undefined;
-        const limit =
-          limitRaw !== undefined ? parseInt(limitRaw, 10) : DEFAULT_LIST_LIMIT;
-        const offset = offsetRaw !== undefined ? parseInt(offsetRaw, 10) : 0;
-        if (
-          limitRaw !== undefined &&
-          (Number.isNaN(limit) || limit < 1 || limit > MAX_LIST_LIMIT)
-        ) {
-          res.status(400).json({
-            error: 'VALIDATION_ERROR',
-            message: `limit must be between 1 and ${MAX_LIST_LIMIT}`,
-          });
-          return;
-        }
-        if (offsetRaw !== undefined && (Number.isNaN(offset) || offset < 0)) {
-          res.status(400).json({
-            error: 'VALIDATION_ERROR',
-            message: 'offset must be a non-negative integer',
-          });
-          return;
-        }
-
-        const options: LeadListOptions = {
-          stage: stageRaw as LeadStage | undefined,
-          source: sourceRaw as LeadSource | undefined,
-          assignedUserId: assignedRaw,
-          limit: Math.min(limit, MAX_LIST_LIMIT),
-          offset,
-        };
-        const result = await leadRepo.listWithMeta(req.auth!.tenantId, options);
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+      if (stageRaw && !(LEAD_STAGES as readonly string[]).includes(stageRaw)) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: `Invalid stage: ${stageRaw}` });
+        return;
       }
-    }
+      if (sourceRaw && !(LEAD_SOURCES as readonly string[]).includes(sourceRaw)) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: `Invalid source: ${sourceRaw}` });
+        return;
+      }
+
+      const limitRaw = req.query.limit as string | undefined;
+      const offsetRaw = req.query.offset as string | undefined;
+      const limit =
+        limitRaw !== undefined ? parseInt(limitRaw, 10) : DEFAULT_LIST_LIMIT;
+      const offset = offsetRaw !== undefined ? parseInt(offsetRaw, 10) : 0;
+      if (
+        limitRaw !== undefined &&
+        (Number.isNaN(limit) || limit < 1 || limit > MAX_LIST_LIMIT)
+      ) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: `limit must be between 1 and ${MAX_LIST_LIMIT}`,
+        });
+        return;
+      }
+      if (offsetRaw !== undefined && (Number.isNaN(offset) || offset < 0)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'offset must be a non-negative integer',
+        });
+        return;
+      }
+
+      const options: LeadListOptions = {
+        stage: stageRaw as LeadStage | undefined,
+        source: sourceRaw as LeadSource | undefined,
+        assignedUserId: assignedRaw,
+        limit: Math.min(limit, MAX_LIST_LIMIT),
+        offset,
+      };
+      const result = await leadRepo.listWithMeta(req.auth!.tenantId, options);
+      res.json(result);
+    })
   );
 
   router.get(
@@ -125,19 +115,14 @@ export function createLeadsRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const lead = await leadRepo.findById(req.auth!.tenantId, req.params.id);
-        if (!lead) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Lead not found' });
-          return;
-        }
-        res.json(lead);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const lead = await leadRepo.findById(req.auth!.tenantId, req.params.id);
+      if (!lead) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Lead not found' });
+        return;
       }
-    }
+      res.json(lead);
+    })
   );
 
   router.patch(
@@ -145,28 +130,23 @@ export function createLeadsRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = updateLeadSchema.parse(req.body);
-        const updated = await updateLead(
-          req.auth!.tenantId,
-          req.params.id,
-          parsed,
-          leadRepo,
-          req.auth!.userId,
-          req.auth!.role,
-          auditRepo
-        );
-        if (!updated) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Lead not found' });
-          return;
-        }
-        res.json(updated);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = updateLeadSchema.parse(req.body);
+      const updated = await updateLead(
+        req.auth!.tenantId,
+        req.params.id,
+        parsed,
+        leadRepo,
+        req.auth!.userId,
+        req.auth!.role,
+        auditRepo
+      );
+      if (!updated) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Lead not found' });
+        return;
       }
-    }
+      res.json(updated);
+    })
   );
 
   router.post(
@@ -174,27 +154,22 @@ export function createLeadsRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:create'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await convertToCustomer(
-          req.auth!.tenantId,
-          req.params.id,
-          leadRepo,
-          customerRepo,
-          req.auth!.userId,
-          req.auth!.role,
-          auditRepo
-        );
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Lead not found' });
-          return;
-        }
-        res.status(201).json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await convertToCustomer(
+        req.auth!.tenantId,
+        req.params.id,
+        leadRepo,
+        customerRepo,
+        req.auth!.userId,
+        req.auth!.role,
+        auditRepo
+      );
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Lead not found' });
+        return;
       }
-    }
+      res.status(201).json(result);
+    })
   );
 
   router.post(
@@ -202,28 +177,23 @@ export function createLeadsRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = loseLeadSchema.parse(req.body);
-        const updated = await loseLead(
-          req.auth!.tenantId,
-          req.params.id,
-          parsed.reason,
-          leadRepo,
-          req.auth!.userId,
-          req.auth!.role,
-          auditRepo
-        );
-        if (!updated) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Lead not found' });
-          return;
-        }
-        res.json(updated);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = loseLeadSchema.parse(req.body);
+      const updated = await loseLead(
+        req.auth!.tenantId,
+        req.params.id,
+        parsed.reason,
+        leadRepo,
+        req.auth!.userId,
+        req.auth!.role,
+        auditRepo
+      );
+      if (!updated) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Lead not found' });
+        return;
       }
-    }
+      res.json(updated);
+    })
   );
 
   return router;

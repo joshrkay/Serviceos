@@ -134,6 +134,16 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // convention as all other nullable optional columns here).
     voiceAgentName: (row.voice_agent_name as string | null) ?? undefined,
     voiceGreeting: (row.voice_greeting as string | null) ?? undefined,
+    // Feature 4 — migration 147. Vapi binding columns. findByTenant uses
+    // SELECT *, so the row carries these; NULL → undefined per this mapper's
+    // convention. Read-only projection (set by the provisioning worker /
+    // voice-config raw SQL, not the update fieldMap below).
+    voiceId: (row.voice_id as string | null) ?? undefined,
+    vapiAssistantId: (row.vapi_assistant_id as string | null) ?? undefined,
+    // Story 15.2 — migration 205. speed_to_lead_enabled is NOT NULL DEFAULT
+    // false so legacy rows read false; template NULL → undefined.
+    speedToLeadEnabled: (row.speed_to_lead_enabled as boolean | null) ?? false,
+    speedToLeadTemplate: (row.speed_to_lead_template as string | null) ?? undefined,
     escalationSettings: (() => {
       const raw = row.escalation_settings as Partial<EscalationSettings> | null | undefined;
       if (!raw || typeof raw !== 'object' || Object.keys(raw).length === 0) {
@@ -353,6 +363,9 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         transferNumber: 'transfer_number',
         // Migration 120 — per-tenant AI model override.
         aiModel: 'ai_model',
+        // Story 15.2 — migration 205.
+        speedToLeadEnabled: 'speed_to_lead_enabled',
+        speedToLeadTemplate: 'speed_to_lead_template',
         // RV-063 — migration 163. digest_time accepts 'HH:MM' (Postgres
         // casts to TIME); digest_channel is CHECK-constrained in the DB
         // and validated at the route boundary.
