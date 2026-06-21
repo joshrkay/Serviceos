@@ -31,8 +31,8 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
          FROM tenant_integrations WHERE tenant_id=$1 AND provider='twilio' LIMIT 1`,
       [tenantId]
     ),
-    db.query<{ stripe_subscription_id: string | null; subscription_status: string | null }>(
-      `SELECT stripe_subscription_id, subscription_status FROM tenants WHERE id=$1`,
+    db.query<{ stripe_subscription_id: string | null; subscription_status: string | null; created_at: Date | null }>(
+      `SELECT stripe_subscription_id, subscription_status, created_at FROM tenants WHERE id=$1`,
       [tenantId]
     ),
     db.query<{ n: number }>(
@@ -77,6 +77,7 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
   return {
     tenantId,
     tenantExists: !!tenant,
+    tenantCreatedAt: tenant?.created_at ?? null,
     identity: {
       businessName: settings?.businessName ?? null,
       businessHours: ts?.business_hours ?? null,

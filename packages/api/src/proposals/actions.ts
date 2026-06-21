@@ -11,6 +11,12 @@ import { chainMetaFor } from './chain';
 import { undoCorrectionLesson } from '../learning/corrections/apply-undo';
 import type { CorrectionLessonRepository } from '../learning/corrections/correction-lesson';
 import type { ConfigPorts } from '../learning/corrections/lesson-applicator';
+import { createLogger } from '../logging/logger';
+
+const logger = createLogger({
+  service: 'proposals.actions',
+  environment: process.env.NODE_ENV || 'development',
+});
 
 /**
  * N-009 / P2-038 — optional correction-loop reversal wired into `undoProposal`.
@@ -425,8 +431,7 @@ export async function undoProposal(
             { repository: correctionLoop.lessonRepo, ports: correctionLoop.ports, auditRepo },
           );
         } catch (err) {
-          // eslint-disable-next-line no-console
-          console.error('undoProposal: individual undoCorrectionLesson reversal failed', {
+          logger.error('undoProposal: individual undoCorrectionLesson reversal failed', {
             proposalId,
             lessonId: lesson.id,
             error: err instanceof Error ? err.message : String(err),
@@ -434,8 +439,7 @@ export async function undoProposal(
         }
       }
     } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error('undoProposal: findBySourceProposal failed', {
+      logger.error('undoProposal: findBySourceProposal failed', {
         proposalId,
         error: err instanceof Error ? err.message : String(err),
       });
@@ -521,7 +525,7 @@ export async function rejectProposal(
       // rejected, and the hold will auto-release at expiry (Task 3's
       // read-time release). Surface it so a stuck-looking calendar slot
       // after a rejection is diagnosable.
-      console.warn(
+      logger.warn(
         `Held appointment ${updated.payload.appointmentId} not found when releasing hold for rejected proposal ${proposalId}; it will auto-release at expiry.`
       );
     }

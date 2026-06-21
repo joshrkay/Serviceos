@@ -23,6 +23,8 @@ import {
 } from '../../hooks/useActiveSessions';
 import { UpgradeNudgeBanner } from '../onboarding/v2/UpgradeNudgeBanner';
 import { ActivationCelebrationBanner } from '../onboarding/v2/ActivationCelebrationBanner';
+import { WelcomeWalkthrough } from '../walkthrough/WelcomeWalkthrough';
+import { WhatsNewModal } from '../walkthrough/WhatsNewModal';
 import { PastDueBanner } from '../billing/PastDueBanner';
 import { EscalationPanelHost } from '../dispatch/EscalationPanelHost';
 import {
@@ -384,6 +386,12 @@ function ShellInner() {
           30-minute trial threshold has fired (and onboarding is otherwise
           complete). */}
       <UpgradeNudgeBanner />
+
+      {/* First-run product tour (new accounts) + what's-new changelog
+          (existing users). Both portal to <body>; gated so a brand-new
+          account sees only the welcome tour on day one. */}
+      <WelcomeWalkthrough />
+      <WhatsNewModal />
 
       <div className="flex flex-1 overflow-hidden">
 

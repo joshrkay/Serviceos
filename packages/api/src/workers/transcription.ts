@@ -176,6 +176,11 @@ async function correctTranscript(input: {
         { role: 'system', content: TRANSCRIPTION_CORRECTION_SYSTEM_PROMPT },
         { role: 'user', content: userPrompt },
       ],
+      // transcription_correction routes to the lightweight tier (cheap model);
+      // its 1024-token default can truncate the correction of a long call. Pin
+      // the budget explicitly (matches the original gateway-config intent of
+      // 2048) so the corrected output is never silently cut off.
+      maxTokens: 2048,
       metadata: { tenantId },
     });
 

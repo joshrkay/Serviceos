@@ -17,11 +17,10 @@
  * succeeded and mark the affected field as `unavailable`. Never throw —
  * a partial summary still grounds the call better than no summary.
  *
- * Performance budget: O(jobs) parallel DB reads (one findByJob per
- * customer job) plus an agreement read. Expected p95 < 300ms for the
- * common case (customer with <10 lifetime jobs). Runs once per session
- * at greeting → identifying transition; cached on the session for the
- * rest of the call.
+ * Performance budget: a small constant number of DB reads — the job
+ * list, one batched `findByJobs` for all invoices, and an agreement
+ * read. Expected p95 < 300ms. Runs once per session at greeting →
+ * identifying transition; cached on the session for the rest of the call.
  *
  * Note on customer-scoped invoice aggregation:
  *   `InvoiceRepository.findByTenant({ customerId })` accepts a
@@ -30,9 +29,9 @@
  *   `pg-invoice.ts:buildListWhere` and `invoice.ts:findByTenant`). Using
  *   that path would aggregate the entire tenant's open balance into
  *   this customer's session context — a real correctness bug surfaced
- *   in PR #249 review. The fix is to fan out via `findByJob` for each
- *   of the customer's jobs and aggregate. When the invoice repo gains
- *   real `customerId` filtering this can be simplified.
+ *   in PR #249 review. Invoices are customer-linked only via `job_id`
+ *   (there is no `invoices.customer_id` column), so we aggregate with a
+ *   single batched `findByJobs` over the customer's jobs.
  */
 
 import type { JobRepository, JobStatus, Job } from '../../jobs/job';
@@ -249,19 +248,16 @@ async function aggregateOpenInvoicesAcrossJobs(
     // Genuine "no jobs, no invoices" — not a failure.
     return { count: 0, totalDueCents: 0 };
   }
-  const settled = await Promise.allSettled(
-    jobIds.map((id) => repo.findByJob(tenantId, id)),
-  );
-  // ANY per-job failure marks the aggregate unavailable. Partial data
-  // would understate the customer's balance; safer to flag than to
-  // mislead downstream skills.
-  const anyFailed = settled.some((r) => r.status === 'rejected');
-  if (anyFailed) {
+  // Single batched read for all of the customer's jobs (was an O(jobs)
+  // findByJob fan-out). A failure marks the aggregate unavailable —
+  // partial/zero data would understate the customer's balance, so flag it
+  // rather than mislead downstream skills.
+  let allInvoices: Invoice[];
+  try {
+    allInvoices = await repo.findByJobs(tenantId, jobIds);
+  } catch {
     return { count: 0, totalDueCents: 0, unavailable: true };
   }
-  const allInvoices: Invoice[] = settled.flatMap((r) =>
-    r.status === 'fulfilled' ? r.value : [],
-  );
   const open = allInvoices.filter((inv) => OPEN_INVOICE_STATUSES.has(inv.status));
   if (open.length === 0) {
     return { count: 0, totalDueCents: 0 };
