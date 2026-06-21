@@ -225,6 +225,7 @@ export const createInvoiceSchema = z.object({
   lineItems: z.array(lineItemSchema).min(1),
   discountCents: z.number().int().nonnegative().optional(),
   taxRateBps: z.number().int().min(0).max(10000).optional(),
+  processingFeeBps: z.number().int().min(0).max(10000).optional(),
   customerMessage: z.string().optional(),
 });
 

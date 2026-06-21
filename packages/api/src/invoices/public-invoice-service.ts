@@ -30,6 +30,8 @@ export interface PublicInvoiceView {
   subtotalCents: number;
   taxCents: number;
   discountCents: number;
+  /** Processing-fee surcharge folded into totalCents/amountDueCents (0 if none). */
+  processingFeeCents: number;
   amountPaidCents: number;
   amountDueCents: number;
   dueDate?: string;
@@ -347,6 +349,7 @@ export class PublicInvoiceService {
       subtotalCents: invoice.totals.subtotalCents,
       taxCents: invoice.totals.taxCents,
       discountCents: invoice.totals.discountCents,
+      processingFeeCents: invoice.totals.processingFeeCents ?? 0,
       amountPaidCents: invoice.amountPaidCents,
       amountDueCents: invoice.amountDueCents,
       dueDate: invoice.dueDate?.toISOString(),

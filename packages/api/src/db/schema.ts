@@ -4993,6 +4993,13 @@ export const MIGRATIONS = {
   '201_customers_source': `
     ALTER TABLE customers ADD COLUMN IF NOT EXISTS source TEXT;
   `,
+  // Jobber-parity invoice processing-fee surcharge: pass card/ACH processing
+  // costs through to the customer. Additive nullable INTEGER columns (basis
+  // points + the computed cents, both folded into total_cents). Invoice-only.
+  '202_invoices_processing_fee': `
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS processing_fee_bps INTEGER;
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS processing_fee_cents INTEGER;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -39,6 +39,7 @@ interface Invoice {
   subtotalCents: number;
   discountCents: number;
   taxCents: number;
+  processingFeeCents?: number;
   totalCents: number;
   amountPaidCents: number;
   amountDueCents: number;
@@ -285,6 +286,9 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
               <p>Subtotal: {formatCents(data.subtotalCents)}</p>
               <p>Discount: {formatCents(data.discountCents)}</p>
               <p>Tax: {formatCents(data.taxCents)}</p>
+              {data.processingFeeCents != null && data.processingFeeCents > 0 && (
+                <p>Processing fee: {formatCents(data.processingFeeCents)}</p>
+              )}
               <p><strong>Total: {formatCents(data.totalCents)}</strong></p>
               <p>Amount Paid: {formatCents(data.amountPaidCents)}</p>
               <p><strong>Amount Due: {formatCents(data.amountDueCents)}</strong></p>

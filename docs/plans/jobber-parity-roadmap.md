@@ -20,7 +20,7 @@ booking + intake, time tracking, expenses, Google reviews, financial reporting,
 | 1 | Customer source/origin tracking ("How did you hear about us?") | CRM | S | ✅ done |
 | 4 | Customer profitability report | Reporting | S | ✅ done |
 | 3 | Technician profitability report | Reporting | S | ✅ done |
-| 2 | Surcharge / processing-fee pass-through | Payments | S | todo |
+| 2 | Surcharge / processing-fee pass-through (invoice) | Payments | S | ✅ done |
 | 5 | Tip collection at checkout | Payments | S | todo |
 | 6 | Maintenance contracts DB persistence (graduate stub) | Jobs | M | todo |
 | 7 | Payment plan / installment support (expose milestone schedules) | Payments | M | todo |
@@ -47,3 +47,9 @@ fully testable in CI.
   shared web ProfitCard (CustomerProfitCard/TechnicianProfitCard wrappers) +
   TechnicianProfitCard on the technician day view (invoices:view-gated). No
   schema change.
+- Iteration 4: #2 Invoice processing-fee surcharge — calculateDocumentTotals
+  gains an optional processingFeeBps (fee on subtotal−discount+tax, folded into
+  totalCents → amountDueCents → the Stripe charge); migration 202 adds the two
+  nullable invoice columns; threaded through the invoice model/repo/route +
+  createInvoiceSchema; rendered on the invoice detail + public pay page.
+  Cents-exact billing tests + integration round-trip + web row tests.

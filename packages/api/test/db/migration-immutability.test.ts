@@ -317,6 +317,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['200_conversations_one_open_thread_noncustomer', '9af90c1b55544fe8451246c42a6c7cd80dd8ed6fae054050bcc070548e253a0f'],
   // Jobber-parity CRM: customer acquisition channel (additive nullable column).
   ['201_customers_source', '2add8937ddc606a7bfe86b59be879b3dceeb6a9730d6ff414f3798a47c362a05'],
+  // Jobber-parity invoice processing-fee surcharge (additive nullable columns).
+  ['202_invoices_processing_fee', '3f1dd0227fd3b18342e06e1bda51f60e83b8a8ab5057da78d2b72986e4cd72cf'],
 ];
 
 function hashMigration(value: string): string {
