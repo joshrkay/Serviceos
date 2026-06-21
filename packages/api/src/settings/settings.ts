@@ -337,6 +337,21 @@ export interface TenantSettings {
    */
   voiceGreeting?: string | null;
   /**
+   * Feature 4 (migration 147) — the chosen ElevenLabs preset voice key
+   * (e.g. 'rachel'/'adam'/'bella'), persisted onto the tenant's Vapi
+   * assistant and mirrored here. Null/undefined = not yet configured (the
+   * default preset applies).
+   */
+  voiceId?: string | null;
+  /**
+   * Feature 4 (migration 147) — the tenant's bound Vapi assistant id, set
+   * during Twilio/Vapi provisioning (workers/provision-twilio.ts) once the
+   * assistant is created. Null/undefined until then. Read-only projection:
+   * written by the provisioning worker + voice-config save via raw SQL, not
+   * the generic settings update path (mirrors the serviceArea* fields).
+   */
+  vapiAssistantId?: string | null;
+  /**
    * F8 — per-tenant escalation channel + trigger flags. When absent,
    * `resolveEscalationSettings` returns `DEFAULT_ESCALATION_SETTINGS`.
    */

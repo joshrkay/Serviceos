@@ -84,4 +84,41 @@ describe('Postgres integration — settings', () => {
       expect(found).toBeNull();
     });
   });
+
+  describe('voice-agent binding columns (migration 147)', () => {
+    it('projects voice_id + vapi_assistant_id onto TenantSettings (real columns)', async () => {
+      const tenant = await createTestTenant(pool);
+      const now = new Date();
+      await settingsRepo.create({
+        id: crypto.randomUUID(),
+        tenantId: tenant.tenantId,
+        businessName: 'Voice Co',
+        timezone: 'America/New_York',
+        estimatePrefix: 'EST',
+        invoicePrefix: 'INV',
+        nextEstimateNumber: 1,
+        nextInvoiceNumber: 1,
+        defaultPaymentTermDays: 30,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      // Unset on a fresh row → undefined (NULL → undefined convention).
+      const fresh = await settingsRepo.findByTenant(tenant.tenantId);
+      expect(fresh!.voiceId).toBeUndefined();
+      expect(fresh!.vapiAssistantId).toBeUndefined();
+
+      // The provisioning / voice-config paths write these via raw SQL. Once
+      // set, findByTenant must surface them — this pins the real column names
+      // through SELECT * + mapRow: a wrong column name would still read as
+      // undefined here even after the UPDATE (the entity-resolver lesson).
+      await pool.query(
+        `UPDATE tenant_settings SET voice_id = $1, vapi_assistant_id = $2 WHERE tenant_id = $3`,
+        ['adam', 'asst_real_123', tenant.tenantId],
+      );
+      const bound = await settingsRepo.findByTenant(tenant.tenantId);
+      expect(bound!.voiceId).toBe('adam');
+      expect(bound!.vapiAssistantId).toBe('asst_real_123');
+    });
+  });
 });
