@@ -137,4 +137,75 @@ describe('Postgres integration — customers', () => {
       expect(found).toBeNull();
     });
   });
+
+  // P4-004 — fuzzy name dedup. Pins the real pg_trgm `%` operator + the
+  // GIN index `idx_customers_name_trgm` (mocked tests can't prove either).
+  describe('findDuplicates — fuzzy name (pg_trgm)', () => {
+    it('returns a name-similar candidate via the pg_trgm `%` operator', async () => {
+      const dedupTenant = await createTestTenant(pool);
+      await repo.create({
+        id: crypto.randomUUID(),
+        tenantId: dedupTenant.tenantId,
+        firstName: 'Jonathan',
+        lastName: 'Doe',
+        displayName: 'Jonathan Doe',
+        preferredChannel: 'phone',
+        smsConsent: false,
+        isArchived: false,
+        createdBy: dedupTenant.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const candidates = await repo.findDuplicates(dedupTenant.tenantId, {
+        name: 'Jonathon Doe',
+      });
+      expect(candidates.map((c) => c.displayName)).toContain('Jonathan Doe');
+    });
+
+    it('does NOT return an unrelated name', async () => {
+      const dedupTenant = await createTestTenant(pool);
+      await repo.create({
+        id: crypto.randomUUID(),
+        tenantId: dedupTenant.tenantId,
+        firstName: 'Jonathan',
+        lastName: 'Doe',
+        displayName: 'Jonathan Doe',
+        preferredChannel: 'phone',
+        smsConsent: false,
+        isArchived: false,
+        createdBy: dedupTenant.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const candidates = await repo.findDuplicates(dedupTenant.tenantId, {
+        name: 'Maria Gonzalez',
+      });
+      expect(candidates).toHaveLength(0);
+    });
+
+    it('is tenant-isolated — a close name on another tenant is not returned', async () => {
+      const tenantA = await createTestTenant(pool);
+      const tenantB = await createTestTenant(pool);
+      await repo.create({
+        id: crypto.randomUUID(),
+        tenantId: tenantA.tenantId,
+        firstName: 'Jonathan',
+        lastName: 'Doe',
+        displayName: 'Jonathan Doe',
+        preferredChannel: 'phone',
+        smsConsent: false,
+        isArchived: false,
+        createdBy: tenantA.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const candidates = await repo.findDuplicates(tenantB.tenantId, {
+        name: 'Jonathon Doe',
+      });
+      expect(candidates).toHaveLength(0);
+    });
+  });
 });

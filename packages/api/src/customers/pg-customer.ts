@@ -383,21 +383,32 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
    * Email matching strategy:
    *   `lower(trim(...))` on both sides, parameterized.
    *
+   * Name matching strategy (P4-004 — fuzzy dedup):
+   *   `display_name % $name` uses the pg_trgm `%` operator, accelerated by
+   *   the GIN index `idx_customers_name_trgm`. It returns rows whose name is
+   *   above pg_trgm's similarity threshold (default 0.3) — a superset of what
+   *   `nameSimilarity()` (threshold 0.4) ultimately flags as a "possible
+   *   duplicate", so the deterministic scorer stays authoritative.
+   *
    * All variables are bound via $N — never concatenated.
    */
   async findDuplicates(
     tenantId: string,
-    criteria: { phone?: string; email?: string }
+    criteria: { phone?: string; email?: string; name?: string }
   ): Promise<Customer[]> {
     const normalizedPhone = criteria.phone ? normalizePhone(criteria.phone) : '';
     const normalizedEmail = criteria.email ? normalizeEmail(criteria.email) : '';
+    const name = criteria.name ? criteria.name.trim() : '';
 
     // Phone shorter than 7 digits is too ambiguous for a high-confidence
     // match — skip the predicate (mirrors checkCustomerDuplicates).
     const includePhone = normalizedPhone.length >= 7;
     const includeEmail = normalizedEmail.length > 0;
+    // A name needs at least one trigram's worth of signal to be worth a
+    // fuzzy scan; 2 chars is the practical floor.
+    const includeName = name.length >= 2;
 
-    if (!includePhone && !includeEmail) return [];
+    if (!includePhone && !includeEmail && !includeName) return [];
 
     return this.withTenant(tenantId, async (client) => {
       const conditions: string[] = ['tenant_id = $1', 'is_archived = false'];
@@ -416,6 +427,11 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
       if (includeEmail) {
         matchClauses.push(`lower(trim(coalesce(email, ''))) = $${paramIndex}`);
         params.push(normalizedEmail);
+        paramIndex++;
+      }
+      if (includeName) {
+        matchClauses.push(`coalesce(display_name, '') % $${paramIndex}`);
+        params.push(name);
         paramIndex++;
       }
 

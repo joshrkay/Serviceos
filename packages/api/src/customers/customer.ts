@@ -5,7 +5,9 @@ import {
   CustomerDuplicateLoader,
   DuplicateWarning,
   isCustomerDuplicateLoader,
+  nameSimilarity,
   normalizeEmail,
+  normalizeName,
   normalizePhone,
 } from './dedup';
 
@@ -162,7 +164,7 @@ export interface CustomerRepository {
    */
   findDuplicates?(
     tenantId: string,
-    criteria: { phone?: string; email?: string }
+    criteria: { phone?: string; email?: string; name?: string }
   ): Promise<Customer[]>;
   /**
    * VQ-006 follow-up (PR #265 review): push the lookup-by-phone filter
@@ -319,7 +321,7 @@ export async function createCustomer(
   // the existing 201 response contract.
   let warnings: DuplicateWarning[] | undefined;
   if (
-    (input.primaryPhone || input.email) &&
+    (input.primaryPhone || input.email || input.firstName || input.companyName) &&
     isCustomerDuplicateLoader(repository)
   ) {
     const found = await checkCustomerDuplicatesPg(
@@ -620,11 +622,12 @@ export class InMemoryCustomerRepository implements CustomerRepository {
    */
   async findDuplicates(
     tenantId: string,
-    criteria: { phone?: string; email?: string }
+    criteria: { phone?: string; email?: string; name?: string }
   ): Promise<Customer[]> {
     const phoneNorm = criteria.phone ? normalizePhone(criteria.phone) : '';
     const emailNorm = criteria.email ? normalizeEmail(criteria.email) : '';
-    if (!phoneNorm && !emailNorm) return [];
+    const nameNorm = criteria.name ? normalizeName(criteria.name) : '';
+    if (!phoneNorm && !emailNorm && !nameNorm) return [];
     return Array.from(this.customers.values())
       .filter((c) => c.tenantId === tenantId && !c.isArchived)
       .filter((c) => {
@@ -634,7 +637,15 @@ export class InMemoryCustomerRepository implements CustomerRepository {
           normalizePhone(c.primaryPhone) === phoneNorm;
         const emailMatch =
           !!emailNorm && c.email && normalizeEmail(c.email) === emailNorm;
-        return phoneMatch || emailMatch;
+        // Mirror the Pg `%` pre-filter: include name-similar candidates at/above
+        // pg_trgm's default threshold (0.3). The scorer makes the final 0.4 call.
+        const existingName =
+          [c.firstName, c.lastName].filter(Boolean).join(' ').trim() || c.displayName;
+        const nameMatch =
+          nameNorm.length >= 2 &&
+          !!existingName &&
+          nameSimilarity(nameNorm, normalizeName(existingName)) >= 0.3;
+        return phoneMatch || emailMatch || nameMatch;
       })
       .map((c) => ({ ...c }));
   }
