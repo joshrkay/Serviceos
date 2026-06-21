@@ -33,6 +33,19 @@ edit the dead one or hunt for system prompts in the wrong place.
 - An **unmapped** `taskType` defaults to the **standard** tier (gateway.ts logs
   a one-time warning). So "cheap model for task X" is only true if X is
   explicitly mapped to a cheaper tier — don't assume.
+- **Live gotcha (found 2026-06-21):** most call-site `taskType` strings are
+  *absent* from `taskTierMapping`, so they silently resolve to **standard**
+  (sonnet). Of ~20 call-site task types, only `intent_classification`,
+  `draft_estimate`, `update_estimate`, and `create_appointment` are mapped;
+  the rest fall through — including `classify_intent` (the mapped key is the
+  differently-named `intent_classification`), `decompose_transcript`,
+  `summarize_conversation`, `transcription_correction` (mapped key is
+  `transcript_normalization`), `voice_clarification`, and `call_sentiment`.
+  Tasks meant to be lightweight are paying for the standard tier. The naming
+  split mirrors the two configs: call sites still use the old
+  `DEFAULT_GATEWAY_CONFIG`-era names while the live map uses newer ones.
+  (Counts from a literal `taskType: '…'` grep — a few dynamic call sites may be
+  missed; verify per task before relying on a tier. Worth a dedicated audit.)
 
 **The gateway does NOT inject system prompts.** `LLMGateway.complete()`
 resolves *provider* and *model* by `taskType`; there is no `taskType →

@@ -127,8 +127,9 @@ export interface CreateTranscriptionWorkerOptions {
 
 /**
  * Best-effort transcription correction. Calls the gateway with
- * `taskType: 'transcription_correction'` (system prompt configured in
- * ai/gateway/routing-config.ts) passing the tenant glossary as context.
+ * `taskType: 'transcription_correction'`, passing the tenant glossary + raw
+ * transcript as the user message. (This taskType isn't in ai-routing.ts
+ * `taskTierMapping` → standard tier; the gateway applies no system prompt.)
  * Returns `{ corrected, glossary }`; on ANY failure, returns the raw
  * transcript unchanged — this is a quality upgrade, not a gate.
  */
