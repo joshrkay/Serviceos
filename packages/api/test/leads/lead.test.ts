@@ -225,15 +225,82 @@ describe('P9-001 — leads repository + service', () => {
     ).toHaveLength(0);
   });
 
-  it('convertToCustomer refuses to re-convert an already-converted lead', async () => {
+  // ── LC-5: dedup (link vs create) + idempotency ────────────────────────
+  it('convertToCustomer LINKS to an existing customer on a phone match (dedup)', async () => {
+    const now = new Date();
+    const existingCustomer = await customerRepo.create({
+      id: crypto.randomUUID(),
+      tenantId: tenantA,
+      firstName: 'Carla',
+      lastName: 'Reyes',
+      displayName: 'Carla Reyes',
+      primaryPhone: '5550100',
+      email: 'carla@example.com',
+      preferredChannel: 'phone',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: 'seed',
+      createdAt: now,
+      updatedAt: now,
+    });
+    const lead = await createLead(
+      { tenantId: tenantA, firstName: 'Carla', primaryPhone: '5550100', source: 'referral', createdBy: 'u' },
+      leadRepo,
+      auditRepo,
+    );
+
+    const result = await convertToCustomer(tenantA, lead.id, leadRepo, customerRepo, 'u2', 'owner', auditRepo);
+    expect(result!.linked).toBe(true);
+    expect(result!.customer.id).toBe(existingCustomer.id);
+    expect(result!.lead.convertedCustomerId).toBe(existingCustomer.id);
+    expect(result!.lead.stage).toBe('won');
+
+    // Exactly one customer for the tenant — no duplicate minted.
+    const all = await customerRepo.findByTenant(tenantA);
+    expect(all).toHaveLength(1);
+    // Linked-from-lead audit emitted instead of created-from-lead.
+    const events = auditRepo.getAll();
+    expect(events.some((e) => e.eventType === 'customer.linked_from_lead')).toBe(true);
+    expect(events.some((e) => e.eventType === 'customer.created_from_lead')).toBe(false);
+  });
+
+  it('convertToCustomer creates a new customer when no high-confidence match exists', async () => {
+    const lead = await createLead(
+      { tenantId: tenantA, firstName: 'Unique', primaryPhone: '5559999', source: 'web_form', createdBy: 'u' },
+      leadRepo,
+      auditRepo,
+    );
+    const result = await convertToCustomer(tenantA, lead.id, leadRepo, customerRepo, 'u2', 'owner', auditRepo);
+    expect(result!.linked).toBeUndefined();
+    expect(result!.customer.originatingLeadId).toBe(lead.id);
+    expect(await customerRepo.findByTenant(tenantA)).toHaveLength(1);
+  });
+
+  it('convertToCustomer is idempotent — re-convert returns the prior result, no duplicate', async () => {
+    const lead = await createLead(
+      { tenantId: tenantA, firstName: 'Repeat', primaryPhone: '5551111', source: 'web_form', createdBy: 'u' },
+      leadRepo,
+      auditRepo,
+    );
+    const first = await convertToCustomer(tenantA, lead.id, leadRepo, customerRepo, 'u2', 'owner', auditRepo);
+    const second = await convertToCustomer(tenantA, lead.id, leadRepo, customerRepo, 'u2', 'owner', auditRepo);
+
+    expect(second!.alreadyConverted).toBe(true);
+    expect(second!.customer.id).toBe(first!.customer.id);
+    // No second customer, no second conversion audit.
+    expect(await customerRepo.findByTenant(tenantA)).toHaveLength(1);
+    expect(auditRepo.getAll().filter((e) => e.eventType === 'lead.converted')).toHaveLength(1);
+  });
+
+  it('convertToCustomer re-convert is idempotent (LC-5): returns the prior result, not an error', async () => {
     const lead = await createLead(
       { tenantId: tenantA, firstName: 'D', source: 'walk_in', createdBy: 'u' },
       leadRepo
     );
-    await convertToCustomer(tenantA, lead.id, leadRepo, customerRepo, 'u', 'owner');
-    await expect(
-      convertToCustomer(tenantA, lead.id, leadRepo, customerRepo, 'u', 'owner')
-    ).rejects.toThrow(/already been converted/);
+    const first = await convertToCustomer(tenantA, lead.id, leadRepo, customerRepo, 'u', 'owner');
+    const again = await convertToCustomer(tenantA, lead.id, leadRepo, customerRepo, 'u', 'owner');
+    expect(again!.alreadyConverted).toBe(true);
+    expect(again!.customer.id).toBe(first!.customer.id);
   });
 
   it('loseLead requires a non-empty reason and writes lead.lost audit event', async () => {
