@@ -1151,11 +1151,30 @@ async function processSegment(
   // auto-executed with no human in the loop.
   const supervisorPresent = await isSupervisorPresent(tenantId);
 
+  // Story 7.2 — Estimate Agent clarification-loop count. Derive how many times
+  // we've already asked clarifying questions for an estimate in this
+  // conversation from the persisted draft_estimate proposals that flagged
+  // `clarification.needed`. The count self-increments (each such draft is
+  // persisted), so the handler reaches the hard 3-loop cap and then proposes a
+  // best-effort estimate flagged for review — no extra conversation state.
+  // Best-effort: a lookup failure degrades to 0 (keep asking — the safe default).
+  let clarificationCount = 0;
+  if (handler.taskType === 'draft_estimate' && conversationId) {
+    const priorProposals = await deps.proposalRepo.findByTenant(tenantId).catch(() => []);
+    clarificationCount = priorProposals.filter((p) => {
+      if (p.proposalType !== 'draft_estimate') return false;
+      if (p.sourceContext?.conversationId !== conversationId) return false;
+      const clar = (p.payload as { clarification?: { needed?: boolean } }).clarification;
+      return clar?.needed === true;
+    }).length;
+  }
+
   const context: TaskContext = {
     tenantId,
     userId,
     message: segmentText,
     conversationId,
+    ...(handler.taskType === 'draft_estimate' ? { clarificationCount } : {}),
     existingEntities: {
       ...entitiesForProposal(classification.intentType, classification.extractedEntities),
       // P8 — resolved IDs ride the context entities so the drafting LLM
