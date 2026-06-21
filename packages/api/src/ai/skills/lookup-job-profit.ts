@@ -22,6 +22,7 @@ import {
 import type { JobRepository } from '../../jobs/job';
 import type { SettingsRepository } from '../../settings/settings';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
+import { formatUsdCentsPlain } from '@ai-service-os/shared';
 
 export interface LookupJobProfitInput {
   tenantId: string;
@@ -50,12 +51,12 @@ export type LookupJobProfitResult =
   | { status: 'not_found'; summary: string; data: { jobId: string } }
   | { status: 'error'; summary: string; data: { error: string } };
 
-/** Local TTS money formatter (the worktree has no shared spoken-format module;
- *  each lookup skill defines its own — kept identical for a consistent voice). */
+/** TTS money formatter for job-profit prose. Always emits a positive-magnitude
+ *  amount — spoken losses read better as "lost $40" than "-$40.00", so the
+ *  caller phrases the sign. Delegates the terse `$N.NN` formatting to the
+ *  shared `formatUsdCentsPlain`. */
 function formatCents(cents: number): string {
-  // Spoken losses read better as "lost $40" than "-$40.00", so the caller
-  // phrases the sign; this helper always emits a positive-magnitude amount.
-  return `$${(Math.abs(cents) / 100).toFixed(2)}`;
+  return formatUsdCentsPlain(Math.abs(cents));
 }
 
 /** Whole-ish hours for speech: "3 hours", "1 hour", "1.5 hours". */
