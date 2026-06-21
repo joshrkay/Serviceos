@@ -14,6 +14,7 @@ const h = vi.hoisted(() => ({
   supportedSecondFactors: [] as Array<{ strategy: string; emailAddressId?: string }>,
   setActive: vi.fn().mockResolvedValue(undefined),
   isLoaded: true,
+  params: {} as { reason?: string; next?: string },
 }));
 
 vi.mock('@clerk/clerk-expo', () => ({
@@ -37,6 +38,7 @@ vi.mock('@clerk/clerk-expo', () => ({
 }));
 vi.mock('expo-router', () => ({
   useRouter: () => ({ replace: h.replace, push: vi.fn(), back: vi.fn() }),
+  useLocalSearchParams: () => h.params,
 }));
 
 // eslint-disable-next-line import/first
@@ -47,6 +49,7 @@ beforeEach(() => {
   h.isLoaded = true;
   h.supportedFirstFactors = [];
   h.supportedSecondFactors = [];
+  h.params = {};
 });
 
 afterEach(() => cleanup());
@@ -113,5 +116,26 @@ describe('Sign-in screen', () => {
     fireEvent.click(container.querySelector('button')!);
     expect(await findByText('Invalid password.')).toBeTruthy();
     expect(h.replace).not.toHaveBeenCalled();
+  });
+
+  it('explains why a session-expired redirect landed here', () => {
+    h.params = { reason: 'session-expired', next: '/customers/c1' };
+    const { getByText } = render(createElement(SignIn));
+    expect(getByText('Your session expired')).toBeTruthy();
+  });
+
+  it('resumes to the preserved next route after re-auth instead of Home', async () => {
+    h.params = { reason: 'session-expired', next: '/customers/c1' };
+    h.create.mockResolvedValue({ status: 'complete', createdSessionId: 'sess_x' });
+    const { container, getByPlaceholderText } = render(createElement(SignIn));
+    fireEvent.change(getByPlaceholderText('Email'), { target: { value: 'owner@shop.com' } });
+    fireEvent.change(getByPlaceholderText('Password'), { target: { value: 'pw' } });
+    fireEvent.click(container.querySelector('button')!);
+    await waitFor(() => expect(h.replace).toHaveBeenCalledWith('/customers/c1'));
+  });
+
+  it('shows no session-expired banner on a cold sign-in', () => {
+    const { queryByText } = render(createElement(SignIn));
+    expect(queryByText('Your session expired')).toBeNull();
   });
 });

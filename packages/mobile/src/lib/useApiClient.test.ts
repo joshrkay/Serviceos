@@ -12,12 +12,20 @@ interface CapturedConfig {
 const h = vi.hoisted(() => ({
   getToken: vi.fn().mockResolvedValue('jwt'),
   replace: vi.fn(),
+  pathname: '/customers/c1',
+  showToast: vi.fn(),
   client: vi.fn() as unknown as ApiFetch,
   config: undefined as unknown as CapturedConfig,
 }));
 
 vi.mock('@clerk/clerk-expo', () => ({ useAuth: () => ({ getToken: h.getToken }) }));
-vi.mock('expo-router', () => ({ useRouter: () => ({ replace: h.replace }) }));
+vi.mock('expo-router', () => ({
+  useRouter: () => ({ replace: h.replace }),
+  usePathname: () => h.pathname,
+}));
+vi.mock('../components/Toast', () => ({
+  useToast: () => ({ showToast: h.showToast, showErrorToast: vi.fn(), hideToast: vi.fn() }),
+}));
 vi.mock('./env', () => ({ API_BASE_URL: 'https://api.test' }));
 vi.mock('./apiFetch', () => ({
   createApiFetch: (cfg: CapturedConfig) => {
@@ -31,6 +39,7 @@ import { useApiClient } from './useApiClient';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  h.pathname = '/customers/c1';
   h.config = undefined as unknown as CapturedConfig;
 });
 
@@ -51,9 +60,27 @@ describe('useApiClient', () => {
     expect(h.getToken).toHaveBeenLastCalledWith({ template: 'serviceos', skipCache: false });
   });
 
-  it('routes to /sign-in when the API reports the session is unauthenticated', () => {
+  it('surfaces a session-expired toast and routes to /sign-in preserving the route', () => {
     renderHook(() => useApiClient());
     h.config.onUnauthenticated();
-    expect(h.replace).toHaveBeenCalledWith('/sign-in');
+
+    expect(h.showToast).toHaveBeenCalledTimes(1);
+    expect(h.showToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Your session expired' }),
+    );
+    // Routes to the sign-in href carrying reason + the current route as `next`.
+    expect(h.replace).toHaveBeenCalledTimes(1);
+    const href = h.replace.mock.calls[0][0] as { pathname: string; params: Record<string, string> };
+    expect(href.pathname).toBe('/sign-in');
+    expect(href.params.reason).toBe('session-expired');
+    expect(href.params.next).toBe('/customers/c1');
+  });
+
+  it('omits next from the sign-in route when on Home', () => {
+    h.pathname = '/';
+    renderHook(() => useApiClient());
+    h.config.onUnauthenticated();
+    const href = h.replace.mock.calls[0][0] as { pathname: string; params: Record<string, string> };
+    expect(href.params.next).toBeUndefined();
   });
 });

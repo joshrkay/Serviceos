@@ -1,11 +1,14 @@
 import { type Href, useRouter } from 'expo-router';
-import { useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
 import { useMe, type Mode } from '../src/hooks/useMe';
 import { useMoneyDashboard } from '../src/hooks/useMoneyDashboard';
 import { usePendingProposals } from '../src/hooks/usePendingProposals';
 import { formatMoneyShort, formatWeekdayDate } from '../src/lib/format';
 import { greetingForDate } from '../src/lib/greeting';
+import { ErrorState } from '../src/components/ErrorState';
+import { PushDeniedNotice } from '../src/components/PushDeniedNotice';
+import { useToast } from '../src/components/Toast';
+import { useReconnectRetry } from '../src/lib/useReconnectRetry';
 
 const MODES: Mode[] = ['supervisor', 'both', 'tech'];
 
@@ -25,10 +28,13 @@ const NAV: Array<{ label: string; route: Href }> = [
 // waiting for approval, and this month's money — over the existing API.
 export default function Home() {
   const router = useRouter();
-  const { me, isLoading, error, switchMode } = useMe();
+  const { me, isLoading, error, switchMode, refetch } = useMe();
   const { count: approvalsCount, isLoading: approvalsLoading } = usePendingProposals();
   const money = useMoneyDashboard();
-  const [modeError, setModeError] = useState<string | null>(null);
+  const { showErrorToast } = useToast();
+
+  // If /api/me failed while offline, heal Home on reconnect without a manual tap.
+  useReconnectRetry(refetch, Boolean(error));
 
   if (isLoading) {
     return (
@@ -41,7 +47,7 @@ export default function Home() {
   if (error) {
     return (
       <View className="flex-1 items-center justify-center bg-background px-6">
-        <Text className="text-base text-destructive">{error.message}</Text>
+        <ErrorState error={error} onRetry={() => void refetch()} className="w-full" />
       </View>
     );
   }
@@ -141,10 +147,7 @@ export default function Home() {
               accessibilityRole="button"
               accessibilityLabel={`Switch to ${m} mode`}
               onPress={() => {
-                setModeError(null);
-                void switchMode(m).catch((e) =>
-                  setModeError(e instanceof Error ? e.message : 'Could not switch mode.'),
-                );
+                void switchMode(m).catch((e) => showErrorToast(e));
               }}
               className={`min-h-11 flex-1 items-center justify-center rounded-md px-3 py-2 ${
                 active ? 'bg-primary' : 'bg-secondary'
@@ -157,7 +160,8 @@ export default function Home() {
           );
         })}
       </View>
-      {modeError ? <Text className="mt-2 text-base text-destructive">{modeError}</Text> : null}
+
+      <PushDeniedNotice className="mt-6" />
 
       <Text className="mt-7 mb-2 text-xs font-medium uppercase tracking-wide text-mutedForeground">
         More

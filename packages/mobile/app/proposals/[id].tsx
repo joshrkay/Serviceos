@@ -2,6 +2,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
 import { useProposalReview } from '../../src/hooks/useProposalReview';
 import { reviewRows, typeLabel } from '../../src/proposals/proposalReview';
+import { ErrorState } from '../../src/components/ErrorState';
 
 // Proposal review + 5-second undo. The owner taps a proposal in the inbox,
 // reviews the AI's draft, and approves it — then has a 5s window to undo before
@@ -29,16 +30,7 @@ export default function ProposalReviewScreen() {
         {phase === 'loading' ? <ActivityIndicator /> : null}
 
         {phase === 'error' ? (
-          <View>
-            <Text className="text-base text-destructive">{error}</Text>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => void reload()}
-              className="mt-4 min-h-11 items-center justify-center rounded-md border border-border px-4 py-3"
-            >
-              <Text className="text-base text-foreground">Try again</Text>
-            </Pressable>
-          </View>
+          <ErrorState error={error} showRetry onRetry={() => void reload()} />
         ) : null}
 
         {proposal && phase !== 'loading' && phase !== 'error' ? (

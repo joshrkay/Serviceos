@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   refetch: vi.fn(),
   api: vi.fn(),
   sendReply: vi.fn(),
+  showErrorToast: vi.fn(),
   messages: [] as ThreadMessage[],
   isLoading: false,
   error: null as string | null,
@@ -19,6 +20,9 @@ vi.mock('expo-router', () => ({
   useRouter: () => ({ back: h.back, push: vi.fn(), replace: vi.fn() }),
 }));
 vi.mock('../lib/useApiClient', () => ({ useApiClient: () => h.api }));
+vi.mock('../components/Toast', () => ({
+  useToast: () => ({ showToast: vi.fn(), showErrorToast: h.showErrorToast, hideToast: vi.fn() }),
+}));
 vi.mock('../messaging/sendReply', () => ({ sendReply: (...args: unknown[]) => h.sendReply(...args) }));
 vi.mock('../messaging/useConversationThread', () => ({
   useConversationThread: () => ({
@@ -81,12 +85,16 @@ describe('Message thread', () => {
     await waitFor(() => expect(getByText('Heading over now')).toBeTruthy());
   });
 
-  it('surfaces a send failure (e.g. DNC) without losing the screen', async () => {
-    h.sendReply.mockRejectedValue(new Error('This customer has opted out of texts (replied STOP).'));
-    const { getByPlaceholderText, getByText, findByText } = render(createElement(MessageThread));
-    fireEvent.change(getByPlaceholderText('Type a message'), { target: { value: 'hi' } });
+  it('surfaces a send failure (e.g. DNC) as a toast without losing the draft', async () => {
+    const failure = new Error('This customer has opted out of texts (replied STOP).');
+    h.sendReply.mockRejectedValue(failure);
+    const { getByPlaceholderText, getByText } = render(createElement(MessageThread));
+    const input = getByPlaceholderText('Type a message') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'hi' } });
     fireEvent.click(getByText('Send').closest('button')!);
-    expect(await findByText(/opted out of texts/)).toBeTruthy();
+    await waitFor(() => expect(h.showErrorToast).toHaveBeenCalledWith(failure));
+    // Draft is preserved for a retry (cleared only on success).
+    expect(input.value).toBe('hi');
   });
 
   it('the Send control is a >=44px tap target', () => {

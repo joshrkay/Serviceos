@@ -72,6 +72,13 @@ export default defineConfig({
       // lane. Screen tests render against host-DOM stubs (and mock useRouter).
       'react-native': path.resolve(__dirname, './test/stubs/react-native.ts'),
       'expo-router': path.resolve(__dirname, './test/stubs/expo-router.ts'),
+      // NetInfo's native entry doesn't resolve under jsdom/node in the
+      // root-only lane; the connectivity layer drives state through
+      // __emitNetInfoForTests, so this only needs to be importable.
+      '@react-native-community/netinfo': path.resolve(
+        __dirname,
+        './test/stubs/react-native-community-netinfo.ts',
+      ),
     },
   },
 });

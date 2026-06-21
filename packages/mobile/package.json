@@ -19,6 +19,7 @@
   "dependencies": {
     "@clerk/clerk-expo": "^2.19.0",
     "@expo/metro-runtime": "~4.0.1",
+    "@react-native-community/netinfo": "11.4.1",
     "expo": "~52.0.0",
     "expo-asset": "~11.0.5",
     "expo-audio": "~0.3.5",

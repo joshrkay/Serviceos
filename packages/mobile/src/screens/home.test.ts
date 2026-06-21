@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
 // Screen tests live under src/ (NOT app/) so expo-router's file-based routing
 // doesn't treat them as routes and Metro doesn't bundle vitest into the app.
-import { cleanup, fireEvent, render } from '@testing-library/react';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MoneySummary } from '../hooks/useMoneyDashboard';
 
 const h = vi.hoisted(() => ({
   push: vi.fn(),
+  showErrorToast: vi.fn(),
+  refetch: vi.fn(),
   switchMode: vi.fn().mockResolvedValue(undefined),
   me: {
     user_id: 'u',
@@ -41,13 +43,18 @@ const h = vi.hoisted(() => ({
 vi.mock('expo-router', () => ({
   useRouter: () => ({ push: h.push, back: vi.fn(), replace: vi.fn() }),
 }));
+vi.mock('../components/Toast', () => ({
+  useToast: () => ({ showToast: vi.fn(), showErrorToast: h.showErrorToast, hideToast: vi.fn() }),
+}));
+vi.mock('../lib/useReconnectRetry', () => ({ useReconnectRetry: vi.fn() }));
+vi.mock('../push/pushStatusContext', () => ({ usePushStatus: () => null }));
 vi.mock('../hooks/useMe', () => ({
   useMe: () => ({
     me: h.me,
     isLoading: h.isLoading,
     error: h.error,
     switchMode: h.switchMode,
-    refetch: vi.fn(),
+    refetch: h.refetch,
   }),
 }));
 vi.mock('../hooks/usePendingProposals', () => ({
@@ -170,16 +177,22 @@ describe('Home / Today dashboard', () => {
     expect(container.querySelectorAll('button')).toHaveLength(0);
   });
 
-  it('renders the error message when /api/me fails', () => {
+  it('renders a friendly error state with a Retry when /api/me fails', () => {
     h.error = new Error('me failed');
     const { getByText } = render(createElement(Home));
+    // copyForError surfaces the message as the body; the Retry calls refetch.
     expect(getByText('me failed')).toBeTruthy();
+    const retry = getByText('Try again').closest('button')!;
+    expect(retry.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(retry);
+    expect(h.refetch).toHaveBeenCalledTimes(1);
   });
 
-  it('surfaces a mode-switch failure inline instead of swallowing it', async () => {
-    h.switchMode = vi.fn().mockRejectedValue(new Error('Not allowed for your role'));
-    const { getByText, findByText } = render(createElement(Home));
+  it('surfaces a mode-switch failure as a toast instead of swallowing it', async () => {
+    const failure = new Error('Not allowed for your role');
+    h.switchMode = vi.fn().mockRejectedValue(failure);
+    const { getByText } = render(createElement(Home));
     fireEvent.click(getByText('tech').closest('button')!);
-    expect(await findByText('Not allowed for your role')).toBeTruthy();
+    await waitFor(() => expect(h.showErrorToast).toHaveBeenCalledWith(failure));
   });
 });

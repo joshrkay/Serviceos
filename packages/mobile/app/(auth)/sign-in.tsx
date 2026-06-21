@@ -1,7 +1,8 @@
 import { useSignIn } from '@clerk/clerk-expo';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter, type Href } from 'expo-router';
 import { useState } from 'react';
 import { ActivityIndicator, Pressable, Text, TextInput, View } from 'react-native';
+import { readSessionExpiredParams } from '../../src/lib/sessionExpired';
 
 // Native email + password sign-in. Clerk-expo has no prebuilt native UI, so we
 // drive the flow with the `useSignIn` hook. (OAuth / email-code strategies can
@@ -9,6 +10,10 @@ import { ActivityIndicator, Pressable, Text, TextInput, View } from 'react-nativ
 export default function SignIn() {
   const { signIn, setActive, isLoaded } = useSignIn();
   const router = useRouter();
+  // A session-expired redirect (from useApiClient) carries `reason` + `next`:
+  // explain why we're here, and resume to `next` after re-auth instead of Home.
+  const params = useLocalSearchParams<{ reason?: string; next?: string }>();
+  const { expired, next } = readSessionExpiredParams(params);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -20,7 +25,8 @@ export default function SignIn() {
       return;
     }
     await setActive({ session: sessionId });
-    router.replace('/');
+    // Resume where the expired session left off, else land on Home.
+    router.replace((next ?? '/') as Href);
   };
 
   const completeEmailCodeFirstFactor = async () => {
@@ -101,6 +107,18 @@ export default function SignIn() {
       <Text className="mb-6 text-base text-mutedForeground">
         You learned the trade. We&apos;ll run the business.
       </Text>
+
+      {expired ? (
+        <View
+          className="mb-6 rounded-lg border border-border bg-accent p-4"
+          accessibilityRole="alert"
+        >
+          <Text className="text-base font-medium text-accentForeground">Your session expired</Text>
+          <Text className="mt-1 text-sm text-mutedForeground">
+            Please sign in again to pick up where you left off.
+          </Text>
+        </View>
+      ) : null}
 
       <TextInput
         className="mb-3 min-h-11 rounded-md border border-border px-4 text-base text-foreground"

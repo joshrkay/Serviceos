@@ -1,5 +1,6 @@
 import { useRouter } from 'expo-router';
 import { ActivityIndicator, FlatList, Pressable, RefreshControl, Text, View } from 'react-native';
+import { ErrorState } from './ErrorState';
 
 export interface EntityRow {
   primary: string;
@@ -48,7 +49,8 @@ export function EntityList<T>({
           <Text className="text-base text-mutedForeground">‹ Back</Text>
         </Pressable>
         <Text className="mt-2 text-2xl font-semibold text-foreground">{title}</Text>
-        {error ? <Text className="mt-2 text-base text-destructive">{error}</Text> : null}
+        {/* Lists already retry via pull-to-refresh, so no explicit Retry button. */}
+        {error ? <ErrorState error={error} showRetry={false} className="mt-2" /> : null}
       </View>
 
       <FlatList

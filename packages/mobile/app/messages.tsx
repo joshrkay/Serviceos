@@ -2,6 +2,7 @@ import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { ActivityIndicator, FlatList, Pressable, RefreshControl, Text, View } from 'react-native';
 import { useConversations, type InboxThread } from '../src/messaging/useConversations';
+import { ErrorState } from '../src/components/ErrorState';
 
 function threadName(t: InboxThread): string {
   // A friendly title wins; for unmatched-SMS threads the entityId is the phone.
@@ -41,7 +42,7 @@ export default function Messages() {
           <Text className="text-base text-mutedForeground">‹ Back</Text>
         </Pressable>
         <Text className="mt-2 text-2xl font-semibold text-foreground">Messages</Text>
-        {error ? <Text className="mt-2 text-base text-destructive">{error}</Text> : null}
+        {error ? <ErrorState error={error} showRetry={false} className="mt-2" /> : null}
       </View>
 
       <FlatList

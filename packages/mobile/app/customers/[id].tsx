@@ -1,10 +1,13 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
 import { useDetailQuery } from '../../src/hooks/useDetailQuery';
 import { useApiClient } from '../../src/lib/useApiClient';
 import { startCustomerConversation } from '../../src/messaging/startCustomerConversation';
 import { useStartCall } from '../../src/calls/useStartCall';
+import { ErrorState } from '../../src/components/ErrorState';
+import { useToast } from '../../src/components/Toast';
+import { useReconnectRetry } from '../../src/lib/useReconnectRetry';
 
 interface Customer {
   id: string;
@@ -26,22 +29,36 @@ export default function CustomerDetail() {
   const id = Array.isArray(params.id) ? params.id[0] : (params.id ?? '');
   const router = useRouter();
   const api = useApiClient();
-  const { data, isLoading, error } = useDetailQuery<Customer>(id ? `/api/customers/${id}` : null);
+  const { showToast, showErrorToast } = useToast();
+  const { data, isLoading, error, refetch } = useDetailQuery<Customer>(
+    id ? `/api/customers/${id}` : null,
+  );
   const { startCall, isCalling, error: callError } = useStartCall();
   const [messaging, setMessaging] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
+
+  // Heal the detail on reconnect if the load failed while offline.
+  useReconnectRetry(refetch, Boolean(error));
+
+  // useStartCall keeps its own (already-friendly) error — surface it as a toast
+  // so a call failure doesn't push a destructive line into the contact card.
+  useEffect(() => {
+    if (callError) showToast({ title: callError, tone: 'error' });
+  }, [callError, showToast]);
 
   const name = customerName(data ?? undefined);
 
   const onMessage = async () => {
     if (!id || messaging) return;
     setMessaging(true);
-    setActionError(null);
     try {
       const conversationId = await startCustomerConversation(api, id);
       router.push({ pathname: '/messages/[id]', params: { id: conversationId, title: name } });
     } catch {
-      setActionError('Could not open the conversation. Please try again.');
+      showToast({
+        title: "Couldn't open the conversation",
+        body: 'Give it another try in a moment.',
+        tone: 'error',
+      });
     } finally {
       setMessaging(false);
     }
@@ -68,7 +85,7 @@ export default function CustomerDetail() {
 
       <ScrollView contentContainerStyle={{ padding: 24 }}>
         {isLoading ? <ActivityIndicator /> : null}
-        {error ? <Text className="text-base text-destructive">{error}</Text> : null}
+        {error ? <ErrorState error={error} showRetry onRetry={() => void refetch()} /> : null}
 
         {data ? (
           <View>
@@ -102,9 +119,6 @@ export default function CustomerDetail() {
                 )}
               </Pressable>
             </View>
-            {actionError || callError ? (
-              <Text className="mt-2 text-base text-destructive">{actionError ?? callError}</Text>
-            ) : null}
 
             <View className="mt-5 rounded-lg border border-border">
               {rows

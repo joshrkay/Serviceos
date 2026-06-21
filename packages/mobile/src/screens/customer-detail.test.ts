@@ -19,6 +19,10 @@ const h = vi.hoisted(() => ({
   api: vi.fn(),
   startConversation: vi.fn(),
   startCall: vi.fn(),
+  showToast: vi.fn(),
+  showErrorToast: vi.fn(),
+  refetch: vi.fn(),
+  callError: null as string | null,
   data: null as Customer | null,
   isLoading: false,
   error: null as string | null,
@@ -30,16 +34,20 @@ vi.mock('expo-router', () => ({
   useRouter: () => ({ back: h.back, push: h.push, replace: vi.fn() }),
 }));
 vi.mock('../lib/useApiClient', () => ({ useApiClient: () => h.api }));
+vi.mock('../components/Toast', () => ({
+  useToast: () => ({ showToast: h.showToast, showErrorToast: h.showErrorToast, hideToast: vi.fn() }),
+}));
+vi.mock('../lib/useReconnectRetry', () => ({ useReconnectRetry: vi.fn() }));
 vi.mock('../messaging/startCustomerConversation', () => ({
   startCustomerConversation: (...args: unknown[]) => h.startConversation(...args),
 }));
 vi.mock('../calls/useStartCall', () => ({
-  useStartCall: () => ({ startCall: h.startCall, isCalling: false, error: null }),
+  useStartCall: () => ({ startCall: h.startCall, isCalling: false, error: h.callError }),
 }));
 vi.mock('../hooks/useDetailQuery', () => ({
   useDetailQuery: (endpoint: string | null) => {
     h.endpoint = endpoint;
-    return { data: h.data, isLoading: h.isLoading, error: h.error, refetch: vi.fn() };
+    return { data: h.data, isLoading: h.isLoading, error: h.error, refetch: h.refetch };
   },
 }));
 
@@ -51,6 +59,7 @@ beforeEach(() => {
   h.data = null;
   h.isLoading = false;
   h.error = null;
+  h.callError = null;
   h.endpoint = null;
 });
 
@@ -110,9 +119,21 @@ describe('Customer detail screen', () => {
     expect(getByText('Call').closest('button')!.disabled).toBe(true);
   });
 
-  it('surfaces a fetch error', () => {
-    h.error = 'HTTP 404';
+  it('surfaces a fetch error as a friendly state (body is the surfaced message)', () => {
+    h.error = 'Customer not found: c1';
     const { getByText } = render(createElement(CustomerDetail));
-    expect(getByText('HTTP 404')).toBeTruthy();
+    expect(getByText('Customer not found: c1')).toBeTruthy();
+  });
+
+  it('toasts a call failure instead of pushing a destructive line into the card', async () => {
+    h.data = { id: 'c1', displayName: 'Acme Plumbing', primaryPhone: '555-0100' };
+    h.callError = 'This customer has opted out of contact (replied STOP).';
+    render(createElement(CustomerDetail));
+    await waitFor(() =>
+      expect(h.showToast).toHaveBeenCalledWith({
+        title: 'This customer has opted out of contact (replied STOP).',
+        tone: 'error',
+      }),
+    );
   });
 });

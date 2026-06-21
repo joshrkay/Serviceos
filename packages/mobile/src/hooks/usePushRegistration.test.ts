@@ -91,6 +91,23 @@ describe('usePushRegistration', () => {
     expect(failed).toHaveBeenCalledTimes(1);
   });
 
+  it("returns 'denied' so the UI can nudge when permission was declined", async () => {
+    h.getPermission.mockResolvedValue({ granted: false, canAskAgain: false });
+    const { result } = renderHook(() => usePushRegistration(true));
+    await waitFor(() => expect(result.current).toBe('denied'));
+    // No device registration is attempted when permission is denied.
+    expect(h.api).not.toHaveBeenCalled();
+  });
+
+  it("returns 'registered' on success and clears to null when signed out", async () => {
+    const { result, rerender } = renderHook(({ enabled }) => usePushRegistration(enabled), {
+      initialProps: { enabled: true },
+    });
+    await waitFor(() => expect(result.current).toBe('registered'));
+    rerender({ enabled: false });
+    await waitFor(() => expect(result.current).toBeNull());
+  });
+
   it('re-registers after a sign-out → sign-in cycle without a remount', async () => {
     const { rerender } = renderHook(({ enabled }) => usePushRegistration(enabled), {
       initialProps: { enabled: true },

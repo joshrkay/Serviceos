@@ -16,6 +16,8 @@ import {
   useConversationThread,
   type ThreadMessage,
 } from '../../src/messaging/useConversationThread';
+import { ErrorState } from '../../src/components/ErrorState';
+import { useToast } from '../../src/components/Toast';
 
 function firstParam(value: string | string[] | undefined): string {
   return (Array.isArray(value) ? value[0] : value) ?? '';
@@ -35,11 +37,11 @@ export default function MessageThread() {
   const title = firstParam(params.title) || 'Conversation';
   const router = useRouter();
   const api = useApiClient();
+  const { showErrorToast } = useToast();
   const { messages, isLoading, error, refetch } = useConversationThread(id || null);
 
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
-  const [sendError, setSendError] = useState<string | null>(null);
   const [sent, setSent] = useState<ThreadMessage[]>([]);
 
   // Optimistic sends reconcile away once refetch returns the same id.
@@ -49,14 +51,15 @@ export default function MessageThread() {
     const body = draft.trim();
     if (!body || sending) return;
     setSending(true);
-    setSendError(null);
     try {
       const message = await sendReply(api, id, body);
       setSent((prev) => [...prev, message]);
       setDraft('');
       void refetch();
     } catch (e) {
-      setSendError(e instanceof Error ? e.message : 'Could not send your message.');
+      // A send failure is a transient action error over a screen the owner wants
+      // to keep — surface it as a toast and preserve their draft for a retry.
+      showErrorToast(e);
     } finally {
       setSending(false);
     }
@@ -81,7 +84,9 @@ export default function MessageThread() {
           <Text className="text-base text-mutedForeground">‹ Messages</Text>
         </Pressable>
         <Text className="mt-2 text-2xl font-semibold text-foreground">{title}</Text>
-        {error ? <Text className="mt-2 text-base text-destructive">{error}</Text> : null}
+        {error ? (
+          <ErrorState error={error} showRetry onRetry={() => void refetch()} className="mt-2" />
+        ) : null}
       </View>
 
       <FlatList
@@ -113,7 +118,6 @@ export default function MessageThread() {
       />
 
       <View className="border-t border-border px-4 py-3">
-        {sendError ? <Text className="mb-2 text-sm text-destructive">{sendError}</Text> : null}
         <View className="flex-row items-end gap-2">
           <TextInput
             className="min-h-11 flex-1 rounded-2xl border border-border px-4 py-2 text-base text-foreground"

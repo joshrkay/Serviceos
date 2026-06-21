@@ -9,6 +9,7 @@ import { useCallback, useRef, useState } from 'react';
 import { useApiClient } from '../lib/useApiClient';
 import { makeIdempotencyKey, uploadFile } from './nativeVoiceDeps';
 import { uploadAndTranscribe, type AudioClip } from './uploadAndTranscribe';
+import { MIC_PERMISSION_COPY } from '../lib/errorCopy';
 
 export type VoicePhase = 'idle' | 'listening' | 'transcribing' | 'transcript' | 'error';
 
@@ -87,7 +88,7 @@ export function useVoiceCapture(): UseVoiceCaptureResult {
       const permission = await AudioModule.requestRecordingPermissionsAsync();
       if (!permission.granted) {
         recStateRef.current = 'idle';
-        setError('Microphone permission is required to record.');
+        setError(MIC_PERMISSION_COPY.body);
         setPhase('error');
         return;
       }

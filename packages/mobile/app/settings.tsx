@@ -4,10 +4,12 @@ import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 
 import { useMe } from '../src/hooks/useMe';
 import { useSignOut } from '../src/push/useSignOut';
 import { getCallbackNumber, saveCallbackNumber } from '../src/calls/callbackStorage';
+import { ErrorState } from '../src/components/ErrorState';
+import { PushDeniedNotice } from '../src/components/PushDeniedNotice';
 
 export default function Settings() {
   const router = useRouter();
-  const { me, isLoading, error } = useMe();
+  const { me, isLoading, error, refetch } = useMe();
   const signOut = useSignOut();
 
   const [callback, setCallback] = useState('');
@@ -52,7 +54,11 @@ export default function Settings() {
 
       <ScrollView contentContainerStyle={{ padding: 24 }}>
         {isLoading ? <ActivityIndicator /> : null}
-        {error ? <Text className="text-base text-destructive">{error.message}</Text> : null}
+        {error ? (
+          <ErrorState error={error} showRetry onRetry={() => void refetch()} className="mb-4" />
+        ) : null}
+
+        <PushDeniedNotice className="mb-4" />
 
         <View className="rounded-lg border border-border">
           {rows
