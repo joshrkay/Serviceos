@@ -96,6 +96,7 @@ export async function createLead(
     utmMedium: input.utmMedium,
     utmCampaign: input.utmCampaign,
     attribution: input.attribution,
+    rawPayload: input.rawPayload,
     stage: 'new',
     estimatedValueCents: input.estimatedValueCents,
     notes: input.notes,

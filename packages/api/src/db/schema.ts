@@ -5030,6 +5030,18 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_maintenance_contracts ON maintenance_contracts
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
+
+  // LC-1 — retain the full, untouched inbound payload for every lead. The
+  // unified inbox needs to show exactly what the web form / partner channel
+  // submitted, and downstream attribution can be re-derived without
+  // re-parsing the flattened `source_detail` blob. `attribution` stays the
+  // curated, size-capped marketing bag; `raw_payload` is the verbatim
+  // submission (also size-capped at the Zod layer on the way in). Defaults to
+  // '{}' so existing rows and manual CRM creates converge without a backfill.
+  '204_leads_raw_payload': `
+    ALTER TABLE leads
+      ADD COLUMN IF NOT EXISTS raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

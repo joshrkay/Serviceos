@@ -27,6 +27,14 @@ export interface Lead {
    * 20 entries, 500 chars each by the Zod layer.
    */
   attribution?: Record<string, string>;
+  /**
+   * LC-1: the verbatim inbound submission (web form / partner channel),
+   * stored as JSONB. Distinct from `attribution` (curated marketing bag) —
+   * this is the untouched payload so the inbox can show exactly what was
+   * received. Set once at intake; never mutated thereafter. Size-capped by
+   * the inbound contract (packages/shared inboundLeadSchema).
+   */
+  rawPayload?: Record<string, unknown>;
   stage: LeadStage;
   /** integer cents — never float */
   estimatedValueCents?: number;
@@ -61,6 +69,8 @@ export interface CreateLeadInput {
   utmMedium?: string;
   utmCampaign?: string;
   attribution?: Record<string, string>;
+  /** LC-1: verbatim inbound payload (web form / partner channel). */
+  rawPayload?: Record<string, unknown>;
   estimatedValueCents?: number;
   notes?: string;
   assignedUserId?: string;

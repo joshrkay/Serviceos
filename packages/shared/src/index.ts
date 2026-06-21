@@ -10,6 +10,7 @@ export * from './contracts/status.js';
 export * from './contracts/appointment-type.js';
 export * from './contracts/job.js';
 export * from './contracts/customer.js';
+export * from './contracts/lead.js';
 export * from './contracts/money.js';
 export * from './contracts/estimate.js';
 export * from './contracts/invoice.js';
