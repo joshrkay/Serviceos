@@ -387,6 +387,43 @@ describe('VQ-021 — gradeDispositionStructured', () => {
     expect(result.failedCriteria).not.toContain(11);
   });
 
+  it('flaky-fix — same-millisecond escalation is attributed by log order, not ts (sql-injection-text repro)', () => {
+    // Event timestamps are `Date.now()` (ms); a fast 2-turn script can emit
+    // both classifications AND the final escalation inside one millisecond.
+    // The agent classifies before it escalates, so the log order is
+    // [intent(turn0), intent(turn1), escalation]. With ts-only windows the
+    // tie put the escalation in turn 0 (`<=` upper bound) and stripped it
+    // from turn 1 — flipping criterion 11 ~30% of runs. The `(ts, logIndex)`
+    // tiebreak must keep it on the (last) turn that actually escalated.
+    const script = makeScript({
+      turns: [
+        {
+          caller: "My name is Jane'); DROP TABLE customers; --",
+          expected: { intent: 'unknown', escalates: false },
+          hangupAfter: false,
+        },
+        {
+          caller: "I'd like to schedule service.",
+          expected: { intent: 'create_appointment', escalates: true },
+          hangupAfter: false,
+        },
+      ],
+    });
+    const obs = makeObservation({
+      events: [
+        intentEvent('unknown', 1_000),
+        intentEvent('create_appointment', 1_000),
+        escalationEvent('adversarial_recognized', 1_000),
+      ],
+    });
+
+    const result = gradeDispositionStructured(obs, script);
+
+    expect(result.perTurnDetail[0].actualEscalated).toBe(false);
+    expect(result.perTurnDetail[1].actualEscalated).toBe(true);
+    expect(result.failedCriteria).not.toContain(11);
+  });
+
   it('PR#265 review — per-turn escalation correlation: an escalation event in every turn-window marks every turn escalated', () => {
     const script = makeScript({
       turns: [

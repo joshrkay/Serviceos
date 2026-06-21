@@ -17,15 +17,17 @@
  * pairs with the i-th script turn, the i-th `proposal_created` event pairs
  * the same way (proposals are looked up by id in `observation.proposals`).
  *
- * Escalation correlation is per-turn by timestamp: a turn is graded as
- * "escalated" iff an `escalation_triggered` event fired AFTER the
- * previous turn's `intent_classified` event AND AT-OR-BEFORE the current
- * turn's `intent_classified` event. (For turn 0 the lower bound is the
- * start of the call.) For the final turn, anything after the previous
- * turn's intent counts. This avoids retroactively marking earlier turns
- * "escalated" when only a late turn triggered escalation — which is
- * the correct behavior for adversarial multi-turn scripts where
- * `expected.escalates` differs across turns.
+ * Escalation correlation is per-turn by `(timestamp, event-log index)`: a
+ * turn is graded as "escalated" iff an `escalation_triggered` event fired
+ * AFTER the previous turn's `intent_classified` event AND AT-OR-BEFORE the
+ * current turn's `intent_classified` event. (For turn 0 the lower bound is
+ * the start of the call.) For the final turn, anything after the previous
+ * turn's intent counts. The log index breaks ms-timestamp ties by true
+ * emission order — without it, a sub-millisecond script can mis-attribute
+ * a late-turn escalation to the earlier turn. This avoids retroactively
+ * marking earlier turns "escalated" when only a late turn triggered
+ * escalation — the correct behavior for adversarial multi-turn scripts
+ * where `expected.escalates` differs across turns.
  *
  * Hard/soft heuristic — v1, deliberately simple, will be tuned with usage:
  *   HARD if the key:
@@ -258,6 +260,27 @@ export function gradeDispositionStructured(
   const proposalsById = new Map<string, Proposal>();
   for (const p of observation.proposals) proposalsById.set(p.id, p);
 
+  // Causal order within the call. Event timestamps are `Date.now()` (ms)
+  // and an entire script can run sub-millisecond, so ts ties between a
+  // turn's `intent_classified` and a later turn's `escalation_triggered`
+  // are common. The append-only event-log index is the deterministic
+  // tiebreaker — the agent always classifies before it decides to
+  // escalate, so the escalation is strictly later in the log — letting us
+  // order events by `(ts, logIndex)` instead of `ts` alone. Without it a
+  // tie mis-attributes a late-turn escalation to the earlier turn (the
+  // `<=` upper bound wins) and flips criterion 11 non-deterministically.
+  const logIndexOf = new Map<VoiceSessionEvent, number>();
+  observation.events.forEach((e, idx) => logIndexOf.set(e, idx));
+  type OrderKey = readonly [number, number];
+  // Only intent/escalation events are ordered here; both carry `ts`.
+  const keyOf = (e: IntentClassifiedEvent | EscalationTriggeredEvent): OrderKey => [
+    e.ts,
+    logIndexOf.get(e) ?? 0,
+  ];
+  const NEG_INF: OrderKey = [-Infinity, -Infinity];
+  const POS_INF: OrderKey = [Infinity, Infinity];
+  const cmpKey = (a: OrderKey, b: OrderKey): number => a[0] - b[0] || a[1] - b[1];
+
   const perTurnDetail: DispositionStructuredResult['perTurnDetail'] = [];
   const failedSet = new Set<number>();
   const reasons: Record<number, string> = {};
@@ -293,24 +316,30 @@ export function gradeDispositionStructured(
         : expectedProposalType === actualProposalType;
 
     // Escalation correlation (per-turn): an escalation_triggered event
-    // is attributed to turn i iff its timestamp falls within turn i's
-    // window. The window's lower bound is the previous turn's
-    // intent_classified.ts (or -Inf for turn 0); the upper bound is
-    // turn i's intent_classified.ts EXCEPT for the last turn, whose
-    // upper bound extends to +Inf so an escalation that fires AFTER
-    // the agent's last classification (but before session_terminated)
-    // still gets attributed to the final turn. When the i-th intent
-    // event is missing AND it isn't the last turn, the window is
-    // un-anchored and we record "no escalation observed for this
-    // turn" — false positives would mis-grade.
-    const lowerBound = i === 0 ? -Infinity : intents[i - 1]?.ts ?? -Infinity;
+    // is attributed to turn i iff its `(ts, logIndex)` order falls within
+    // turn i's window. The window's lower bound is the previous turn's
+    // intent_classified (or -Inf for turn 0); the upper bound is turn i's
+    // intent_classified EXCEPT for the last turn, whose upper bound
+    // extends to +Inf so an escalation that fires AFTER the agent's last
+    // classification (but before session_terminated) still gets
+    // attributed to the final turn. Comparing by `(ts, logIndex)` rather
+    // than `ts` alone keeps the bounds tie-proof when several events land
+    // in the same millisecond (see `logIndexOf` above). When the i-th
+    // intent event is missing AND it isn't the last turn, the window is
+    // un-anchored and we record "no escalation observed for this turn" —
+    // false positives would mis-grade.
+    const lowerKey: OrderKey =
+      i === 0 ? NEG_INF : intents[i - 1] ? keyOf(intents[i - 1]) : NEG_INF;
     const isLastTurn = i === script.turns.length - 1;
-    const upperBound = isLastTurn
-      ? Infinity
-      : intentEv?.ts ?? -Infinity;
-    const actualEscalated = escalations.some(
-      (esc) => esc.ts > lowerBound && esc.ts <= upperBound,
-    );
+    const upperKey: OrderKey = isLastTurn
+      ? POS_INF
+      : intentEv
+        ? keyOf(intentEv)
+        : NEG_INF;
+    const actualEscalated = escalations.some((esc) => {
+      const k = keyOf(esc);
+      return cmpKey(k, lowerKey) > 0 && cmpKey(k, upperKey) <= 0;
+    });
     const expectedEscalates = expected.escalates;
     const escalationMatched =
       expectedEscalates === undefined ? true : expectedEscalates === actualEscalated;
