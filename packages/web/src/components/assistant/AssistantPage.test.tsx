@@ -175,6 +175,45 @@ describe('P20-005 — AI failure messaging', () => {
   });
 });
 
+// ─── Story 3.12: retry affordance on a failed turn ───────────────────────────
+
+describe('Story 3.12 — retry on agent failure', () => {
+  async function typeAndSend(text: string) {
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    fireEvent.change(input, { target: { value: text } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+  }
+
+  it('offers a one-tap retry after a failed turn, then recovers', async () => {
+    mockedApiFetch.mockRejectedValueOnce(new Error('Network error'));
+    renderPage();
+    await typeAndSend('Invoice Acme');
+
+    // Inline error + an actionable retry (never a silent failure).
+    await waitFor(() =>
+      expect(screen.getByText(/Couldn.t reach the assistant/i)).toBeInTheDocument(),
+    );
+    const retry = screen.getByRole('button', { name: /^retry$/i });
+
+    // The retry resends the SAME input; this attempt succeeds.
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({ message: { content: 'Created the invoice.' } }),
+    );
+    fireEvent.click(retry);
+
+    await waitFor(() =>
+      expect(screen.getByText('Created the invoice.')).toBeInTheDocument(),
+    );
+    // The retry strip clears once the resend succeeds.
+    await waitFor(() =>
+      expect(screen.queryByText(/Couldn.t reach the assistant/i)).toBeNull(),
+    );
+  });
+});
+
 // ─── B4: authenticated proposal approve/reject with visible failures ─────────
 
 describe('B4 — proposal approve/reject', () => {
