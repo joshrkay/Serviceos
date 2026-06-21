@@ -1,9 +1,25 @@
 import { Proposal, ProposalType } from './proposal';
+import { TIER_KEYS, type TierKey } from '../ai/skills/triage-rules.schema';
 
 export interface PrioritizedProposal {
   proposal: Proposal;
   urgency: 'critical' | 'high' | 'normal' | 'low';
   reason?: string;
+}
+
+/**
+ * Read the §6.4-B emergency severity tier a draft carries, if any. The MMS
+ * vision task (and voice triage) persist it at `payload._meta.severity` as
+ * an optional {@link TierKey}; `payload` is an untyped bag, so read it
+ * defensively and ignore anything that isn't a known tier.
+ */
+function severityTier(proposal: Proposal): TierKey | undefined {
+  const meta = (proposal.payload as { _meta?: { severity?: unknown } })._meta;
+  const severity = meta?.severity;
+  return typeof severity === 'string' &&
+    (TIER_KEYS as readonly string[]).includes(severity)
+    ? (severity as TierKey)
+    : undefined;
 }
 
 const TYPE_PRIORITY: Record<ProposalType, number> = {
@@ -84,6 +100,20 @@ export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['
     if (timeUntilExpiry <= twoHoursMs) {
       return { urgency: 'critical', reason: 'Expiring within 2 hours' };
     }
+  }
+
+  // §6.4-B — a photo/voice-sourced emergency must surface at the top of the
+  // queue even at normal confidence. getUrgency is the inbox's only ordering
+  // signal, so without this an emergency draft (e.g. a burst-pipe photo quote)
+  // would sit at 'low' behind routine work. TIER_1 (evacuate / life-safety) is
+  // critical; TIER_2 (emergency dispatch) is high. TIER_3/4 (same-day/routine)
+  // do not elevate — they fall through to the confidence/status rules below.
+  const severity = severityTier(proposal);
+  if (severity === 'TIER_1_EVACUATE') {
+    return { urgency: 'critical', reason: 'Emergency severity — evacuate' };
+  }
+  if (severity === 'TIER_2_EMERGENCY_DISPATCH') {
+    return { urgency: 'high', reason: 'Emergency severity — dispatch' };
   }
 
   if (proposal.confidenceScore !== undefined && proposal.confidenceScore < 0.5) {
