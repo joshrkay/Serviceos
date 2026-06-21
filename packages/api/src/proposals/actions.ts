@@ -626,7 +626,11 @@ export async function reproposeProposal(
   const replacement = createProposal({
     tenantId,
     proposalType: source.proposalType,
-    payload: source.payload,
+    // Deep-clone so the new draft's payload doesn't alias the expired source's
+    // (a later edit to one must not mutate the other). Payloads are JSON values
+    // — the same shape that round-trips through the JSONB column — so a
+    // structured clone is faithful.
+    payload: structuredClone(source.payload),
     summary: source.summary,
     explanation: source.explanation,
     targetEntityType: source.targetEntityType,

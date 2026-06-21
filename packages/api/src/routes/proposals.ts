@@ -5,7 +5,7 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { toErrorResponse } from '../shared/errors';
 import { validate } from '../shared/validation';
 import { Role } from '../auth/rbac';
-import { ProposalRepository, isScheduleProposalType } from '../proposals/proposal';
+import { ProposalRepository, isScheduleProposalType, SCHEDULE_PROPOSAL_TYPES } from '../proposals/proposal';
 import { AppointmentRepository } from '../appointments/appointment';
 import { AuditRepository } from '../audit/audit';
 import { ProposalFilter } from '../proposals/proposal-contracts';
@@ -44,6 +44,7 @@ const approveBatchBodySchema = z.object({
 // as expired history accumulates (the cards are still re-proposable via the
 // list endpoint by id).
 const EXPIRED_INBOX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const EXPIRED_INBOX_LIMIT = 20;
 
 // U2 (P2-035) — resolve an ambiguous catalog line by picking one of the
 // line's surfaced candidates. Patches the draft; never approves (D-004).
@@ -167,34 +168,43 @@ export function createProposalsRouter(
         // both need to be approvable from the inbox. The 100-item cap keeps
         // the payload small; for a solo operator the inbox is single-digit
         // dozens, not hundreds.
-        const [drafts, ready, expiredAll] = await Promise.all([
+        // §5.5 — surface recently-expired schedule proposal cards so the operator
+        // can see what lapsed and re-propose it. Bounded in the DB (WHERE on type
+        // + a recent window, ORDER BY recency, LIMIT) so the inbox can't degrade
+        // as expired history accumulates; operators re-propose recent lapses, not
+        // ancient ones. Falls back to an in-memory trim for repos that predate
+        // the bounded query.
+        const since = new Date(Date.now() - EXPIRED_INBOX_WINDOW_MS);
+        const [drafts, ready, expiredRows] = await Promise.all([
           proposalRepo.findByStatus(req.auth!.tenantId, 'draft'),
           proposalRepo.findByStatus(req.auth!.tenantId, 'ready_for_review'),
-          proposalRepo.findByStatus(req.auth!.tenantId, 'expired'),
+          proposalRepo.findExpiredScheduleProposals
+            ? proposalRepo.findExpiredScheduleProposals(
+                req.auth!.tenantId,
+                SCHEDULE_PROPOSAL_TYPES,
+                since,
+                EXPIRED_INBOX_LIMIT,
+              )
+            : proposalRepo.findByStatus(req.auth!.tenantId, 'expired').then((all) =>
+                all
+                  .filter(
+                    (p) =>
+                      isScheduleProposalType(p.proposalType) &&
+                      (p.expiresAt?.getTime() ?? 0) >= since.getTime(),
+                  )
+                  .sort((a, b) => (b.expiresAt?.getTime() ?? 0) - (a.expiresAt?.getTime() ?? 0))
+                  .slice(0, EXPIRED_INBOX_LIMIT),
+              ),
         ]);
         const inbox = buildInboxPayload([...ready, ...drafts], 100);
-        // §5.5 — surface recently-expired schedule proposal cards so the operator
-        // can see what lapsed and re-propose it. Only schedule types ever expire.
-        // Bounded to a recent window (operators re-propose recent lapses, not
-        // ancient ones) so the list can't grow without limit as expired history
-        // accumulates; a DB-side limit / retention sweep is the deeper follow-up.
-        const expiredCutoff = Date.now() - EXPIRED_INBOX_WINDOW_MS;
-        const expired = expiredAll
-          .filter(
-            (p) =>
-              isScheduleProposalType(p.proposalType) &&
-              (p.expiresAt?.getTime() ?? 0) >= expiredCutoff,
-          )
-          .sort((a, b) => (b.expiresAt?.getTime() ?? 0) - (a.expiresAt?.getTime() ?? 0))
-          .slice(0, 20)
-          .map((p) => ({
-            id: p.id,
-            proposalType: p.proposalType,
-            summary: p.summary,
-            status: p.status,
-            expiresAt: p.expiresAt?.toISOString(),
-            createdAt: p.createdAt.toISOString(),
-          }));
+        const expired = expiredRows.map((p) => ({
+          id: p.id,
+          proposalType: p.proposalType,
+          summary: p.summary,
+          status: p.status,
+          expiresAt: p.expiresAt?.toISOString(),
+          createdAt: p.createdAt.toISOString(),
+        }));
         res.json({ ...inbox, expired });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);

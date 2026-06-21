@@ -2,7 +2,7 @@ import { Pool, PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
 import { PgBaseRepository } from '../db/pg-base';
-import { Proposal, ProposalRepository, ProposalStatus } from './proposal';
+import { Proposal, ProposalRepository, ProposalStatus, ProposalType } from './proposal';
 
 function mapRow(row: Record<string, unknown>): Proposal {
   return {
@@ -173,6 +173,27 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       const result = await client.query(
         'SELECT * FROM proposals WHERE tenant_id = $1 AND status = $2 ORDER BY created_at DESC',
         [tenantId, status]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
+  async findExpiredScheduleProposals(
+    tenantId: string,
+    proposalTypes: readonly ProposalType[],
+    since: Date,
+    limit: number,
+  ): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM proposals
+           WHERE tenant_id = $1
+             AND status = 'expired'
+             AND proposal_type = ANY($2::text[])
+             AND expires_at >= $3
+           ORDER BY expires_at DESC
+           LIMIT $4`,
+        [tenantId, proposalTypes as readonly string[], since, limit]
       );
       return result.rows.map(mapRow);
     });

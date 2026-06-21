@@ -677,3 +677,41 @@ describe('§5.5 — schedule proposals carry a 48h expiry at creation', () => {
     expect(p.expiresAt).toEqual(explicit);
   });
 });
+
+describe('§5.5 — InMemoryProposalRepository.findExpiredScheduleProposals', () => {
+  const NOW = Date.now();
+  const types = ['create_appointment', 'create_booking', 'reschedule_appointment'] as const;
+
+  async function seedExpired(repo: InMemoryProposalRepository, opts: { type: ProposalType; ageMs: number; tenantId?: string }) {
+    const p = createProposal({
+      tenantId: opts.tenantId ?? 'tenant-1',
+      proposalType: opts.type,
+      payload: {},
+      summary: `${opts.type}@${opts.ageMs}`,
+      createdBy: 'u1',
+      expiresAt: new Date(NOW - opts.ageMs),
+    });
+    await repo.create({ ...p, status: 'expired' });
+    return p;
+  }
+
+  it('returns only schedule, in-window, this-tenant expired rows, newest-first and capped', async () => {
+    const repo = new InMemoryProposalRepository();
+    const since = new Date(NOW - 7 * 24 * 60 * 60 * 1000);
+    await seedExpired(repo, { type: 'create_appointment', ageMs: 60 * 60 * 1000 }); // 1h ago (recent)
+    await seedExpired(repo, { type: 'create_booking', ageMs: 2 * 60 * 60 * 1000 }); // 2h ago
+    await seedExpired(repo, { type: 'reschedule_appointment', ageMs: 8 * 24 * 60 * 60 * 1000 }); // 8d ago (out of window)
+    await seedExpired(repo, { type: 'create_appointment', ageMs: 30 * 60 * 1000, tenantId: 'other' }); // other tenant
+
+    const rows = await repo.findExpiredScheduleProposals('tenant-1', types, since, 10);
+    expect(rows.map((r) => r.summary)).toEqual([
+      'create_appointment@3600000', // 1h ago first (newest expiresAt)
+      'create_booking@7200000',     // 2h ago second
+    ]);
+
+    // limit is honored
+    const capped = await repo.findExpiredScheduleProposals('tenant-1', types, since, 1);
+    expect(capped).toHaveLength(1);
+    expect(capped[0].summary).toBe('create_appointment@3600000');
+  });
+});

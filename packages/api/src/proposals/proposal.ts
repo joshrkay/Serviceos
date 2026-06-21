@@ -503,6 +503,19 @@ export interface ProposalRepository {
   findById(tenantId: string, id: string): Promise<Proposal | null>;
   findByTenant(tenantId: string): Promise<Proposal[]>;
   findByStatus(tenantId: string, status: ProposalStatus): Promise<Proposal[]>;
+  /**
+   * §5.5 — expired proposals of the given types that lapsed on/after `since`,
+   * newest first, capped at `limit`. Bounds the inbox's re-proposable list in
+   * the DB (WHERE + ORDER BY + LIMIT) instead of fetching every expired row and
+   * trimming in memory. Optional so legacy fakes still satisfy the interface;
+   * callers fall back to findByStatus + in-memory filtering when it's absent.
+   */
+  findExpiredScheduleProposals?(
+    tenantId: string,
+    proposalTypes: readonly ProposalType[],
+    since: Date,
+    limit: number,
+  ): Promise<Proposal[]>;
   findByAiRun(tenantId: string, aiRunId: string): Promise<Proposal[]>;
   /**
    * Indexed lookup for voice redelivery dedup (P1). Returns the most recent
@@ -768,6 +781,26 @@ export class InMemoryProposalRepository implements ProposalRepository {
   async findByStatus(tenantId: string, status: ProposalStatus): Promise<Proposal[]> {
     return Array.from(this.proposals.values())
       .filter((p) => p.tenantId === tenantId && p.status === status)
+      .map((p) => ({ ...p }));
+  }
+
+  async findExpiredScheduleProposals(
+    tenantId: string,
+    proposalTypes: readonly ProposalType[],
+    since: Date,
+    limit: number,
+  ): Promise<Proposal[]> {
+    return Array.from(this.proposals.values())
+      .filter(
+        (p) =>
+          p.tenantId === tenantId &&
+          p.status === 'expired' &&
+          proposalTypes.includes(p.proposalType) &&
+          !!p.expiresAt &&
+          p.expiresAt.getTime() >= since.getTime(),
+      )
+      .sort((a, b) => (b.expiresAt?.getTime() ?? 0) - (a.expiresAt?.getTime() ?? 0))
+      .slice(0, limit)
       .map((p) => ({ ...p }));
   }
 
