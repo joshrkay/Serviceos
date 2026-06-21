@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { asyncRoute } from '../middleware/async-route';
+import { toErrorResponse } from '../shared/errors';
 import { validate } from '../shared/validation';
 import { Role } from '../auth/rbac';
 import { ProposalRepository, isScheduleProposalType, SCHEDULE_PROPOSAL_TYPES } from '../proposals/proposal';

@@ -1827,10 +1827,10 @@ export function createApp(): express.Express {
     hfcrWeeklySend: 590014,
     holdReaper: 590015,
     thankYouSms: 590016,
-    // §5.5 — schedule proposal cards expire after 48h.
-    proposalExpiry: 590017,
     setupReminder: 590017,
     trialReminder: 590018,
+    // §5.5 — schedule proposal cards expire after 48h.
+    proposalExpiry: 590019,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
