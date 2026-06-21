@@ -5031,7 +5031,49 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
 
-  '204_create_corrections': `
+  '204_lifecycle_emails_and_trial_ends': `
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMPTZ;
+    CREATE TABLE IF NOT EXISTS lifecycle_emails (
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      kind TEXT NOT NULL,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (tenant_id, kind)
+    );
+    ALTER TABLE lifecycle_emails ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE lifecycle_emails FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_lifecycle_emails ON lifecycle_emails
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+  `,
+  // Story 15.2 — speed-to-lead first-response. Opt-in (default false) for
+  // TCPA/consent safety; the send still routes through the DNC/consent gate.
+  '205_tenant_settings_speed_to_lead': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS speed_to_lead_enabled BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS speed_to_lead_template TEXT;
+  `,
+
+  // Reconcile a duplicate-CREATE divergence on tenant_integrations. Two
+  // migration keys both run `CREATE TABLE IF NOT EXISTS tenant_integrations`:
+  // `070_tenant_location_and_integrations` (earlier in source order, so it
+  // wins) defines auth_token_primary_secret_ref / _secondary_secret_ref, while
+  // `070_tenant_integrations` (later, a no-op CREATE) defines the _enc columns
+  // that ALL production code actually uses (provision-twilio worker,
+  // integration-resolver, deprovision, credentials, app.ts). On a fresh
+  // database the _enc columns therefore never get created and any provisioning
+  // / webhook-resolution query fails with `column "auth_token_primary_enc"
+  // does not exist`. Production survived only because its table predates the
+  // duplicate; CI's ephemeral Postgres exposed it. We cannot edit the shipped
+  // 070 migrations (immutability), so add the columns idempotently here — a
+  // no-op where they already exist (mirrors migration 155's credentials fix).
+  '206_tenant_integrations_auth_token_enc_columns': `
+    ALTER TABLE tenant_integrations
+      ADD COLUMN IF NOT EXISTS auth_token_primary_enc TEXT;
+    ALTER TABLE tenant_integrations
+      ADD COLUMN IF NOT EXISTS auth_token_secondary_enc TEXT;
+  `,
+
+  '207_create_corrections': `
     -- Story 3.9 (correction capture) — a RAW, per-field edit log: every field a
     -- user changes on a proposal writes one row (intent + field + before/after).
     -- This is DISTINCT from correction_lessons (migration 185): that table holds
