@@ -22,7 +22,7 @@ booking + intake, time tracking, expenses, Google reviews, financial reporting,
 | 3 | Technician profitability report | Reporting | S | ✅ done |
 | 2 | Surcharge / processing-fee pass-through (invoice) | Payments | S | ✅ done |
 | 5 | Tip collection at checkout | Payments | S | todo |
-| 6 | Maintenance contracts DB persistence (graduate stub) | Jobs | M | todo |
+| 6 | Maintenance contracts DB persistence (graduate stub) | Jobs | M | ✅ done |
 | 7 | Payment plan / installment support (expose milestone schedules) | Payments | M | todo |
 | 8 | Customer groups / segmentation | CRM | M | todo |
 | 9 | ACH bank payments | Payments | M | todo |
@@ -53,3 +53,8 @@ fully testable in CI.
   nullable invoice columns; threaded through the invoice model/repo/route +
   createInvoiceSchema; rendered on the invoice detail + public pay page.
   Cents-exact billing tests + integration round-trip + web row tests.
+- Iteration 5: #6 Maintenance contracts persistence — graduated the in-memory
+  route stub to a real tenant-scoped table (migration 203) + domain module +
+  PgMaintenanceContractRepository (with an InMemory double) + router rewrite +
+  app.ts wiring. API shape unchanged (no web change). Route + audit + Docker-
+  gated integration round-trip tests.

@@ -5000,6 +5000,35 @@ export const MIGRATIONS = {
     ALTER TABLE invoices ADD COLUMN IF NOT EXISTS processing_fee_bps INTEGER;
     ALTER TABLE invoices ADD COLUMN IF NOT EXISTS processing_fee_cents INTEGER;
   `,
+  // Graduate maintenance contracts from the in-memory route stub to a real
+  // tenant-scoped table (persistence survives restarts). Free-text customer/
+  // location fields mirror what the Contracts UI sends today; the contract↔CRM
+  // FK link is a separate follow-up. Null-safe RLS (missing_ok) so a connection
+  // with no GUC set doesn't error on the UUID cast (matches migration 199).
+  '203_create_maintenance_contracts': `
+    CREATE TABLE IF NOT EXISTS maintenance_contracts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      title TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'paused', 'cancelled')),
+      customer_display_name TEXT,
+      location_street1 TEXT,
+      cadence TEXT,
+      service_window TEXT,
+      duration TEXT,
+      start_date TEXT,
+      end_date TEXT,
+      default_summary TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_maintenance_contracts_tenant
+      ON maintenance_contracts(tenant_id);
+    ALTER TABLE maintenance_contracts ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_maintenance_contracts ON maintenance_contracts
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

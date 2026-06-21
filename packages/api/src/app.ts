@@ -361,6 +361,8 @@ import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
 import { PgAgreementRunRepository } from './agreements/pg-agreement-run';
 import { createAgreementsRouter } from './routes/agreements';
 import { createMaintenanceContractsRouter } from './routes/maintenance-contracts';
+import { PgMaintenanceContractRepository } from './maintenance-contracts/pg-maintenance-contract';
+import { InMemoryMaintenanceContractRepository } from './maintenance-contracts/maintenance-contract';
 import {
   InMemoryPortalSessionRepository,
   PortalSessionRepository,
@@ -4060,8 +4062,16 @@ export function createApp(): express.Express {
 
   // BUG-6 — backs the Contracts page (`MaintenanceContractsPage`,
   // `ContractDetailPage`, `CreateContractSheet`). Distinct surface
-  // from /api/agreements; in-memory only.
-  app.use('/api/maintenance-contracts', createMaintenanceContractsRouter(auditRepo));
+  // from /api/agreements; persisted via PgMaintenanceContractRepository.
+  app.use(
+    '/api/maintenance-contracts',
+    createMaintenanceContractsRouter(
+      pool
+        ? new PgMaintenanceContractRepository(pool)
+        : new InMemoryMaintenanceContractRepository(),
+      auditRepo,
+    ),
+  );
 
   // Recurring agreements sweep (P9-003). Runs every 60s. Uses the same
   // setInterval driver pattern as the execution-worker (P0-009). The

@@ -319,6 +319,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['201_customers_source', '2add8937ddc606a7bfe86b59be879b3dceeb6a9730d6ff414f3798a47c362a05'],
   // Jobber-parity invoice processing-fee surcharge (additive nullable columns).
   ['202_invoices_processing_fee', '3f1dd0227fd3b18342e06e1bda51f60e83b8a8ab5057da78d2b72986e4cd72cf'],
+  // Graduate maintenance contracts to a real tenant-scoped table.
+  ['203_create_maintenance_contracts', '9538c240e473a37dd3ce543c17575b55ecf0ee2faa8e89faef27087f0bba0fad'],
 ];
 
 function hashMigration(value: string): string {
