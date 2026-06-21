@@ -174,6 +174,7 @@ import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
 import type { UnsupervisedProposalRouting } from '../settings/settings';
 import type { OutboundAnchorKind } from './sms/sms-event';
+import { notifyOwner } from '../notifications/owner-notifications-instance';
 
 /** Hard ceiling on one-tap link lifetime (risk note: TTL ≤ 30 minutes). */
 export const ONE_TAP_APPROVE_MAX_TTL_MS = 30 * 60 * 1000;
@@ -522,6 +523,12 @@ export async function routeUnsupervisedProposal(
   if (effective === 'escalate_to_oncall' && deps.escalateToOnCall) {
     await deps.escalateToOnCall();
     escalated = true;
+    // U6 — owner `escalation` push alongside the on-call routing. Best-effort
+    // and failure-isolated by the notifier; never blocks the escalation.
+    await notifyOwner(input.tenantId, 'escalation', {
+      reason: input.summaryText ?? 'A proposal was escalated to on-call.',
+      proposalId: input.proposalId,
+    });
   }
 
   if (effective === 'queue_and_sms') {
