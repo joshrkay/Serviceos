@@ -599,6 +599,11 @@ export class InMemoryCustomerRepository implements CustomerRepository {
    * skill: stored.endsWith(target) || target.endsWith(stored). Includes
    * archived rows so callers can decide. Returns multiple matches when
    * a phone is shared (e.g. household lines).
+   *
+   * U7 (4.7) — matches the customer's primary AND secondary phone. The
+   * Pg repo additionally matches contact phones (customer_contacts); the
+   * in-memory customer store has no contacts, so contact-phone matching
+   * is proven by the Pg integration test, not here.
    */
   async findByPhoneNormalized(
     tenantId: string,
@@ -606,13 +611,15 @@ export class InMemoryCustomerRepository implements CustomerRepository {
   ): Promise<Customer[]> {
     if (!phoneNormalized || phoneNormalized.length < 7) return [];
     const target = phoneNormalized.slice(-10);
+    const tolerantMatch = (raw?: string): boolean => {
+      if (!raw) return false;
+      const stored = normalizePhone(raw);
+      if (stored.length < 7) return false;
+      return stored.endsWith(target) || target.endsWith(stored);
+    };
     return Array.from(this.customers.values())
       .filter((c) => c.tenantId === tenantId)
-      .filter((c) => {
-        if (!c.primaryPhone) return false;
-        const stored = normalizePhone(c.primaryPhone);
-        return stored.endsWith(target) || target.endsWith(stored);
-      })
+      .filter((c) => tolerantMatch(c.primaryPhone) || tolerantMatch(c.secondaryPhone))
       .map((c) => ({ ...c }));
   }
 

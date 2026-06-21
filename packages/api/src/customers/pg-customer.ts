@@ -308,6 +308,16 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
    * — callers decide whether to ask "which person?". Archived rows are
    * included so the skill can confirm record info even on archived
    * customers.
+   *
+   * U7 (4.7 multi-channel) — caller-ID is matched against ALL of a
+   * customer's phones, not just the primary: `phone_normalized` (the
+   * indexed generated column from `primary_phone`), `secondary_phone`,
+   * and every non-archived `customer_contacts.phone`. Secondary/contact
+   * numbers aren't pre-normalized in a generated column, so they're
+   * stripped inline; the predicate is bounded to a single tenant (RLS +
+   * the explicit `tenant_id = $1` first predicate), which keeps it
+   * tractable for v1 row counts. A 7-digit floor on the stored value
+   * avoids the empty-suffix `LIKE '%'` over-match.
    */
   async findByPhoneNormalized(
     tenantId: string,
@@ -316,17 +326,36 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
     if (!phoneNormalized || phoneNormalized.length < 7) return [];
     const tail = phoneNormalized.slice(-10);
     return this.withTenant(tenantId, async (client) => {
-      // Match either:
-      //   (a) phone_normalized ends with the supplied tail (caller said
+      // For each stored phone, match either:
+      //   (a) the stored value ends with the supplied tail (caller said
       //       a 10-digit number; record stored with country prefix), or
-      //   (b) the supplied tail ends with phone_normalized (caller had
+      //   (b) the supplied tail ends with the stored value (caller had
       //       a country prefix; record stored without).
       const result = await client.query(
-        `SELECT * FROM customers
-         WHERE tenant_id = $1
-           AND phone_normalized IS NOT NULL
-           AND phone_normalized <> ''
-           AND (right(phone_normalized, 10) = $2 OR $2 LIKE '%' || phone_normalized)`,
+        `SELECT DISTINCT c.* FROM customers c
+         LEFT JOIN customer_contacts cc
+           ON cc.tenant_id = c.tenant_id
+          AND cc.customer_id = c.id
+          AND cc.is_archived = false
+         WHERE c.tenant_id = $1
+           AND (
+             (c.phone_normalized IS NOT NULL AND c.phone_normalized <> ''
+               AND (right(c.phone_normalized, 10) = $2 OR $2 LIKE '%' || c.phone_normalized))
+             OR (
+               length(regexp_replace(coalesce(c.secondary_phone, ''), '\\D', '', 'g')) >= 7
+               AND (
+                 right(regexp_replace(c.secondary_phone, '\\D', '', 'g'), 10) = $2
+                 OR $2 LIKE '%' || regexp_replace(c.secondary_phone, '\\D', '', 'g')
+               )
+             )
+             OR (
+               length(regexp_replace(coalesce(cc.phone, ''), '\\D', '', 'g')) >= 7
+               AND (
+                 right(regexp_replace(cc.phone, '\\D', '', 'g'), 10) = $2
+                 OR $2 LIKE '%' || regexp_replace(cc.phone, '\\D', '', 'g')
+               )
+             )
+           )`,
         [tenantId, tail]
       );
       return result.rows.map(mapRow);
