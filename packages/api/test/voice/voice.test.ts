@@ -306,6 +306,77 @@ describe('P0-012 — Voice ingestion and transcription pipeline', () => {
     });
   });
 
+  // The correction pass MUST send a system prompt. transcription_correction
+  // was the only AI call site running without one — the intended prompt lived
+  // in the never-wired DEFAULT_GATEWAY_CONFIG, so the model received just the
+  // raw transcript. This pins that the prompt is restored and sent first.
+  describe('transcription correction request shape', () => {
+    it('sends the correction system prompt ahead of the user transcript', async () => {
+      const voiceRepo = new InMemoryVoiceRepository();
+      const recording = createVoiceRecording({
+        tenantId: 'tenant-1',
+        fileId: 'file-sys',
+        createdBy: 'user-1',
+      });
+      await voiceRepo.create(recording);
+
+      let captured: any;
+      const capturingGateway = {
+        complete: async (req: any) => {
+          captured = req;
+          return {
+            content: 'Install the PEX manifold on the water heater',
+            model: 'mock',
+            provider: 'mock',
+            tokenUsage: { input: 1, output: 1, total: 2 },
+            latencyMs: 1,
+          };
+        },
+      } as any;
+
+      const worker = createTranscriptionWorker(
+        voiceRepo,
+        {
+          async transcribe() {
+            return { transcript: 'install the pex manifold on the water heater', metadata: {} };
+          },
+        },
+        {
+          gateway: capturingGateway,
+          glossary: {
+            async termsForTenant() {
+              return ['PEX'];
+            },
+          },
+        }
+      );
+
+      const msg: QueueMessage<any> = {
+        id: 'sys',
+        type: 'transcription',
+        payload: { tenantId: 'tenant-1', recordingId: recording.id, audioUrl: 'x' },
+        attempts: 1,
+        maxAttempts: 3,
+        idempotencyKey: 'k-sys',
+        createdAt: new Date().toISOString(),
+      };
+
+      await worker.handle(msg, logger);
+
+      expect(captured.taskType).toBe('transcription_correction');
+      // Two messages: system prompt first, then the user transcript. The
+      // system message was previously absent entirely.
+      expect(captured.messages).toHaveLength(2);
+      expect(captured.messages[0].role).toBe('system');
+      expect(captured.messages[0].content).toContain('Correct errors in voice transcriptions');
+      expect(captured.messages[0].content).toContain('Return corrected text only');
+      // The user transcript (with glossary) is preserved as the second message.
+      expect(captured.messages[1].role).toBe('user');
+      expect(captured.messages[1].content).toContain('PEX');
+      expect(captured.messages[1].content).toContain('manifold');
+    });
+  });
+
   describe('Phase 2 — outcome stamping', () => {
     it('stampOutcome sets the terminal-state enum', async () => {
       const repo = new InMemoryVoiceRepository();

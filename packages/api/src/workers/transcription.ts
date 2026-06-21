@@ -126,11 +126,23 @@ export interface CreateTranscriptionWorkerOptions {
 }
 
 /**
+ * System prompt for the transcription-correction pass. Restored from the
+ * (removed) DEFAULT_GATEWAY_CONFIG, which defined this prompt for
+ * `transcription_correction` but was never wired into the live gateway — so
+ * the correction call had been running with no system instruction at all.
+ */
+const TRANSCRIPTION_CORRECTION_SYSTEM_PROMPT =
+  'Correct errors in voice transcriptions for a service business context. ' +
+  'Fix technical terminology, trade-specific terms, names, and numbers. ' +
+  'Return corrected text only — no commentary.';
+
+/**
  * Best-effort transcription correction. Calls the gateway with
- * `taskType: 'transcription_correction'` (system prompt configured in
- * ai/gateway/routing-config.ts) passing the tenant glossary as context.
- * Returns `{ corrected, glossary }`; on ANY failure, returns the raw
- * transcript unchanged — this is a quality upgrade, not a gate.
+ * `taskType: 'transcription_correction'`, sending the system prompt above
+ * plus the tenant glossary + raw transcript as the user message. (This
+ * taskType isn't in ai-routing.ts `taskTierMapping`, so it resolves to the
+ * standard tier.) Returns `{ corrected, glossary }`; on ANY failure, returns
+ * the raw transcript unchanged — this is a quality upgrade, not a gate.
  */
 async function correctTranscript(input: {
   raw: string;
@@ -160,7 +172,10 @@ async function correctTranscript(input: {
 
     const response = await gateway.complete({
       taskType: 'transcription_correction',
-      messages: [{ role: 'user', content: userPrompt }],
+      messages: [
+        { role: 'system', content: TRANSCRIPTION_CORRECTION_SYSTEM_PROMPT },
+        { role: 'user', content: userPrompt },
+      ],
       metadata: { tenantId },
     });
 
