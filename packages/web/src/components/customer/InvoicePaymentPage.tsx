@@ -37,6 +37,7 @@ interface PublicInvoiceView {
   subtotalCents: number;
   taxCents: number;
   discountCents: number;
+  processingFeeCents?: number;
   amountPaidCents: number;
   amountDueCents: number;
   dueDate?: string;
@@ -589,6 +590,15 @@ export function InvoicePaymentPage() {
             <div className="flex justify-between px-5 py-2 border-t border-slate-100">
               <span className="text-sm text-slate-500">Tax</span>
               <span className="text-sm text-slate-500">${formatMoney(inv.taxCents)}</span>
+            </div>
+          )}
+          {(inv.processingFeeCents ?? 0) > 0 && (
+            <div
+              data-testid="invoice-processing-fee-row"
+              className="flex justify-between px-5 py-2 border-t border-slate-100"
+            >
+              <span className="text-sm text-slate-500">Processing fee</span>
+              <span className="text-sm text-slate-500">${formatMoney(inv.processingFeeCents ?? 0)}</span>
             </div>
           )}
           {(inv.depositCreditCents ?? 0) > 0 && (

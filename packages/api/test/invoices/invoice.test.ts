@@ -45,6 +45,27 @@ describe('P1-011 — Invoice entity + balance calculations', () => {
     expect(invoice.totals.subtotalCents).toBe(20000);
   });
 
+  it('processing-fee surcharge folds into the total and amount due', async () => {
+    const invoice = await createInvoice(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        invoiceNumber: 'INV-FEE',
+        lineItems: sampleItems,
+        taxRateBps: 0,
+        processingFeeBps: 300, // 3%
+        createdBy: 'user-1',
+      },
+      repo,
+    );
+    // chargeable = 20000, fee 3% = 600 → total 20600
+    expect(invoice.totals.processingFeeBps).toBe(300);
+    expect(invoice.totals.processingFeeCents).toBe(600);
+    expect(invoice.totals.totalCents).toBe(20600);
+    // The customer is charged the fee: amount due derives from total.
+    expect(invoice.amountDueCents).toBe(20600);
+  });
+
   it('happy path — retrieves invoice', async () => {
     const invoice = await createInvoice(
       { tenantId: 'tenant-1', jobId: 'job-1', invoiceNumber: 'INV-0001', lineItems: sampleItems, createdBy: 'u-1' },

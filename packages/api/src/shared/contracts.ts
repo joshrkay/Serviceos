@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { CUSTOMER_SOURCES } from '../customers/customer';
 
 export const tenantIdHeader = 'x-tenant-id';
 export const correlationIdHeader = 'x-correlation-id';
@@ -130,6 +131,7 @@ export const createCustomerSchema = z.object({
   preferredChannel: z.enum(['phone', 'email', 'sms', 'none']).optional(),
   smsConsent: z.boolean().optional(),
   communicationNotes: z.string().optional(),
+  source: z.enum(CUSTOMER_SOURCES).optional(),
 });
 
 // U1 (CRM Jobber parity) — request bodies for the nested customer-contacts
@@ -223,6 +225,7 @@ export const createInvoiceSchema = z.object({
   lineItems: z.array(lineItemSchema).min(1),
   discountCents: z.number().int().nonnegative().optional(),
   taxRateBps: z.number().int().min(0).max(10000).optional(),
+  processingFeeBps: z.number().int().min(0).max(10000).optional(),
   customerMessage: z.string().optional(),
 });
 

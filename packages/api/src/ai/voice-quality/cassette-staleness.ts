@@ -91,6 +91,15 @@ function median(values: number[]): number | null {
   return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!;
 }
 
+/** Order ISO timestamp strings chronologically (not lexically). */
+function chronologicalRecordedAts(raws: string[]): string[] {
+  return raws
+    .map((raw) => ({ raw, t: Date.parse(raw) }))
+    .filter((x) => Number.isFinite(x.t))
+    .sort((a, b) => a.t - b.t)
+    .map((x) => x.raw);
+}
+
 /**
  * The same "one logical call" key the replay fallback narrows on: response
  * schema + first-sentence system fingerprint + last user message. Entries
@@ -192,10 +201,9 @@ export function analyzeCassetteStaleness(
       return b.maxDepth - a.maxDepth;
     });
 
-  const allRecordedAts = cassettes
-    .flatMap((c) => [c.newestRecordedAt, c.oldestRecordedAt])
-    .filter((r): r is string => r !== null)
-    .sort();
+  const sortedRecordedAts = chronologicalRecordedAts(
+    cassettes.flatMap((c) => [c.newestRecordedAt, c.oldestRecordedAt]).filter((r): r is string => r !== null),
+  );
   const ages = cassettes.map((c) => c.ageDays).filter((a): a is number => a !== null);
   const med = median(ages);
 
@@ -207,8 +215,8 @@ export function analyzeCassetteStaleness(
     accretedCassettes: cassettes.filter((c) => c.maxDepth >= 2).length,
     deeplyAccretedCassettes: cassettes.filter((c) => c.deeplyAccreted).length,
     staleCassettes: cassettes.filter((c) => c.stale).length,
-    newestRecordedAt: allRecordedAts.length ? allRecordedAts[allRecordedAts.length - 1]! : null,
-    oldestRecordedAt: allRecordedAts.length ? allRecordedAts[0]! : null,
+    newestRecordedAt: sortedRecordedAts.length ? sortedRecordedAts[sortedRecordedAts.length - 1]! : null,
+    oldestRecordedAt: sortedRecordedAts.length ? sortedRecordedAts[0]! : null,
     medianAgeDays: med === null ? null : round1(med),
     cassettes,
   };

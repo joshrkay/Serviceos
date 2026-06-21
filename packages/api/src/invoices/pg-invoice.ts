@@ -24,11 +24,12 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
         `INSERT INTO invoices (
           id, tenant_id, job_id, estimate_id, invoice_number, status,
           discount_cents, tax_rate_bps, subtotal_cents, taxable_subtotal_cents,
-          tax_cents, total_cents, amount_paid_cents, amount_due_cents,
+          tax_cents, processing_fee_bps, processing_fee_cents, total_cents,
+          amount_paid_cents, amount_due_cents,
           issued_at, due_date, customer_message, originating_lead_id,
           schedule_id, milestone_index,
           created_by, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
         [
           invoice.id,
           invoice.tenantId,
@@ -41,6 +42,8 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
           invoice.totals.subtotalCents,
           invoice.totals.taxableSubtotalCents,
           invoice.totals.taxCents,
+          invoice.totals.processingFeeBps ?? null,
+          invoice.totals.processingFeeCents ?? null,
           invoice.totals.totalCents,
           invoice.amountPaidCents,
           invoice.amountDueCents,
@@ -239,6 +242,10 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
         values.push(updates.totals.taxableSubtotalCents);
         setClauses.push(`tax_cents = $${paramIndex++}`);
         values.push(updates.totals.taxCents);
+        setClauses.push(`processing_fee_bps = $${paramIndex++}`);
+        values.push(updates.totals.processingFeeBps ?? null);
+        setClauses.push(`processing_fee_cents = $${paramIndex++}`);
+        values.push(updates.totals.processingFeeCents ?? null);
         setClauses.push(`total_cents = $${paramIndex++}`);
         values.push(updates.totals.totalCents);
       }

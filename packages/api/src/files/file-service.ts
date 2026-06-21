@@ -110,6 +110,12 @@ const ALLOWED_CONTENT_TYPES = [
   'audio/wav',
   'audio/ogg',
   'audio/webm',
+  // Native mobile recorders (expo-audio / AVFoundation / MediaRecorder on
+  // Android) emit AAC-in-MP4 (.m4a) — Content-Type `audio/mp4` (some
+  // platforms report `audio/x-m4a`). Whisper transcribes both. Without
+  // these the voice-capture upload-url path 400s before it can record.
+  'audio/mp4',
+  'audio/x-m4a',
   'text/plain',
   'application/json',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',

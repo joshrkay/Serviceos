@@ -11,6 +11,7 @@ import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
 import { createIntegrationResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
+import { createCallsRouter, createCallBridgeRouter } from './routes/calls';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
 import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from './telephony/dispatcher-phone-resolver';
@@ -75,6 +76,18 @@ import { StripeConnectService } from './billing/stripe-connect';
 import { BillingService } from './billing/subscription';
 import { createPaymentRouter } from './routes/payments';
 import { createNoteRouter } from './routes/notes';
+import { createDevicesRouter } from './routes/devices';
+import { InMemoryDeviceTokenRepository } from './push/device-token-service';
+import { PgDeviceTokenRepository } from './push/pg-device-token-repository';
+import { ExpoPushDeliveryProvider } from './notifications/expo-push-service';
+import {
+  approverUserIdsResolver,
+  notifyExecuted as notifyExecutedPush_,
+  notifyNeedsApproval as notifyNeedsApprovalPush_,
+} from './notifications/proposal-push-notifier';
+import { OwnerNotificationService } from './notifications/owner-notification-service';
+import { userIdsWithPermissionResolver } from './notifications/user-targeting';
+import { setOwnerNotifications } from './notifications/owner-notifications-instance';
 import {
   createMeRouter,
   DEFAULT_TENANT_TIMEZONE,
@@ -339,7 +352,7 @@ import { PgGoogleBusinessReplyResolver } from './reputation/pg-google-business-r
 import { MessageDeliveryReviewPrivateMessageSender } from './reputation/private-message-sender-adapter';
 import { NoopBrandVoiceLoader } from './reputation/brand-voice';
 import { PgCustomerLoader } from './reputation/match-customer';
-import { createCredentialResolver } from './integrations/credentials';
+import { createCredentialResolver, getTenantTwilioCreds } from './integrations/credentials';
 import { InMemoryAgreementRepository } from './agreements/agreement';
 import { PgAgreementRepository } from './agreements/pg-agreement';
 import { InMemoryCustomerPaymentMethodRepository } from './payments/customer-payment-method';
@@ -351,6 +364,8 @@ import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
 import { PgAgreementRunRepository } from './agreements/pg-agreement-run';
 import { createAgreementsRouter } from './routes/agreements';
 import { createMaintenanceContractsRouter } from './routes/maintenance-contracts';
+import { PgMaintenanceContractRepository } from './maintenance-contracts/pg-maintenance-contract';
+import { InMemoryMaintenanceContractRepository } from './maintenance-contracts/maintenance-contract';
 import {
   InMemoryPortalSessionRepository,
   PortalSessionRepository,
@@ -1607,6 +1622,19 @@ export function createApp(): express.Express {
   let supervisorSpendRecorder:
     | ((tenantId: string, proposalId: string) => Promise<void>)
     | null = null;
+  // U7 — push the owner a "done" notification when an approved proposal
+  // executes. Late-bound: the device-token repo + push provider are built
+  // further down. Null until then, and the notifier swallows its own errors,
+  // so this can never break the execution path.
+  let notifyExecutedPush:
+    | ((tenantId: string, proposalId: string) => Promise<void>)
+    | null = null;
+  // U7 — "needs approval" push, wired into the voice-action-router worker's
+  // unsupervised-routing deps (built above the device-token repo). Same
+  // late-bound pattern; the worker reads it through a stable wrapper.
+  let notifyNeedsApprovalPush:
+    | ((args: { tenantId: string; proposal: { id: string; summary: string } }) => Promise<void>)
+    | null = null;
   const proposalExecutor = new ProposalExecutor(
     executionHandlers,
     proposalRepo,
@@ -1620,6 +1648,11 @@ export function createApp(): express.Express {
         // never throws, and the executor's onExecuted is failure-soft.
         if (supervisorSpendRecorder) {
           await supervisorSpendRecorder(event.tenantId, event.proposalId);
+        }
+        // U7 — "done" push to the owner's devices. The notifier is
+        // failure-isolated internally; onExecuted is failure-soft too.
+        if (notifyExecutedPush) {
+          await notifyExecutedPush(event.tenantId, event.proposalId);
         }
         try {
           await queue.send(
@@ -1879,6 +1912,11 @@ export function createApp(): express.Express {
     unsupervisedRouting: {
       auditRepo,
       ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
+      // U7 — stable wrapper reads the late-bound notifier at call time (the
+      // device-token repo + push provider are built further down).
+      notifyPush: async (args) => {
+        await notifyNeedsApprovalPush?.(args);
+      },
       ...(oneTapSecret ? { secret: oneTapSecret } : {}),
       buildApproveUrl: (token: string) =>
         `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
@@ -2561,6 +2599,9 @@ export function createApp(): express.Express {
     invoiceRepo,
     estimateRepo,
     customerRepo,
+    // Inbound-call timeline logging — an identified caller's call is threaded
+    // onto their conversation, mirroring the outbound click-to-call log.
+    conversationRepo,
     agreementRepo,
     moneyDashboardRepo,
     catalogRepo,
@@ -2856,6 +2897,47 @@ export function createApp(): express.Express {
       { publicBaseUrl: () => process.env.PUBLIC_API_URL },
     ),
     whisperRouter({ whisperCache: sharedWhisperCache }),
+  );
+
+  // Owner→customer click-to-call. The authed POST /api/calls is wired only when
+  // the structural prerequisites are present — a Postgres pool (per-tenant cred
+  // + repo access) and PUBLIC_API_URL; without them POST /api/calls returns 503.
+  // We do NOT gate on a global TWILIO_ACCOUNT_SID: Twilio creds are resolved
+  // per-tenant at call time by getTenantTwilioCreds, which fails closed (→ 503
+  // not_configured) for a tenant with no active integration. Prod multi-tenant
+  // deployments use per-tenant tenant_integrations and often have NO global SID,
+  // so gating on it left click-to-call dark for every tenant on that path.
+  // The bridge TwiML callback is mounted HERE — before the global
+  // /api Clerk-auth chain — because Twilio carries no Clerk JWT (same reason the
+  // telephony webhooks above are). The authed POST /api/calls is mounted after
+  // auth, further down. Both share these deps.
+  // Click-to-call requires PUBLIC_API_URL: it is the host Twilio calls back for
+  // the bridge TwiML. Without it we'd build the callback against the frontend
+  // origin (APP_PUBLIC_URL), which doesn't serve /api/calls/bridge, so the call
+  // would ring the owner but never connect. Gate the feature on it instead.
+  const callDeps =
+    pool && process.env.PUBLIC_API_URL
+      ? {
+          customerRepo,
+          conversationRepo,
+          dncRepo,
+          auditRepo,
+          logger: requestLogger,
+          getCreds: (tid: string) => getTenantTwilioCreds(tid, pool),
+          publicApiUrl: process.env.PUBLIC_API_URL,
+        }
+      : undefined;
+  app.use(
+    '/api/calls',
+    createCallBridgeRouter({
+      ...(callDeps ? { callDeps } : {}),
+      twilioAuthTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+      // Verify the signature against the SAME base the bridge URL is built from
+      // (outbound-call-service uses PUBLIC_API_URL ?? publicBaseUrl); otherwise
+      // the signed URL and the reconstructed URL diverge when PUBLIC_API_URL is
+      // unset and every callback 403s.
+      publicBaseUrl: process.env.PUBLIC_API_URL ?? publicBaseUrl,
+    }),
   );
 
   // P8-012: attach the Media Streams WebSocketServer to the http.Server
@@ -3732,6 +3814,42 @@ export function createApp(): express.Express {
   }
 
   app.use('/api/me', createMeRouter(userModeService, auditRepo));
+
+  // Mobile push-token registration (POST/DELETE /api/devices). Pg-backed when
+  // a DB is configured; in-memory otherwise. Feeds the proposal-execution
+  // notify path.
+  const deviceTokenRepo = pool
+    ? new PgDeviceTokenRepository(pool)
+    : new InMemoryDeviceTokenRepository();
+  app.use('/api/devices', createDevicesRouter(deviceTokenRepo, auditRepo));
+
+  // U7 — bind the push notifiers into the late-bound slots now that the
+  // device-token repo exists.
+  const expoPushProvider = new ExpoPushDeliveryProvider(fetch, process.env.EXPO_ACCESS_TOKEN);
+  // Only the approver/owner devices should receive proposal pushes — never a
+  // technician who happens to have signed into the app.
+  const resolveApproverUserIds = approverUserIdsResolver(userRepo);
+  notifyExecutedPush = (tenantId, proposalId) =>
+    notifyExecutedPush_(
+      { deviceTokenRepo, provider: expoPushProvider, resolveApproverUserIds },
+      { tenantId, proposalId },
+    );
+  notifyNeedsApprovalPush = (args) =>
+    notifyNeedsApprovalPush_(
+      { deviceTokenRepo, provider: expoPushProvider, resolveApproverUserIds },
+      args,
+    );
+  // Register the generic owner-notification fan-out used by the non-proposal
+  // producer seams (inbound call/SMS, appointment reminder/cancellation,
+  // payment, lead, escalation). Each type targets the permission its descriptor
+  // declares (owner+dispatcher, never a technician device).
+  setOwnerNotifications(
+    new OwnerNotificationService({
+      deviceTokenRepo,
+      provider: expoPushProvider,
+      resolveUserIds: userIdsWithPermissionResolver(userRepo),
+    }),
+  );
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use(
     '/api/conversations',
@@ -3754,9 +3872,16 @@ export function createApp(): express.Express {
             settingsRepo,
           }
         : undefined,
+      // Lets POST /customer/:customerId 404 unknown customers before creating.
+      customerRepo,
     ),
   );
   app.use('/api/dnc', createDncRouter({ dncRepo, auditRepo }));
+
+  // Owner→customer click-to-call (authed POST). Mounted after the global /api
+  // auth chain; the unauthenticated Twilio /bridge callback was mounted earlier
+  // (before auth). Shares callDeps built above; 503 when Twilio is unconfigured.
+  app.use('/api/calls', createCallsRouter(callDeps ? { callDeps } : {}));
 
   app.use(
     '/api/settings',
@@ -3951,8 +4076,16 @@ export function createApp(): express.Express {
 
   // BUG-6 — backs the Contracts page (`MaintenanceContractsPage`,
   // `ContractDetailPage`, `CreateContractSheet`). Distinct surface
-  // from /api/agreements; in-memory only.
-  app.use('/api/maintenance-contracts', createMaintenanceContractsRouter(auditRepo));
+  // from /api/agreements; persisted via PgMaintenanceContractRepository.
+  app.use(
+    '/api/maintenance-contracts',
+    createMaintenanceContractsRouter(
+      pool
+        ? new PgMaintenanceContractRepository(pool)
+        : new InMemoryMaintenanceContractRepository(),
+      auditRepo,
+    ),
+  );
 
   // Recurring agreements sweep (P9-003). Runs every 60s. Uses the same
   // setInterval driver pattern as the execution-worker (P0-009). The
@@ -4237,6 +4370,8 @@ export function createApp(): express.Express {
         proposalRepo,
         dunningConfigRepo,
         dunningEventRepo,
+        // Owner `invoice_overdue` push dep (U6) — without it the push no-ops.
+        customerRepo,
         listTenantIds: async () => {
           if (!pool) return [];
           const r = await pool.query('SELECT id FROM tenants');
@@ -4329,6 +4464,13 @@ export function createApp(): express.Express {
         await runAppointmentReminderSweep({
           appointmentRepo,
           transactionalComms,
+          // Owner `appointment_reminder` push deps (U4) — without all four the
+          // owner push no-ops; message_dispatches gives it an independent
+          // idempotency key from the customer SMS.
+          jobRepo,
+          customerRepo,
+          settingsRepo,
+          dispatchRepo,
           listTenantIds: async () => {
             if (!pool) return [];
             const r = await pool.query('SELECT id FROM tenants');

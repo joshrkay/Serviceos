@@ -167,6 +167,27 @@ describe('analyzeCassetteStaleness', () => {
     expect(r.medianAgeDays).toBeNull(); // NaN must not poison the aggregate
   });
 
+  it('report-level recording span orders chronologically across cassettes (mixed offsets)', () => {
+    const r = analyzeCassetteStaleness(
+      [
+        {
+          scriptId: 'early',
+          entries: [entry({ system: 'You are X. a', user: 'hi', recordedAt: '2026-05-01T00:00:00.000Z' })],
+        },
+        {
+          scriptId: 'late',
+          entries: [
+            entry({ system: 'You are X. a', user: 'hi', recordedAt: '2026-06-18T00:00:00.000Z' }),
+            entry({ system: 'You are X. a', user: 'hi', recordedAt: '2026-06-17T20:00:00.000-05:00' }),
+          ],
+        },
+      ],
+      NOW,
+    );
+    expect(r.oldestRecordedAt).toBe('2026-05-01T00:00:00.000Z');
+    expect(r.newestRecordedAt).toBe('2026-06-17T20:00:00.000-05:00');
+  });
+
   it('orders recordedAt chronologically, not lexically (timezone offsets)', () => {
     // 2026-06-17T20:00-05:00 == 2026-06-18T01:00Z is the true newest, yet its
     // string sorts lexically *before* the 2026-06-18T00:00Z entry.

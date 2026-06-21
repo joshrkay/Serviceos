@@ -146,6 +146,12 @@ export interface VoiceSession {
   channel: CallingAgentChannel;
   /** Twilio CallSid for telephony sessions; undefined for in-app. */
   callSid?: string;
+  /**
+   * Caller's phone number (Twilio `From`), set by the inbound adapter. Lets a
+   * later gather turn create/resolve a CUSTOMER for an unknown caller who books
+   * (the ask_caller → caller_known wire in the voice-turn processor).
+   */
+  callerPhone?: string;
   /** Linked conversation row for persisting transcript / proposals. */
   conversationId?: string;
   machine: CallingAgentStateMachine;

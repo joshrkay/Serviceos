@@ -12,6 +12,7 @@ import {
 } from '../../components/forms/LineItemEditor';
 import { apiFetch } from '../../utils/api-fetch';
 import { formatCurrency as formatCents } from '../../utils/currency';
+import { toTitleCase } from '../../utils/string';
 
 interface LineItem {
   id: string;
@@ -38,6 +39,7 @@ interface Invoice {
   subtotalCents: number;
   discountCents: number;
   taxCents: number;
+  processingFeeCents?: number;
   totalCents: number;
   amountPaidCents: number;
   amountDueCents: number;
@@ -63,11 +65,11 @@ function formatPaymentMethod(method: string): string {
     zelle: 'Zelle',
     other: 'Other',
   };
-  return labels[normalized] ?? method.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+  return labels[normalized] ?? toTitleCase(method);
 }
 
 function formatPaymentStatus(status: string): string {
-  return status.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+  return toTitleCase(status);
 }
 
 function isSettledPayment(status: string): boolean {
@@ -284,6 +286,9 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
               <p>Subtotal: {formatCents(data.subtotalCents)}</p>
               <p>Discount: {formatCents(data.discountCents)}</p>
               <p>Tax: {formatCents(data.taxCents)}</p>
+              {data.processingFeeCents != null && data.processingFeeCents > 0 && (
+                <p>Processing fee: {formatCents(data.processingFeeCents)}</p>
+              )}
               <p><strong>Total: {formatCents(data.totalCents)}</strong></p>
               <p>Amount Paid: {formatCents(data.amountPaidCents)}</p>
               <p><strong>Amount Due: {formatCents(data.amountDueCents)}</strong></p>
