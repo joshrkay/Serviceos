@@ -4,6 +4,7 @@ import {
   formatVerticalForCallerPrompt,
   formatIntakeQuestionsForPrompt,
   formatObjectionScriptsForPrompt,
+  formatEntityVocabularyForPrompt,
   ContextAssemblyDependencies,
 } from '../../src/verticals/context-assembly';
 import { InMemoryVerticalPackRepository } from '../../src/verticals/registry';
@@ -314,5 +315,38 @@ describe('formatObjectionScriptsForPrompt — §3E objection-handling block', ()
     };
     const out = formatObjectionScriptsForPrompt(stripped);
     expect(out).toContain('reframe: "Some response text."');
+  });
+});
+
+describe('formatEntityVocabularyForPrompt (story 2.5)', () => {
+  it('renders only the tenant overrides, skipping defaults', () => {
+    const out = formatEntityVocabularyForPrompt({
+      estimateTerm: 'Quote',
+      jobTerm: 'Project',
+      invoiceTerm: 'Invoice', // equals default → omitted
+    });
+    expect(out).toContain('Business terminology');
+    expect(out).toContain('Say "Quote" where you would normally say "Estimate".');
+    expect(out).toContain('Say "Project" where you would normally say "Job".');
+    expect(out).not.toContain('Invoice');
+  });
+
+  it('returns an empty string when there are no overrides', () => {
+    expect(formatEntityVocabularyForPrompt(undefined)).toBe('');
+    expect(formatEntityVocabularyForPrompt({})).toBe('');
+    // A value equal to the platform default (case-insensitive) is not an override.
+    expect(formatEntityVocabularyForPrompt({ estimateTerm: 'estimate' })).toBe('');
+  });
+
+  it('ignores non-entity keys stored alongside (teamSize, ownerName, equipment terms)', () => {
+    const out = formatEntityVocabularyForPrompt({
+      teamSize: '5',
+      ownerName: 'Dana',
+      furnace: 'Heater',
+      customerTerm: 'Client',
+    });
+    expect(out).toContain('Say "Client" where you would normally say "Customer".');
+    expect(out).not.toContain('Dana');
+    expect(out).not.toContain('Heater');
   });
 });

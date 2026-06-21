@@ -2339,6 +2339,11 @@ export function createApp(): express.Express {
     canonicalPackRegistry,
     trainingAssetRepo,
     logger: verticalPromptResolverLogger,
+    // Story 2.5 — the calling agent speaks the tenant's own words. Reads
+    // terminology_preferences via the same settings repo (RLS-respecting)
+    // used elsewhere; tenants with no overrides add nothing to the prompt.
+    entityVocabularyResolver: async (tenantId) =>
+      (await settingsRepo.findByTenant(tenantId))?.terminologyPreferences,
   });
   invalidateVerticalPromptCache = (tenantId) => verticalPromptResolver.invalidate(tenantId);
   // §3B/3D/3E — light up the operator-side resolver shim now that the
