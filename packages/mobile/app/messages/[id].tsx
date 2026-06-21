@@ -3,6 +3,8 @@ import { useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   Text,
   TextInput,
@@ -61,7 +63,14 @@ export default function MessageThread() {
   };
 
   return (
-    <View className="flex-1 bg-background pt-16">
+    // The composer is bottom-anchored, so without this the on-screen keyboard
+    // covers it on both platforms. `padding` is the iOS-correct behavior;
+    // Android resizes its own height. The custom header lives inside the view
+    // (no navigation header), so no keyboardVerticalOffset is needed.
+    <KeyboardAvoidingView
+      className="flex-1 bg-background pt-16"
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    >
       <View className="px-6">
         <Pressable
           accessibilityRole="button"
@@ -127,6 +136,6 @@ export default function MessageThread() {
           </Pressable>
         </View>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   );
 }

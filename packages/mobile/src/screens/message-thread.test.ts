@@ -93,4 +93,16 @@ describe('Message thread', () => {
     const { getByText } = render(createElement(MessageThread));
     expect(getByText('Send').closest('button')!.className).toMatch(/\bmin-h-11\b/);
   });
+
+  it('keeps the composer above the on-screen keyboard (KeyboardAvoidingView)', () => {
+    // The bottom-anchored composer would otherwise be hidden by the keyboard on
+    // both iOS and Android. The screen wraps everything in a keyboard-avoiding
+    // container with iOS-correct `padding` behavior (the stub runs as iOS).
+    const { getByPlaceholderText, container } = render(createElement(MessageThread));
+    const kav = container.querySelector('[data-behavior]');
+    expect(kav).toBeTruthy();
+    expect(kav!.getAttribute('data-behavior')).toBe('padding');
+    // The composer input must live inside that container, not outside it.
+    expect(kav!.contains(getByPlaceholderText('Type a message'))).toBe(true);
+  });
 });

@@ -21,6 +21,20 @@ export const ScrollView = host('div');
 export const ActivityIndicator = host('div');
 export const RefreshControl = host('div');
 
+// Surfaces `behavior` as a data attribute so screen tests can assert the
+// composer is wrapped in a keyboard-avoiding container with the right
+// platform behavior (the native runtime can't be exercised under jsdom).
+export const KeyboardAvoidingView = ({ children, className, behavior }: Props) =>
+  createElement('div', { className, 'data-behavior': behavior as string }, children as ReactNode);
+
+// Minimal Platform: tests run as iOS so `Platform.OS === 'ios'` branches are
+// the rendered default; `select` mirrors RN's ios/android/default resolution.
+export const Platform = {
+  OS: 'ios' as 'ios' | 'android' | 'web',
+  select: <T,>(spec: { ios?: T; android?: T; native?: T; default?: T }): T | undefined =>
+    spec.ios ?? spec.native ?? spec.default,
+};
+
 export const TextInput = ({ onChangeText, value, className, placeholder }: Props) =>
   createElement('input', {
     className,
