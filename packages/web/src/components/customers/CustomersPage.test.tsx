@@ -152,6 +152,26 @@ describe('CustomersPage', () => {
     expect(screen.queryByTestId('tag-filters')).not.toBeInTheDocument();
   });
 
+  it('flags a fuzzy name match as a possible duplicate in the Add sheet (4.4)', () => {
+    renderPage();
+    fireEvent.click(screen.getByText('Add customer')); // open the Add sheet
+    const nameInput = screen.getByPlaceholderText('Full name *');
+    fireEvent.change(nameInput, { target: { value: 'Alice Smyth' } });
+    // 'Alice Smyth' is a close trigram match for the existing 'Alice Smith'.
+    expect(screen.getByText('Possible duplicate')).toBeInTheDocument();
+    expect(screen.getByText(/Similar name matches an existing customer/)).toBeInTheDocument();
+  });
+
+  it('does not flag an unrelated name in the Add sheet', () => {
+    renderPage();
+    fireEvent.click(screen.getByText('Add customer'));
+    fireEvent.change(screen.getByPlaceholderText('Full name *'), {
+      target: { value: 'Zachary Quinto' },
+    });
+    expect(screen.queryByText('Possible duplicate')).not.toBeInTheDocument();
+    expect(screen.queryByText('Already in your system')).not.toBeInTheDocument();
+  });
+
   it('offers an acquisition-source selector when adding a customer', () => {
     renderPage();
     fireEvent.click(screen.getByText('Add customer')); // open the Add sheet
