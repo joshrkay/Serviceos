@@ -27,6 +27,7 @@ import type {
   NotificationContextMap,
 } from '../notifications/owner-notification-service';
 import type { Logger } from '../logging/logger';
+import { isValidTimezone } from '../shared/timezone';
 
 export type AssignmentChangeKind = 'assigned' | 'unassigned';
 
@@ -72,28 +73,29 @@ export interface TechnicianAssignmentNotifierDeps {
   logger?: Logger;
 }
 
-/** Render the appointment instant in its display timezone (matches the confirmation notifier). */
+/**
+ * Render the appointment instant in its display timezone (matches the
+ * confirmation notifier). Formatters are cached per timezone —
+ * Intl.DateTimeFormat construction is comparatively expensive.
+ */
+const WHEN_FORMATTER_CACHE = new Map<string, Intl.DateTimeFormat>();
+
 export function formatAssignmentWhenLabel(date: Date, timezone: string): string {
-  try {
-    return new Intl.DateTimeFormat('en-US', {
+  // Bad/unknown tz → render in UTC rather than throwing.
+  const tz = isValidTimezone(timezone) ? timezone : 'UTC';
+  let formatter = WHEN_FORMATTER_CACHE.get(tz);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-US', {
       weekday: 'short',
       month: 'short',
       day: 'numeric',
       hour: 'numeric',
       minute: '2-digit',
-      timeZone: timezone,
-    }).format(date);
-  } catch {
-    // An invalid/unknown tz must never break the notification — fall back to UTC.
-    return new Intl.DateTimeFormat('en-US', {
-      weekday: 'short',
-      month: 'short',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-      timeZone: 'UTC',
-    }).format(date);
+      timeZone: tz,
+    });
+    WHEN_FORMATTER_CACHE.set(tz, formatter);
   }
+  return formatter.format(date);
 }
 
 /** Render a service location as a single-line address for an SMS body. */
@@ -149,9 +151,12 @@ export class TechnicianAssignmentNotifier {
       };
 
       // In-app push (targeted by Clerk subject — device tokens key on it, not
-      // users.id) and SMS (to the tech's own mobile) are sent independently.
-      await this.sendPush(tenantId, user.clerkUserId ?? null, kind, ctx);
-      await this.sendSms(tenantId, user.mobileNumber ?? null, kind, ctx);
+      // users.id) and SMS (to the tech's own mobile) are independent channels —
+      // run them in parallel; each is failure-isolated internally.
+      await Promise.all([
+        this.sendPush(tenantId, user.clerkUserId ?? null, kind, ctx),
+        this.sendSms(tenantId, user.mobileNumber ?? null, kind, ctx),
+      ]);
     } catch (err) {
       this.warn('technician assignment notification failed', tenantId, { appointmentId, technicianId, kind }, err);
     }
