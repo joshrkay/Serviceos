@@ -393,8 +393,8 @@ describe('VQ-021 — gradeDispositionStructured', () => {
     // The agent classifies before it escalates, so the log order is
     // [intent(turn0), intent(turn1), escalation]. With ts-only windows the
     // tie put the escalation in turn 0 (`<=` upper bound) and stripped it
-    // from turn 1 — flipping criterion 11 ~30% of runs. The `(ts, logIndex)`
-    // tiebreak must keep it on the (last) turn that actually escalated.
+    // from turn 1 — flipping criterion 11 ~30% of runs. Log-index windows
+    // keep the escalation on the (last) turn that actually escalated.
     const script = makeScript({
       turns: [
         {
