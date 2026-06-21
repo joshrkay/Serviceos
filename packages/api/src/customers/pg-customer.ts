@@ -176,6 +176,20 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
       paramIndex++;
     }
 
+    // U2 (4.8) — tag filter. EXISTS against customer_tags keeps the data and
+    // count queries in agreement; tenant_id is bound inside the subquery too
+    // (defense-in-depth alongside RLS). The index idx_customer_tags_customer
+    // serves the correlated lookup.
+    if (options?.tag) {
+      conditions.push(
+        `EXISTS (SELECT 1 FROM customer_tags ct
+                 WHERE ct.tenant_id = $1 AND ct.customer_id = customers.id
+                   AND ct.tag = $${paramIndex})`
+      );
+      params.push(options.tag);
+      paramIndex++;
+    }
+
     return { where: `WHERE ${conditions.join(' AND ')}`, params };
   }
 

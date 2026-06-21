@@ -128,6 +128,14 @@ export interface UpdateCustomerInput {
 export interface CustomerListOptions {
   includeArchived?: boolean;
   search?: string;
+  /**
+   * U2 (4.8) — filter the list to customers carrying this exact tag.
+   * Implemented as an `EXISTS` join against `customer_tags` in the Pg
+   * repository (so the paginated data and total count agree). The
+   * in-memory customer store holds no tags, so it ignores this filter —
+   * the behavior is proven by the customer-tags integration test.
+   */
+  tag?: string;
   /** Pagination cap. Default 50, hard-capped server-side at 200. */
   limit?: number;
   /** Pagination offset. Default 0. */

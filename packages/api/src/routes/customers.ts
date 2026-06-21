@@ -118,6 +118,7 @@ export function createCustomerRouter(
       try {
         const includeArchived = req.query.includeArchived === 'true';
         const search = req.query.search as string | undefined;
+        const tag = req.query.tag as string | undefined;
         const sort: 'asc' | 'desc' = req.query.sort === 'desc' ? 'desc' : 'asc';
 
         // P1-018: when `paginated=true` (or limit/offset are present) we
@@ -152,6 +153,7 @@ export function createCustomerRouter(
           const result = await listCustomersWithMeta(req.auth!.tenantId, customerRepo, {
             includeArchived,
             search,
+            tag,
             limit,
             offset,
             sort,
@@ -163,6 +165,7 @@ export function createCustomerRouter(
         const result = await listCustomers(req.auth!.tenantId, customerRepo, {
           includeArchived,
           search,
+          tag,
           sort,
         });
         res.json(result);
