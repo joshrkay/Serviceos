@@ -137,6 +137,16 @@ describe('Postgres integration — leads', () => {
       expect(result.data).toHaveLength(1);
       expect(result.total).toBe(3);
     });
+
+    it('LC-8 — countBySource groups by source, tenant-scoped (real columns)', async () => {
+      const counts = await repo.countBySource(filterTenant.tenantId);
+      const bySource = Object.fromEntries(counts.map((c) => [c.source, c]));
+      // filterTenant seeded: referral x1, web_form x1, phone_call x1.
+      expect(bySource['referral']?.leadCount).toBe(1);
+      expect(bySource['web_form']?.leadCount).toBe(1);
+      expect(bySource['phone_call']?.leadCount).toBe(1);
+      expect(counts.reduce((n, c) => n + c.leadCount, 0)).toBe(3);
+    });
   });
 
   describe('update', () => {

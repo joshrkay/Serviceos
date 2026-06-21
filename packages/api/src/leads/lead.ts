@@ -128,6 +128,22 @@ export interface LeadListResult {
   total: number;
 }
 
+/** LC-8 — per-source lead counts for the digest/dashboard analytics hook. */
+export interface LeadSourceCount {
+  source: LeadSource;
+  /** Leads created in the window with this source. */
+  leadCount: number;
+  /** Of those, how many have been converted to a customer. */
+  convertedCount: number;
+}
+
+/** Window for source analytics (inclusive `from`, exclusive `to`), by
+ *  `created_at`. Both bounds optional — omit for all-time. */
+export interface LeadSourceCountOptions {
+  from?: Date;
+  to?: Date;
+}
+
 export interface LeadRepository {
   create(lead: Lead): Promise<Lead>;
   findById(tenantId: string, id: string): Promise<Lead | null>;
@@ -142,6 +158,15 @@ export interface LeadRepository {
    * normalizes `primaryPhone` on the fly.
    */
   findByPhoneNormalized(tenantId: string, phoneNormalized: string): Promise<Lead | null>;
+  /**
+   * LC-8 — count leads grouped by source within an optional [from, to)
+   * created-at window, with how many of each converted. Powers the
+   * source-attribution analytics for the digest/dashboard.
+   */
+  countBySource(
+    tenantId: string,
+    options?: LeadSourceCountOptions,
+  ): Promise<LeadSourceCount[]>;
 }
 
 export const DEFAULT_LIST_LIMIT = 50;

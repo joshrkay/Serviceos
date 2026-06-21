@@ -23,8 +23,11 @@ import {
   LeadListOptions,
   LeadListResult,
   LeadRepository,
+  LeadSourceCount,
+  LeadSourceCountOptions,
   MAX_LIST_LIMIT,
 } from './lead';
+import { LeadSource } from './enums';
 
 export class InMemoryLeadRepository implements LeadRepository {
   private leads: Map<string, Lead> = new Map();
@@ -95,6 +98,25 @@ export class InMemoryLeadRepository implements LeadRepository {
       )
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     return matches.length > 0 ? { ...matches[0] } : null;
+  }
+
+  async countBySource(
+    tenantId: string,
+    options?: LeadSourceCountOptions,
+  ): Promise<LeadSourceCount[]> {
+    const counts = new Map<LeadSource, { leadCount: number; convertedCount: number }>();
+    for (const lead of this.leads.values()) {
+      if (lead.tenantId !== tenantId) continue;
+      if (options?.from && lead.createdAt < options.from) continue;
+      if (options?.to && lead.createdAt >= options.to) continue;
+      const entry = counts.get(lead.source) ?? { leadCount: 0, convertedCount: 0 };
+      entry.leadCount += 1;
+      if (lead.convertedCustomerId) entry.convertedCount += 1;
+      counts.set(lead.source, entry);
+    }
+    return Array.from(counts.entries())
+      .map(([source, v]) => ({ source, ...v }))
+      .sort((a, b) => b.leadCount - a.leadCount);
   }
 
   /** Test helper. */

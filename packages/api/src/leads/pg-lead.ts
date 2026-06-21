@@ -6,6 +6,8 @@ import {
   LeadListOptions,
   LeadListResult,
   LeadRepository,
+  LeadSourceCount,
+  LeadSourceCountOptions,
   MAX_LIST_LIMIT,
 } from './lead';
 import { LeadSource, LeadStage } from './enums';
@@ -209,6 +211,39 @@ export class PgLeadRepository extends PgBaseRepository implements LeadRepository
         params
       );
       return { data, total: countResult.rows[0].total as number };
+    });
+  }
+
+  async countBySource(
+    tenantId: string,
+    options?: LeadSourceCountOptions,
+  ): Promise<LeadSourceCount[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const conditions: string[] = ['tenant_id = $1'];
+      const params: unknown[] = [tenantId];
+      if (options?.from) {
+        params.push(options.from);
+        conditions.push(`created_at >= $${params.length}`);
+      }
+      if (options?.to) {
+        params.push(options.to);
+        conditions.push(`created_at < $${params.length}`);
+      }
+      const result = await client.query(
+        `SELECT source,
+                COUNT(*)::int AS lead_count,
+                COUNT(converted_customer_id)::int AS converted_count
+         FROM leads
+         WHERE ${conditions.join(' AND ')}
+         GROUP BY source
+         ORDER BY lead_count DESC`,
+        params,
+      );
+      return result.rows.map((r: Record<string, unknown>) => ({
+        source: r.source as LeadSource,
+        leadCount: r.lead_count as number,
+        convertedCount: r.converted_count as number,
+      }));
     });
   }
 
