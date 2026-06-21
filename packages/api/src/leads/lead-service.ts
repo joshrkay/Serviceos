@@ -46,7 +46,7 @@ export async function notifyOwnerLeadCaptured(tenantId: string, lead: Lead): Pro
   if (isPhoneOriginatedLeadSource(lead.source)) return;
   try {
     await notifyOwner(tenantId, 'lead_captured', {
-      customerId: lead.id,
+      leadId: lead.id,
       leadLabel: leadLabel(lead),
     });
   } catch {

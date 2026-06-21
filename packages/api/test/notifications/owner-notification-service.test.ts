@@ -87,7 +87,7 @@ describe('OwnerNotificationService', () => {
   });
 
   it('no tokens → no send (no-op)', async () => {
-    await service.notify(TENANT, 'lead_captured', { customerId: 'c1', leadLabel: 'A new lead' });
+    await service.notify(TENANT, 'lead_captured', { leadId: 'c1', leadLabel: 'A new lead' });
     expect(provider.sent).toHaveLength(0);
   });
 

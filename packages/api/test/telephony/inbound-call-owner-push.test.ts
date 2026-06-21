@@ -49,33 +49,35 @@ describe('U2 — inbound call owner push', () => {
     expect(provider.sent[0].body).toContain('Jane Doe');
   });
 
-  it('unknown caller → uses the resolved lead id and a "New caller: <phone>" label', async () => {
+  it('unknown caller (lead only) → routes to the customers LIST, not a dead /customers/<leadId>', async () => {
     await notifyOwnerOfIncomingCall({
       tenantId,
-      leadId: 'lead-9',
       fromPhone: '+15555550199',
     });
 
     expect(provider.sent).toHaveLength(1);
-    expect(provider.sent[0].data?.screen).toBe('/customers/lead-9');
+    // A lead has no mobile detail route — the tap must land on a valid screen.
+    expect(provider.sent[0].data?.screen).toBe('/customers');
+    expect(provider.sent[0].data?.entityId).toBeUndefined();
     expect(provider.sent[0].body).toContain('New caller: +15555550199');
   });
 
   it('blocked/withheld caller-id → generic "New caller" label, no crash', async () => {
     await notifyOwnerOfIncomingCall({
       tenantId,
-      leadId: 'lead-10',
       fromPhone: 'restricted',
     });
 
     expect(provider.sent).toHaveLength(1);
+    expect(provider.sent[0].data?.screen).toBe('/customers');
     expect(provider.sent[0].body).toContain('New caller');
     expect(provider.sent[0].body).not.toContain('restricted');
   });
 
-  it('no resolved entity id → fires nothing (never deep-links to nothing)', async () => {
+  it('caller with no id at all → still fires one push to the customers list', async () => {
     await notifyOwnerOfIncomingCall({ tenantId, fromPhone: '+15555550000' });
-    expect(provider.sent).toHaveLength(0);
+    expect(provider.sent).toHaveLength(1);
+    expect(provider.sent[0].data?.screen).toBe('/customers');
   });
 
   it('fires exactly one push (not per media frame) per call', async () => {

@@ -491,34 +491,30 @@ export function isBlockedCallerId(from: string | undefined): boolean {
 /**
  * Fire exactly one `incoming_call` owner push for an inbound call (best-effort).
  *
- * Known caller → deep-links to their customer record with their name; unknown
- * caller → the resolved lead id (so the push still lands somewhere actionable)
- * with a "New caller: <phone>" label. Blocked/withheld caller-id degrades to a
- * generic "New caller". Returns early (no push) when there is no resolved entity
- * id at all, so we never deep-link to nothing. Never throws — `notifyOwner` is
- * itself failure-isolated; this wrapper only assembles the typed context.
+ * Known caller → deep-links to their customer record with their name; an
+ * unknown caller has only a CRM lead (a separate id space with no mobile detail
+ * route), so the push omits the customer id and the client routes to the
+ * customers list (never a dead `/customers/<leadId>` link). Blocked/withheld
+ * caller-id degrades to a generic "New caller". Always fires — an inbound call
+ * is always worth surfacing. Never throws — `notifyOwner` is itself
+ * failure-isolated; this wrapper only assembles the typed context.
  */
 export async function notifyOwnerOfIncomingCall(opts: {
   tenantId: string;
-  /** Resolved customer id (known caller). */
+  /** Resolved customer id (known caller only). Omitted for unknown callers. */
   customerId?: string;
-  /** Resolved lead id (unknown caller). Used as the deep-link entity when no
-   *  customer id is available. */
-  leadId?: string;
   /** Known caller's display name, when matched. */
   customerName?: string;
   /** Raw caller phone (Twilio `From`); may be blocked/withheld. */
   fromPhone?: string;
 }): Promise<void> {
-  const entityId = opts.customerId ?? opts.leadId;
-  if (!entityId) return;
   const callerLabel = opts.customerName?.trim()
     ? opts.customerName.trim()
     : isBlockedCallerId(opts.fromPhone) || !opts.fromPhone?.trim()
       ? 'New caller'
       : `New caller: ${opts.fromPhone.trim()}`;
   await notifyOwner(opts.tenantId, 'incoming_call', {
-    customerId: entityId,
+    ...(opts.customerId ? { customerId: opts.customerId } : {}),
     callerLabel,
   });
 }
@@ -1651,12 +1647,11 @@ export class TwilioGatherAdapter {
 
     // U2 — fire ONE owner "incoming call" push per inbound call (best-effort,
     // after the caller is identified above). Known caller deep-links to their
-    // customer with their name; unknown caller uses the resolved lead id with a
-    // "New caller: <phone>" label. notifyOwner is failure-isolated.
+    // customer with their name; an unknown caller routes to the customers list
+    // (a lead has no mobile detail route). notifyOwner is failure-isolated.
     await notifyOwnerOfIncomingCall({
       tenantId: opts.tenantId,
       ...(callerKnown ? { customerId: callerKnown.customerId, customerName: callerKnown.customerName } : {}),
-      ...(session.leadId ? { leadId: session.leadId } : {}),
       ...(opts.from ? { fromPhone: opts.from } : {}),
     });
 

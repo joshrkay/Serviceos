@@ -27,13 +27,13 @@ import { type PushDeliveryProvider, type PushMessage } from './push-delivery-pro
 export interface NotificationContextMap {
   proposal_needs_approval: { proposalId: string; summary: string };
   proposal_executed: { proposalId: string; summary?: string };
-  incoming_call: { customerId: string; callerLabel: string };
+  incoming_call: { customerId?: string; callerLabel: string };
   inbound_sms: { conversationId: string; customerName: string; preview: string };
   appointment_reminder: { appointmentId: string; customerName: string; whenLabel: string };
   appointment_cancellation: { appointmentId: string; customerName: string; whenLabel: string };
   payment_received: { invoiceId: string; customerName: string; amountLabel: string };
   invoice_overdue: { invoiceId: string; customerName: string; amountLabel: string };
-  lead_captured: { customerId: string; leadLabel: string };
+  lead_captured: { leadId: string; leadLabel: string };
   escalation: { reason: string; proposalId?: string; customerId?: string };
   emergency: { reason: string; proposalId?: string; customerId?: string };
 }
@@ -93,8 +93,11 @@ export const NOTIFICATION_DESCRIPTORS: DescriptorMap = {
       body: `${ctx.callerLabel} is calling.`,
       data: {
         type: 'incoming_call',
-        screen: `/customers/${ctx.customerId}`,
-        entityId: ctx.customerId,
+        // Known caller → their customer record; an unknown caller has only a
+        // CRM lead (separate id space, no mobile detail route) → the customers
+        // list, so the tap never 404s.
+        screen: ctx.customerId ? `/customers/${ctx.customerId}` : '/customers',
+        ...(ctx.customerId ? { entityId: ctx.customerId } : {}),
       },
     }),
   },
@@ -165,8 +168,10 @@ export const NOTIFICATION_DESCRIPTORS: DescriptorMap = {
       body: `${ctx.leadLabel} just came in.`,
       data: {
         type: 'lead_captured',
-        screen: `/customers/${ctx.customerId}`,
-        entityId: ctx.customerId,
+        // A lead is not a customer (separate id space, no mobile detail route),
+        // so deep-link to the customers list. `entityId` carries the lead id.
+        screen: '/customers',
+        entityId: ctx.leadId,
       },
     }),
   },
