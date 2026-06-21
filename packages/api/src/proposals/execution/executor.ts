@@ -6,6 +6,12 @@ import { ProposalType } from '../proposal';
 import { AppError } from '../../shared/errors';
 import { ProposalExecutionRepository } from '../proposal-execution';
 import { resolveChainReferences } from './chain-resolution';
+import { createLogger } from '../../logging/logger';
+
+const logger = createLogger({
+  service: 'proposals.execution.executor',
+  environment: process.env.NODE_ENV || 'development',
+});
 
 /**
  * Fired after a proposal completes execution (success or failure).
@@ -273,8 +279,7 @@ export class ProposalExecutor {
         executionId = row.id;
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
-        // eslint-disable-next-line no-console
-        console.error('proposal-executor: recordExecution failed', {
+        logger.error('proposal-executor: recordExecution failed', {
           proposalId: updatedProposal.id,
           tenantId: updatedProposal.tenantId,
           error: error.message,
@@ -297,8 +302,7 @@ export class ProposalExecutor {
         });
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
-        // eslint-disable-next-line no-console
-        console.error('proposal-executor: onExecuted callback failed', {
+        logger.error('proposal-executor: onExecuted callback failed', {
           proposalId: updatedProposal.id,
           tenantId: updatedProposal.tenantId,
           error: error.message,

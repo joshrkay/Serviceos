@@ -1,4 +1,5 @@
 import React from 'react';
+import { formatUsdCentsFixed } from '@ai-service-os/shared';
 
 /**
  * Icon glyph per lead source. P12-005 introduces `customer_portal` as a
@@ -63,10 +64,7 @@ function fullName(lead: LeadCardData): string {
 
 function formatCents(cents?: number): string | null {
   if (cents === undefined || cents === null) return null;
-  // Display whole-dollar — never reformat as float math; this is just rendering.
-  const dollars = Math.floor(cents / 100);
-  const remainder = cents % 100;
-  return `$${dollars.toLocaleString('en-US')}.${String(remainder).padStart(2, '0')}`;
+  return formatUsdCentsFixed(cents);
 }
 
 export function LeadCard({ lead, onClick, onDragStart }: LeadCardProps) {

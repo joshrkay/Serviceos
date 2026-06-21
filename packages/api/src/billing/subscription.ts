@@ -353,7 +353,20 @@ export class BillingService {
     customerId: string;
     subscriptionId: string;
     status: string;
+    /** Mirror of the Stripe subscription's trial_end; null clears it. Drives
+     * the trial-reminder sweep. Omit to leave the cached value untouched. */
+    trialEndsAt?: Date | null;
   }): Promise<void> {
+    if (input.trialEndsAt !== undefined) {
+      await this.deps.pool.query(
+        `UPDATE tenants
+         SET stripe_subscription_id = $1, subscription_status = $2,
+             trial_ends_at = $3, updated_at = NOW()
+         WHERE stripe_customer_id = $4`,
+        [input.subscriptionId, input.status, input.trialEndsAt, input.customerId],
+      );
+      return;
+    }
     await this.deps.pool.query(
       `UPDATE tenants
        SET stripe_subscription_id = $1, subscription_status = $2, updated_at = NOW()

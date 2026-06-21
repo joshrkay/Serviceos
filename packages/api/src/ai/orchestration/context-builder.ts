@@ -2,6 +2,12 @@ import { Message } from '../../conversations/conversation-service';
 import { VerticalType } from '../../shared/vertical-types';
 import type { KnowledgeChunkSourceType } from '../training/knowledge-chunks';
 import type { RetrieveContextResult } from '../skills/retrieve-context';
+import { createLogger } from '../../logging/logger';
+
+const logger = createLogger({
+  service: 'ai.orchestration.context-builder',
+  environment: process.env.NODE_ENV || 'development',
+});
 
 export interface VerticalContext {
   type: VerticalType;
@@ -162,7 +168,7 @@ export async function buildSourceContext(
         };
       }
     } catch (err) {
-      console.error('Failed to load vertical config for tenant', tenantId, err);
+      logger.error('Failed to load vertical config for tenant', { tenantId, err });
     }
   }
 
@@ -187,8 +193,7 @@ export async function buildSourceContext(
       } catch (err) {
         // The adapter contract is failure-soft, but defend against
         // adapters that throw synchronously (e.g., misconfigured deps).
-        // eslint-disable-next-line no-console
-        console.error('context-builder: retrieve adapter threw', tenantId, err);
+        logger.error('context-builder: retrieve adapter threw', { tenantId, err });
       }
     }
   }

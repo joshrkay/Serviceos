@@ -3,6 +3,7 @@ import { TrendingUp, BarChart3 } from 'lucide-react';
 import { useApiClient } from '../../lib/apiClient';
 import { Spinner, EmptyState } from '../ui';
 import { ErrorState } from '../ErrorState';
+import { formatUsdCentsWhole } from '@ai-service-os/shared';
 
 /**
  * Revenue-by-source attribution report.
@@ -33,9 +34,7 @@ const SOURCE_LABEL: Record<string, string> = {
   unknown: 'Unattributed',
 };
 
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
-}
+const formatCents = formatUsdCentsWhole;
 
 function isoDaysAgo(days: number): string {
   const d = new Date();
