@@ -19,6 +19,7 @@ import { StatusBadge } from '../shared/StatusBadge';
 import { TimeGivenBackCard } from './TimeGivenBackCard';
 import { MoneyLoopHomeCard } from './MoneyLoopHomeCard';
 import { HfcrHeroCard } from './HfcrHeroCard';
+import { VoiceRoiCard } from './VoiceRoiCard';
 import { ErrorState } from '../ErrorState';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import {
@@ -395,6 +396,8 @@ export function HomePage() {
         </div>
 
         <HfcrHeroCard />
+
+        <VoiceRoiCard />
 
         <MoneyLoopHomeCard />
 

@@ -143,6 +143,9 @@ import { createPublicBookingRouter } from './routes/public-booking';
 import { createReportsRouter } from './routes/reports';
 import { createDigestsRouter } from './routes/digests';
 import { RepoBackedTimeGivenBackReporter } from './reports/time-given-back';
+import { RepoBackedVoiceRoiReporter } from './analytics/voice-roi';
+import { createVoiceRoiRouter } from './analytics/voice-roi-router';
+import { loadTenantBusinessHours } from './telephony/business-hours-loader';
 import { createTimeEntriesRouter } from './routes/time-entries';
 import { InMemoryTimeEntryRepository } from './time-tracking/time-entry';
 import { PgTimeEntryRepository } from './time-tracking/pg-time-entry';
@@ -3687,6 +3690,19 @@ export function createApp(): express.Express {
       },
     }),
   );
+
+  // Epic 12.5 — Voice ROI headline (inbound / answered / booked / after-hours /
+  // would-have-hit-voicemail). Composes the existing voice-session + proposal
+  // repos with the tenant business-hours loader (after-hours attribution). The
+  // loader is only wired when a pool exists; the in-memory boot path leaves it
+  // undefined, so after-hours fails open (counts as zero) rather than erroring.
+  const voiceRoiReporter = new RepoBackedVoiceRoiReporter(
+    voiceSessionRepo,
+    proposalRepo,
+    pool ? (tenantId: string) => loadTenantBusinessHours(pool, tenantId) : undefined,
+  );
+  app.use('/api/analytics/voice-roi', createVoiceRoiRouter({ voiceRoiReporter }));
+
   // RV-062 — end-of-day digest web view (SMS deep link target).
   app.use('/api/digests', createDigestsRouter({ digestRepo: dailyDigestRepo }));
   app.use(

@@ -1,7 +1,7 @@
 import { createBrowserRouter } from 'react-router';
 import { Shell } from './components/layout/Shell';
 import { RouteErrorElement } from './components/layout/RouteErrorElement';
-import { HomePage } from './components/home/HomePage';
+import { RoleHome } from './components/home/RoleHome';
 import { AssistantPage } from './components/assistant/AssistantPage';
 import { JobsPage } from './components/jobs/JobsPage';
 import { SchedulePage } from './components/schedule/SchedulePage';
@@ -157,7 +157,7 @@ export const router = createBrowserRouter([
       path: '/',
       Component: Shell,
       children: [
-      { index: true,            Component: HomePage        },
+      { index: true,            Component: RoleHome        },
       { path: 'assistant',      Component: AssistantPage   },
       { path: 'jobs',           Component: JobsPage        },
       { path: 'jobs/new',       Component: JobCreate       },
