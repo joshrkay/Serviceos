@@ -223,6 +223,22 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     });
   }
 
+  async findByConversation(tenantId: string, conversationId: string): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      // Filter in SQL on source_context->>'conversationId' (same JSONB-extraction
+      // pattern as findByRecordingId) so we never pull a tenant-wide proposal set
+      // into app memory to count per-conversation state. Tenant-scoped by RLS +
+      // the explicit tenant_id predicate.
+      const result = await client.query(
+        `SELECT * FROM proposals
+         WHERE tenant_id = $1 AND source_context->>'conversationId' = $2
+         ORDER BY created_at ASC`,
+        [tenantId, conversationId]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
   async updateStatus(
     tenantId: string,
     id: string,

@@ -628,3 +628,35 @@ describe('InMemoryProposalRepository.findByRecordingId — voice dedup lookup', 
     expect(await repo.findByRecordingId(TENANT, 'rec-4', 'voice:rec-4')).toBeNull();
   });
 });
+
+describe('findByConversation — conversation-scoped fetch', () => {
+  const base: CreateProposalInput = {
+    tenantId: 'tenant-1',
+    proposalType: 'draft_estimate',
+    payload: {},
+    summary: 's',
+    createdBy: 'user-1',
+  };
+
+  it('returns only proposals whose sourceContext.conversationId matches', async () => {
+    const repo = new InMemoryProposalRepository();
+    await repo.create(createProposal({ ...base, sourceContext: { conversationId: 'conv-A' }, summary: 'a1' }));
+    await repo.create(createProposal({ ...base, sourceContext: { conversationId: 'conv-A' }, summary: 'a2' }));
+    await repo.create(createProposal({ ...base, sourceContext: { conversationId: 'conv-B' }, summary: 'b1' }));
+    await repo.create(createProposal({ ...base, summary: 'no-context' }));
+
+    const a = await repo.findByConversation('tenant-1', 'conv-A');
+    expect(a).toHaveLength(2);
+    expect(a.every((p) => p.sourceContext?.conversationId === 'conv-A')).toBe(true);
+
+    expect(await repo.findByConversation('tenant-1', 'conv-B')).toHaveLength(1);
+    expect(await repo.findByConversation('tenant-1', 'conv-none')).toEqual([]);
+  });
+
+  it('is tenant-scoped', async () => {
+    const repo = new InMemoryProposalRepository();
+    await repo.create(createProposal({ ...base, tenantId: 'tenant-1', sourceContext: { conversationId: 'conv-X' } }));
+    await repo.create(createProposal({ ...base, tenantId: 'tenant-2', sourceContext: { conversationId: 'conv-X' } }));
+    expect(await repo.findByConversation('tenant-1', 'conv-X')).toHaveLength(1);
+  });
+});

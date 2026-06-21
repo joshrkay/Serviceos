@@ -1160,7 +1160,13 @@ async function processSegment(
   // Best-effort: a lookup failure degrades to 0 (keep asking — the safe default).
   let clarificationCount = 0;
   if (handler.taskType === 'draft_estimate' && conversationId) {
-    const priorProposals = await deps.proposalRepo.findByTenant(tenantId).catch(() => []);
+    // Conversation-scoped fetch (SQL-filtered) so we never pull the tenant's
+    // whole proposal set into memory. Falls back to findByTenant only for
+    // partial test doubles that don't implement the scoped query.
+    const priorProposals = await (deps.proposalRepo.findByConversation
+      ? deps.proposalRepo.findByConversation(tenantId, conversationId)
+      : deps.proposalRepo.findByTenant(tenantId)
+    ).catch(() => []);
     clarificationCount = priorProposals.filter((p) => {
       if (p.proposalType !== 'draft_estimate') return false;
       if (p.sourceContext?.conversationId !== conversationId) return false;

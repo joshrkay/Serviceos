@@ -14,6 +14,9 @@ import { useApiClient } from '../lib/apiClient';
 export const DEFAULT_ESTIMATE_TERM = 'Estimate';
 
 let cachedEstimateTerm: string | null = null;
+// Shared in-flight request so several estimate components mounting together
+// (list + detail + sheets) make ONE /api/settings call, not one each.
+let pendingSettingsPromise: Promise<string> | null = null;
 
 export function useEstimateTerm(): string {
   const apiFetch = useApiClient();
@@ -25,18 +28,26 @@ export function useEstimateTerm(): string {
       return;
     }
     let cancelled = false;
-    (async () => {
-      try {
-        const res = await apiFetch('/api/settings');
-        if (cancelled || !res.ok) return;
-        const data = await res.json() as { terminologyPreferences?: Record<string, string> };
-        const term = data.terminologyPreferences?.estimateTerm?.trim() || DEFAULT_ESTIMATE_TERM;
-        cachedEstimateTerm = term;
-        if (!cancelled) setEstimateTerm(term);
-      } catch {
-        /* network hiccup — default stands */
-      }
-    })();
+    if (!pendingSettingsPromise) {
+      pendingSettingsPromise = (async () => {
+        try {
+          const res = await apiFetch('/api/settings');
+          if (!res.ok) return DEFAULT_ESTIMATE_TERM;
+          const data = await res.json() as { terminologyPreferences?: Record<string, string> };
+          const term = data.terminologyPreferences?.estimateTerm?.trim() || DEFAULT_ESTIMATE_TERM;
+          cachedEstimateTerm = term;
+          return term;
+        } catch {
+          return DEFAULT_ESTIMATE_TERM; // network hiccup — default stands
+        } finally {
+          // Clear so a later mount can retry if the term wasn't cached.
+          pendingSettingsPromise = null;
+        }
+      })();
+    }
+    pendingSettingsPromise.then((term) => {
+      if (!cancelled) setEstimateTerm(term);
+    });
     return () => { cancelled = true; };
   }, [apiFetch]);
 
