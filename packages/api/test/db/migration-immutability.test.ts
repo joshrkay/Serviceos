@@ -321,6 +321,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['202_invoices_processing_fee', '3f1dd0227fd3b18342e06e1bda51f60e83b8a8ab5057da78d2b72986e4cd72cf'],
   // Graduate maintenance contracts to a real tenant-scoped table.
   ['203_create_maintenance_contracts', 'f0f77a5ba2060be02849eccd0f75066a43813c2f0004c3fb591a8a5f76ca78a6'],
+  // Story 3.9: raw per-field proposal-edit corrections log (intent + field +
+  // before/after), queryable per tenant and per intent; FORCE RLS.
+  ['204_create_corrections', '37eac96b01f69d24106801716fbc9e5ed12d9b708e66877bcda4e7f3781e66d9'],
 ];
 
 function hashMigration(value: string): string {

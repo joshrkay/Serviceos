@@ -27,6 +27,7 @@ import {
 } from '../proposals/proposal-contracts';
 import { FeasibilityDependencies } from '../scheduling/feasibility-types';
 import { createSchedulingProposal } from '../proposals/create-scheduling';
+import type { CorrectionRepository } from '../proposals/corrections/correction';
 
 // P2-035 — Batch approval body schema. Lives inline rather than in
 // proposal-contracts.ts so this story stays within its allowed-files
@@ -53,6 +54,9 @@ export function createProposalsRouter(
   // N-009 / P2-038 — when supplied, undoing a proposal also reverses the
   // structured correction lessons it recorded (and the config each cascaded).
   undoCorrectionLoop?: UndoCorrectionLoopDeps,
+  // Story 3.9 — when supplied, editing a proposal logs each changed field
+  // (intent + field + before/after) to the corrections training table.
+  correctionRepo?: CorrectionRepository,
 ): Router {
   const router = Router();
 
@@ -340,6 +344,7 @@ export function createProposalsRouter(
           req.auth!.role as Role,
           parsed.edits,
           auditRepo,
+          correctionRepo,
         );
         res.json(result);
       } catch (err) {
