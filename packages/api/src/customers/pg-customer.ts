@@ -353,7 +353,7 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
           AND cc.is_archived = false
          WHERE c.tenant_id = $1
            AND (
-             (c.phone_normalized IS NOT NULL AND c.phone_normalized <> ''
+             (c.phone_normalized IS NOT NULL AND length(c.phone_normalized) >= 7
                AND (right(c.phone_normalized, 10) = $2 OR $2 LIKE '%' || c.phone_normalized))
              OR (
                length(regexp_replace(coalesce(c.secondary_phone, ''), '\\D', '', 'g')) >= 7

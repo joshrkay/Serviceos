@@ -99,6 +99,34 @@ describe('Postgres integration — customer merge (Story 4.6)', () => {
     await tags.addTag(t.tenantId, loser.id, 'vip');
     await tags.addTag(t.tenantId, loser.id, 'net30');
 
+    // Survivor already has its own primary location + contact, so the
+    // incoming loser primaries must be demoted (single-primary invariant).
+    const survivorLoc = await locations.create({
+      id: crypto.randomUUID(),
+      tenantId: t.tenantId,
+      customerId: survivor.id,
+      street1: '9 Survivor Way',
+      city: 'Austin',
+      state: 'TX',
+      postalCode: '78702',
+      country: 'USA',
+      isPrimary: true,
+      isArchived: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    await createContact(
+      {
+        tenantId: t.tenantId,
+        customerId: survivor.id,
+        name: 'Survivor Primary',
+        role: 'primary',
+        isPrimary: true,
+        phone: '555-111-2222',
+        createdBy: t.userId,
+      },
+      contacts,
+    );
     // Loser primary contact (should arrive demoted).
     await createContact(
       {
@@ -134,20 +162,28 @@ describe('Postgres integration — customer merge (Story 4.6)', () => {
     );
     expect(result.movedCounts.jobs).toBe(1);
 
-    // Job + location now belong to the survivor.
+    // Job now belongs to the survivor.
     expect((await jobs.findByCustomer(t.tenantId, survivor.id)).map((j) => j.id)).toContain(job.id);
     expect((await jobs.findByCustomer(t.tenantId, loser.id))).toHaveLength(0);
-    expect((await locations.findByCustomer(t.tenantId, survivor.id)).map((l) => l.id)).toContain(loc.id);
+
+    // Both locations belong to the survivor, but exactly one stays primary
+    // (the survivor's own; the loser's is demoted).
+    const survivorLocs = await locations.findByCustomer(t.tenantId, survivor.id);
+    expect(survivorLocs.map((l) => l.id)).toEqual(expect.arrayContaining([loc.id, survivorLoc.id]));
+    expect(survivorLocs.filter((l) => l.isPrimary).map((l) => l.id)).toEqual([survivorLoc.id]);
 
     // Tags consolidated without duplicating 'vip'.
     expect((await tags.listForCustomer(t.tenantId, survivor.id)).sort()).toEqual(['net30', 'vip']);
     expect(await tags.listForCustomer(t.tenantId, loser.id)).toEqual([]);
 
-    // Contact moved in, demoted from primary.
+    // Contact moved in, demoted from primary (survivor kept its own primary).
     const survivorContacts = await contacts.findByCustomer(t.tenantId, survivor.id);
     const moved = survivorContacts.find((c) => c.name === 'Loser Primary');
     expect(moved).toBeDefined();
     expect(moved!.isPrimary).toBe(false);
+    expect(survivorContacts.filter((c) => c.isPrimary).map((c) => c.name)).toEqual([
+      'Survivor Primary',
+    ]);
 
     // Note re-parented.
     expect((await notes.findByEntity(t.tenantId, 'customer', survivor.id)).map((n) => n.content)).toContain(
@@ -157,6 +193,64 @@ describe('Postgres integration — customer merge (Story 4.6)', () => {
     // Loser archived; survivor active.
     expect((await customers.findById(t.tenantId, loser.id))!.isArchived).toBe(true);
     expect((await customers.findById(t.tenantId, survivor.id))!.isArchived).toBe(false);
+  });
+
+  // Helpers for the saved-card collision case (no payment-method repo here).
+  async function insertPaymentMethod(tenantId: string, customerId: string, stripePmId: string) {
+    const client = await pool.connect();
+    try {
+      await client.query(`SET app.current_tenant_id = '${tenantId}'`);
+      await client.query(
+        `INSERT INTO customer_payment_methods
+           (tenant_id, customer_id, stripe_customer_id, stripe_payment_method_id)
+         VALUES ($1, $2, $3, $4)`,
+        [tenantId, customerId, 'cus_test', stripePmId],
+      );
+    } finally {
+      await client.query('RESET app.current_tenant_id').catch(() => {});
+      client.release();
+    }
+  }
+  async function listPaymentMethodIds(tenantId: string, customerId: string): Promise<string[]> {
+    const client = await pool.connect();
+    try {
+      await client.query(`SET app.current_tenant_id = '${tenantId}'`);
+      const res = await client.query(
+        `SELECT stripe_payment_method_id FROM customer_payment_methods
+          WHERE tenant_id = $1 AND customer_id = $2 ORDER BY stripe_payment_method_id`,
+        [tenantId, customerId],
+      );
+      return res.rows.map((r) => r.stripe_payment_method_id as string);
+    } finally {
+      await client.query('RESET app.current_tenant_id').catch(() => {});
+      client.release();
+    }
+  }
+
+  it('merges duplicates that share a saved card without tripping the UNIQUE', async () => {
+    const t = await createTestTenant(pool);
+    const survivor = await customers.create(baseCustomer(t.tenantId, t.userId, 'Card Survivor'));
+    const loser = await customers.create(baseCustomer(t.tenantId, t.userId, 'Card Loser'));
+    // Same card saved under BOTH duplicates (the realistic collision), plus
+    // a loser-only card.
+    await insertPaymentMethod(t.tenantId, survivor.id, 'pm_shared');
+    await insertPaymentMethod(t.tenantId, loser.id, 'pm_shared');
+    await insertPaymentMethod(t.tenantId, loser.id, 'pm_loser_only');
+
+    // A blind re-parent would abort on UNIQUE (tenant_id, stripe_payment_method_id).
+    await mergeCustomers(
+      t.tenantId,
+      { survivingId: survivor.id, losingId: loser.id, actorId: t.userId },
+      { customerRepo: customers, mergeRepo },
+    );
+
+    // Survivor keeps one copy of the shared card + the moved loser-only card.
+    expect(await listPaymentMethodIds(t.tenantId, survivor.id)).toEqual([
+      'pm_loser_only',
+      'pm_shared',
+    ]);
+    expect(await listPaymentMethodIds(t.tenantId, loser.id)).toEqual([]);
+    expect((await customers.findById(t.tenantId, loser.id))!.isArchived).toBe(true);
   });
 
   it('is tenant-isolated — cannot reach a customer in another tenant', async () => {

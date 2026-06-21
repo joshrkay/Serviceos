@@ -39,12 +39,14 @@ export class PgCustomerMergeRepository
       const counts: Record<string, number> = {};
 
       // Simple FK re-parents. Order is irrelevant — all scoped to the loser.
+      // (service_locations + customer_payment_methods are handled separately
+      // below: the former carries a single-primary invariant, the latter a
+      // per-(tenant, stripe_payment_method_id) UNIQUE that duplicates collide
+      // on, so neither is a safe blind UPDATE.)
       const simpleTables = [
-        'service_locations',
         'jobs',
         'service_agreements',
         'service_credits',
-        'customer_payment_methods',
         'voice_sessions',
         'portal_sessions',
       ];
@@ -52,14 +54,42 @@ export class PgCustomerMergeRepository
         counts[table] = await this.reassign(client, table, tenantId, survivingId, losingId);
       }
 
-      // Contacts: demote on the way in so the survivor keeps one primary.
-      const contacts = await client.query(
-        `UPDATE customer_contacts
-            SET customer_id = $2, is_primary = false, updated_at = NOW()
+      // Service locations + contacts both carry a single-primary invariant —
+      // re-parent while preserving exactly one primary on the survivor.
+      counts.service_locations = await this.reassignPreservingSinglePrimary(
+        client,
+        'service_locations',
+        tenantId,
+        survivingId,
+        losingId,
+      );
+      counts.customer_contacts = await this.reassignPreservingSinglePrimary(
+        client,
+        'customer_contacts',
+        tenantId,
+        survivingId,
+        losingId,
+      );
+
+      // Saved cards: the survivor's copy of a shared card wins. A blind move
+      // would trip UNIQUE (tenant_id, stripe_payment_method_id) when both
+      // duplicates saved the same card and abort the whole merge.
+      await client.query(
+        `DELETE FROM customer_payment_methods
+          WHERE tenant_id = $1 AND customer_id = $2
+            AND stripe_payment_method_id IN (
+              SELECT stripe_payment_method_id FROM customer_payment_methods
+               WHERE tenant_id = $1 AND customer_id = $3
+            )`,
+        [tenantId, losingId, survivingId],
+      );
+      const cards = await client.query(
+        `UPDATE customer_payment_methods
+            SET customer_id = $2, updated_at = NOW()
           WHERE tenant_id = $1 AND customer_id = $3`,
         [tenantId, survivingId, losingId],
       );
-      counts.customer_contacts = contacts.rowCount ?? 0;
+      counts.customer_payment_methods = cards.rowCount ?? 0;
 
       // Tags: move only tags the survivor doesn't already carry, then drop
       // the loser's now-duplicate leftovers (the UNIQUE constraint forbids
@@ -156,6 +186,38 @@ export class PgCustomerMergeRepository
     // so the identifier interpolation is safe; all values are bound via $N.
     const result = await client.query(
       `UPDATE ${table} SET customer_id = $2 WHERE tenant_id = $1 AND customer_id = $3`,
+      [tenantId, survivingId, losingId],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  /**
+   * Re-parent a table that has a single-active-primary invariant
+   * (`is_primary` + `is_archived`, e.g. service_locations, customer_contacts).
+   * If the survivor already has an active primary, the incoming rows are
+   * demoted so exactly one primary remains; if the survivor has none, the
+   * loser's primary (at most one, by the source invariant) is preserved. The
+   * `NOT EXISTS` reads the survivor's pre-merge rows (the UPDATE's own changes
+   * aren't visible to its subquery), so it can't demote against a row it's
+   * about to move. `table` is from the fixed allowlist — never user input.
+   */
+  private async reassignPreservingSinglePrimary(
+    client: PoolClient,
+    table: 'service_locations' | 'customer_contacts',
+    tenantId: string,
+    survivingId: string,
+    losingId: string,
+  ): Promise<number> {
+    const result = await client.query(
+      `UPDATE ${table}
+          SET customer_id = $2,
+              is_primary = is_primary AND NOT EXISTS (
+                SELECT 1 FROM ${table}
+                 WHERE tenant_id = $1 AND customer_id = $2
+                   AND is_primary = true AND is_archived = false
+              ),
+              updated_at = NOW()
+        WHERE tenant_id = $1 AND customer_id = $3`,
       [tenantId, survivingId, losingId],
     );
     return result.rowCount ?? 0;
