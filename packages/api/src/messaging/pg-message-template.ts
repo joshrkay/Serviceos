@@ -136,7 +136,15 @@ export class PgMessageTemplateRepository
       }
 
       if (setClauses.length === 0) {
-        return this.findById(tenantId, id);
+        // No-op update: read back on the SAME client rather than calling
+        // findById, which would open a nested withTenant (a second pool
+        // checkout). Keep the explicit tenant_id filter for consistency with
+        // the file's other queries (belt-and-braces alongside RLS/GUC).
+        const result = await client.query(
+          `SELECT * FROM message_templates WHERE id = $1 AND tenant_id = $2`,
+          [id, tenantId],
+        );
+        return result.rows.length > 0 ? rowToTemplate(result.rows[0]) : null;
       }
 
       setClauses.push(`updated_at = $${paramIndex++}`);
