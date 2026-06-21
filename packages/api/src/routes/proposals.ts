@@ -4,6 +4,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { asyncRoute } from '../middleware/async-route';
 import { validate } from '../shared/validation';
+import { toErrorResponse } from '../shared/errors';
 import { Role } from '../auth/rbac';
 import { ProposalRepository } from '../proposals/proposal';
 import { AppointmentRepository } from '../appointments/appointment';

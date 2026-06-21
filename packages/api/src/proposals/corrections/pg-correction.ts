@@ -39,28 +39,41 @@ export class PgCorrectionRepository extends PgBaseRepository implements Correcti
   async recordMany(corrections: Correction[]): Promise<Correction[]> {
     if (corrections.length === 0) return [];
     // All rows in a batch share the tenant (one edit, one proposal). Insert them
-    // under that tenant's RLS context in a single round-trip via UNNEST.
+    // under that tenant's RLS context in a single round-trip. The batch is sent
+    // as ONE jsonb param and expanded with jsonb_array_elements — node-postgres
+    // serializes a JS array of JSON strings into a Postgres array literal that
+    // cannot be cast to jsonb[] (malformed-literal / invalid-json), so jsonb[]
+    // bind params are avoided. before/after ride as nested jsonb so any value
+    // shape (incl. JSON null) round-trips losslessly.
     const tenantId = corrections[0].tenantId;
+    const batch = corrections.map((c) => ({
+      id: c.id,
+      tenantId: c.tenantId,
+      proposalId: c.proposalId,
+      intent: c.intent,
+      field: c.field,
+      beforeValue: c.beforeValue ?? null,
+      afterValue: c.afterValue ?? null,
+      actorId: c.actorId,
+      createdAt: c.createdAt,
+    }));
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
         `INSERT INTO corrections
            (id, tenant_id, proposal_id, intent, field, before_value, after_value, actor_id, created_at)
-         SELECT * FROM UNNEST(
-           $1::uuid[], $2::uuid[], $3::uuid[], $4::text[], $5::text[],
-           $6::jsonb[], $7::jsonb[], $8::text[], $9::timestamptz[]
-         )
+         SELECT
+           (elem->>'id')::uuid,
+           (elem->>'tenantId')::uuid,
+           (elem->>'proposalId')::uuid,
+           elem->>'intent',
+           elem->>'field',
+           elem->'beforeValue',
+           elem->'afterValue',
+           elem->>'actorId',
+           (elem->>'createdAt')::timestamptz
+         FROM jsonb_array_elements($1::jsonb) AS elem
          RETURNING *`,
-        [
-          corrections.map((c) => c.id),
-          corrections.map((c) => c.tenantId),
-          corrections.map((c) => c.proposalId),
-          corrections.map((c) => c.intent),
-          corrections.map((c) => c.field),
-          corrections.map((c) => JSON.stringify(c.beforeValue ?? null)),
-          corrections.map((c) => JSON.stringify(c.afterValue ?? null)),
-          corrections.map((c) => c.actorId),
-          corrections.map((c) => c.createdAt),
-        ],
+        [JSON.stringify(batch)],
       );
       return result.rows.map(mapRow);
     });

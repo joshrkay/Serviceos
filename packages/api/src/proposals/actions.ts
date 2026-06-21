@@ -11,8 +11,14 @@ import { chainMetaFor } from './chain';
 import { undoCorrectionLesson } from '../learning/corrections/apply-undo';
 import type { CorrectionLessonRepository } from '../learning/corrections/correction-lesson';
 import type { ConfigPorts } from '../learning/corrections/lesson-applicator';
+import { createLogger } from '../logging/logger';
 import { computeCorrections } from './corrections/correction';
 import type { CorrectionRepository } from './corrections/correction';
+
+const logger = createLogger({
+  service: 'proposals.actions',
+  environment: process.env.NODE_ENV || 'development',
+});
 
 /**
  * N-009 / P2-038 — optional correction-loop reversal wired into `undoProposal`.

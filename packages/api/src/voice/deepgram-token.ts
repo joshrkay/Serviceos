@@ -83,7 +83,17 @@ export async function mintDeepgramStreamToken(
     throw new DeepgramTokenMintError(`Deepgram grant returned ${res.status}`);
   }
 
-  const data = (await res.json()) as { access_token?: string; expires_in?: number };
+  // A 200 with a non-JSON body (HTML error page, truncated stream) makes
+  // res.json() throw a raw SyntaxError outside the doFetch try/catch — wrap it
+  // so callers always see a typed DeepgramTokenMintError.
+  let data: { access_token?: string; expires_in?: number };
+  try {
+    data = (await res.json()) as { access_token?: string; expires_in?: number };
+  } catch (err) {
+    throw new DeepgramTokenMintError(
+      `Failed to parse Deepgram grant response: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
   if (!data.access_token) {
     throw new DeepgramTokenMintError('Deepgram grant response missing access_token');
   }

@@ -62,7 +62,14 @@ export function useDeepgramDictation(opts: {
   onPartial?: (text: string) => void;
   onFinal?: (text: string) => void;
 }): UseDeepgramDictation {
-  const { onPartial, onFinal } = opts;
+  // Keep the latest callbacks in refs so `start`/`stop` keep a stable identity
+  // even when the caller passes a fresh `opts` object literal on every render
+  // (otherwise they'd churn and defeat memoization in consumers/effects).
+  const onPartialRef = useRef(opts.onPartial);
+  const onFinalRef = useRef(opts.onFinal);
+  onPartialRef.current = opts.onPartial;
+  onFinalRef.current = opts.onFinal;
+
   const [isRecording, setIsRecording] = useState(false);
   const [partial, setPartial] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -109,8 +116,8 @@ export function useDeepgramDictation(opts: {
     setIsRecording(false);
     const finalText = composed();
     interimRef.current = '';
-    if (finalText) onFinal?.(finalText);
-  }, [cleanup, composed, onFinal]);
+    if (finalText) onFinalRef.current?.(finalText);
+  }, [cleanup, composed]);
 
   const start = useCallback(async () => {
     if (isRecording) return;
@@ -172,7 +179,7 @@ export function useDeepgramDictation(opts: {
           interimRef.current = '';
         } else {
           interimRef.current = transcript;
-          onPartial?.(transcript);
+          onPartialRef.current?.(transcript);
         }
         const live = composed();
         setPartial(live);
@@ -192,7 +199,7 @@ export function useDeepgramDictation(opts: {
       cleanup();
       setIsRecording(false);
     }
-  }, [isRecording, cleanup, composed, onPartial]);
+  }, [isRecording, cleanup, composed]);
 
   // Tear down on unmount so a mic/WS never leaks past the component.
   useEffect(() => () => cleanup(), [cleanup]);

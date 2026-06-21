@@ -38,9 +38,11 @@ export function HomeConversationPanel() {
   const [draft, setDraft] = useState('');
 
   // Same active-conversation handle the AssistantPage uses, so the preview and
-  // the composer act on the one running thread.
-  const conversationId =
-    typeof localStorage !== 'undefined' ? localStorage.getItem('conversationId') : null;
+  // the composer act on the one running thread. Lazy useState initializer so the
+  // localStorage read runs once on mount, not on every render.
+  const [conversationId] = useState<string | null>(() =>
+    typeof localStorage !== 'undefined' ? localStorage.getItem('conversationId') : null,
+  );
   // useDetailQuery with a null id does not fetch — empty state renders cleanly.
   const { data: conversation } = useDetailQuery<ApiConversation>(
     '/api/conversations',
