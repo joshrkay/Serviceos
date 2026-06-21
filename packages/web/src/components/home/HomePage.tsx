@@ -4,7 +4,7 @@ import { useUser } from '@clerk/clerk-react';
 import {
   AlertCircle, Clock, ChevronRight, ArrowRight,
   DollarSign, FileText, Send, Eye, Briefcase,
-  CheckCircle2, Mic, TrendingUp, Bell,
+  CheckCircle2, Mic, TrendingUp, UserPlus, CalendarPlus,
 } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
 import { StatCard } from '../ui';
@@ -22,6 +22,7 @@ import { HfcrHeroCard } from './HfcrHeroCard';
 import { VoiceRoiCard } from './VoiceRoiCard';
 import { PendingProposalsCard } from './PendingProposalsCard';
 import { ErrorState } from '../ErrorState';
+import { EmptyState } from '../EmptyState';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import {
   formatDateInTenantTz,
@@ -283,13 +284,18 @@ export function HomePage() {
   const today = todayIso();
   const todayDate = new Date(); todayDate.setHours(0, 0, 0, 0);
 
-  const jobsQuery = useListQuery<ApiJob>('/api/jobs', { filters: { scheduledDate: today } });
-  const estimatesQuery = useListQuery<ApiEstimate>('/api/estimates', { filters: { status: 'sent' } });
-  const invoicesQuery = useListQuery<ApiInvoice>('/api/invoices', { filters: { status: 'open' } });
-  const leadsQuery = useListQuery<ApiLead>('/api/leads', { filters: { limit: '50' } });
+  // Epic 12.2 — the "today" snapshot updates live: each list re-polls on this
+  // interval (paused while the tab is hidden, see useListQuery).
+  const LIVE_REFETCH_MS = 60_000;
+  const jobsQuery = useListQuery<ApiJob>('/api/jobs', { filters: { scheduledDate: today }, refetchInterval: LIVE_REFETCH_MS });
+  const estimatesQuery = useListQuery<ApiEstimate>('/api/estimates', { filters: { status: 'sent' }, refetchInterval: LIVE_REFETCH_MS });
+  const invoicesQuery = useListQuery<ApiInvoice>('/api/invoices', { filters: { status: 'open' }, refetchInterval: LIVE_REFETCH_MS });
+  const leadsQuery = useListQuery<ApiLead>('/api/leads', { filters: { limit: '50' }, refetchInterval: LIVE_REFETCH_MS });
   const leads = leadsQuery.data ?? [];
 
   const todayJobs    = jobsQuery.data.filter(j => normalizeJobStatus(j.status) !== 'Canceled');
+  // Epic 12.2 — unassigned work for today (no technician on the job).
+  const unassignedToday = todayJobs.filter(j => !j.technician);
   const pendingEsts  = estimatesQuery.data.filter(e => {
     const uiStatus = normalizeEstimateStatus(e.status);
     return uiStatus === 'Sent';
@@ -428,13 +434,36 @@ export function HomePage() {
                   onRetry={() => jobsQuery.refetch()}
                 />
               ) : todayJobs.length === 0 ? (
-                <p className="text-sm text-slate-400 py-4 text-center">No jobs scheduled today</p>
+                <EmptyState
+                  title="No jobs scheduled today"
+                  description="Schedule your first job and it'll show up right here."
+                  actionLabel="Schedule a job"
+                  onAction={() => navigate(`/assistant?q=${encodeURIComponent('Schedule a new job')}`)}
+                  icon={<Briefcase size={20} />}
+                />
               ) : (
-                <div className="rounded-xl bg-white border border-slate-200 overflow-hidden divide-y divide-slate-100">
-                  {todayJobs.map(job => (
-                    <JobRow key={job.id} job={job} onClick={() => navigate(`/jobs/${job.id}`)} />
-                  ))}
-                </div>
+                <>
+                  {/* Epic 12.2 — unassigned work surfaces with a one-tap path to
+                      the dispatch board where it can be assigned. */}
+                  {unassignedToday.length > 0 && (
+                    <button
+                      onClick={() => navigate('/dispatch')}
+                      data-testid="home-unassigned"
+                      className="mb-2 flex min-h-11 w-full items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 text-left text-sm text-amber-800 transition-colors hover:bg-amber-100"
+                    >
+                      <AlertCircle size={14} className="shrink-0 text-amber-600" />
+                      <span className="flex-1">
+                        {unassignedToday.length} unassigned {unassignedToday.length === 1 ? 'job' : 'jobs'} — assign on the dispatch board
+                      </span>
+                      <ArrowRight size={13} className="shrink-0" />
+                    </button>
+                  )}
+                  <div className="rounded-xl bg-white border border-slate-200 overflow-hidden divide-y divide-slate-100">
+                    {todayJobs.map(job => (
+                      <JobRow key={job.id} job={job} onClick={() => navigate(`/jobs/${job.id}`)} />
+                    ))}
+                  </div>
+                </>
               )}
             </section>
 
@@ -639,20 +668,22 @@ export function HomePage() {
               </section>
             )}
 
-            {/* Quick actions */}
+            {/* Quick actions — each opens the conversational flow (Epic 12.8):
+                the assistant auto-submits the prefilled `q` and drafts a
+                proposal for approval, so creates stay proposal-first. */}
             <section className="px-4 py-5">
               <SectionHead label="Quick actions" />
               <div className="grid grid-cols-2 gap-2">
                 {[
-                  { label: 'Approval inbox', icon: Bell,         color: 'text-blue-600',   bg: 'bg-blue-50',   to: '/inbox'          },
-                  { label: 'Money summary',  icon: TrendingUp,   color: 'text-amber-700',  bg: 'bg-amber-50',  to: '/reports/money'  },
-                  { label: 'New estimate',   icon: FileText,     color: 'text-indigo-600', bg: 'bg-indigo-50', to: '/estimates'      },
-                  { label: 'New invoice',    icon: DollarSign,   color: 'text-amber-600',  bg: 'bg-amber-50',  to: '/invoices'       },
-                ].map(({ label, icon: Icon, color, bg, to }) => (
+                  { label: 'Add customer',  icon: UserPlus,     color: 'text-blue-600',   bg: 'bg-blue-50',   q: 'Add a new customer'    },
+                  { label: 'Schedule',      icon: CalendarPlus, color: 'text-violet-600', bg: 'bg-violet-50', q: 'Schedule a new job'    },
+                  { label: 'New estimate',  icon: FileText,     color: 'text-indigo-600', bg: 'bg-indigo-50', q: 'Create a new estimate' },
+                  { label: 'New invoice',   icon: DollarSign,   color: 'text-amber-600',  bg: 'bg-amber-50',  q: 'Create a new invoice'  },
+                ].map(({ label, icon: Icon, color, bg, q }) => (
                   <button
                     key={label}
-                    onClick={() => navigate(to)}
-                    className="flex items-center gap-2 rounded-xl bg-white border border-slate-200 px-3.5 py-3 text-left hover:border-slate-300 hover:shadow-sm transition-all"
+                    onClick={() => navigate(`/assistant?q=${encodeURIComponent(q)}`)}
+                    className="flex min-h-11 items-center gap-2 rounded-xl bg-white border border-slate-200 px-3.5 py-3 text-left hover:border-slate-300 hover:shadow-sm transition-all"
                   >
                     <span className={`flex size-7 items-center justify-center rounded-lg ${bg} shrink-0`}>
                       <Icon size={14} className={color} />

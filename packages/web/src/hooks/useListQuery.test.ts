@@ -266,3 +266,39 @@ describe('P0-030 useListQuery — Authorization Bearer header', () => {
     expect(getAuthHeader(fetchSpy.mock.calls[0]!)).toBeNull();
   });
 });
+
+describe('useListQuery — live polling (Epic 12.2)', () => {
+  it('re-fetches on the refetchInterval, and not at all without one', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: [], total: 0 }),
+      } as Response);
+
+      // No interval → exactly one fetch on mount, none after time passes.
+      renderHook(() => useListQuery('/api/items'));
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+      fetchSpy.mockClear();
+
+      // With an interval → an extra fetch each period.
+      renderHook(() => useListQuery('/api/items', { refetchInterval: 1_000 }));
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(3));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

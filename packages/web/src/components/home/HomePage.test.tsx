@@ -173,13 +173,16 @@ describe('HomePage', () => {
     expect(screen.getAllByText('$1,250').length).toBeGreaterThan(0);
   });
 
-  it('renders money loop hub and quick actions', () => {
+  it('renders money loop hub and conversational quick actions', () => {
     renderPage();
     expect(screen.getByTestId('money-loop-home-card')).toBeInTheDocument();
-    expect(screen.getByText('Approval inbox')).toBeInTheDocument();
-    expect(screen.getAllByText('Money summary').length).toBeGreaterThan(0);
+    // Epic 12.8 — quick actions open the conversational flow.
+    expect(screen.getByText('Add customer')).toBeInTheDocument();
+    expect(screen.getByText('Schedule')).toBeInTheDocument();
     expect(screen.getByText('New estimate')).toBeInTheDocument();
     expect(screen.getByText('New invoice')).toBeInTheDocument();
+    const addCustomer = screen.getByText('Add customer').closest('button')!;
+    expect(addCustomer).toBeInTheDocument();
   });
 
   it('queries /api/jobs with today scheduledDate filter', () => {
@@ -238,7 +241,24 @@ describe('HomePage', () => {
       return makeListResult([]) as ReturnType<typeof useListQuery>;
     });
     renderPage();
+    // Epic 12.9 — the empty state points to a first action (no dead end).
     expect(screen.getByText('No jobs scheduled today')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /schedule a job/i })).toBeInTheDocument();
+  });
+
+  it('[12.2] surfaces unassigned work with a path to the dispatch board', () => {
+    // mockJobs j2 (Bob Jones) has no technician → counts as unassigned today.
+    renderPage();
+    const unassigned = screen.getByTestId('home-unassigned');
+    expect(unassigned).toHaveTextContent(/1 unassigned job/i);
+  });
+
+  it('[12.2] passes a live refetch interval to the today queries', () => {
+    renderPage();
+    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith(
+      '/api/jobs',
+      expect.objectContaining({ refetchInterval: expect.any(Number) }),
+    );
   });
 
   // ── P20-004: Error states for authenticated data panels ──────────────────
