@@ -8,7 +8,9 @@ import { test } from '@playwright/test';
 import { workflow } from './catalog';
 import {
   assertRouteLoads,
+  assertListHasCreateAction,
   hasClerkUi,
+  isAuthedWorkflowProject,
   prepareAuthedPage,
 } from './helpers';
 
@@ -20,6 +22,13 @@ test.describe('P0 UI affordances', () => {
     test.info().annotations.push({ type: 'passCriteria', description: def.passCriteria });
     await prepareAuthedPage(page);
     await assertRouteLoads(page, '/jobs');
+  });
+
+  test('WF-17 UI: jobs list exposes New job (authed)', async ({ page }) => {
+    test.skip(!isAuthedWorkflowProject(), 'Requires workflows-authed project');
+    const def = workflow('WF-17');
+    test.info().annotations.push({ type: 'passCriteria', description: def.passCriteria });
+    await assertListHasCreateAction(page, '/jobs', /new job/i);
   });
 
   test('WF-14 UI: leads list route renders', async ({ page }) => {

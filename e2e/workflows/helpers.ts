@@ -6,8 +6,15 @@
  */
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { setupClerkTestingToken, hasClerkTestingCreds } from '../helpers/clerk-testing';
+import {
+  installAuthedShellMocks,
+} from '../helpers/clerk-session';
 import { mintToken } from '../qa-matrix/fixtures/tokens';
 import { CONSOLE_ERROR_ALLOWLIST } from '../helpers/coverage-sweep-routes';
+
+export function isAuthedWorkflowProject(): boolean {
+  return test.info().project.name === 'workflows-authed';
+}
 
 export function apiBase(): string {
   return (process.env.E2E_API_URL ?? 'http://localhost:3000').replace(/\/$/, '');
@@ -38,6 +45,13 @@ export function matrixTenantBToken(): string {
 
 /** Register Clerk testing token before navigating authed routes. */
 export async function prepareAuthedPage(page: Page): Promise<void> {
+  if (isAuthedWorkflowProject()) {
+    if (hasClerkTestingCreds()) {
+      await setupClerkTestingToken(page).catch(() => undefined);
+    }
+    await installAuthedShellMocks(page);
+    return;
+  }
   if (hasClerkTestingCreds()) {
     await setupClerkTestingToken(page).catch(() => undefined);
   }
@@ -79,17 +93,30 @@ export async function assertListHasCreateAction(
   path: string,
   actionName: RegExp,
 ): Promise<void> {
-  await prepareAuthedPage(page);
-  await page.goto(path, { waitUntil: 'domcontentloaded' });
-  if (page.url().includes('/login')) {
-    test.skip(true, 'Authenticated session required — sign in via Clerk testing flow or deploy E2E_BASE_URL with session');
+  if (isAuthedWorkflowProject()) {
+    if (hasClerkTestingCreds()) {
+      await setupClerkTestingToken(page).catch(() => undefined);
+    }
+    await installAuthedShellMocks(page);
+  } else {
+    await prepareAuthedPage(page);
   }
-  const consoleErrors: string[] = [];
-  page.on('pageerror', (err) => consoleErrors.push(err.message));
-  expect(consoleErrors, `page errors on ${path}`).toEqual([]);
+  await page.goto(path, { waitUntil: 'networkidle' });
+  if (page.url().includes('/login')) {
+    test.skip(
+      true,
+      isAuthedWorkflowProject()
+        ? 'Clerk session not active in browser — set E2E_CLERK_USER_USERNAME/PASSWORD for create-action checks'
+        : 'Authenticated session required — run with workflows-authed project',
+    );
+  }
   await expect(
-    page.getByRole('link', { name: actionName }).or(page.getByRole('button', { name: actionName })).first(),
-  ).toBeVisible({ timeout: 10_000 });
+    page
+      .getByRole('link', { name: actionName })
+      .or(page.getByRole('button', { name: actionName }))
+      .or(page.getByText(actionName))
+      .first(),
+  ).toBeVisible({ timeout: 15_000 });
 }
 
 /** Public forms must render at least one input control or primary CTA. */

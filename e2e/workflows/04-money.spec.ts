@@ -34,7 +34,7 @@ test.describe('WF-28 UI — Estimates list', () => {
   test('WF-28 UI: estimates list route renders', async ({ page }) => {
     const def = workflow('WF-28');
     test.info().annotations.push({ type: 'passCriteria', description: def.passCriteria });
-    test.info().annotations.push({ type: 'note', description: 'Full EST-01 + create-action in qa-matrix with auth' });
+    test.info().annotations.push({ type: 'note', description: 'Create-action wired in 07-authed-create-actions.spec.ts' });
 
     await prepareAuthedPage(page);
     await assertRouteLoads(page, '/estimates');
@@ -47,7 +47,7 @@ test.describe('WF-32 UI — Invoices', () => {
   test('WF-32 UI: invoices list route renders', async ({ page }) => {
     const def = workflow('WF-32');
     test.info().annotations.push({ type: 'passCriteria', description: def.passCriteria });
-    test.info().annotations.push({ type: 'note', description: 'Full BILL-02 + create-action in qa-matrix with auth' });
+    test.info().annotations.push({ type: 'note', description: 'Create-action wired in 07-authed-create-actions.spec.ts' });
 
     await prepareAuthedPage(page);
     await assertRouteLoads(page, '/invoices');
