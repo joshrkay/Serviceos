@@ -5030,6 +5030,13 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_maintenance_contracts ON maintenance_contracts
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
+
+  // Epic 12.6 — weekly feedback email opt-out. Opt-OUT (default true) so
+  // pilots receive the weekly advisor email unless they turn it off.
+  '204_tenant_settings_weekly_feedback': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS weekly_feedback_enabled BOOLEAN NOT NULL DEFAULT true;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

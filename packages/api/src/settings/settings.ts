@@ -401,6 +401,13 @@ export interface TenantSettings {
   digestEnabled?: boolean;
   digestTime?: string;
   digestChannel?: DigestChannel;
+  /**
+   * Epic 12.6 — weekly feedback email. Opt-OUT (column defaults true,
+   * migration 204), so pilots receive it unless they turn it off. Optional
+   * on the type so pre-migration rows / legacy fixtures read as "on" via
+   * `?? true`.
+   */
+  weeklyFeedbackEnabled?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -520,6 +527,8 @@ export interface UpdateSettingsInput {
   digestTime?: string;
   /** RV-063 — 'sms' (owner SMS) or 'none' (store/web only). */
   digestChannel?: DigestChannel;
+  /** Epic 12.6 — opt out of the weekly feedback email (column default true). */
+  weeklyFeedbackEnabled?: boolean;
 }
 
 export interface SettingsRepository {

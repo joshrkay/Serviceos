@@ -346,6 +346,9 @@ import { InMemoryDailyDigestRepository, type DailyDigestPayload } from './digest
 import { composeBrandVoiceMessage } from './ai/brand-voice/composer';
 import { runOverdueInvoiceSweep } from './workers/overdue-invoice-worker';
 import { runHfcrWeeklySendSweep } from './workers/hfcr-weekly-send-worker';
+import { runWeeklyFeedbackSweep } from './workers/weekly-feedback-worker';
+import { buildWeeklyFeedbackSnapshot } from './digest/weekly-feedback-builder';
+import { buildSuggestionsPrompt, parseSuggestions } from './digest/weekly-feedback';
 import {
   PgHfcrWeeklySendRepository,
   InMemoryHfcrWeeklySendRepository,
@@ -1807,6 +1810,8 @@ export function createApp(): express.Express {
     hfcrWeeklySend: 590014,
     holdReaper: 590015,
     thankYouSms: 590016,
+    // Epic 12.6 — weekly feedback email sweep.
+    weeklyFeedback: 590017,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -4452,6 +4457,78 @@ export function createApp(): express.Express {
           });
         }).catch((err) => {
           hfcrWeeklyLogger.error('HFCR weekly send failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }, 24 * 60 * 60_000),
+    );
+  }
+
+  // Epic 12.6 — weekly feedback email. One advisor email per tenant per
+  // completed week (performance snapshot + wins/misses/actions), idempotent
+  // via a `weekly_feedback_email` audit event. Daily tick for restart-safety
+  // (like the HFCR weekly sweep). Needs email delivery + a pool; suggestions
+  // go through the LLM gateway only when a real provider is configured (the
+  // mock gateway must not produce owner-facing text), else deterministic.
+  if (messageDelivery && pool) {
+    const weeklyFeedbackPool = pool;
+    const weeklyFeedbackDelivery = messageDelivery;
+    const weeklyFeedbackLogger = createLogger({
+      service: 'weekly-feedback-worker',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    registerInterval(
+      setInterval(() => {
+        void runAsLeader(SWEEP_LOCK.weeklyFeedback, async () => {
+          await runWeeklyFeedbackSweep({
+            auditRepo,
+            buildSnapshot: (tenantId, weekStart, weekEnd) =>
+              buildWeeklyFeedbackSnapshot(weeklyFeedbackPool, tenantId, weekStart, weekEnd),
+            resolveOwnerEmail: async (tenantId) => {
+              const r = await weeklyFeedbackPool.query(
+                'SELECT owner_email FROM tenants WHERE id = $1',
+                [tenantId],
+              );
+              return (r.rows[0]?.owner_email as string | undefined) ?? null;
+            },
+            isFeedbackEnabled: async (tenantId) => {
+              const s = await settingsRepo.findByTenant(tenantId);
+              return s?.weeklyFeedbackEnabled !== false;
+            },
+            resolveBusinessName: async (tenantId) => {
+              const s = await settingsRepo.findByTenant(tenantId);
+              return s?.businessName ?? null;
+            },
+            sendEmail: (args) =>
+              weeklyFeedbackDelivery.sendEmail({
+                to: args.to,
+                subject: args.subject,
+                text: args.text,
+                html: args.html,
+              }),
+            listTenantIds: async () => {
+              const r = await weeklyFeedbackPool.query('SELECT id FROM tenants');
+              return r.rows.map((row: { id: string }) => row.id);
+            },
+            logger: weeklyFeedbackLogger,
+            ...(config.AI_PROVIDER_API_KEY
+              ? {
+                  composeSuggestions: async (tenantId, snapshot) => {
+                    const res = await llmGateway.complete({
+                      taskType: 'weekly_feedback_suggestions',
+                      messages: [{ role: 'user', content: buildSuggestionsPrompt(snapshot) }],
+                      responseFormat: 'json',
+                      temperature: 0.4,
+                      maxTokens: 400,
+                      tenantId,
+                    });
+                    return parseSuggestions(res.content);
+                  },
+                }
+              : {}),
+          });
+        }).catch((err) => {
+          weeklyFeedbackLogger.error('Weekly feedback sweep failed', {
             error: err instanceof Error ? err.message : String(err),
           });
         });

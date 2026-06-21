@@ -159,6 +159,9 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     digestEnabled: (row.digest_enabled as boolean | null) ?? false,
     digestTime: normalizeDigestTime(row.digest_time),
     digestChannel: (row.digest_channel as 'sms' | 'none' | null) ?? 'sms',
+    // Epic 12.6 — migration 204. Opt-out: column defaults true, so a
+    // pre-migration row reads as enabled.
+    weeklyFeedbackEnabled: (row.weekly_feedback_enabled as boolean | null) ?? true,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -340,6 +343,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         digestEnabled: 'digest_enabled',
         digestTime: 'digest_time',
         digestChannel: 'digest_channel',
+        // Epic 12.6 — migration 204.
+        weeklyFeedbackEnabled: 'weekly_feedback_enabled',
         updatedAt: 'updated_at',
       };
 

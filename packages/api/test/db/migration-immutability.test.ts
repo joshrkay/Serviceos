@@ -321,6 +321,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['202_invoices_processing_fee', '3f1dd0227fd3b18342e06e1bda51f60e83b8a8ab5057da78d2b72986e4cd72cf'],
   // Graduate maintenance contracts to a real tenant-scoped table.
   ['203_create_maintenance_contracts', 'f0f77a5ba2060be02849eccd0f75066a43813c2f0004c3fb591a8a5f76ca78a6'],
+  ['204_tenant_settings_weekly_feedback', '3e78d143c8b22d97a2db02d551166f3ffaa23e12bb8c15b90dbc79340b6ef70f'],
 ];
 
 function hashMigration(value: string): string {
