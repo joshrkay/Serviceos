@@ -352,6 +352,15 @@ export interface TenantSettings {
    */
   vapiAssistantId?: string | null;
   /**
+   * Story 15.2 — Speed-to-lead instant response. When true, a new web/
+   * marketplace lead gets an immediate templated SMS (the "answer before
+   * voicemail" thesis). OFF by default (opt-in) for TCPA/consent safety; the
+   * send still routes through the DNC/consent gate. Migration 204.
+   */
+  speedToLeadEnabled?: boolean;
+  /** Story 15.2 — first-response SMS template ({first_name}/{business_name}); null/undefined → built-in default. */
+  speedToLeadTemplate?: string | null;
+  /**
    * F8 — per-tenant escalation channel + trigger flags. When absent,
    * `resolveEscalationSettings` returns `DEFAULT_ESCALATION_SETTINGS`.
    */
@@ -510,6 +519,10 @@ export interface UpdateSettingsInput {
   voiceAgentName?: string | null;
   /** B1 — custom greeting text; null clears the field. */
   voiceGreeting?: string | null;
+  /** Story 15.2 — enable the speed-to-lead first-response SMS (opt-in). */
+  speedToLeadEnabled?: boolean;
+  /** Story 15.2 — first-response SMS template; null clears (→ built-in default). */
+  speedToLeadTemplate?: string | null;
   /** F8 — per-tenant escalation settings; partial — missing keys fall back to DEFAULT_ESCALATION_SETTINGS. */
   escalationSettings?: Partial<EscalationSettings>;
   /** P4-015 — per-tenant brand voice tone; null clears the field. */

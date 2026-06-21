@@ -121,4 +121,37 @@ describe('Postgres integration — settings', () => {
       expect(bound!.vapiAssistantId).toBe('asst_real_123');
     });
   });
+
+  describe('speed-to-lead settings (migration 204)', () => {
+    it('round-trips speed_to_lead_enabled + template through update/find (real columns)', async () => {
+      const tenant = await createTestTenant(pool);
+      const now = new Date();
+      await settingsRepo.create({
+        id: crypto.randomUUID(),
+        tenantId: tenant.tenantId,
+        businessName: 'Lead Co',
+        timezone: 'America/New_York',
+        estimatePrefix: 'EST',
+        invoicePrefix: 'INV',
+        nextEstimateNumber: 1,
+        nextInvoiceNumber: 1,
+        defaultPaymentTermDays: 30,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      // Opt-in default: OFF, template unset.
+      const fresh = await settingsRepo.findByTenant(tenant.tenantId);
+      expect(fresh!.speedToLeadEnabled).toBe(false);
+      expect(fresh!.speedToLeadTemplate).toBeUndefined();
+
+      await settingsRepo.update(tenant.tenantId, {
+        speedToLeadEnabled: true,
+        speedToLeadTemplate: 'Hi {first_name}, {business_name} here.',
+      });
+      const updated = await settingsRepo.findByTenant(tenant.tenantId);
+      expect(updated!.speedToLeadEnabled).toBe(true);
+      expect(updated!.speedToLeadTemplate).toBe('Hi {first_name}, {business_name} here.');
+    });
+  });
 });
