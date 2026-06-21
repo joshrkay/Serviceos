@@ -486,6 +486,14 @@ export interface ProposalRepository {
    * chain into one card.
    */
   findByChain(tenantId: string, chainId: string): Promise<Proposal[]>;
+  /**
+   * Conversation-scoped fetch — every proposal whose
+   * sourceContext.conversationId matches, filtered in SQL. Lets callers count
+   * per-conversation state (e.g. the Estimate Agent's clarification-loop count)
+   * without pulling a tenant-wide proposal set into memory. Optional so partial
+   * test doubles still satisfy the interface; both real repos implement it.
+   */
+  findByConversation?(tenantId: string, conversationId: string): Promise<Proposal[]>;
   updateStatus(
     tenantId: string,
     id: string,
@@ -763,6 +771,17 @@ export class InMemoryProposalRepository implements ProposalRepository {
         const bi = (b.sourceContext?.chainIndex as number | undefined) ?? 0;
         return ai - bi;
       });
+  }
+
+  async findByConversation(tenantId: string, conversationId: string): Promise<Proposal[]> {
+    return Array.from(this.proposals.values())
+      .filter(
+        (p) =>
+          p.tenantId === tenantId &&
+          (p.sourceContext as Record<string, unknown> | undefined)?.conversationId ===
+            conversationId,
+      )
+      .map((p) => ({ ...p }));
   }
 
   async updateStatus(
