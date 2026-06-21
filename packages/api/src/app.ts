@@ -85,6 +85,9 @@ import {
   notifyExecuted as notifyExecutedPush_,
   notifyNeedsApproval as notifyNeedsApprovalPush_,
 } from './notifications/proposal-push-notifier';
+import { OwnerNotificationService } from './notifications/owner-notification-service';
+import { userIdsWithPermissionResolver } from './notifications/user-targeting';
+import { setOwnerNotifications } from './notifications/owner-notifications-instance';
 import {
   createMeRouter,
   DEFAULT_TENANT_TIMEZONE,
@@ -3836,6 +3839,17 @@ export function createApp(): express.Express {
       { deviceTokenRepo, provider: expoPushProvider, resolveApproverUserIds },
       args,
     );
+  // Register the generic owner-notification fan-out used by the non-proposal
+  // producer seams (inbound call/SMS, appointment reminder/cancellation,
+  // payment, lead, escalation). Each type targets the permission its descriptor
+  // declares (owner+dispatcher, never a technician device).
+  setOwnerNotifications(
+    new OwnerNotificationService({
+      deviceTokenRepo,
+      provider: expoPushProvider,
+      resolveUserIds: userIdsWithPermissionResolver(userRepo),
+    }),
+  );
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use(
     '/api/conversations',
