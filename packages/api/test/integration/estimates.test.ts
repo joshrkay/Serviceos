@@ -101,6 +101,47 @@ describe('Postgres integration — estimates', () => {
       expect(found!.lineItems).toHaveLength(1);
     });
 
+    it('filters by jobIds (customer filter) against the real DB', async () => {
+      // A second job for the same tenant, so the jobIds predicate has to
+      // isolate. estimates only carry job_id; the route resolves customerId
+      // → jobIds, which this exercises at the SQL level.
+      const customerRepo = new PgCustomerRepository(pool);
+      const locationRepo = new PgLocationRepository(pool);
+      const customer2 = crypto.randomUUID();
+      await customerRepo.create({
+        id: customer2, tenantId: tenant.tenantId, firstName: 'Second', lastName: 'Customer',
+        displayName: 'Second Customer', preferredChannel: 'phone', smsConsent: false,
+        isArchived: false, createdBy: tenant.userId, createdAt: new Date(), updatedAt: new Date(),
+      });
+      const location2 = crypto.randomUUID();
+      await locationRepo.create({
+        id: location2, tenantId: tenant.tenantId, customerId: customer2, street1: '9 Oak',
+        city: 'Austin', state: 'TX', postalCode: '78702', country: 'USA', isPrimary: true,
+        addressType: 'service', isArchived: false, createdAt: new Date(), updatedAt: new Date(),
+      });
+      const jobId2 = crypto.randomUUID();
+      await jobRepo.create({
+        id: jobId2, tenantId: tenant.tenantId, customerId: customer2, locationId: location2,
+        jobNumber: 'JOB-002', summary: 'Second job', status: 'scheduled', priority: 'normal',
+        createdBy: tenant.userId, createdAt: new Date(), updatedAt: new Date(),
+      });
+
+      const mk = (jobIdForEst: string, num: string) => estimateRepo.create({
+        id: crypto.randomUUID(), tenantId: tenant.tenantId, jobId: jobIdForEst, estimateNumber: num,
+        status: 'draft', lineItems: [buildLineItem(crypto.randomUUID(), 'L', 1, 1000, 1, false, 'labor')],
+        totals: calculateDocumentTotals([buildLineItem(crypto.randomUUID(), 'L', 1, 1000, 1, false, 'labor')], 0, 0),
+        version: 1, createdBy: tenant.userId, createdAt: new Date(), updatedAt: new Date(),
+      });
+      await mk(jobId, 'EST-CF-1');
+      const onJob2 = await mk(jobId2, 'EST-CF-2');
+
+      const filtered = await estimateRepo.findByTenant(tenant.tenantId, { jobIds: [jobId2] });
+      expect(filtered.map((e) => e.id)).toEqual([onJob2.id]);
+
+      const empty = await estimateRepo.findByTenant(tenant.tenantId, { jobIds: [] });
+      expect(empty).toEqual([]);
+    });
+
     it('updates estimate and reflects in findById', async () => {
       const lineItems = [
         buildLineItem(crypto.randomUUID(),'Labor', 1, 5000, 1, true, 'labor'),

@@ -3615,6 +3615,7 @@ export function createApp(): express.Express {
       { docRevisionRepo: documentRevisionRepo, editDeltaRepo: deltaRepo },
       paymentRepo,
       agreementRepo,
+      templateRepo,
     ),
   );
   app.use(

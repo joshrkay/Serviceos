@@ -117,4 +117,16 @@ describe('EstimateApprovalPage — mobile layout contract', () => {
     const pdf = screen.getByRole('button', { name: /download pdf/i });
     expect(pdf.className).toContain('min-h-11');
   });
+
+  it('renders the tenant terminology label (Quote) instead of "Estimate"', async () => {
+    // Story 7.4 — the tenant's word flows into the customer-facing approval page.
+    apiFetchMock.mockImplementation(async (_url: string, init?: RequestInit) => {
+      if (!init || init.method === undefined) return jsonResponse({ ...view, estimateLabel: 'Quote' });
+      return jsonResponse({});
+    });
+    renderPage();
+    expect(await screen.findByText('Quote')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Accept this quote/i })).toBeInTheDocument();
+    expect(screen.queryByText('Estimate')).not.toBeInTheDocument();
+  });
 });

@@ -18,10 +18,13 @@ import { InMemoryJobRepository } from '../../src/jobs/job';
 import { InMemoryJobTimelineRepository } from '../../src/jobs/job-lifecycle';
 import { InMemoryCustomerRepository } from '../../src/customers/customer';
 import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
+import { InMemoryEditDeltaRepository } from '../../src/estimates/edit-delta';
+import { InMemoryDocumentRevisionRepository } from '../../src/ai/document-revision';
 import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
 import { InMemoryPaymentRepository } from '../../src/invoices/payment';
 import { InMemoryAppointmentRepository } from '../../src/appointments/appointment';
 import { InMemoryAgreementRepository } from '../../src/agreements/agreement';
+import { InMemoryEstimateTemplateRepository } from '../../src/templates/estimate-template';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemorySettingsRepository, TenantSettings } from '../../src/settings/settings';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -89,6 +92,9 @@ export async function buildTestApp(): Promise<TestApp> {
   const settingsRepo = new InMemorySettingsRepository();
   const auditRepo = new InMemoryAuditRepository();
   const agreementRepo = new InMemoryAgreementRepository();
+  const editDeltaRepo = new InMemoryEditDeltaRepository();
+  const docRevisionRepo = new InMemoryDocumentRevisionRepository();
+  const templateRepo = new InMemoryEstimateTemplateRepository();
 
   // Estimates and invoices need settings for number generation
   await settingsRepo.create(makeSeedSettings(TEST_TENANT_ID));
@@ -111,9 +117,10 @@ export async function buildTestApp(): Promise<TestApp> {
       undefined,
       undefined,
       { jobRepo, invoiceRepo },
-      undefined,
+      { docRevisionRepo, editDeltaRepo },
       undefined,
       agreementRepo,
+      templateRepo,
     ),
   );
   app.use(
