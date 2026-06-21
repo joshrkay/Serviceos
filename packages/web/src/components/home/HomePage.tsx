@@ -20,6 +20,7 @@ import { TimeGivenBackCard } from './TimeGivenBackCard';
 import { MoneyLoopHomeCard } from './MoneyLoopHomeCard';
 import { HfcrHeroCard } from './HfcrHeroCard';
 import { VoiceRoiCard } from './VoiceRoiCard';
+import { PendingProposalsCard } from './PendingProposalsCard';
 import { ErrorState } from '../ErrorState';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import {
@@ -394,6 +395,10 @@ export function HomePage() {
             </button>
           </div>
         </div>
+
+        {/* Awaiting-decision queue first — the command surface leads with
+            what needs the owner now (Epic 12.3 / 12.1). */}
+        <PendingProposalsCard />
 
         <HfcrHeroCard />
 
