@@ -132,15 +132,17 @@ same commit per CLAUDE.md), verified with `tsc --project tsconfig.build.json --n
    then evaluate a third language.
 7. **Rows 17–19 — outbound + coaching.** Larger product bets (see analysis §8 Tier-2/3);
    reuse the grader infra for row 19.
-8. **Dialect/accent eval (Row 7) — grading core + runner SHIPPED.**
-   `ai/voice-quality/dialect/` provides WER (`wer.ts`), the per-dialect report with a
-   WER/intent-accuracy gate (`dialect-report.ts`), and the runner (`dialect-runner.ts`:
-   `runDialectEval` with injected ASR + optional agent eval, bounded concurrency,
-   per-case error capture, and `makeWhisperDialectTranscriber` bridging the existing
-   `whisper-real-provider`). 29 unit tests. **Remaining (needs assets/API):** author
-   real-audio dialect fixtures (Southern US, AAVE, Indian/Caribbean English,
-   Hispanic-accented English); wire the agent evaluator + a CI job; wire the Whisper
-   `prompt` (catalog/trade vocab) to lift accented-term recognition.
+8. **Dialect/accent eval (Row 7) — grading core + runner + flywheel bridge SHIPPED.**
+   `ai/voice-quality/dialect/`: WER (`wer.ts`), per-dialect report with a WER/intent gate
+   (`dialect-report.ts`), the runner (`dialect-runner.ts`), and the call-mining bridge
+   (`dialect-fixture.ts`: `buildDialectFixtureFromCall` / `buildDialectFixtures` scrub a
+   labeled call's corrected transcript through `ai/training/scrub.ts` → a clean
+   `DialectEvalCase`, rejecting/quarantining residual PII; `makeScrubbingTranscriber`
+   keeps the ASR hypothesis PII-safe for symmetric WER). 36 unit tests. **Remaining
+   (data/ops, not logic):** a labeling step that flags dialect-stress calls (low ASR
+   confidence / high reprompt / clarification) and assigns dialect tags; wire the agent
+   evaluator + a CI job; wire the Whisper `prompt` for trade/catalog vocab. Best data
+   source = your own recorded calls (capture + consent + scrub already exist).
 
 ---
 
