@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiClient } from '../lib/useApiClient';
+import { decodeError } from '../lib/appError';
 
 export interface MoneySummary {
   month: string;
@@ -54,7 +55,7 @@ export function useMoneyDashboard(): MoneyDashboardResult {
         setNotConfigured(true);
         return;
       }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error((await decodeError(res)).message);
       const body = (await res.json()) as { data?: MoneySummary };
       if (myVersion !== versionRef.current) return;
       setSummary(body.data ?? null);

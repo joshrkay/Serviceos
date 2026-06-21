@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 import { useApiClient } from '../lib/useApiClient';
+import { decodeError } from '../lib/appError';
 
 export interface ThreadMessage {
   id: string;
@@ -64,7 +65,7 @@ export function useConversationThread(
     try {
       const res = await apiRef.current(`/api/conversations/${conversationId}/messages`);
       if (myVersion !== versionRef.current) return;
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error((await decodeError(res)).message);
       const body = (await res.json()) as ThreadMessage[];
       if (myVersion !== versionRef.current) return;
       setMessages(Array.isArray(body) ? body : []);

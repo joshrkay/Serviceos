@@ -44,10 +44,14 @@ describe('useMoneyDashboard', () => {
     expect(result.current.error).toBeNull();
   });
 
-  it('surfaces a non-ok (non-503) response as an error', async () => {
-    h.api.mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
+  it('surfaces the backend error message on a non-ok (non-503) response', async () => {
+    h.api.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: 'INTERNAL_ERROR', message: 'Report failed' }),
+    });
     const { result } = renderHook(() => useMoneyDashboard());
-    await waitFor(() => expect(result.current.error).toBe('HTTP 500'));
+    await waitFor(() => expect(result.current.error).toBe('Report failed'));
     expect(result.current.summary).toBeNull();
   });
 

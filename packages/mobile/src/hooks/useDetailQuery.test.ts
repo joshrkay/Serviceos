@@ -37,9 +37,13 @@ describe('useDetailQuery', () => {
     expect(h.api).not.toHaveBeenCalled();
   });
 
-  it('surfaces a non-ok response as an error', async () => {
-    h.api.mockResolvedValue({ ok: false, status: 404, json: async () => ({}) });
+  it('surfaces the backend error message on a non-ok response', async () => {
+    h.api.mockResolvedValue({
+      ok: false,
+      status: 404,
+      json: async () => ({ error: 'NOT_FOUND', message: 'Customer not found: missing' }),
+    });
     const { result } = renderHook(() => useDetailQuery('/api/customers/missing'));
-    await waitFor(() => expect(result.current.error).toBe('HTTP 404'));
+    await waitFor(() => expect(result.current.error).toBe('Customer not found: missing'));
   });
 });

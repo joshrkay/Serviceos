@@ -50,6 +50,20 @@ export function makeUnauthenticatedAbort(): Error {
   return err;
 }
 
+/**
+ * Error a request rejects with when it exceeds {@link DEFAULT_TIMEOUT_MS}.
+ * Tagged `name === 'TimeoutError'` (distinct from the sign-out `AbortError`) so
+ * `decodeError` classifies it as `timeout` rather than the swallowed sign-out.
+ */
+export function makeTimeoutError(): Error {
+  const err = new Error('Request timed out');
+  err.name = 'TimeoutError';
+  return err;
+}
+
+/** Default per-request timeout — a hung socket rejects instead of hanging the UI. */
+export const DEFAULT_TIMEOUT_MS = 15_000;
+
 export type TokenGetter = (options?: { forceRefresh?: boolean }) => Promise<string | null>;
 
 export type ApiFetch = (path: string, init?: RequestInit) => Promise<Response>;
@@ -61,6 +75,8 @@ export interface ApiFetchDeps {
   getToken: TokenGetter;
   /** Called when re-auth is required (after a failed 401 retry). */
   onUnauthenticated?: () => void;
+  /** Per-request timeout; defaults to {@link DEFAULT_TIMEOUT_MS}. 0 disables it. */
+  timeoutMs?: number;
 }
 
 function buildHeaders(init: RequestInit): Record<string, string> {
@@ -85,15 +101,38 @@ function buildHeaders(init: RequestInit): Record<string, string> {
 /** Build a fetch-shaped client with auth + 401-retry baked in. */
 export function createApiFetch(deps: ApiFetchDeps): ApiFetch {
   const { baseUrl, getToken, onUnauthenticated } = deps;
+  const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const toUrl = (path: string): string =>
     path.startsWith('http') ? path : `${baseUrl}${path}`;
+
+  // Wrap fetch with an AbortController timeout. A real abort surfaces as an
+  // AbortError DOMException; we translate the *timeout* abort to a distinct
+  // TimeoutError so it isn't mistaken for the sign-out AbortError and so
+  // `decodeError` can classify it as `timeout`.
+  const fetchWithTimeout = async (url: string, init: RequestInit): Promise<Response> => {
+    if (timeoutMs <= 0) return fetch(url, init);
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } catch (err) {
+      if (timedOut) throw makeTimeoutError();
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 
   return async (path: string, init: RequestInit = {}): Promise<Response> => {
     const headers = buildHeaders(init);
     const url = toUrl(path);
 
     if (isPublicApiPath(path)) {
-      return fetch(url, { ...init, headers });
+      return fetchWithTimeout(url, { ...init, headers });
     }
 
     if (!shouldInjectAuth(path)) {
@@ -103,7 +142,7 @@ export function createApiFetch(deps: ApiFetchDeps): ApiFetch {
       } catch {
         // best-effort — don't block a public-ish call on token errors
       }
-      return fetch(url, { ...init, headers });
+      return fetchWithTimeout(url, { ...init, headers });
     }
 
     // Authenticated /api/ path — strictly require a token.
@@ -111,7 +150,7 @@ export function createApiFetch(deps: ApiFetchDeps): ApiFetch {
     if (!token) throw makeUnauthenticatedAbort();
     headers['Authorization'] = `Bearer ${token}`;
 
-    const response = await fetch(url, { ...init, headers });
+    const response = await fetchWithTimeout(url, { ...init, headers });
     if (response.status !== 401) return response;
 
     // 401 — one retry with a force-refreshed token before giving up.
@@ -122,7 +161,7 @@ export function createApiFetch(deps: ApiFetchDeps): ApiFetch {
       fresh = null;
     }
     if (fresh) {
-      const retry = await fetch(url, {
+      const retry = await fetchWithTimeout(url, {
         ...init,
         headers: { ...headers, Authorization: `Bearer ${fresh}` },
       });

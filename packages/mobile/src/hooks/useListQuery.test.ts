@@ -74,10 +74,14 @@ describe('useListQuery', () => {
     expect(result.current.error).toBeNull();
   });
 
-  it('surfaces a non-ok response as an error', async () => {
-    h.api.mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
+  it('surfaces the backend error message on a non-ok response', async () => {
+    h.api.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: 'INTERNAL_ERROR', message: 'Boom on our end' }),
+    });
     const { result } = renderHook(() => useListQuery('/api/customers'));
-    await waitFor(() => expect(result.current.error).toBe('HTTP 500'));
+    await waitFor(() => expect(result.current.error).toBe('Boom on our end'));
   });
 
   it('does not fetch when disabled', async () => {

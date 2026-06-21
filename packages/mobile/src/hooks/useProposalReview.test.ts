@@ -13,8 +13,8 @@ const T0 = Date.UTC(2026, 5, 20, 0, 0, 0);
 function okJson(body: unknown) {
   return { ok: true, status: 200, json: async () => body };
 }
-function err(status: number) {
-  return { ok: false, status, json: async () => ({}) };
+function err(status: number, body: unknown = {}) {
+  return { ok: false, status, json: async () => body };
 }
 function proposal(over: Record<string, unknown> = {}) {
   return {
@@ -136,11 +136,11 @@ describe('useProposalReview', () => {
     expect(result.current.phase).toBe('committed');
   });
 
-  it('surfaces a load error', async () => {
-    h.api.mockResolvedValue(err(500));
+  it('surfaces a load error with the backend message', async () => {
+    h.api.mockResolvedValue(err(500, { error: 'INTERNAL_ERROR', message: 'Load failed' }));
     const { result } = renderHook(() => useProposalReview('p1'));
     await settle();
     expect(result.current.phase).toBe('error');
-    expect(result.current.error).toBe('HTTP 500');
+    expect(result.current.error).toBe('Load failed');
   });
 });

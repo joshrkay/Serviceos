@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiClient } from '../lib/useApiClient';
+import { decodeError } from '../lib/appError';
 import { type ReviewProposal, undoSecondsLeft } from '../proposals/proposalReview';
 
 export type { ReviewProposal };
@@ -90,7 +91,7 @@ export function useProposalReview(id: string): UseProposalReviewResult {
     setError(null);
     try {
       const res = await api(`/api/proposals/${id}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error((await decodeError(res)).message);
       const p = normalize(await res.json());
       setProposal(p);
       const initial = phaseForStatus(p.status, p.approvedAt ?? null);
@@ -112,7 +113,7 @@ export function useProposalReview(id: string): UseProposalReviewResult {
     setError(null);
     try {
       const res = await api(`/api/proposals/${id}/approve`, { method: 'POST' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error((await decodeError(res)).message);
       // POST /:id/approve returns the approved Proposal directly (res.json of
       // approveProposal's result). Support a { approved: [...] } wrapper too in
       // case a chained/batch path is ever routed here.
@@ -142,7 +143,7 @@ export function useProposalReview(id: string): UseProposalReviewResult {
           setPhase('committed');
           return;
         }
-        throw new Error(`HTTP ${res.status}`);
+        throw new Error((await decodeError(res)).message);
       }
       setProposal(normalize(await res.json()));
       setPhase('undone');

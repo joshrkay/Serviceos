@@ -33,9 +33,13 @@ describe('useConversationThread', () => {
     expect(h.api).not.toHaveBeenCalled();
   });
 
-  it('surfaces a non-ok response as an error', async () => {
-    h.api.mockResolvedValue({ ok: false, status: 404, json: async () => ({}) });
+  it('surfaces the backend error message on a non-ok response', async () => {
+    h.api.mockResolvedValue({
+      ok: false,
+      status: 404,
+      json: async () => ({ error: 'NOT_FOUND', message: 'Conversation not found: c1' }),
+    });
     const { result } = renderHook(() => useConversationThread('c1', { pollIntervalMs: 1_000_000 }));
-    await waitFor(() => expect(result.current.error).toBe('HTTP 404'));
+    await waitFor(() => expect(result.current.error).toBe('Conversation not found: c1'));
   });
 });

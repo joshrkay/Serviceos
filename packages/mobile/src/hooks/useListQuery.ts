@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApiClient } from '../lib/useApiClient';
+import { decodeError } from '../lib/appError';
 
 export interface ListQueryOptions {
   enabled?: boolean;
@@ -49,7 +50,7 @@ export function useListQuery<T>(endpoint: string, options: ListQueryOptions = {}
     try {
       const res = await api(url);
       if (myVersion !== versionRef.current) return;
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error((await decodeError(res)).message);
       const result = (await res.json()) as { data?: T[]; total?: number } | T[];
       if (myVersion !== versionRef.current) return;
       const list = (Array.isArray(result) ? result : (result.data ?? [])) as T[];

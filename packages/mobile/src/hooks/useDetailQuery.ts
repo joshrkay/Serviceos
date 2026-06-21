@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiClient } from '../lib/useApiClient';
+import { decodeError } from '../lib/appError';
 
 export interface DetailQueryResult<T> {
   data: T | null;
@@ -36,7 +37,7 @@ export function useDetailQuery<T>(
     try {
       const res = await api(endpoint);
       if (myVersion !== versionRef.current) return;
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error((await decodeError(res)).message);
       const result = (await res.json()) as { data?: T } | T;
       if (myVersion !== versionRef.current) return;
       const value =

@@ -70,11 +70,15 @@ describe('usePendingProposals', () => {
     expect(result.current.count).toBe(2);
   });
 
-  it('surfaces a non-ok response as an error', async () => {
-    h.api.mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
+  it('surfaces the backend error message on a non-ok response', async () => {
+    h.api.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: 'INTERNAL_ERROR', message: 'Inbox failed' }),
+    });
     const { result } = renderHook(() => usePendingProposals({ pollIntervalMs: 1_000_000 }));
 
-    await waitFor(() => expect(result.current.error).toBe('HTTP 500'));
+    await waitFor(() => expect(result.current.error).toBe('Inbox failed'));
   });
 
   it('does not fetch when disabled', async () => {
