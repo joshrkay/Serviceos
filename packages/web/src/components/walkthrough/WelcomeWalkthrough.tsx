@@ -1,18 +1,27 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Phone, FileText, CreditCard, Moon, PartyPopper } from 'lucide-react';
 import { useOnboardingStatus } from '../../hooks/useOnboardingStatus';
 import { getLocalFlag, setLocalFlag } from '../../lib/uiFlags';
 import { Walkthrough, type WalkStep } from './Walkthrough';
+import { WHATS_NEW_SEEN_KEY, latestReleaseId } from './whatsNew';
 
 /**
  * First-run product tour for a brand-new account. Surfaces once, the first
- * time an owner reaches the app with onboarding complete, then never again
+ * time a *new* owner reaches the app with onboarding complete, then never again
  * (persisted in localStorage). Introduces what Rivet now does on their behalf.
  *
- * The `WELCOME_SEEN_KEY` is also read by WhatsNewModal so a brand-new account
- * sees only this tour, not the changelog, on day one.
+ * This component is the single owner of the "brand-new account" decision: it
+ * gates on account age (accountCreatedAt from the onboarding status), and when
+ * it identifies a new account it seeds the what's-new cursor so day one shows
+ * only this tour, not the changelog. Established users never hit that seed, so
+ * WhatsNewModal shows them the changelog normally.
  */
 export const WELCOME_SEEN_KEY = 'walkthrough.welcome.v1';
+
+/** An account is "new" (eligible for the welcome tour) for this long after
+ * creation. Comfortably covers signup → finish-onboarding, while excluding
+ * established users on the release that ships these surfaces. */
+const NEW_ACCOUNT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 const STEPS: WalkStep[] = [
   {
@@ -51,7 +60,22 @@ export function WelcomeWalkthrough() {
   const { data } = useOnboardingStatus(30_000, true);
   const [seen, setSeen] = useState(() => getLocalFlag(WELCOME_SEEN_KEY) !== null);
 
-  const visible = !seen && !!data?.isComplete;
+  const isNewAccount =
+    !!data?.accountCreatedAt &&
+    Date.now() - Date.parse(data.accountCreatedAt) < NEW_ACCOUNT_MAX_AGE_MS;
+
+  const visible = !seen && !!data?.isComplete && isNewAccount;
+
+  // Seed the what's-new cursor for a brand-new account the first time we
+  // identify it, so the changelog stays suppressed on day one (the welcome
+  // tour is enough). Established users never reach this branch, so their
+  // cursor stays null and WhatsNewModal shows them the changelog.
+  useEffect(() => {
+    if (isNewAccount && getLocalFlag(WHATS_NEW_SEEN_KEY) === null) {
+      const latest = latestReleaseId();
+      if (latest) setLocalFlag(WHATS_NEW_SEEN_KEY, latest);
+    }
+  }, [isNewAccount]);
 
   function finish() {
     setLocalFlag(WELCOME_SEEN_KEY);

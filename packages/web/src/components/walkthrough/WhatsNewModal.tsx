@@ -4,23 +4,22 @@ import { Modal } from '../ui/modal';
 import { Button } from '../ui/button';
 import { track } from '../../lib/analytics';
 import { getLocalFlag, setLocalFlag } from '../../lib/uiFlags';
-import { RELEASES, latestReleaseId } from './whatsNew';
-import { WELCOME_SEEN_KEY } from './WelcomeWalkthrough';
+import { RELEASES, latestReleaseId, WHATS_NEW_SEEN_KEY } from './whatsNew';
+
+// Re-exported for callers (and tests) that import the key from this module.
+export { WHATS_NEW_SEEN_KEY };
 
 /**
- * "What's new" changelog for existing users. Surfaces the release notes the
- * user hasn't seen yet, then records the newest id so it won't show again
- * until the next release.
+ * "What's new" changelog. Shows whenever the newest release id differs from the
+ * user's stored cursor, then records the newest id so it won't show again until
+ * the next release.
  *
- * Gating keeps the two surfaces from colliding:
- *   - A brand-new account (welcome tour not yet seen) gets its last-seen id
- *     initialized to the latest release and the modal stays hidden — day one
- *     is for the welcome tour, not the changelog.
- *   - Everyone else sees it whenever the latest release id differs from their
- *     stored last-seen id.
+ * New-vs-existing gating lives entirely in WelcomeWalkthrough: it seeds this
+ * cursor to the latest release for a brand-new account, so day one shows only
+ * the welcome tour. Established users never get that seed, so they fall straight
+ * into the "cursor !== latest → show" path here. This component therefore stays
+ * pure-localStorage (no onboarding-status poll of its own).
  */
-export const WHATS_NEW_SEEN_KEY = 'walkthrough.whatsnew.lastSeen';
-
 export function WhatsNewModal() {
   const latestId = latestReleaseId();
   const [open, setOpen] = useState(false);
@@ -28,16 +27,7 @@ export function WhatsNewModal() {
   useEffect(() => {
     if (!latestId) return;
     const lastSeen = getLocalFlag(WHATS_NEW_SEEN_KEY);
-    const welcomeSeen = getLocalFlag(WELCOME_SEEN_KEY) !== null;
-
     if (lastSeen === latestId) return; // already up to date
-
-    // Brand-new account: suppress the changelog and treat the current release
-    // as already seen, so only the welcome tour shows on day one.
-    if (!welcomeSeen && lastSeen === null) {
-      setLocalFlag(WHATS_NEW_SEEN_KEY, latestId);
-      return;
-    }
 
     setOpen(true);
     track('announcement_shown', { releaseId: latestId });
@@ -49,11 +39,10 @@ export function WhatsNewModal() {
     setOpen(false);
   }
 
-  // Show every release at/after the one the user last saw (or all, first time).
+  // Show every release newer than the one the user last saw (or all, first time).
   const lastSeen = getLocalFlag(WHATS_NEW_SEEN_KEY);
   const lastSeenIndex = lastSeen ? RELEASES.findIndex((r) => r.id === lastSeen) : -1;
-  const unseen = lastSeenIndex === -1 ? RELEASES : RELEASES.slice(0, lastSeenIndex);
-  const toShow = unseen.length > 0 ? unseen : RELEASES.slice(0, 1);
+  const toShow = lastSeenIndex === -1 ? RELEASES : RELEASES.slice(0, lastSeenIndex);
 
   return (
     <Modal

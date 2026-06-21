@@ -7,6 +7,9 @@
  *
  * Bump by PREPENDING a new entry with a fresh, stable `id` (date-prefixed).
  */
+/** localStorage cursor: the id of the newest release the user has seen. */
+export const WHATS_NEW_SEEN_KEY = 'walkthrough.whatsnew.lastSeen';
+
 export interface Release {
   /** Stable, unique, sortable id — e.g. "2026-06-21-onboarding". */
   id: string;

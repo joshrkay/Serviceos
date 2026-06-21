@@ -23,11 +23,3 @@ export function appStoreUrl(): string {
 export function playStoreUrl(): string {
   return getRuntimeConfigValue('VITE_PLAY_STORE_URL') || FALLBACK;
 }
-
-/** True once at least one real store URL is configured. */
-export function hasLiveStoreLinks(): boolean {
-  return (
-    !!getRuntimeConfigValue('VITE_APP_STORE_URL') ||
-    !!getRuntimeConfigValue('VITE_PLAY_STORE_URL')
-  );
-}
