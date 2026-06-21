@@ -127,11 +127,12 @@ export class TechnicianAssignmentNotifier {
   async notifyChange(change: TechnicianAssignmentChange): Promise<void> {
     const { tenantId, appointmentId, technicianId, kind } = change;
     try {
-      const user = await this.deps.userRepo.findById(tenantId, technicianId);
-      if (!user) return;
-
-      const appointment = await this.deps.appointmentRepo.findById(tenantId, appointmentId);
-      if (!appointment) return;
+      // The user and appointment lookups are independent — run them together.
+      const [user, appointment] = await Promise.all([
+        this.deps.userRepo.findById(tenantId, technicianId),
+        this.deps.appointmentRepo.findById(tenantId, appointmentId),
+      ]);
+      if (!user || !appointment) return;
 
       const job = await this.deps.jobRepo.findById(tenantId, appointment.jobId);
       const customer = job
