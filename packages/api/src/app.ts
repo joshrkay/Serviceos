@@ -139,6 +139,7 @@ import { PgAttachmentRepository } from './attachments/pg-attachment';
 import { createDispatchRoutes } from './dispatch/routes';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
+import { createLeadIntakeRouter } from './routes/lead-intake';
 import { createPublicBookingRouter } from './routes/public-booking';
 import { createReportsRouter } from './routes/reports';
 import { createDigestsRouter } from './routes/digests';
@@ -624,6 +625,10 @@ export function createApp(): express.Express {
   // before global express.json() so /webhooks/twilio/* routes get populated
   // req.body fields (used for signature verification + AccountSid match).
   app.use('/webhooks/twilio', express.urlencoded({ extended: false }));
+
+  // LC-2 — signed lead-intake webhook. HMAC verification needs the exact
+  // signed bytes, so capture the raw Buffer here before global express.json().
+  app.use('/webhooks/lead-intake', express.raw({ type: 'application/json' }));
 
   // Body parsing for all other routes
   app.use(express.json());
@@ -2050,6 +2055,21 @@ export function createApp(): express.Express {
       legacyHeaders: false,
     }),
     createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo, settingsRepo, canonicalPackRegistry, pool)
+  );
+
+  // LC-2 — signed lead-intake webhook (server-to-server form/partner relay).
+  // Raw-body parser for this path is mounted up top (before express.json()).
+  // Reuses the single tenantRepo + the durable webhookRepo idempotency store.
+  app.use(
+    '/webhooks/lead-intake',
+    createLeadIntakeRouter({
+      leadRepo,
+      tenantRepo: intakeTenantRepo,
+      auditRepo,
+      customerRepo,
+      signingSecret: config.WEBHOOK_SIGNING_SECRET,
+      webhookRepo,
+    }),
   );
 
   // Public unauthenticated estimate approval flow (token-authenticated).
