@@ -112,21 +112,11 @@ export function createCustomerRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const includeArchived = req.query.includeArchived === 'true';
-        const search = req.query.search as string | undefined;
-        const tag = req.query.tag as string | undefined;
-        const sort: 'asc' | 'desc' = req.query.sort === 'desc' ? 'desc' : 'asc';
-
-        // P1-018: when `paginated=true` (or limit/offset are present) we
-        // return `{ data, total }` so the frontend can drive UI pagination.
-        // Without those query params we keep the legacy bare-array shape so
-        // existing list consumers don't need changes.
-        const wantsPaginated =
-          req.query.paginated === 'true' ||
-          req.query.limit !== undefined ||
-          req.query.offset !== undefined;
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const includeArchived = req.query.includeArchived === 'true';
+      const search = req.query.search as string | undefined;
+      const tag = req.query.tag as string | undefined;
+      const sort: 'asc' | 'desc' = req.query.sort === 'desc' ? 'desc' : 'asc';
 
       // P1-018: when `paginated=true` (or limit/offset are present) we
       // return `{ data, total }` so the frontend can drive UI pagination.
@@ -137,24 +127,32 @@ export function createCustomerRouter(
         req.query.limit !== undefined ||
         req.query.offset !== undefined;
 
-        if (wantsPaginated) {
-          const result = await listCustomersWithMeta(req.auth!.tenantId, customerRepo, {
-            includeArchived,
-            search,
-            tag,
-            limit,
-            offset,
-            sort,
-          });
-          res.json(result);
-          return;
-        }
+      const limitRaw = req.query.limit as string | undefined;
+      const offsetRaw = req.query.offset as string | undefined;
+      const limit = limitRaw !== undefined ? parseInt(limitRaw, 10) : DEFAULT_LIST_LIMIT;
+      const offset = offsetRaw !== undefined ? parseInt(offsetRaw, 10) : 0;
+      if (limitRaw !== undefined && (Number.isNaN(limit) || limit < 1 || limit > MAX_LIST_LIMIT)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: `limit must be between 1 and ${MAX_LIST_LIMIT}`,
+        });
+        return;
+      }
+      if (offsetRaw !== undefined && (Number.isNaN(offset) || offset < 0)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'offset must be a non-negative integer',
+        });
+        return;
+      }
 
       if (wantsPaginated) {
         const result = await listCustomersWithMeta(req.auth!.tenantId, customerRepo, {
           includeArchived,
           search,
           tag,
+          limit,
+          offset,
           sort,
         });
         res.json(result);
@@ -164,6 +162,7 @@ export function createCustomerRouter(
       const result = await listCustomers(req.auth!.tenantId, customerRepo, {
         includeArchived,
         search,
+        tag,
         sort,
       });
       res.json(result);
@@ -239,32 +238,27 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:update'),
-      async (req: AuthenticatedRequest, res: Response) => {
-        try {
-          const losingId = (req.body?.losingId ?? '') as string;
-          if (typeof losingId !== 'string' || losingId.trim() === '') {
-            res.status(400).json({
-              error: 'VALIDATION_ERROR',
-              message: 'losingId is required',
-            });
-            return;
-          }
-          const result = await mergeCustomers(
-            req.auth!.tenantId,
-            {
-              survivingId: req.params.id,
-              losingId,
-              actorId: req.auth!.userId,
-              actorRole: req.auth!.role,
-            },
-            { customerRepo, mergeRepo, auditRepo }
-          );
-          res.json(result);
-        } catch (err) {
-          const { statusCode, body } = toErrorResponse(err);
-          res.status(statusCode).json(body);
+      asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+        const losingId = (req.body?.losingId ?? '') as string;
+        if (typeof losingId !== 'string' || losingId.trim() === '') {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: 'losingId is required',
+          });
+          return;
         }
-      }
+        const result = await mergeCustomers(
+          req.auth!.tenantId,
+          {
+            survivingId: req.params.id,
+            losingId,
+            actorId: req.auth!.userId,
+            actorRole: req.auth!.role,
+          },
+          { customerRepo, mergeRepo, auditRepo }
+        );
+        res.json(result);
+      })
     );
   }
 
