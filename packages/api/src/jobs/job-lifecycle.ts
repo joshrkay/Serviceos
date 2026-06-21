@@ -38,11 +38,24 @@ export interface DelayAcknowledgmentMetadata extends Record<string, unknown> {
   inferredTriggerState: 'running_behind' | 'on_time';
 }
 
+/**
+ * Epic 5.1 — forward (and cancel/reopen) transitions of the canonical job
+ * lifecycle: Requested(new) → Scheduled → Dispatched → In-progress →
+ * Complete(completed) → Invoiced → Closed. `dispatched` may be skipped
+ * (scheduled → in_progress) so existing flows that never dispatch stay valid.
+ * Backward moves (e.g. in_progress → scheduled) are NOT listed here — they are
+ * owner-gated and routed through the §5.8 backward path in
+ * `transitionJobStatus`. `canceled` is reachable from every active state and
+ * reopens to `new`.
+ */
 export const JOB_STATUS_TRANSITIONS: Record<JobStatus, JobStatus[]> = {
   new: ['scheduled', 'canceled'],
-  scheduled: ['in_progress', 'canceled'],
-  in_progress: ['completed', 'scheduled', 'canceled'],
-  completed: [],
+  scheduled: ['dispatched', 'in_progress', 'canceled'],
+  dispatched: ['in_progress', 'canceled'],
+  in_progress: ['completed', 'canceled'],
+  completed: ['invoiced', 'closed'],
+  invoiced: ['closed'],
+  closed: [],
   canceled: ['new'],
 };
 
@@ -59,8 +72,11 @@ export function isValidTransition(from: JobStatus, to: JobStatus): boolean {
 export const JOB_STATUS_ORDER: Record<Exclude<JobStatus, 'canceled'>, number> = {
   new: 0,
   scheduled: 1,
-  in_progress: 2,
-  completed: 3,
+  dispatched: 2,
+  in_progress: 3,
+  completed: 4,
+  invoiced: 5,
+  closed: 6,
 };
 
 /**
@@ -69,6 +85,19 @@ export const JOB_STATUS_ORDER: Record<Exclude<JobStatus, 'canceled'>, number> = 
  * the story's "owner or admin" maps onto.
  */
 export const BACKWARD_MOVE_ROLES: readonly string[] = ['owner'];
+
+/**
+ * §5.1 Statuses at or past Complete whose forward entry fires irreversible
+ * side effects (auto-invoice, completion milestones, feedback SMS, and the
+ * money rollup). Backward moves out of these are refused even for an owner —
+ * un-doing them would desynchronize money state. Reversing a completion is a
+ * deliberate, separate operation, out of scope for a status step-back.
+ */
+export const POST_COMPLETION_STATUSES: readonly JobStatus[] = ['completed', 'invoiced', 'closed'];
+
+export function isPostCompletionStatus(status: JobStatus): boolean {
+  return POST_COMPLETION_STATUSES.includes(status);
+}
 
 /**
  * True when `to` sits earlier on the linear lifecycle than `from`.
@@ -110,10 +139,11 @@ export async function transitionJobStatus(
 
   if (backward) {
     // §5.8 — backward moves exist to fix mistakes, but only an owner may
-    // make them, always with a recorded reason. Terminal statuses
-    // (e.g. 'completed', whose side effects — auto-invoice, completion
-    // milestones, feedback SMS — have already fired) can never be undone
-    // this way; reversing money state is out of scope here.
+    // make them, always with a recorded reason. Post-completion statuses
+    // (completed/invoiced/closed, whose side effects — auto-invoice,
+    // completion milestones, feedback SMS, money rollup — have already
+    // fired) can never be undone this way; reversing money state is out of
+    // scope here.
     if (!BACKWARD_MOVE_ROLES.includes(actorRole)) {
       throw new ForbiddenError(
         `Only an owner can move a job backward (${oldStatus} → ${newStatus})`,
@@ -122,9 +152,9 @@ export async function transitionJobStatus(
     if (!trimmedReason) {
       throw new ValidationError('A reason is required to move a job backward in status');
     }
-    if (isTerminalJobStatus(oldStatus)) {
+    if (isPostCompletionStatus(oldStatus)) {
       throw new ValidationError(
-        `Cannot move a job backward out of terminal status '${oldStatus}'`,
+        `Cannot move a job backward out of post-completion status '${oldStatus}'`,
       );
     }
   } else if (!isValidTransition(oldStatus, newStatus)) {

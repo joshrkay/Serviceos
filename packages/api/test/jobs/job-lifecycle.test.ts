@@ -95,10 +95,31 @@ describe('P1-006 — Job lifecycle and timeline events', () => {
     ).rejects.toThrow('Invalid transition from new to completed');
   });
 
-  it('validation — completed is terminal', () => {
-    expect(isValidTransition('completed', 'new')).toBe(false);
-    expect(isValidTransition('completed', 'scheduled')).toBe(false);
+  it('validation — closed is the terminal state; completed flows on to invoiced/closed', () => {
+    // §5.1 — the canonical lifecycle now extends past completion.
+    expect(isValidTransition('completed', 'invoiced')).toBe(true);
+    expect(isValidTransition('completed', 'closed')).toBe(true);
+    expect(isValidTransition('invoiced', 'closed')).toBe(true);
+    expect(isValidTransition('closed', 'invoiced')).toBe(false);
+    expect(isValidTransition('closed', 'new')).toBe(false);
+    // forward map carries no backward edges (handled by the §5.8 owner path)
     expect(isValidTransition('completed', 'in_progress')).toBe(false);
+  });
+
+  it('happy path — full canonical lifecycle new → … → closed', async () => {
+    const job = await createJob(
+      { tenantId: 'tenant-1', customerId: 'c-1', locationId: 'l-1', summary: 'Canonical', createdBy: 'u-1' },
+      jobRepo
+    );
+    for (const next of ['scheduled', 'dispatched', 'in_progress', 'completed', 'invoiced', 'closed'] as const) {
+      await transitionJobStatus('tenant-1', job.id, next, 'u-1', 'owner', jobRepo, timelineRepo);
+    }
+    const fresh = await jobRepo.findById('tenant-1', job.id);
+    expect(fresh!.status).toBe('closed');
+    const timeline = await timelineRepo.findByJob('tenant-1', job.id);
+    expect(timeline.map((t) => t.toStatus)).toEqual([
+      'scheduled', 'dispatched', 'in_progress', 'completed', 'invoiced', 'closed',
+    ]);
   });
 
   it('validation — rejects transition for non-existent job', async () => {
@@ -191,7 +212,9 @@ describe('P1-006 / §5.8 — Backward status moves', () => {
     // canceled has no ordinal — reopen/cancel are never "backward"
     expect(isBackwardTransition('canceled', 'new')).toBe(false);
     expect(isBackwardTransition('in_progress', 'canceled')).toBe(false);
-    expect(isTerminalJobStatus('completed')).toBe(true);
+    // §5.1 — 'closed' is the only terminal state; 'completed' now flows on
+    expect(isTerminalJobStatus('closed')).toBe(true);
+    expect(isTerminalJobStatus('completed')).toBe(false);
     expect(isTerminalJobStatus('in_progress')).toBe(false);
   });
 
@@ -241,13 +264,20 @@ describe('P1-006 / §5.8 — Backward status moves', () => {
     ).rejects.toThrow('A reason is required to move a job backward');
   });
 
-  it('never un-does a terminal status, even for an owner with a reason', async () => {
+  it('never un-does a post-completion status, even for an owner with a reason', async () => {
     const job = await seedInProgressJob();
     await transitionJobStatus('tenant-1', job.id, 'completed', 'owner-1', 'owner', jobRepo, timelineRepo);
 
+    // completed → in_progress (backward across the completion boundary)
     await expect(
       transitionJobStatus('tenant-1', job.id, 'in_progress', 'owner-1', 'owner', jobRepo, timelineRepo, auditRepo, 'mistaken completion')
-    ).rejects.toThrow("Cannot move a job backward out of terminal status 'completed'");
+    ).rejects.toThrow("Cannot move a job backward out of post-completion status 'completed'");
+
+    // and once invoiced/closed the boundary still holds
+    await transitionJobStatus('tenant-1', job.id, 'invoiced', 'owner-1', 'owner', jobRepo, timelineRepo);
+    await expect(
+      transitionJobStatus('tenant-1', job.id, 'completed', 'owner-1', 'owner', jobRepo, timelineRepo, auditRepo, 'oops')
+    ).rejects.toThrow("Cannot move a job backward out of post-completion status 'invoiced'");
   });
 
   it('forward moves still require no reason and are allowed for any role', async () => {
