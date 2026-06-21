@@ -486,7 +486,7 @@ function firstSentence(text: string): string {
   return hardCap.slice(0, Math.min(...stops));
 }
 
-function systemFingerprintFromPromptString(prompt: string): string | null {
+export function systemFingerprintFromPromptString(prompt: string): string | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(prompt);
@@ -504,7 +504,7 @@ function systemFingerprintFromPromptString(prompt: string): string | null {
  * (see snapshotRequest below). Parse it defensively and extract the
  * same canonical last-user-message key the live-request side uses.
  */
-function lastUserContentFromPromptString(prompt: string): string | null {
+export function lastUserContentFromPromptString(prompt: string): string | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(prompt);

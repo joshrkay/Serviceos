@@ -51,9 +51,19 @@ jobs:
           VOICE_QUALITY_CASSETTE_MODE: replay
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         continue-on-error: true # TODO(VQ-024-followup): remove once pg mode + cassettes are ready
+      - name: Cassette staleness report (informational)
+        if: always()
+        # Deterministic, offline (no DB/LLM): surfaces how much of the corpus
+        # is served by the replay drift-fallback rather than exact replay, so
+        # re-records become deliberate. Non-gating: run without --strict, and
+        # continue-on-error so a corrupt cassette can't redden this nightly.
+        continue-on-error: true
+        run: npm run voice-quality:staleness --workspace=packages/api
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: voice-quality-nightly-report
-          path: packages/api/voice-quality-report.json
+          path: |
+            packages/api/voice-quality-report.json
+            packages/api/voice-quality-cassette-staleness.json
