@@ -1,12 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useUser } from '@clerk/clerk-react';
 import {
   AlertCircle, Clock, ChevronRight, ArrowRight,
   DollarSign, FileText, Send, Eye, Briefcase,
-  CheckCircle2, Mic, TrendingUp, Bell,
+  CheckCircle2, Mic, TrendingUp, Bell, MessageSquare,
 } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
+import { listInboxThreads, type InboxThread } from '../../api/conversations';
 import { StatCard } from '../ui';
 import {
   normalizeJobStatus,
@@ -281,6 +282,17 @@ export function HomePage() {
   const today = todayIso();
   const todayDate = new Date(); todayDate.setHours(0, 0, 0, 0);
 
+  // Story 10.7 — surface unread customer replies (newest message inbound) on
+  // the home page so two-way threads needing a response aren't missed.
+  const [unreadThreads, setUnreadThreads] = useState<InboxThread[]>([]);
+  useEffect(() => {
+    let active = true;
+    listInboxThreads({ needsReplyOnly: true, limit: 20 })
+      .then((threads) => { if (active) setUnreadThreads(threads); })
+      .catch(() => { if (active) setUnreadThreads([]); });
+    return () => { active = false; };
+  }, []);
+
   const jobsQuery = useListQuery<ApiJob>('/api/jobs', { filters: { scheduledDate: today } });
   const estimatesQuery = useListQuery<ApiEstimate>('/api/estimates', { filters: { status: 'sent' } });
   const invoicesQuery = useListQuery<ApiInvoice>('/api/invoices', { filters: { status: 'open' } });
@@ -304,6 +316,12 @@ export function HomePage() {
 
   // Build attention items
   const attentionItems = [
+    ...unreadThreads.map(t => ({
+      id: `reply-${t.conversation.id}`, type: 'reply' as const,
+      message: `${t.customerName ?? 'Customer'} replied`,
+      sub: t.lastMessagePreview || 'New message',
+      action: 'Reply', to: '/comms-inbox',
+    })),
     ...overdueInvs.map(i => ({
       id: `inv-${i.id}`, type: 'overdue' as const,
       message: `${customerName(i.customer)} — invoice overdue`,
@@ -321,6 +339,7 @@ export function HomePage() {
   const ATTN_STYLE = {
     overdue:  { icon: AlertCircle,  ic: 'text-red-500',    border: 'border-red-100',   bg: 'bg-red-50'    },
     followup: { icon: Eye,          ic: 'text-violet-500', border: 'border-violet-100',bg: 'bg-violet-50/50' },
+    reply:    { icon: MessageSquare,ic: 'text-blue-500',   border: 'border-blue-100',  bg: 'bg-blue-50'   },
   };
 
   return (
