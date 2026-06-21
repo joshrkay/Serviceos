@@ -64,12 +64,6 @@ export const VoiceQualityScriptSchema = z.object({
    * via `loadLayer2Corpus()`.
    */
   layer2Only: z.boolean().default(false),
-  expectedCallerMetrics: z
-    .object({
-      ttfaMaxMs: z.number().optional(),
-      reprompMaxRatio: z.number().optional(),
-    })
-    .optional(),
 });
 
 export type VoiceQualityScript = z.infer<typeof VoiceQualityScriptSchema>;

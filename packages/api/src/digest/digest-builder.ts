@@ -9,6 +9,7 @@
 import type { Pool } from 'pg';
 import { setTenantContext } from '../db/schema';
 import type { DigestSection, DigestSourceData } from './digest-types';
+import { formatUsd } from './digest-service';
 
 export interface BuildDigestDataResult {
   sections: DigestSection[];
@@ -220,13 +221,3 @@ export async function buildDigestData(
   }
 }
 
-/** $12 / $12.50 formatting for SMS — integer cents in, no float math. */
-function formatUsd(cents: number): string {
-  const sign = cents < 0 ? '-' : '';
-  const abs = Math.abs(cents);
-  const dollars = Math.floor(abs / 100);
-  const rem = abs % 100;
-  return rem === 0
-    ? `${sign}$${dollars}`
-    : `${sign}$${dollars}.${String(rem).padStart(2, '0')}`;
-}

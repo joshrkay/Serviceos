@@ -9,6 +9,10 @@ export interface OnboardingFacts {
    * tenant_id onto funnel events without a separate /me round-trip. */
   tenantId: string;
   tenantExists: boolean;
+  /** tenants.created_at — drives the client's new-account vs. existing-user
+   * distinction (welcome tour vs. what's-new changelog). Optional so existing
+   * fact fixtures don't need it. */
+  tenantCreatedAt?: Date | null;
   identity: {
     businessName: string | null;
     businessHours: unknown | null;     // null OR an empty object {} both count as "not set"
@@ -115,5 +119,6 @@ export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResp
       ? { upgradePromptShownAt: f.upgradePromptShownAt.toISOString() }
       : {}),
     ...(f.activatedAt ? { activatedAt: f.activatedAt.toISOString() } : {}),
+    ...(f.tenantCreatedAt ? { accountCreatedAt: f.tenantCreatedAt.toISOString() } : {}),
   };
 }
