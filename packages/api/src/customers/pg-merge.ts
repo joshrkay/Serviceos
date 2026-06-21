@@ -39,14 +39,18 @@ export class PgCustomerMergeRepository
       const counts: Record<string, number> = {};
 
       // Simple FK re-parents. Order is irrelevant — all scoped to the loser.
-      // (service_locations + customer_payment_methods are handled separately
-      // below: the former carries a single-primary invariant, the latter a
-      // per-(tenant, stripe_payment_method_id) UNIQUE that duplicates collide
-      // on, so neither is a safe blind UPDATE.)
+      // (service_locations + customer_contacts are handled separately below:
+      // they carry a single-primary invariant a blind UPDATE wouldn't respect.)
+      //
+      // customer_payment_methods is safe as a blind re-parent: its UNIQUE is on
+      // (tenant_id, stripe_payment_method_id), which the move never touches —
+      // and that same constraint already forbids the two records from sharing a
+      // card, so no collision is possible.
       const simpleTables = [
         'jobs',
         'service_agreements',
         'service_credits',
+        'customer_payment_methods',
         'voice_sessions',
         'portal_sessions',
       ];
@@ -70,26 +74,6 @@ export class PgCustomerMergeRepository
         survivingId,
         losingId,
       );
-
-      // Saved cards: the survivor's copy of a shared card wins. A blind move
-      // would trip UNIQUE (tenant_id, stripe_payment_method_id) when both
-      // duplicates saved the same card and abort the whole merge.
-      await client.query(
-        `DELETE FROM customer_payment_methods
-          WHERE tenant_id = $1 AND customer_id = $2
-            AND stripe_payment_method_id IN (
-              SELECT stripe_payment_method_id FROM customer_payment_methods
-               WHERE tenant_id = $1 AND customer_id = $3
-            )`,
-        [tenantId, losingId, survivingId],
-      );
-      const cards = await client.query(
-        `UPDATE customer_payment_methods
-            SET customer_id = $2, updated_at = NOW()
-          WHERE tenant_id = $1 AND customer_id = $3`,
-        [tenantId, survivingId, losingId],
-      );
-      counts.customer_payment_methods = cards.rowCount ?? 0;
 
       // Tags: move only tags the survivor doesn't already carry, then drop
       // the loser's now-duplicate leftovers (the UNIQUE constraint forbids

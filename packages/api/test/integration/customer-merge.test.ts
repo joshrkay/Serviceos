@@ -195,7 +195,7 @@ describe('Postgres integration — customer merge (Story 4.6)', () => {
     expect((await customers.findById(t.tenantId, survivor.id))!.isArchived).toBe(false);
   });
 
-  // Helpers for the saved-card collision case (no payment-method repo here).
+  // Helper: seed a saved card (no payment-method repo in this suite).
   async function insertPaymentMethod(tenantId: string, customerId: string, stripePmId: string) {
     const client = await pool.connect();
     try {
@@ -227,27 +227,27 @@ describe('Postgres integration — customer merge (Story 4.6)', () => {
     }
   }
 
-  it('merges duplicates that share a saved card without tripping the UNIQUE', async () => {
+  it('re-parents the loser saved cards onto the survivor', async () => {
+    // customer_payment_methods.UNIQUE is (tenant_id, stripe_payment_method_id),
+    // so two records can never share a card and the move (which only changes
+    // customer_id) can't collide — a plain re-parent is correct.
     const t = await createTestTenant(pool);
     const survivor = await customers.create(baseCustomer(t.tenantId, t.userId, 'Card Survivor'));
     const loser = await customers.create(baseCustomer(t.tenantId, t.userId, 'Card Loser'));
-    // Same card saved under BOTH duplicates (the realistic collision), plus
-    // a loser-only card.
-    await insertPaymentMethod(t.tenantId, survivor.id, 'pm_shared');
-    await insertPaymentMethod(t.tenantId, loser.id, 'pm_shared');
-    await insertPaymentMethod(t.tenantId, loser.id, 'pm_loser_only');
+    await insertPaymentMethod(t.tenantId, survivor.id, 'pm_survivor');
+    await insertPaymentMethod(t.tenantId, loser.id, 'pm_loser_a');
+    await insertPaymentMethod(t.tenantId, loser.id, 'pm_loser_b');
 
-    // A blind re-parent would abort on UNIQUE (tenant_id, stripe_payment_method_id).
     await mergeCustomers(
       t.tenantId,
       { survivingId: survivor.id, losingId: loser.id, actorId: t.userId },
       { customerRepo: customers, mergeRepo },
     );
 
-    // Survivor keeps one copy of the shared card + the moved loser-only card.
     expect(await listPaymentMethodIds(t.tenantId, survivor.id)).toEqual([
-      'pm_loser_only',
-      'pm_shared',
+      'pm_loser_a',
+      'pm_loser_b',
+      'pm_survivor',
     ]);
     expect(await listPaymentMethodIds(t.tenantId, loser.id)).toEqual([]);
     expect((await customers.findById(t.tenantId, loser.id))!.isArchived).toBe(true);
