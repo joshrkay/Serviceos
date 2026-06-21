@@ -13,8 +13,8 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
+import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { toErrorResponse } from '../shared/errors';
 import type { DailyDigestRepository } from '../digest/digest-service';
 
 export interface DigestsRouterDeps {
@@ -40,44 +40,39 @@ export function createDigestsRouter(deps: DigestsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('reports:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const tenantId = req.auth!.tenantId;
-        const raw = req.params.date;
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const tenantId = req.auth!.tenantId;
+      const raw = req.params.date;
 
-        const record =
-          raw === 'latest'
-            ? await deps.digestRepo.findLatest(tenantId)
-            : await (async () => {
-                const parsed = dateParamSchema.safeParse(raw);
-                if (!parsed.success) return undefined;
-                return deps.digestRepo.findByTenantAndDate(tenantId, parsed.data);
-              })();
+      const record =
+        raw === 'latest'
+          ? await deps.digestRepo.findLatest(tenantId)
+          : await (async () => {
+              const parsed = dateParamSchema.safeParse(raw);
+              if (!parsed.success) return undefined;
+              return deps.digestRepo.findByTenantAndDate(tenantId, parsed.data);
+            })();
 
-        if (record === undefined) {
-          res
-            .status(400)
-            .json({ error: 'VALIDATION_ERROR', message: 'date must be YYYY-MM-DD or "latest"' });
-          return;
-        }
-        if (record === null) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'No digest for this day' });
-          return;
-        }
-
-        res.json({
-          data: {
-            date: record.digestDate,
-            payload: record.payload,
-            narrative: record.narrative ?? null,
-            generatedAt: record.generatedAt.toISOString(),
-          },
-        });
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+      if (record === undefined) {
+        res
+          .status(400)
+          .json({ error: 'VALIDATION_ERROR', message: 'date must be YYYY-MM-DD or "latest"' });
+        return;
       }
-    },
+      if (record === null) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'No digest for this day' });
+        return;
+      }
+
+      res.json({
+        data: {
+          date: record.digestDate,
+          payload: record.payload,
+          narrative: record.narrative ?? null,
+          generatedAt: record.generatedAt.toISOString(),
+        },
+      });
+    }),
   );
 
   return router;

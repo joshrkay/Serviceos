@@ -355,6 +355,9 @@ import {
 } from './metrics/hfcr-weekly-send';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
 import { runThankYouSmsSweep } from './workers/thank-you-sms-worker';
+import { createLifecycleEmailWorker } from './workers/lifecycle-email-worker';
+import { runSetupReminderSweep } from './workers/setup-reminder-sweep';
+import { runTrialReminderSweep } from './workers/trial-reminder-sweep';
 import { PgReviewRepository } from './reputation/pg-review';
 import { PgReviewPollStateRepository } from './reputation/poll-state';
 import { PgServiceCreditRepository } from './reputation/pg-service-credit';
@@ -1380,6 +1383,29 @@ export function createApp(): express.Express {
     imagePostProcessWorker as import('./queues/queue').WorkerHandler<unknown>
   );
 
+  // ── Onboarding lifecycle emails. The frontend origin backs the CTA links
+  // (/onboarding, /settings) and the support address backs the footer ask;
+  // shared by the welcome worker (below) and the setup/trial sweeps.
+  const lifecycleEmailAppBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
+  const lifecycleEmailSupportEmail =
+    process.env.SUPPORT_EMAIL ?? process.env.SENDGRID_REPLY_TO_EMAIL ?? 'support@rivet.ai';
+  const lifecycleEmailWorker = createLifecycleEmailWorker({
+    delivery: messageDelivery,
+    pool: pool ?? null,
+    settingsRepo,
+    auditRepo,
+    appBaseUrl: lifecycleEmailAppBaseUrl,
+    supportEmail: lifecycleEmailSupportEmail,
+    logger: createLogger({
+      service: 'lifecycle-email-worker',
+      environment: process.env.NODE_ENV || 'development',
+    }),
+  });
+  workerRegistry.set(
+    lifecycleEmailWorker.type,
+    lifecycleEmailWorker as import('./queues/queue').WorkerHandler<unknown>
+  );
+
   // ── Auto-delivery worker: sweeps approved proposals past the 5-second
   // undo window and hands them to the executor. Closes the operational
   // question from the D9 undo-window slice: "who kicks execution after
@@ -1810,8 +1836,10 @@ export function createApp(): express.Express {
     hfcrWeeklySend: 590014,
     holdReaper: 590015,
     thankYouSms: 590016,
-    // Epic 12.6 — weekly feedback email sweep.
-    weeklyFeedback: 590017,
+    setupReminder: 590017,
+    trialReminder: 590018,
+    // Epic 12.6 — weekly feedback email sweep (590017/590018 taken by main).
+    weeklyFeedback: 590019,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -4477,8 +4505,7 @@ export function createApp(): express.Express {
       service: 'weekly-feedback-worker',
       environment: process.env.NODE_ENV || 'development',
     });
-    registerInterval(
-      setInterval(() => {
+    const runWeeklyFeedback = () => {
         void runAsLeader(SWEEP_LOCK.weeklyFeedback, async () => {
           await runWeeklyFeedbackSweep({
             auditRepo,
@@ -4532,8 +4559,12 @@ export function createApp(): express.Express {
             error: err instanceof Error ? err.message : String(err),
           });
         });
-      }, 24 * 60 * 60_000),
-    );
+    };
+    // Run once on boot so frequent redeploys don't postpone the weekly send
+    // indefinitely (a pure 24h setInterval never elapses if the process keeps
+    // restarting). The per-week audit gate keeps this to one email per week.
+    runWeeklyFeedback();
+    registerInterval(setInterval(runWeeklyFeedback, 24 * 60 * 60_000));
   }
 
   // F17 — push paid invoices + customers to QuickBooks every 5 minutes.
@@ -4776,6 +4807,49 @@ export function createApp(): express.Express {
       });
     });
   }, 10 * 60_000));
+
+  // Onboarding lifecycle email sweeps (setup reminder + trial-ending). Same
+  // P0-009 sweep idiom; the pool guard inside each no-ops when running
+  // in-memory, and each send claims the lifecycle_emails ledger so a re-tick
+  // never double-sends.
+  const lifecycleSweepLogger = createLogger({
+    service: 'lifecycle-email-sweep',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.setupReminder, async () => {
+      await runSetupReminderSweep({
+        pool: pool ?? null,
+        settingsRepo,
+        delivery: messageDelivery,
+        auditRepo,
+        appBaseUrl: lifecycleEmailAppBaseUrl,
+        supportEmail: lifecycleEmailSupportEmail,
+        logger: lifecycleSweepLogger,
+      });
+    }).catch((err) => {
+      lifecycleSweepLogger.error('Setup-reminder sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 60 * 60_000));
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.trialReminder, async () => {
+      await runTrialReminderSweep({
+        pool: pool ?? null,
+        settingsRepo,
+        delivery: messageDelivery,
+        auditRepo,
+        appBaseUrl: lifecycleEmailAppBaseUrl,
+        supportEmail: lifecycleEmailSupportEmail,
+        logger: lifecycleSweepLogger,
+      });
+    }).catch((err) => {
+      lifecycleSweepLogger.error('Trial-reminder sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 60 * 60_000));
 
   // U5 — the redundant P5-020 hourly digest worker was removed; the daily
   // digest (RV-063 runDailyDigestSweep, scheduled above on the dailyDigest

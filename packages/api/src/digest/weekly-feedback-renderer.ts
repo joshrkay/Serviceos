@@ -18,9 +18,17 @@ export interface RenderWeeklyOptions {
   businessName?: string;
 }
 
+// Hoisted so we don't construct an Intl formatter on every call.
+const DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+  timeZone: 'UTC',
+});
+const NUMBER_FORMATTER = new Intl.NumberFormat('en-US');
+
 function dollars(cents: number): string {
   const sign = cents < 0 ? '-' : '';
-  return `${sign}$${Math.abs(Math.round(cents / 100)).toLocaleString('en-US')}`;
+  return `${sign}$${NUMBER_FORMATTER.format(Math.abs(Math.round(cents / 100)))}`;
 }
 
 function escapeHtml(s: string): string {
@@ -32,11 +40,10 @@ function escapeHtml(s: string): string {
 }
 
 function fmtRange(startIso: string, endIso: string): string {
-  const opts: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric', timeZone: 'UTC' };
-  const start = new Date(startIso).toLocaleDateString('en-US', opts);
+  const start = DATE_FORMATTER.format(new Date(startIso));
   // weekEnd is exclusive (the next Monday); show the inclusive last day.
   const lastDay = new Date(new Date(endIso).getTime() - 24 * 60 * 60 * 1000);
-  const end = lastDay.toLocaleDateString('en-US', opts);
+  const end = DATE_FORMATTER.format(lastDay);
   return `${start} – ${end}`;
 }
 

@@ -1,3 +1,4 @@
+import { createLogger } from '../../logging/logger';
 import type { EmbeddingProvider } from '../providers/openai-compatible';
 import type { KnowledgeChunkRepository } from '../training/knowledge-chunks';
 import type { RetrievalEvalRunRepository } from '../training/retrieval-eval-run';
@@ -11,6 +12,11 @@ import {
   type RetrieveContextResult,
 } from '../skills/retrieve-context';
 import type { RetrieveAdapter } from './context-builder';
+
+const logger = createLogger({
+  service: 'ai.orchestration.retrieve-adapter',
+  environment: process.env.NODE_ENV || 'development',
+});
 
 /**
  * Phase 4a-2 reader wiring. Builds the `RetrieveAdapter` consumed by
@@ -125,8 +131,7 @@ export function createRetrieveAdapter(
           detectedLanguage,
         });
       } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error('retrieve-adapter: recordRun failed', {
+        logger.error('retrieve-adapter: recordRun failed', {
           tenantId: input.tenantId,
           error: err instanceof Error ? err.message : String(err),
         });

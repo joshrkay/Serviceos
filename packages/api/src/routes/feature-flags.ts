@@ -7,7 +7,7 @@ import {
   PgPlatformAdminChecker,
   requirePlatformAdmin,
 } from '../auth/platform-admin';
-import { toErrorResponse } from '../shared/errors';
+import { asyncRoute } from '../middleware/async-route';
 import { validate } from '../shared/validation';
 import {
   FeatureFlag,
@@ -63,15 +63,10 @@ export function createFeatureFlagsRouter(
     requireAuth,
     requireTenant,
     adminGate,
-    async (_req: AuthenticatedRequest, res: Response) => {
-      try {
-        const flags = await repo.list();
-        res.json({ data: flags });
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    asyncRoute(async (_req: AuthenticatedRequest, res: Response) => {
+      const flags = await repo.list();
+      res.json({ data: flags });
+    })
   );
 
   router.get(
@@ -79,19 +74,14 @@ export function createFeatureFlagsRouter(
     requireAuth,
     requireTenant,
     adminGate,
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const flag = await repo.get(req.params.name);
-        if (!flag) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Flag not found' });
-          return;
-        }
-        res.json(flag);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const flag = await repo.get(req.params.name);
+      if (!flag) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Flag not found' });
+        return;
       }
-    }
+      res.json(flag);
+    })
   );
 
   router.put(
@@ -99,55 +89,50 @@ export function createFeatureFlagsRouter(
     requireAuth,
     requireTenant,
     adminGate,
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = validate(upsertSchema, { ...req.body, name: req.params.name });
-        const flag: FeatureFlag = {
-          name: parsed.name,
-          enabled: parsed.enabled,
-          environments: parsed.environments,
-          tenantIds: parsed.tenantIds,
-          description: parsed.description,
-        };
-        const saved = await repo.upsert(flag);
-        store.setFlag(saved);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = validate(upsertSchema, { ...req.body, name: req.params.name });
+      const flag: FeatureFlag = {
+        name: parsed.name,
+        enabled: parsed.enabled,
+        environments: parsed.environments,
+        tenantIds: parsed.tenantIds,
+        description: parsed.description,
+      };
+      const saved = await repo.upsert(flag);
+      store.setFlag(saved);
 
-        // D2-1c — audit-log the upsert. Feature-flags are platform-admin
-        // gated → cross-tenant blast radius, so we tag the audit row with
-        // `metadata.scope: 'platform'` and write under the acting admin's
-        // home tenant. (The audit schema requires a non-empty tenantId;
-        // using a synthetic '__platform__' value would break the RLS-safe
-        // findByEntity query and the operator-history view, both of which
-        // filter on `tenantId = $1`.)
-        if (auditRepo) {
-          await auditRepo.create(
-            createAuditEvent({
-              tenantId: req.auth!.tenantId,
-              actorId: req.auth!.userId,
-              actorRole: req.auth!.role,
-              eventType: 'feature_flag.upserted',
-              entityType: 'feature_flag',
-              entityId: saved.name,
-              metadata: {
-                scope: 'platform',
-                flagName: saved.name,
-                value: {
-                  enabled: saved.enabled,
-                  environments: saved.environments,
-                  tenantIds: saved.tenantIds,
-                },
-                environment: process.env.NODE_ENV ?? 'development',
+      // D2-1c — audit-log the upsert. Feature-flags are platform-admin
+      // gated → cross-tenant blast radius, so we tag the audit row with
+      // `metadata.scope: 'platform'` and write under the acting admin's
+      // home tenant. (The audit schema requires a non-empty tenantId;
+      // using a synthetic '__platform__' value would break the RLS-safe
+      // findByEntity query and the operator-history view, both of which
+      // filter on `tenantId = $1`.)
+      if (auditRepo) {
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId: req.auth!.tenantId,
+            actorId: req.auth!.userId,
+            actorRole: req.auth!.role,
+            eventType: 'feature_flag.upserted',
+            entityType: 'feature_flag',
+            entityId: saved.name,
+            metadata: {
+              scope: 'platform',
+              flagName: saved.name,
+              value: {
+                enabled: saved.enabled,
+                environments: saved.environments,
+                tenantIds: saved.tenantIds,
               },
-            }),
-          );
-        }
-
-        res.json(saved);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+              environment: process.env.NODE_ENV ?? 'development',
+            },
+          }),
+        );
       }
-    }
+
+      res.json(saved);
+    })
   );
 
   router.delete(
@@ -155,42 +140,37 @@ export function createFeatureFlagsRouter(
     requireAuth,
     requireTenant,
     adminGate,
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const removed = await repo.delete(req.params.name);
-        if (!removed) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Flag not found' });
-          return;
-        }
-        store.removeFlag(req.params.name);
-
-        // D2-1c — audit-log the delete. Same scope='platform' tagging as
-        // the upsert path so the operator-history view can group
-        // platform-scope flag mutations regardless of which tenant the
-        // acting admin was authenticated under.
-        if (auditRepo) {
-          await auditRepo.create(
-            createAuditEvent({
-              tenantId: req.auth!.tenantId,
-              actorId: req.auth!.userId,
-              actorRole: req.auth!.role,
-              eventType: 'feature_flag.deleted',
-              entityType: 'feature_flag',
-              entityId: req.params.name,
-              metadata: {
-                scope: 'platform',
-                flagName: req.params.name,
-              },
-            }),
-          );
-        }
-
-        res.status(204).send();
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const removed = await repo.delete(req.params.name);
+      if (!removed) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Flag not found' });
+        return;
       }
-    }
+      store.removeFlag(req.params.name);
+
+      // D2-1c — audit-log the delete. Same scope='platform' tagging as
+      // the upsert path so the operator-history view can group
+      // platform-scope flag mutations regardless of which tenant the
+      // acting admin was authenticated under.
+      if (auditRepo) {
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId: req.auth!.tenantId,
+            actorId: req.auth!.userId,
+            actorRole: req.auth!.role,
+            eventType: 'feature_flag.deleted',
+            entityType: 'feature_flag',
+            entityId: req.params.name,
+            metadata: {
+              scope: 'platform',
+              flagName: req.params.name,
+            },
+          }),
+        );
+      }
+
+      res.status(204).send();
+    })
   );
 
   return router;
