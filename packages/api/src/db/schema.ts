@@ -5030,6 +5030,33 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_maintenance_contracts ON maintenance_contracts
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
+
+  // Story 10.5 — tenant-scoped customer message templates with `{{variable}}`
+  // placeholders. Distinct from estimate_templates (estimate copy); these are
+  // reusable SMS/email texts shared by the agent draft path and humans.
+  '204_create_message_templates': `
+    CREATE TABLE IF NOT EXISTS message_templates (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'general'
+        CHECK (category IN ('general', 'appointment', 'estimate', 'invoice', 'followup', 'review')),
+      channel TEXT NOT NULL DEFAULT 'sms'
+        CHECK (channel IN ('sms', 'email')),
+      body TEXT NOT NULL,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_templates_tenant
+      ON message_templates(tenant_id, channel);
+    ALTER TABLE message_templates ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE message_templates FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_message_templates ON message_templates
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
