@@ -4,7 +4,7 @@ import {
   addDelayAcknowledgmentTimelineEntry,
   isValidTransition,
   isBackwardTransition,
-  isTerminalJobStatus,
+  isPostCompletionStatus,
   InMemoryJobTimelineRepository,
 } from '../../src/jobs/job-lifecycle';
 import { createJob, InMemoryJobRepository } from '../../src/jobs/job';
@@ -212,10 +212,13 @@ describe('P1-006 / §5.8 — Backward status moves', () => {
     // canceled has no ordinal — reopen/cancel are never "backward"
     expect(isBackwardTransition('canceled', 'new')).toBe(false);
     expect(isBackwardTransition('in_progress', 'canceled')).toBe(false);
-    // §5.1 — 'closed' is the only terminal state; 'completed' now flows on
-    expect(isTerminalJobStatus('closed')).toBe(true);
-    expect(isTerminalJobStatus('completed')).toBe(false);
-    expect(isTerminalJobStatus('in_progress')).toBe(false);
+    // §5.1 — completed/invoiced/closed are the post-completion floor; backward
+    // moves out of them are refused (money side effects already fired).
+    expect(isPostCompletionStatus('completed')).toBe(true);
+    expect(isPostCompletionStatus('invoiced')).toBe(true);
+    expect(isPostCompletionStatus('closed')).toBe(true);
+    expect(isPostCompletionStatus('in_progress')).toBe(false);
+    expect(isPostCompletionStatus('scheduled')).toBe(false);
   });
 
   it('owner can move a job backward with a reason — recorded on timeline and audit', async () => {

@@ -632,7 +632,15 @@ export async function reproposeProposal(
     targetEntityType: source.targetEntityType,
     targetEntityId: source.targetEntityId,
     createdBy: actorId,
+    // Carry the source's unfilled required fields forward so a re-proposed
+    // draft that was incomplete stays gated — approveProposal refuses a draft
+    // with outstanding missingFields, and dropping them here would let the
+    // clone be approved with the same incomplete payload.
+    missingFields: missingFieldsFor(source),
     // A fresh 48h expiry is applied by createProposal's schedule-type default.
+    // chainId is intentionally NOT carried: a re-proposal is a standalone card
+    // (the original chain's siblings have also expired), so it must not link
+    // back into a dead chain.
   });
   const created = await proposalRepo.create(replacement);
 

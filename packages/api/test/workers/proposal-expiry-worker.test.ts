@@ -95,6 +95,33 @@ describe('runProposalExpirySweep (§5.5)', () => {
     expect((await proposalRepo.findById('t1', p.id))?.status).toBe('approved');
   });
 
+  it('does not expire a proposal approved between the status scan and the write', async () => {
+    // Simulate the race: findByStatus returns a stale 'draft' snapshot, but the
+    // row was approved before the sweep writes. The re-read guard must skip it.
+    const past = new Date(NOW.getTime() - 60 * 60 * 1000);
+    const stale = createProposal({
+      tenantId: 't1', proposalType: 'create_appointment', payload: {}, summary: 's', createdBy: 'u1', expiresAt: past,
+    } as CreateProposalInput);
+    const updateCalls: string[] = [];
+    const racingRepo = {
+      async findByStatus(_t: string, status: string) {
+        return status === 'draft' ? [stale] : [];
+      },
+      // by write-time the operator has approved it
+      async findById() {
+        return { ...stale, status: 'approved' as const };
+      },
+      async updateStatus(_t: string, id: string, status: string) {
+        updateCalls.push(`${id}:${status}`);
+        return null;
+      },
+    } as unknown as InMemoryProposalRepository;
+
+    const res = await runProposalExpirySweep(deps({ proposalRepo: racingRepo }));
+    expect(res.expired).toBe(0);
+    expect(updateCalls).toEqual([]); // never clobbered the approval
+  });
+
   it('isProposalExpired only fires for pending proposals past their expiry', () => {
     const stale = createProposal({
       tenantId: 't1', proposalType: 'create_appointment', payload: {}, summary: 's', createdBy: 'u', expiresAt: PAST,

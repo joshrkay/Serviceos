@@ -39,6 +39,12 @@ const approveBatchBodySchema = z.object({
   proposalIds: z.array(z.string().uuid()).min(1).max(50),
 });
 
+// §5.5 — how far back the inbox surfaces expired schedule cards. Operators
+// re-propose recent lapses; bounding the window keeps the response from growing
+// as expired history accumulates (the cards are still re-proposable via the
+// list endpoint by id).
+const EXPIRED_INBOX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
 // U2 (P2-035) — resolve an ambiguous catalog line by picking one of the
 // line's surfaced candidates. Patches the draft; never approves (D-004).
 const resolveLineBodySchema = z.object({
@@ -167,11 +173,18 @@ export function createProposalsRouter(
           proposalRepo.findByStatus(req.auth!.tenantId, 'expired'),
         ]);
         const inbox = buildInboxPayload([...ready, ...drafts], 100);
-        // §5.5 — surface expired schedule proposal cards so the operator can
-        // see what lapsed and re-propose it. Only schedule types ever expire;
-        // cap + most-recent-first keeps the list bounded.
+        // §5.5 — surface recently-expired schedule proposal cards so the operator
+        // can see what lapsed and re-propose it. Only schedule types ever expire.
+        // Bounded to a recent window (operators re-propose recent lapses, not
+        // ancient ones) so the list can't grow without limit as expired history
+        // accumulates; a DB-side limit / retention sweep is the deeper follow-up.
+        const expiredCutoff = Date.now() - EXPIRED_INBOX_WINDOW_MS;
         const expired = expiredAll
-          .filter((p) => isScheduleProposalType(p.proposalType))
+          .filter(
+            (p) =>
+              isScheduleProposalType(p.proposalType) &&
+              (p.expiresAt?.getTime() ?? 0) >= expiredCutoff,
+          )
           .sort((a, b) => (b.expiresAt?.getTime() ?? 0) - (a.expiresAt?.getTime() ?? 0))
           .slice(0, 20)
           .map((p) => ({

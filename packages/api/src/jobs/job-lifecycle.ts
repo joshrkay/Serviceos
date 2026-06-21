@@ -110,11 +110,6 @@ export function isBackwardTransition(from: JobStatus, to: JobStatus): boolean {
   return toOrder < fromOrder;
 }
 
-/** A status is terminal when it has no outbound transitions in the map. */
-export function isTerminalJobStatus(status: JobStatus): boolean {
-  return (JOB_STATUS_TRANSITIONS[status]?.length ?? 0) === 0;
-}
-
 export async function transitionJobStatus(
   tenantId: string,
   jobId: string,
@@ -165,8 +160,10 @@ export async function transitionJobStatus(
   const updated = await jobRepo.update(tenantId, jobId, {
     status: newStatus,
     updatedAt: now,
-    // Stamp the explicit completion time exactly once. JOB_STATUS_TRANSITIONS
-    // forbids leaving 'completed', so this never gets cleared post-write.
+    // Stamp the explicit completion time only on entry to 'completed'. Forward
+    // moves past it (completed → invoiced → closed) don't include completedAt,
+    // and backward moves out of a post-completion status are refused above, so
+    // it's written once and never cleared.
     ...(newStatus === 'completed' ? { completedAt: now } : {}),
   });
 

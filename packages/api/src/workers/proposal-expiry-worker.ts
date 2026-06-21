@@ -86,11 +86,17 @@ export async function runProposalExpirySweep(
 
     for (const proposal of candidates) {
       if (!isProposalExpired(proposal, asOf)) continue;
-      // Defensive: the lifecycle already permits draft/ready_for_review →
-      // expired, but guard so a future status change can't silently no-op.
-      if (!canTransition(proposal.status, 'expired')) continue;
 
       try {
+        // Re-read immediately before writing: `candidates` was a snapshot, and
+        // an operator may have approved/rejected this proposal in the same tick.
+        // updateStatus sets status unconditionally, so without this guard the
+        // sweep would clobber a fresh decision (e.g. approved → expired). Skip
+        // unless the row is still a pending, past-expiry schedule card.
+        const fresh = await deps.proposalRepo.findById(tenantId, proposal.id);
+        if (!fresh || !isProposalExpired(fresh, asOf)) continue;
+        if (!canTransition(fresh.status, 'expired')) continue;
+
         await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'expired');
         expired++;
         if (deps.auditRepo) {

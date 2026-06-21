@@ -134,6 +134,24 @@ describe('GET /api/proposals/inbox', () => {
       status: 'expired',
     });
   });
+
+  it('§5.5 — does not surface schedule cards that expired outside the recent window', async () => {
+    const { app, proposalRepo } = buildApp();
+    const longAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000); // 8 days ago
+    const ancient = createProposal({
+      tenantId: 'tenant-i1',
+      proposalType: 'create_booking',
+      payload: {},
+      summary: 'Ancient lapsed booking',
+      createdBy: 'user-i1',
+      expiresAt: longAgo,
+    });
+    await proposalRepo.create({ ...ancient, status: 'expired' });
+
+    const res = await request(app).get('/api/proposals/inbox');
+    expect(res.status).toBe(200);
+    expect(res.body.expired).toHaveLength(0);
+  });
 });
 
 describe('POST /api/proposals/:id/re-propose (§5.5)', () => {
@@ -162,6 +180,27 @@ describe('POST /api/proposals/:id/re-propose (§5.5)', () => {
 
     // the expired source is left untouched
     expect((await proposalRepo.findById('tenant-i1', lapsed.id))?.status).toBe('expired');
+  });
+
+  it('carries the source missingFields forward so an incomplete card stays gated', async () => {
+    const { app, proposalRepo } = buildApp();
+    const past = new Date(Date.now() - 60 * 60 * 1000);
+    const incomplete = createProposal({
+      tenantId: 'tenant-i1',
+      proposalType: 'create_appointment',
+      payload: {},
+      summary: 'Needs a time',
+      createdBy: 'user-i1',
+      expiresAt: past,
+      missingFields: ['scheduledStart'],
+    });
+    await proposalRepo.create({ ...incomplete, status: 'expired' });
+
+    const res = await request(app).post(`/api/proposals/${incomplete.id}/re-propose`);
+    expect(res.status).toBe(201);
+    // missingFields ride in sourceContext; a re-proposed incomplete draft must
+    // still surface them so approveProposal keeps refusing it until filled.
+    expect(res.body.sourceContext?.missingFields).toEqual(['scheduledStart']);
   });
 
   it('returns 409 when the proposal is not expired', async () => {
