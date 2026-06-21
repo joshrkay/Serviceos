@@ -66,3 +66,46 @@ export function formatUsdCents(cents: number): string {
   const rem = abs % 100;
   return rem === 0 ? `${sign}$${dollars}` : `${sign}$${dollars}.${String(rem).padStart(2, '0')}`;
 }
+
+const USD_FIXED_FORMATTER = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+});
+
+const USD_WHOLE_FORMATTER = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 0,
+});
+
+/**
+ * Format integer cents as a user-facing currency string that always keeps the
+ * two-digit cents (`123450 → "$1,234.50"`, `5000 → "$50.00"`). Thousands
+ * separators and correct negative placement (`-$5.00`, never `$-5.00`) come
+ * from `Intl.NumberFormat`. Use this where trailing zero cents must show; use
+ * `formatUsdCents` where whole dollars should drop the decimals.
+ */
+export function formatUsdCentsFixed(cents: number): string {
+  return USD_FIXED_FORMATTER.format(cents / 100);
+}
+
+/**
+ * Format integer cents as whole dollars, rounded, with thousands separators and
+ * no cents (`125050 → "$1,251"`). For dashboard/summary tiles where cents are
+ * noise. Rounds (not floors) to match the prior `maximumFractionDigits: 0`
+ * call sites this replaces.
+ */
+export function formatUsdCentsWhole(cents: number): string {
+  return USD_WHOLE_FORMATTER.format(cents / 100);
+}
+
+/**
+ * Format integer cents as a bare `$N.NN` with two-digit cents and NO thousands
+ * separators (`123450 → "$1234.50"`). For terse contexts — spoken prompts, SMS
+ * bodies — where separators add noise. Prefer `formatUsdCentsFixed` for
+ * on-screen display.
+ */
+export function formatUsdCentsPlain(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
+}

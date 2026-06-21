@@ -1,11 +1,11 @@
 import { resolveModelForTask, getTaskTier, enrichRequestWithRouting } from '../../src/ai/gateway/router';
-import { DEFAULT_AI_ROUTING_CONFIG } from '../../src/config/ai-routing';
+import { DEFAULT_AI_ROUTING_CONFIG, TASK_TYPES } from '../../src/config/ai-routing';
 import type { AIRoutingConfig } from '../../src/config/ai-routing';
 import type { LLMRequest } from '../../src/ai/gateway/gateway';
 
 function makeRequest(overrides: Partial<LLMRequest> = {}): LLMRequest {
   return {
-    taskType: 'create_customer',
+    taskType: 'create_appointment',
     messages: [{ role: 'user', content: 'Hello' }],
     ...overrides,
   };
@@ -22,7 +22,7 @@ describe('P2-028 — Task-complexity-based model routing', () => {
   });
 
   it('happy path — standard task routes to sonnet', () => {
-    const tierConfig = resolveModelForTask('create_customer');
+    const tierConfig = resolveModelForTask('create_appointment');
 
     expect(tierConfig.model).toBe('claude-sonnet-4-6');
     expect(tierConfig.provider).toBe('default');
@@ -73,14 +73,14 @@ describe('P2-028 — Task-complexity-based model routing', () => {
   });
 
   it('happy path — enrichRequestWithRouting applies tier config', () => {
-    const request = makeRequest({ taskType: 'entity_extraction' });
+    const request = makeRequest({ taskType: 'classify_intent' });
     const enriched = enrichRequestWithRouting(request);
 
     expect(enriched.model).toBe('claude-haiku-4-5-20251001');
     expect(enriched.maxTokens).toBe(1024);
     expect(enriched.temperature).toBe(0);
     // Original request fields preserved
-    expect(enriched.taskType).toBe('entity_extraction');
+    expect(enriched.taskType).toBe('classify_intent');
     expect(enriched.messages).toEqual(request.messages);
   });
 
@@ -115,5 +115,67 @@ describe('P2-028 — Task-complexity-based model routing', () => {
     expect(enriched.model).toBe(defaultTierConfig.model);
     expect(enriched.maxTokens).toBe(defaultTierConfig.maxTokens);
     expect(enriched.temperature).toBe(defaultTierConfig.temperature);
+  });
+});
+
+describe('P2-028 — taskTierMapping reconciliation (follow-up #2)', () => {
+  const mapping = DEFAULT_AI_ROUTING_CONFIG.taskTierMapping;
+
+  it('maps exactly the canonical gateway taskTypes — no dead keys, no gaps', () => {
+    // The mapping must cover precisely the taskTypes that reach the gateway,
+    // guarding against the historical drift (idealized keys matching no call
+    // site) from recurring.
+    expect(Object.keys(mapping).sort()).toEqual([...TASK_TYPES].sort());
+  });
+
+  it('drops the idealized keys that matched no real call site', () => {
+    for (const dead of [
+      'entity_extraction',
+      'transcript_normalization',
+      'clarification',
+      'create_customer',
+      'update_customer',
+      'create_job',
+      'multi_entity_proposal',
+    ]) {
+      expect(mapping).not.toHaveProperty(dead);
+    }
+  });
+
+  it('routes the hot-path cheap tasks to lightweight (the cost win)', () => {
+    for (const t of [
+      'classify_intent',
+      'decompose_transcript',
+      'summarize_conversation',
+      'generate_clarification_questions',
+      'transcription_correction',
+    ]) {
+      expect(getTaskTier(t)).toBe('lightweight');
+    }
+  });
+
+  it('fixes the classify_intent vs intent_classification naming split', () => {
+    // The live intent-classifier.ts call site emits `classify_intent`; the old
+    // mapping only had `intent_classification` (used solely by the onboarding
+    // self-check), so the hot path silently ran on standard.
+    expect(mapping).toHaveProperty('classify_intent');
+    expect(getTaskTier('classify_intent')).toBe('lightweight');
+  });
+
+  it('keeps financial + vision tasks on complex', () => {
+    for (const t of ['draft_estimate', 'update_estimate', 'draft_invoice', 'update_invoice', 'mms_estimate']) {
+      expect(getTaskTier(t)).toBe('complex');
+    }
+  });
+
+  it('keeps customer-facing writing on standard', () => {
+    for (const t of ['suggest_reply', 'brand_voice_v1', 'review_private_followup', 'review_public_response', 'create_appointment']) {
+      expect(getTaskTier(t)).toBe('standard');
+    }
+  });
+
+  it('lets dynamic assistant.* taskTypes fall through to standard', () => {
+    expect(getTaskTier('assistant.chain')).toBe('standard');
+    expect(getTaskTier('assistant.query.unpaid_invoices')).toBe('standard');
   });
 });

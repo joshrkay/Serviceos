@@ -32,6 +32,21 @@ export type AnalyticsEvent =
   | 'trial_started'
   | 'pricing_cta_clicked'
   | 'landing_signup_clicked'
+  // Marketing-site pageviews + app-store CTA. Fired from the standalone
+  // marketing pages (features/pricing/about/download) and the store badges.
+  | 'view_features'
+  | 'view_pricing'
+  | 'view_about'
+  | 'view_download'
+  | 'download_app_clicked'
+  // In-app guidance: the new-account first-run tour and the what's-new
+  // changelog (components/walkthrough/*).
+  | 'tour_started'
+  | 'tour_step_viewed'
+  | 'tour_completed'
+  | 'tour_dismissed'
+  | 'announcement_shown'
+  | 'announcement_dismissed'
   // Launch funnel (added for the onboarding launch-readiness pass). These
   // are emitted via trackFunnel() so they always carry tenant_id/user_id/
   // timestamp/source. See FUNNEL.md for the trigger + payload of each.

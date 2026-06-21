@@ -9,7 +9,7 @@ import {
   requirePermission,
   requireRole,
 } from '../middleware/auth';
-import { toErrorResponse } from '../shared/errors';
+import { asyncRoute } from '../middleware/async-route';
 import { AgreementRepository } from '../agreements/agreement';
 import { AgreementRunRepository } from '../agreements/agreement-run';
 import {
@@ -45,25 +45,20 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('customers:create'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = createAgreementSchema.parse(req.body);
-        const result = await createAgreement(
-          {
-            ...parsed,
-            tenantId: req.auth!.tenantId,
-            createdBy: req.auth!.userId,
-            actorRole: req.auth!.role,
-          },
-          agreementRepo,
-          auditRepo,
-        );
-        res.status(201).json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    },
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = createAgreementSchema.parse(req.body);
+      const result = await createAgreement(
+        {
+          ...parsed,
+          tenantId: req.auth!.tenantId,
+          createdBy: req.auth!.userId,
+          actorRole: req.auth!.role,
+        },
+        agreementRepo,
+        auditRepo,
+      );
+      res.status(201).json(result);
+    }),
   );
 
   router.get(
@@ -71,24 +66,19 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('customers:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const customerId = req.query.customerId as string | undefined;
-        const status = req.query.status as
-          | 'active'
-          | 'paused'
-          | 'cancelled'
-          | undefined;
-        const data = await agreementRepo.findByTenant(req.auth!.tenantId, {
-          customerId,
-          status,
-        });
-        res.json({ data, total: data.length });
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    },
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const customerId = req.query.customerId as string | undefined;
+      const status = req.query.status as
+        | 'active'
+        | 'paused'
+        | 'cancelled'
+        | undefined;
+      const data = await agreementRepo.findByTenant(req.auth!.tenantId, {
+        customerId,
+        status,
+      });
+      res.json({ data, total: data.length });
+    }),
   );
 
   router.get(
@@ -96,21 +86,16 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('customers:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const tenantId = req.auth!.tenantId;
-        const agreement = await agreementRepo.findById(tenantId, req.params.id);
-        if (!agreement) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Agreement not found' });
-          return;
-        }
-        const runs = await runRepo.findByAgreement(tenantId, agreement.id, 25);
-        res.json({ ...agreement, recentRuns: runs });
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const tenantId = req.auth!.tenantId;
+      const agreement = await agreementRepo.findById(tenantId, req.params.id);
+      if (!agreement) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Agreement not found' });
+        return;
       }
-    },
+      const runs = await runRepo.findByAgreement(tenantId, agreement.id, 25);
+      res.json({ ...agreement, recentRuns: runs });
+    }),
   );
 
   router.patch(
@@ -118,25 +103,20 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('customers:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = updateAgreementSchema.parse(req.body);
-        const result = await updateAgreement(
-          req.auth!.tenantId,
-          req.params.id,
-          parsed,
-          agreementRepo,
-        );
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Agreement not found' });
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = updateAgreementSchema.parse(req.body);
+      const result = await updateAgreement(
+        req.auth!.tenantId,
+        req.params.id,
+        parsed,
+        agreementRepo,
+      );
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Agreement not found' });
+        return;
       }
-    },
+      res.json(result);
+    }),
   );
 
   router.post(
@@ -144,19 +124,14 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('customers:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await pauseAgreement(req.auth!.tenantId, req.params.id, agreementRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Agreement not found' });
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await pauseAgreement(req.auth!.tenantId, req.params.id, agreementRepo);
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Agreement not found' });
+        return;
       }
-    },
+      res.json(result);
+    }),
   );
 
   router.post(
@@ -164,19 +139,14 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('customers:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await resumeAgreement(req.auth!.tenantId, req.params.id, agreementRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Agreement not found' });
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await resumeAgreement(req.auth!.tenantId, req.params.id, agreementRepo);
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Agreement not found' });
+        return;
       }
-    },
+      res.json(result);
+    }),
   );
 
   router.post(
@@ -184,19 +154,14 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('customers:delete'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await cancelAgreement(req.auth!.tenantId, req.params.id, agreementRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Agreement not found' });
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await cancelAgreement(req.auth!.tenantId, req.params.id, agreementRepo);
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Agreement not found' });
+        return;
       }
-    },
+      res.json(result);
+    }),
   );
 
   // Owner-only manual trigger. Useful for support runbooks ("the recurring
@@ -206,34 +171,29 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requireRole('owner'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const tenantId = req.auth!.tenantId;
-        const agreement = await agreementRepo.findById(tenantId, req.params.id);
-        if (!agreement) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Agreement not found' });
-          return;
-        }
-        // Force the next-run pointer to "now" for this single agreement so
-        // the sweep picks it up, then run.
-        const now = new Date();
-        if (agreement.nextRunAt.getTime() > now.getTime()) {
-          await agreementRepo.update(tenantId, agreement.id, { nextRunAt: now });
-        }
-        const result = await runDueAgreements(tenantId, {
-          agreementRepo,
-          runRepo,
-          jobsService,
-          invoicesService,
-          auditRepo,
-          now,
-        });
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const tenantId = req.auth!.tenantId;
+      const agreement = await agreementRepo.findById(tenantId, req.params.id);
+      if (!agreement) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Agreement not found' });
+        return;
       }
-    },
+      // Force the next-run pointer to "now" for this single agreement so
+      // the sweep picks it up, then run.
+      const now = new Date();
+      if (agreement.nextRunAt.getTime() > now.getTime()) {
+        await agreementRepo.update(tenantId, agreement.id, { nextRunAt: now });
+      }
+      const result = await runDueAgreements(tenantId, {
+        agreementRepo,
+        runRepo,
+        jobsService,
+        invoicesService,
+        auditRepo,
+        now,
+      });
+      res.json(result);
+    }),
   );
 
   return router;
