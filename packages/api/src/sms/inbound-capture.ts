@@ -33,8 +33,44 @@ import type {
   Conversation,
   ConversationRepository,
 } from '../conversations/conversation-service';
+import { isUniqueViolation } from '../conversations/conversation-service';
 import type { FallbackHandler, InboundSmsContext, HandlerResult } from './inbound-dispatch';
 import type { Logger } from '../logging/logger';
+import { notifyOwner } from '../notifications/owner-notifications-instance';
+
+/** Max characters of the inbound text shown in the owner push preview. */
+const SMS_PREVIEW_MAX = 80;
+
+/** STOP/HELP-class compliance keywords. These normally short-circuit far
+ *  upstream (compliance/stop-reply.ts) and never reach capture, but guard here
+ *  so a compliance message never produces an owner "new text" push. */
+const COMPLIANCE_KEYWORDS = new Set([
+  'stop',
+  'stopall',
+  'unsubscribe',
+  'cancel',
+  'end',
+  'quit',
+  'start',
+  'unstop',
+  'help',
+  'info',
+]);
+
+/** True when the message's first token is a carrier compliance keyword. */
+export function isComplianceKeywordMessage(body: string): boolean {
+  const firstToken = body.trim().split(/\s+/, 1)[0] ?? '';
+  const normalized = firstToken.toLowerCase().replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
+  return COMPLIANCE_KEYWORDS.has(normalized);
+}
+
+/** Single-line, ≤80-char preview of an inbound text for the owner push body. */
+export function buildSmsPreview(body: string): string {
+  const collapsed = body.replace(/\s+/g, ' ').trim();
+  return collapsed.length > SMS_PREVIEW_MAX
+    ? `${collapsed.slice(0, SMS_PREVIEW_MAX)}…`
+    : collapsed;
+}
 
 /** Conversation entity type used for inbound texts we could not pin to a
  *  single customer (and could not land on a lead — e.g. ambiguous existing
@@ -166,13 +202,33 @@ async function openOrAppendConversation(
   // back-and-forth lands on one conversation instead of spawning one per text.
   const openThread = existing.find((c) => c.status === 'open');
   if (openThread) return openThread;
-  return deps.conversationRepo.createConversation({
-    tenantId: ctx.tenantId,
-    title: target.title,
-    entityType: target.entityType,
-    entityId: target.entityId,
-    createdBy: 'system:sms-capture',
-  });
+  try {
+    return await deps.conversationRepo.createConversation({
+      tenantId: ctx.tenantId,
+      title: target.title,
+      entityType: target.entityType,
+      entityId: target.entityId,
+      createdBy: 'system:sms-capture',
+    });
+  } catch (err) {
+    // The one-open-thread partial unique indexes — uq_conversations_open_customer
+    // (migration 198) and uq_conversations_open_noncustomer (migration 200,
+    // covering 'lead' and 'sms_unmatched') — reject a concurrent insert with
+    // 23505 when another inbound text or a Message-tap opened the thread first.
+    // Re-read and reuse the winner so the inbound message threads onto it
+    // instead of erroring (which would bounce the Twilio webhook). Every SMS
+    // capture target type is now indexed, so this recovery is atomic for all of
+    // them, not just customer.
+    if (!isUniqueViolation(err)) throw err;
+    const after = await deps.conversationRepo.findByEntity(
+      ctx.tenantId,
+      target.entityType,
+      target.entityId,
+    );
+    const winner = after.find((c) => c.status === 'open');
+    if (winner) return winner;
+    throw err;
+  }
 }
 
 export function createInboundCaptureHandler(
@@ -236,6 +292,18 @@ export function createInboundCaptureHandler(
           } catch {
             /* audit is best-effort — never fail capture on a ledger write */
           }
+        }
+
+        // U3 — fire an owner "new text" push (best-effort). Skip carrier
+        // compliance keywords (STOP/HELP) — those are not conversational and
+        // must never page the owner. notifyOwner is failure-isolated, so a push
+        // failure can never break SMS capture.
+        if (!isComplianceKeywordMessage(ctx.body)) {
+          await notifyOwner(ctx.tenantId, 'inbound_sms', {
+            conversationId: conversation.id,
+            customerName: target.title,
+            preview: buildSmsPreview(ctx.body),
+          });
         }
 
         return { handled: true, handler: 'sms-capture' };

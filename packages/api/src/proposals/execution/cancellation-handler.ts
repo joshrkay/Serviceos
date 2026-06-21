@@ -9,6 +9,32 @@ import {
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { TransactionalCommsService } from '../../notifications/transactional-comms-service';
 import { notifyDispatchBoardChanged } from '../../dispatch/board-notify';
+import { isValidTimezone } from '../../shared/timezone';
+import { notifyOwner } from '../../notifications/owner-notifications-instance';
+
+/**
+ * Resolve the customer display name for the owner cancellation push. The
+ * cancellation handler isn't wired with a customer/job repo, so the name is
+ * optional context the caller may supply; absent, we fall back to a generic,
+ * blame-free label rather than leaking an id.
+ */
+export type CancellationCustomerNameResolver = (
+  tenantId: string,
+  appointmentId: string,
+) => Promise<string | undefined>;
+
+/** Render an appointment start in the tenant timezone, e.g. "Sat, Mar 14, 9:00 AM".
+ *  Mirrors the Intl.DateTimeFormat pattern used by sibling execution handlers. */
+function formatWhenLabel(start: Date, timezone: string): string {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: isValidTimezone(timezone) ? timezone : 'UTC',
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(start);
+}
 
 export class CancelAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'cancel_appointment';
@@ -18,6 +44,7 @@ export class CancelAppointmentExecutionHandler implements ExecutionHandler {
     private readonly analyticsRepo?: DispatchAnalyticsRepository,
     private readonly auditRepo?: AuditRepository,
     private readonly transactionalComms?: TransactionalCommsService,
+    private readonly resolveCustomerName?: CancellationCustomerNameResolver,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -93,6 +120,24 @@ export class CancelAppointmentExecutionHandler implements ExecutionHandler {
 
       if (this.transactionalComms) {
         await this.transactionalComms.notifyCanceled(context.tenantId, appointmentId);
+      }
+
+      // U5 — owner "appointment cancelled" push (best-effort). Covers both
+      // owner- and portal-initiated cancellations (both reach this handler).
+      // The name resolver is optional context; a failure here must never break
+      // the cancellation, so it's isolated. notifyOwner is itself failure-safe.
+      try {
+        const customerName =
+          (this.resolveCustomerName
+            ? await this.resolveCustomerName(context.tenantId, appointmentId)
+            : undefined) || 'A customer';
+        await notifyOwner(context.tenantId, 'appointment_cancellation', {
+          appointmentId,
+          customerName,
+          whenLabel: formatWhenLabel(appointment.scheduledStart, appointment.timezone),
+        });
+      } catch {
+        /* owner push is best-effort — never fail a cancellation on it */
       }
 
       // Spatial board sync: a canceled appointment must vanish from any open

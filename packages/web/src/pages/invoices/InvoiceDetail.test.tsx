@@ -37,6 +37,26 @@ describe('InvoiceDetail', () => {
     expect(screen.getByText('Payments')).toBeInTheDocument();
   });
 
+  it('shows a processing-fee row when the invoice carries a surcharge', () => {
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: {
+        id: '1', invoiceNumber: 'INV-FEE', status: 'sent', jobId: 'j1',
+        subtotalCents: 20000, discountCents: 0, taxCents: 0,
+        processingFeeCents: 600, totalCents: 20600,
+        amountPaidCents: 0, amountDueCents: 20600,
+        createdAt: '2026-01-15T00:00:00Z', lineItems: [], payments: [],
+      },
+      isLoading: false, error: null, refetch: vi.fn(),
+    });
+    render(<InvoiceDetail invoiceId="1" />);
+    expect(screen.getByText(/Processing fee:/)).toBeInTheDocument();
+  });
+
+  it('hides the processing-fee row when there is no surcharge', () => {
+    render(<InvoiceDetail invoiceId="1" />); // default fixture has no fee
+    expect(screen.queryByText(/Processing fee:/)).not.toBeInTheDocument();
+  });
+
   it('renders line item and payment data', () => {
     render(<InvoiceDetail invoiceId="1" />);
     expect(screen.getByText('Labor')).toBeInTheDocument();

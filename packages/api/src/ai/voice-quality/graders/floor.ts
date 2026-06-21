@@ -13,6 +13,7 @@
 import type { Observation } from '../observation';
 import type { VoiceQualityScript } from '../schema';
 import type { VoiceSessionEvent } from '../../agents/customer-calling/voice-session-store';
+import { eventLogIndex } from './event-order';
 
 export interface FloorResult {
   passed: boolean;
@@ -366,24 +367,24 @@ export function hangupHandled(
     };
   }
 
-  // No proposal_created after the hangup termination event.
-  let hangupTs: number | undefined;
-  for (const e of observation.events) {
-    if (e.type === 'session_terminated' && e.cause === 'hangup') {
-      hangupTs = e.ts;
-      break;
-    }
-  }
-  if (hangupTs !== undefined) {
-    for (const e of observation.events) {
-      if (e.type !== 'proposal_created') continue;
-      const ts = (e as unknown as { ts?: number }).ts;
-      if (typeof ts === 'number' && ts > hangupTs) {
-        return {
-          passed: false,
-          reason: 'Proposal created after caller hangup',
-        };
-      }
+  // No proposal_created after the hangup termination event. Order by
+  // causal log position, not `ts`: `proposal_created` carries no `ts` at
+  // all (so the old ts-based comparison never fired), and sub-millisecond
+  // scripts tie timestamps anyway. See `eventLogIndex`.
+  const logIndexAt = eventLogIndex(observation.events);
+  const hangupEvent = observation.events.find(
+    (e) => e.type === 'session_terminated' && e.cause === 'hangup',
+  );
+  if (hangupEvent) {
+    const hangupIdx = logIndexAt(hangupEvent);
+    const postHangupProposal = observation.events.some(
+      (e) => e.type === 'proposal_created' && logIndexAt(e) > hangupIdx,
+    );
+    if (postHangupProposal) {
+      return {
+        passed: false,
+        reason: 'Proposal created after caller hangup',
+      };
     }
   }
 

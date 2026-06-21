@@ -9,8 +9,8 @@
  *
  * Per tenant (gated by the 'supervisor_agent' flag when wired): recent
  * ready_for_review proposals lacking `payload._meta.supervisorAnnotation`
- * each get ONE gateway call (taskType 'supervisor_annotate', cheap model
- * per routing-config) producing {riskSummary, flags}. The result is
+ * each get ONE gateway call (taskType 'supervisor_annotate'; model resolved
+ * by tier in config/ai-routing.ts) producing {riskSummary, flags}. The result is
  * written into the payload via the proposal repo's `update` path —
  * NEVER a status change, NEVER through approveProposal. Any LLM /
  * parse / write failure skips that proposal silently (advisory note;

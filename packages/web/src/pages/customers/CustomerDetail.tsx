@@ -5,6 +5,8 @@ import { toast } from 'sonner';
 import { DetailPage } from '../../components/DetailPage';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { CommunicationTimeline } from '../../components/customers/CommunicationTimeline';
+import { CustomerProfitCard } from '../../components/customers/CustomerProfitCard';
+import { toTitleCase } from '../../utils/string';
 import { LanguageBadge } from '../../components/customers/LanguageBadge';
 import { ContactsPanel } from '../../components/customers/ContactsPanel';
 import { TagsPanel } from '../../components/customers/TagsPanel';
@@ -32,6 +34,8 @@ interface Customer {
   communicationNotes?: string;
   isArchived: boolean;
   originatingLeadId?: string;
+  /** Jobber-parity acquisition channel ("How did you hear about us?"). */
+  source?: string;
   /** P11-002: optional spoken-language preference. */
   preferredLanguage?: 'en' | 'es' | null;
 }
@@ -305,6 +309,12 @@ export function CustomerDetail({
                   {data.preferredChannel}
                 </dd>
               </div>
+              <div className="flex justify-between gap-4">
+                <dt className="text-slate-400">Source</dt>
+                <dd className="text-slate-800">
+                  {data.source ? toTitleCase(data.source) : '—'}
+                </dd>
+              </div>
               {/* P11-002: spoken-language preference, now persisted on change
                   so dispatchers can route Spanish callers correctly. */}
               <div className="flex items-center justify-between gap-4 pt-1">
@@ -521,6 +531,7 @@ export function CustomerDetail({
                   .
                 </p>
               ) : null}
+              <CustomerProfitCard customerId={customerId} />
               <CommunicationTimeline customerId={customerId} />
             </div>
           ),

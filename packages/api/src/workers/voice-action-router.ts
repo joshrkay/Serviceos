@@ -1379,6 +1379,7 @@ async function processChain(
         {
           auditRepo: ur.auditRepo,
           ...(ur.sendSms ? { sendSms: ur.sendSms } : {}),
+          ...(ur.notifyPush ? { notifyPush: ur.notifyPush } : {}),
           ...(ur.secret ? { secret: ur.secret } : {}),
           ...(ur.buildApproveUrl ? { buildApproveUrl: ur.buildApproveUrl } : {}),
           ...(ur.recordSmsEvent
@@ -1634,6 +1635,7 @@ export function createVoiceActionRouterWorker(
               {
                 auditRepo: ur.auditRepo,
                 ...(ur.sendSms ? { sendSms: ur.sendSms } : {}),
+                ...(ur.notifyPush ? { notifyPush: ur.notifyPush } : {}),
                 ...(ur.secret ? { secret: ur.secret } : {}),
                 ...(ur.buildApproveUrl ? { buildApproveUrl: ur.buildApproveUrl } : {}),
                 // P2-034 — persist the outbound render so the inbound

@@ -14,8 +14,45 @@ import {
 } from '../customers/customer';
 import { ValidationError } from '../shared/errors';
 import { CreateLeadInput, Lead, LeadRepository, UpdateLeadInput } from './lead';
-import { LeadStage } from './enums';
+import { LeadSource, LeadStage } from './enums';
 import { buildAttributionMetadata } from './attribution-metadata';
+import { notifyOwner } from '../notifications/owner-notifications-instance';
+
+/**
+ * U6 dedupe — lead sources that originate on the inbound PHONE/CALL channel.
+ * Those paths fire `incoming_call` separately, so they must NOT also fire
+ * `lead_captured` (no double owner notification for one inbound call/voicemail).
+ * A web/manual/referral lead is NOT phone-originated and DOES fire the push.
+ */
+const PHONE_ORIGINATED_LEAD_SOURCES: ReadonlySet<LeadSource> = new Set(['phone_call']);
+
+export function isPhoneOriginatedLeadSource(source: LeadSource): boolean {
+  return PHONE_ORIGINATED_LEAD_SOURCES.has(source);
+}
+
+/** Short owner-facing label for a freshly captured lead. */
+function leadLabel(lead: Pick<Lead, 'firstName' | 'lastName' | 'companyName' | 'primaryPhone'>): string {
+  const name = [lead.firstName, lead.lastName].filter(Boolean).join(' ').trim();
+  return name || lead.companyName || lead.primaryPhone || 'A new lead';
+}
+
+/**
+ * Fire the owner `lead_captured` push for a newly created lead (best-effort).
+ * SUPPRESSED for phone-originated leads — the inbound-call path fires
+ * `incoming_call` instead, so this avoids a duplicate owner notification.
+ * Never throws — capture must not be disturbed. Exported for unit testing.
+ */
+export async function notifyOwnerLeadCaptured(tenantId: string, lead: Lead): Promise<void> {
+  if (isPhoneOriginatedLeadSource(lead.source)) return;
+  try {
+    await notifyOwner(tenantId, 'lead_captured', {
+      leadId: lead.id,
+      leadLabel: leadLabel(lead),
+    });
+  } catch {
+    // Best-effort: the lead already persisted; the push must not bounce it.
+  }
+}
 
 /**
  * Subset of `PgLeadRepository` capabilities the service needs for the
@@ -85,6 +122,10 @@ export async function createLead(
       })
     );
   }
+
+  // U6 — owner `lead_captured` push (best-effort; suppressed for
+  // phone-originated leads, which fire `incoming_call` instead).
+  await notifyOwnerLeadCaptured(input.tenantId, created);
 
   return created;
 }

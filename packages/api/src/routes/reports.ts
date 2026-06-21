@@ -16,6 +16,8 @@ import { JobRepository } from '../jobs/job';
 import { TimeEntryRepository } from '../time-tracking/time-entry';
 import { SettingsRepository } from '../settings/settings';
 import { getJobProfit, MaterialsResolver } from '../jobs/job-profit';
+import { getCustomerProfit, type GetCustomerProfitDeps } from '../reports/customer-profit';
+import { getTechnicianProfit } from '../reports/technician-profit';
 
 /**
  * Tenant-scoped reporting endpoints. Add new reports here rather than
@@ -348,6 +350,100 @@ export function createReportsRouter(deps: ReportsRouterDeps): Router {
             laborRateCentsPerHour: settings?.laborRateCentsPerHour ?? null,
           },
           {
+            invoiceRepo: deps.invoiceRepo,
+            timeEntryRepo: deps.timeEntryRepo,
+            expenseRepo: deps.expenseRepo,
+            ...(deps.materialsResolver ? { materialsResolver: deps.materialsResolver } : {}),
+          },
+        );
+        res.json({ data: profit });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  // Customer profitability — aggregates per-job profit across a customer's
+  // jobs. Reuses the same repos as job-profit (jobRepo.findByCustomer is
+  // required here); 503 when any is absent.
+  router.get(
+    '/customer-profit/:customerId',
+    requireAuth,
+    requireTenant,
+    requirePermission('invoices:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (
+          !deps.jobRepo?.findByCustomer ||
+          !deps.invoiceRepo ||
+          !deps.timeEntryRepo ||
+          !deps.expenseRepo ||
+          !deps.settingsRepo
+        ) {
+          res
+            .status(503)
+            .json({ error: 'NOT_CONFIGURED', message: 'Customer profit unavailable' });
+          return;
+        }
+        const tenantId = req.auth!.tenantId;
+        const settings = await deps.settingsRepo.findByTenant(tenantId);
+        const profit = await getCustomerProfit(
+          {
+            tenantId,
+            customerId: req.params.customerId,
+            laborRateCentsPerHour: settings?.laborRateCentsPerHour ?? null,
+          },
+          {
+            // Pass the repo whole (preserves method `this`); the guard above
+            // proved findByCustomer is present, which the cast asserts.
+            jobRepo: deps.jobRepo as GetCustomerProfitDeps['jobRepo'],
+            invoiceRepo: deps.invoiceRepo,
+            timeEntryRepo: deps.timeEntryRepo,
+            expenseRepo: deps.expenseRepo,
+            ...(deps.materialsResolver ? { materialsResolver: deps.materialsResolver } : {}),
+          },
+        );
+        res.json({ data: profit });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  // Technician profitability — aggregates per-job profit across the jobs
+  // assigned to a technician. Same repos as customer-profit; jobRepo.findByTenant
+  // is a required method (no narrowing/cast needed). 503 when any dep is absent.
+  router.get(
+    '/technician-profit/:technicianId',
+    requireAuth,
+    requireTenant,
+    requirePermission('invoices:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (
+          !deps.jobRepo ||
+          !deps.invoiceRepo ||
+          !deps.timeEntryRepo ||
+          !deps.expenseRepo ||
+          !deps.settingsRepo
+        ) {
+          res
+            .status(503)
+            .json({ error: 'NOT_CONFIGURED', message: 'Technician profit unavailable' });
+          return;
+        }
+        const tenantId = req.auth!.tenantId;
+        const settings = await deps.settingsRepo.findByTenant(tenantId);
+        const profit = await getTechnicianProfit(
+          {
+            tenantId,
+            technicianId: req.params.technicianId,
+            laborRateCentsPerHour: settings?.laborRateCentsPerHour ?? null,
+          },
+          {
+            jobRepo: deps.jobRepo,
             invoiceRepo: deps.invoiceRepo,
             timeEntryRepo: deps.timeEntryRepo,
             expenseRepo: deps.expenseRepo,

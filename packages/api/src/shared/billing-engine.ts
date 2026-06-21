@@ -55,6 +55,15 @@ export interface DocumentTotals {
   taxRateBps: number;
   taxableSubtotalCents: number;
   taxCents: number;
+  /**
+   * Optional processing-fee surcharge (Jobber parity). Basis points applied to
+   * the chargeable amount (subtotal − discount + tax) to pass card/ACH
+   * processing costs through to the customer. Absent/0 ⇒ no surcharge.
+   * Invoice-only today (estimates never pass a fee); the fields are optional so
+   * every existing DocumentTotals literal stays valid.
+   */
+  processingFeeBps?: number;
+  processingFeeCents?: number;
   totalCents: number;
 }
 
@@ -76,7 +85,8 @@ export function applyBps(amountCents: number, bps: number): number {
 export function calculateDocumentTotals(
   lineItems: LineItem[],
   discountCents: number,
-  taxRateBps: number
+  taxRateBps: number,
+  processingFeeBps: number = 0
 ): DocumentTotals {
   const subtotalCents = lineItems.reduce((sum, item) => sum + item.totalCents, 0);
   const taxableSubtotalCents = lineItems
@@ -86,7 +96,12 @@ export function calculateDocumentTotals(
   // Apply discount to taxable amount before computing tax
   const effectiveTaxableAmount = Math.max(0, taxableSubtotalCents - discountCents);
   const taxCents = applyBps(effectiveTaxableAmount, taxRateBps);
-  const totalCents = subtotalCents - discountCents + taxCents;
+  // Processing fee passes card/ACH costs through on the amount actually charged
+  // (subtotal − discount + tax), so it compounds nothing and never goes
+  // negative even under a total-clearing discount.
+  const chargeableBeforeFeeCents = Math.max(0, subtotalCents - discountCents + taxCents);
+  const processingFeeCents = applyBps(chargeableBeforeFeeCents, processingFeeBps);
+  const totalCents = subtotalCents - discountCents + taxCents + processingFeeCents;
 
   return {
     subtotalCents,
@@ -94,6 +109,8 @@ export function calculateDocumentTotals(
     taxRateBps,
     taxableSubtotalCents,
     taxCents,
+    processingFeeBps,
+    processingFeeCents,
     totalCents: Math.max(0, totalCents),
   };
 }
@@ -220,6 +237,10 @@ export function validateDocumentTotals(totals: DocumentTotals): string[] {
   if (totals.discountCents < 0) errors.push('discountCents must be non-negative');
   if (totals.taxRateBps < 0) errors.push('taxRateBps must be non-negative');
   if (totals.taxRateBps > 10000) errors.push('taxRateBps must not exceed 10000 (100%)');
+  if ((totals.processingFeeBps ?? 0) < 0) errors.push('processingFeeBps must be non-negative');
+  if ((totals.processingFeeBps ?? 0) > 10000) {
+    errors.push('processingFeeBps must not exceed 10000 (100%)');
+  }
   return errors;
 }
 

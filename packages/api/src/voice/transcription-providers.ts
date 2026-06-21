@@ -45,6 +45,23 @@ export class DevNoopTranscriptionProvider implements TranscriptionProvider {
 /** OpenAI's documented Whisper upload limit. */
 export const WHISPER_MAX_BYTES = 25 * 1024 * 1024;
 
+/**
+ * Whisper decodes the upload by the multipart filename's extension, so the
+ * extension MUST match the actual bytes. Web records `audio/webm`; native
+ * mobile records AAC-in-MP4 (`audio/mp4` / `audio/x-m4a`). Derive the
+ * filename from the fetched blob's Content-Type (R2 returns the stored
+ * type) and fall back to `webm` when the type is unknown.
+ */
+export function whisperUploadFilename(contentType: string | undefined): string {
+  const base = (contentType ?? '').split(';')[0].trim().toLowerCase();
+  if (base.includes('mp4') || base.includes('m4a')) return 'audio.m4a';
+  if (base.includes('wav')) return 'audio.wav';
+  if (base.includes('ogg')) return 'audio.ogg';
+  if (base.includes('mpeg') || base.includes('mp3')) return 'audio.mp3';
+  if (base.includes('flac')) return 'audio.flac';
+  return 'audio.webm';
+}
+
 export class WhisperTimeoutError extends Error {
   readonly code = 'WHISPER_TIMEOUT';
   readonly retriable = true;
@@ -133,7 +150,7 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 
     // 3) Build multipart form. Field names are required by Whisper.
     const fd = new FormData();
-    fd.append('file', audioBlob, 'audio.webm');
+    fd.append('file', audioBlob, whisperUploadFilename(audioBlob.type));
     fd.append('model', this.model);
     if (options.language) {
       fd.append('language', options.language);

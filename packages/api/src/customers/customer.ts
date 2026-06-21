@@ -13,6 +13,23 @@ export type CustomerWithWarnings = Customer & { warnings?: DuplicateWarning[] };
 
 export type PreferredChannel = 'phone' | 'email' | 'sms' | 'none';
 
+/**
+ * Jobber-parity "How did you hear about us?" attribution. Distinct from
+ * `originatingLeadId` (which links a specific converted lead): `source` is the
+ * marketing channel the customer came in through, set at creation and editable
+ * later, so revenue can be rolled up by acquisition channel.
+ */
+export const CUSTOMER_SOURCES = [
+  'website',
+  'referral',
+  'google',
+  'social_media',
+  'advertising',
+  'repeat_client',
+  'other',
+] as const;
+export type CustomerSource = (typeof CUSTOMER_SOURCES)[number];
+
 export interface Customer {
   id: string;
   tenantId: string;
@@ -37,6 +54,8 @@ export interface Customer {
    * back to the originating campaign with a single join.
    */
   originatingLeadId?: string;
+  /** Acquisition channel ("How did you hear about us?"). See CUSTOMER_SOURCES. */
+  source?: CustomerSource;
   /**
    * Phase 4c: BCP-47 short code (e.g. 'en', 'es', 'vi') the operator or
    * caller-ID-resolution layer recorded as this customer's preferred
@@ -86,6 +105,7 @@ export interface CreateCustomerInput {
   preferredChannel?: PreferredChannel;
   smsConsent?: boolean;
   communicationNotes?: string;
+  source?: CustomerSource;
   createdBy: string;
   actorRole?: string;
 }
@@ -100,6 +120,7 @@ export interface UpdateCustomerInput {
   preferredChannel?: PreferredChannel;
   smsConsent?: boolean;
   communicationNotes?: string;
+  source?: CustomerSource;
 }
 
 export interface CustomerListOptions {
@@ -213,6 +234,7 @@ interface CustomerFieldValues {
   secondaryPhone?: string;
   email?: string;
   preferredChannel?: string;
+  source?: string;
 }
 
 /**
@@ -249,6 +271,9 @@ function validateCustomerFields(
   ) {
     errors.push('Invalid preferredChannel');
   }
+  if (fields.source && !CUSTOMER_SOURCES.includes(fields.source as CustomerSource)) {
+    errors.push('Invalid source');
+  }
   return errors;
 }
 
@@ -273,6 +298,7 @@ export function validateCustomerUpdateInput(
       secondaryPhone: input.secondaryPhone ?? existing.secondaryPhone,
       email: input.email ?? existing.email,
       preferredChannel: input.preferredChannel ?? existing.preferredChannel,
+      source: input.source ?? existing.source,
     },
     true
   );
@@ -322,6 +348,7 @@ export async function createCustomer(
     preferredChannel: input.preferredChannel || 'none',
     smsConsent: input.smsConsent ?? false,
     communicationNotes: input.communicationNotes,
+    source: input.source,
     isArchived: false,
     createdBy: input.createdBy,
     createdAt: new Date(),

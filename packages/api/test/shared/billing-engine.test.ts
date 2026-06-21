@@ -123,4 +123,54 @@ describe('P1-009A — Shared line-item validation + calculation engine', () => {
     expect(errors).toContain('discountCents must be non-negative');
     expect(errors).toContain('taxRateBps must not exceed 10000 (100%)');
   });
+
+  describe('processing-fee surcharge', () => {
+    it('defaults to no fee when the 4th arg is omitted', () => {
+      const items = [buildLineItem('1', 'Service', 1, 10000, 1, true)];
+      const totals = calculateDocumentTotals(items, 0, 0);
+      expect(totals.processingFeeBps).toBe(0);
+      expect(totals.processingFeeCents).toBe(0);
+      expect(totals.totalCents).toBe(10000);
+    });
+
+    it('applies the fee to the chargeable amount (subtotal − discount + tax)', () => {
+      const items = [
+        buildLineItem('1', 'Labor', 2, 5000, 1, true, 'labor'),
+        buildLineItem('2', 'Material', 1, 3000, 2, true, 'material'),
+        buildLineItem('3', 'Non-tax', 1, 2000, 3, false),
+      ];
+      // subtotal 15000, taxable 13000, tax = round(13000*825/10000) = 1073,
+      // chargeable = 15000 + 1073 = 16073, fee 3% = round(16073*300/10000) = 482
+      const totals = calculateDocumentTotals(items, 0, 825, 300);
+      expect(totals.taxCents).toBe(1073);
+      expect(totals.processingFeeBps).toBe(300);
+      expect(totals.processingFeeCents).toBe(482);
+      expect(totals.totalCents).toBe(16555); // 16073 + 482
+    });
+
+    it('computes the fee after the discount (on the net charged)', () => {
+      const items = [buildLineItem('1', 'Service', 1, 10000, 1, true)];
+      // chargeable = 10000 − 2000 + 800 = 8800, fee 3% = 264
+      const totals = calculateDocumentTotals(items, 2000, 1000, 300);
+      expect(totals.processingFeeCents).toBe(264);
+      expect(totals.totalCents).toBe(9064);
+    });
+
+    it('never charges a negative fee under a total-clearing discount', () => {
+      const items = [buildLineItem('1', 'Service', 1, 10000, 1, true)];
+      const totals = calculateDocumentTotals(items, 20000, 0, 300);
+      expect(totals.processingFeeCents).toBe(0);
+      expect(totals.totalCents).toBe(0);
+    });
+
+    it('validateDocumentTotals rejects an out-of-range fee', () => {
+      const base = calculateDocumentTotals([buildLineItem('1', 's', 1, 100, 1, true)], 0, 0);
+      expect(validateDocumentTotals({ ...base, processingFeeBps: -1 })).toContain(
+        'processingFeeBps must be non-negative',
+      );
+      expect(validateDocumentTotals({ ...base, processingFeeBps: 10001 })).toContain(
+        'processingFeeBps must not exceed 10000 (100%)',
+      );
+    });
+  });
 });

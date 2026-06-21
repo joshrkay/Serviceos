@@ -13,6 +13,9 @@ vi.mock('../../utils/api-fetch', () => ({
 vi.mock('../../components/customers/CommunicationTimeline', () => ({
   CommunicationTimeline: () => <div>Timeline</div>,
 }));
+vi.mock('../../components/customers/CustomerProfitCard', () => ({
+  CustomerProfitCard: () => <div>Profit</div>,
+}));
 // U1/U2 panels are self-contained (they fetch their own data); mock them here
 // so this suite stays focused on CustomerDetail and its locations fetch order.
 vi.mock('../../components/customers/ContactsPanel', () => ({

@@ -57,6 +57,8 @@ export interface CreateInvoiceInput {
   lineItems: LineItem[];
   discountCents?: number;
   taxRateBps?: number;
+  /** Processing-fee surcharge in basis points (Jobber parity). 0/omitted ⇒ none. */
+  processingFeeBps?: number;
   customerMessage?: string;
   /** Optional override; routes auto-populate from job when omitted. */
   originatingLeadId?: string;
@@ -70,6 +72,7 @@ export interface UpdateInvoiceInput {
   lineItems?: LineItem[];
   discountCents?: number;
   taxRateBps?: number;
+  processingFeeBps?: number;
   customerMessage?: string;
 }
 
@@ -178,7 +181,8 @@ export async function createInvoice(
   const totals = calculateDocumentTotals(
     input.lineItems,
     input.discountCents || 0,
-    input.taxRateBps || 0
+    input.taxRateBps || 0,
+    input.processingFeeBps || 0
   );
 
   const invoice: Invoice = {
@@ -318,7 +322,9 @@ export async function updateInvoice(
   const lineItems = input.lineItems ?? existing.lineItems;
   const discountCents = input.discountCents ?? existing.totals.discountCents;
   const taxRateBps = input.taxRateBps ?? existing.totals.taxRateBps;
-  const totals = calculateDocumentTotals(lineItems, discountCents, taxRateBps);
+  const processingFeeBps =
+    input.processingFeeBps ?? existing.totals.processingFeeBps ?? 0;
+  const totals = calculateDocumentTotals(lineItems, discountCents, taxRateBps, processingFeeBps);
 
   const updated = await repository.update(tenantId, id, {
     lineItems,
