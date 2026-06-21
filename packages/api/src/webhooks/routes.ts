@@ -9,6 +9,7 @@ import {
 import { createLogger } from '../logging/logger';
 import { isValidTenantId } from '../db/schema';
 import { bootstrapTenant, TenantRepository } from '../auth/clerk';
+import { LIFECYCLE_EMAIL_JOB_TYPE } from '../workers/lifecycle-email-worker';
 import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository, recordPayment, PaymentReceiptNotifier, PaymentMethod } from '../invoices/payment';
@@ -534,6 +535,27 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               `provision-twilio-${result.tenantId}`
             );
             logger.info('Twilio provisioning job enqueued', { tenantId: result.tenantId, region });
+          }
+
+          // Welcome email — enqueue for brand-new tenants only. The worker
+          // claims the lifecycle_emails ledger before sending, so a webhook
+          // replay (same idempotency key) never double-sends.
+          if (result.created && deps.queue && primaryEmail) {
+            try {
+              await deps.queue.send(
+                LIFECYCLE_EMAIL_JOB_TYPE,
+                { tenantId: result.tenantId, ownerEmail: primaryEmail, kind: 'welcome' },
+                `lifecycle-welcome-${result.tenantId}`,
+              );
+              logger.info('Welcome email job enqueued', { tenantId: result.tenantId });
+            } catch (err) {
+              // Never fail the signup webhook over the welcome email — the
+              // tenant is already bootstrapped; the email is best-effort.
+              logger.warn('Welcome email enqueue failed', {
+                tenantId: result.tenantId,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
           }
 
           if (deps.auditRepo) {
@@ -1382,9 +1404,16 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           id?: string;
           customer?: string;
           status?: string;
+          trial_end?: number | null;
           metadata?: { tenant_id?: string };
         };
         if (sub.id && sub.customer && sub.status) {
+          // Mirror the Stripe trial_end (epoch seconds) into trial_ends_at so
+          // the trial-reminder sweep can compute the 3d/1d/day-of windows. When
+          // the trial converts to active, Stripe drops trial_end → null, which
+          // clears our cached value and stops the sweep.
+          const trialEndsAt =
+            typeof sub.trial_end === 'number' ? new Date(sub.trial_end * 1000) : null;
           // Trial-checkout sessions stamp subscription.metadata.tenant_id
           // (see createTrialCheckoutSession), but Stripe doesn't echo our
           // tenants.stripe_customer_id back to us — so for a brand-new
@@ -1478,9 +1507,10 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                   `UPDATE tenants
                       SET stripe_subscription_id = $1,
                           subscription_status = $2,
+                          trial_ends_at = $3,
                           updated_at = NOW()
-                    WHERE id = $3`,
-                  [sub.id, sub.status, row.id],
+                    WHERE id = $4`,
+                  [sub.id, sub.status, trialEndsAt, row.id],
                 );
               }
               await client.query('COMMIT');
@@ -1503,6 +1533,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               customerId: sub.customer,
               subscriptionId: sub.id,
               status: sub.status,
+              trialEndsAt,
             });
           }
 

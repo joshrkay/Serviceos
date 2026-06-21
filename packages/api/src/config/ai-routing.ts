@@ -22,33 +22,114 @@ const lightweightModel = process.env.AI_LIGHTWEIGHT_MODEL || 'claude-haiku-4-5-2
 const standardModel = process.env.AI_STANDARD_MODEL || 'claude-sonnet-4-6';
 const complexModel = process.env.AI_COMPLEX_MODEL || 'claude-sonnet-4-6';
 
+/**
+ * Canonical set of gateway taskTypes — every value passed to
+ * `gateway.complete({ taskType })`. This array is the single source of truth:
+ * `TaskType` is derived from it, and `DEFAULT_TASK_TIER_MAPPING` is keyed by it
+ * (a `Record<TaskType, ModelTier>`), so the compiler refuses to build unless
+ * every taskType has an explicit tier — preventing the historical drift where
+ * the mapping used idealized names (`intent_classification`,
+ * `transcript_normalization`, …) that matched no real call site, silently
+ * sending everything to `standard`.
+ *
+ * NOTE: dynamically-constructed taskTypes (the `assistant.*` namespace built in
+ * routes/assistant.ts as `assistant.${handler.taskType}`) are intentionally NOT
+ * listed — they resolve to `standard` via the `|| 'standard'` default in
+ * router.ts, which is the desired behavior for those user-facing queries.
+ */
+export const TASK_TYPES = [
+  // ── Lightweight: cheap model; deterministic classification, lite extraction,
+  //    graders, and transcript correction. Most of these were designed for the
+  //    cheap model in the (removed) DEFAULT_GATEWAY_CONFIG but had been silently
+  //    resolving to `standard` because the call-site taskType never matched a key.
+  'classify_intent',
+  'decompose_transcript',
+  'summarize_conversation',
+  'generate_clarification_questions',
+  'transcription_correction',
+  'extract_team',
+  'extract_schedule',
+  'supervisor_annotate',
+  'intent_classification',
+  'call_sentiment',
+  'grade_vulnerability',
+  'voice_quality_judge',
+  'voice_quality_perceived_completion',
+  'voice_quality_reprompt_judge',
+  'review_classify',
+  'proposal_sms_edit',
+  // ── Standard: moderate generation / customer-facing writing where output
+  //    quality matters more than latency or cost.
+  'create_appointment',
+  'suggest_reply',
+  'brand_voice_v1',
+  'review_private_followup',
+  'review_public_response',
+  'extract_business_profile',
+  'extract_categories',
+  'extract_pricing',
+  // ── Complex: high-stakes structured generation — financial documents,
+  //    multi-line estimates/invoices, and MMS-to-quote (vision-capable tier).
+  'draft_estimate',
+  'update_estimate',
+  'mms_estimate',
+  'draft_invoice',
+  'update_invoice',
+] as const;
+
+export type TaskType = (typeof TASK_TYPES)[number];
+
+const DEFAULT_TASK_TIER_MAPPING: Record<TaskType, ModelTier> = {
+  // Lightweight
+  classify_intent: 'lightweight',
+  decompose_transcript: 'lightweight',
+  summarize_conversation: 'lightweight',
+  generate_clarification_questions: 'lightweight',
+  transcription_correction: 'lightweight',
+  extract_team: 'lightweight',
+  extract_schedule: 'lightweight',
+  supervisor_annotate: 'lightweight',
+  intent_classification: 'lightweight',
+  call_sentiment: 'lightweight',
+  grade_vulnerability: 'lightweight',
+  voice_quality_judge: 'lightweight',
+  voice_quality_perceived_completion: 'lightweight',
+  voice_quality_reprompt_judge: 'lightweight',
+  review_classify: 'lightweight',
+  proposal_sms_edit: 'lightweight',
+  // Standard
+  create_appointment: 'standard',
+  suggest_reply: 'standard',
+  brand_voice_v1: 'standard',
+  review_private_followup: 'standard',
+  review_public_response: 'standard',
+  // Onboarding profile/categories/pricing want the stronger (standard) model for
+  // vertical detection + taxonomy/pricing parsing. Kept at `standard`, not
+  // `complex`, so they don't inherit the complex tier's temperature 0.5 — too
+  // high for structured extraction (this is also their current effective tier,
+  // so no behavior regression).
+  extract_business_profile: 'standard',
+  extract_categories: 'standard',
+  extract_pricing: 'standard',
+  // Complex
+  draft_estimate: 'complex',
+  update_estimate: 'complex',
+  // MMS-to-quote MUST stay on a vision-capable tier. Unmapped it would fall to
+  // `standard`, which only works while that tier's model is vision-capable — an
+  // AI_STANDARD_MODEL override to a text model would trip the gateway's vision
+  // failfast. Pinning to complex removes that footgun.
+  mms_estimate: 'complex',
+  draft_invoice: 'complex',
+  update_invoice: 'complex',
+};
+
 export const DEFAULT_AI_ROUTING_CONFIG: AIRoutingConfig = {
   tiers: {
     lightweight: { model: lightweightModel, provider: 'default', maxTokens: 1024, temperature: 0 },
     standard: { model: standardModel, provider: 'default', maxTokens: 4096, temperature: 0.3 },
     complex: { model: complexModel, provider: 'default', maxTokens: 8192, temperature: 0.5 },
   },
-  taskTierMapping: {
-    // Lightweight
-    'intent_classification': 'lightweight',
-    'entity_extraction': 'lightweight',
-    'transcript_normalization': 'lightweight',
-    // Standard
-    'create_customer': 'standard',
-    'update_customer': 'standard',
-    'create_job': 'standard',
-    'create_appointment': 'standard',
-    'clarification': 'standard',
-    // Complex
-    'draft_estimate': 'complex',
-    'update_estimate': 'complex',
-    'multi_entity_proposal': 'complex',
-    // Vision (MMS-to-quote): MUST stay on a vision-capable tier. Unmapped it
-    // falls through to `standard`, which only works while that tier's model is
-    // vision-capable — an AI_STANDARD_MODEL override to a text model would trip
-    // the gateway's vision failfast. Pinning to complex removes that footgun.
-    'mms_estimate': 'complex',
-  },
+  taskTierMapping: DEFAULT_TASK_TIER_MAPPING,
 };
 
 /**

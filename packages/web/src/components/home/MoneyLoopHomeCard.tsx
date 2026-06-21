@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router';
 import { Bell, ChevronRight, DollarSign, TrendingUp } from 'lucide-react';
 import { useApiClient } from '../../lib/apiClient';
 import { usePendingProposals } from '../../hooks/usePendingProposals';
+import { formatUsdCentsWhole } from '@ai-service-os/shared';
 
 interface MoneyDashboardSummary {
   month: string;
@@ -12,10 +13,7 @@ interface MoneyDashboardSummary {
   revenueTrendCents: number;
 }
 
-function formatCents(cents: number): string {
-  const sign = cents < 0 ? '-' : '';
-  return `${sign}$${Math.abs(cents / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
-}
+const formatCents = formatUsdCentsWhole;
 
 function currentMonth(): string {
   const now = new Date();

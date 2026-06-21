@@ -4,6 +4,9 @@ import {
   renderEstimateSms,
   renderInvoiceEmail,
   renderInvoiceSms,
+  renderWelcomeEmail,
+  renderSetupReminderEmail,
+  renderTrialEndingEmail,
 } from '../../src/notifications/templates';
 
 describe('estimate templates', () => {
@@ -58,6 +61,42 @@ describe('estimate templates', () => {
   it('renders Spanish email subject when language is es', () => {
     const { subject } = renderEstimateEmail({ ...ctx, language: 'es' });
     expect(subject).toBe('Presupuesto EST-1042 de Acme HVAC');
+  });
+});
+
+describe('onboarding lifecycle emails', () => {
+  const base = { appBaseUrl: 'https://app.rivet.ai', supportEmail: 'support@rivet.ai' };
+
+  it('welcome email links to /onboarding and lists what Rivet does', () => {
+    const { subject, text, html } = renderWelcomeEmail(base);
+    expect(subject).toMatch(/welcome to rivet/i);
+    expect(text).toContain('https://app.rivet.ai/onboarding');
+    expect(html).toContain('https://app.rivet.ai/onboarding');
+    expect(text).toContain('Answers every call');
+    expect(html).toContain('support@rivet.ai');
+  });
+
+  it('setup reminder lists the outstanding steps and escapes them', () => {
+    const { subject, text, html } = renderSetupReminderEmail({
+      ...base,
+      businessName: 'M&R Mechanical',
+      remainingSteps: ['Forward your phone line', 'Start your free trial'],
+    });
+    expect(subject).toMatch(/finish setting up/i);
+    expect(text).toContain('Forward your phone line');
+    expect(text).toContain('Start your free trial');
+    expect(html).toContain('Forward your phone line');
+    // Business name is HTML-escaped in the body.
+    expect(html).toContain('M&amp;R Mechanical');
+    expect(html).not.toContain('M&R Mechanical');
+  });
+
+  it('trial-ending copy varies by daysLeft', () => {
+    expect(renderTrialEndingEmail({ ...base, daysLeft: 3 }).subject).toMatch(/in 3 days/i);
+    expect(renderTrialEndingEmail({ ...base, daysLeft: 1 }).subject).toMatch(/tomorrow/i);
+    const today = renderTrialEndingEmail({ ...base, daysLeft: 0 });
+    expect(today.subject).toMatch(/today/i);
+    expect(today.text).toContain('https://app.rivet.ai/settings');
   });
 });
 
