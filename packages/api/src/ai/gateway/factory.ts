@@ -160,11 +160,15 @@ export function createLLMGateway(
   return maybeBuildCacheWrapper(bareGateway, opts);
 }
 
-/** Default cache-eligible task types for P2-031. */
+/**
+ * Default cache-eligible task types for P2-031 — deterministic tasks whose
+ * identical inputs yield identical outputs. Reconciled to the real gateway
+ * taskTypes (follow-up #2): the live classifier emits `classify_intent`, not
+ * `intent_classification`, so the old entry never matched a real call; and
+ * `entity_extraction` / `transcript_normalization` matched no call site at all.
+ */
 const DEFAULT_DETERMINISTIC_TASK_TYPES: readonly string[] = [
-  'intent_classification',
-  'entity_extraction',
-  'transcript_normalization',
+  'classify_intent',
   'extract_categories',
 ];
 
