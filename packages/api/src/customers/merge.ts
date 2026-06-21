@@ -89,6 +89,26 @@ export async function mergeCustomers(
     throw new ValidationError('Losing customer is already archived');
   }
 
+  // B2B hierarchy: refuse to merge a customer into one of its own
+  // sub-accounts. Re-parenting the loser's sub-accounts onto the survivor
+  // would otherwise create a parent/child cycle (in the direct case, the
+  // survivor would become its own parent). Walk up from the survivor; if we
+  // reach the loser, the survivor is somewhere in the loser's subtree. The
+  // `seen` set bounds the walk against any pre-existing malformed cycle.
+  const seen = new Set<string>([surviving.id]);
+  let ancestorId = surviving.parentAccountId;
+  while (ancestorId) {
+    if (ancestorId === input.losingId) {
+      throw new ValidationError(
+        'Cannot merge a customer into one of its own sub-accounts; pick the parent account as the survivor instead',
+      );
+    }
+    if (seen.has(ancestorId)) break;
+    seen.add(ancestorId);
+    const ancestor = await deps.customerRepo.findById(tenantId, ancestorId);
+    ancestorId = ancestor?.parentAccountId;
+  }
+
   const movedCounts = await deps.mergeRepo.reassignAndArchive(
     tenantId,
     input.survivingId,

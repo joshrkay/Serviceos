@@ -128,10 +128,13 @@ export class PgCustomerMergeRepository
       counts.customer_custom_field_values = cfvMoved.rowCount ?? 0;
 
       // B2B hierarchy: sub-accounts of the loser now hang off the survivor.
+      // `id <> $2` is defense-in-depth against a self-reference cycle — the
+      // mergeCustomers guard already rejects merging a customer into its own
+      // descendant, so the survivor can't be in the loser's subtree here.
       const subAccounts = await client.query(
         `UPDATE customers
             SET parent_account_id = $2, updated_at = NOW()
-          WHERE tenant_id = $1 AND parent_account_id = $3`,
+          WHERE tenant_id = $1 AND parent_account_id = $3 AND id <> $2`,
         [tenantId, survivingId, losingId],
       );
       counts.customer_sub_accounts = subAccounts.rowCount ?? 0;

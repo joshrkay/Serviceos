@@ -73,7 +73,7 @@ export function nameSimilarity(a: string, b: string): number {
 }
 
 export async function checkCustomerDuplicates(
-  input: { firstName?: string; lastName?: string; email?: string; primaryPhone?: string; tenantId: string },
+  input: { firstName?: string; lastName?: string; companyName?: string; email?: string; primaryPhone?: string; tenantId: string },
   repository: CustomerRepository
 ): Promise<DuplicateWarning[]> {
   const warnings: DuplicateWarning[] = [];
@@ -92,7 +92,7 @@ export async function checkCustomerDuplicates(
 }
 
 function scoreCustomerMatches(
-  input: { firstName?: string; lastName?: string; email?: string; primaryPhone?: string },
+  input: { firstName?: string; lastName?: string; companyName?: string; email?: string; primaryPhone?: string },
   candidates: Customer[],
   warnings: DuplicateWarning[]
 ): void {
@@ -127,7 +127,11 @@ function scoreCustomerMatches(
 
     // Name match. Exact normalized match is medium/0.8; a close trigram
     // match (pg_trgm parity) is a "possible duplicate" at medium/0.6.
-    const inputName = [input.firstName, input.lastName].filter(Boolean).join(' ').trim();
+    // Company-only records (no first/last) fall back to companyName on both
+    // sides so B2B duplicates are still caught.
+    const inputName =
+      [input.firstName, input.lastName].filter(Boolean).join(' ').trim() ||
+      (input.companyName ?? '').trim();
     const existingName =
       [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim() ||
       customer.displayName;
@@ -182,11 +186,15 @@ export interface CustomerDuplicateLoader {
  * row (it should not), no warning is emitted.
  */
 export async function checkCustomerDuplicatesPg(
-  input: { firstName?: string; lastName?: string; email?: string; primaryPhone?: string; tenantId: string },
+  input: { firstName?: string; lastName?: string; companyName?: string; email?: string; primaryPhone?: string; tenantId: string },
   loader: CustomerDuplicateLoader
 ): Promise<DuplicateWarning[]> {
   const warnings: DuplicateWarning[] = [];
-  const name = [input.firstName, input.lastName].filter(Boolean).join(' ').trim();
+  // Company-only records fall back to companyName so B2B duplicates are still
+  // name-checked (display_name == companyName for those rows).
+  const name =
+    [input.firstName, input.lastName].filter(Boolean).join(' ').trim() ||
+    (input.companyName ?? '').trim();
   const candidates = await loader.findDuplicates(input.tenantId, {
     phone: input.primaryPhone,
     email: input.email,

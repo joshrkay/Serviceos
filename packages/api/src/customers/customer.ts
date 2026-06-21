@@ -337,6 +337,7 @@ export async function createCustomer(
         tenantId: input.tenantId,
         firstName: input.firstName,
         lastName: input.lastName,
+        companyName: input.companyName,
         primaryPhone: input.primaryPhone,
         email: input.email,
       },

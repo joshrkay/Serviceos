@@ -65,6 +65,23 @@ describe('Story 4.6 — customer merge orchestration', () => {
     ).rejects.toBeInstanceOf(ValidationError);
   });
 
+  it('rejects merging a customer into one of its own sub-accounts (B2B cycle)', async () => {
+    const parent = await seedCustomer('Parent', 'Co');
+    const sub = await seedCustomer('Sub', 'Account');
+    // `sub` is a sub-account of `parent`. Merging the parent (loser) INTO the
+    // sub (survivor) would re-parent the sub onto itself → cycle. Reject it.
+    await customerRepo.update(TENANT, sub.id, { parentAccountId: parent.id });
+    await expect(
+      mergeCustomers(
+        TENANT,
+        { survivingId: sub.id, losingId: parent.id, actorId: ACTOR },
+        { customerRepo, mergeRepo, auditRepo },
+      ),
+    ).rejects.toBeInstanceOf(ValidationError);
+    // Nothing was archived — the guard fires before any write.
+    expect((await customerRepo.findById(TENANT, parent.id))!.isArchived).toBe(false);
+  });
+
   it('404s when the surviving record does not exist', async () => {
     const loser = await seedCustomer('Drop', 'Me');
     await expect(

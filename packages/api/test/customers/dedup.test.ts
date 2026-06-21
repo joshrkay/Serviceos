@@ -349,4 +349,19 @@ describe('P4-004 — Fuzzy name dedup (pg_trgm parity)', () => {
     );
     expect(warnings).toHaveLength(0);
   });
+
+  it('flags a company-only (B2B) duplicate by companyName', async () => {
+    const b2b = new InMemoryCustomerRepository();
+    await createCustomer(
+      { tenantId: 'tenant-1', firstName: '', lastName: '', companyName: 'Acme Plumbing LLC', createdBy: 'u' },
+      b2b
+    );
+    const warnings = await checkCustomerDuplicatesPg(
+      { tenantId: 'tenant-1', companyName: 'Acme Plumbing' },
+      b2b
+    );
+    const nameMatch = warnings.find((w) => w.matchType === 'name');
+    expect(nameMatch).toBeDefined();
+    expect(nameMatch!.confidence).toBe('medium');
+  });
 });
