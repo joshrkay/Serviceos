@@ -62,7 +62,7 @@ const SUGGESTIONS = [
 // Send user messages to the backend conversation API and receive real AI responses.
 // Falls back to a simple echo if the API is unavailable.
 async function sendToConversationAPI(
-  _conversationId: string | null,
+  conversationId: string | null,
   text: string,
   history: Array<{ role: 'user' | 'assistant'; content: string }>,
 ): Promise<{ content: string; reasoning?: string; proposal?: AIProposal; autoApplied?: boolean; newConversationId?: string; failed?: boolean }> {
@@ -71,11 +71,14 @@ async function sendToConversationAPI(
     // classification first; recognized actions (e.g. create_customer)
     // come back as a proposal the UI renders inline instead of as free
     // text. Everything else falls through to the generic LLM reply.
+    // Story 3.11 — pin the running conversation so each turn persists to the
+    // same thread (server opens one on the first turn and echoes its id).
     const res = await apiFetch('/api/assistant/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         messages: [...history, { role: 'user', content: text }],
+        ...(conversationId ? { conversationId } : {}),
       }),
     });
 
@@ -90,6 +93,7 @@ async function sendToConversationAPI(
       reasoning: msg.reasoning,
       proposal: msg.proposal,
       autoApplied: msg.autoApplied,
+      newConversationId: data.conversationId,
     };
   } catch (err) {
     // Network/auth failure reaching the assistant API. Surface an accurate,
@@ -823,8 +827,9 @@ export function AssistantPage() {
     try {
       const reply = await sendToConversationAPI(conversationId, text, history);
 
-      // If a new conversation was created, store it
-      if (reply.newConversationId && !conversationId) {
+      // Story 3.11 — pin the server's conversation id so the next turn appends
+      // to the same persisted thread (and survives reload).
+      if (reply.newConversationId) {
         localStorage.setItem('conversationId', reply.newConversationId);
       }
 

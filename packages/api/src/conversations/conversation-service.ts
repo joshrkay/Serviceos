@@ -81,6 +81,27 @@ export interface ListInboxThreadsOptions {
   limit?: number;
 }
 
+/**
+ * Story 3.11 — a message that matched a history search, with the minimal
+ * conversation context the UI needs to label it and deep-link into the thread.
+ */
+export interface MessageSearchHit {
+  message: Message;
+  conversation: Pick<Conversation, 'id' | 'title' | 'entityType' | 'entityId'>;
+}
+
+/**
+ * Story 3.11 — history search params: free-text content match and/or a
+ * linked-entity filter (customer or job). All optional; an empty query returns
+ * the most recent messages for the tenant.
+ */
+export interface MessageSearchParams {
+  text?: string;
+  entityType?: string;
+  entityId?: string;
+  limit?: number;
+}
+
 export interface ConversationRepository {
   createConversation(input: CreateConversationInput): Promise<Conversation>;
   findById(tenantId: string, id: string): Promise<Conversation | null>;
@@ -93,6 +114,71 @@ export interface ConversationRepository {
     tenantId: string,
     options?: ListInboxThreadsOptions,
   ): Promise<InboxThreadSummary[]>;
+  /**
+   * Story 3.11 — search message history by free text and/or linked entity
+   * (customer/job). Tenant-scoped; newest first. Drives the history search UI.
+   */
+  searchMessages(tenantId: string, params: MessageSearchParams): Promise<MessageSearchHit[]>;
+}
+
+/**
+ * Story 3.11 — persist one assistant chat turn (the operator's message + the
+ * agent's reply) so the running conversation survives reload and is searchable.
+ * Get-or-create: reuse the supplied conversation when it exists, else open a new
+ * one titled from the first message. Returns the conversation id so the client
+ * can pin it for subsequent turns. The agent reply is only written when present
+ * (a clarifying/empty reply still records the operator's turn).
+ */
+export async function recordAssistantTurn(
+  repository: ConversationRepository,
+  input: {
+    tenantId: string;
+    userId: string;
+    conversationId?: string;
+    userText: string;
+    assistantText?: string;
+  },
+  auditRepo?: AuditRepository,
+): Promise<string> {
+  let conversation =
+    input.conversationId != null
+      ? await repository.findById(input.tenantId, input.conversationId)
+      : null;
+  if (!conversation) {
+    conversation = await createConversationWithAudit(
+      {
+        tenantId: input.tenantId,
+        createdBy: input.userId,
+        ...(input.userText ? { title: input.userText.slice(0, 80) } : {}),
+      },
+      repository,
+      auditRepo,
+      'owner',
+    );
+  }
+  if (input.userText) {
+    await repository.addMessage({
+      tenantId: input.tenantId,
+      conversationId: conversation.id,
+      messageType: 'text',
+      content: input.userText,
+      senderId: input.userId,
+      senderRole: 'user',
+      source: 'assistant',
+    });
+  }
+  if (input.assistantText) {
+    await repository.addMessage({
+      tenantId: input.tenantId,
+      conversationId: conversation.id,
+      messageType: 'text',
+      content: input.assistantText,
+      senderId: 'assistant',
+      senderRole: 'assistant',
+      source: 'assistant',
+    });
+  }
+  return conversation.id;
 }
 
 /** Direction of a message: explicit metadata.direction, else inferred from the
@@ -278,6 +364,35 @@ export class InMemoryConversationRepository implements ConversationRepository {
       metadata: { ...this.messages[idx].metadata, ...metadata },
     };
     return { ...this.messages[idx] };
+  }
+
+  async searchMessages(
+    tenantId: string,
+    params: MessageSearchParams,
+  ): Promise<MessageSearchHit[]> {
+    const limit = params.limit ?? 50;
+    const needle = params.text?.trim().toLowerCase();
+    const hits: MessageSearchHit[] = [];
+    for (const m of this.messages) {
+      if (m.tenantId !== tenantId) continue;
+      if (needle && !(m.content ?? '').toLowerCase().includes(needle)) continue;
+      const conv = this.conversations.get(m.conversationId);
+      if (!conv || conv.tenantId !== tenantId) continue;
+      if (params.entityType && conv.entityType !== params.entityType) continue;
+      if (params.entityId && conv.entityId !== params.entityId) continue;
+      hits.push({
+        message: { ...m },
+        conversation: {
+          id: conv.id,
+          title: conv.title,
+          entityType: conv.entityType,
+          entityId: conv.entityId,
+        },
+      });
+    }
+    return hits
+      .sort((a, b) => b.message.createdAt.getTime() - a.message.createdAt.getTime())
+      .slice(0, limit);
   }
 
   async listInboxThreads(

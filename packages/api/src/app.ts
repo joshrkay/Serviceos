@@ -3988,6 +3988,10 @@ export function createApp(): express.Express {
       // shim with the voice-action-router so the same vertical context
       // reaches both text and voice classification paths.
       verticalPromptResolver: operatorVerticalResolverShim,
+      // Story 3.11 — persist each chat turn so the running conversation
+      // survives reload and is searchable.
+      conversationRepo,
+      auditRepo,
     }),
   );
   // D2-1c — audit-log proposal approve / reject / edit / undo.

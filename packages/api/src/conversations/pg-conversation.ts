@@ -10,6 +10,8 @@ import {
   InboxThreadSummary,
   ListInboxThreadsOptions,
   Message,
+  MessageSearchHit,
+  MessageSearchParams,
 } from './conversation-service';
 
 function mapConversationRow(row: Record<string, unknown>): Conversation {
@@ -134,6 +136,63 @@ export class PgConversationRepository extends PgBaseRepository implements Conver
       );
       if (result.rows.length === 0) return null;
       return mapMessageRow(result.rows[0]);
+    });
+  }
+
+  async searchMessages(
+    tenantId: string,
+    params: MessageSearchParams,
+  ): Promise<MessageSearchHit[]> {
+    const limit = params.limit ?? 50;
+    return this.withTenant(tenantId, async (client) => {
+      // tenant_id is the first predicate (defense-in-depth alongside RLS).
+      // Optional content ILIKE (text) and linked-entity filters are appended
+      // positionally so the parameterized query stays injection-safe.
+      const sqlParams: unknown[] = [tenantId];
+      let textClause = '';
+      if (params.text && params.text.trim().length > 0) {
+        sqlParams.push(`%${params.text.trim()}%`);
+        textClause = `AND m.content ILIKE $${sqlParams.length}`;
+      }
+      let entityTypeClause = '';
+      if (params.entityType) {
+        sqlParams.push(params.entityType);
+        entityTypeClause = `AND c.entity_type = $${sqlParams.length}`;
+      }
+      let entityIdClause = '';
+      if (params.entityId) {
+        sqlParams.push(params.entityId);
+        entityIdClause = `AND c.entity_id = $${sqlParams.length}`;
+      }
+      sqlParams.push(limit);
+      const limitParam = `$${sqlParams.length}`;
+
+      const sql = `
+        SELECT
+          m.*,
+          c.title AS conv_title,
+          c.entity_type AS conv_entity_type,
+          c.entity_id AS conv_entity_id
+        FROM messages m
+        JOIN conversations c
+          ON c.id = m.conversation_id AND c.tenant_id = m.tenant_id
+        WHERE m.tenant_id = $1
+          ${textClause}
+          ${entityTypeClause}
+          ${entityIdClause}
+        ORDER BY m.created_at DESC
+        LIMIT ${limitParam}
+      `;
+      const { rows } = await client.query(sql, sqlParams);
+      return rows.map((row) => ({
+        message: mapMessageRow(row),
+        conversation: {
+          id: row.conversation_id as string,
+          title: row.conv_title as string | undefined,
+          entityType: row.conv_entity_type as string | undefined,
+          entityId: row.conv_entity_id as string | undefined,
+        },
+      }));
     });
   }
 
