@@ -88,6 +88,9 @@ import {
 import { OwnerNotificationService } from './notifications/owner-notification-service';
 import { userIdsWithPermissionResolver } from './notifications/user-targeting';
 import { setOwnerNotifications } from './notifications/owner-notifications-instance';
+import { createNotificationPreferencesRouter } from './routes/notification-preferences';
+import { InMemoryNotificationPreferenceRepository } from './notifications/notification-preferences-service';
+import { PgNotificationPreferenceRepository } from './notifications/pg-notification-preferences-repository';
 import {
   createMeRouter,
   DEFAULT_TENANT_TIMEZONE,
@@ -3823,6 +3826,16 @@ export function createApp(): express.Express {
     : new InMemoryDeviceTokenRepository();
   app.use('/api/devices', createDevicesRouter(deviceTokenRepo, auditRepo));
 
+  // U10 — per-user owner-notification opt-outs. GET/PUT for the settings UI;
+  // the fan-out below consults `listMutedUserIds` to drop muted recipients.
+  const notificationPreferenceRepo = pool
+    ? new PgNotificationPreferenceRepository(pool)
+    : new InMemoryNotificationPreferenceRepository();
+  app.use(
+    '/api/notification-preferences',
+    createNotificationPreferencesRouter(notificationPreferenceRepo, auditRepo),
+  );
+
   // U7 — bind the push notifiers into the late-bound slots now that the
   // device-token repo exists.
   const expoPushProvider = new ExpoPushDeliveryProvider(fetch, process.env.EXPO_ACCESS_TOKEN);
@@ -3848,6 +3861,8 @@ export function createApp(): express.Express {
       deviceTokenRepo,
       provider: expoPushProvider,
       resolveUserIds: userIdsWithPermissionResolver(userRepo),
+      resolveMutedUserIds: (tenantId, type) =>
+        notificationPreferenceRepo.listMutedUserIds(tenantId, type),
     }),
   );
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
