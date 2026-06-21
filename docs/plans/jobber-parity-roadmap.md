@@ -18,9 +18,9 @@ booking + intake, time tracking, expenses, Google reviews, financial reporting,
 | # | Feature | Pillar | Size | Status |
 |---|---------|--------|------|--------|
 | 1 | Customer source/origin tracking ("How did you hear about us?") | CRM | S | ✅ done |
+| 4 | Customer profitability report | Reporting | S | ✅ done |
 | 2 | Surcharge / processing-fee pass-through | Payments | S | todo |
 | 3 | Technician profitability report | Reporting | S | todo |
-| 4 | Customer profitability report | Reporting | S | todo |
 | 5 | Tip collection at checkout | Payments | S | todo |
 | 6 | Maintenance contracts DB persistence (graduate stub) | Jobs | M | todo |
 | 7 | Payment plan / installment support (expose milestone schedules) | Payments | M | todo |
@@ -37,3 +37,7 @@ fully testable in CI.
 ## Log
 - Iteration 1: #1 Customer source tracking — shared type + DB migration + API
   create/update/validation + web capture/display + tests.
+- Iteration 2: #4 Customer profitability report — getCustomerProfit aggregation
+  (reuses getJobProfit) + GET /api/reports/customer-profit/:customerId +
+  CustomerProfitCard on the customer detail + unit/route/web tests. No schema
+  change (read-only).

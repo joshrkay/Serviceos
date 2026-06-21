@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import { DetailPage } from '../../components/DetailPage';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { CommunicationTimeline } from '../../components/customers/CommunicationTimeline';
+import { CustomerProfitCard } from '../../components/customers/CustomerProfitCard';
 import { LanguageBadge } from '../../components/customers/LanguageBadge';
 import { ContactsPanel } from '../../components/customers/ContactsPanel';
 import { TagsPanel } from '../../components/customers/TagsPanel';
@@ -531,6 +532,7 @@ export function CustomerDetail({
                   .
                 </p>
               ) : null}
+              <CustomerProfitCard customerId={customerId} />
               <CommunicationTimeline customerId={customerId} />
             </div>
           ),
