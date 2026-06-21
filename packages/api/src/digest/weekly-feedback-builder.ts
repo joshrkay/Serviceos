@@ -21,6 +21,11 @@ export async function buildWeeklyFeedbackSnapshot(
   try {
     await client.query(setTenantContext(tenantId));
 
+    // Every query filters by tenant_id explicitly in ADDITION to the RLS GUC
+    // set above — defense-in-depth (matches the money-dashboard repo). RLS
+    // scopes us in production; the explicit predicate keeps the rollup correct
+    // even on a connection whose role bypasses RLS (e.g. the CI superuser).
+
     // Revenue: net completed payments received in the window (this + prior).
     // The "received" timestamp column is `paid_at` (the repo maps it to
     // receivedAt) — there is no `received_at` column.
@@ -30,8 +35,8 @@ export async function buildWeeklyFeedbackSnapshot(
          COALESCE(SUM(amount_cents) FILTER (WHERE paid_at >= $1 AND paid_at < $2), 0)::bigint AS prior_cents,
          COUNT(*) FILTER (WHERE paid_at >= $2 AND paid_at < $3)::int AS paid_count
        FROM payments
-       WHERE status = 'completed' AND paid_at >= $1 AND paid_at < $3`,
-      [priorStart, weekStart, weekEnd],
+       WHERE tenant_id = $4 AND status = 'completed' AND paid_at >= $1 AND paid_at < $3`,
+      [priorStart, weekStart, weekEnd, tenantId],
     );
 
     const jobs = await client.query<{ completed: string; prior_completed: string; booked: string }>(
@@ -40,8 +45,9 @@ export async function buildWeeklyFeedbackSnapshot(
          COUNT(*) FILTER (WHERE status = 'completed' AND updated_at >= $1 AND updated_at < $2)::int AS prior_completed,
          COUNT(*) FILTER (WHERE created_at >= $2 AND created_at < $3)::int AS booked
        FROM jobs
-       WHERE (updated_at >= $1 AND updated_at < $3) OR (created_at >= $2 AND created_at < $3)`,
-      [priorStart, weekStart, weekEnd],
+       WHERE tenant_id = $4
+         AND ((updated_at >= $1 AND updated_at < $3) OR (created_at >= $2 AND created_at < $3))`,
+      [priorStart, weekStart, weekEnd, tenantId],
     );
 
     const estimates = await client.query<{ sent_count: string; sent_value: string }>(
@@ -49,29 +55,33 @@ export async function buildWeeklyFeedbackSnapshot(
          COUNT(*)::int AS sent_count,
          COALESCE(SUM(total_cents), 0)::bigint AS sent_value
        FROM estimates
-       WHERE status = 'sent' AND sent_at >= $1 AND sent_at < $2`,
-      [weekStart, weekEnd],
+       WHERE tenant_id = $3 AND status = 'sent' AND sent_at >= $1 AND sent_at < $2`,
+      [weekStart, weekEnd, tenantId],
     );
 
     const calls = await client.query<{ answered: string }>(
       `SELECT COUNT(*)::int AS answered
        FROM voice_sessions
-       WHERE channel = 'voice_inbound'
+       WHERE tenant_id = $3
+         AND channel = 'voice_inbound'
          AND ended_at >= $1 AND ended_at < $2
          AND (outcome IS NULL OR outcome <> 'failed')`,
-      [weekStart, weekEnd],
+      [weekStart, weekEnd, tenantId],
     );
 
     const leads = await client.query<{ new_leads: string }>(
-      `SELECT COUNT(*)::int AS new_leads FROM leads WHERE created_at >= $1 AND created_at < $2`,
-      [weekStart, weekEnd],
+      `SELECT COUNT(*)::int AS new_leads
+       FROM leads
+       WHERE tenant_id = $3 AND created_at >= $1 AND created_at < $2`,
+      [weekStart, weekEnd, tenantId],
     );
 
     // Outstanding is a current snapshot of what's owed, not a windowed sum.
     const outstanding = await client.query<{ outstanding: string }>(
       `SELECT COALESCE(SUM(total_cents - amount_paid_cents), 0)::bigint AS outstanding
        FROM invoices
-       WHERE status IN ('open', 'partially_paid')`,
+       WHERE tenant_id = $1 AND status IN ('open', 'partially_paid')`,
+      [tenantId],
     );
 
     const num = (v: string | number | undefined): number => Number(v ?? 0);
