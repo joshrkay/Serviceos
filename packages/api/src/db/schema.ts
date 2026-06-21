@@ -439,6 +439,12 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
+  // ⚠️ DUPLICATE tenant_integrations CREATE. This key runs BEFORE
+  // '070_tenant_integrations' (source order = run order), so THIS CREATE wins
+  // and the other's is a no-op. The auth_token_*_secret_ref columns defined
+  // here are dead (no code path ever read/wrote them) and are dropped by
+  // migration 207; the _enc columns production actually uses are added by 206.
+  // Neither 070 can be removed (immutability). See also 1929 below.
   '070_tenant_location_and_integrations': `
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS country CHAR(2) NOT NULL DEFAULT 'US',
@@ -1921,6 +1927,11 @@ export const MIGRATIONS = {
   // Creates tenant_integrations to track Twilio subaccount + SendGrid subuser
   // provisioning state per tenant. Auth tokens are stored AES-256-GCM
   // encrypted (app-level key) — never plaintext.
+  // ⚠️ DUPLICATE tenant_integrations CREATE. This key runs AFTER
+  // '070_tenant_location_and_integrations' (which already created the table),
+  // so this CREATE IF NOT EXISTS is a NO-OP — its auth_token_*_enc columns were
+  // never created on fresh DBs until migration 206 added them via ALTER. Kept
+  // for immutability (production ran it); do not rely on its body taking effect.
   '070_tenant_integrations': `
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS country CHAR(2) NOT NULL DEFAULT 'US',
@@ -5084,6 +5095,22 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS auth_token_primary_enc TEXT;
     ALTER TABLE tenant_integrations
       ADD COLUMN IF NOT EXISTS auth_token_secondary_enc TEXT;
+  `,
+
+  // Tech-debt cleanup: drop the orphaned auth_token_*_secret_ref columns that
+  // the winning 070_tenant_location_and_integrations CREATE left on the table.
+  // No code ever read OR wrote them (the credential path has always used the
+  // _enc columns added in 206), so they are guaranteed empty on every database
+  // — DROP is non-destructive. IF EXISTS keeps it idempotent across the
+  // runner's per-boot re-execution and safe on the fresh-DB ordering (070
+  // creates them, 207 removes them). The duplicate 070 CREATE itself cannot be
+  // removed (immutability — production already ran both keys); it is now inert
+  // (IF NOT EXISTS) and documented at both definition sites.
+  '207_drop_tenant_integrations_dead_secret_ref_columns': `
+    ALTER TABLE tenant_integrations
+      DROP COLUMN IF EXISTS auth_token_primary_secret_ref;
+    ALTER TABLE tenant_integrations
+      DROP COLUMN IF EXISTS auth_token_secondary_secret_ref;
   `,
 };
 

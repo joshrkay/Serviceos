@@ -328,6 +328,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // fresh DBs because a duplicate 070 CREATE shadowed the _enc definition (the
   // column all provisioning/webhook code uses). Additive ALTER, no-op on prod.
   ['206_tenant_integrations_auth_token_enc_columns', '21416ab18ca77cd08ca4f1d76d2f13f756f586b36fe90f1dd7adb2b9041fff28'],
+  // Tech-debt: drop the dead auth_token_*_secret_ref columns (never read/written;
+  // the credential path uses the _enc columns). Idempotent DROP COLUMN IF EXISTS.
+  ['207_drop_tenant_integrations_dead_secret_ref_columns', '1a2db8b309e3aaae66e843bb9d2735db8be01c1ab189e0338b08548d2cd6d93d'],
 ];
 
 function hashMigration(value: string): string {
