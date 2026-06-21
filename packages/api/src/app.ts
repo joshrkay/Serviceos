@@ -88,6 +88,7 @@ import {
 import { OwnerNotificationService } from './notifications/owner-notification-service';
 import { userIdsWithPermissionResolver } from './notifications/user-targeting';
 import { setOwnerNotifications } from './notifications/owner-notifications-instance';
+import { setOwnerNotificationNameResolvers } from './notifications/owner-notification-name-resolver';
 import { createNotificationPreferencesRouter } from './routes/notification-preferences';
 import { InMemoryNotificationPreferenceRepository } from './notifications/notification-preferences-service';
 import { PgNotificationPreferenceRepository } from './notifications/pg-notification-preferences-repository';
@@ -3893,6 +3894,27 @@ export function createApp(): express.Express {
         notificationPreferenceRepo.listMutedUserIds(tenantId, type),
     }),
   );
+  // Render the real customer name in payment/cancellation pushes (best-effort;
+  // falls back to "A customer" on any miss) without threading a resolver
+  // through every recordPayment / cancellation call site.
+  setOwnerNotificationNameResolvers({
+    invoiceCustomerName: async (tid, invoiceId) => {
+      const invoice = await invoiceRepo.findById(tid, invoiceId);
+      if (!invoice?.jobId) return undefined;
+      const job = await jobRepo.findById(tid, invoice.jobId);
+      if (!job?.customerId) return undefined;
+      const customer = await customerRepo.findById(tid, job.customerId);
+      return customer?.displayName;
+    },
+    appointmentCustomerName: async (tid, appointmentId) => {
+      const appointment = await appointmentRepo.findById(tid, appointmentId);
+      if (!appointment?.jobId) return undefined;
+      const job = await jobRepo.findById(tid, appointment.jobId);
+      if (!job?.customerId) return undefined;
+      const customer = await customerRepo.findById(tid, job.customerId);
+      return customer?.displayName;
+    },
+  });
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use(
     '/api/conversations',
