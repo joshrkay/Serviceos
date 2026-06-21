@@ -56,8 +56,7 @@ export interface GetCustomerProfitInput {
 
 export interface GetCustomerProfitDeps extends GetJobProfitDeps {
   /** findByCustomer is required here (it is optional on the wider interface). */
-  jobRepo: Pick<JobRepository, 'findByCustomer'> &
-    Required<Pick<JobRepository, 'findByCustomer'>>;
+  jobRepo: Required<Pick<JobRepository, 'findByCustomer'>>;
 }
 
 export async function getCustomerProfit(

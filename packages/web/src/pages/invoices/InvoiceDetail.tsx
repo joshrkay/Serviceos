@@ -12,6 +12,7 @@ import {
 } from '../../components/forms/LineItemEditor';
 import { apiFetch } from '../../utils/api-fetch';
 import { formatCurrency as formatCents } from '../../utils/currency';
+import { toTitleCase } from '../../utils/string';
 
 interface LineItem {
   id: string;
@@ -63,11 +64,11 @@ function formatPaymentMethod(method: string): string {
     zelle: 'Zelle',
     other: 'Other',
   };
-  return labels[normalized] ?? method.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+  return labels[normalized] ?? toTitleCase(method);
 }
 
 function formatPaymentStatus(status: string): string {
-  return status.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+  return toTitleCase(status);
 }
 
 function isSettledPayment(status: string): boolean {

@@ -6,6 +6,7 @@ import { DetailPage } from '../../components/DetailPage';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { CommunicationTimeline } from '../../components/customers/CommunicationTimeline';
 import { CustomerProfitCard } from '../../components/customers/CustomerProfitCard';
+import { toTitleCase } from '../../utils/string';
 import { LanguageBadge } from '../../components/customers/LanguageBadge';
 import { ContactsPanel } from '../../components/customers/ContactsPanel';
 import { TagsPanel } from '../../components/customers/TagsPanel';
@@ -311,9 +312,7 @@ export function CustomerDetail({
               <div className="flex justify-between gap-4">
                 <dt className="text-slate-400">Source</dt>
                 <dd className="text-slate-800">
-                  {data.source
-                    ? data.source.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
-                    : '—'}
+                  {data.source ? toTitleCase(data.source) : '—'}
                 </dd>
               </div>
               {/* P11-002: spoken-language preference, now persisted on change

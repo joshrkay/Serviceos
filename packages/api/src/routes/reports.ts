@@ -16,7 +16,7 @@ import { JobRepository } from '../jobs/job';
 import { TimeEntryRepository } from '../time-tracking/time-entry';
 import { SettingsRepository } from '../settings/settings';
 import { getJobProfit, MaterialsResolver } from '../jobs/job-profit';
-import { getCustomerProfit } from '../reports/customer-profit';
+import { getCustomerProfit, type GetCustomerProfitDeps } from '../reports/customer-profit';
 
 /**
  * Tenant-scoped reporting endpoints. Add new reports here rather than
@@ -374,8 +374,7 @@ export function createReportsRouter(deps: ReportsRouterDeps): Router {
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (
-          !deps.jobRepo ||
-          !deps.jobRepo.findByCustomer ||
+          !deps.jobRepo?.findByCustomer ||
           !deps.invoiceRepo ||
           !deps.timeEntryRepo ||
           !deps.expenseRepo ||
@@ -395,7 +394,9 @@ export function createReportsRouter(deps: ReportsRouterDeps): Router {
             laborRateCentsPerHour: settings?.laborRateCentsPerHour ?? null,
           },
           {
-            jobRepo: deps.jobRepo as Parameters<typeof getCustomerProfit>[1]['jobRepo'],
+            // Pass the repo whole (preserves method `this`); the guard above
+            // proved findByCustomer is present, which the cast asserts.
+            jobRepo: deps.jobRepo as GetCustomerProfitDeps['jobRepo'],
             invoiceRepo: deps.invoiceRepo,
             timeEntryRepo: deps.timeEntryRepo,
             expenseRepo: deps.expenseRepo,

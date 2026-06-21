@@ -30,26 +30,28 @@ interface CustomerProfit {
  * report is hidden when it isn't configured (503) so it never shows an error
  * on a tenant without the billing repos wired.
  */
+type LoadState =
+  | { status: 'loading' }
+  | { status: 'ready'; data: CustomerProfit }
+  | { status: 'unavailable' };
+
 export function CustomerProfitCard({ customerId }: { customerId: string }) {
-  const [data, setData] = useState<CustomerProfit | null>(null);
-  const [state, setState] = useState<'loading' | 'ready' | 'unavailable'>('loading');
+  const [load, setLoad] = useState<LoadState>({ status: 'loading' });
 
   useEffect(() => {
     let cancelled = false;
+    setLoad({ status: 'loading' });
     (async () => {
       try {
         const res = await apiFetch(`/api/reports/customer-profit/${customerId}`);
         if (!res.ok) {
-          if (!cancelled) setState('unavailable');
+          if (!cancelled) setLoad({ status: 'unavailable' });
           return;
         }
         const body = (await res.json()) as { data: CustomerProfit };
-        if (!cancelled) {
-          setData(body.data);
-          setState('ready');
-        }
+        if (!cancelled) setLoad({ status: 'ready', data: body.data });
       } catch {
-        if (!cancelled) setState('unavailable');
+        if (!cancelled) setLoad({ status: 'unavailable' });
       }
     })();
     return () => {
@@ -57,7 +59,8 @@ export function CustomerProfitCard({ customerId }: { customerId: string }) {
     };
   }, [customerId]);
 
-  if (state === 'unavailable') return null;
+  if (load.status === 'unavailable') return null;
+  const data = load.status === 'ready' ? load.data : null;
 
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4">
@@ -70,7 +73,7 @@ export function CustomerProfitCard({ customerId }: { customerId: string }) {
         )}
       </div>
 
-      {state === 'loading' || !data ? (
+      {!data ? (
         <p className="text-xs text-slate-400">Loading…</p>
       ) : (
         <>
