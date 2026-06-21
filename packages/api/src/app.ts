@@ -89,6 +89,10 @@ import { OwnerNotificationService } from './notifications/owner-notification-ser
 import { userIdsWithPermissionResolver } from './notifications/user-targeting';
 import { setOwnerNotifications } from './notifications/owner-notifications-instance';
 import {
+  TechnicianAssignmentNotifier,
+  setTechnicianAssignmentNotifier,
+} from './appointments/assignment-notifications';
+import {
   createMeRouter,
   DEFAULT_TENANT_TIMEZONE,
   InMemoryUserModeService,
@@ -3843,11 +3847,23 @@ export function createApp(): express.Express {
   // producer seams (inbound call/SMS, appointment reminder/cancellation,
   // payment, lead, escalation). Each type targets the permission its descriptor
   // declares (owner+dispatcher, never a technician device).
-  setOwnerNotifications(
-    new OwnerNotificationService({
-      deviceTokenRepo,
-      provider: expoPushProvider,
-      resolveUserIds: userIdsWithPermissionResolver(userRepo),
+  const ownerNotificationService = new OwnerNotificationService({
+    deviceTokenRepo,
+    provider: expoPushProvider,
+    resolveUserIds: userIdsWithPermissionResolver(userRepo),
+  });
+  setOwnerNotifications(ownerNotificationService);
+  // Epic 6 — technician assignment notifications (in-app push to the assigned
+  // tech). Reuses the owner-notification service's user-targeted send; the
+  // producer resolves customer/time/service from the appointment. Wired into
+  // assignTechnician / unassignTechnician via the process-wide accessor.
+  setTechnicianAssignmentNotifier(
+    new TechnicianAssignmentNotifier({
+      appointmentRepo,
+      jobRepo,
+      customerRepo,
+      userRepo,
+      notifier: ownerNotificationService,
     }),
   );
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
