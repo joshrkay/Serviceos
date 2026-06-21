@@ -150,6 +150,62 @@ describe('analyzeCassetteStaleness', () => {
     expect(c.deeplyAccreted).toBe(false);
   });
 
+  it('surfaces an unparseable recordedAt instead of silently treating it as fresh', () => {
+    const r = analyzeCassetteStaleness(
+      [
+        {
+          scriptId: 'corrupt',
+          entries: [entry({ system: 'You are X. a', user: 'hi', recordedAt: '2026-13-99T00:00:00.000Z' })],
+        },
+      ],
+      NOW,
+    );
+    const c = r.cassettes[0]!;
+    expect(c.ageDays).toBeNull(); // NOT NaN
+    expect(c.stale).toBe(true); // flagged, not hidden
+    expect(c.reasons.join(' ')).toContain('unparseable');
+    expect(r.medianAgeDays).toBeNull(); // NaN must not poison the aggregate
+  });
+
+  it('orders recordedAt chronologically, not lexically (timezone offsets)', () => {
+    // 2026-06-17T20:00-05:00 == 2026-06-18T01:00Z is the true newest, yet its
+    // string sorts lexically *before* the 2026-06-18T00:00Z entry.
+    const c = analyzeCassetteStaleness(
+      [
+        {
+          scriptId: 'tz',
+          entries: [
+            entry({ system: 'You are X. a', user: 'hi', recordedAt: '2026-06-18T00:00:00.000Z' }),
+            entry({ system: 'You are X. a', user: 'hi', recordedAt: '2026-06-17T20:00:00.000-05:00' }),
+          ],
+        },
+      ],
+      NOW,
+    ).cassettes[0]!;
+    expect(c.newestRecordedAt).toBe('2026-06-17T20:00:00.000-05:00');
+    expect(c.oldestRecordedAt).toBe('2026-06-18T00:00:00.000Z');
+  });
+
+  it('keys calls structurally — a "::" in user/fingerprint text cannot collide distinct calls', () => {
+    // Under a `${schema}::${fp}::${user}` join these two collapse to one key
+    // ("...::A::y::z"); they are two distinct logical calls.
+    const c = analyzeCassetteStaleness(
+      [
+        {
+          scriptId: 'colon',
+          entries: [
+            entry({ system: 'A', user: 'y::z', recordedAt: '2026-06-20T00:00:00.000Z' }),
+            entry({ system: 'A::y', user: 'z', recordedAt: '2026-06-20T00:00:00.000Z' }),
+          ],
+        },
+      ],
+      NOW,
+    ).cassettes[0]!;
+    expect(c.callCount).toBe(2);
+    expect(c.maxDepth).toBe(1);
+    expect(c.driftedCalls).toBe(0);
+  });
+
   it('formatStalenessReport surfaces flagged rows and a fresh count', () => {
     const r = analyzeCassetteStaleness([freshCassette, driftedCassette, oldCassette], NOW);
     const md = formatStalenessReport(r);

@@ -55,7 +55,9 @@ jobs:
         if: always()
         # Deterministic, offline (no DB/LLM): surfaces how much of the corpus
         # is served by the replay drift-fallback rather than exact replay, so
-        # re-records become deliberate. Non-gating (no --strict).
+        # re-records become deliberate. Non-gating: run without --strict, and
+        # continue-on-error so a corrupt cassette can't redden this nightly.
+        continue-on-error: true
         run: npm run voice-quality:staleness --workspace=packages/api
       - name: Upload report
         if: always()

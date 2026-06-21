@@ -100,7 +100,9 @@ function callKey(entry: CassetteEntry): string {
   const schema = entry.request.schema;
   const fp = systemFingerprintFromPromptString(entry.request.prompt) ?? '(no-system)';
   const user = lastUserContentFromPromptString(entry.request.prompt) ?? '(no-user)';
-  return `${schema}::${fp}::${user}`;
+  // Structured (not delimiter-joined) so a "::" inside a fingerprint or user
+  // message can't shift field boundaries and collide two distinct calls.
+  return JSON.stringify([schema, fp, user]);
 }
 
 function analyzeCassette(
@@ -122,22 +124,33 @@ function analyzeCassette(
     if (depth >= 2) driftedCalls++;
   }
 
-  const recordedAts = entries
+  // Parse timestamps once and order them chronologically (not lexically — a
+  // bare string .sort() would mis-rank a hand-edited offset timestamp). A
+  // non-empty but unparseable recordedAt is surfaced loudly rather than
+  // silently treated as fresh: `new Date('bad').getTime()` is NaN, and
+  // `Math.max(0, NaN)` is NaN, which `NaN > maxAge` would read as "not stale".
+  const rawRecordedAts = entries
     .map((e) => e.recordedAt)
-    .filter((r): r is string => typeof r === 'string' && r.length > 0)
-    .sort();
-  const newestRecordedAt = recordedAts.length ? recordedAts[recordedAts.length - 1]! : null;
-  const oldestRecordedAt = recordedAts.length ? recordedAts[0]! : null;
-  const ageDays =
-    newestRecordedAt !== null
-      ? Math.max(0, (now.getTime() - new Date(newestRecordedAt).getTime()) / DAY_MS)
-      : null;
+    .filter((r): r is string => typeof r === 'string' && r.length > 0);
+  const parsedAts = rawRecordedAts
+    .map((raw) => ({ raw, t: Date.parse(raw) }))
+    .filter((x) => Number.isFinite(x.t))
+    .sort((a, b) => a.t - b.t);
+  const malformedCount = rawRecordedAts.length - parsedAts.length;
+  const newest = parsedAts.length ? parsedAts[parsedAts.length - 1]! : null;
+  const newestRecordedAt = newest ? newest.raw : null;
+  const oldestRecordedAt = parsedAts.length ? parsedAts[0]!.raw : null;
+  const ageDays = newest ? Math.max(0, (now.getTime() - newest.t) / DAY_MS) : null;
 
   const reasons: string[] = [];
-  const stale = ageDays !== null && ageDays > thresholds.maxAgeDays;
+  const staleByAge = ageDays !== null && ageDays > thresholds.maxAgeDays;
   const deeplyAccreted = maxDepth > thresholds.maxDepth;
-  if (stale) {
+  const stale = staleByAge || malformedCount > 0;
+  if (staleByAge) {
     reasons.push(`newest recording ${round1(ageDays!)}d old (> ${thresholds.maxAgeDays}d) — re-record`);
+  }
+  if (malformedCount > 0) {
+    reasons.push(`${malformedCount} unparseable recordedAt timestamp(s) — re-record`);
   }
   if (deeplyAccreted) {
     reasons.push(

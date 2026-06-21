@@ -6,7 +6,7 @@
  *
  * Usage:
  *   npm run voice-quality:staleness              # print report + write JSON, exit 0
- *   npm run voice-quality:staleness -- --strict  # also exit 1 if any cassette is stale
+ *   npm run voice-quality:staleness -- --strict  # also exit 1 if any cassette is stale or deeply accreted
  *
  * Refresh stale cassettes with `npm run voice-quality:refresh` (needs an AI key).
  */
@@ -39,10 +39,19 @@ function loadCassettes(): CassetteInput[] {
 
   const inputs: CassetteInput[] = [];
   for (const file of files) {
-    const parsed = JSON.parse(fs.readFileSync(path.join(CASSETTES_DIR, file), 'utf-8')) as {
-      scriptId?: string;
-      entries?: unknown;
-    };
+    const filePath = path.join(CASSETTES_DIR, file);
+    let parsed: { scriptId?: string; entries?: unknown };
+    try {
+      const json = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as unknown;
+      if (typeof json !== 'object' || json === null || Array.isArray(json)) {
+        throw new Error('cassette JSON is not an object');
+      }
+      parsed = json as { scriptId?: string; entries?: unknown };
+    } catch (err) {
+      console.error(`Invalid cassette JSON: ${filePath}`);
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
     const scriptId =
       typeof parsed.scriptId === 'string' ? parsed.scriptId : path.basename(file, '.json');
     if (layer2OnlyIds.has(scriptId)) continue;
@@ -66,12 +75,19 @@ function main(): void {
   console.log(formatStalenessReport(report));
   fs.writeFileSync(OUT_PATH, JSON.stringify(report, null, 2));
 
-  if (strict && report.staleCassettes > 0) {
-    console.error(
-      `\n${report.staleCassettes} cassette(s) exceed staleness thresholds — ` +
-        `refresh with VOICE_QUALITY_CASSETTE_MODE=refresh when convenient.`,
-    );
-    process.exit(1);
+  if (strict) {
+    // Gate on the union of both signals — age-staleness alone never fires on a
+    // corpus that is re-recorded often (the accretion case), which is exactly
+    // what the report exists to surface.
+    const flaggedCount = report.cassettes.filter((c) => c.stale || c.deeplyAccreted).length;
+    if (flaggedCount > 0) {
+      console.error(
+        `\n${flaggedCount} cassette(s) exceed staleness thresholds ` +
+          `(${report.staleCassettes} by age, ${report.deeplyAccretedCassettes} by depth) — ` +
+          `refresh with VOICE_QUALITY_CASSETTE_MODE=refresh when convenient.`,
+      );
+      process.exit(1);
+    }
   }
 }
 
