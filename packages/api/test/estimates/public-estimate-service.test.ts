@@ -159,6 +159,29 @@ describe('PublicEstimateService.getByToken', () => {
     expect(view.isActionable).toBe(true);
   });
 
+  it('defaults estimateLabel to "Estimate" when no terminology is configured', async () => {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+
+    const view = await h.service.getByToken(est.viewToken!);
+    expect(view.estimateLabel).toBe('Estimate');
+  });
+
+  it('surfaces the tenant terminology label (Quote) on the customer view', async () => {
+    // Story 7.4 — the tenant's word flows into the customer-facing page.
+    await h.settings.update(TENANT, {
+      terminologyPreferences: { estimateTerm: 'Quote' },
+      updatedAt: new Date(),
+    });
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+
+    const view = await h.service.getByToken(est.viewToken!);
+    expect(view.estimateLabel).toBe('Quote');
+  });
+
   it('throws NotFoundError for unknown token', async () => {
     await expect(
       h.service.getByToken('not-a-real-token-just-padding-here')
