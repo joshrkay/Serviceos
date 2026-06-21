@@ -214,3 +214,47 @@ describe('P2-036 V2 (U-G) — isEstimateCatalogGrounded', () => {
     expect(isEstimateCatalogGrounded({ lineItems: [zeroLine] })).toBe(false);
   });
 });
+
+describe('7.10 — EstimateListOptions.jobIds filter', () => {
+  let repo: InMemoryEstimateRepository;
+
+  const itemsFor = () => [buildLineItem('i1', 'Labor', 1, 5000, 0, false, 'labor')];
+
+  async function seed(jobId: string, num: string): Promise<void> {
+    await createEstimate(
+      { tenantId: 'tenant-1', jobId, estimateNumber: num, lineItems: itemsFor(), createdBy: 'user-1' },
+      repo,
+    );
+  }
+
+  beforeEach(async () => {
+    repo = new InMemoryEstimateRepository();
+    await seed('job-A', 'EST-0001');
+    await seed('job-A', 'EST-0002');
+    await seed('job-B', 'EST-0003');
+    await seed('job-C', 'EST-0004');
+  });
+
+  it('returns only estimates whose jobId is in the set', async () => {
+    const rows = await repo.findByTenant('tenant-1', { jobIds: ['job-A', 'job-B'] });
+    expect(rows).toHaveLength(3);
+    expect(rows.every((e) => e.jobId === 'job-A' || e.jobId === 'job-B')).toBe(true);
+  });
+
+  it('an empty jobIds set matches nothing', async () => {
+    const rows = await repo.findByTenant('tenant-1', { jobIds: [] });
+    expect(rows).toHaveLength(0);
+  });
+
+  it('composes with status and reports the right total via listWithMeta', async () => {
+    const { data, total } = await repo.listWithMeta('tenant-1', {
+      jobIds: ['job-A'],
+      status: 'draft',
+      limit: 50,
+      offset: 0,
+    });
+    expect(total).toBe(2);
+    expect(data).toHaveLength(2);
+    expect(data.every((e) => e.jobId === 'job-A')).toBe(true);
+  });
+});

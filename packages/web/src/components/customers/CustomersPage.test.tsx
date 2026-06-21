@@ -124,6 +124,54 @@ describe('CustomersPage', () => {
     expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/customers');
   });
 
+  it('shows the primary phone in each row (4.1)', () => {
+    renderPage();
+    expect(screen.getByText('5125550001')).toBeInTheDocument();
+    expect(screen.getByText('5125550002')).toBeInTheDocument();
+  });
+
+  it('renders tag filter chips and narrows the list by tag (4.8)', () => {
+    renderPage();
+    const tagBar = screen.getByTestId('tag-filters');
+    expect(tagBar).toBeInTheDocument();
+    // Both customers visible before filtering.
+    expect(screen.getByText('Alice Smith')).toBeInTheDocument();
+    expect(screen.getByText('Bob Jones')).toBeInTheDocument();
+    // Click the #VIP tag chip → only Bob (who carries 'VIP') remains.
+    fireEvent.click(screen.getByText('#VIP'));
+    expect(screen.queryByText('Alice Smith')).not.toBeInTheDocument();
+    expect(screen.getByText('Bob Jones')).toBeInTheDocument();
+  });
+
+  it('hides the tag filter bar when no customer has tags', () => {
+    vi.mocked(useListQuery).mockReturnValue({
+      ...defaultListResult,
+      data: [{ ...mockCustomers[0], tags: [] }],
+    });
+    renderPage();
+    expect(screen.queryByTestId('tag-filters')).not.toBeInTheDocument();
+  });
+
+  it('flags a fuzzy name match as a possible duplicate in the Add sheet (4.4)', () => {
+    renderPage();
+    fireEvent.click(screen.getByText('Add customer')); // open the Add sheet
+    const nameInput = screen.getByPlaceholderText('Full name *');
+    fireEvent.change(nameInput, { target: { value: 'Alice Smyth' } });
+    // 'Alice Smyth' is a close trigram match for the existing 'Alice Smith'.
+    expect(screen.getByText('Possible duplicate')).toBeInTheDocument();
+    expect(screen.getByText(/Similar name matches an existing customer/)).toBeInTheDocument();
+  });
+
+  it('does not flag an unrelated name in the Add sheet', () => {
+    renderPage();
+    fireEvent.click(screen.getByText('Add customer'));
+    fireEvent.change(screen.getByPlaceholderText('Full name *'), {
+      target: { value: 'Zachary Quinto' },
+    });
+    expect(screen.queryByText('Possible duplicate')).not.toBeInTheDocument();
+    expect(screen.queryByText('Already in your system')).not.toBeInTheDocument();
+  });
+
   it('offers an acquisition-source selector when adding a customer', () => {
     renderPage();
     fireEvent.click(screen.getByText('Add customer')); // open the Add sheet
