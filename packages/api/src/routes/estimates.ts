@@ -2,7 +2,12 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { createEstimateSchema } from '../shared/contracts';
+import { createEstimateSchema, verticalTypeSchema } from '../shared/contracts';
+import {
+  EstimateTemplateRepository,
+  createTemplate,
+  buildTemplateInputFromEstimate,
+} from '../templates/estimate-template';
 import { toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
@@ -93,6 +98,10 @@ export function createEstimateRouter(
   // estimate for a customer with an active discounting membership has that
   // discount folded in automatically. Optional so legacy harnesses build.
   agreementRepo?: AgreementRepository,
+  // Estimate templates (#7.9). When wired, mounts POST /:id/save-as-template,
+  // which turns an existing estimate into a reusable, tenant-scoped template.
+  // Optional so legacy harnesses build (the route returns 503 when absent).
+  templateRepo?: EstimateTemplateRepository,
 ): Router {
   const router = Router();
 
@@ -488,6 +497,59 @@ export function createEstimateRouter(
           return;
         }
         res.status(201).json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  // POST /:id/save-as-template — turn an existing estimate into a reusable,
+  // tenant-scoped template (Story 7.9). The server fills the template's line
+  // items, discount, tax rate, and customer message from the estimate; the
+  // caller supplies the template's name + classification. The canonical
+  // estimate is unchanged.
+  const saveAsTemplateSchema = z.object({
+    name: z.string().min(1).max(255),
+    verticalType: verticalTypeSchema,
+    categoryId: z.string().min(1),
+    description: z.string().max(1000).optional(),
+  });
+
+  router.post(
+    '/:id/save-as-template',
+    requireAuth,
+    requireTenant,
+    requirePermission('estimates:create'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!templateRepo) {
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Estimate templates are not configured for this environment',
+          });
+          return;
+        }
+        const parsed = saveAsTemplateSchema.parse(req.body ?? {});
+        const estimate = await getEstimate(req.auth!.tenantId, req.params.id, estimateRepo);
+        if (!estimate) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
+          return;
+        }
+        const template = await createTemplate(
+          buildTemplateInputFromEstimate(estimate, {
+            tenantId: req.auth!.tenantId,
+            name: parsed.name,
+            verticalType: parsed.verticalType,
+            categoryId: parsed.categoryId,
+            description: parsed.description,
+            createdBy: req.auth!.userId,
+          }),
+          templateRepo,
+          auditRepo,
+          req.auth!.role ?? undefined,
+        );
+        res.status(201).json(template);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

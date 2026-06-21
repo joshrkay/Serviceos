@@ -732,6 +732,98 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
   );
 }
 
+// ─── Save as Template Sheet (7.9) ─────────────────────────────────────────
+function SaveAsTemplateSheet({ estimateId, estimateNumber, onClose, onSaved }: {
+  estimateId: string; estimateNumber: string; onClose: () => void; onSaved: () => void;
+}) {
+  const [name, setName] = useState('');
+  const [verticalType, setVerticalType] = useState<'hvac' | 'plumbing' | 'electrical' | 'painting'>('hvac');
+  const [categoryId, setCategoryId] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSave() {
+    if (!name.trim() || !categoryId.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/estimates/${estimateId}/save-as-template`, {
+        method: 'POST',
+        body: JSON.stringify({ name: name.trim(), verticalType, categoryId: categoryId.trim() }),
+      });
+      if (!res.ok) throw new Error(`Could not save template (HTTP ${res.status})`);
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save template');
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col justify-end" onClick={onClose}>
+      <div className="bg-white rounded-t-2xl max-h-[90vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+          <div>
+            <p className="text-sm text-slate-900">Save as template</p>
+            <p className="text-xs text-slate-400">Reuse {estimateNumber}’s lines on future estimates</p>
+          </div>
+          <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100">
+            <X size={15} className="text-slate-500" />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 flex flex-col gap-4">
+          <div>
+            <p className="text-xs text-slate-500 mb-1.5">Template name</p>
+            <input
+              value={name}
+              onChange={e => setName(e.target.value)}
+              aria-label="Template name"
+              placeholder="e.g. Standard AC tune-up"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-blue-400 bg-white"
+            />
+          </div>
+          <div>
+            <p className="text-xs text-slate-500 mb-1.5">Trade</p>
+            <select
+              value={verticalType}
+              onChange={e => setVerticalType(e.target.value as typeof verticalType)}
+              aria-label="Template trade"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-blue-400 bg-white"
+            >
+              <option value="hvac">HVAC</option>
+              <option value="plumbing">Plumbing</option>
+              <option value="electrical">Electrical</option>
+              <option value="painting">Painting</option>
+            </select>
+          </div>
+          <div>
+            <p className="text-xs text-slate-500 mb-1.5">Category</p>
+            <input
+              value={categoryId}
+              onChange={e => setCategoryId(e.target.value)}
+              aria-label="Template category"
+              placeholder="e.g. ac-repair"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-blue-400 bg-white"
+            />
+          </div>
+
+          {error && <p className="text-xs text-red-600 -mt-1">{error}</p>}
+
+          <button
+            onClick={handleSave}
+            disabled={saving || !name.trim() || !categoryId.trim()}
+            className="flex items-center justify-center gap-2 w-full rounded-xl bg-slate-900 text-white py-3.5 text-sm hover:bg-slate-700 disabled:opacity-50 transition-colors"
+          >
+            {saving ? 'Saving…' : <><FileText size={15} /> Save as template</>}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Estimate Detail ──────────────────────────────────────────────────────
 function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: () => void }) {
   const navigate = useNavigate();
@@ -747,6 +839,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   const [wasSent,      setWasSent]      = useState(false);
   const [convertOpen,  setConvertOpen]  = useState(false);
   const [convertJobOpen, setConvertJobOpen] = useState(false);
+  const [templateOpen, setTemplateOpen] = useState(false);
   const [actionBusy,   setActionBusy]   = useState(false);
   const [actionError,  setActionError]  = useState<string | null>(null);
 
@@ -1138,6 +1231,12 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                 >
                   <Eye size={14} /> Preview document
                 </button>
+                <button
+                  onClick={() => setTemplateOpen(true)}
+                  className="flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-slate-700 py-3 text-sm hover:bg-slate-50 transition-colors"
+                >
+                  <FileText size={14} /> Save as template
+                </button>
                 <div className="flex gap-2">
                   <button
                     onClick={() => void handleClone()}
@@ -1210,6 +1309,14 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
           est={estCompat}
           lineItems={uiLineItems}
           onClose={() => setPreviewOpen(false)}
+        />
+      )}
+      {templateOpen && est && (
+        <SaveAsTemplateSheet
+          estimateId={est.id}
+          estimateNumber={est.estimateNumber}
+          onClose={() => setTemplateOpen(false)}
+          onSaved={() => toast.success('Saved as template')}
         />
       )}
       {convertJobOpen && est && (

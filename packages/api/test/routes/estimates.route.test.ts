@@ -393,6 +393,45 @@ describe('7.10 — GET /api/estimates/:id/history', () => {
   });
 });
 
+describe('7.9 — POST /api/estimates/:id/save-as-template', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('creates a tenant-scoped template from the estimate', async () => {
+    const created = await createEstimate(app, { taxRateBps: 825 });
+    const res = await request(app)
+      .post(`/api/estimates/${created.body.id}/save-as-template`)
+      .send({ name: 'AC Tune-up', verticalType: 'hvac', categoryId: 'hvac-repair-ac' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.name).toBe('AC Tune-up');
+    expect(res.body.verticalType).toBe('hvac');
+    expect(res.body.defaultTaxRateBps).toBe(825);
+    expect(res.body.lineItemTemplates).toHaveLength(1);
+    expect(res.body.lineItemTemplates[0].description).toBe('Diagnostic fee');
+    expect(res.body.lineItemTemplates[0].defaultUnitPriceCents).toBe(9500);
+  });
+
+  it('returns 404 for an unknown estimate', async () => {
+    const res = await request(app)
+      .post('/api/estimates/nope/save-as-template')
+      .send({ name: 'X', verticalType: 'hvac', categoryId: 'c1' });
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 400 when name or classification is missing', async () => {
+    const created = await createEstimate(app);
+    const res = await request(app)
+      .post(`/api/estimates/${created.body.id}/save-as-template`)
+      .send({ verticalType: 'hvac' }); // missing name + categoryId
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+});
+
 describe('POST /api/estimates/:id/transition', () => {
   let app: Express;
 
