@@ -186,6 +186,19 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
 ] as const;
 
 /**
+ * Story 3.4 — versioned intent taxonomy. Every classification is stamped with
+ * this version (see `classifyIntent`) so downstream consumers — correction
+ * analytics (story 3.9), routing observability, evaluation snapshots — can tell
+ * which taxonomy produced an intent and detect drift across deploys.
+ *
+ * BUMP THIS whenever `SUPPORTED_INTENTS` changes (an intent added, removed, or
+ * its meaning materially changed). Semantics: MAJOR = an intent removed or its
+ * meaning changed (consumers must re-map); MINOR = an intent added (additive,
+ * backward-compatible).
+ */
+export const INTENT_TAXONOMY_VERSION = '1.0.0';
+
+/**
  * P11-001: convenience predicate the FSM adapter uses to route
  * `lookup_*` intents to the read-only skill family instead of the
  * proposal-draft pipeline.
@@ -361,6 +374,12 @@ export interface IntentClassification {
    * short-circuits without an LLM call.
    */
   tokenUsage?: { input: number; output: number };
+  /**
+   * Story 3.4 — the intent-taxonomy version that produced this classification
+   * (`INTENT_TAXONOMY_VERSION`). Stamped on every result by `classifyIntent`;
+   * lets observability / correction analytics detect taxonomy drift.
+   */
+  taxonomyVersion?: string;
 }
 
 export interface ClassifyContext {
@@ -1280,6 +1299,19 @@ export function isCreateCustomerSignupPhrasing(transcript: string): boolean {
 }
 
 export async function classifyIntent(
+  transcript: string,
+  context: ClassifyContext,
+  gateway: LLMGateway
+): Promise<IntentClassification> {
+  // Story 3.4 — single choke point that stamps the taxonomy version on every
+  // classification, regardless of which of classifyIntentRaw's return paths
+  // (short-circuit, override, low-confidence, unknown, success) produced it.
+  const result = await classifyIntentRaw(transcript, context, gateway);
+  result.taxonomyVersion = INTENT_TAXONOMY_VERSION;
+  return result;
+}
+
+async function classifyIntentRaw(
   transcript: string,
   context: ClassifyContext,
   gateway: LLMGateway

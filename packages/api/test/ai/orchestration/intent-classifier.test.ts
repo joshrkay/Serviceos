@@ -15,6 +15,7 @@ import {
   CLASSIFIER_CONFIDENCE_THRESHOLD,
   parseClassifierJson,
   isLookupIntent,
+  INTENT_TAXONOMY_VERSION,
 } from '../../../src/ai/orchestration/intent-classifier';
 import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import { formatVerticalForCallerPrompt } from '../../../src/verticals/context-assembly';
@@ -921,5 +922,40 @@ describe('intent-classifier — lookup_job_profit (P22-005)', () => {
       expect(result.intentType).toBe('lookup_job_profit');
       expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
     }
+  });
+});
+
+describe('Story 3.4 — versioned intent taxonomy', () => {
+  const tenantId = 'tenant-1';
+
+  it('exposes a semver-shaped taxonomy version', () => {
+    expect(INTENT_TAXONOMY_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  it('stamps the taxonomy version on a successful classification', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.92 }),
+    );
+    const result = await classifyIntent('invoice Acme for $200', { tenantId }, gateway);
+    expect(result.intentType).toBe('create_invoice');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+  });
+
+  it('stamps the version on the empty-transcript short-circuit (no gateway call)', async () => {
+    const gateway = mockGateway('{}');
+    const result = await classifyIntent('   ', { tenantId }, gateway);
+    expect(result.intentType).toBe('unknown');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+    expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it('stamps the version on the low-confidence → unknown path', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.2 }),
+    );
+    const result = await classifyIntent('mumble mumble', { tenantId }, gateway);
+    expect(result.intentType).toBe('unknown');
+    expect(result.unknownReason).toBe('low_confidence');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
   });
 });
