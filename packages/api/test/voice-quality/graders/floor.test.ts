@@ -61,7 +61,7 @@ function makeScript(partial: Partial<VoiceQualityScript> = {}): VoiceQualityScri
     turns: partial.turns ?? [],
     grading: partial.grading ?? { appliesFloor: [1, 2, 3, 4, 5, 6, 7, 8], appliesDisposition: [] },
     layer2Eligible: partial.layer2Eligible ?? false,
-    expectedCallerMetrics: partial.expectedCallerMetrics,
+    layer2Only: partial.layer2Only ?? false,
   };
 }
 

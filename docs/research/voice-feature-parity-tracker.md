@@ -80,7 +80,7 @@ Legend: ✅ at parity · 🟡 partial / unverified · 🔴 gap. "Corpus" = eval 
 | 13 | **Bilingual / Spanish** | **Voice-parity Feature 6**: `language-detector`, ES i18n, Spanish booking-rate test | `spanish-booking-rate` test; **not in corpus buckets** | 9,12 | **🟡 partial** |
 | 14 | **Multilingual beyond Spanish / code-switch** | only en/es | 🔴 | — | **🔴 gap** |
 | 15 | **Emergency vs. routine triage** (Avoca's HVAC-native claim) | `emergency-page-retry`, `emergency_dispatch` intent | 🔴 no triage corpus | 9,11 | **🔴 gap** |
-| 16 | **Sub-2-second answer latency** | `ttfaMaxMs` captured; bar is 5s soft / 7s hard | metric exists | 3 | **🔴 no sub-2s benchmark** |
+| 16 | **Sub-2-second answer latency** | **`gradeCallerExperience`: TTFA P95 ≤800ms + lookup→speak P95 ≤2s**, aggregated cross-script in `buildLayer2Report` with a launch gate; rendered in PR-comment markdown | L2 corpus | 3 | **✅ benchmark exists (stricter than Avoca <2s); ensure L2 runs in CI** |
 | 17 | **Outbound voice (Nurture / Speed-to-Lead)** | only `call_me_back` (reactive); no proactive dialer/drip | 🔴 | — | **🔴 gap** |
 | 18 | **Objection handling on calls** | not modeled as a graded skill | 🔴 | 12 | **🔴 gap** |
 | 19 | **CSR call scoring / coaching** (Avoca Coach) | graders grade the **AI**, not productized for **human** CSR calls | grader infra ✅ (reusable) | reuse 9–12 | **🔴 product gap** |
@@ -96,9 +96,13 @@ These block *proving* parity even where the feature exists:
   to VQ-009). CLAUDE.md's own warning applies: the entity resolver once shipped with
   nonexistent column names *because its Pool was mocked*. Voice flows are not yet proven
   against real Postgres in the harness. **→ wire pg-mode / a Docker-gated nightly run.**
-- **H2 — No production-latency benchmark vs. Avoca's "<2s".** Rubric #3 grades ≤5s/7s;
-  Avoca markets sub-2s. We capture `ttfaMaxMs` but have no asserted sub-2s target.
-  **→ add a latency budget + L2 assertion; decide our public number.**
+- **H2 — Latency benchmark EXISTS (corrected).** `gradeCallerExperience`
+  (`graders/caller-experience.ts`) enforces TTFA P95 ≤800ms + lookup→speak P95 ≤2s per
+  script; `buildLayer2Report` (`report-layer2.ts`) aggregates cross-script TTFA/lookup
+  P50/P95 and **launch-gates on TTFA P95 ≤800ms**, rendered in PR-comment markdown — a
+  *stricter* bar than Avoca's "<2s". The original "no benchmark" claim came from the
+  stale first audit. **Residual: ensure the Layer-2 audio corpus runs in CI on a cadence
+  (Layer 1 is the per-PR gate) and publish the measured number.**
 - **H3 — Corpus coverage holes** for rows 11–18 above (transfer, quote-accuracy,
   multilingual, emergency-triage, outbound, objection). **→ author golden scripts.**
 - **H4 — Disposition #12 is LLM-judged.** Stabilized by median-of-three, but judge drift
@@ -114,8 +118,9 @@ same commit per CLAUDE.md), verified with `tsc --project tsconfig.build.json --n
 1. **Close H1 (pg-mode harness).** Highest-value: makes *every* row's green a real green,
    not a mock green. Wire `makeRepoBundle('pg')` against the existing pgvector
    testcontainer; gate in PR CI.
-2. **Row 16 / H2 — latency benchmark.** Add a TTFA budget + L2 assertion; establish our
-   honest answer-latency number so "same quality as Avoca's sub-2s" is measured, not hoped.
+2. **Row 16 / H2 — latency benchmark (DONE; CI cadence remains).** The TTFA/lookup budget +
+   L2 launch gate already exist (`caller-experience.ts` + `report-layer2.ts`). Remaining:
+   schedule the Layer-2 audio corpus in CI and publish the measured P95 number.
 3. **Row 11 — transfer-with-context corpus.** Promote the `transfer-context` test into a
    `07`/new bucket golden script so human-handoff parity is rubric-graded (criterion 11).
 4. **Row 12 — quote-accuracy corpus.** Author `02-happy-booker` scripts that assert
