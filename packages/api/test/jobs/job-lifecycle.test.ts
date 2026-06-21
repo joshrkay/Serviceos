@@ -3,6 +3,8 @@ import {
   addTimelineEntry,
   addDelayAcknowledgmentTimelineEntry,
   isValidTransition,
+  isBackwardTransition,
+  isTerminalJobStatus,
   InMemoryJobTimelineRepository,
 } from '../../src/jobs/job-lifecycle';
 import { createJob, InMemoryJobRepository } from '../../src/jobs/job';
@@ -155,5 +157,107 @@ describe('P1-006 — Job lifecycle and timeline events', () => {
         }
       )
     ).rejects.toThrow('delayMinutes is required when isRunningBehind is true');
+  });
+});
+
+describe('P1-006 / §5.8 — Backward status moves', () => {
+  let jobRepo: InMemoryJobRepository;
+  let timelineRepo: InMemoryJobTimelineRepository;
+  let auditRepo: InMemoryAuditRepository;
+
+  beforeEach(() => {
+    jobRepo = new InMemoryJobRepository();
+    timelineRepo = new InMemoryJobTimelineRepository();
+    auditRepo = new InMemoryAuditRepository();
+  });
+
+  async function seedInProgressJob() {
+    const job = await createJob(
+      { tenantId: 'tenant-1', customerId: 'c-1', locationId: 'l-1', summary: 'Backward', createdBy: 'u-1' },
+      jobRepo
+    );
+    await transitionJobStatus('tenant-1', job.id, 'scheduled', 'owner-1', 'owner', jobRepo, timelineRepo);
+    await transitionJobStatus('tenant-1', job.id, 'in_progress', 'owner-1', 'owner', jobRepo, timelineRepo);
+    return job;
+  }
+
+  it('classifies linear regressions as backward and ignores canceled/forward moves', () => {
+    expect(isBackwardTransition('in_progress', 'scheduled')).toBe(true);
+    expect(isBackwardTransition('scheduled', 'new')).toBe(true);
+    expect(isBackwardTransition('in_progress', 'new')).toBe(true);
+    // forward and lateral moves are never backward
+    expect(isBackwardTransition('new', 'scheduled')).toBe(false);
+    expect(isBackwardTransition('scheduled', 'in_progress')).toBe(false);
+    // canceled has no ordinal — reopen/cancel are never "backward"
+    expect(isBackwardTransition('canceled', 'new')).toBe(false);
+    expect(isBackwardTransition('in_progress', 'canceled')).toBe(false);
+    expect(isTerminalJobStatus('completed')).toBe(true);
+    expect(isTerminalJobStatus('in_progress')).toBe(false);
+  });
+
+  it('owner can move a job backward with a reason — recorded on timeline and audit', async () => {
+    const job = await seedInProgressJob();
+
+    const { job: updated, timelineEntry } = await transitionJobStatus(
+      'tenant-1', job.id, 'scheduled', 'owner-1', 'owner', jobRepo, timelineRepo, auditRepo,
+      'Customer rescheduled to next week'
+    );
+
+    expect(updated.status).toBe('scheduled');
+    expect(timelineEntry.metadata).toMatchObject({ backward: true, reason: 'Customer rescheduled to next week' });
+    expect(timelineEntry.description).toContain('moved backward');
+
+    const events = await auditRepo.findByEntity('tenant-1', 'job', job.id);
+    const statusEvent = events.find((e) => e.eventType === 'job.status_changed' && e.metadata?.backward === true);
+    expect(statusEvent).toBeDefined();
+    expect(statusEvent!.metadata).toMatchObject({
+      fromStatus: 'in_progress',
+      toStatus: 'scheduled',
+      reason: 'Customer rescheduled to next week',
+    });
+  });
+
+  it('rejects a backward move from a non-owner (dispatcher / technician)', async () => {
+    const job = await seedInProgressJob();
+
+    await expect(
+      transitionJobStatus('tenant-1', job.id, 'scheduled', 'd-1', 'dispatcher', jobRepo, timelineRepo, auditRepo, 'fix it')
+    ).rejects.toThrow('Only an owner can move a job backward');
+
+    await expect(
+      transitionJobStatus('tenant-1', job.id, 'scheduled', 't-1', 'technician', jobRepo, timelineRepo, auditRepo, 'fix it')
+    ).rejects.toThrow('Only an owner can move a job backward');
+  });
+
+  it('rejects an owner backward move without a reason', async () => {
+    const job = await seedInProgressJob();
+
+    await expect(
+      transitionJobStatus('tenant-1', job.id, 'scheduled', 'owner-1', 'owner', jobRepo, timelineRepo, auditRepo)
+    ).rejects.toThrow('A reason is required to move a job backward');
+
+    await expect(
+      transitionJobStatus('tenant-1', job.id, 'scheduled', 'owner-1', 'owner', jobRepo, timelineRepo, auditRepo, '   ')
+    ).rejects.toThrow('A reason is required to move a job backward');
+  });
+
+  it('never un-does a terminal status, even for an owner with a reason', async () => {
+    const job = await seedInProgressJob();
+    await transitionJobStatus('tenant-1', job.id, 'completed', 'owner-1', 'owner', jobRepo, timelineRepo);
+
+    await expect(
+      transitionJobStatus('tenant-1', job.id, 'in_progress', 'owner-1', 'owner', jobRepo, timelineRepo, auditRepo, 'mistaken completion')
+    ).rejects.toThrow("Cannot move a job backward out of terminal status 'completed'");
+  });
+
+  it('forward moves still require no reason and are allowed for any role', async () => {
+    const job = await createJob(
+      { tenantId: 'tenant-1', customerId: 'c-1', locationId: 'l-1', summary: 'Forward', createdBy: 'u-1' },
+      jobRepo
+    );
+    const { job: updated } = await transitionJobStatus(
+      'tenant-1', job.id, 'scheduled', 'd-1', 'dispatcher', jobRepo, timelineRepo, auditRepo
+    );
+    expect(updated.status).toBe('scheduled');
   });
 });
