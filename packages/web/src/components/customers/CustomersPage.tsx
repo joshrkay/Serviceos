@@ -436,16 +436,25 @@ type Filter = 'All' | ServiceType;
 export function CustomersPage() {
   const navigate = useNavigate();
   const [filter,       setFilter]       = useState<Filter>('All');
+  const [tagFilter,    setTagFilter]    = useState<string>('');
   const [showAdd,      setShowAdd]      = useState(false);
   const [showEstimate, setShowEstimate] = useState(false);
   const [showJob,      setShowJob]      = useState(false);
 
   const { data, total, isLoading, error, setSearch, refetch } = useListQuery<CustomerListItem>('/api/customers');
 
+  // 4.8 — tags filterable in the list. Distinct tags across the loaded set
+  // drive the chips; selection narrows the list (client-side, mirroring the
+  // service-type filter above).
+  const availableTags = [...new Set(data.flatMap(c => c.tags ?? []))].sort();
+
   // Client-side service type filter (API doesn't support this filter)
-  const filtered = filter === 'All'
+  let filtered = filter === 'All'
     ? data
     : data.filter(c => customerServiceTypes(c).includes(filter));
+  if (tagFilter) {
+    filtered = filtered.filter(c => (c.tags ?? []).includes(tagFilter));
+  }
 
   const totalLocations = data.reduce((n, c) => n + (c.locations?.length ?? 0), 0);
 
@@ -493,6 +502,39 @@ export function CustomersPage() {
           ))}
         </div>
 
+        {/* 4.8 — tag filter chips (only shown when the loaded set has tags) */}
+        {availableTags.length > 0 && (
+          <div
+            className="flex gap-2 mt-2 overflow-x-auto pb-1"
+            style={{ scrollbarWidth: 'none' }}
+            data-testid="tag-filters"
+          >
+            <button
+              onClick={() => setTagFilter('')}
+              className={`rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
+                tagFilter === ''
+                  ? 'bg-indigo-600 border-indigo-600 text-white'
+                  : 'border-slate-200 text-slate-500 hover:border-slate-400'
+              }`}
+            >
+              All tags
+            </button>
+            {availableTags.map(tag => (
+              <button
+                key={tag}
+                onClick={() => setTagFilter(t => (t === tag ? '' : tag))}
+                className={`rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
+                  tagFilter === tag
+                    ? 'bg-indigo-600 border-indigo-600 text-white'
+                    : 'border-slate-200 text-slate-500 hover:border-slate-400'
+                }`}
+              >
+                #{tag}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* list */}
         {isLoading && (
           <div className="flex items-center justify-center py-16">
@@ -531,6 +573,12 @@ export function CustomersPage() {
                         </span>
                       )}
                     </div>
+                    {c.primaryPhone && (
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <Phone size={10} className="text-slate-400 shrink-0" />
+                        <p className="text-xs text-slate-500 truncate">{c.primaryPhone}</p>
+                      </div>
+                    )}
                     <div className="flex items-center gap-1.5 mt-0.5">
                       <MapPin size={10} className="text-slate-400 shrink-0" />
                       <p className="text-xs text-slate-400 truncate">

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router';
-import { MapPin } from 'lucide-react';
+import { Link, useNavigate } from 'react-router';
+import { MapPin, CalendarPlus, FileText, MessageSquare } from 'lucide-react';
 import { toast } from 'sonner';
 import { DetailPage } from '../../components/DetailPage';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
@@ -96,6 +96,7 @@ export function CustomerDetail({
   onEdit,
   onArchived,
 }: CustomerDetailProps) {
+  const navigate = useNavigate();
   const { data, isLoading, error, refetch } = useDetailQuery<Customer>(
     '/api/customers',
     customerId,
@@ -287,6 +288,45 @@ export function CustomerDetail({
         },
       ]}
       sections={[
+        {
+          // 4.5 — quick actions: schedule, estimate, message. Each deep-links
+          // into the matching create/compose flow with this customer attached.
+          title: 'Quick Actions',
+          content: (
+            <div className="grid grid-cols-3 gap-2" data-testid="customer-quick-actions">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  navigate(`/jobs/new?customerId=${encodeURIComponent(customerId)}`)
+                }
+              >
+                <CalendarPlus size={14} className="mr-1.5" />
+                Schedule
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  navigate(`/estimates/new?customerId=${encodeURIComponent(customerId)}`)
+                }
+              >
+                <FileText size={14} className="mr-1.5" />
+                Estimate
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  navigate(`/comms-inbox?customerId=${encodeURIComponent(customerId)}`)
+                }
+              >
+                <MessageSquare size={14} className="mr-1.5" />
+                Message
+              </Button>
+            </div>
+          ),
+        },
         {
           title: 'Contact Information',
           content: (

@@ -77,6 +77,18 @@ describe('CustomerDetail', () => {
     });
   });
 
+  it('offers schedule / estimate / message quick actions (4.5)', async () => {
+    renderCustomerDetail();
+    const quickActions = screen.getByTestId('customer-quick-actions');
+    expect(quickActions).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Schedule/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Estimate/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Message/ })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/locations?customerId=1');
+    });
+  });
+
   it('surfaces persisted customer notes without drilling', async () => {
     renderCustomerDetail();
 

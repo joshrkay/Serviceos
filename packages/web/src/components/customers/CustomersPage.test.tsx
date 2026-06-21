@@ -124,6 +124,34 @@ describe('CustomersPage', () => {
     expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/customers');
   });
 
+  it('shows the primary phone in each row (4.1)', () => {
+    renderPage();
+    expect(screen.getByText('5125550001')).toBeInTheDocument();
+    expect(screen.getByText('5125550002')).toBeInTheDocument();
+  });
+
+  it('renders tag filter chips and narrows the list by tag (4.8)', () => {
+    renderPage();
+    const tagBar = screen.getByTestId('tag-filters');
+    expect(tagBar).toBeInTheDocument();
+    // Both customers visible before filtering.
+    expect(screen.getByText('Alice Smith')).toBeInTheDocument();
+    expect(screen.getByText('Bob Jones')).toBeInTheDocument();
+    // Click the #VIP tag chip → only Bob (who carries 'VIP') remains.
+    fireEvent.click(screen.getByText('#VIP'));
+    expect(screen.queryByText('Alice Smith')).not.toBeInTheDocument();
+    expect(screen.getByText('Bob Jones')).toBeInTheDocument();
+  });
+
+  it('hides the tag filter bar when no customer has tags', () => {
+    vi.mocked(useListQuery).mockReturnValue({
+      ...defaultListResult,
+      data: [{ ...mockCustomers[0], tags: [] }],
+    });
+    renderPage();
+    expect(screen.queryByTestId('tag-filters')).not.toBeInTheDocument();
+  });
+
   it('offers an acquisition-source selector when adding a customer', () => {
     renderPage();
     fireEvent.click(screen.getByText('Add customer')); // open the Add sheet
