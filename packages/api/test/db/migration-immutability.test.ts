@@ -321,6 +321,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['202_invoices_processing_fee', '3f1dd0227fd3b18342e06e1bda51f60e83b8a8ab5057da78d2b72986e4cd72cf'],
   // Graduate maintenance contracts to a real tenant-scoped table.
   ['203_create_maintenance_contracts', 'f0f77a5ba2060be02849eccd0f75066a43813c2f0004c3fb591a8a5f76ca78a6'],
+  // Story 15.2 — speed-to-lead first-response opt-in settings.
+  ['204_tenant_settings_speed_to_lead', '571411ab97bf29e4992cf08bb54555d0916e35fd1bc60f5f1c0f783b227bac21'],
 ];
 
 function hashMigration(value: string): string {
