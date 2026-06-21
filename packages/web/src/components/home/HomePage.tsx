@@ -20,6 +20,7 @@ import { TimeGivenBackCard } from './TimeGivenBackCard';
 import { MoneyLoopHomeCard } from './MoneyLoopHomeCard';
 import { HfcrHeroCard } from './HfcrHeroCard';
 import { VoiceRoiCard } from './VoiceRoiCard';
+import { CoreKpisCard } from './CoreKpisCard';
 import { PendingProposalsCard } from './PendingProposalsCard';
 import { ErrorState } from '../ErrorState';
 import { EmptyState } from '../EmptyState';
@@ -411,6 +412,9 @@ export function HomePage() {
         <VoiceRoiCard />
 
         <MoneyLoopHomeCard />
+
+        {/* ── Core KPIs (revenue, receivables, MoM) ── */}
+        <CoreKpisCard />
 
         {/* ── Time given back ── */}
         <TimeGivenBackCard />
