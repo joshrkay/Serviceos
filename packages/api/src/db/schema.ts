@@ -5057,6 +5057,14 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_message_templates ON message_templates
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
+
+  // Story 10.2 — tenant-configurable reminder cadence. Hours-before-start at
+  // which an appointment reminder fires (e.g. [24, 2]). Default [24] preserves
+  // the legacy single T-24h reminder exactly.
+  '205_tenant_settings_reminder_offsets': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS appointment_reminder_offsets_hours JSONB NOT NULL DEFAULT '[24]'::jsonb;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

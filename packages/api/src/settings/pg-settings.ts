@@ -5,7 +5,23 @@ import {
   EscalationSettings,
   SettingsRepository,
   TenantSettings,
+  normalizeReminderOffsets,
 } from './settings';
+
+/**
+ * node-pg returns JSONB already parsed, but tolerate a string form too so a
+ * stringified column (e.g. via some drivers/migrations) still yields an array.
+ */
+function parseJsonbArray(value: unknown): unknown {
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  return value;
+}
 
 function mapRow(row: Record<string, unknown>): TenantSettings {
   const terminologyRaw = row.terminology_preferences as Record<string, unknown> | null;
@@ -50,6 +66,9 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // DEFAULT value.
     autoApplyInternalUpdates: row.auto_apply_internal_updates as boolean | undefined,
     autoSendAppointmentReminders: row.auto_send_appointment_reminders as boolean | undefined,
+    appointmentReminderOffsetsHours: normalizeReminderOffsets(
+      parseJsonbArray(row.appointment_reminder_offsets_hours),
+    ),
     autoInvoiceOnCompletion: row.auto_invoice_on_completion as boolean | undefined,
     // Migration 194 — DEFAULT TRUE at the column level so legacy rows
     // surface as `true` (matches the "built-in, included" framing).
@@ -357,6 +376,15 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           setClauses.push(`auto_approve_threshold = $${paramIndex}::jsonb`);
           const v = value as Record<string, number> | undefined | null;
           params.push(v && Object.keys(v).length > 0 ? JSON.stringify(v) : '{}');
+          paramIndex++;
+          continue;
+        }
+        // Story 10.2 — appointment_reminder_offsets_hours is JSONB. Normalize
+        // (dedupe/clamp/sort/cap) before persist so the column never holds an
+        // out-of-range or duplicate cadence; a cleared write resets to [24].
+        if (key === 'appointmentReminderOffsetsHours') {
+          setClauses.push(`appointment_reminder_offsets_hours = $${paramIndex}::jsonb`);
+          params.push(JSON.stringify(normalizeReminderOffsets(value)));
           paramIndex++;
           continue;
         }

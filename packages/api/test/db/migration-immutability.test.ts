@@ -323,6 +323,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['203_create_maintenance_contracts', 'f0f77a5ba2060be02849eccd0f75066a43813c2f0004c3fb591a8a5f76ca78a6'],
   // Story 10.5 — tenant-scoped customer message templates.
   ['204_create_message_templates', 'a38dc2fba90473aec17537126a25c71fbf8461b012531c94ea55c858aa85f71d'],
+  // Story 10.2 — tenant-configurable reminder cadence (offsets).
+  ['205_tenant_settings_reminder_offsets', '7043e4a221b59d530abd0a9d74ac8dd1a7f13379eeefb9b1749cc2b98368442a'],
 ];
 
 function hashMigration(value: string): string {

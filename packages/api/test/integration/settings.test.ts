@@ -45,6 +45,37 @@ describe('Postgres integration — settings', () => {
       expect(found!.timezone).toBe('America/Chicago');
     });
 
+    it('defaults reminder offsets to [24] and normalizes on update (Story 10.2)', async () => {
+      const tenant = await createTestTenant(pool);
+      const now = new Date();
+      await settingsRepo.create({
+        id: crypto.randomUUID(),
+        tenantId: tenant.tenantId,
+        businessName: 'Cadence Co',
+        timezone: 'UTC',
+        estimatePrefix: 'EST',
+        invoicePrefix: 'INV',
+        nextEstimateNumber: 1,
+        nextInvoiceNumber: 1,
+        defaultPaymentTermDays: 30,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      // DB default column value.
+      const created = await settingsRepo.findByTenant(tenant.tenantId);
+      expect(created!.appointmentReminderOffsetsHours).toEqual([24]);
+
+      // Update normalizes: dedupe + clamp + sort descending.
+      const updated = await settingsRepo.update(tenant.tenantId, {
+        appointmentReminderOffsetsHours: [2, 24, 24, 0, 9999],
+      });
+      expect(updated!.appointmentReminderOffsetsHours).toEqual([24, 2]);
+
+      const found = await settingsRepo.findByTenant(tenant.tenantId);
+      expect(found!.appointmentReminderOffsetsHours).toEqual([24, 2]);
+    });
+
     it('updates settings and reflects in findByTenant', async () => {
       const tenant = await createTestTenant(pool);
       const now = new Date();

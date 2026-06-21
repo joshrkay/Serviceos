@@ -8,6 +8,27 @@ import { isValidTimezone } from '../shared/timezone';
  *  settings→ai module dependency. */
 export type Language = 'en' | 'es';
 
+/** Story 10.2 — default reminder cadence: a single reminder 24h before. */
+export const DEFAULT_REMINDER_OFFSETS_HOURS: readonly number[] = [24];
+
+/**
+ * Story 10.2 — sanitize tenant-supplied reminder offsets into a safe,
+ * deterministic list: integer hours in [1, 720], deduped, sorted descending
+ * (soonest-configured reminder fires last), capped at 5. Anything invalid or
+ * empty falls back to the conservative default [24]. Used on both the write
+ * path (before persist) and the read path (defensive), so the worker never
+ * sees garbage.
+ */
+export function normalizeReminderOffsets(input: unknown): number[] {
+  if (!Array.isArray(input)) return [...DEFAULT_REMINDER_OFFSETS_HOURS];
+  const cleaned = input
+    .map((v) => Number(v))
+    .filter((n) => Number.isFinite(n) && n >= 1 && n <= 720)
+    .map((n) => Math.round(n));
+  const unique = Array.from(new Set(cleaned)).sort((a, b) => b - a);
+  return unique.length > 0 ? unique.slice(0, 5) : [...DEFAULT_REMINDER_OFFSETS_HOURS];
+}
+
 /**
  * F8 — per-tenant escalation channel + trigger flags.
  *
@@ -203,6 +224,14 @@ export interface TenantSettings {
    * customers ~2h before scheduled appointments. Default true.
    */
   autoSendAppointmentReminders?: boolean;
+  /**
+   * Story 10.2 — tenant-configurable reminder cadence. Hours-before-start
+   * at which an appointment reminder fires; e.g. [24, 2] sends a reminder a
+   * day ahead and again two hours out. Normalized (deduped, 1..720h, ≤5
+   * entries, descending). Defaults to [24]. A single entry preserves the
+   * legacy one-shot behavior exactly.
+   */
+  appointmentReminderOffsetsHours?: number[];
   /**
    * P20-001 — when true, completing a job auto-drafts an invoice (as a
    * proposal the owner approves to send). Default false (opt-in).
@@ -464,6 +493,8 @@ export interface UpdateSettingsInput {
   autoApplyInternalUpdates?: boolean;
   /** Tier 4 — auto-text customers ~2h before scheduled appointments. */
   autoSendAppointmentReminders?: boolean;
+  /** Story 10.2 — reminder cadence (hours-before-start); e.g. [24, 2]. */
+  appointmentReminderOffsetsHours?: number[];
   /** P20-001 — auto-draft an invoice (as a proposal) on job completion. */
   autoInvoiceOnCompletion?: boolean;
   /** Post-job 2hr thank-you SMS. Default true. */
