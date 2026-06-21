@@ -1,6 +1,8 @@
 import { useEffect, useState, type FormEvent } from 'react';
+import { MessageSquare, ArrowLeft } from 'lucide-react';
 import { useApiClient } from '../../../../lib/apiClient';
 import { Button, Field, Input, Select } from '../../../ui';
+import { OnboardingConversation } from '../OnboardingConversation';
 import type { BusinessHours } from '../../../../types/onboarding';
 
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const;
@@ -67,6 +69,9 @@ const COMMON_TIMEZONES = [
 
 export function IdentityStep({ onSaved }: IdentityStepProps) {
   const apiFetch = useApiClient();
+  // Two ways in: the classic form (default), or a chat with the setup
+  // assistant that drafts the same config as proposals to approve.
+  const [mode, setMode] = useState<'form' | 'chat'>('form');
   const [businessName, setBusinessName] = useState('');
   const [ownerPhone, setOwnerPhone] = useState('');
   const [serviceAreaText, setServiceAreaText] = useState('');
@@ -175,6 +180,27 @@ export function IdentityStep({ onSaved }: IdentityStepProps) {
     }
   }
 
+  if (mode === 'chat') {
+    return (
+      <div className="space-y-5 max-w-xl">
+        <header>
+          <h1 className="text-2xl font-medium tracking-tight text-slate-900">Let’s set up your business</h1>
+          <p className="text-sm text-slate-500 mt-2">
+            Answer a few questions and the assistant drafts your setup for you to approve.
+          </p>
+        </header>
+        <button
+          type="button"
+          onClick={() => setMode('form')}
+          className="inline-flex min-h-11 items-center gap-1.5 text-sm text-slate-600 hover:text-slate-900"
+        >
+          <ArrowLeft size={14} /> Fill out the form instead
+        </button>
+        <OnboardingConversation onComplete={onSaved} />
+      </div>
+    );
+  }
+
   return (
     <form onSubmit={onSubmit} className="space-y-7 max-w-xl">
       <header>
@@ -183,6 +209,14 @@ export function IdentityStep({ onSaved }: IdentityStepProps) {
           This is what the AI uses to greet callers, draft quotes, and schedule jobs.
         </p>
       </header>
+
+      <button
+        type="button"
+        onClick={() => setMode('chat')}
+        className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 text-sm font-medium text-slate-700 hover:bg-slate-100"
+      >
+        <MessageSquare size={16} /> Prefer to chat? Set up by conversation instead
+      </button>
 
       <Field
         label="Business name"
