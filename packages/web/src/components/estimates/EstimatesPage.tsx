@@ -14,6 +14,7 @@ import { ErrorState } from '../ErrorState';
 import { apiFetch } from '../../utils/api-fetch';
 import { printEstimateDocument } from '../../lib/estimatePdf';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { useEstimateTerm } from '../../hooks/useEstimateTerm';
 import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
@@ -472,6 +473,7 @@ function LineItemsEditor({ items, editable, onChange, onAddRow }: {
 function EstimateDocPreview({ est, lineItems, onClose }: {
   est: EstCompat; lineItems: LineItem[]; onClose: () => void;
 }) {
+  const estimateTerm = useEstimateTerm();
   const total    = lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
   const [copied, setCopied] = useState(false);
   const link = `rivet.ai/e/${est.estimateNumber.toLowerCase().replace('-', '')}`;
@@ -497,6 +499,7 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
                 businessContact: 'Austin, TX · (512) 555-0000',
                 description: est.description,
                 validUntil: est.validUntil,
+                documentLabel: estimateTerm,
                 lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate })),
               })}
               className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 transition-colors"
@@ -521,7 +524,7 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
               <p className="text-xs text-slate-400">Austin, TX · (512) 555-0000</p>
             </div>
             <div className="text-right">
-              <p className="text-xs text-slate-400">Estimate</p>
+              <p className="text-xs text-slate-400">{estimateTerm}</p>
               <p className="text-sm text-slate-900">{est.estimateNumber}</p>
               {est.validUntil && <p className="text-xs text-slate-400 mt-0.5">Valid until {est.validUntil}</p>}
             </div>
@@ -563,7 +566,7 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
 
           {/* CTA */}
           <div className="rounded-xl bg-blue-600 px-4 py-4 text-center mb-4">
-            <p className="text-white text-sm">Accept this estimate</p>
+            <p className="text-white text-sm">Accept this {estimateTerm.toLowerCase()}</p>
             <p className="text-white/60 text-xs mt-0.5">{link}</p>
           </div>
 
@@ -589,6 +592,7 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
   /** When set, the sheet calls the real /api/estimates/:id/send endpoint. */
   apiId?: string;
 }) {
+  const estimateTerm = useEstimateTerm();
   const [channel, setChannel] = useState<'sms' | 'email'>('sms');
   const [recipient, setRecipient] = useState<string>('');
   const [sending, setSending] = useState(false);
@@ -638,7 +642,7 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
       <div className="bg-white rounded-t-2xl max-h-[90vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
           <div>
-            <p className="text-sm text-slate-900">Send estimate</p>
+            <p className="text-sm text-slate-900">Send {estimateTerm.toLowerCase()}</p>
             <p className="text-xs text-slate-400">{est.estimateNumber} · {est.customer}</p>
           </div>
           <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100">
@@ -702,7 +706,7 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
           {/* Valid until */}
           {est.validUntil && (
             <p className="text-xs text-slate-400 flex items-center gap-1.5">
-              <Clock size={11} /> Estimate valid until {est.validUntil}
+              <Clock size={11} /> {estimateTerm} valid until {est.validUntil}
             </p>
           )}
 
@@ -720,7 +724,7 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
                         'bg-blue-600  text-white hover:bg-blue-700'
             }`}
           >
-            {sent ? <><Check size={15} /> Sent!</> : sending ? 'Sending…' : <><Send size={15} /> Send estimate</>}
+            {sent ? <><Check size={15} /> Sent!</> : sending ? 'Sending…' : <><Send size={15} /> Send {estimateTerm.toLowerCase()}</>}
           </button>
         </div>
       </div>
@@ -732,6 +736,7 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
 function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: () => void }) {
   const navigate = useNavigate();
   const tz = useTenantTimezone();
+  const estimateTerm = useEstimateTerm();
   const { data: est, isLoading, error, refetch } = useDetailQuery<EstimateResponse>('/api/estimates', estimateId);
   const { mutate: updateEstimate } = useMutation<Record<string, unknown>, EstimateResponse>('PUT', `/api/estimates/${estimateId}`);
   const { mutate: transitionEstimate } = useMutation<{ status: string }, EstimateResponse>('POST', `/api/estimates/${estimateId}/transition`);
@@ -873,7 +878,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   if (isLoading) {
     return (
       <div className="h-full flex items-center justify-center">
-        <Spinner size="md" className="text-slate-900" label="Loading estimate" />
+        <Spinner size="md" className="text-slate-900" label={`Loading ${estimateTerm.toLowerCase()}`} />
       </div>
     );
   }
@@ -881,7 +886,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   if (error || !est) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-3">
-        <p className="text-sm text-red-500">Failed to load estimate</p>
+        <p className="text-sm text-red-500">Failed to load {estimateTerm.toLowerCase()}</p>
         <button onClick={onBack} className="text-xs text-blue-500 hover:underline">Go back</button>
       </div>
     );
@@ -912,7 +917,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
         <div className="max-w-5xl mx-auto px-4 md:px-6 py-4 md:py-6">
           {/* Back */}
           <button onClick={onBack} className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition-colors mb-5">
-            <ArrowLeft size={14} /> Back to Estimates
+            <ArrowLeft size={14} /> Back to {estimateTerm}s
           </button>
 
           {/* Header */}
@@ -1242,6 +1247,8 @@ const TABS: { label: string; value: EstimateStatus | 'All' }[] = [
 export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {
   const navigate = useNavigate();
   const tz = useTenantTimezone();
+  const estimateTerm = useEstimateTerm();
+  const estimateTermPlural = `${estimateTerm}s`;
   const [tab,              setTab]           = useState<EstimateStatus | 'All'>('All');
   const [selected,         setSelected]      = useState<string | null>(defaultSelectedId ?? null);
   const [newEstimateOpen,  setNewEstimate]   = useState(false);
@@ -1279,12 +1286,12 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
       <div className="px-4 md:px-6 py-4 md:py-6 max-w-3xl mx-auto">
         <div className="flex items-center justify-between mb-5">
-          <h1 className="text-slate-900">Estimates</h1>
+          <h1 className="text-slate-900">{estimateTermPlural}</h1>
           <button
             onClick={() => setNewEstimate(true)}
             className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors"
           >
-            <Plus size={14} /> New estimate
+            <Plus size={14} /> New {estimateTerm.toLowerCase()}
           </button>
         </div>
 
@@ -1326,11 +1333,11 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
         {/* Loading / Error */}
         {isLoading && (
           <div className="flex items-center justify-center py-16">
-            <Spinner size="md" className="text-slate-900" label="Loading estimates" />
+            <Spinner size="md" className="text-slate-900" label={`Loading ${estimateTermPlural.toLowerCase()}`} />
           </div>
         )}
         {error && (
-          <ErrorState message="Failed to load estimates" onRetry={refetch} />
+          <ErrorState message={`Failed to load ${estimateTermPlural.toLowerCase()}`} onRetry={refetch} />
         )}
 
         {/* List */}
@@ -1382,7 +1389,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
               );
             })}
             {filtered.length === 0 && (
-              <EmptyState title="No estimates" />
+              <EmptyState title={`No ${estimateTermPlural.toLowerCase()}`} />
             )}
           </div>
         )}
