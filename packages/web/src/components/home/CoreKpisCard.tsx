@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { TrendingUp, TrendingDown, Minus, DollarSign, Wallet, ArrowRight } from 'lucide-react';
+import { TrendingUp, TrendingDown, Minus, DollarSign, Wallet, Briefcase, ArrowRight } from 'lucide-react';
 import { useApiClient } from '../../lib/apiClient';
 import { StatCard } from '../ui';
 import { formatCurrency } from '../../utils/currency';
@@ -25,6 +25,12 @@ interface MoneyDashboardSummary {
   overdueCents: number;
 }
 
+interface JobsBookedSummary {
+  bookedThisPeriod: number;
+  trend: number;
+  trendPct: number | null;
+}
+
 function currentMonth(): string {
   const now = new Date();
   return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
@@ -40,6 +46,7 @@ export function CoreKpisCard() {
   const apiFetch = useApiClient();
   const navigate = useNavigate();
   const [summary, setSummary] = useState<MoneyDashboardSummary | null>(null);
+  const [jobsBooked, setJobsBooked] = useState<JobsBookedSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -58,6 +65,24 @@ export function CoreKpisCard() {
       })
       .finally(() => {
         if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiFetch]);
+
+  // Jobs-booked is a separate, best-effort fetch: if it fails or is unwired
+  // (503), the card still shows revenue + receivables without the tile.
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch(`/api/analytics/jobs-booked?month=${currentMonth()}`)
+      .then(async (res) => {
+        if (!res.ok) return;
+        const body = await res.json();
+        if (!cancelled) setJobsBooked(body.data as JobsBookedSummary);
+      })
+      .catch(() => {
+        /* best-effort — leave the tile out */
       });
     return () => {
       cancelled = true;
@@ -90,7 +115,7 @@ export function CoreKpisCard() {
         </button>
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         <button
           type="button"
           onClick={() => navigate('/reports/money')}
@@ -129,6 +154,27 @@ export function CoreKpisCard() {
             icon={<Wallet size={16} />}
           />
         </button>
+        {jobsBooked && (
+          <button
+            type="button"
+            onClick={() => navigate('/jobs')}
+            data-testid="kpi-jobs-booked"
+            className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+          >
+            <StatCard
+              className="h-full"
+              tone="info"
+              label="Jobs booked"
+              value={jobsBooked.bookedThisPeriod}
+              hint={
+                jobsBooked.trendPct === null
+                  ? 'this month'
+                  : `${jobsBooked.trend >= 0 ? '+' : ''}${jobsBooked.trendPct}% vs last month`
+              }
+              icon={<Briefcase size={16} />}
+            />
+          </button>
+        )}
       </div>
     </section>
   );

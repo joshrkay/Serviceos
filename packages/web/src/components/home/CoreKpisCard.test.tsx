@@ -8,10 +8,6 @@ const mockNavigate = vi.fn();
 vi.mock('../../lib/apiClient', () => ({ useApiClient: () => mockApiFetch }));
 vi.mock('react-router', () => ({ useNavigate: () => mockNavigate }));
 
-function resolveWith(data: Record<string, unknown>) {
-  mockApiFetch.mockResolvedValue({ ok: true, json: async () => ({ data }) });
-}
-
 const BASE = {
   month: '2026-06',
   revenueCents: 1_250_000,
@@ -20,6 +16,28 @@ const BASE = {
   outstandingCents: 320_000,
   overdueCents: 80_000,
 };
+
+const JOBS = { bookedThisPeriod: 9, trend: 3, trendPct: 50 };
+
+/** Route each endpoint independently; jobsBooked defaults to a 503 (omitted). */
+function setup(opts: { money?: Record<string, unknown> | number; jobs?: Record<string, unknown> | number } = {}) {
+  const money = opts.money ?? BASE;
+  const jobs = opts.jobs ?? 503;
+  mockApiFetch.mockImplementation((url: string) => {
+    if (url.includes('/api/analytics/jobs-booked')) {
+      return typeof jobs === 'number'
+        ? Promise.resolve({ ok: false, status: jobs })
+        : Promise.resolve({ ok: true, json: async () => ({ data: jobs }) });
+    }
+    return typeof money === 'number'
+      ? Promise.resolve({ ok: false, status: money })
+      : Promise.resolve({ ok: true, json: async () => ({ data: money }) });
+  });
+}
+
+function resolveWith(data: Record<string, unknown>) {
+  setup({ money: data });
+}
 
 describe('CoreKpisCard', () => {
   beforeEach(() => {
@@ -61,10 +79,25 @@ describe('CoreKpisCard', () => {
     expect(mockNavigate).toHaveBeenCalledWith('/reports/money');
   });
 
-  it('renders nothing on error', async () => {
-    mockApiFetch.mockResolvedValue({ ok: false, status: 503 });
+  it('renders nothing when the money dashboard errors', async () => {
+    setup({ money: 503, jobs: 503 });
     const { container } = render(<CoreKpisCard />);
     await waitFor(() => expect(mockApiFetch).toHaveBeenCalled());
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it('omits the jobs-booked tile when that endpoint is unavailable', async () => {
+    setup({ money: BASE, jobs: 503 });
+    render(<CoreKpisCard />);
+    await screen.findByText('$12,500.00');
+    expect(screen.queryByTestId('kpi-jobs-booked')).not.toBeInTheDocument();
+  });
+
+  it('shows the jobs-booked tile with its MoM trend when available', async () => {
+    setup({ money: BASE, jobs: JOBS });
+    render(<CoreKpisCard />);
+    const tile = await screen.findByTestId('kpi-jobs-booked');
+    expect(tile).toHaveTextContent('9');
+    expect(tile).toHaveTextContent('+50% vs last month');
   });
 });

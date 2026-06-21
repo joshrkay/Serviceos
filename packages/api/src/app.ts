@@ -145,6 +145,8 @@ import { createDigestsRouter } from './routes/digests';
 import { RepoBackedTimeGivenBackReporter } from './reports/time-given-back';
 import { RepoBackedVoiceRoiReporter } from './analytics/voice-roi';
 import { createVoiceRoiRouter } from './analytics/voice-roi-router';
+import { PgJobsBookedReporter } from './analytics/jobs-booked';
+import { createJobsBookedRouter } from './analytics/jobs-booked-router';
 import { loadTenantBusinessHours } from './telephony/business-hours-loader';
 import { createTimeEntriesRouter } from './routes/time-entries';
 import { InMemoryTimeEntryRepository } from './time-tracking/time-entry';
@@ -3702,6 +3704,11 @@ export function createApp(): express.Express {
     pool ? (tenantId: string) => loadTenantBusinessHours(pool, tenantId) : undefined,
   );
   app.use('/api/analytics/voice-roi', createVoiceRoiRouter({ voiceRoiReporter }));
+
+  // Epic 12.4 — jobs-booked KPI (this month vs last). Pool-backed RLS-scoped
+  // counts; left unwired (→ 503) on the in-memory boot path that has no pool.
+  const jobsBookedReporter = pool ? new PgJobsBookedReporter(pool) : undefined;
+  app.use('/api/analytics/jobs-booked', createJobsBookedRouter({ jobsBookedReporter }));
 
   // RV-062 — end-of-day digest web view (SMS deep link target).
   app.use('/api/digests', createDigestsRouter({ digestRepo: dailyDigestRepo }));
