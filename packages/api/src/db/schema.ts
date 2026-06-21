@@ -5026,6 +5026,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_maintenance_contracts_tenant
       ON maintenance_contracts(tenant_id);
     ALTER TABLE maintenance_contracts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE maintenance_contracts FORCE ROW LEVEL SECURITY;
     CREATE POLICY tenant_isolation_maintenance_contracts ON maintenance_contracts
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
