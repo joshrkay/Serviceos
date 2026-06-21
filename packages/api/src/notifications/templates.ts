@@ -14,6 +14,7 @@
  */
 import { tn } from './i18n';
 import type { Language } from '../ai/i18n/i18n';
+import { formatUsdCentsPlain } from '@ai-service-os/shared';
 
 export interface EstimateMessageContext {
   customerName: string;
@@ -46,10 +47,7 @@ export interface RenderedEmail {
   html: string;
 }
 
-function formatMoney(cents: number): string {
-  const dollars = (cents / 100).toFixed(2);
-  return `$${dollars}`;
-}
+const formatMoney = formatUsdCentsPlain;
 
 function escapeHtml(value: string): string {
   return value
