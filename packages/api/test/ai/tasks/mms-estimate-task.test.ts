@@ -103,6 +103,40 @@ describe('U2 — MmsEstimateTaskHandler', () => {
     expect(result.proposal.payload.notes).toContain('corroded');
   });
 
+  it('stamps §6.4-B severity from the vision model into _meta (U2)', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      content: JSON.stringify({
+        lineItems: [{ description: 'Burst pipe repair', quantity: 1, unitPrice: 35000 }],
+        severity: 'TIER_2_EMERGENCY_DISPATCH',
+        confidence_score: 0.8,
+      }),
+    });
+    const handler = new MmsEstimateTaskHandler(makeGateway(stub));
+
+    const result = await handler.handle(makeInput());
+    if (result.status !== 'drafted') throw new Error('expected drafted');
+    const meta = result.proposal.payload._meta as { severity?: string };
+    expect(meta.severity).toBe('TIER_2_EMERGENCY_DISPATCH');
+  });
+
+  it('drops an unknown severity tier — still drafts (U2)', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      content: JSON.stringify({
+        lineItems: [{ description: 'Faucet swap', quantity: 1, unitPrice: 12000 }],
+        severity: 'SUPER_DUPER_URGENT',
+        confidence_score: 0.7,
+      }),
+    });
+    const handler = new MmsEstimateTaskHandler(makeGateway(stub));
+
+    const result = await handler.handle(makeInput());
+    if (result.status !== 'drafted') throw new Error('expected drafted');
+    const meta = result.proposal.payload._meta as { severity?: string };
+    expect(meta.severity).toBeUndefined();
+  });
+
   it('sends the photo as an image_url block on a multimodal user message', async () => {
     const stub = new StubProvider('stub');
     stub.setResponse({ content: validVisionJson });

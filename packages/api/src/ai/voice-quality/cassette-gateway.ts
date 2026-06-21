@@ -137,15 +137,6 @@ export class CassetteLLMGateway extends LLMGateway {
   private readonly rubricVersion: string;
   /** Throttle the drift warning to once per gateway instance. */
   private driftWarned = false;
-  /**
-   * Per-(schema, system-fp, user) consumption counter — when the
-   * fingerprint key has N matching cassette entries, the Kth fallback
-   * hit returns the Kth entry in recorded order rather than always
-   * the first. Preserves call-order semantics for scripts that issue
-   * the same logical request multiple times across turns (e.g. an
-   * intent classifier called once per user turn).
-   */
-  private fallbackCounts: Map<string, number> = new Map();
 
   constructor(opts: CassetteLLMGatewayOptions) {
     // We never call into the parent's provider machinery — `complete()` is
@@ -261,14 +252,13 @@ export class CassetteLLMGateway extends LLMGateway {
       else return null; // matches exist but none with right fp — give up
     }
 
-    // Stage 3 — walk the matches in recorded order. The Kth fallback
-    // for the same (schema, system-fp, user) triple returns the Kth
-    // recorded entry; if we run out, repeat the last one (degrades but
-    // never crashes).
-    const key = `${liveSchema}::${liveSystemFp ?? ''}::${liveUser}`;
-    const prevCount = this.fallbackCounts.get(key) ?? 0;
-    this.fallbackCounts.set(key, prevCount + 1);
-    return matches[Math.min(prevCount, matches.length - 1)];
+    // Stage 3 — the match set is now the refresh history of a single
+    // logical call (same schema + system fingerprint + last user message);
+    // replay the most recently recorded entry, which carries current
+    // behavior. See pickNewestRecording for why `recordedAt` — not a
+    // prompt-prefix proxy or implicit file order — is the robust,
+    // drift-shape-independent key.
+    return pickNewestRecording(matches);
   }
 
   private async recordOrRefresh(
@@ -525,6 +515,43 @@ function lastUserContentFromPromptString(prompt: string): string | null {
   return lastUserContentFromMessages(
     parsed as ReadonlyArray<{ role: string; content?: unknown; parts?: unknown }>
   );
+}
+
+/**
+ * Deterministically pick the most recently recorded entry among fallback
+ * matches.
+ *
+ * By the time we reach here the match set has already been narrowed to a
+ * single logical call — same schema, same system-prompt fingerprint, same
+ * last user message (see {@link CassetteLLMGateway.findFallbackEntry}
+ * stages 1-2). Multiple entries for that one call are refresh history
+ * accreted over the cassette's life as the system prompt grew or was
+ * re-recorded; the newest carries current behavior.
+ *
+ * Ranking by `recordedAt` is drift-shape-independent: `recordedAt` is an
+ * ISO-8601 instant from `Date.toISOString()` (fixed-width UTC, so a
+ * lexicographic `>=` is also chronological — verified across the corpus),
+ * and it stays correct whether drift was a suffix append, a head/middle
+ * edit, or an in-place refresh (which keeps the array index but bumps the
+ * timestamp). A prompt-prefix/length proxy, by contrast, silently degrades
+ * the moment drift is not a pure append. On an equal timestamp
+ * (same-millisecond batch record) the later array entry wins, so the result
+ * is a pure function of the match set: identical input always yields the
+ * same entry, on every call and across reused gateway instances.
+ *
+ * `matches` is non-empty by construction at the call site.
+ */
+export function pickNewestRecording(matches: CassetteEntry[]): CassetteEntry {
+  let best = matches[0]!;
+  for (let i = 1; i < matches.length; i++) {
+    const candidate = matches[i]!;
+    // `>=` so that on an equal recordedAt the later (higher-index, i.e.
+    // appended/refreshed later) entry wins — a deterministic tie-break.
+    if (candidate.recordedAt >= best.recordedAt) {
+      best = candidate;
+    }
+  }
+  return best;
 }
 
 function canonicalize(value: unknown): unknown {

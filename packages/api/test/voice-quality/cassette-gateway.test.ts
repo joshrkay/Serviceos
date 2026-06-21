@@ -17,10 +17,12 @@ import { randomUUID } from 'crypto';
 import {
   CassetteLLMGateway,
   defaultCassettesDir,
+  pickNewestRecording,
   type CassetteFile,
+  type CassetteEntry,
 } from '../../src/ai/voice-quality/cassette-gateway';
 import { createMockLLMGateway } from '../../src/ai/gateway/factory';
-import type { LLMRequest } from '../../src/ai/gateway/gateway';
+import type { LLMRequest, LLMResponse } from '../../src/ai/gateway/gateway';
 
 function makeRequest(
   overrides: Partial<LLMRequest> = {}
@@ -42,6 +44,31 @@ function makeTempDir(): string {
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
+
+/**
+ * Build a minimal CassetteEntry for the pure-selector unit tests. `marker`
+ * is round-tripped through the response content so a test can identify which
+ * entry was chosen; `promptLen` lets a test pin that selection ignores prompt
+ * size (it is keyed on recordedAt, not prompt similarity).
+ */
+function makeEntry(recordedAt: string, marker: string, promptLen = 100): CassetteEntry {
+  const response: LLMResponse = {
+    content: JSON.stringify({ marker }),
+    model: 'mock',
+    provider: 'mock',
+    tokenUsage: { input: 0, output: 0, total: 0 },
+    latencyMs: 0,
+  };
+  return {
+    requestHash: `sha256:${marker}`,
+    request: { model: 'mock', prompt: 'x'.repeat(promptLen), schema: 'json' },
+    response,
+    tokenUsage: { inputTokens: 0, outputTokens: 0, costCents: 0 },
+    recordedAt,
+  };
+}
+
+const markerOf = (e: CassetteEntry): string => JSON.parse(e.response.content).marker;
 
 function readCassette(dir: string, scriptId: string): CassetteFile {
   const raw = fs.readFileSync(path.join(dir, `${scriptId}.json`), 'utf-8');
@@ -208,61 +235,141 @@ describe('VQ-005 — CassetteLLMGateway', () => {
     expect(response.content).not.toContain('intentType');
   });
 
-  it('drift fallback — multiple matches with same fingerprint walk in recorded order', async () => {
-    const scriptId = 'drift-fallback-counter';
+  it('drift fallback — replays the newest recording for the same logical call, deterministically', async () => {
+    // Models the real corpus pathology: one (schema, system-fp, user) key
+    // accrues several recordings as the classifier system prompt is
+    // re-recorded over time. An OLD recording carries a now-stale response;
+    // a NEWER recording carries the current one. On a hash-miss the fallback
+    // must replay the NEWEST recording (by recordedAt) — not matches[0] by
+    // file order — and do so identically on every call (no consumption
+    // counter). The live prompt here only serves to force the hash-miss;
+    // selection is by recordedAt, so the later-recorded entry wins.
+    const scriptId = 'drift-newest-recording';
     const { gateway: realGateway, provider } = createMockLLMGateway();
-
-    // Record three classifier calls with the same system+user — modeling
-    // a multi-turn script that re-classifies. Each recorded response is
-    // distinct so we can prove the Nth replay returns the Nth recording.
+    const user = 'reschedule my Tuesday appointment to Wednesday at the same time';
     const recorder = new CassetteLLMGateway({
       scriptId,
       cassettesDir: tempDir,
       mode: 'record',
       realGateway,
     });
-    // Vary the model each round so the recorded hashes are distinct
-    // (the cassette dedups on hash collision); the fallback ignores
-    // model entirely so all three entries still match the same
-    // (schema, system-fp, user) key.
-    for (const [tag, model] of [
-      ['first', 'm1'],
-      ['second', 'm2'],
-      ['third', 'm3'],
-    ] as const) {
-      provider.setDefaultResponse(`{"tag":"${tag}"}`);
-      await recorder.complete(
-        makeRequest({
-          model,
-          messages: [
-            { role: 'system', content: 'You are an intent classifier.' },
-            { role: 'user', content: 'classify me' },
-          ],
-        }),
-      );
-    }
 
-    // Replay each fallback hit in turn and assert the order.
+    // OLD recording (file index 0): short prompt, STALE/vague response.
+    provider.setDefaultResponse(
+      '{"intentType":"reschedule_appointment","newDateTimeDescription":"the requested new time"}',
+    );
+    await recorder.complete(
+      makeRequest({
+        messages: [
+          { role: 'system', content: 'You are an intent classifier. Intents: book, cancel.' },
+          { role: 'user', content: user },
+        ],
+      }),
+    );
+
+    // NEW recording (file index 1): longer prompt (intents appended), the
+    // CURRENT concrete response. Shares the classifier first-sentence
+    // fingerprint with the old one, so both land in the fallback match set.
+    provider.setDefaultResponse(
+      '{"intentType":"reschedule_appointment","newDateTimeDescription":"May 13 2026 2:00 PM"}',
+    );
+    await recorder.complete(
+      makeRequest({
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are an intent classifier. Intents: book, cancel, reschedule, lookup, confirm, escalate, transfer, voicemail.',
+          },
+          { role: 'user', content: user },
+        ],
+      }),
+    );
+
+    // LIVE request: a further-drifted prompt, so it hash-misses BOTH
+    // recordings and falls through to the newest-recording selection.
     const replayer = new CassetteLLMGateway({
       scriptId,
       cassettesDir: tempDir,
       mode: 'replay',
     });
-    const driftedRequest = makeRequest({
+    const drifted = makeRequest({
       messages: [
         {
           role: 'system',
-          content: 'You are an intent classifier. NEW: extra paragraph added after recording.',
+          content:
+            'You are an intent classifier. Intents: book, cancel, reschedule, lookup, confirm, escalate, transfer, voicemail, complaint.',
         },
-        { role: 'user', content: 'classify me' },
+        { role: 'user', content: user },
       ],
     });
-    const a = await replayer.complete(driftedRequest);
-    const b = await replayer.complete(driftedRequest);
-    const c = await replayer.complete(driftedRequest);
-    expect(JSON.parse(a.content)).toEqual({ tag: 'first' });
-    expect(JSON.parse(b.content)).toEqual({ tag: 'second' });
-    expect(JSON.parse(c.content)).toEqual({ tag: 'third' });
+
+    const a = await replayer.complete(drifted);
+    const b = await replayer.complete(drifted);
+    const c = await replayer.complete(drifted);
+    // The fallback returns the NEWEST recording (concrete value), not the
+    // older stale one ("the requested new time")...
+    expect(JSON.parse(a.content).newDateTimeDescription).toBe('May 13 2026 2:00 PM');
+    // ...deterministically across repeated calls (no positional walk).
+    expect(b.content).toBe(a.content);
+    expect(c.content).toBe(a.content);
+  });
+
+  describe('pickNewestRecording — drift fallback selection', () => {
+    // The match set reaching this selector is already narrowed to one
+    // logical call's refresh history (same schema + system fingerprint +
+    // user); these tests pin the pure ranking contract directly, including
+    // the branches the end-to-end replay test cannot reach.
+
+    it('returns the newest recordedAt regardless of array position (in-place refresh case)', () => {
+      // The current recording sits at index 0 — e.g. a `refresh` overwrote it
+      // in place, bumping its timestamp without moving it — while longer,
+      // older recordings follow. Selection by file order OR prompt length
+      // would wrongly pick a later/longer entry; recordedAt pins the current.
+      const matches: CassetteEntry[] = [
+        makeEntry('2026-06-14T12:00:00.000Z', 'current', 50),
+        makeEntry('2026-05-01T00:00:00.000Z', 'stale-a', 9000),
+        makeEntry('2026-05-20T00:00:00.000Z', 'stale-b', 9000),
+      ];
+      expect(markerOf(pickNewestRecording(matches))).toBe('current');
+    });
+
+    it('is order-independent: any permutation of distinct timestamps yields the same pick', () => {
+      const a = makeEntry('2026-01-01T00:00:00.000Z', 'old');
+      const b = makeEntry('2026-03-01T00:00:00.000Z', 'mid');
+      const c = makeEntry('2026-06-01T00:00:00.000Z', 'new');
+      expect(markerOf(pickNewestRecording([a, b, c]))).toBe('new');
+      expect(markerOf(pickNewestRecording([c, a, b]))).toBe('new');
+      expect(markerOf(pickNewestRecording([b, c, a]))).toBe('new');
+    });
+
+    it('breaks an equal-recordedAt tie by preferring the later (newer) array entry, deterministically', () => {
+      const ts = '2026-06-01T00:00:00.000Z';
+      const matches: CassetteEntry[] = [
+        makeEntry(ts, 'first'),
+        makeEntry(ts, 'second'),
+        makeEntry(ts, 'third'),
+      ];
+      // Later index wins on a full timestamp tie, and repeats identically
+      // (pure function, no per-instance counter).
+      expect(markerOf(pickNewestRecording(matches))).toBe('third');
+      expect(markerOf(pickNewestRecording(matches))).toBe('third');
+    });
+
+    it('ignores prompt size — a shorter, older-prompt entry with a newer recordedAt still wins', () => {
+      // Guards against regressing to a prompt-similarity selector: the newer
+      // recording here has the far SHORTER prompt.
+      const matches: CassetteEntry[] = [
+        makeEntry('2026-05-01T00:00:00.000Z', 'long-old', 20000),
+        makeEntry('2026-06-01T00:00:00.000Z', 'short-new', 80),
+      ];
+      expect(markerOf(pickNewestRecording(matches))).toBe('short-new');
+    });
+
+    it('returns the sole entry when the match set has one element', () => {
+      const only = makeEntry('2026-06-01T00:00:00.000Z', 'only');
+      expect(pickNewestRecording([only])).toBe(only);
+    });
   });
 
   it('VQ-005 — replay mode raises a clear error if cassette file exists but the request hash is not in it', async () => {

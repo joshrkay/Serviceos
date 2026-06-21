@@ -63,6 +63,17 @@ export const CUSTOMER_MMS_ACTOR = 'system:customer-mms-intake';
 export const CUSTOMER_MMS_PARSE_FALLBACK_NOTICE =
   'A customer texted a photo we could not turn into a draft estimate automatically. Check the conversation and follow up.';
 
+/**
+ * U6 — inbound MMS cost/abuse policy. Each photo-quote is a vision-model call
+ * (+ a possible customer auto-create), so a sender is capped per phone per
+ * window via the generic PhoneRateLimiter under this scope. Env-overridable.
+ */
+export const CUSTOMER_MMS_RATE_SCOPE = 'customer_mms';
+export const CUSTOMER_MMS_RATE_LIMIT = Number(process.env.CUSTOMER_MMS_RATE_LIMIT ?? 5);
+export const CUSTOMER_MMS_RATE_WINDOW_MS = Number(
+  process.env.CUSTOMER_MMS_RATE_WINDOW_MS ?? 60 * 60 * 1000,
+);
+
 const EXTENSION_BY_TYPE: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
@@ -79,6 +90,7 @@ function isSupportedImage(contentType: string): boolean {
 
 export type CustomerMmsOutcome =
   | 'ignored_no_media'
+  | 'rate_limited'
   | 'clarification'
   | 'no_storable_media'
   | 'parse_failed'
@@ -107,6 +119,13 @@ export interface CustomerMmsIntakeDeps {
   auditRepo?: AuditRepository;
   /** Owner notice transport for the parse-failure fallback. Absent → skipped. */
   notifyOwner?: (tenantId: string, body: string) => Promise<void>;
+  /**
+   * U6 — cost/abuse gate. Returns true when this sender is within the
+   * photo-quote cap (and records the usage), false when over. Absent → no
+   * limiting (e.g. in-memory/dev). Called BEFORE customer resolution and the
+   * vision call so an over-limit sender creates nothing and costs nothing.
+   */
+  checkRateLimit?: (tenantId: string, fromPhone: string) => Promise<boolean>;
   /** Supervisor presence/mode, threaded to the auto-approve gate when known. */
   supervisorPresent?: boolean;
   logger?: Logger;
@@ -180,6 +199,19 @@ export async function ingestCustomerMms(
   const media = ctx.media ?? [];
   if (media.length === 0) {
     return { outcome: 'ignored_no_media', storedImages: 0 };
+  }
+
+  // U6 — bound cost/abuse BEFORE resolving/creating a customer or calling the
+  // vision model. Over-limit is silent: no proposal, no customer, no LLM spend.
+  if (deps.checkRateLimit) {
+    const allowed = await deps.checkRateLimit(ctx.tenantId, ctx.fromE164);
+    if (!allowed) {
+      logger.info('customer MMS: rate limited (sender over photo-quote cap)', {
+        tenantId: ctx.tenantId,
+        messageSid: ctx.messageSid,
+      });
+      return { outcome: 'rate_limited', storedImages: 0 };
+    }
   }
 
   // 1. Customer resolution — 0 / 1 / many.
@@ -343,6 +375,27 @@ export async function ingestCustomerMms(
       );
     } catch {
       /* audit best-effort — the proposal itself is the source of truth */
+    }
+  }
+
+  // U3 — surface the draft to the owner. The proposal lands in the review
+  // queue regardless, but a customer-initiated photo quote warrants a proactive
+  // heads-up (the in-app/voice paths already SMS their proposals; this path did
+  // not). Best-effort and idempotent: the mms_ingest queue dedupes on
+  // messageSid, so intake runs once per inbound MMS — one notice per draft.
+  if (deps.notifyOwner) {
+    try {
+      const who = customer.displayName || customer.companyName || ctx.fromE164;
+      await deps.notifyOwner(
+        ctx.tenantId,
+        `New photo quote ready to review${who ? ` — from ${who}` : ''}. Open the app to approve, edit, or reject.`,
+      );
+    } catch (err) {
+      logger.warn('customer MMS: owner draft-ready notice failed', {
+        tenantId: ctx.tenantId,
+        messageSid: ctx.messageSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

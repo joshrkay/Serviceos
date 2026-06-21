@@ -10,6 +10,7 @@ import type {
   ProposalType,
   ProposalConfidence,
   ProposalConfidenceLevel,
+  ProposalSeverity,
 } from '../../data/mock-data';
 
 const TYPE_CONFIG: Record<ProposalType, {
@@ -72,6 +73,16 @@ const CONFIDENCE_LEVEL_CONFIG: Record<ProposalConfidenceLevel, ConfidenceDisplay
   medium:   { bar: 'bg-amber-400',  track: 'bg-amber-100', width: 'w-3/5',    label: 'Review recommended',  labelColor: 'text-amber-700' },
   low:      { bar: 'bg-orange-500', track: 'bg-orange-100',width: 'w-2/5',    label: 'Low confidence',      labelColor: 'text-orange-700' },
   very_low: { bar: 'bg-red-500',    track: 'bg-red-100',   width: 'w-1/5',    label: 'Very low confidence', labelColor: 'text-red-700' },
+};
+
+// §6.4-B (U5) — severity badge config, keyed by the backend's urgency tier
+// (`_meta.severity`). Same tier scale voice triage uses, so the owner sees one
+// consistent urgency language across a voice call and a texted photo.
+const SEVERITY_CONFIG: Record<ProposalSeverity, { label: string; classes: string }> = {
+  TIER_1_EVACUATE:           { label: 'Evacuate',        classes: 'border-red-300 bg-red-100 text-red-800' },
+  TIER_2_EMERGENCY_DISPATCH: { label: 'Emergency',       classes: 'border-red-200 bg-red-50 text-red-700' },
+  TIER_3_SAME_DAY_URGENT:    { label: 'Same-day urgent', classes: 'border-amber-200 bg-amber-50 text-amber-700' },
+  TIER_4_SCHEDULE:           { label: 'Routine',         classes: 'border-slate-200 bg-slate-100 text-slate-600' },
 };
 
 // P2-035 (U2) — per-line catalog-grounding badge styling. 'manual' is
@@ -160,6 +171,7 @@ export function AIProposalCard({ proposal, compact, onApprove, onReject }: Props
         s === 'catalog' || s === 'ambiguous' || s === 'uncatalogued',
     );
   const markers = proposal.meta?.markers ?? [];
+  const severity = proposal.meta?.severity;
 
   // ── Approved ──────────────────────────────────────────────────
   if (status === 'Approved') {
@@ -267,6 +279,18 @@ export function AIProposalCard({ proposal, compact, onApprove, onReject }: Props
             {proposal.impact && (
               <div className="mt-2 inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1">
                 <span className="text-xs text-slate-600">{proposal.impact}</span>
+              </div>
+            )}
+
+            {/* §6.4-B severity marker (U5) — urgency of the visible problem,
+                from `_meta.severity` (same tier scale as voice triage). Set on
+                MMS photo drafts; absent → not rendered. */}
+            {severity && SEVERITY_CONFIG[severity] && (
+              <div
+                className={`mt-2 ml-2 inline-flex items-center gap-1 rounded-full border px-2.5 py-1 ${SEVERITY_CONFIG[severity].classes}`}
+                data-testid="severity-badge"
+              >
+                <span className="text-xs font-medium">{SEVERITY_CONFIG[severity].label}</span>
               </div>
             )}
 

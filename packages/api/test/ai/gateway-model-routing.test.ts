@@ -17,6 +17,7 @@ import type {
 import { StubProvider } from '../../src/ai/gateway/providers';
 import { InMemoryAiRunRepository } from '../../src/ai/ai-run';
 import { clearUnmappedTaskTypeWarnings } from '../../src/ai/gateway/router';
+import { isVisionCapableModel } from '../../src/config/ai-routing';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -119,6 +120,20 @@ describe('P2-028 — gateway model routing integration', () => {
 
     const lastRequest = stub.getLastRequest();
     expect(lastRequest?.model).toBe(process.env.AI_COMPLEX_MODEL ?? 'claude-sonnet-4-6');
+  });
+
+  it('routes mms_estimate to a vision-capable complex model (U1)', async () => {
+    const providers = makeStubProviders();
+    const stub = providers.get('stub') as StubProvider;
+    const gateway = makeGateway(providers);
+
+    await gateway.complete(makeRequest({ taskType: 'mms_estimate' }));
+
+    const model = stub.getLastRequest()?.model;
+    expect(model).toBe(process.env.AI_COMPLEX_MODEL ?? 'claude-sonnet-4-6');
+    // R1: an image task must resolve to a vision-capable model. Pinning to the
+    // complex tier means an AI_STANDARD_MODEL override can't silently strip vision.
+    expect(isVisionCapableModel(model ?? '')).toBe(true);
   });
 
   // -------------------------------------------------------------------------
