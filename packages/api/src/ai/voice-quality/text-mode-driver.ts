@@ -517,12 +517,11 @@ export class TextModeDriver implements AgentDriver {
         state.tainted = true;
       }
 
-      // Emit `intent_classified` AFTER the escalation decision so its
-      // timestamp is at-or-after any escalation_triggered fired this
-      // turn. The disposition grader attributes an escalation to turn i
-      // when its ts is in (intent[i-1].ts, intent[i].ts]; emitting the
-      // intent last keeps each turn's escalation inside its own window
-      // regardless of millisecond-clock ticks.
+      // Emit `intent_classified` AFTER the escalation decision so its log
+      // index is at-or-after any escalation_triggered fired this turn.
+      // The disposition grader attributes escalations by append-only log
+      // index (not timestamp): turn i owns events in (intent[i-1], intent[i]].
+      // Emitting intent last keeps each turn's escalation inside its window.
       const emitIntentClassified = (): void => {
         session.events.emit(
           'voice-event',
