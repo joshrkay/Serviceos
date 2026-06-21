@@ -28,11 +28,10 @@ export const KeyboardAvoidingView = ({ children, className, behavior }: Props) =
   createElement('div', { className, 'data-behavior': behavior as string }, children as ReactNode);
 
 // Minimal Platform: tests run as iOS so `Platform.OS === 'ios'` branches are
-// the rendered default; `select` mirrors RN's ios/android/default resolution.
+// the rendered default. (`select` is intentionally omitted — no screen under
+// test uses it; add it when one does.)
 export const Platform = {
   OS: 'ios' as 'ios' | 'android' | 'web',
-  select: <T,>(spec: { ios?: T; android?: T; native?: T; default?: T }): T | undefined =>
-    spec.ios ?? spec.native ?? spec.default,
 };
 
 export const TextInput = ({ onChangeText, value, className, placeholder }: Props) =>

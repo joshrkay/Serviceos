@@ -17,17 +17,17 @@
  * pairs with the i-th script turn, the i-th `proposal_created` event pairs
  * the same way (proposals are looked up by id in `observation.proposals`).
  *
- * Escalation correlation is per-turn by `(timestamp, event-log index)`: a
- * turn is graded as "escalated" iff an `escalation_triggered` event fired
- * AFTER the previous turn's `intent_classified` event AND AT-OR-BEFORE the
- * current turn's `intent_classified` event. (For turn 0 the lower bound is
- * the start of the call.) For the final turn, anything after the previous
- * turn's intent counts. The log index breaks ms-timestamp ties by true
- * emission order — without it, a sub-millisecond script can mis-attribute
- * a late-turn escalation to the earlier turn. This avoids retroactively
- * marking earlier turns "escalated" when only a late turn triggered
- * escalation — the correct behavior for adversarial multi-turn scripts
- * where `expected.escalates` differs across turns.
+ * Escalation correlation is per-turn by event-log index: a turn is graded
+ * as "escalated" iff an `escalation_triggered` event fired AFTER the
+ * previous turn's `intent_classified` event AND AT-OR-BEFORE the current
+ * turn's `intent_classified` event. (For turn 0 the lower bound is the
+ * start of the call.) For the final turn, anything after the previous
+ * turn's intent counts. Log index — not the `Date.now()` ms timestamp — is
+ * the ordering key, because a sub-millisecond script ties timestamps and
+ * would mis-attribute a late-turn escalation to the earlier turn. This
+ * avoids retroactively marking earlier turns "escalated" when only a late
+ * turn triggered escalation — the correct behavior for adversarial
+ * multi-turn scripts where `expected.escalates` differs across turns.
  *
  * Hard/soft heuristic — v1, deliberately simple, will be tuned with usage:
  *   HARD if the key:
@@ -261,25 +261,19 @@ export function gradeDispositionStructured(
   for (const p of observation.proposals) proposalsById.set(p.id, p);
 
   // Causal order within the call. Event timestamps are `Date.now()` (ms)
-  // and an entire script can run sub-millisecond, so ts ties between a
-  // turn's `intent_classified` and a later turn's `escalation_triggered`
-  // are common. The append-only event-log index is the deterministic
-  // tiebreaker — the agent always classifies before it decides to
-  // escalate, so the escalation is strictly later in the log — letting us
-  // order events by `(ts, logIndex)` instead of `ts` alone. Without it a
-  // tie mis-attributes a late-turn escalation to the earlier turn (the
-  // `<=` upper bound wins) and flips criterion 11 non-deterministically.
+  // and an entire script can run sub-millisecond, so a turn's
+  // `intent_classified` and a later turn's `escalation_triggered` routinely
+  // share a timestamp; ordering by ts then mis-attributes the escalation to
+  // the earlier turn (the `<=` upper bound below wins) and flips criterion
+  // 11 non-deterministically. The append-only event-log index IS the causal
+  // order — the agent always classifies before it escalates — so we
+  // attribute escalations by log index, not timestamp.
   const logIndexOf = new Map<VoiceSessionEvent, number>();
   observation.events.forEach((e, idx) => logIndexOf.set(e, idx));
-  type OrderKey = readonly [number, number];
-  // Only intent/escalation events are ordered here; both carry `ts`.
-  const keyOf = (e: IntentClassifiedEvent | EscalationTriggeredEvent): OrderKey => [
-    e.ts,
-    logIndexOf.get(e) ?? 0,
-  ];
-  const NEG_INF: OrderKey = [-Infinity, -Infinity];
-  const POS_INF: OrderKey = [Infinity, Infinity];
-  const cmpKey = (a: OrderKey, b: OrderKey): number => a[0] - b[0] || a[1] - b[1];
+  const logIndexAt = (e: IntentClassifiedEvent | EscalationTriggeredEvent): number =>
+    logIndexOf.get(e) ?? -1;
+  // Escalation positions are turn-independent — derive them once.
+  const escalationIndices = escalations.map(logIndexAt);
 
   const perTurnDetail: DispositionStructuredResult['perTurnDetail'] = [];
   const failedSet = new Set<number>();
@@ -315,31 +309,22 @@ export function gradeDispositionStructured(
         ? true
         : expectedProposalType === actualProposalType;
 
-    // Escalation correlation (per-turn): an escalation_triggered event
-    // is attributed to turn i iff its `(ts, logIndex)` order falls within
-    // turn i's window. The window's lower bound is the previous turn's
-    // intent_classified (or -Inf for turn 0); the upper bound is turn i's
-    // intent_classified EXCEPT for the last turn, whose upper bound
-    // extends to +Inf so an escalation that fires AFTER the agent's last
-    // classification (but before session_terminated) still gets
-    // attributed to the final turn. Comparing by `(ts, logIndex)` rather
-    // than `ts` alone keeps the bounds tie-proof when several events land
-    // in the same millisecond (see `logIndexOf` above). When the i-th
-    // intent event is missing AND it isn't the last turn, the window is
-    // un-anchored and we record "no escalation observed for this turn" —
-    // false positives would mis-grade.
-    const lowerKey: OrderKey =
-      i === 0 ? NEG_INF : intents[i - 1] ? keyOf(intents[i - 1]) : NEG_INF;
+    // Escalation correlation (per-turn): an escalation_triggered event is
+    // attributed to turn i iff its log index falls within turn i's window
+    // (see `logIndexOf` above for why log index, not timestamp). The lower
+    // bound is the previous turn's intent_classified index (or -1 before
+    // turn 0); the upper bound is turn i's intent_classified index EXCEPT
+    // for the last turn, whose upper bound is +Inf so an escalation that
+    // fires after the agent's last classification (but before
+    // session_terminated) still lands on the final turn. A missing intent
+    // on a non-last turn leaves the window un-anchored (upper = -1) so
+    // nothing is attributed — a false positive would mis-grade.
+    const lowerBound = i === 0 ? -1 : intents[i - 1] ? logIndexAt(intents[i - 1]) : -1;
     const isLastTurn = i === script.turns.length - 1;
-    const upperKey: OrderKey = isLastTurn
-      ? POS_INF
-      : intentEv
-        ? keyOf(intentEv)
-        : NEG_INF;
-    const actualEscalated = escalations.some((esc) => {
-      const k = keyOf(esc);
-      return cmpKey(k, lowerKey) > 0 && cmpKey(k, upperKey) <= 0;
-    });
+    const upperBound = isLastTurn ? Infinity : intentEv ? logIndexAt(intentEv) : -1;
+    const actualEscalated = escalationIndices.some(
+      (k) => k > lowerBound && k <= upperBound,
+    );
     const expectedEscalates = expected.escalates;
     const escalationMatched =
       expectedEscalates === undefined ? true : expectedEscalates === actualEscalated;
