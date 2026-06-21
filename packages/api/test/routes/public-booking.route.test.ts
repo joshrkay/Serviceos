@@ -269,4 +269,80 @@ describe('public-booking route', () => {
       expect(res.status).toBe(404);
     });
   });
+
+  // ── LC-6 — served-postal-code in-area gating ──────────────────────────
+  describe('in-area gating (LC-6)', () => {
+    async function setServedZips(zips: string[]): Promise<void> {
+      await settingsRepo.update(tenantId, { serviceAreaZips: zips });
+    }
+
+    it('a tenant with no served ZIPs serves everywhere (no postalCode needed)', async () => {
+      const res = await request(app)
+        .get(`/api/public/booking/${tenantId}/availability`)
+        .query({ from: isoDate(1), to: isoDate(3), durationMin: 60 });
+      expect(res.status).toBe(200);
+      expect(res.body.outOfArea).toBeUndefined();
+      expect(res.body.slots.length).toBeGreaterThan(0);
+    });
+
+    it('returns slots when the postalCode is in the served set', async () => {
+      await setServedZips(['85001', '85002']);
+      const res = await request(app)
+        .get(`/api/public/booking/${tenantId}/availability`)
+        .query({ from: isoDate(1), to: isoDate(3), durationMin: 60, postalCode: '85001-1234' });
+      expect(res.status).toBe(200);
+      expect(res.body.outOfArea).toBeUndefined();
+      expect(res.body.slots.length).toBeGreaterThan(0);
+    });
+
+    it('returns no slots + outOfArea when the postalCode is not served', async () => {
+      await setServedZips(['85001']);
+      const res = await request(app)
+        .get(`/api/public/booking/${tenantId}/availability`)
+        .query({ from: isoDate(1), to: isoDate(3), durationMin: 60, postalCode: '99999' });
+      expect(res.status).toBe(200);
+      expect(res.body.outOfArea).toBe(true);
+      expect(res.body.slots).toEqual([]);
+    });
+
+    it('a gated tenant returns outOfArea when no postalCode is supplied', async () => {
+      await setServedZips(['85001']);
+      const res = await request(app)
+        .get(`/api/public/booking/${tenantId}/availability`)
+        .query({ from: isoDate(1), to: isoDate(3), durationMin: 60 });
+      expect(res.status).toBe(200);
+      expect(res.body.outOfArea).toBe(true);
+    });
+
+    it('POST rejects an out-of-area address with 422 and writes nothing', async () => {
+      await setServedZips(['85001']);
+      // Get a real slot first (in-area), then submit an out-of-area address.
+      const avail = await request(app)
+        .get(`/api/public/booking/${tenantId}/availability`)
+        .query({ from: isoDate(1), to: isoDate(3), durationMin: 60, postalCode: '85001' });
+      const slot = avail.body.slots[0];
+
+      const res = await request(app)
+        .post(`/api/public/booking/${tenantId}`)
+        .send({ ...validBooking(slot.start, slot.end), postalCode: '99999' });
+      expect(res.status).toBe(422);
+      expect(res.body.error).toBe('OUT_OF_AREA');
+      expect(await proposalRepo.findByTenant(tenantId)).toHaveLength(0);
+      expect(await customerRepo.findByTenant(tenantId)).toHaveLength(0);
+    });
+
+    it('POST accepts an in-area address (creates the booking proposal)', async () => {
+      await setServedZips(['85001']);
+      const avail = await request(app)
+        .get(`/api/public/booking/${tenantId}/availability`)
+        .query({ from: isoDate(1), to: isoDate(3), durationMin: 60, postalCode: '85001' });
+      const slot = avail.body.slots[0];
+
+      const res = await request(app)
+        .post(`/api/public/booking/${tenantId}`)
+        .send(validBooking(slot.start, slot.end));
+      expect(res.status).toBe(201);
+      expect(await proposalRepo.findByTenant(tenantId)).toHaveLength(1);
+    });
+  });
 });

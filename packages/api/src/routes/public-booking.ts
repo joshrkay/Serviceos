@@ -107,7 +107,39 @@ const availabilityQuerySchema = z.object({
   from: z.string().regex(DATE_RE, 'from must be YYYY-MM-DD'),
   to: z.string().regex(DATE_RE, 'to must be YYYY-MM-DD'),
   durationMin: z.coerce.number().int().min(15).max(480).default(60),
+  // LC-6 — optional service-area gate. A postal/ZIP code is area-level, not
+  // PII, so it's allowed in the query string; when the tenant serves a fixed
+  // ZIP set, out-of-area requests get no slots.
+  postalCode: z.string().trim().max(20).optional(),
 });
+
+/** Normalize to a comparable 5-digit US ZIP (strips +4 and any formatting). */
+function normalizeZip(postalCode: string): string {
+  return postalCode.replace(/\D/g, '').slice(0, 5);
+}
+
+/**
+ * LC-6 in-area test. A tenant with NO configured served ZIPs serves
+ * everywhere (returns true) — geofencing is opt-in. Otherwise the prospect's
+ * ZIP must be in the served set. A missing prospect ZIP against a gated tenant
+ * is treated as out-of-area (can't confirm coverage).
+ */
+function isServedPostalCode(servedZips: string[], postalCode?: string): boolean {
+  if (servedZips.length === 0) return true;
+  if (!postalCode) return false;
+  const target = normalizeZip(postalCode);
+  if (!target) return false;
+  return servedZips.some((z) => normalizeZip(z) === target);
+}
+
+async function resolveServiceAreaZips(
+  deps: PublicBookingDeps,
+  tenantId: string,
+): Promise<string[]> {
+  if (!deps.settingsRepo) return [];
+  const settings = await deps.settingsRepo.findByTenant(tenantId);
+  return (settings?.serviceAreaZips ?? []).filter((z) => z.trim().length > 0);
+}
 
 const bookingSchema = z
   .object({
@@ -196,6 +228,16 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
 
       const q = availabilityQuerySchema.parse(req.query ?? {});
       const timezone = await resolveTenantTimezone(deps, tenantId);
+
+      // LC-6 in-area gate: never offer slots a gated tenant can't actually
+      // service. Out-of-area returns zero slots + an explicit flag so the UI
+      // can say "we don't serve your area" instead of showing a dead calendar.
+      const servedZips = await resolveServiceAreaZips(deps, tenantId);
+      if (!isServedPostalCode(servedZips, q.postalCode)) {
+        res.status(200).json({ timezone, durationMin: q.durationMin, slots: [], outOfArea: true });
+        return;
+      }
+
       const slots = await findBookableSlots(
         { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo },
         {
@@ -241,6 +283,18 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
       // Honeypot tripped — pretend success so the bot moves on, write nothing.
       if (parsed._company_url && parsed._company_url.trim().length > 0) {
         res.status(200).json({ status: 'pending_confirmation' });
+        return;
+      }
+
+      // LC-6 in-area gate: a gated tenant rejects an out-of-area address before
+      // any write (the real submitted ZIP is authoritative — the GET filter is
+      // advisory). 422 so the UI distinguishes "out of area" from a bad slot.
+      const servedZips = await resolveServiceAreaZips(deps, tenantId);
+      if (!isServedPostalCode(servedZips, parsed.postalCode)) {
+        res.status(422).json({
+          error: 'OUT_OF_AREA',
+          message: "Sorry — that address is outside this business's service area.",
+        });
         return;
       }
 
