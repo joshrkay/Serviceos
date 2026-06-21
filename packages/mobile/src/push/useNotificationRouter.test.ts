@@ -59,6 +59,20 @@ describe('useNotificationRouter', () => {
     expect(h.push).toHaveBeenCalledWith('/proposals/p9');
   });
 
+  it('a tap while running routes an allowlisted screen', async () => {
+    renderHook(() => useNotificationRouter());
+    await act(async () => {
+      h.responseCb?.({ type: 'inbound_sms', screen: '/messages/m1' });
+    });
+    expect(h.push).toHaveBeenCalledWith('/messages/m1');
+  });
+
+  it('cold start: routes a launch notification with an unroutable payload to Home', async () => {
+    h.lastData = { type: 'incoming_call', screen: '/not-allowed' };
+    renderHook(() => useNotificationRouter());
+    await waitFor(() => expect(h.push).toHaveBeenCalledWith('/'));
+  });
+
   it('a foreground notification refreshes without navigating', async () => {
     const onForeground = vi.fn();
     renderHook(() => useNotificationRouter(onForeground));
@@ -66,6 +80,25 @@ describe('useNotificationRouter', () => {
       h.foregroundCb?.();
     });
     expect(onForeground).toHaveBeenCalledTimes(1);
+    expect(h.push).not.toHaveBeenCalled();
+  });
+
+  it('refreshes on every foreground push, not just the first', async () => {
+    const onForeground = vi.fn();
+    renderHook(() => useNotificationRouter(onForeground));
+    await act(async () => {
+      h.foregroundCb?.();
+      h.foregroundCb?.();
+    });
+    expect(onForeground).toHaveBeenCalledTimes(2);
+    expect(h.push).not.toHaveBeenCalled();
+  });
+
+  it('tolerates a foreground push when no onForeground callback is provided', async () => {
+    renderHook(() => useNotificationRouter());
+    await act(async () => {
+      h.foregroundCb?.();
+    });
     expect(h.push).not.toHaveBeenCalled();
   });
 
