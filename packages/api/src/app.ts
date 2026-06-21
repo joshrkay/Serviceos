@@ -4370,6 +4370,8 @@ export function createApp(): express.Express {
         proposalRepo,
         dunningConfigRepo,
         dunningEventRepo,
+        // Owner `invoice_overdue` push dep (U6) — without it the push no-ops.
+        customerRepo,
         listTenantIds: async () => {
           if (!pool) return [];
           const r = await pool.query('SELECT id FROM tenants');
@@ -4462,6 +4464,13 @@ export function createApp(): express.Express {
         await runAppointmentReminderSweep({
           appointmentRepo,
           transactionalComms,
+          // Owner `appointment_reminder` push deps (U4) — without all four the
+          // owner push no-ops; message_dispatches gives it an independent
+          // idempotency key from the customer SMS.
+          jobRepo,
+          customerRepo,
+          settingsRepo,
+          dispatchRepo,
           listTenantIds: async () => {
             if (!pool) return [];
             const r = await pool.query('SELECT id FROM tenants');
