@@ -19,5 +19,6 @@ export * from './contracts/tech-status-event.js';
 export * from './contracts/proposal-sms.js';
 
 export * from './contracts/digest.js';
+export * from './contracts/devices.js';
 export * from './contracts/correction-lesson.js';
 export * from './contracts/negotiation-event.js';

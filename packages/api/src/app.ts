@@ -369,6 +369,13 @@ import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
 import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
+import { createPushNotificationWorker } from './workers/push-notification-worker';
+import { createDevicesRouter } from './routes/devices';
+import {
+  PgDeviceTokenRepository,
+  InMemoryDeviceTokenRepository,
+} from './devices/device-token-repository';
+import { InMemoryPushDeliveryProvider } from './notifications/push-delivery-provider';
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
 // U7 — structured correction-lesson loop (record on execution, undo on undo).
 import {
@@ -1353,6 +1360,28 @@ export function createApp(): express.Express {
   workerRegistry.set(
     imagePostProcessWorker.type,
     imagePostProcessWorker as import('./queues/queue').WorkerHandler<unknown>
+  );
+
+  // ── Push-notification worker (mobile): sends a queued push to a tenant's
+  // registered devices (RLS-scoped token selection via the repo's withTenant),
+  // prunes dead tokens, and writes a system-actor audit. Unlike per-tenant SMS
+  // there is no per-tenant provider resolution: push credentials are app-global
+  // (one Firebase service account, like SendGrid), so tenant isolation lives
+  // entirely in device_tokens RLS. InMemoryPushDeliveryProvider records would-be
+  // sends — push stays dormant until the FCM provider + mobile client ship;
+  // swap it for an FcmPushDeliveryProvider when the service account is configured.
+  const deviceTokenRepo = pool
+    ? new PgDeviceTokenRepository(pool)
+    : new InMemoryDeviceTokenRepository();
+  const pushProvider = new InMemoryPushDeliveryProvider();
+  const pushNotificationWorker = createPushNotificationWorker({
+    deviceTokenRepo,
+    pushProvider,
+    auditRepo,
+  });
+  workerRegistry.set(
+    pushNotificationWorker.type,
+    pushNotificationWorker as import('./queues/queue').WorkerHandler<unknown>,
   );
 
   // ── Auto-delivery worker: sweeps approved proposals past the 5-second
@@ -3834,6 +3863,8 @@ export function createApp(): express.Express {
         technicianLocationAuthorizer.canSubmitForTechnician(auth, technicianId),
     })
   );
+  // Mobile push device registration (Capacitor app).
+  app.use('/api/devices', createDevicesRouter({ deviceTokenRepo, auditRepo }));
   app.use('/api/catalog/items', createCatalogItemsRouter(catalogRepo, auditRepo));
   app.use(
     '/api/files',
