@@ -33,7 +33,22 @@ const EXTRA_WEB_ROUTES: SweepRoute[] = [
   { path: '/digest', label: 'digest', category: 'app' },
 ];
 
-const ROUTES: SweepRoute[] = [...PUBLIC_SWEEP_ROUTES, ...SWEEP_ROUTES, ...EXTRA_WEB_ROUTES];
+// Public customer-facing routes (token/id fixture — page shell must render).
+const PUBLIC_UI_FLOW_ROUTES: SweepRoute[] = [
+  { path: '/intake', label: 'intake', category: 'public' },
+  { path: '/book', label: 'booking', category: 'public' },
+  { path: '/e/00000000-0000-0000-0000-000000000001', label: 'estimate-approval', category: 'public', allowApiStatuses: [404] },
+  { path: '/pay/00000000-0000-0000-0000-000000000001', label: 'invoice-payment', category: 'public', allowApiStatuses: [404] },
+  { path: '/feedback/00000000-0000-0000-0000-000000000001', label: 'feedback', category: 'public', allowApiStatuses: [404] },
+  { path: '/portal/00000000-0000-0000-0000-000000000001', label: 'portal', category: 'public', allowApiStatuses: [404] },
+];
+
+const ROUTES: SweepRoute[] = [
+  ...PUBLIC_SWEEP_ROUTES,
+  ...PUBLIC_UI_FLOW_ROUTES,
+  ...SWEEP_ROUTES,
+  ...EXTRA_WEB_ROUTES,
+];
 const canReachSpa = !!process.env.E2E_BASE_URL || !!process.env.VITE_CLERK_PUBLISHABLE_KEY;
 
 test.describe('UI flow capture — web', () => {

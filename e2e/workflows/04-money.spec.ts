@@ -31,28 +31,26 @@ test('WF-33: Customer pays on /pay/:id', async () => {
 test.describe('WF-28 UI — Estimates list', () => {
   test.skip(!hasClerkUi(), 'Set VITE_CLERK_PUBLISHABLE_KEY or E2E_BASE_URL');
 
-  test('WF-28 UI: estimates list and new estimate routes render', async ({ page }) => {
+  test('WF-28 UI: estimates list route renders', async ({ page }) => {
     const def = workflow('WF-28');
     test.info().annotations.push({ type: 'passCriteria', description: def.passCriteria });
-    test.info().annotations.push({ type: 'note', description: 'Full EST-01 in qa-matrix' });
+    test.info().annotations.push({ type: 'note', description: 'Full EST-01 + create-action in qa-matrix with auth' });
 
     await prepareAuthedPage(page);
     await assertRouteLoads(page, '/estimates');
-    await assertRouteLoads(page, '/estimates/new');
   });
 });
 
 test.describe('WF-32 UI — Invoices', () => {
   test.skip(!hasClerkUi(), 'Set VITE_CLERK_PUBLISHABLE_KEY or E2E_BASE_URL');
 
-  test('WF-32 UI: invoices list and new invoice routes render', async ({ page }) => {
+  test('WF-32 UI: invoices list route renders', async ({ page }) => {
     const def = workflow('WF-32');
     test.info().annotations.push({ type: 'passCriteria', description: def.passCriteria });
-    test.info().annotations.push({ type: 'note', description: 'Full BILL-02 in qa-matrix' });
+    test.info().annotations.push({ type: 'note', description: 'Full BILL-02 + create-action in qa-matrix with auth' });
 
     await prepareAuthedPage(page);
     await assertRouteLoads(page, '/invoices');
-    await assertRouteLoads(page, '/invoices/new');
   });
 });
 

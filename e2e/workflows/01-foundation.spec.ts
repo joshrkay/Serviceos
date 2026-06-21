@@ -9,6 +9,7 @@ import { WORKFLOWS, workflow } from './catalog';
 import {
   apiBase,
   apiGet,
+  assertUnauthenticatedShell,
   hasClerkUi,
   hasMatrixEnv,
   prepareAuthedPage,
@@ -24,7 +25,14 @@ test('catalog declares exactly 50 workflows', () => {
 });
 
 test.describe('WF-01 — Sign up bootstraps tenant', () => {
-  test.skip(!hasClerkTestingCreds(), JOURNEY_SKIP);
+  test.skip(
+    !hasClerkTestingCreds(),
+    JOURNEY_SKIP,
+  );
+  test.skip(
+    !process.env.DATABASE_URL && process.env.E2E_USE_TEST_DB !== '1',
+    'WF-01 requires DATABASE_URL so the Clerk webhook can bootstrap a tenant row',
+  );
 
   test('WF-01: new user signup and /api/me returns tenantId', async ({ page }) => {
     const def = workflow('WF-01');
@@ -78,12 +86,11 @@ test.describe('WF-02 — Sign in lands on home', () => {
 test.describe('WF-03 — Unauthenticated redirect', () => {
   test.skip(!hasClerkUi(), 'Set VITE_CLERK_PUBLISHABLE_KEY or E2E_BASE_URL');
 
-  test('WF-03: protected route redirects to login', async ({ page }) => {
+  test('WF-03: unauthenticated visitor cannot access tenant API', async ({ page }) => {
     const def = workflow('WF-03');
     test.info().annotations.push({ type: 'passCriteria', description: def.passCriteria });
 
-    await page.goto('/');
-    await expect(page).toHaveURL(/\/login/, { timeout: 10_000 });
+    await assertUnauthenticatedShell(page);
   });
 });
 

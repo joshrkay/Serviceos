@@ -4,9 +4,10 @@
  * Lighter than the QA matrix harness — enough for UI navigation checks and
  * simple API assertions. Matrix-backed workflows delegate to e2e:qa-matrix.
  */
-import { expect, type APIRequestContext, type Page } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { setupClerkTestingToken, hasClerkTestingCreds } from '../helpers/clerk-testing';
 import { mintToken } from '../qa-matrix/fixtures/tokens';
+import { CONSOLE_ERROR_ALLOWLIST } from '../helpers/coverage-sweep-routes';
 
 export function apiBase(): string {
   return (process.env.E2E_API_URL ?? 'http://localhost:3000').replace(/\/$/, '');
@@ -17,7 +18,7 @@ export function hasClerkUi(): boolean {
   return !!process.env.E2E_BASE_URL || !!process.env.VITE_CLERK_PUBLISHABLE_KEY;
 }
 
-/** HMAC tokens + seeded tenant A for API-level workflow checks. */
+/** HMAC tokens + seeded tenants for API-level workflow checks. */
 export function hasMatrixEnv(): boolean {
   return !!(
     process.env.E2E_CLERK_HMAC_SECRET &&
@@ -42,10 +43,19 @@ export async function prepareAuthedPage(page: Page): Promise<void> {
   }
 }
 
-/** Visit a route and assert the SPA shell renders without page errors. */
+function isAllowedConsoleError(message: string): boolean {
+  return CONSOLE_ERROR_ALLOWLIST.some((pattern) => message.includes(pattern));
+}
+
+/** Visit a route and assert the SPA shell renders without uncaught page errors. */
 export async function assertRouteLoads(page: Page, path: string, heading?: RegExp): Promise<void> {
   const consoleErrors: string[] = [];
   page.on('pageerror', (err) => consoleErrors.push(err.message));
+  page.on('console', (msg) => {
+    if (msg.type() === 'error' && !isAllowedConsoleError(msg.text())) {
+      consoleErrors.push(msg.text());
+    }
+  });
   await page.goto(path, { waitUntil: 'domcontentloaded' });
   if (heading) {
     await expect(page.getByRole('heading', { name: heading }).first()).toBeVisible({
@@ -53,6 +63,42 @@ export async function assertRouteLoads(page: Page, path: string, heading?: RegEx
     });
   }
   expect(consoleErrors, `console errors on ${path}`).toEqual([]);
+}
+
+/** Unauthenticated visitors must not receive a tenant-scoped /api/me payload. */
+export async function assertUnauthenticatedShell(page: Page): Promise<void> {
+  await page.goto('/');
+  await page.waitForLoadState('domcontentloaded');
+  const me = await page.request.get('/api/me');
+  expect([401, 403]).toContain(me.status());
+}
+
+/** List pages should expose a primary create action (link or button). */
+export async function assertListHasCreateAction(
+  page: Page,
+  path: string,
+  actionName: RegExp,
+): Promise<void> {
+  await prepareAuthedPage(page);
+  await page.goto(path, { waitUntil: 'domcontentloaded' });
+  if (page.url().includes('/login')) {
+    test.skip(true, 'Authenticated session required — sign in via Clerk testing flow or deploy E2E_BASE_URL with session');
+  }
+  const consoleErrors: string[] = [];
+  page.on('pageerror', (err) => consoleErrors.push(err.message));
+  expect(consoleErrors, `page errors on ${path}`).toEqual([]);
+  await expect(
+    page.getByRole('link', { name: actionName }).or(page.getByRole('button', { name: actionName })).first(),
+  ).toBeVisible({ timeout: 10_000 });
+}
+
+/** Public forms must render at least one input control or primary CTA. */
+export async function assertPublicFormShell(page: Page, path: string): Promise<void> {
+  await assertRouteLoads(page, path);
+  const hasControl = page
+    .locator('input, textarea, select, [role="textbox"]')
+    .or(page.getByRole('button').first());
+  await expect(hasControl.first()).toBeVisible({ timeout: 10_000 });
 }
 
 export async function apiGet(

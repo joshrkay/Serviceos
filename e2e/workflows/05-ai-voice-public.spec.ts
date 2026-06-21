@@ -111,7 +111,7 @@ test.describe('WF-49 — Feedback', () => {
     const def = workflow('WF-49');
     test.info().annotations.push({ type: 'passCriteria', description: def.passCriteria });
 
-    await assertRouteLoads(page, '/public/feedback/00000000-0000-0000-0000-000000000001');
+    await assertRouteLoads(page, '/feedback/00000000-0000-0000-0000-000000000001');
   });
 });
 

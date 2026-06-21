@@ -1,11 +1,14 @@
 /**
  * WF-06 … WF-16 — Onboarding & CRM workflows.
  */
-import { test } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 import { workflow } from './catalog';
 import {
   assertRouteLoads,
+  apiBase,
   hasClerkUi,
+  hasMatrixEnv,
+  matrixTenantAToken,
   prepareAuthedPage,
   JOURNEY_SKIP,
   MANUAL_SKIP,
@@ -54,9 +57,33 @@ test.describe('WF-10 — Onboarding guard', () => {
   });
 });
 
-test('WF-11: Create customer (UI + API)', async () => {
-  test.skip(true, MATRIX_SKIP);
-  workflow('WF-11');
+test.describe('WF-11 — Create customer (UI + API)', () => {
+  test.skip(!hasMatrixEnv(), MATRIX_SKIP);
+
+  test('WF-11: POST /api/customers creates a tenant-scoped row', async ({ request }) => {
+    const def = workflow('WF-11');
+    test.info().annotations.push({ type: 'passCriteria', description: def.passCriteria });
+
+    const stamp = Date.now();
+    const res = await request.post(`${apiBase()}/api/customers`, {
+      headers: {
+        authorization: `Bearer ${matrixTenantAToken()}`,
+        'content-type': 'application/json',
+        accept: 'application/json',
+      },
+      data: {
+        firstName: 'WF',
+        lastName: `Eleven-${stamp}`,
+        primaryPhone: `+1555${String(stamp).slice(-7)}`,
+        email: `wf11-${stamp}@example.com`,
+        preferredChannel: 'sms',
+        smsConsent: true,
+      },
+    });
+    expect(res.status()).toBe(201);
+    const body = (await res.json()) as { id?: string };
+    expect(body.id).toBeTruthy();
+  });
 });
 
 test('WF-12: Edit customer + service location', async () => {
@@ -96,7 +123,7 @@ test('WF-15: Convert lead → customer', async () => {
 test.describe('WF-16 — Public intake', () => {
   test.skip(!hasClerkUi(), 'Set VITE_CLERK_PUBLISHABLE_KEY or E2E_BASE_URL');
 
-  test('WF-16: intake form page renders', async ({ page }) => {
+  test('WF-16: intake page renders public shell', async ({ page }) => {
     const def = workflow('WF-16');
     test.info().annotations.push({ type: 'passCriteria', description: def.passCriteria });
 
