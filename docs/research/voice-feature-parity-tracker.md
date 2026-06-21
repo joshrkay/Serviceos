@@ -71,7 +71,7 @@ Legend: ✅ at parity · 🟡 partial / unverified · 🔴 gap. "Corpus" = eval 
 | 4 | **Lead capture (unknown caller)** | `find-or-create-lead`, `convert_lead` | `03-lead-capture` ✅ | 6,9,10 | **✅** |
 | 5 | **After-hours / compliance / DNC** | `enforce-compliance`; after-hours→callback | `05-compliance-edges` ✅ | 7 | **✅** |
 | 6 | **Hangup robustness** | session lifecycle + termination events | `06-hangup-edges` ✅ | 8 | **✅** |
-| 7 | **Ambiguity / accent / mumble recovery** | entity-resolver clarifications; reprompt | `08-ambiguity` ✅ (incl. L2-only mumble/pause) | 9,10,12 | **🟡 expand L2** |
+| 7 | **Ambiguity / accent / mumble recovery** | entity-resolver clarifications; reprompt; **dialect WER + per-dialect report scaffold** (`ai/voice-quality/dialect/`) | `08-ambiguity` ✅; **dialect grading core ✅, real-audio fixtures pending** | 9,10,12 | **🟡 author real-audio dialect fixtures** |
 | 8 | **Concurrency (slot taken mid-call)** | optimistic checks | `09-concurrency` ✅ | 2,11 | **✅** |
 | 9 | **Adversarial robustness** (spam/injection) | input handling | `10-adversarial` ✅ (sql-injection, spam) | 1,2,5 | **✅** |
 | 10 | **Out-of-scope → escalate** | `escalate-to-human` | `07-out-of-scope` ✅ | 11 | **✅** |
@@ -132,6 +132,13 @@ same commit per CLAUDE.md), verified with `tsc --project tsconfig.build.json --n
    then evaluate a third language.
 7. **Rows 17–19 — outbound + coaching.** Larger product bets (see analysis §8 Tier-2/3);
    reuse the grader infra for row 19.
+8. **Dialect/accent eval (Row 7) — grading core SHIPPED.** `ai/voice-quality/dialect/`
+   provides WER (`wer.ts`) + per-dialect report with a WER/intent-accuracy gate
+   (`dialect-report.ts`), both unit-tested. **Remaining:** author real-audio dialect
+   fixtures (Southern US, AAVE, Indian/Caribbean English, Hispanic-accented English) and
+   a runner that feeds them through the existing `whisper-real-provider`, scoring each
+   via `scoreDialectCase`; wire the Whisper `prompt` (catalog/trade vocab) to lift
+   accented-term recognition. So we get a per-dialect "did we understand?" number.
 
 ---
 
