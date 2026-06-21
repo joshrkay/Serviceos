@@ -34,7 +34,13 @@ describe('proposal-push-notifier', () => {
 
     expect(provider.sent).toHaveLength(2);
     expect(provider.sent[0].body).toBe('Invoice Acme $123');
-    expect(provider.sent[0].data).toEqual({ proposalId: 'p1', kind: 'needs_approval', screen: '/proposals/p1' });
+    expect(provider.sent[0].data).toEqual({
+      type: 'proposal_needs_approval',
+      screen: '/proposals/p1',
+      entityId: 'p1',
+      proposalId: 'p1',
+      kind: 'needs_approval',
+    });
   });
 
   it('notifyExecuted sends kind=executed once per token', async () => {
@@ -42,7 +48,13 @@ describe('proposal-push-notifier', () => {
     await notifyExecuted(deps, { tenantId: TENANT, proposalId: 'p9', summary: 'Payment recorded' });
 
     expect(provider.sent).toHaveLength(1);
-    expect(provider.sent[0].data).toEqual({ proposalId: 'p9', kind: 'executed', screen: '/proposals/p9' });
+    expect(provider.sent[0].data).toEqual({
+      type: 'proposal_executed',
+      screen: '/proposals/p9',
+      entityId: 'p9',
+      proposalId: 'p9',
+      kind: 'executed',
+    });
   });
 
   it('no active tokens → no send (no-op)', async () => {
