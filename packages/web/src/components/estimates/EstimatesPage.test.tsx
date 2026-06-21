@@ -90,9 +90,10 @@ function renderPage() {
 describe('EstimatesPage', () => {
   it('renders estimate list with customer names', () => {
     renderPage();
-    expect(screen.getByText('Alice Smith')).toBeInTheDocument();
-    expect(screen.getByText('Bob Jones')).toBeInTheDocument();
-    expect(screen.getByText('Carol White')).toBeInTheDocument();
+    // Names also appear in the customer-filter <option>s, so allow >1 match.
+    expect(screen.getAllByText('Alice Smith').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Bob Jones').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Carol White').length).toBeGreaterThan(0);
   });
 
   it('renders estimate numbers', () => {
@@ -181,6 +182,19 @@ describe('EstimatesPage', () => {
     renderPage();
     expect(screen.getByRole('heading', { name: 'Quotes' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /New quote/i })).toBeInTheDocument();
+  });
+
+  it('filters the list by customer (7.10)', () => {
+    renderPage();
+    // Assert on estimate numbers (unique to list rows; not in the dropdown).
+    expect(screen.getByText('EST-001')).toBeInTheDocument(); // Alice
+    expect(screen.getByText('EST-002')).toBeInTheDocument(); // Bob
+    expect(screen.getByText('EST-003')).toBeInTheDocument(); // Carol
+    // Select Bob (c2) → only his estimate row remains.
+    fireEvent.change(screen.getByLabelText('Filter by customer'), { target: { value: 'c2' } });
+    expect(screen.getByText('EST-002')).toBeInTheDocument();
+    expect(screen.queryByText('EST-001')).not.toBeInTheDocument();
+    expect(screen.queryByText('EST-003')).not.toBeInTheDocument();
   });
 
   it('uses the tenant label in the empty state', () => {

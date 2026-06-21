@@ -833,6 +833,16 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
       .catch(() => setNotesLoaded(true));
   }, [estimateId]);
 
+  // Change history (7.10): edit deltas recorded between persisted versions.
+  const [history, setHistory] = useState<Array<{ id: string; summary: string; createdAt: string }>>([]);
+  useEffect(() => {
+    apiFetch(`/api/estimates/${estimateId}/history`)
+      .then(r => r.ok ? r.json() : [])
+      .then((data: Array<{ id: string; summary: string; createdAt: string }>) =>
+        setHistory(Array.isArray(data) ? data : []))
+      .catch(() => { /* history is best-effort; absence just hides the card */ });
+  }, [estimateId]);
+
   async function saveNote() {
     if (!noteText.trim()) return;
     setSavingNote(true);
@@ -1008,6 +1018,25 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                   </button>
                 </div>
               </div>
+
+              {/* Change history (7.10) */}
+              {history.length > 0 && (
+                <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
+                  <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100">
+                    <Clock size={13} className="text-slate-400" />
+                    <p className="text-sm text-slate-700">Change history</p>
+                    <span className="ml-auto text-xs text-slate-400">{history.length}</span>
+                  </div>
+                  <div className="divide-y divide-slate-50">
+                    {history.map(h => (
+                      <div key={h.id} className="px-4 py-3">
+                        <p className="text-sm text-slate-700 leading-snug">{h.summary}</p>
+                        <p className="text-xs text-slate-400 mt-1">{formatDateTimeInTenantTz(h.createdAt, tz)}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* ── Right rail ── */}
@@ -1250,6 +1279,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
   const estimateTerm = useEstimateTerm();
   const estimateTermPlural = `${estimateTerm}s`;
   const [tab,              setTab]           = useState<EstimateStatus | 'All'>('All');
+  const [customerFilter,   setCustomerFilter] = useState<string>('all');
   const [selected,         setSelected]      = useState<string | null>(defaultSelectedId ?? null);
   const [newEstimateOpen,  setNewEstimate]   = useState(false);
 
@@ -1274,9 +1304,23 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
     uiStatus: normalizeEstimateStatus(e.status) as EstimateStatus,
   }));
 
-  const filtered = tab === 'All'
-    ? normalizedData
-    : normalizedData.filter(e => e.uiStatus === tab);
+  // Customer filter (7.10). Options are the distinct customers present in the
+  // loaded estimates, so no extra fetch is needed; filtering is client-side,
+  // matching how the status tabs also narrow the loaded list.
+  const customerOptions = Array.from(
+    new Map(
+      normalizedData
+        .filter(e => e.customer?.id)
+        .map(e => [
+          e.customer!.id,
+          e.customer!.displayName || [e.customer!.firstName, e.customer!.lastName].filter(Boolean).join(' ') || 'Customer',
+        ] as const)
+    ).entries()
+  ).map(([id, name]) => ({ id, name }));
+
+  const filtered = normalizedData
+    .filter(e => (tab === 'All' ? true : e.uiStatus === tab))
+    .filter(e => (customerFilter === 'all' ? true : e.customer?.id === customerFilter));
 
   const pendingCount  = normalizedData.filter(e => e.uiStatus === 'Sent' || e.uiStatus === 'Viewed').length;
   const approvedCount = normalizedData.filter(e => e.uiStatus === 'Approved').length;
@@ -1308,6 +1352,23 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
             </div>
           ))}
         </div>
+
+        {/* Customer filter */}
+        {customerOptions.length > 1 && (
+          <div className="mb-3">
+            <select
+              aria-label="Filter by customer"
+              value={customerFilter}
+              onChange={e => setCustomerFilter(e.target.value)}
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:border-blue-400"
+            >
+              <option value="all">All customers</option>
+              {customerOptions.map(c => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {/* Tabs */}
         <div className="flex gap-1 mb-4 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>

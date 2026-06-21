@@ -7,7 +7,7 @@
  */
 import request from 'supertest';
 import { describe, it, expect, beforeEach } from 'vitest';
-import { buildTestApp } from './test-app';
+import { buildTestApp, TEST_TENANT_ID, TEST_USER_ID } from './test-app';
 import type { Express } from 'express';
 
 const SAMPLE_LINE_ITEMS = [
@@ -300,6 +300,96 @@ describe('P1-018 — listEstimates filter + pagination', () => {
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body)).toBe(true);
     expect(res.body).toHaveLength(1);
+  });
+});
+
+describe('7.10 — GET /api/estimates customer filter', () => {
+  let app: Express;
+  let jobRepo: Awaited<ReturnType<typeof buildTestApp>>['jobRepo'];
+
+  beforeEach(async () => {
+    ({ app, jobRepo } = await buildTestApp());
+    // estimates only carry job_id; the route resolves customerId → jobIds
+    // via the customer's jobs, so seed jobs for two customers.
+    const base = {
+      tenantId: TEST_TENANT_ID,
+      locationId: 'loc-1',
+      summary: 'Work',
+      status: 'scheduled' as const,
+      priority: 'normal' as const,
+      createdBy: TEST_USER_ID,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    await jobRepo.create({ ...base, id: 'job-A', customerId: 'cust-1', jobNumber: 'JOB-A' });
+    await jobRepo.create({ ...base, id: 'job-B', customerId: 'cust-2', jobNumber: 'JOB-B' });
+  });
+
+  it('filters estimates by customerId via the customer’s jobs', async () => {
+    await createEstimate(app, { jobId: 'job-A' });
+    await createEstimate(app, { jobId: 'job-A' });
+    await createEstimate(app, { jobId: 'job-B' });
+
+    const res = await request(app).get('/api/estimates?customerId=cust-1&paginated=true');
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(2);
+    expect(res.body.data.every((e: { jobId: string }) => e.jobId === 'job-A')).toBe(true);
+  });
+
+  it('combines the customer filter with status', async () => {
+    const e1 = await createEstimate(app, { jobId: 'job-A' });
+    await createEstimate(app, { jobId: 'job-A' });
+    await request(app).post(`/api/estimates/${e1.body.id}/transition`).send({ status: 'sent' });
+
+    const res = await request(app).get('/api/estimates?customerId=cust-1&status=sent');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].id).toBe(e1.body.id);
+  });
+
+  it('returns an empty result for a customer with no jobs', async () => {
+    await createEstimate(app, { jobId: 'job-A' });
+    const res = await request(app).get('/api/estimates?customerId=ghost&paginated=true');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ data: [], total: 0 });
+  });
+});
+
+describe('7.10 — GET /api/estimates/:id/history', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('returns the recorded edit deltas after an edit', async () => {
+    const created = await createEstimate(app, { taxRateBps: 0 });
+    await request(app)
+      .patch(`/api/estimates/${created.body.id}`)
+      .send({
+        lineItems: [
+          { id: 'li-1', description: 'Revised', quantity: 2, unitPriceCents: 5000, totalCents: 10000, category: 'labor', sortOrder: 0, taxable: false },
+        ],
+      });
+
+    const res = await request(app).get(`/api/estimates/${created.body.id}/history`);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.length).toBeGreaterThan(0);
+    expect(res.body[0]).toHaveProperty('summary');
+    expect(res.body[0]).toHaveProperty('deltas');
+  });
+
+  it('returns an empty array for an estimate with no edits', async () => {
+    const created = await createEstimate(app);
+    const res = await request(app).get(`/api/estimates/${created.body.id}/history`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+
+  it('returns 404 for an unknown estimate', async () => {
+    const res = await request(app).get('/api/estimates/nope/history');
+    expect(res.status).toBe(404);
   });
 });
 
