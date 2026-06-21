@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
-import { Sparkles, Send, Mic, ArrowRight, MessageSquare } from 'lucide-react';
+import { Sparkles, Send, Mic, Square, ArrowRight, MessageSquare } from 'lucide-react';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
+import { useDeepgramDictation } from '../../hooks/useDeepgramDictation';
 
 /**
  * Story 3.1 — conversation thread panel on HomePage.
@@ -48,6 +49,19 @@ export function HomeConversationPanel() {
 
   const messages = conversation?.messages ?? [];
   const preview = messages.slice(-PREVIEW_COUNT);
+
+  // Story 3.2 — live dictation: interim transcripts stream into the composer
+  // as they arrive; the final transcript lands in the draft for the operator
+  // to review and send to the agent.
+  const dictation = useDeepgramDictation({
+    onPartial: (text) => setDraft(text),
+    onFinal: (text) => setDraft(text),
+  });
+
+  function toggleDictation() {
+    if (dictation.isRecording) dictation.stop();
+    else void dictation.start();
+  }
 
   function openThread(seed?: string) {
     const q = (seed ?? draft).trim();
@@ -120,6 +134,13 @@ export function HomeConversationPanel() {
           )}
         </div>
 
+        {/* Dictation error — surfaced, never silent */}
+        {dictation.error && (
+          <p role="alert" className="px-4 pb-2 text-xs text-red-600">
+            {dictation.error}
+          </p>
+        )}
+
         {/* Composer — hands off to the persistent thread */}
         <div className="flex items-end gap-2 px-4 pb-4">
           <div className="flex flex-1 items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-3 min-h-11">
@@ -127,17 +148,22 @@ export function HomeConversationPanel() {
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Ask anything or give a command…"
+              placeholder={dictation.isRecording ? 'Listening…' : 'Ask anything or give a command…'}
               aria-label="Message the assistant"
               className="flex-1 bg-transparent text-sm text-slate-700 placeholder-slate-400 outline-none min-w-0 py-2"
             />
             <button
               type="button"
-              onClick={() => openThread()}
-              aria-label="Voice"
-              className="flex size-9 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+              onClick={toggleDictation}
+              aria-label={dictation.isRecording ? 'Stop dictation' : 'Voice'}
+              aria-pressed={dictation.isRecording}
+              className={`flex size-9 shrink-0 items-center justify-center rounded-lg transition-colors ${
+                dictation.isRecording
+                  ? 'bg-red-50 text-red-600'
+                  : 'text-slate-400 hover:text-blue-600 hover:bg-blue-50'
+              }`}
             >
-              <Mic size={15} />
+              {dictation.isRecording ? <Square size={13} className="fill-current" /> : <Mic size={15} />}
             </button>
           </div>
           <button

@@ -13,6 +13,18 @@ vi.mock('../../hooks/useDetailQuery', () => ({
   useDetailQuery: (...args: unknown[]) => detailQueryMock(...args),
 }));
 
+const dictationStart = vi.fn();
+const dictationStop = vi.fn();
+let dictationState = { isRecording: false, partial: '', error: null as string | null };
+vi.mock('../../hooks/useDeepgramDictation', () => ({
+  useDeepgramDictation: () => ({
+    ...dictationState,
+    supported: true,
+    start: dictationStart,
+    stop: dictationStop,
+  }),
+}));
+
 import { HomeConversationPanel } from './HomeConversationPanel';
 
 function renderPanel() {
@@ -28,6 +40,9 @@ describe('Story 3.1 — HomeConversationPanel', () => {
     navigateMock.mockReset();
     detailQueryMock.mockReset();
     detailQueryMock.mockReturnValue({ data: null, isLoading: false, error: null, refetch: vi.fn() });
+    dictationStart.mockReset();
+    dictationStop.mockReset();
+    dictationState = { isRecording: false, partial: '', error: null };
     localStorage.clear();
   });
 
@@ -90,5 +105,20 @@ describe('Story 3.1 — HomeConversationPanel', () => {
     // Header "Open" and the empty-state CTA carry min-h-11 (44px).
     expect(screen.getByText('Open').closest('button')!.className).toContain('min-h-11');
     expect(screen.getByTestId('home-conversation-empty').className).toContain('min-h-11');
+  });
+
+  it('starts live dictation when the mic is tapped', () => {
+    renderPanel();
+    fireEvent.click(screen.getByLabelText('Voice'));
+    expect(dictationStart).toHaveBeenCalled();
+    expect(navigateMock).not.toHaveBeenCalled();
+  });
+
+  it('shows a stop control and surfaces dictation errors while recording', () => {
+    dictationState = { isRecording: true, partial: 'invoice the', error: 'Microphone permission is required for voice dictation.' };
+    renderPanel();
+    fireEvent.click(screen.getByLabelText('Stop dictation'));
+    expect(dictationStop).toHaveBeenCalled();
+    expect(screen.getByRole('alert').textContent).toMatch(/microphone permission/i);
   });
 });
