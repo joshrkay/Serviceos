@@ -9,12 +9,16 @@ import {
   ArrowRight,
   AlertCircle,
   Smartphone,
+  DollarSign,
+  Clock,
+  ShieldCheck,
 } from 'lucide-react';
 import { Button } from '../ui/button';
 import { track, trackFunnel } from '../../lib/analytics';
 import { MarketingHeader } from '../marketing/MarketingHeader';
 import { MarketingFooter } from '../marketing/MarketingFooter';
 import { StoreBadges } from '../marketing/StoreBadges';
+import { SocialProof } from '../marketing/SocialProof';
 
 const onCtaClick = (location: string) => () =>
   track('landing_signup_clicked', { location });
@@ -31,54 +35,97 @@ export function LandingPage() {
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <MarketingHeader />
       <Hero />
+      <TrustBar />
       <ProblemSection />
+      <HowItWorksSection />
       <FeaturesSection />
       <ComparisonSection />
-      <HowItWorksSection />
       <TrustSection />
+      <SocialProof />
       <MobileAppSection />
       <PricingSection />
       <FAQSection />
       <FinalCTASection />
       <MarketingFooter />
+      <StickyMobileCTA />
     </div>
   );
 }
 
 function Hero() {
   return (
-    <section className="relative overflow-hidden border-b border-slate-200 bg-white">
+    <section className="relative overflow-hidden bg-slate-900">
       <div className="mx-auto max-w-6xl px-6 py-20 md:py-28">
         <div className="mx-auto max-w-3xl text-center">
-          <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-600">
+          <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-800 px-3 py-1 text-xs text-slate-300">
             <span className="size-1.5 rounded-full bg-green-500" />
             Built for solo HVAC, plumbing &amp; service-trade owners
           </div>
-          <h1 className="text-4xl font-medium tracking-tight text-slate-900 sm:text-5xl md:text-6xl">
+          <h1 className="text-4xl font-medium tracking-tight text-white sm:text-5xl md:text-6xl">
             Your AI dispatcher.
           </h1>
-          <p className="mt-6 text-lg leading-relaxed text-slate-600 sm:text-xl">
+          <p className="mt-6 text-lg leading-relaxed text-slate-300 sm:text-xl">
             Rivet answers your phone, books your jobs, sends your
             estimates, and chases your invoices. You approve what matters
             in 30 seconds a day.
           </p>
-          <p className="mt-3 text-base text-slate-500">
+          <p className="mt-3 text-base text-slate-400">
             Built for the shop with 1&ndash;3 trucks and no office.
           </p>
           <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
             <Link to="/signup" onClick={onCtaClick('hero')}>
-              <Button variant="primary" size="lg" rightIcon={<ArrowRight size={16} />}>
+              <Button variant="brand" size="lg" rightIcon={<ArrowRight size={16} />}>
                 Start 14-day free trial
               </Button>
             </Link>
             <a href="#how">
-              <Button variant="outline" size="lg">See how it works</Button>
+              <Button
+                variant="outline"
+                size="lg"
+                className="border-slate-600 bg-transparent text-slate-200 hover:border-slate-500 hover:bg-slate-800 hover:text-white"
+              >
+                See how it works
+              </Button>
             </a>
           </div>
-          <p className="mt-4 text-xs text-slate-500">
+          <p className="mt-4 text-xs text-slate-400">
             Card on file, nothing charged for 14 days &middot; Cancel anytime
           </p>
         </div>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Honest value/trust bar directly under the dark hero (navy + orange — the
+ * pairing that reads as premium and makes the CTA the obvious action). Every
+ * item is a defensible claim, NOT a fabricated metric: no customer counts, no
+ * invented "saves X hours" numbers while we are in early access.
+ */
+function TrustBar() {
+  const items = [
+    { icon: DollarSign, label: 'Replaces a $2,400+/mo dispatcher' },
+    { icon: Clock, label: 'Live in 15 minutes' },
+    { icon: ShieldCheck, label: 'A second AI reviews every booking' },
+    { icon: Check, label: 'Cancel anytime — keep your data' },
+  ];
+  return (
+    <section className="border-b border-slate-800 bg-slate-900">
+      <div className="mx-auto max-w-6xl px-6 pb-16">
+        <ul className="grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2 lg:grid-cols-4">
+          {items.map((item) => (
+            <li
+              key={item.label}
+              className="flex items-center gap-3 text-sm text-slate-200"
+            >
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-slate-800 text-orange-400">
+                <item.icon size={18} aria-hidden="true" />
+              </span>
+              <span className="font-medium">{item.label}</span>
+            </li>
+          ))}
+        </ul>
       </div>
     </section>
   );
@@ -138,7 +185,7 @@ function FeaturesSection() {
     },
   ];
   return (
-    <section className="border-b border-slate-200 bg-white">
+    <section className="border-b border-slate-200 bg-slate-50">
       <div className="mx-auto max-w-6xl px-6 py-20">
         <div className="text-center">
           <p className="text-sm uppercase tracking-widest text-slate-500">
@@ -152,7 +199,7 @@ function FeaturesSection() {
           {features.map((f) => (
             <div
               key={f.title}
-              className="rounded-2xl border border-slate-200 bg-slate-50 p-6"
+              className="rounded-2xl border border-slate-200 bg-white p-6"
             >
               <div className="flex size-10 items-center justify-center rounded-xl bg-slate-900 text-white">
                 <f.icon size={18} />
@@ -201,7 +248,7 @@ function ComparisonSection() {
     },
   ];
   return (
-    <section className="border-b border-slate-200 bg-slate-50">
+    <section className="border-b border-slate-200 bg-white">
       <div className="mx-auto max-w-6xl px-6 py-20">
         <div className="text-center">
           <p className="text-sm uppercase tracking-widest text-slate-500">
@@ -211,7 +258,7 @@ function ComparisonSection() {
             Same day. Different operator.
           </h2>
         </div>
-        <div className="mt-14 overflow-hidden rounded-2xl border border-slate-200 bg-white">
+        <div className="mt-14 overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
           <div className="grid grid-cols-1 border-b border-slate-200 bg-slate-100 text-xs font-medium uppercase tracking-wider text-slate-500 sm:grid-cols-[100px_1fr_1fr]">
             <div className="hidden p-4 sm:block">Time</div>
             <div className="border-l border-slate-200 p-4 sm:border-l">Without Rivet</div>
@@ -408,7 +455,7 @@ function PricingSection() {
                 ))}
               </ul>
               <Link to="/signup" className="mt-7 block" onClick={onPricingCtaClick}>
-                <Button variant="primary" size="lg" fullWidth rightIcon={<ArrowRight size={16} />}>
+                <Button variant="brand" size="lg" fullWidth rightIcon={<ArrowRight size={16} />}>
                   Start free trial
                 </Button>
               </Link>
@@ -484,7 +531,7 @@ function FinalCTASection() {
         </p>
         <div className="mt-8 flex items-center justify-center gap-3">
           <Link to="/signup" onClick={onCtaClick('final_cta')}>
-            <Button variant="primary" size="lg" rightIcon={<ArrowRight size={16} />}>
+            <Button variant="brand" size="lg" rightIcon={<ArrowRight size={16} />}>
               Start free trial
             </Button>
           </Link>
@@ -494,6 +541,30 @@ function FinalCTASection() {
         </div>
       </div>
     </section>
+  );
+}
+
+/**
+ * Persistent mobile-only signup bar. On a long landing page the hero CTA
+ * scrolls away fast on a phone; this keeps the single highest-intent action one
+ * thumb-tap away without crowding the desktop layout (hidden at ≥sm, where the
+ * sticky header CTA is always visible). ≥44px glove target.
+ */
+function StickyMobileCTA() {
+  return (
+    <div className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 p-3 backdrop-blur sm:hidden">
+      <Link to="/signup" className="block" onClick={onCtaClick('sticky')}>
+        <Button
+          variant="brand"
+          size="lg"
+          fullWidth
+          className="min-h-11"
+          rightIcon={<ArrowRight size={16} />}
+        >
+          Start 14-day free trial
+        </Button>
+      </Link>
+    </div>
   );
 }
 

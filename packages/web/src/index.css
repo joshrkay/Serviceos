@@ -18,6 +18,13 @@
   --muted-foreground: #717182;
   --accent: #e9ebef;
   --accent-foreground: #030213;
+  /* Brand accent (orange-on-slate). Burnt orange chosen so white button text
+     clears WCAG AA (≥4.5:1) at the 14px button size — #c2410c on white text is
+     5.18:1. Reserved for primary signup CTAs; brighter orange-400/500 utilities
+     are used only for accent text on the dark hero, where contrast is high. */
+  --brand-accent: #c2410c;
+  --brand-accent-hover: #9a3412;
+  --brand-accent-foreground: #ffffff;
   --destructive: #d4183d;
   --destructive-foreground: #ffffff;
   --border: rgba(0, 0, 0, 0.1);
@@ -95,6 +102,9 @@
   --color-muted-foreground: var(--muted-foreground);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
+  --color-brand-accent: var(--brand-accent);
+  --color-brand-accent-hover: var(--brand-accent-hover);
+  --color-brand-accent-foreground: var(--brand-accent-foreground);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-border: var(--border);

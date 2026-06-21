@@ -16,7 +16,7 @@ import { test, expect, Page } from '@playwright/test';
 
 const hasClerk = !!process.env.E2E_BASE_URL || !!process.env.VITE_CLERK_PUBLISHABLE_KEY;
 
-const MARKETING_ROUTES = ['/features', '/pricing', '/download'] as const;
+const MARKETING_ROUTES = ['/', '/features', '/pricing', '/download'] as const;
 
 async function horizontalOverflow(page: Page): Promise<number> {
   return page.evaluate(

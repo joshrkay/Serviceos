@@ -32,7 +32,7 @@ export function MarketingHeader() {
             to="/signup"
             onClick={() => track('landing_signup_clicked', { location: 'header' })}
           >
-            <Button variant="primary" size="sm">Start free trial</Button>
+            <Button variant="brand" size="sm">Start free trial</Button>
           </Link>
         </div>
       </div>

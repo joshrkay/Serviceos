@@ -62,6 +62,10 @@ describe('marketing CTA tap-target contract', () => {
       '/pricing',
     );
     expect(screen.getByRole('button', { name: /log in/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /start free trial/i })).toBeInTheDocument();
+    const cta = screen.getByRole('button', { name: /start free trial/i });
+    expect(cta).toBeInTheDocument();
+    // The signup CTA is the orange brand variant — the one scarce accent that
+    // marks the high-intent action across the marketing site.
+    expect(cta.className).toContain('bg-brand-accent');
   });
 });

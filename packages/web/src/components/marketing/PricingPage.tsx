@@ -103,7 +103,7 @@ export function PricingPage() {
                 onClick={() => track('pricing_cta_clicked', { location: 'pricing_page' })}
               >
                 <Button
-                  variant="primary"
+                  variant="brand"
                   size="lg"
                   fullWidth
                   rightIcon={<ArrowRight size={16} />}

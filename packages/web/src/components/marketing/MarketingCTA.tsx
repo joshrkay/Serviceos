@@ -29,7 +29,7 @@ export function MarketingCTA({
             to="/signup"
             onClick={() => track('landing_signup_clicked', { location })}
           >
-            <Button variant="primary" size="lg" rightIcon={<ArrowRight size={16} />}>
+            <Button variant="brand" size="lg" rightIcon={<ArrowRight size={16} />}>
               Start free trial
             </Button>
           </Link>

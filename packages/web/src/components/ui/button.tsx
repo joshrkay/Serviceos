@@ -4,6 +4,7 @@ import { Spinner } from './spinner';
 
 export type ButtonVariant =
   | 'primary'
+  | 'brand'
   | 'secondary'
   | 'outline'
   | 'ghost'
@@ -13,6 +14,10 @@ export type ButtonSize = 'sm' | 'md' | 'lg';
 const VARIANT_CLASSES: Record<ButtonVariant, string> = {
   primary:
     'bg-slate-900 text-white hover:bg-slate-700 active:bg-slate-800 disabled:hover:bg-slate-900',
+  // High-intent conversion CTAs only (signup). The orange is scarce on purpose
+  // so it reads as "the action"; everything else stays slate/outline.
+  brand:
+    'bg-brand-accent text-brand-accent-foreground hover:bg-brand-accent-hover active:bg-brand-accent-hover disabled:hover:bg-brand-accent',
   secondary:
     'bg-slate-100 text-slate-800 hover:bg-slate-200 active:bg-slate-200 disabled:hover:bg-slate-100',
   outline:
