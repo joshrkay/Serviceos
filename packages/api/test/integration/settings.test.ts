@@ -122,7 +122,7 @@ describe('Postgres integration — settings', () => {
     });
   });
 
-  describe('speed-to-lead settings (migration 204)', () => {
+  describe('speed-to-lead settings (migration 205)', () => {
     it('round-trips speed_to_lead_enabled + template through update/find (real columns)', async () => {
       const tenant = await createTestTenant(pool);
       const now = new Date();

@@ -121,7 +121,7 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // voice-config raw SQL, not the update fieldMap below).
     voiceId: (row.voice_id as string | null) ?? undefined,
     vapiAssistantId: (row.vapi_assistant_id as string | null) ?? undefined,
-    // Story 15.2 — migration 204. speed_to_lead_enabled is NOT NULL DEFAULT
+    // Story 15.2 — migration 205. speed_to_lead_enabled is NOT NULL DEFAULT
     // false so legacy rows read false; template NULL → undefined.
     speedToLeadEnabled: (row.speed_to_lead_enabled as boolean | null) ?? false,
     speedToLeadTemplate: (row.speed_to_lead_template as string | null) ?? undefined,
@@ -344,7 +344,7 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         transferNumber: 'transfer_number',
         // Migration 120 — per-tenant AI model override.
         aiModel: 'ai_model',
-        // Story 15.2 — migration 204.
+        // Story 15.2 — migration 205.
         speedToLeadEnabled: 'speed_to_lead_enabled',
         speedToLeadTemplate: 'speed_to_lead_template',
         // RV-063 — migration 163. digest_time accepts 'HH:MM' (Postgres

@@ -5030,13 +5030,6 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_maintenance_contracts ON maintenance_contracts
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
-  // Story 15.2 — speed-to-lead first-response. Opt-in (default false) for
-  // TCPA/consent safety; the send still routes through the DNC/consent gate.
-  '204_tenant_settings_speed_to_lead': `
-    ALTER TABLE tenant_settings
-      ADD COLUMN IF NOT EXISTS speed_to_lead_enabled BOOLEAN NOT NULL DEFAULT false;
-    ALTER TABLE tenant_settings
-      ADD COLUMN IF NOT EXISTS speed_to_lead_template TEXT;
   // Onboarding email lifecycle (welcome / setup-reminder / trial-ending).
   //   1. tenants.trial_ends_at — cached mirror of the Stripe subscription's
   //      trial_end, written by the customer.subscription.* webhook alongside
@@ -5063,6 +5056,14 @@ export const MIGRATIONS = {
     ALTER TABLE lifecycle_emails FORCE ROW LEVEL SECURITY;
     CREATE POLICY tenant_isolation_lifecycle_emails ON lifecycle_emails
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+  `,
+  // Story 15.2 — speed-to-lead first-response. Opt-in (default false) for
+  // TCPA/consent safety; the send still routes through the DNC/consent gate.
+  '205_tenant_settings_speed_to_lead': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS speed_to_lead_enabled BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS speed_to_lead_template TEXT;
   `,
 };
 
