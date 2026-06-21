@@ -39,6 +39,8 @@
     "e2e:db:seed": "tsx e2e/fixtures/seed-journey-fixtures.ts",
     "e2e:db:teardown": "tsx e2e/fixtures/teardown-test-db.ts",
     "e2e:qa-matrix": "QA_MATRIX=1 playwright test --project=qa-matrix",
+    "e2e:workflows": "WORKFLOWS=1 playwright test --project=workflows",
+    "e2e:workflows:p0": "WORKFLOWS=1 playwright test --project=workflows --grep \"WF-0[1-5]|WF-1[0-689]|WF-2[089]|WF-3[0123]|WF-4[2367]\"",
     "ui-flow:capture": "UI_FLOW=1 playwright test --project=ui-flow",
     "ui-flow:doc": "tsx scripts/build-ui-flow-doc.ts",
     "ui-flow": "npm run ui-flow:capture && npm run ui-flow:doc",

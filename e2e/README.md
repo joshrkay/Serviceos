@@ -30,7 +30,47 @@ First run downloads Chromium (~90MB). Cached after that.
 
 These always run. If any fail, something basic is broken in the stack.
 
-### Journeys (`journeys/*.spec.ts`)
+### Workflows (`workflows/*.spec.ts`) — WF-01 … WF-50
+
+The 50-workflow catalog from
+[`docs/superpowers/specs/2026-05-24-platform-assessment-and-e2e-qa-50-workflows.md`](../docs/superpowers/specs/2026-05-24-platform-assessment-and-e2e-qa-50-workflows.md)
+is mapped to Playwright tests under `e2e/workflows/`:
+
+| Spec file | Workflows |
+|-----------|-----------|
+| `01-foundation.spec.ts` | WF-01 … WF-05 |
+| `02-onboarding-crm.spec.ts` | WF-06 … WF-16 |
+| `03-jobs-scheduling.spec.ts` | WF-17 … WF-27 |
+| `04-money.spec.ts` | WF-28 … WF-35 |
+| `05-ai-voice-public.spec.ts` | WF-36 … WF-50 |
+
+```bash
+# Run the full catalog (opt-in — not part of default npm run e2e)
+npm run e2e:workflows
+
+# Solo launch gate subset (25 P0 workflows)
+npm run e2e:workflows:p0
+```
+
+Each test is tagged `WF-XX:` in its title. Matrix-backed workflows skip with a
+pointer to `npm run e2e:qa-matrix`; manual/Twilio/Stripe rows skip with runbook
+notes. UI-surface checks run when `VITE_CLERK_PUBLISHABLE_KEY` or `E2E_BASE_URL`
+is set.
+
+See also `e2e/workflows/catalog.ts` for the canonical workflow metadata.
+
+### UI flow capture (`ui-flow-capture*.spec.ts`)
+
+Screenshot every screen into `docs/ui-flows/` for visual navigation docs:
+
+```bash
+npm run ui-flow          # capture + regenerate README
+npm run ui-flow:capture  # screenshots only (UI_FLOW=1)
+npm run ui-flow:doc      # rebuild docs/ui-flows/README.md from PNGs
+```
+
+Requires Clerk for authenticated web screens and `E2E_MOBILE_URL` for mobile.
+
 All three are currently `test.skip()` — the spec code documents the intended
 test shape, but the test doesn't execute until the preconditions in each
 file's header comment are met.
@@ -95,6 +135,11 @@ then fill in the preconditions one at a time.
 e2e/
 ├── README.md                              # this file
 ├── smoke.spec.ts                          # always runs
+├── workflows/                             # WF-01 … WF-50 (opt-in via e2e:workflows)
+│   ├── catalog.ts
+│   ├── helpers.ts
+│   └── *.spec.ts
+├── ui-flow-capture*.spec.ts               # screenshot docs (opt-in via ui-flow)
 └── journeys/
     ├── signup-to-first-estimate.spec.ts   # skipped
     ├── estimate-approval-execution.spec.ts # skipped
@@ -105,3 +150,6 @@ e2e/
 
 See `.github/workflows/e2e.yml` — runs on every PR and posts the HTML report
 as a build artifact. Failure screenshots + traces are uploaded for debugging.
+
+Scheduled workflow catalog runs: `.github/workflows/e2e-workflows.yml` (Mondays +
+manual dispatch).
