@@ -3863,7 +3863,22 @@ export function createApp(): express.Express {
       jobRepo,
       customerRepo,
       userRepo,
+      locationRepo,
       notifier: ownerNotificationService,
+      // Staff direct-send: the tech's own job text goes through the raw
+      // delivery provider, NOT the customer message-delivery service — an
+      // internal/transactional text must not be gated by customer DNC/consent
+      // (mirrors emergency owner-cell paging). No provider → in-app push only.
+      ...(messageDelivery
+        ? {
+            smsSender: (input: {
+              to: string;
+              body: string;
+              tenantId: string;
+              idempotencyKey?: string;
+            }) => messageDelivery!.sendSms(input),
+          }
+        : {}),
     }),
   );
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));

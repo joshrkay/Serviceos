@@ -19,9 +19,10 @@
  */
 import type { NotificationType } from '@ai-service-os/shared';
 import type { AppointmentRepository } from './appointment';
-import type { JobRepository } from '../jobs/job';
+import type { JobRepository, Job } from '../jobs/job';
 import type { CustomerRepository } from '../customers/customer';
 import type { UserRepository } from '../users/user';
+import type { LocationRepository, ServiceLocation } from '../locations/location';
 import type {
   NotificationContextMap,
 } from '../notifications/owner-notification-service';
@@ -47,12 +48,27 @@ export interface UserNotifier {
   ): Promise<void>;
 }
 
+/**
+ * Staff SMS sender. Wired to the raw message-delivery provider's sendSms in
+ * app.ts — NOT the customer message-delivery service: a technician's own job
+ * text is internal/transactional and must not be gated by customer DNC/consent
+ * (mirrors the emergency owner-cell paging path). Optional: when unset, only
+ * the in-app push is sent.
+ */
+export interface StaffSmsSender {
+  (input: { to: string; body: string; tenantId: string; idempotencyKey?: string }): Promise<unknown>;
+}
+
 export interface TechnicianAssignmentNotifierDeps {
   appointmentRepo: Pick<AppointmentRepository, 'findById'>;
   jobRepo: Pick<JobRepository, 'findById'>;
   customerRepo: Pick<CustomerRepository, 'findById'>;
   userRepo: Pick<UserRepository, 'findById'>;
   notifier: UserNotifier;
+  /** Optional — resolves the service address for the SMS body. */
+  locationRepo?: Pick<LocationRepository, 'findById'>;
+  /** Optional — when set, an SMS is also sent to the tech's mobile. */
+  smsSender?: StaffSmsSender;
   logger?: Logger;
 }
 
@@ -80,21 +96,39 @@ export function formatAssignmentWhenLabel(date: Date, timezone: string): string 
   }
 }
 
+/** Render a service location as a single-line address for an SMS body. */
+export function formatLocationAddress(
+  loc: Pick<ServiceLocation, 'street1' | 'street2' | 'city' | 'state' | 'postalCode'>,
+): string {
+  const street = [loc.street1, loc.street2].map((s) => s?.trim()).filter(Boolean).join(' ');
+  const cityState = [loc.city?.trim(), loc.state?.trim()].filter(Boolean).join(', ');
+  const cityLine = [cityState, loc.postalCode?.trim()].filter(Boolean).join(' ');
+  return [street, cityLine].filter(Boolean).join(', ');
+}
+
+interface ResolvedAssignmentContext {
+  appointmentId: string;
+  technicianId: string;
+  customerName: string;
+  whenLabel: string;
+  serviceLabel: string;
+  job: Job | null;
+}
+
 export class TechnicianAssignmentNotifier {
   constructor(private readonly deps: TechnicianAssignmentNotifierDeps) {}
 
   /**
-   * Resolve the assignment context and push to the technician's devices.
-   * Never throws — failures are logged and swallowed so the triggering
-   * assignment write is unaffected.
+   * Resolve the assignment context and notify the technician via in-app push
+   * AND (when an SMS sender is wired) SMS to their own mobile. The two channels
+   * are independent — one failing never blocks the other — and the whole method
+   * never throws, so the triggering assignment write is unaffected.
    */
   async notifyChange(change: TechnicianAssignmentChange): Promise<void> {
     const { tenantId, appointmentId, technicianId, kind } = change;
     try {
-      // Targeting: device tokens key on the Clerk subject, not users.id.
       const user = await this.deps.userRepo.findById(tenantId, technicianId);
-      const clerkUserId = user?.clerkUserId;
-      if (!clerkUserId) return; // no signed-in device to reach
+      if (!user) return;
 
       const appointment = await this.deps.appointmentRepo.findById(tenantId, appointmentId);
       if (!appointment) return;
@@ -104,37 +138,107 @@ export class TechnicianAssignmentNotifier {
         ? await this.deps.customerRepo.findById(tenantId, job.customerId)
         : null;
 
-      const customerName = customer?.displayName?.trim() || 'A customer';
-      const whenLabel = formatAssignmentWhenLabel(
-        appointment.scheduledStart,
-        appointment.timezone,
-      );
+      const ctx: ResolvedAssignmentContext = {
+        appointmentId,
+        technicianId,
+        customerName: customer?.displayName?.trim() || 'A customer',
+        whenLabel: formatAssignmentWhenLabel(appointment.scheduledStart, appointment.timezone),
+        serviceLabel: job?.summary?.trim() || appointment.appointmentType || 'Service visit',
+        job,
+      };
 
+      // In-app push (targeted by Clerk subject — device tokens key on it, not
+      // users.id) and SMS (to the tech's own mobile) are sent independently.
+      await this.sendPush(tenantId, user.clerkUserId ?? null, kind, ctx);
+      await this.sendSms(tenantId, user.mobileNumber ?? null, kind, ctx);
+    } catch (err) {
+      this.warn('technician assignment notification failed', tenantId, { appointmentId, technicianId, kind }, err);
+    }
+  }
+
+  private async sendPush(
+    tenantId: string,
+    clerkUserId: string | null,
+    kind: AssignmentChangeKind,
+    ctx: ResolvedAssignmentContext,
+  ): Promise<void> {
+    if (!clerkUserId) return; // no signed-in device to reach
+    try {
       if (kind === 'assigned') {
-        const serviceLabel =
-          job?.summary?.trim() || appointment.appointmentType || 'Service visit';
         await this.deps.notifier.notifyUser(tenantId, clerkUserId, 'appointment_assigned', {
-          appointmentId,
-          customerName,
-          whenLabel,
-          serviceLabel,
+          appointmentId: ctx.appointmentId,
+          customerName: ctx.customerName,
+          whenLabel: ctx.whenLabel,
+          serviceLabel: ctx.serviceLabel,
         });
       } else {
         await this.deps.notifier.notifyUser(tenantId, clerkUserId, 'appointment_unassigned', {
-          appointmentId,
-          customerName,
-          whenLabel,
+          appointmentId: ctx.appointmentId,
+          customerName: ctx.customerName,
+          whenLabel: ctx.whenLabel,
         });
       }
     } catch (err) {
-      this.deps.logger?.warn('technician assignment notification failed', {
-        tenantId,
-        appointmentId,
-        technicianId,
-        kind,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      this.warn('technician assignment push failed', tenantId, { ...ctx, kind }, err);
     }
+  }
+
+  private async sendSms(
+    tenantId: string,
+    mobileNumber: string | null,
+    kind: AssignmentChangeKind,
+    ctx: ResolvedAssignmentContext,
+  ): Promise<void> {
+    const sender = this.deps.smsSender;
+    if (!sender || !mobileNumber) return; // SMS not wired, or tech has no mobile on file
+    try {
+      const body =
+        kind === 'assigned'
+          ? await this.buildAssignedSmsBody(tenantId, ctx)
+          : `Reassigned: ${ctx.customerName}'s job (${ctx.whenLabel}) was moved to another tech.`;
+      await sender({
+        to: mobileNumber,
+        body,
+        tenantId,
+        // Dedupe a retry of the same assignment change at the provider.
+        idempotencyKey: `tech-assign-sms:${ctx.appointmentId}:${ctx.technicianId}:${kind}`,
+      });
+    } catch (err) {
+      this.warn('technician assignment SMS failed', tenantId, { ...ctx, kind }, err);
+    }
+  }
+
+  /** Assigned-job SMS: customer, time, service, and address (AC 6.3). */
+  private async buildAssignedSmsBody(
+    tenantId: string,
+    ctx: ResolvedAssignmentContext,
+  ): Promise<string> {
+    let addressLine = '';
+    if (ctx.job?.locationId && this.deps.locationRepo) {
+      const loc = await this.deps.locationRepo.findById(tenantId, ctx.job.locationId);
+      if (loc) addressLine = formatLocationAddress(loc);
+    }
+    return [
+      `New job — ${ctx.customerName}`,
+      ctx.whenLabel,
+      ctx.serviceLabel,
+      addressLine,
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  private warn(
+    message: string,
+    tenantId: string,
+    detail: Record<string, unknown>,
+    err: unknown,
+  ): void {
+    this.deps.logger?.warn(message, {
+      tenantId,
+      ...detail,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
