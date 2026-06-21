@@ -50,6 +50,7 @@ import type { Observation } from '../observation';
 import type { VoiceQualityScript } from '../schema';
 import type { Proposal } from '../../../proposals/proposal';
 import type { VoiceSessionEvent } from '../../agents/customer-calling/voice-session-store';
+import { eventLogIndex } from './event-order';
 
 type IntentClassifiedEvent = Extract<VoiceSessionEvent, { type: 'intent_classified' }>;
 type EscalationTriggeredEvent = Extract<VoiceSessionEvent, { type: 'escalation_triggered' }>;
@@ -260,18 +261,11 @@ export function gradeDispositionStructured(
   const proposalsById = new Map<string, Proposal>();
   for (const p of observation.proposals) proposalsById.set(p.id, p);
 
-  // Causal order within the call. Event timestamps are `Date.now()` (ms)
-  // and an entire script can run sub-millisecond, so a turn's
-  // `intent_classified` and a later turn's `escalation_triggered` routinely
-  // share a timestamp; ordering by ts then mis-attributes the escalation to
-  // the earlier turn (the `<=` upper bound below wins) and flips criterion
-  // 11 non-deterministically. The append-only event-log index IS the causal
-  // order — the agent always classifies before it escalates — so we
-  // attribute escalations by log index, not timestamp.
-  const logIndexOf = new Map<VoiceSessionEvent, number>();
-  observation.events.forEach((e, idx) => logIndexOf.set(e, idx));
-  const logIndexAt = (e: IntentClassifiedEvent | EscalationTriggeredEvent): number =>
-    logIndexOf.get(e) ?? -1;
+  // Attribute escalations to turns by causal log order, not `Date.now()`
+  // timestamps — a sub-millisecond script ties a turn's intent_classified
+  // with a later turn's escalation_triggered, mis-grading criterion 11.
+  // See `eventLogIndex`.
+  const logIndexAt = eventLogIndex(observation.events);
   // Escalation positions are turn-independent — derive them once.
   const escalationIndices = escalations.map(logIndexAt);
 
