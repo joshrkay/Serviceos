@@ -1,6 +1,35 @@
 import { createHash } from 'crypto';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import { tenantContextStore } from '../middleware/tenant-context';
+
+/**
+ * Run `fn` against a single pooled client inside a tenant-scoped transaction:
+ * BEGIN, set the `app.current_tenant_id` GUC LOCAL (parameterized — never
+ * interpolated), run `fn`, then COMMIT (or ROLLBACK on throw) and always
+ * release the client. Use this for self-contained reads/writes that just need
+ * RLS scoping and a rollback boundary, without the savepoint/advisory-lock
+ * machinery of `PgTenantTransactionRunner`. The original error is re-thrown
+ * after a best-effort ROLLBACK.
+ */
+export async function withTenantConnection<T>(
+  pool: Pool,
+  tenantId: string,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
 /**
  * A single tenant-scoped transaction. Repositories that honor

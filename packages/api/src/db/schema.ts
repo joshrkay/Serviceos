@@ -5037,6 +5037,32 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS speed_to_lead_enabled BOOLEAN NOT NULL DEFAULT false;
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS speed_to_lead_template TEXT;
+  // Onboarding email lifecycle (welcome / setup-reminder / trial-ending).
+  //   1. tenants.trial_ends_at — cached mirror of the Stripe subscription's
+  //      trial_end, written by the customer.subscription.* webhook alongside
+  //      subscription_status. The trial-reminder sweep reads it to decide the
+  //      3d/1d/day-of windows without a Stripe round-trip.
+  //   2. lifecycle_emails — the at-most-once ledger for every lifecycle email.
+  //      One row per (tenant, kind); the send path claims a row with
+  //      INSERT … ON CONFLICT DO NOTHING and only sends when it created the row,
+  //      so the welcome event, the sweeps, and webhook retries can never double
+  //      send. Tenant-scoped, so it FORCEs RLS like every other tenant table;
+  //      the cross-tenant sweeps reach it via the same RLS-bypassing pool the
+  //      thank-you/overdue sweeps use, while request-path reads are isolated by
+  //      the null-safe tenant policy. Null-safe USING (missing GUC → no rows)
+  //      mirrors migration 199/203.
+  '204_lifecycle_emails_and_trial_ends': `
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMPTZ;
+    CREATE TABLE IF NOT EXISTS lifecycle_emails (
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      kind TEXT NOT NULL,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (tenant_id, kind)
+    );
+    ALTER TABLE lifecycle_emails ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE lifecycle_emails FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_lifecycle_emails ON lifecycle_emails
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
 };
 

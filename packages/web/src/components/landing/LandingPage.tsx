@@ -1,7 +1,6 @@
 import { useEffect } from 'react';
 import { Link } from 'react-router';
 import {
-  Zap,
   Phone,
   FileText,
   CreditCard,
@@ -9,9 +8,13 @@ import {
   Check,
   ArrowRight,
   AlertCircle,
+  Smartphone,
 } from 'lucide-react';
 import { Button } from '../ui/button';
 import { track, trackFunnel } from '../../lib/analytics';
+import { MarketingHeader } from '../marketing/MarketingHeader';
+import { MarketingFooter } from '../marketing/MarketingFooter';
+import { StoreBadges } from '../marketing/StoreBadges';
 
 const onCtaClick = (location: string) => () =>
   track('landing_signup_clicked', { location });
@@ -26,46 +29,19 @@ export function LandingPage() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
-      <Header />
+      <MarketingHeader />
       <Hero />
       <ProblemSection />
       <FeaturesSection />
       <ComparisonSection />
       <HowItWorksSection />
       <TrustSection />
+      <MobileAppSection />
       <PricingSection />
       <FAQSection />
       <FinalCTASection />
-      <Footer />
+      <MarketingFooter />
     </div>
-  );
-}
-
-function Header() {
-  return (
-    <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/80 backdrop-blur">
-      <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
-        <Link to="/" className="flex items-center gap-2.5">
-          <span className="flex size-8 items-center justify-center rounded-xl bg-slate-900">
-            <Zap size={15} className="text-white" />
-          </span>
-          <span className="text-base tracking-tight">Rivet</span>
-        </Link>
-        <nav className="hidden items-center gap-7 text-sm text-slate-600 md:flex">
-          <a href="#how" className="hover:text-slate-900">How it works</a>
-          <a href="#pricing" className="hover:text-slate-900">Pricing</a>
-          <a href="#faq" className="hover:text-slate-900">FAQ</a>
-        </nav>
-        <div className="flex items-center gap-2">
-          <Link to="/login">
-            <Button variant="ghost" size="sm">Log in</Button>
-          </Link>
-          <Link to="/signup" onClick={onCtaClick('header')}>
-            <Button variant="primary" size="sm">Start free trial</Button>
-          </Link>
-        </div>
-      </div>
-    </header>
   );
 }
 
@@ -521,21 +497,47 @@ function FinalCTASection() {
   );
 }
 
-function Footer() {
+function MobileAppSection() {
   return (
-    <footer className="border-t border-slate-200 bg-white">
-      <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-4 px-6 py-8 sm:flex-row">
-        <div className="flex items-center gap-2.5">
-          <span className="flex size-7 items-center justify-center rounded-lg bg-slate-900">
-            <Zap size={13} className="text-white" />
-          </span>
-          <span className="text-sm tracking-tight text-slate-900">Rivet</span>
+    <section className="border-b border-slate-200 bg-white">
+      <div className="mx-auto max-w-6xl px-6 py-20">
+        <div className="grid items-center gap-12 md:grid-cols-2">
+          <div>
+            <div className="flex size-10 items-center justify-center rounded-xl bg-slate-900 text-white">
+              <Smartphone size={18} />
+            </div>
+            <h2 className="mt-5 text-3xl font-medium tracking-tight text-slate-900 sm:text-4xl">
+              Run it from your pocket.
+            </h2>
+            <p className="mt-4 max-w-md text-base leading-relaxed text-slate-600">
+              The Rivet app for iPhone and Android puts approvals, your money
+              dashboard, and one-tap voice capture in your pocket. Speak an
+              action between jobs — Rivet drafts the rest.
+            </p>
+            <div className="mt-8">
+              <StoreBadges />
+            </div>
+            <p className="mt-4 text-xs text-slate-500">
+              Sign up on the web in 15 minutes, then sign in on the app.
+            </p>
+          </div>
+          <div className="rounded-3xl border border-slate-200 bg-slate-50 p-8">
+            <ul className="space-y-4">
+              {[
+                'Speak an action and approve the draft in one tap',
+                'See today’s revenue and what’s waiting on you',
+                'Recordings queue offline and send when you’re back in range',
+              ].map((item) => (
+                <li key={item} className="flex items-start gap-3 text-sm text-slate-700">
+                  <Check size={16} className="mt-0.5 shrink-0 text-green-600" />
+                  <span>{item}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
         </div>
-        <p className="text-xs text-slate-500">
-          &copy; 2026 Rivet &middot; Privacy &middot; Terms
-        </p>
       </div>
-    </footer>
+    </section>
   );
 }
 

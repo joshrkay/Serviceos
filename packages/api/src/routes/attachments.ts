@@ -32,7 +32,7 @@ import {
 } from '../attachments/attachment';
 import { AttachmentActor, AttachmentService } from '../attachments/attachment-service';
 import { requireAuth, requirePermission, requireTenant } from '../middleware/auth';
-import { toErrorResponse } from '../shared/errors';
+import { asyncRoute } from '../middleware/async-route';
 import { validate } from '../shared/validation';
 
 // Presign is restricted to the entity types that have wired entity-existence
@@ -100,75 +100,70 @@ export function createAttachmentsRouter(deps: AttachmentsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('files:upload'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const body = validate(presignSchema, req.body ?? {});
-        const tenantId = req.auth!.tenantId;
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const body = validate(presignSchema, req.body ?? {});
+      const tenantId = req.auth!.tenantId;
 
-        const uploadRequest = {
-          tenantId,
-          uploadedBy: req.auth!.userId,
-          filename: body.filename,
-          contentType: body.contentType,
-          sizeBytes: body.sizeBytes,
-          entityType: body.entityType,
-          entityId: body.entityId,
-        };
-        const errors = validateUpload(uploadRequest);
-        if (errors.length > 0) {
-          res.status(400).json({ error: 'VALIDATION_ERROR', message: errors.join(', ') });
-          return;
-        }
-
-        // Tenant-prefixed key, namespaced under attachments/ so objects are
-        // grepable by entity in the bucket.
-        const fileId = uuidv4();
-        const safeName = sanitizeFilename(body.filename);
-        const now = new Date();
-        const fileRecord: FileRecord = {
-          id: fileId,
-          tenantId,
-          filename: body.filename,
-          contentType: body.contentType,
-          sizeBytes: body.sizeBytes,
-          storageBucket: bucket,
-          storageKey: `${tenantId}/attachments/${body.entityType}/${body.entityId}/${fileId}-${safeName}`,
-          entityType: body.entityType,
-          entityId: body.entityId,
-          uploadedBy: req.auth!.userId,
-          createdAt: now,
-          updatedAt: now,
-        };
-        const created = await fileRepo.create(fileRecord);
-        const uploadUrl = await storage.generateUploadUrl(
-          created.storageBucket,
-          created.storageKey,
-          created.contentType
-        );
-
-        await auditRepo.create(
-          createAuditEvent({
-            tenantId,
-            actorId: req.auth!.userId,
-            actorRole: req.auth!.role,
-            eventType: 'attachment.upload_requested',
-            entityType: body.entityType,
-            entityId: body.entityId,
-            metadata: {
-              fileId: created.id,
-              filename: created.filename,
-              contentType: created.contentType,
-              sizeBytes: created.sizeBytes,
-            },
-          })
-        );
-
-        res.status(201).json({ fileId: created.id, uploadUrl, fileRecord: created });
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+      const uploadRequest = {
+        tenantId,
+        uploadedBy: req.auth!.userId,
+        filename: body.filename,
+        contentType: body.contentType,
+        sizeBytes: body.sizeBytes,
+        entityType: body.entityType,
+        entityId: body.entityId,
+      };
+      const errors = validateUpload(uploadRequest);
+      if (errors.length > 0) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: errors.join(', ') });
+        return;
       }
-    }
+
+      // Tenant-prefixed key, namespaced under attachments/ so objects are
+      // grepable by entity in the bucket.
+      const fileId = uuidv4();
+      const safeName = sanitizeFilename(body.filename);
+      const now = new Date();
+      const fileRecord: FileRecord = {
+        id: fileId,
+        tenantId,
+        filename: body.filename,
+        contentType: body.contentType,
+        sizeBytes: body.sizeBytes,
+        storageBucket: bucket,
+        storageKey: `${tenantId}/attachments/${body.entityType}/${body.entityId}/${fileId}-${safeName}`,
+        entityType: body.entityType,
+        entityId: body.entityId,
+        uploadedBy: req.auth!.userId,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const created = await fileRepo.create(fileRecord);
+      const uploadUrl = await storage.generateUploadUrl(
+        created.storageBucket,
+        created.storageKey,
+        created.contentType
+      );
+
+      await auditRepo.create(
+        createAuditEvent({
+          tenantId,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role,
+          eventType: 'attachment.upload_requested',
+          entityType: body.entityType,
+          entityId: body.entityId,
+          metadata: {
+            fileId: created.id,
+            filename: created.filename,
+            contentType: created.contentType,
+            sizeBytes: created.sizeBytes,
+          },
+        })
+      );
+
+      res.status(201).json({ fileId: created.id, uploadUrl, fileRecord: created });
+    })
   );
 
   // Step 2 of upload: client confirms the PUT succeeded and asks us to
@@ -178,27 +173,22 @@ export function createAttachmentsRouter(deps: AttachmentsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('files:upload'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const body = validate(attachSchema, req.body ?? {});
-        const tenantId = req.auth!.tenantId;
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const body = validate(attachSchema, req.body ?? {});
+      const tenantId = req.auth!.tenantId;
 
-        const attachment = await service.attach(tenantId, actorOf(req), {
-          fileId: body.fileId,
-          entityType: body.entityType,
-          entityId: body.entityId,
-          kind: body.kind,
-          caption: body.caption,
-          category: body.category,
-          source: body.source,
-        });
+      const attachment = await service.attach(tenantId, actorOf(req), {
+        fileId: body.fileId,
+        entityType: body.entityType,
+        entityId: body.entityId,
+        kind: body.kind,
+        caption: body.caption,
+        category: body.category,
+        source: body.source,
+      });
 
-        res.status(201).json(attachment);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+      res.status(201).json(attachment);
+    })
   );
 
   router.get(
@@ -206,21 +196,16 @@ export function createAttachmentsRouter(deps: AttachmentsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('files:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const query = validate(listQuerySchema, req.query ?? {});
-        const attachments = await service.listForEntity(
-          req.auth!.tenantId,
-          query.entityType,
-          query.entityId,
-          { includeArchived: query.includeArchived === 'true' }
-        );
-        res.json(attachments);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const query = validate(listQuerySchema, req.query ?? {});
+      const attachments = await service.listForEntity(
+        req.auth!.tenantId,
+        query.entityType,
+        query.entityId,
+        { includeArchived: query.includeArchived === 'true' }
+      );
+      res.json(attachments);
+    })
   );
 
   // Soft delete: only sets archived_at — the files row + S3 object remain
@@ -230,15 +215,10 @@ export function createAttachmentsRouter(deps: AttachmentsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('files:delete'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const archived = await service.archive(req.auth!.tenantId, actorOf(req), req.params.id);
-        res.json(archived);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const archived = await service.archive(req.auth!.tenantId, actorOf(req), req.params.id);
+      res.json(archived);
+    })
   );
 
   router.post(
@@ -246,21 +226,16 @@ export function createAttachmentsRouter(deps: AttachmentsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('attachments:visibility'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const body = validate(visibilitySchema, req.body ?? {});
-        const updated = await service.setPortalVisibility(
-          req.auth!.tenantId,
-          actorOf(req),
-          req.params.id,
-          body.visible
-        );
-        res.json(updated);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const body = validate(visibilitySchema, req.body ?? {});
+      const updated = await service.setPortalVisibility(
+        req.auth!.tenantId,
+        actorOf(req),
+        req.params.id,
+        body.visible
+      );
+      res.json(updated);
+    })
   );
 
   router.post(
@@ -268,22 +243,17 @@ export function createAttachmentsRouter(deps: AttachmentsRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('files:upload'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const body = validate(pairSchema, req.body ?? {});
-        const result = await service.pair(
-          req.auth!.tenantId,
-          actorOf(req),
-          req.params.id,
-          body.otherId,
-          body.role
-        );
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const body = validate(pairSchema, req.body ?? {});
+      const result = await service.pair(
+        req.auth!.tenantId,
+        actorOf(req),
+        req.params.id,
+        body.otherId,
+        body.role
+      );
+      res.json(result);
+    })
   );
 
   return router;
