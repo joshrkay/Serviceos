@@ -40,6 +40,7 @@ import {
 import { toErrorResponse } from '../shared/errors';
 import { isValidTenantId } from '../db/schema';
 import { createLogger } from '../logging/logger';
+import { Queue } from '../queues/queue';
 
 const logger = createLogger({
   service: 'lead-intake',
@@ -64,6 +65,8 @@ export interface LeadIntakeRouterDeps {
   signingSecret?: string;
   /** Durable replay/idempotency store; falls back to in-memory for tests. */
   webhookRepo?: WebhookRepository;
+  /** LC-3 — when wired, createLead enqueues a speed-to-lead auto-response. */
+  queue?: Queue;
 }
 
 function rawBodyString(req: Request): string {
@@ -203,8 +206,11 @@ export function createLeadIntakeRouter(deps: LeadIntakeRouterDeps): Router {
           attribution: parsed.attribution,
           // The verbatim submission — retained for the inbox (migration 204).
           rawPayload: parsed.rawPayload ?? body,
+          // LC-3 — explicit SMS consent gates the speed-to-lead SMS reply.
+          smsConsent: parsed.smsConsent,
           createdBy: LEAD_INTAKE_ACTOR_ID,
           actorRole: LEAD_INTAKE_ACTOR_ROLE,
+          queue: deps.queue,
         },
         deps.leadRepo,
         deps.auditRepo,

@@ -17,6 +17,30 @@ import { CreateLeadInput, Lead, LeadRepository, UpdateLeadInput } from './lead';
 import { LeadSource, LeadStage } from './enums';
 import { buildAttributionMetadata } from './attribution-metadata';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
+import {
+  LEAD_AUTO_RESPONSE_JOB_TYPE,
+  type LeadAutoResponsePayload,
+} from '../workers/lead-auto-response';
+
+/**
+ * LC-3 — lead sources that warrant an immediate customer-facing auto-response
+ * (speed-to-lead). Inbound web/partner inquiries where the customer is waiting
+ * for a reply; excludes phone_call (the call handles it), sms (the SMS reply
+ * handler owns the thread), walk_in (in person) and customer_portal (already a
+ * logged-in customer). Matches the externally-submittable inbound source set.
+ */
+const AUTO_RESPONSE_LEAD_SOURCES: ReadonlySet<LeadSource> = new Set([
+  'web_form',
+  'marketplace',
+  'referral',
+  'other',
+]);
+
+export function shouldAutoRespondToLead(lead: Pick<Lead, 'source' | 'primaryPhone' | 'email'>): boolean {
+  if (!AUTO_RESPONSE_LEAD_SOURCES.has(lead.source)) return false;
+  // No contact channel ⇒ nothing to send.
+  return Boolean(lead.primaryPhone || lead.email);
+}
 
 /**
  * U6 dedupe — lead sources that originate on the inbound PHONE/CALL channel.
@@ -97,6 +121,7 @@ export async function createLead(
     utmCampaign: input.utmCampaign,
     attribution: input.attribution,
     rawPayload: input.rawPayload,
+    smsConsent: input.smsConsent ?? false,
     stage: 'new',
     estimatedValueCents: input.estimatedValueCents,
     notes: input.notes,
@@ -127,6 +152,22 @@ export async function createLead(
   // U6 — owner `lead_captured` push (best-effort; suppressed for
   // phone-originated leads, which fire `incoming_call` instead).
   await notifyOwnerLeadCaptured(input.tenantId, created);
+
+  // LC-3 — speed-to-lead: enqueue an immediate customer-facing auto-response
+  // for inbound channels. Best-effort + idempotent (one job per lead) so a
+  // queue hiccup never bounces the capture; consent/DNC gating happens in the
+  // worker via the delivery service.
+  if (input.queue && shouldAutoRespondToLead(created)) {
+    try {
+      await input.queue.send<LeadAutoResponsePayload>(
+        LEAD_AUTO_RESPONSE_JOB_TYPE,
+        { tenantId: created.tenantId, leadId: created.id },
+        `${LEAD_AUTO_RESPONSE_JOB_TYPE}:${created.id}`,
+      );
+    } catch {
+      // Best-effort: the lead persisted; a missed auto-response must not bounce it.
+    }
+  }
 
   return created;
 }

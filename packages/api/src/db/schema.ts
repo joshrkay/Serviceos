@@ -5042,6 +5042,34 @@ export const MIGRATIONS = {
     ALTER TABLE leads
       ADD COLUMN IF NOT EXISTS raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb;
   `,
+
+  // LC-3 — explicit SMS consent captured at intake. Speed-to-lead auto-
+  // responses route through the consent/DNC-gated delivery service, which
+  // only sends SMS when the contact has consented. A web-form lead has no
+  // consent unless the form captured it, so persist the form's disclosure
+  // here (default FALSE — never assume consent). Email auto-response is
+  // unaffected (no consent gate on email).
+  '205_leads_sms_consent': `
+    ALTER TABLE leads
+      ADD COLUMN IF NOT EXISTS sms_consent BOOLEAN NOT NULL DEFAULT FALSE;
+  `,
+
+  // LC-3 — widen the message_dispatches entity_type CHECK so the speed-to-
+  // lead auto-response logs a first-class dispatch row (entity_id = lead.id),
+  // keeping source-attributed comms queryable. Mirrors the prior widenings
+  // (092 / 125 / 164 / 190); carries the full set forward.
+  '206_dispatch_entity_lead_auto_response': `
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_entity_type_check
+        CHECK (entity_type IN (
+          'estimate', 'invoice', 'appointment_confirmation',
+          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
+          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
+          'daily_digest', 'conversation_reply', 'lead_auto_response'
+        ));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

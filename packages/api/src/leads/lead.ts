@@ -35,6 +35,12 @@ export interface Lead {
    * the inbound contract (packages/shared inboundLeadSchema).
    */
   rawPayload?: Record<string, unknown>;
+  /**
+   * LC-3: explicit SMS consent captured at intake (default false). Gates the
+   * speed-to-lead SMS auto-response via the consent/DNC delivery service —
+   * never assume consent for an inbound lead.
+   */
+  smsConsent?: boolean;
   stage: LeadStage;
   /** integer cents — never float */
   estimatedValueCents?: number;
@@ -71,11 +77,19 @@ export interface CreateLeadInput {
   attribution?: Record<string, string>;
   /** LC-1: verbatim inbound payload (web form / partner channel). */
   rawPayload?: Record<string, unknown>;
+  /** LC-3: explicit SMS consent captured at intake (default false). */
+  smsConsent?: boolean;
   estimatedValueCents?: number;
   notes?: string;
   assignedUserId?: string;
   createdBy: string;
   actorRole?: string;
+  /**
+   * LC-3: when provided, createLead enqueues a speed-to-lead auto-response
+   * job for inbound channels (web_form/marketplace/referral/other). Optional
+   * so the CRM / voice / portal callers that don't want an auto-reply omit it.
+   */
+  queue?: import('../queues/queue').Queue;
 }
 
 export interface UpdateLeadInput {

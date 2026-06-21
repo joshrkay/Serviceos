@@ -74,6 +74,12 @@ export const inboundLeadSchema = z
     attribution: inboundAttributionSchema.optional(),
     /** Verbatim original submission, retained on the lead (migration 204). */
     rawPayload: inboundRawPayloadSchema.optional(),
+    /**
+     * LC-3: explicit SMS consent. Only when `true` does the speed-to-lead
+     * SMS auto-response fire (the form must capture a disclosure). Absent /
+     * false ⇒ no SMS; DNC is always honored regardless.
+     */
+    smsConsent: z.boolean().optional(),
   })
   .refine((v) => Boolean(v.firstName || v.companyName), {
     message: 'firstName or companyName is required',

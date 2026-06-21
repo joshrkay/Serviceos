@@ -333,6 +333,7 @@ import { createPublicInvoicesRouter } from './routes/public-invoices';
 import { createPublicPaymentsRouter } from './routes/public-payments';
 import { createOneTapApproveRouter } from './routes/one-tap-approve';
 import { createFeedbackSendWorker } from './workers/feedback-send';
+import { createLeadAutoResponseWorker } from './workers/lead-auto-response';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
 import { runDailyDigestSweep, DIGEST_SWEEP_INTERVAL_MS } from './workers/daily-digest-worker';
 import { PgDailyDigestRepository } from './digest/pg-daily-digest';
@@ -1952,6 +1953,24 @@ export function createApp(): express.Express {
     feedbackSendWorker as import('./queues/queue').WorkerHandler<unknown>
   );
 
+  // LC-3 — speed-to-lead auto-response. Gateway/delivery are optional: without
+  // an AI key copy falls back to a deterministic template; without a delivery
+  // provider the reply is logged to the lead thread but not sent.
+  const leadAutoResponseWorker = createLeadAutoResponseWorker({
+    leadRepo,
+    settingsRepo,
+    conversationRepo,
+    dispatchRepo,
+    dncRepo,
+    auditRepo,
+    gateway: llmGateway ?? undefined,
+    delivery: messageDelivery,
+  });
+  workerRegistry.set(
+    leadAutoResponseWorker.type,
+    leadAutoResponseWorker as import('./queues/queue').WorkerHandler<unknown>
+  );
+
   if (pool) {
     const provisionTwilioWorker = createProvisionTwilioWorker({ pool });
     workerRegistry.set(
@@ -2054,7 +2073,7 @@ export function createApp(): express.Express {
       standardHeaders: true,
       legacyHeaders: false,
     }),
-    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo, settingsRepo, canonicalPackRegistry, pool)
+    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo, settingsRepo, canonicalPackRegistry, pool, queue)
   );
 
   // LC-2 — signed lead-intake webhook (server-to-server form/partner relay).
@@ -2069,6 +2088,7 @@ export function createApp(): express.Express {
       customerRepo,
       signingSecret: config.WEBHOOK_SIGNING_SECRET,
       webhookRepo,
+      queue,
     }),
   );
 
