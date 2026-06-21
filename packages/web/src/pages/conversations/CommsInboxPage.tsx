@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ConversationThread } from './ConversationThread';
+import { SearchBar } from '../../components/conversations/SearchBar';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import {
@@ -7,6 +8,7 @@ import {
   getConversationMessages,
   sendConversationReply,
   suggestReply,
+  searchConversations,
   type InboxThread,
 } from '../../api/conversations';
 import type { Message } from '../../types/conversation';
@@ -39,6 +41,34 @@ export function CommsInboxPage(): React.ReactElement {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+
+  // Story 3.11 — history search. `query` filters the thread list by customer
+  // name / preview instantly (client-side) AND by message content (server
+  // hits → matchedIds). `matchedIds === null` means no active content search.
+  const [query, setQuery] = useState('');
+  const [matchedIds, setMatchedIds] = useState<Set<string> | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
+  const handleSearch = useCallback((raw: string) => {
+    const trimmed = raw.trim();
+    setQuery(trimmed);
+    setSearchError(null);
+    if (!trimmed) {
+      setMatchedIds(null);
+      return;
+    }
+    void (async () => {
+      try {
+        const hits = await searchConversations(trimmed);
+        setMatchedIds(new Set(hits.map((h) => h.conversation.id)));
+      } catch (err) {
+        // Content search failed — keep the instant client-side label match
+        // working and surface the error rather than blanking the list.
+        setSearchError(err instanceof Error ? err.message : 'Search failed');
+        setMatchedIds(null);
+      }
+    })();
+  }, []);
 
   const loadThreads = useCallback(async () => {
     setLoadingThreads(true);
@@ -95,6 +125,21 @@ export function CommsInboxPage(): React.ReactElement {
     return suggestReply(selectedId);
   }, [selectedId]);
 
+  // Filter the loaded threads by the active query: instant label/preview match,
+  // plus server message-content matches once they arrive.
+  const visibleThreads = useMemo(() => {
+    if (!query) return threads;
+    const q = query.toLowerCase();
+    return threads.filter((t) => {
+      const label = (t.customerName || t.conversation.title || '').toLowerCase();
+      return (
+        label.includes(q) ||
+        t.lastMessagePreview.toLowerCase().includes(q) ||
+        (matchedIds?.has(t.conversation.id) ?? false)
+      );
+    });
+  }, [threads, query, matchedIds]);
+
   return (
     <div className="mx-auto w-full max-w-5xl px-4 py-6" data-testid="comms-inbox">
       <h1 className="mb-4 text-xl font-semibold text-gray-900">Inbox</h1>
@@ -108,6 +153,18 @@ export function CommsInboxPage(): React.ReactElement {
           aria-label="Conversations"
           className={selectedId ? 'hidden md:block' : 'block'}
         >
+          {/* Story 3.11 — search the inbox by customer name or message text. */}
+          <div className="mb-3">
+            <SearchBar onSearch={handleSearch} placeholder="Search by customer or message…" />
+          </div>
+          {searchError && (
+            <div
+              role="alert"
+              className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800"
+            >
+              {searchError}
+            </div>
+          )}
           {loadingThreads && (
             <p className="py-8 text-center text-sm text-gray-500">Loading…</p>
           )}
@@ -124,8 +181,13 @@ export function CommsInboxPage(): React.ReactElement {
               No conversations yet. Customer texts and replies show up here.
             </p>
           )}
+          {!loadingThreads && !threadsError && threads.length > 0 && visibleThreads.length === 0 && (
+            <p className="py-8 text-center text-sm text-gray-500" data-testid="comms-inbox-no-matches">
+              No conversations match “{query}”.
+            </p>
+          )}
           <ul className="divide-y divide-gray-100">
-            {threads.map((thread) => {
+            {visibleThreads.map((thread) => {
               const id = thread.conversation.id;
               const active = id === selectedId;
               return (
