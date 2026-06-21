@@ -31,6 +31,11 @@ import { reviewResponseProposalPayloadSchema } from '@ai-service-os/shared';
 // proposal-layer consumers don't reach into src/ai for the type.
 import { CONFIDENCE_LEVELS } from '../ai/guardrails/confidence';
 export type { ConfidenceLevel } from '../ai/guardrails/confidence';
+// RV-MMS (§6.4-B) — severity markers reuse the canonical urgency-tier
+// vocabulary that drives voice triage, so a photo-sourced draft and a voice
+// call speak the same severity language. (proposals already depends on ../ai
+// for the confidence vocabulary above.)
+import { TIER_KEYS } from '../ai/skills/triage-rules.schema';
 
 // ───────────────────────────────────────────────────────────────────────────
 // RV-007 (F-4) — Confidence Marker `_meta` on proposal payloads.
@@ -57,6 +62,12 @@ export const confidenceLevelSchema = z.enum(CONFIDENCE_LEVELS);
 
 export const proposalConfidenceMetaSchema = z.object({
   overallConfidence: confidenceLevelSchema,
+  /**
+   * §6.4-B severity marker — how urgent the visible problem is, on the same
+   * urgency-tier scale as voice triage. Optional; today set by the MMS-to-quote
+   * vision draft and surfaced to the owner in the review UI / SMS.
+   */
+  severity: z.enum(TIER_KEYS).optional(),
   /** Per-field certainty keyed by payload path, e.g. "lineItems[0].unitPrice". */
   fieldConfidence: z.record(confidenceLevelSchema).optional(),
   /** Human-readable callouts the review UI / SMS / voice readback render. */

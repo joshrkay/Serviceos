@@ -102,6 +102,7 @@ describe('Postgres integration — MMS-to-quote (U2)', () => {
       gateway: gatewayReturning(visionJson),
       catalogRepo,
       auditRepo,
+      notifyOwner: vi.fn(async () => {}),
     };
   });
 
@@ -151,6 +152,12 @@ describe('Postgres integration — MMS-to-quote (U2)', () => {
     const files = await fileRepo.findByEntity(tenant.tenantId, 'customer', result.customerId!);
     expect(files.length).toBeGreaterThanOrEqual(1);
     expect(files[0].tenantId).toBe(tenant.tenantId);
+
+    // U3 — a successful draft surfaces to the owner (heads-up SMS via notifyOwner).
+    expect(deps.notifyOwner).toHaveBeenCalledWith(
+      tenant.tenantId,
+      expect.stringContaining('photo quote'),
+    );
   });
 
   it('known customer MMS → drafts against the resolved customer (no duplicate created)', async () => {

@@ -64,6 +64,62 @@ describe('P2-021 — Proposal inbox prioritization', () => {
     expect(result[0].urgency).toBe('high');
   });
 
+  describe('§6.4-B — emergency severity elevates inbox urgency', () => {
+    // A normal-confidence MMS photo draft with an emergency severity in
+    // payload._meta would otherwise sort as 'low' and sit behind routine work.
+    function emergencyDraft(severity: string): Proposal {
+      return makeProposal({
+        proposalType: 'draft_estimate',
+        status: 'draft',
+        confidenceScore: 0.85, // normal confidence — only severity should elevate
+        payload: { _meta: { severity } },
+      });
+    }
+
+    it('TIER_1 (evacuate) → critical', () => {
+      const u = getUrgency(emergencyDraft('TIER_1_EVACUATE'));
+      expect(u.urgency).toBe('critical');
+      expect(u.reason).toBe('Emergency severity — evacuate');
+    });
+
+    it('TIER_2 (emergency dispatch) → high', () => {
+      const u = getUrgency(emergencyDraft('TIER_2_EMERGENCY_DISPATCH'));
+      expect(u.urgency).toBe('high');
+      expect(u.reason).toBe('Emergency severity — dispatch');
+    });
+
+    it('TIER_3 / TIER_4 (same-day / routine) do NOT elevate', () => {
+      expect(getUrgency(emergencyDraft('TIER_3_SAME_DAY_URGENT')).urgency).toBe('low');
+      expect(getUrgency(emergencyDraft('TIER_4_SCHEDULE')).urgency).toBe('low');
+    });
+
+    it('an unknown/garbage severity value is ignored (falls through to standard rules)', () => {
+      expect(getUrgency(emergencyDraft('TIER_9_NONSENSE')).urgency).toBe('low');
+      // missing _meta entirely
+      const noMeta = makeProposal({ status: 'draft', confidenceScore: 0.85, payload: {} });
+      expect(getUrgency(noMeta).urgency).toBe('low');
+    });
+
+    it('expiry still outranks severity (expiring TIER_2 stays critical)', () => {
+      const expiringEmergency = makeProposal({
+        proposalType: 'draft_estimate',
+        status: 'draft',
+        confidenceScore: 0.85,
+        payload: { _meta: { severity: 'TIER_2_EMERGENCY_DISPATCH' } },
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000), // 30 min
+      });
+      expect(getUrgency(expiringEmergency).reason).toBe('Expiring within 2 hours');
+    });
+
+    it('sorts an emergency MMS draft ahead of a routine ready-for-review proposal', () => {
+      const routine = makeProposal({ status: 'ready_for_review', confidenceScore: 0.9 });
+      const emergency = emergencyDraft('TIER_2_EMERGENCY_DISPATCH');
+      const result = prioritizeProposals([routine, emergency]);
+      expect(result[0].proposal.id).toBe(emergency.id);
+      expect(result[0].urgency).toBe('high');
+    });
+  });
+
   it('happy path — older proposals before newer', () => {
     const now = new Date();
     const older = makeProposal({

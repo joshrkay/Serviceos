@@ -1,0 +1,47 @@
+name: MMS vision smoke (real model, daily)
+
+# Proves the real image→vision-model→estimate path (the default lane mocks the
+# gateway). Gated: runs only here, with a real AI key + a committed repair photo
+# at packages/api/test/fixtures/mms-smoke.jpg (or MMS_VISION_SMOKE_IMAGE).
+on:
+  schedule:
+    - cron: '0 10 * * *'  # 10:00 UTC daily
+  workflow_dispatch: {}
+
+jobs:
+  mms-vision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: packages/api/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: packages/api
+      - name: Real vision smoke — draft an estimate from a fixture photo
+        run: npx vitest run test/smoke/mms-vision-real.test.ts
+        working-directory: packages/api
+        env:
+          MMS_VISION_SMOKE: '1'
+          AI_PROVIDER_API_KEY: ${{ secrets.AI_PROVIDER_API_KEY }}
+          # mms_estimate routes to the COMPLEX tier, which defaults to
+          # claude-sonnet-4-6. The smoke uses the default OpenAI-compatible
+          # provider (AI_PROVIDER_API_KEY), so without this it would send a
+          # Claude model name to OpenAI. Pin the complex tier to a real,
+          # vision-capable OpenAI model so the smoke actually exercises vision.
+          AI_COMPLEX_MODEL: gpt-4o
+      - name: Notify Slack on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.27.0
+        with:
+          payload: |
+            {
+              "text": ":rotating_light: mms-vision-smoke FAILED — ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_ALERTS_WEBHOOK }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

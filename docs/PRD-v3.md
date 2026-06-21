@@ -248,7 +248,7 @@ Jobber is the primary head-to-head competitor at this ICP. The table below is th
 | **Review response drafting** | No | AI drafts public response + private apology | Differentiator | ✅ Built |
 | **Memberships / maintenance plans** | Full engine (auto-renew, member pricing) | Auto-renew (off-session) + member pricing + priority booking | Parity | ✅ Built |
 | **Client Hub / customer portal** | Full (book, approve, pay, history) | Lightweight (approve + pay only, no login) | Jobber leads on depth | ✅ Built (lightweight) |
-| **QuickBooks sync** | Deep, battle-tested | Basic sync (Wave 3) | Jobber leads | 📋 Specced (P23) |
+| **QuickBooks sync** | Deep, battle-tested | Basic one-way sync (paid invoices → QBO) | Jobber leads | ✅ Built (one-way) |
 | **Route optimization** | Available | Drive-time feasibility (Google Maps) | Jobber leads on optimization | ✅ Built (feasibility) |
 | **Custom job forms** | Builder | Vertical-specific voice checklists | Different model | 🔮 Wave 4 |
 | **Mobile app (tech)** | Native iOS/Android | PWA (Capacitor native roadmap) | Jobber leads | 🔧 PWA built; native roadmap |
@@ -256,11 +256,13 @@ Jobber is the primary head-to-head competitor at this ICP. The table below is th
 | **Offline voice capture** | No | PWA + queue (voice notes sync on reconnect) | Differentiator | 📋 Specced (Capacitor spike) |
 | **AI writes to system of record** | No (read-mostly AI) | Yes — via typed proposals with approval + audit | Core differentiator | ✅ Built |
 | **Trust / approval layer** | None | Every AI action = typed proposal + undo + audit | Core differentiator | ✅ Built |
-| **Correction loop** | No | Owner edits → system learns → digest reports | Differentiator | 📋 Specced (N-009) |
+| **Correction loop** | No | Owner edits → system learns → digest reports | Differentiator | ✅ Built |
 
 **Legend:** ✅ Built · 🔧 Partial · 📋 Specced (story exists, not yet built) · 🔮 Wave 3+
 
 > **Status verification (2026-06-14):** The Status column above was reconciled against the canonical `/packages` codebase (wiring + tests). This pass **downgraded** MMS-to-quote, ACH payments, and B2B account recognition (✅→🔧 — claimed built, only partially implemented) and **upgraded** memberships, auto-invoice on completion, dunning/overdue, late fees, estimate follow-up, and auto-pay/saved-card (📋/🔧→✅ — shipped ahead of their roadmap status). Three further suspected gaps — review-request gating, voice en-route/ETA, and voice dispatch reassignment — were investigated and found already built (left ✅). Rationale recorded in `docs/decisions.md` (D-012).
+>
+> **Status update (2026-06-20):** Two more rows corrected after code verification — **QuickBooks sync** (one-way `accounting-sync-worker` wired in `app.ts` under a leader-elected sweep) and **Correction loop** (`learning/corrections/*` wired into `proposals/actions.ts` + `digest-builder.ts`): both 📋 → ✅. Rationale: `docs/decisions.md` (D-013). Note: §6.5, §6.12, and §8 (P23) still describe QuickBooks as "Wave 3" and should be refreshed for consistency.
 
 ---
 
@@ -1101,6 +1103,7 @@ The pattern: every adjacent vertical has entrenched vertical software with zero 
 | 3.0 | 2026-06-11 | **Voice-first reframe** — voice elevated to primary interface (both directions); SMS is async approval/notification channel. Added full Jobber feature parity map. Added job costing, memberships depth, client hub (lightweight portal), native mobile strategy. Updated ICP to include "going independent" persona. 6-month roadmap with phased priorities. Updated all 16 product decisions. |
 | 3.1 | 2026-06-11 | **Vertical expansion roadmap** (§9) — Wave 2: Electrical + Pest Control; Wave 3: Painting + Handyman. Per-vertical feature delta, platform investment estimates, ICP definitions, and competitive position by vertical. Pest control identified as architecturally distinct (route-dense, recurring-first); route optimization promoted from "post-PMF deferred" to Wave 2 required. |
 | 3.2 | 2026-06-14 | **Status reconciliation** — §5 parity Status column verified against the `/packages` codebase. Downgraded 3 rows (MMS-to-quote, ACH payments, B2B account recognition: ✅→🔧); upgraded 6 rows (memberships, auto-invoice on completion, dunning/overdue, late fees, estimate follow-up, auto-pay/saved-card → ✅). Rationale in `docs/decisions.md` D-012. |
+| 3.3 | 2026-06-20 | **Status correction** — §5 QuickBooks sync and Correction loop reconciled 📋 Specced → ✅ Built after code verification (one-way `accounting-sync-worker` and `learning/corrections/*` both wired). Rationale in `docs/decisions.md` D-013. |
 
 **Next review:** After Phase 1 exit (weeks 5–6), before Phase 2 kick-off.  
 **Change protocol:** PRD changes require a recorded decision in `docs/decisions.md` and a paired update to `docs/strategy/day-in-the-life.md` if the change affects the customer experience.

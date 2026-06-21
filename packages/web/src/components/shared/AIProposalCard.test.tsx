@@ -47,6 +47,25 @@ describe('P2-035 (U2) AIProposalCard confidence markers', () => {
     expect(screen.getByText('High confidence')).toBeInTheDocument();
   });
 
+  // §6.4-B (U5) — severity badge from `_meta.severity` (MMS photo drafts).
+  it('renders the §6.4-B severity badge from _meta.severity', () => {
+    render(
+      <AIProposalCard
+        proposal={makeProposal({
+          meta: { overallConfidence: 'medium', severity: 'TIER_2_EMERGENCY_DISPATCH' },
+        })}
+      />,
+    );
+    expect(screen.getByTestId('severity-badge')).toHaveTextContent('Emergency');
+  });
+
+  it('omits the severity badge when _meta has no severity', () => {
+    render(
+      <AIProposalCard proposal={makeProposal({ meta: { overallConfidence: 'medium' } })} />,
+    );
+    expect(screen.queryByTestId('severity-badge')).toBeNull();
+  });
+
   it('does not crash when _meta carries an unknown overallConfidence', () => {
     // Defensive: a malformed level must not throw — the card falls back to
     // the coarse bar rather than indexing undefined config.
