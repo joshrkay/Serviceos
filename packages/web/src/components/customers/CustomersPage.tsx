@@ -39,6 +39,18 @@ type SheetStep = 'contact' | 'location' | 'done';
 
 function normalizePhone(p: string) { return p.replace(/\D/g, ''); }
 
+// Acquisition channels ("How did you hear about us?") — must mirror the API's
+// CUSTOMER_SOURCES enum (packages/api/src/customers/customer.ts).
+const CUSTOMER_SOURCE_OPTIONS: { value: string; label: string }[] = [
+  { value: 'website', label: 'Website' },
+  { value: 'referral', label: 'Referral' },
+  { value: 'google', label: 'Google' },
+  { value: 'social_media', label: 'Social media' },
+  { value: 'advertising', label: 'Advertising' },
+  { value: 'repeat_client', label: 'Repeat client' },
+  { value: 'other', label: 'Other' },
+];
+
 interface AddCustomerSheetProps {
   onClose: () => void;
   onNewEstimate: () => void;
@@ -54,7 +66,7 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
 
   const [step, setStep] = useState<SheetStep>('contact');
   const [form, setForm] = useState({
-    name: '', phone: '', email: '',
+    name: '', phone: '', email: '', source: '',
     locNickname: 'Home', locAddress: '', locServiceTypes: [] as ServiceType[],
     locNotes: '', locAccessCode: '',
   });
@@ -192,6 +204,19 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
                 </div>
               </div>
 
+              {/* ── How did you hear about us? ── */}
+              <select
+                aria-label="How did you hear about us?"
+                value={form.source}
+                onChange={e => setForm(f => ({ ...f, source: e.target.value }))}
+                className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-700 focus:outline-none focus:border-blue-400 transition-colors min-h-11"
+              >
+                <option value="">How did you hear about us? (optional)</option>
+                {CUSTOMER_SOURCE_OPTIONS.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+
               {/* ── Duplicate match card ── */}
               {duplicate && (
                 <div
@@ -305,6 +330,7 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
                     lastName: nameParts.slice(1).join(' ') || 'Customer',
                     primaryPhone: form.phone || undefined,
                     email: form.email || undefined,
+                    source: form.source || undefined,
                   });
                   const address = splitAddress(form.locAddress);
                   await createLocation({

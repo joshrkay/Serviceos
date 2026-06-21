@@ -315,6 +315,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // inbound-capture 23505 recovery is atomic for every SMS target type, not
   // just customer (migration 198).
   ['200_conversations_one_open_thread_noncustomer', '9af90c1b55544fe8451246c42a6c7cd80dd8ed6fae054050bcc070548e253a0f'],
+  // Jobber-parity CRM: customer acquisition channel (additive nullable column).
+  ['201_customers_source', '2add8937ddc606a7bfe86b59be879b3dceeb6a9730d6ff414f3798a47c362a05'],
 ];
 
 function hashMigration(value: string): string {

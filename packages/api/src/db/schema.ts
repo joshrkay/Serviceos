@@ -4987,6 +4987,12 @@ export const MIGRATIONS = {
       WHERE entity_type IN ('lead', 'sms_unmatched')
         AND status = 'open' AND entity_id IS NOT NULL;
   `,
+  // Jobber-parity CRM: customer acquisition channel ("How did you hear about
+  // us?"). Additive, nullable TEXT (app validates against CUSTOMER_SOURCES);
+  // distinct from originating_lead_id, which links a specific converted lead.
+  '201_customers_source': `
+    ALTER TABLE customers ADD COLUMN IF NOT EXISTS source TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

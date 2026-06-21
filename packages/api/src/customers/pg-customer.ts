@@ -25,6 +25,7 @@ function mapRow(row: Record<string, unknown>): Customer {
     preferredChannel: row.preferred_channel as Customer['preferredChannel'],
     smsConsent: row.sms_consent as boolean,
     communicationNotes: (row.communication_notes as string) ?? undefined,
+    source: (row.source as Customer['source']) ?? undefined,
     isArchived: row.is_archived as boolean,
     archivedAt: row.archived_at ? new Date(row.archived_at as string) : undefined,
     originatingLeadId: (row.originating_lead_id as string) ?? undefined,
@@ -105,9 +106,9 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
           primary_phone, secondary_phone, email, preferred_channel, sms_consent,
           communication_notes, is_archived, archived_at, originating_lead_id,
           date_of_birth, account_type, parent_account_id, preferred_language,
-          created_by, created_at, updated_at
+          source, created_by, created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                  $15, $16, $17, $18, $19, $20, $21, $22)
+                  $15, $16, $17, $18, $19, $20, $21, $22, $23)
         RETURNING *`,
         [
           customer.id,
@@ -129,6 +130,7 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
           customer.accountType ?? null,
           customer.parentAccountId ?? null,
           customer.preferredLanguage ?? null,
+          customer.source ?? null,
           customer.createdBy,
           customer.createdAt,
           customer.updatedAt,
@@ -237,6 +239,7 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
         preferredChannel: 'preferred_channel',
         smsConsent: 'sms_consent',
         communicationNotes: 'communication_notes',
+        source: 'source',
         isArchived: 'is_archived',
         archivedAt: 'archived_at',
         originatingLeadId: 'originating_lead_id',

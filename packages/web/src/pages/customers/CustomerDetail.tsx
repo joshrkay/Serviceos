@@ -32,6 +32,8 @@ interface Customer {
   communicationNotes?: string;
   isArchived: boolean;
   originatingLeadId?: string;
+  /** Jobber-parity acquisition channel ("How did you hear about us?"). */
+  source?: string;
   /** P11-002: optional spoken-language preference. */
   preferredLanguage?: 'en' | 'es' | null;
 }
@@ -303,6 +305,14 @@ export function CustomerDetail({
                 <dt className="text-slate-400">Preferred channel</dt>
                 <dd className="text-slate-800 capitalize">
                   {data.preferredChannel}
+                </dd>
+              </div>
+              <div className="flex justify-between gap-4">
+                <dt className="text-slate-400">Source</dt>
+                <dd className="text-slate-800">
+                  {data.source
+                    ? data.source.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+                    : '—'}
                 </dd>
               </div>
               {/* P11-002: spoken-language preference, now persisted on change
