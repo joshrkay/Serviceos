@@ -27,6 +27,9 @@ vi.mock('../../components/customers/TagsPanel', () => ({
 vi.mock('../../components/customers/CustomFieldsPanel', () => ({
   CustomFieldsPanel: () => <div>CustomFieldsPanel</div>,
 }));
+vi.mock('../../components/customers/MergeCustomerPanel', () => ({
+  MergeCustomerPanel: () => <div>MergeCustomerPanel</div>,
+}));
 
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { apiFetch } from '../../utils/api-fetch';
