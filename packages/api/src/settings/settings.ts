@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { ENTITY_TERM_KEYS } from '@ai-service-os/shared';
 import { ValidationError } from '../shared/errors';
 
 import { isValidTimezone } from '../shared/timezone';
@@ -914,20 +915,20 @@ export async function getNextInvoiceNumber(
  * of "Job"). Distinct from per-vertical equipment terminology keys
  * which come from the active pack at runtime.
  *
+ * The canonical entity keys come from the shared `ENTITY_TERM_KEYS`
+ * single source of truth (packages/shared/src/contracts/terminology.ts),
+ * which also backs the render-side resolver — so the keys we accept here
+ * never drift from the keys we render. The two onboarding-only keys
+ * (teamSize / ownerName) are appended because onboarding seeds them into
+ * the same JSON column and a re-save of that payload must still validate.
+ *
  * Used by `validateTerminologyPreferences` so a PUT /api/settings can
  * persist these regardless of which vertical packs are active. The
  * onboarding route already writes these keys directly through the
  * repo; this allowlist makes them editable through the API too.
  */
 export const ENTITY_LABEL_TERMINOLOGY_KEYS = [
-  'jobTerm',
-  'estimateTerm',
-  'invoiceTerm',
-  'customerTerm',
-  'appointmentTerm',
-  'workerTerm',
-  // Onboarding seeds these too — included here so a re-save of the
-  // existing payload doesn't accidentally fail validation.
+  ...ENTITY_TERM_KEYS,
   'teamSize',
   'ownerName',
 ] as const;
