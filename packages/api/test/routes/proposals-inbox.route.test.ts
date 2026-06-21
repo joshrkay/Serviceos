@@ -102,4 +102,94 @@ describe('GET /api/proposals/inbox', () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(0);
   });
+
+  it('§5.5 — surfaces expired schedule cards under `expired`, excluding non-schedule expired', async () => {
+    const { app, proposalRepo } = buildApp();
+    const past = new Date(Date.now() - 60 * 60 * 1000);
+    const lapsed = createProposal({
+      tenantId: 'tenant-i1',
+      proposalType: 'create_appointment',
+      payload: {},
+      summary: 'Lapsed booking',
+      createdBy: 'user-i1',
+      expiresAt: past,
+    });
+    await proposalRepo.create({ ...lapsed, status: 'expired' });
+    // a non-schedule proposal that somehow reached 'expired' must NOT surface
+    const otherExpired = createProposal({
+      tenantId: 'tenant-i1',
+      proposalType: 'add_note',
+      payload: {},
+      summary: 'not a schedule card',
+      createdBy: 'user-i1',
+    });
+    await proposalRepo.create({ ...otherExpired, status: 'expired' });
+
+    const res = await request(app).get('/api/proposals/inbox');
+    expect(res.status).toBe(200);
+    expect(res.body.expired).toHaveLength(1);
+    expect(res.body.expired[0]).toMatchObject({
+      summary: 'Lapsed booking',
+      proposalType: 'create_appointment',
+      status: 'expired',
+    });
+  });
+});
+
+describe('POST /api/proposals/:id/re-propose (§5.5)', () => {
+  it('clones an expired schedule proposal into a fresh draft with a new 48h expiry', async () => {
+    const { app, proposalRepo } = buildApp();
+    const past = new Date(Date.now() - 60 * 60 * 1000);
+    const lapsed = createProposal({
+      tenantId: 'tenant-i1',
+      proposalType: 'create_booking',
+      payload: { slot: 'x' },
+      summary: 'Book it',
+      createdBy: 'user-i1',
+      expiresAt: past,
+    });
+    await proposalRepo.create({ ...lapsed, status: 'expired' });
+
+    const res = await request(app).post(`/api/proposals/${lapsed.id}/re-propose`);
+    expect(res.status).toBe(201);
+    expect(res.body.id).not.toBe(lapsed.id);
+    expect(res.body.status).toBe('draft');
+    expect(res.body.proposalType).toBe('create_booking');
+    expect(res.body.summary).toBe('Book it');
+    expect(res.body.payload).toEqual({ slot: 'x' });
+    const freshMs = new Date(res.body.expiresAt).getTime() - Date.now();
+    expect(freshMs).toBeGreaterThan(47 * 60 * 60 * 1000);
+
+    // the expired source is left untouched
+    expect((await proposalRepo.findById('tenant-i1', lapsed.id))?.status).toBe('expired');
+  });
+
+  it('returns 409 when the proposal is not expired', async () => {
+    const { app, proposalRepo } = buildApp();
+    const draft = createProposal({
+      tenantId: 'tenant-i1',
+      proposalType: 'create_appointment',
+      payload: {},
+      summary: 'still pending',
+      createdBy: 'user-i1',
+    });
+    await proposalRepo.create(draft);
+    const res = await request(app).post(`/api/proposals/${draft.id}/re-propose`);
+    expect(res.status).toBe(409);
+  });
+
+  it('returns 404 for an expired proposal owned by another tenant', async () => {
+    const { app, proposalRepo } = buildApp();
+    const other = createProposal({
+      tenantId: 'tenant-other',
+      proposalType: 'create_appointment',
+      payload: {},
+      summary: 's',
+      createdBy: 'u',
+      expiresAt: new Date(Date.now() - 1000),
+    });
+    await proposalRepo.create({ ...other, status: 'expired' });
+    const res = await request(app).post(`/api/proposals/${other.id}/re-propose`);
+    expect(res.status).toBe(404);
+  });
 });

@@ -5,7 +5,7 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { toErrorResponse } from '../shared/errors';
 import { validate } from '../shared/validation';
 import { Role } from '../auth/rbac';
-import { ProposalRepository } from '../proposals/proposal';
+import { ProposalRepository, isScheduleProposalType } from '../proposals/proposal';
 import { AppointmentRepository } from '../appointments/appointment';
 import { AuditRepository } from '../audit/audit';
 import { ProposalFilter } from '../proposals/proposal-contracts';
@@ -17,6 +17,7 @@ import {
   rejectProposal,
   editProposal,
   undoProposal,
+  reproposeProposal,
   type UndoCorrectionLoopDeps,
 } from '../proposals/actions';
 import { resolveProposalLine } from '../proposals/resolve-line';
@@ -160,12 +161,28 @@ export function createProposalsRouter(
         // both need to be approvable from the inbox. The 100-item cap keeps
         // the payload small; for a solo operator the inbox is single-digit
         // dozens, not hundreds.
-        const [drafts, ready] = await Promise.all([
+        const [drafts, ready, expiredAll] = await Promise.all([
           proposalRepo.findByStatus(req.auth!.tenantId, 'draft'),
           proposalRepo.findByStatus(req.auth!.tenantId, 'ready_for_review'),
+          proposalRepo.findByStatus(req.auth!.tenantId, 'expired'),
         ]);
         const inbox = buildInboxPayload([...ready, ...drafts], 100);
-        res.json(inbox);
+        // §5.5 — surface expired schedule proposal cards so the operator can
+        // see what lapsed and re-propose it. Only schedule types ever expire;
+        // cap + most-recent-first keeps the list bounded.
+        const expired = expiredAll
+          .filter((p) => isScheduleProposalType(p.proposalType))
+          .sort((a, b) => (b.expiresAt?.getTime() ?? 0) - (a.expiresAt?.getTime() ?? 0))
+          .slice(0, 20)
+          .map((p) => ({
+            id: p.id,
+            proposalType: p.proposalType,
+            summary: p.summary,
+            status: p.status,
+            expiresAt: p.expiresAt?.toISOString(),
+            createdAt: p.createdAt.toISOString(),
+          }));
+        res.json({ ...inbox, expired });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
@@ -322,6 +339,31 @@ export function createProposalsRouter(
         res.status(statusCode).json(body);
       }
     }
+  );
+
+  // §5.5 — re-propose an expired schedule proposal card. Mints a fresh draft
+  // (new 48h clock) carrying the same intent; the expired source is untouched.
+  router.post(
+    '/:id/re-propose',
+    requireAuth,
+    requireTenant,
+    requirePermission('proposals:approve'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const result = await reproposeProposal(
+          proposalRepo,
+          req.auth!.tenantId,
+          req.params.id,
+          req.auth!.userId,
+          req.auth!.role as Role,
+          auditRepo,
+        );
+        res.status(201).json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
   );
 
   router.put(
