@@ -5,6 +5,7 @@ import {
   AlertCircle, Clock, ChevronRight, ArrowRight,
   DollarSign, FileText, Send, Eye, Briefcase,
   CheckCircle2, Mic, TrendingUp, Bell, MessageSquare,
+  UserPlus, CalendarPlus,
 } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
 import { listInboxThreads, type InboxThread } from '../../api/conversations';

@@ -252,8 +252,8 @@ export interface OwnerNotificationServiceDeps {
    */
   resolveUserIds?: (tenantId: string, permission: Permission) => Promise<Set<string>>;
   /**
-   * U10 — user ids (within the tenant) who have muted this notification type.
-   * Their devices are dropped before sending. Omit for "all categories on".
+   * User ids in the tenant who have MUTED this notification type (U10). Their
+   * devices are dropped from the recipient set. Omit to mute nobody.
    */
   resolveMutedUserIds?: (tenantId: string, type: NotificationType) => Promise<Set<string>>;
   logger?: Logger;
@@ -322,23 +322,27 @@ export class OwnerNotificationService {
       }
       if (recipients.length === 0) return;
 
-      // U10 — drop devices of users who muted this category (default-on, so
-      // only users with an explicit opt-out row are excluded).
-      if (this.deps.resolveMutedUserIds) {
-        const muted = await this.deps.resolveMutedUserIds(tenantId, built.data.type);
-        if (muted.size > 0) {
-          recipients = recipients.filter((t) => !muted.has(t.userId));
-          if (recipients.length === 0) return;
-        }
-      }
+      await this.send(tenantId, recipients, built);
+    } catch (err) {
+      this.logFailure(tenantId, built, err);
+    }
+  }
 
-      const messages: PushMessage[] = recipients.map((t) => ({
-        to: t.expoPushToken,
-        title: built.title,
-        body: built.body,
-        data: built.data,
-      }));
-      const results = await this.deps.provider.sendPush(messages);
+  /** Send to a resolved recipient set and prune dead tokens. */
+  private async send(
+    tenantId: string,
+    recipients: Array<{ expoPushToken: string }>,
+    built: BuiltNotification,
+  ): Promise<void> {
+    if (recipients.length === 0) return;
+
+    const messages: PushMessage[] = recipients.map((t) => ({
+      to: t.expoPushToken,
+      title: built.title,
+      body: built.body,
+      data: built.data,
+    }));
+    const results = await this.deps.provider.sendPush(messages);
 
     for (const r of results) {
       if (r.deviceNotRegistered) {

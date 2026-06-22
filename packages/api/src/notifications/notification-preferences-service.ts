@@ -1,11 +1,10 @@
 /**
- * U10 — per-user notification preferences (opt-out by category).
+ * U10 — per-user owner-notification preferences (opt-out by category).
  *
- * Default-ON: the ABSENCE of a row means the category is enabled, so a fresh
- * user receives every push until they explicitly mute one. The
- * OwnerNotificationService consults `listMutedUserIds(tenant, type)` to drop
- * muted recipients before sending; the settings UI reads/writes via `listByUser`
- * / `set`.
+ * Opt-out model: the ABSENCE of a row means the notification is enabled, so a
+ * fresh tenant receives everything and a row is written only when a user mutes
+ * a category. The owner-notification fan-out consults `listMutedUserIds` at send
+ * time to drop muted recipients; the settings UI reads/writes via the service.
  */
 import {
   NOTIFICATION_TYPES,
@@ -20,73 +19,78 @@ export interface NotificationPreference {
 }
 
 export interface NotificationPreferenceRepository {
-  /** Every explicit preference row for a user (absent types are enabled). */
-  listByUser(tenantId: string, userId: string): Promise<NotificationPreference[]>;
-  /** Upsert one (tenant,user,type) preference; returns the stored row. */
-  set(
+  /** Explicit rows for a user (absence of a type = enabled). */
+  listForUser(tenantId: string, userId: string): Promise<NotificationPreference[]>;
+  /** Upsert a single (user, type) enabled flag. */
+  setEnabled(
     tenantId: string,
     userId: string,
-    notificationType: NotificationType,
+    type: NotificationType,
     enabled: boolean,
-  ): Promise<NotificationPreference>;
-  /** User ids (within the tenant) who have explicitly DISABLED `type`. */
-  listMutedUserIds(tenantId: string, notificationType: NotificationType): Promise<Set<string>>;
-}
-
-export function isNotificationType(value: unknown): value is NotificationType {
-  return typeof value === 'string' && (NOTIFICATION_TYPES as readonly string[]).includes(value);
+  ): Promise<void>;
+  /** User ids in the tenant who have MUTED `type` (enabled = false). */
+  listMutedUserIds(tenantId: string, type: NotificationType): Promise<Set<string>>;
 }
 
 /**
- * Merge a user's explicit rows over the default-on baseline into a full
- * `{ [type]: enabled }` map for the settings UI. Pure — unit-tested.
+ * Effective preference for every notification type for one user — explicit
+ * rows merged over the default-enabled baseline. Drives the settings UI so the
+ * owner sees a full, toggleable list rather than only the categories they have
+ * already touched.
  */
-export function toPreferenceMap(
-  rows: NotificationPreference[],
-): Record<NotificationType, boolean> {
-  const map = {} as Record<NotificationType, boolean>;
-  for (const type of NOTIFICATION_TYPES) map[type] = true; // default-on
-  for (const row of rows) map[row.notificationType] = row.enabled;
-  return map;
+export async function effectivePreferences(
+  repo: Pick<NotificationPreferenceRepository, 'listForUser'>,
+  tenantId: string,
+  userId: string,
+): Promise<Record<NotificationType, boolean>> {
+  const explicit = new Map<NotificationType, boolean>();
+  for (const row of await repo.listForUser(tenantId, userId)) {
+    explicit.set(row.notificationType, row.enabled);
+  }
+  const out = {} as Record<NotificationType, boolean>;
+  for (const type of NOTIFICATION_TYPES) {
+    out[type] = explicit.get(type) ?? true; // absent → enabled
+  }
+  return out;
 }
 
 export class InMemoryNotificationPreferenceRepository
   implements NotificationPreferenceRepository
 {
-  /** key: `${tenantId}::${userId}::${type}` */
+  /** key = `${tenantId}|${userId}|${type}` */
   private readonly rows = new Map<string, NotificationPreference>();
 
   private key(tenantId: string, userId: string, type: NotificationType): string {
-    return `${tenantId}::${userId}::${type}`;
+    return `${tenantId}|${userId}|${type}`;
   }
 
-  async listByUser(tenantId: string, userId: string): Promise<NotificationPreference[]> {
-    return Array.from(this.rows.values())
-      .filter((r) => r.tenantId === tenantId && r.userId === userId)
-      .map((r) => ({ ...r }));
+  async listForUser(tenantId: string, userId: string): Promise<NotificationPreference[]> {
+    return [...this.rows.values()].filter(
+      (r) => r.tenantId === tenantId && r.userId === userId,
+    );
   }
 
-  async set(
+  async setEnabled(
     tenantId: string,
     userId: string,
-    notificationType: NotificationType,
+    type: NotificationType,
     enabled: boolean,
-  ): Promise<NotificationPreference> {
-    const row: NotificationPreference = { tenantId, userId, notificationType, enabled };
-    this.rows.set(this.key(tenantId, userId, notificationType), row);
-    return { ...row };
+  ): Promise<void> {
+    this.rows.set(this.key(tenantId, userId, type), {
+      tenantId,
+      userId,
+      notificationType: type,
+      enabled,
+    });
   }
 
-  async listMutedUserIds(
-    tenantId: string,
-    notificationType: NotificationType,
-  ): Promise<Set<string>> {
-    const muted = new Set<string>();
+  async listMutedUserIds(tenantId: string, type: NotificationType): Promise<Set<string>> {
+    const ids = new Set<string>();
     for (const r of this.rows.values()) {
-      if (r.tenantId === tenantId && r.notificationType === notificationType && !r.enabled) {
-        muted.add(r.userId);
+      if (r.tenantId === tenantId && r.notificationType === type && !r.enabled) {
+        ids.add(r.userId);
       }
     }
-    return muted;
+    return ids;
   }
 }

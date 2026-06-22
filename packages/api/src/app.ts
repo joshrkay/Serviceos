@@ -92,9 +92,6 @@ import { createNotificationPreferencesRouter } from './routes/notification-prefe
 import { userIdsWithPermissionResolver } from './notifications/user-targeting';
 import { setOwnerNotifications } from './notifications/owner-notifications-instance';
 import { setOwnerNotificationNameResolvers } from './notifications/owner-notification-name-resolver';
-import { createNotificationPreferencesRouter } from './routes/notification-preferences';
-import { InMemoryNotificationPreferenceRepository } from './notifications/notification-preferences-service';
-import { PgNotificationPreferenceRepository } from './notifications/pg-notification-preferences-repository';
 import {
   TechnicianAssignmentNotifier,
   setTechnicianAssignmentNotifier,
@@ -1873,8 +1870,10 @@ export function createApp(): express.Express {
     thankYouSms: 590016,
     setupReminder: 590017,
     trialReminder: 590018,
-    // Epic 12.6 — weekly feedback email sweep (590017/590018 taken by main).
-    weeklyFeedback: 590019,
+    // §5.5 — schedule proposal cards expire after 48h.
+    proposalExpiry: 590019,
+    // Epic 12.6 — weekly feedback email sweep (590019 taken by proposalExpiry on main).
+    weeklyFeedback: 590020,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
