@@ -5030,6 +5030,7 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_maintenance_contracts ON maintenance_contracts
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
+
   // Onboarding email lifecycle (welcome / setup-reminder / trial-ending).
   //   1. tenants.trial_ends_at — cached mirror of the Stripe subscription's
   //      trial_end, written by the customer.subscription.* webhook alongside
@@ -5086,12 +5087,26 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS auth_token_secondary_enc TEXT;
   `,
 
+  // Epic 5.1 — canonical seven-state job lifecycle. The original CREATE TABLE
+  // (016) constrained jobs.status to five states; this widens the CHECK to the
+  // full canonical set by adding 'dispatched', 'invoiced', and 'closed'. It is a
+  // pure superset of the old set, so every existing row already satisfies it —
+  // no data backfill is needed. The named ADD CONSTRAINT is made re-run-safe by
+  // getMigrationSQL's DROP-CONSTRAINT rewriter (which targets the constraint
+  // name PostgreSQL auto-assigned to the inline CHECK, `jobs_status_check`).
+  // This is the authoritative jobs.status CHECK; status.test.ts pins it against
+  // jobStatusSchema.
+  '207_jobs_status_canonical_lifecycle': `
+    ALTER TABLE jobs
+      ADD CONSTRAINT jobs_status_check
+      CHECK (status IN ('new', 'scheduled', 'dispatched', 'in_progress', 'completed', 'invoiced', 'closed', 'canceled'));
+  `,
+
   // Story 10.5 — tenant-scoped customer message templates with `{{variable}}`
   // placeholders. Distinct from estimate_templates (estimate copy); these are
   // reusable SMS/email texts shared by the agent draft path and humans.
-  // (Renumbered 204→207 to resolve a migration-number collision with main's
-  // 204/205/206 when this branch merged main.)
-  '207_create_message_templates': `
+  // (Renumbered to clear migration-number collisions with main on merge.)
+  '208_create_message_templates': `
     CREATE TABLE IF NOT EXISTS message_templates (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -5117,9 +5132,9 @@ export const MIGRATIONS = {
 
   // Story 10.2 — tenant-configurable reminder cadence. Hours-before-start at
   // which an appointment reminder fires (e.g. [24, 2]). Default [24] preserves
-  // the legacy single T-24h reminder exactly. (Renumbered 205→208 for the
-  // same merge collision noted above.)
-  '208_tenant_settings_reminder_offsets': `
+  // the legacy single T-24h reminder exactly. (Renumbered to clear the same
+  // merge collision noted above.)
+  '209_tenant_settings_reminder_offsets': `
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS appointment_reminder_offsets_hours JSONB NOT NULL DEFAULT '[24]'::jsonb;
   `,

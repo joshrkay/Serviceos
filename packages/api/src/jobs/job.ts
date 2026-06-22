@@ -3,7 +3,23 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
 import { buildOriginationMetadata } from '../leads/attribution-metadata';
 
-export type JobStatus = 'new' | 'scheduled' | 'in_progress' | 'completed' | 'canceled';
+/**
+ * Epic 5.1 — canonical job lifecycle. Stored identifiers; the product labels
+ * `new` as "Requested" and `completed` as "Complete" (tenant labels may
+ * override). `dispatched`, `invoiced`, and `closed` complete the canonical
+ * progression; `canceled` is a lateral terminal state. Kept in lockstep with
+ * jobStatusSchema (packages/shared) and the jobs.status CHECK (schema.ts);
+ * status.test.ts fails CI on drift.
+ */
+export type JobStatus =
+  | 'new'
+  | 'scheduled'
+  | 'dispatched'
+  | 'in_progress'
+  | 'completed'
+  | 'invoiced'
+  | 'closed'
+  | 'canceled';
 export type JobPriority = 'low' | 'normal' | 'high' | 'urgent';
 
 /**

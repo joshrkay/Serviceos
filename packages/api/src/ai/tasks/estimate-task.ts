@@ -11,6 +11,18 @@ import {
   resolveLineItems,
   UNCATALOGUED_CONFIDENCE_CAP,
 } from '../resolution/catalog-resolver';
+import {
+  detectEstimateAmbiguities,
+  decideEstimateClarification,
+  EstimateDraftSignals,
+} from '../clarification/estimate-clarification';
+
+/**
+ * Story 7.2 — confidence ceiling for a draft that still has open clarifications
+ * or was flagged for review at the loop cap. Sits well below every auto-approve
+ * threshold so such a draft always lands in 'draft' for a human to review.
+ */
+const CLARIFICATION_REVIEW_CONFIDENCE_CAP = 0.5;
 
 const ESTIMATE_SYSTEM_PROMPT = `You are an estimate generation assistant for a field service company.
 Given the conversation context and entity information, generate a structured estimate.
@@ -132,6 +144,55 @@ export class EstimateTaskHandler implements TaskHandler {
       // Money-correctness gate: an AI-invented price must never ride a
       // ≥0.9 confidence score into autonomous auto-approval.
       confidenceScore = Math.min(confidenceScore, UNCATALOGUED_CONFIDENCE_CAP);
+    }
+
+    // Story 7.2 — clarifying-questions policy. Detect what's ambiguous about
+    // this draft and decide whether to ask (under the 3-loop cap) or finalize.
+    // The questions + loop state ride on the payload for the voice/UI layer to
+    // ask and re-draft; here we enforce the money gate: an ambiguous draft, or
+    // one flagged at the cap, has its confidence capped so it can never
+    // auto-approve — a human reviews it.
+    const lineItemSignals = (Array.isArray(payload.lineItems)
+      ? (payload.lineItems as Array<Record<string, unknown>>)
+      : []
+    ).map((li) => ({
+      description: String(li.description ?? ''),
+      quantity: typeof li.quantity === 'number' ? li.quantity : undefined,
+      unitPriceCents: typeof li.unitPrice === 'number' ? li.unitPrice : undefined,
+      pricingSource: typeof li.pricingSource === 'string' ? li.pricingSource : undefined,
+    }));
+    const draftSignals: EstimateDraftSignals = {
+      description: context.message ?? '',
+      hasCustomer: Boolean(
+        payload.customerId ||
+          context.customerId ||
+          (context.existingEntities &&
+            (context.existingEntities as Record<string, unknown>).customerId),
+      ),
+      lineItems: lineItemSignals,
+      ambiguousCatalogFields: catalogOutcome?.missingFields,
+    };
+    const ambiguities = detectEstimateAmbiguities(draftSignals);
+    const clarification = decideEstimateClarification({
+      clarificationCount: context.clarificationCount ?? 0,
+      ambiguities,
+    });
+    payload.clarification = {
+      needed: clarification.action === 'clarify',
+      questions: clarification.questions,
+      loopCount: clarification.loopCount,
+      capped: clarification.capped,
+      flaggedForReview: clarification.flaggedForReview,
+      ambiguityCodes: ambiguities.map((a) => a.code),
+    };
+    if (clarification.flaggedForReview) {
+      confidenceScore = Math.min(confidenceScore, CLARIFICATION_REVIEW_CONFIDENCE_CAP);
+      confidenceFactors.push('flagged_for_review');
+    } else if (clarification.action === 'clarify') {
+      // Open questions remain — keep the best-effort draft out of auto-approve
+      // until they're answered.
+      confidenceScore = Math.min(confidenceScore, CLARIFICATION_REVIEW_CONFIDENCE_CAP);
+      confidenceFactors.push('clarification_pending');
     }
 
     // RV-007 — Confidence Marker `_meta`. Overall level is the mapped

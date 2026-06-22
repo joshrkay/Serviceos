@@ -164,6 +164,8 @@ import { InMemoryTagRepository } from './customers/tag';
 import { PgTagRepository } from './customers/pg-tag';
 import { InMemoryCustomFieldRepository } from './customers/custom-field';
 import { PgCustomFieldRepository } from './customers/pg-custom-field';
+import { InMemoryCustomerMergeRepository } from './customers/merge';
+import { PgCustomerMergeRepository } from './customers/pg-merge';
 import { createCustomerCustomFieldRouter } from './routes/customer-custom-fields';
 import { InMemoryLeadRepository } from './leads/lead';
 import { InMemoryLocationRepository } from './locations/location';
@@ -510,6 +512,7 @@ import { runAppointmentReminderSweep } from './workers/appointment-reminder-work
 import { runHoldReaperSweep } from './workers/hold-reaper-worker';
 import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
 import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
+import { runProposalExpirySweep } from './workers/proposal-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import {
@@ -897,6 +900,11 @@ export function createApp(): express.Express {
   // U2 (CRM Jobber parity) — customer tags + tenant-defined custom fields.
   const customerTagRepo     = pool ? new PgTagRepository(pool)           : new InMemoryTagRepository();
   const customerCustomFieldRepo = pool ? new PgCustomFieldRepository(pool) : new InMemoryCustomFieldRepository();
+  // Story 4.6 — customer merge. Pg re-parents child rows + archives the loser
+  // in one transaction; the no-DB dev path only archives (no child tables).
+  const customerMergeRepo = pool
+    ? new PgCustomerMergeRepository(pool)
+    : new InMemoryCustomerMergeRepository(customerRepo);
   // N-003 (P2-036) — caller LTV/recency for the negotiation guardrail callback.
   const customerNegotiationContextProvider = pool
     ? new PgCustomerNegotiationContextProvider(pool)
@@ -1835,6 +1843,8 @@ export function createApp(): express.Express {
     thankYouSms: 590016,
     setupReminder: 590017,
     trialReminder: 590018,
+    // §5.5 — schedule proposal cards expire after 48h.
+    proposalExpiry: 590019,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -3401,10 +3411,23 @@ export function createApp(): express.Express {
     createCustomerRouter(
       customerRepo,
       auditRepo,
-      undefined,
+      // P9-002 / Story 4.9 — wire the unified customer timeline so
+      // GET /api/customers/:id/timeline (consumed by the web
+      // CommunicationTimeline) resolves instead of quietly 404ing.
+      {
+        noteRepo,
+        jobRepo,
+        jobTimelineRepo: timelineRepo,
+        estimateRepo,
+        invoiceRepo,
+        paymentRepo,
+        conversationRepo,
+        appointmentRepo,
+      },
       customerContactRepo,
       customerTagRepo,
-      customerCustomFieldRepo
+      customerCustomFieldRepo,
+      customerMergeRepo
     )
   );
   app.use(
@@ -3632,6 +3655,7 @@ export function createApp(): express.Express {
       { docRevisionRepo: documentRevisionRepo, editDeltaRepo: deltaRepo },
       paymentRepo,
       agreementRepo,
+      templateRepo,
     ),
   );
   app.use(
@@ -4610,6 +4634,34 @@ export function createApp(): express.Express {
       });
     }).catch((err) => {
       estimateExpiryLogger.error('Estimate-expiry sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 60 * 60_000));
+
+  // §5.5 Proposal-expiry worker — transitions schedule proposal cards
+  // (create_appointment / create_booking / reschedule_appointment) past their
+  // 48h `expiresAt` to 'expired' so stale bookings don't linger in the inbox.
+  // Every other proposal type carries no expiry and is untouched. Hourly; no
+  // SendService dependency (it only changes status).
+  const proposalExpiryLogger = createLogger({
+    service: 'proposal-expiry-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.proposalExpiry, async () => {
+      await runProposalExpirySweep({
+        proposalRepo,
+        auditRepo,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        logger: proposalExpiryLogger,
+      });
+    }).catch((err) => {
+      proposalExpiryLogger.error('Proposal-expiry sweep failed', {
         error: err instanceof Error ? err.message : String(err),
       });
     });

@@ -2,7 +2,12 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { createEstimateSchema } from '../shared/contracts';
+import { createEstimateSchema, verticalTypeSchema } from '../shared/contracts';
+import {
+  EstimateTemplateRepository,
+  createTemplate,
+  buildTemplateInputFromEstimate,
+} from '../templates/estimate-template';
 import { toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
@@ -93,6 +98,10 @@ export function createEstimateRouter(
   // estimate for a customer with an active discounting membership has that
   // discount folded in automatically. Optional so legacy harnesses build.
   agreementRepo?: AgreementRepository,
+  // Estimate templates (#7.9). When wired, mounts POST /:id/save-as-template,
+  // which turns an existing estimate into a reusable, tenant-scoped template.
+  // Optional so legacy harnesses build (the route returns 503 when absent).
+  templateRepo?: EstimateTemplateRepository,
 ): Router {
   const router = Router();
 
@@ -223,6 +232,7 @@ export function createEstimateRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const jobId = typeof req.query.jobId === 'string' ? req.query.jobId : undefined;
+        const customerId = typeof req.query.customerId === 'string' ? req.query.customerId : undefined;
         const status = typeof req.query.status === 'string' ? req.query.status as EstimateStatus : undefined;
         const search = typeof req.query.search === 'string' ? req.query.search : undefined;
         const sort: 'asc' | 'desc' = req.query.sort === 'asc' ? 'asc' : 'desc';
@@ -231,6 +241,7 @@ export function createEstimateRouter(
         // Preserves the existing UI contract for `?jobId=...` consumers.
         if (
           jobId &&
+          customerId === undefined &&
           status === undefined &&
           search === undefined &&
           req.query.paginated !== 'true' &&
@@ -266,7 +277,29 @@ export function createEstimateRouter(
           return;
         }
 
-        const baseOptions = { status, jobId, search, sort };
+        // Customer filter (Story 7.10). Estimates carry only job_id, so
+        // translate a customerId into the customer's jobIds and filter on
+        // those. Both queries are tenant-scoped (RLS + explicit tenant_id).
+        let jobIds: string[] | undefined;
+        if (customerId !== undefined) {
+          if (!jobRepo?.findByCustomer) {
+            res.status(400).json({
+              error: 'VALIDATION_ERROR',
+              message: 'Customer filtering is not available in this environment',
+            });
+            return;
+          }
+          const customerJobs = await jobRepo.findByCustomer(req.auth!.tenantId, customerId);
+          jobIds = customerJobs.map((j) => j.id);
+          if (jobIds.length === 0) {
+            // The customer has no jobs → no estimates. Return the empty shape
+            // matching the requested response form.
+            res.json(wantsPaginated ? { data: [], total: 0 } : []);
+            return;
+          }
+        }
+
+        const baseOptions = { status, jobId, jobIds, search, sort };
 
         if (wantsPaginated) {
           const result = await listEstimatesWithMeta(req.auth!.tenantId, estimateRepo, {
@@ -300,6 +333,42 @@ export function createEstimateRouter(
           return;
         }
         res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  // GET /:id/history — edit/revision history for the detail view (Story
+  // 7.10). Returns the recorded edit deltas (what changed between persisted
+  // versions) newest-last. 503 when the revision subsystem isn't wired.
+  router.get(
+    '/:id/history',
+    requireAuth,
+    requireTenant,
+    requirePermission('estimates:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!revisionDeps?.editDeltaRepo) {
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Estimate history is not configured for this environment',
+          });
+          return;
+        }
+        // Tenant-ownership check: only surface history for an estimate the
+        // caller can actually see.
+        const estimate = await getEstimate(req.auth!.tenantId, req.params.id, estimateRepo);
+        if (!estimate) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
+          return;
+        }
+        const history = await revisionDeps.editDeltaRepo.findByEstimate(
+          req.auth!.tenantId,
+          req.params.id,
+        );
+        res.json(history);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
@@ -428,6 +497,59 @@ export function createEstimateRouter(
           return;
         }
         res.status(201).json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  // POST /:id/save-as-template — turn an existing estimate into a reusable,
+  // tenant-scoped template (Story 7.9). The server fills the template's line
+  // items, discount, tax rate, and customer message from the estimate; the
+  // caller supplies the template's name + classification. The canonical
+  // estimate is unchanged.
+  const saveAsTemplateSchema = z.object({
+    name: z.string().min(1).max(255),
+    verticalType: verticalTypeSchema,
+    categoryId: z.string().min(1),
+    description: z.string().max(1000).optional(),
+  });
+
+  router.post(
+    '/:id/save-as-template',
+    requireAuth,
+    requireTenant,
+    requirePermission('estimates:create'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!templateRepo) {
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Estimate templates are not configured for this environment',
+          });
+          return;
+        }
+        const parsed = saveAsTemplateSchema.parse(req.body ?? {});
+        const estimate = await getEstimate(req.auth!.tenantId, req.params.id, estimateRepo);
+        if (!estimate) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
+          return;
+        }
+        const template = await createTemplate(
+          buildTemplateInputFromEstimate(estimate, {
+            tenantId: req.auth!.tenantId,
+            name: parsed.name,
+            verticalType: parsed.verticalType,
+            categoryId: parsed.categoryId,
+            description: parsed.description,
+            createdBy: req.auth!.userId,
+          }),
+          templateRepo,
+          auditRepo,
+          req.auth!.role ?? undefined,
+        );
+        res.status(201).json(template);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

@@ -10,8 +10,11 @@ export { formatCurrency } from './currency';
 export const JOB_STATUS_MAP: Record<string, string> = {
   new:          'New',
   scheduled:    'Scheduled',
+  dispatched:   'Dispatched',
   in_progress:  'In Progress',
   completed:    'Completed',
+  invoiced:     'Invoiced',
+  closed:       'Closed',
   canceled:     'Canceled',
 };
 

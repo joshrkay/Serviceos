@@ -116,6 +116,7 @@ const OPEN_INVOICE_STATUSES: ReadonlySet<InvoiceStatus> = new Set([
 const ACTIVE_JOB_STATUSES: ReadonlySet<JobStatus> = new Set([
   'new',
   'scheduled',
+  'dispatched',
   'in_progress',
 ]);
 
