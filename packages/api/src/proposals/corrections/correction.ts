@@ -10,7 +10,7 @@
  * (src/learning/corrections): that captures conservative, cascading config
  * lessons (labor rate / SKU price / banned phrase / scope) only on succeeded
  * execution. This captures the unfiltered edit deltas at edit time. The repo
- * persists `corrections` (tenant_id + FORCE RLS, migration 208); a mocked Pool
+ * persists `corrections` (tenant_id + FORCE RLS, migration 209); a mocked Pool
  * is NOT proof the columns exist — the Docker-gated integration test pins them.
  */
 import { randomUUID } from 'crypto';
