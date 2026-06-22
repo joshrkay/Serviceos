@@ -12,6 +12,8 @@ import { undoCorrectionLesson } from '../learning/corrections/apply-undo';
 import type { CorrectionLessonRepository } from '../learning/corrections/correction-lesson';
 import type { ConfigPorts } from '../learning/corrections/lesson-applicator';
 import { createLogger } from '../logging/logger';
+import { computeCorrections } from './corrections/correction';
+import type { CorrectionRepository } from './corrections/correction';
 
 const logger = createLogger({
   service: 'proposals.actions',
@@ -542,6 +544,10 @@ export async function editProposal(
   actorRole: Role,
   edits: Record<string, unknown>,
   auditRepo?: AuditRepository,
+  // Story 3.9 — when supplied, every changed field is logged to the corrections
+  // table (intent + field + before/after) as the training signal for prompt/
+  // routing improvement. Capture is failure-soft (see below).
+  correctionRepo?: CorrectionRepository,
 ): Promise<{ proposal: Proposal; editedFields: string[] }> {
   if (!hasPermission(actorRole, 'proposals:edit')) {
     throw new ForbiddenError();
@@ -593,6 +599,33 @@ export async function editProposal(
         },
       }),
     );
+  }
+
+  // Story 3.9 — capture each changed field as a correction row keyed by intent
+  // (the proposal type). Failure-soft: the payload is already written, so a
+  // capture failure is logged and swallowed rather than 500-ing the edit after
+  // a successful write (corrections are an analytics signal, not user state).
+  if (correctionRepo && editedFields.length > 0) {
+    try {
+      const corrections = computeCorrections({
+        tenantId,
+        proposalId: updated.id,
+        intent: updated.proposalType,
+        actorId,
+        fields: editedFields,
+        before: proposal.payload,
+        after: updatedPayload,
+      });
+      if (corrections.length > 0) {
+        await correctionRepo.recordMany(corrections);
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('editProposal: correction capture failed', {
+        proposalId: updated.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   return { proposal: updated, editedFields };

@@ -15,6 +15,8 @@ import {
   CLASSIFIER_CONFIDENCE_THRESHOLD,
   parseClassifierJson,
   isLookupIntent,
+  isInventoryLoggingPhrasing,
+  INTENT_TAXONOMY_VERSION,
 } from '../../../src/ai/orchestration/intent-classifier';
 import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import { formatVerticalForCallerPrompt } from '../../../src/verticals/context-assembly';
@@ -921,5 +923,97 @@ describe('intent-classifier — lookup_job_profit (P22-005)', () => {
       expect(result.intentType).toBe('lookup_job_profit');
       expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
     }
+  });
+});
+
+describe('Story 3.4 — versioned intent taxonomy', () => {
+  const tenantId = 'tenant-1';
+
+  it('exposes a semver-shaped taxonomy version', () => {
+    expect(INTENT_TAXONOMY_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  it('stamps the taxonomy version on a successful classification', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.92 }),
+    );
+    const result = await classifyIntent('invoice Acme for $200', { tenantId }, gateway);
+    expect(result.intentType).toBe('create_invoice');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+  });
+
+  it('stamps the version on the empty-transcript short-circuit (no gateway call)', async () => {
+    const gateway = mockGateway('{}');
+    const result = await classifyIntent('   ', { tenantId }, gateway);
+    expect(result.intentType).toBe('unknown');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+    expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it('stamps the version on the low-confidence → unknown path', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.2 }),
+    );
+    const result = await classifyIntent('mumble mumble', { tenantId }, gateway);
+    expect(result.intentType).toBe('unknown');
+    expect(result.unknownReason).toBe('low_confidence');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+  });
+});
+
+describe('Story 3.4 — "log inventory" maps to expense logging', () => {
+  const tenantId = 'tenant-1';
+
+  it('recognizes inventory-LOGGING phrasings but not stock QUERIES', () => {
+    expect(isInventoryLoggingPhrasing('log inventory: 20 feet of copper pipe')).toBe(true);
+    expect(isInventoryLoggingPhrasing('record stock intake from the supply run')).toBe(true);
+    expect(isInventoryLoggingPhrasing('received new stock today')).toBe(true);
+    expect(isInventoryLoggingPhrasing('add this to inventory')).toBe(true);
+    // Queries must NOT be treated as logging.
+    expect(isInventoryLoggingPhrasing('how much stock is left')).toBe(false);
+    expect(isInventoryLoggingPhrasing('check inventory for the Smith job')).toBe(false);
+    expect(isInventoryLoggingPhrasing("what's in stock")).toBe(false);
+    expect(isInventoryLoggingPhrasing('create an invoice for Acme')).toBe(false);
+  });
+
+  it('maps an inventory-logging utterance to log_expense even when the LLM punts', async () => {
+    const gateway = mockGateway(JSON.stringify({ intentType: 'unknown', confidence: 0.4 }));
+    const result = await classifyIntent('log inventory: 20 feet of copper pipe', { tenantId }, gateway);
+    expect(result.intentType).toBe('log_expense');
+    expect(result.confidence).toBeGreaterThanOrEqual(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    expect(result.extractedEntities?.expenseCategory).toBe('materials');
+    expect(result.taxonomyVersion).toBe(INTENT_TAXONOMY_VERSION);
+  });
+
+  it('preserves an LLM-extracted amount and existing category when mapping', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'add_note',
+        confidence: 0.7,
+        extractedEntities: { amount: 5500, expenseCategory: 'tools' },
+      }),
+    );
+    const result = await classifyIntent('record stock intake — a new drill, 55 dollars', { tenantId }, gateway);
+    expect(result.intentType).toBe('log_expense');
+    expect(result.extractedEntities?.amount).toBe(5500);
+    // Pre-existing category is respected, not overwritten with 'materials'.
+    expect(result.extractedEntities?.expenseCategory).toBe('tools');
+  });
+
+  it('does not override a stock QUERY', async () => {
+    const gateway = mockGateway(JSON.stringify({ intentType: 'lookup_catalog', confidence: 0.9 }));
+    const result = await classifyIntent('how much copper stock is left', { tenantId }, gateway);
+    expect(result.intentType).toBe('lookup_catalog');
+  });
+
+  it('leaves a genuine log_expense classification untouched', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'log_expense', confidence: 0.95, extractedEntities: { amount: 4000 } }),
+    );
+    const result = await classifyIntent('add a 40 dollar fuel expense', { tenantId }, gateway);
+    expect(result.intentType).toBe('log_expense');
+    // Not remapped through the inventory override (which stamps an inventory reason).
+    expect(result.reasoning ?? '').not.toMatch(/inventory/i);
+    expect(result.extractedEntities?.amount).toBe(4000);
   });
 });

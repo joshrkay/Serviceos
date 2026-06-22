@@ -5129,6 +5129,40 @@ export const MIGRATIONS = {
       ADD CONSTRAINT jobs_status_check
       CHECK (status IN ('new', 'scheduled', 'dispatched', 'in_progress', 'completed', 'invoiced', 'closed', 'canceled'));
   `,
+
+  '209_create_corrections': `
+    -- Story 3.9 (correction capture) — a RAW, per-field edit log: every field a
+    -- user changes on a proposal writes one row (intent + field + before/after).
+    -- This is DISTINCT from correction_lessons (migration 185): that table holds
+    -- conservative, cascading config "lessons" (labor rate, SKU price, banned
+    -- phrase, scope) recorded only on succeeded execution and queryable by
+    -- day/source-proposal. This table is the unfiltered training signal that
+    -- feeds prompt/routing improvement, queryable per tenant AND per intent.
+    -- intent = the proposal_type that was corrected (maps to the intent taxonomy).
+    -- before/after are JSONB so any payload value shape round-trips losslessly.
+    -- Tenant-scoped with FORCE RLS like every other tenant table.
+    CREATE TABLE IF NOT EXISTS corrections (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID NOT NULL,
+      intent TEXT NOT NULL,
+      field TEXT NOT NULL,
+      before_value JSONB,
+      after_value JSONB,
+      actor_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_corrections_tenant
+      ON corrections(tenant_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_corrections_intent
+      ON corrections(tenant_id, intent, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_corrections_proposal
+      ON corrections(tenant_id, proposal_id);
+    ALTER TABLE corrections ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE corrections FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_corrections ON corrections
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
