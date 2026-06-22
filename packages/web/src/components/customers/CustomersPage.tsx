@@ -9,6 +9,7 @@ import type { ServiceType } from '../../data/mock-data';
 import type { Customer, CustomerListItem } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useMutation } from '../../hooks/useMutation';
+import { useEntityLabels } from '../../hooks/useEntityLabels';
 import { nameSimilarity, FUZZY_NAME_THRESHOLD } from '../../utils/name-similarity';
 import { Spinner, EmptyState } from '../ui';
 import { ErrorState } from '../ErrorState';
