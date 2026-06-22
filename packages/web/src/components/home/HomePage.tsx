@@ -300,10 +300,13 @@ export function HomePage() {
     return () => { active = false; };
   }, []);
 
-  const jobsQuery = useListQuery<ApiJob>('/api/jobs', { filters: { scheduledDate: today } });
-  const estimatesQuery = useListQuery<ApiEstimate>('/api/estimates', { filters: { status: 'sent' } });
-  const invoicesQuery = useListQuery<ApiInvoice>('/api/invoices', { filters: { status: 'open' } });
-  const leadsQuery = useListQuery<ApiLead>('/api/leads', { filters: { limit: '50' } });
+  // Epic 12.2 — the home dashboard auto-refreshes the "today" panels so the
+  // owner sees new jobs/estimates/invoices/leads without a manual reload.
+  const LIVE_REFETCH_MS = 60_000;
+  const jobsQuery = useListQuery<ApiJob>('/api/jobs', { filters: { scheduledDate: today }, refetchInterval: LIVE_REFETCH_MS });
+  const estimatesQuery = useListQuery<ApiEstimate>('/api/estimates', { filters: { status: 'sent' }, refetchInterval: LIVE_REFETCH_MS });
+  const invoicesQuery = useListQuery<ApiInvoice>('/api/invoices', { filters: { status: 'open' }, refetchInterval: LIVE_REFETCH_MS });
+  const leadsQuery = useListQuery<ApiLead>('/api/leads', { filters: { limit: '50' }, refetchInterval: LIVE_REFETCH_MS });
   const leads = leadsQuery.data ?? [];
 
   const todayJobs    = jobsQuery.data.filter(j => normalizeJobStatus(j.status) !== 'Canceled');
