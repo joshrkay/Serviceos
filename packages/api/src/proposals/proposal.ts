@@ -77,14 +77,7 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
  * types that put a specific time on the calendar (the booking/reschedule cards
  * a contractor reviews) — if not acted on they go stale: the slot may pass or
  * be taken, so a silently-lingering one could be approved into a conflict.
- * Every OTHER proposal type persists indefinitely (its `expiresAt` is left
- * unset). This list is the single source of truth for the expiry policy.
- *
- * Note: the product also speaks of "message schedule" proposals, but the live
- * stack has no distinct scheduled-message proposal type — outbound messages
- * (send_estimate/send_invoice/etc.) are comms proposals that intentionally
- * persist until an operator acts. If a scheduled-message type is added later,
- * add it here.
+ * This list is the single source of truth for the schedule expiry policy.
  */
 export const SCHEDULE_PROPOSAL_TYPES: readonly ProposalType[] = [
   'create_appointment',
@@ -92,21 +85,85 @@ export const SCHEDULE_PROPOSAL_TYPES: readonly ProposalType[] = [
   'reschedule_appointment',
 ];
 
-/** §5.5 — 48 hours, in milliseconds. */
-export const SCHEDULE_PROPOSAL_EXPIRY_MS = 48 * 60 * 60 * 1000;
+/**
+ * §10.4 / interaction-model §10 — most outbound *message* proposals also expire
+ * after 48h (re-proposable), exactly like schedule cards. These are the
+ * customer-facing comms a contractor reviews before anything is sent; left
+ * unacted they go stale (a 2-day-late "running late" text or feedback ask is
+ * wrong), so they lapse rather than linger.
+ *
+ * EXCEPTION: comms raised exactly-once by an automated sweep that marks its step
+ * "done" on raise (not on send) are kept PERSISTENT (see
+ * PERSISTENT_COMMS_PROPOSAL_TYPES) — expiring their proposal would permanently
+ * drop the action, because the sweep never re-raises it.
+ *
+ * Every comms type must be classified as either expiring (here) or persistent;
+ * a unit test (proposal.test.ts §10.4 drift guard) asserts the two lists
+ * partition the 'comms' action class exactly, so a new comms type added to
+ * `actionClassForProposalType` cannot silently skip the decision.
+ *
+ * This SUPERSEDES the earlier blanket decision that comms proposals persist
+ * indefinitely; see docs/decisions/2026-06-22-message-proposal-expiry.md.
+ */
+export const MESSAGE_PROPOSAL_TYPES: readonly ProposalType[] = [
+  'notify_delay',
+  'request_feedback',
+  'send_invoice',
+  'send_estimate',
+  'send_estimate_nudge',
+];
+
+/**
+ * §10.4 exception — comms proposals an automated, once-only sweep raises and
+ * marks "done" on raise; their proposal must PERSIST until an operator acts,
+ * because 48h expiry would permanently drop the action:
+ *   - `send_payment_reminder` — `overdue-invoice-worker` records the dunning
+ *     ledger row BEFORE creating the proposal (one per invoice/step, ever), so
+ *     an expired reminder is never re-raised and the customer is never reminded.
+ *   - `review_response_proposal` — `google-reviews` emits once per review (the
+ *     review's `inserted` flag + a permanent idempotency key), so an expired
+ *     draft would leave the review unanswered by the automated path.
+ * See docs/decisions/2026-06-22-message-proposal-expiry.md.
+ */
+export const PERSISTENT_COMMS_PROPOSAL_TYPES: readonly ProposalType[] = [
+  'send_payment_reminder',
+  'review_response_proposal',
+];
+
+/**
+ * The proposal types that carry a 48h TTL: schedule (§5.5) + message (§10.4).
+ * Every OTHER type persists indefinitely (its `expiresAt` is left unset).
+ */
+export const EXPIRING_PROPOSAL_TYPES: readonly ProposalType[] = [
+  ...SCHEDULE_PROPOSAL_TYPES,
+  ...MESSAGE_PROPOSAL_TYPES,
+];
+
+/** §5.5/§10.4 — 48 hours, in milliseconds (shared by schedule + message). */
+export const PROPOSAL_EXPIRY_MS = 48 * 60 * 60 * 1000;
 
 export function isScheduleProposalType(type: ProposalType): boolean {
   return SCHEDULE_PROPOSAL_TYPES.includes(type);
 }
 
+export function isMessageProposalType(type: ProposalType): boolean {
+  return MESSAGE_PROPOSAL_TYPES.includes(type);
+}
+
+/** A proposal that lapses after 48h — schedule (§5.5) or message (§10.4). */
+export function isExpiringProposalType(type: ProposalType): boolean {
+  return isScheduleProposalType(type) || isMessageProposalType(type);
+}
+
 /**
- * §5.5 Default expiry for a newly created proposal: schedule proposals get a
- * 48-hour TTL from `now`; everything else persists (returns undefined). An
- * explicit `expiresAt` supplied by the caller always takes precedence.
+ * §5.5/§10.4 Default expiry for a newly created proposal: schedule and message
+ * proposals get a 48-hour TTL from `now`; everything else persists (returns
+ * undefined). An explicit `expiresAt` supplied by the caller always takes
+ * precedence.
  */
 export function defaultProposalExpiry(type: ProposalType, now: Date): Date | undefined {
-  return isScheduleProposalType(type)
-    ? new Date(now.getTime() + SCHEDULE_PROPOSAL_EXPIRY_MS)
+  return isExpiringProposalType(type)
+    ? new Date(now.getTime() + PROPOSAL_EXPIRY_MS)
     : undefined;
 }
 
@@ -504,13 +561,14 @@ export interface ProposalRepository {
   findByTenant(tenantId: string): Promise<Proposal[]>;
   findByStatus(tenantId: string, status: ProposalStatus): Promise<Proposal[]>;
   /**
-   * §5.5 — expired proposals of the given types that lapsed on/after `since`,
-   * newest first, capped at `limit`. Bounds the inbox's re-proposable list in
-   * the DB (WHERE + ORDER BY + LIMIT) instead of fetching every expired row and
-   * trimming in memory. Optional so legacy fakes still satisfy the interface;
-   * callers fall back to findByStatus + in-memory filtering when it's absent.
+   * §5.5/§10.4 — expired proposals of the given types that lapsed on/after
+   * `since`, newest first, capped at `limit`. Bounds the inbox's re-proposable
+   * list in the DB (WHERE + ORDER BY + LIMIT) instead of fetching every expired
+   * row and trimming in memory. Optional so legacy fakes still satisfy the
+   * interface; callers fall back to findByStatus + in-memory filtering when it's
+   * absent.
    */
-  findExpiredScheduleProposals?(
+  findExpiredProposalsByType?(
     tenantId: string,
     proposalTypes: readonly ProposalType[],
     since: Date,
@@ -708,8 +766,8 @@ export function createProposal(input: CreateProposalInput): Proposal {
     targetEntityType: input.targetEntityType,
     targetEntityId: input.targetEntityId,
     idempotencyKey: input.idempotencyKey,
-    // §5.5 — schedule proposals default to a 48h TTL; an explicit caller
-    // value always wins, and non-schedule types stay unset (persist).
+    // §5.5/§10.4 — schedule + message proposals default to a 48h TTL; an
+    // explicit caller value always wins, and other types stay unset (persist).
     expiresAt: input.expiresAt ?? defaultProposalExpiry(input.proposalType, now),
     chainId: input.chainId,
     approvedAt,
@@ -792,7 +850,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
       .map((p) => ({ ...p }));
   }
 
-  async findExpiredScheduleProposals(
+  async findExpiredProposalsByType(
     tenantId: string,
     proposalTypes: readonly ProposalType[],
     since: Date,

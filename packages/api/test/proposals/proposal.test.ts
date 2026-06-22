@@ -7,6 +7,11 @@ import {
   Proposal,
   decideInitialStatus,
   actionClassForProposalType,
+  SCHEDULE_PROPOSAL_TYPES,
+  MESSAGE_PROPOSAL_TYPES,
+  PERSISTENT_COMMS_PROPOSAL_TYPES,
+  EXPIRING_PROPOSAL_TYPES,
+  VALID_PROPOSAL_TYPES,
 } from '../../src/proposals/proposal';
 import { ConflictError } from '../../src/shared/errors';
 
@@ -651,8 +656,17 @@ describe('§5.5 — schedule proposals carry a 48h expiry at creation', () => {
     },
   );
 
-  it('leaves expiresAt unset for non-schedule proposal types (they persist)', () => {
-    for (const proposalType of ['draft_estimate', 'send_invoice', 'create_customer', 'record_payment'] as const) {
+  it('leaves expiresAt unset for non-expiring proposal types (they persist)', () => {
+    // Capture / money / irreversible (non-schedule, non-comms) types persist.
+    // send_invoice is intentionally NOT here anymore — it is a message proposal
+    // and now expires under §10.4 (covered by the §10.4 suite below).
+    for (const proposalType of [
+      'draft_estimate',
+      'create_customer',
+      'record_payment',
+      'cancel_appointment',
+      'log_expense',
+    ] as const) {
       const p = createProposal({
         tenantId: 'tenant-1',
         proposalType,
@@ -678,9 +692,86 @@ describe('§5.5 — schedule proposals carry a 48h expiry at creation', () => {
   });
 });
 
-describe('§5.5 — InMemoryProposalRepository.findExpiredScheduleProposals', () => {
+describe('§10.4 — message (outbound comms) proposals carry a 48h expiry at creation', () => {
+  const FORTY_EIGHT_H_MS = 48 * 60 * 60 * 1000;
+
+  it.each([...MESSAGE_PROPOSAL_TYPES])(
+    'defaults expiresAt to ~48h for message type %s',
+    (proposalType) => {
+      const before = Date.now();
+      const p = createProposal({
+        tenantId: 'tenant-1',
+        proposalType,
+        payload: {},
+        summary: 's',
+        createdBy: 'u1',
+      });
+      expect(p.expiresAt, `${proposalType} should expire`).toBeInstanceOf(Date);
+      const delta = p.expiresAt!.getTime() - before;
+      expect(delta).toBeGreaterThanOrEqual(FORTY_EIGHT_H_MS - 5000);
+      expect(delta).toBeLessThanOrEqual(FORTY_EIGHT_H_MS + 5000);
+    },
+  );
+
+  it('honors an explicit expiresAt over the message default', () => {
+    const explicit = new Date('2030-01-01T00:00:00Z');
+    const p = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'send_invoice',
+      payload: {},
+      summary: 's',
+      createdBy: 'u1',
+      expiresAt: explicit,
+    });
+    expect(p.expiresAt).toEqual(explicit);
+  });
+
+  // §10.4 exception: comms raised exactly-once by an automated sweep
+  // (send_payment_reminder via the dunning ledger; review_response_proposal via
+  // the review `inserted` flag) must PERSIST — expiring them would permanently
+  // drop the action, since the sweep never re-raises an expired card.
+  it('keeps automated once-only comms (PERSISTENT_COMMS_PROPOSAL_TYPES) unset', () => {
+    for (const proposalType of [...PERSISTENT_COMMS_PROPOSAL_TYPES]) {
+      const p = createProposal({
+        tenantId: 'tenant-1',
+        proposalType,
+        payload: {},
+        summary: 's',
+        createdBy: 'u1',
+      });
+      expect(p.expiresAt, `${proposalType} must persist`).toBeUndefined();
+    }
+  });
+
+  // Drift guard: the expiring (message) + persistent comms lists must PARTITION
+  // the 'comms' action class exactly — so a new outbound-message type added to
+  // `actionClassForProposalType` is forced into one bucket or the other and
+  // cannot silently skip the §10.4 expiry decision.
+  it('MESSAGE + PERSISTENT_COMMS partition the comms-class proposal types exactly', () => {
+    const commsTypes = VALID_PROPOSAL_TYPES.filter(
+      (t) => actionClassForProposalType(t) === 'comms',
+    );
+    expect(
+      [...MESSAGE_PROPOSAL_TYPES, ...PERSISTENT_COMMS_PROPOSAL_TYPES].sort(),
+    ).toEqual([...commsTypes].sort());
+    const overlap = MESSAGE_PROPOSAL_TYPES.filter((t) =>
+      PERSISTENT_COMMS_PROPOSAL_TYPES.includes(t),
+    );
+    expect(overlap).toEqual([]);
+  });
+
+  it('schedule and message expiry sets are disjoint and compose EXPIRING_PROPOSAL_TYPES', () => {
+    const overlap = SCHEDULE_PROPOSAL_TYPES.filter((t) => MESSAGE_PROPOSAL_TYPES.includes(t));
+    expect(overlap).toEqual([]);
+    expect([...EXPIRING_PROPOSAL_TYPES].sort()).toEqual(
+      [...SCHEDULE_PROPOSAL_TYPES, ...MESSAGE_PROPOSAL_TYPES].sort(),
+    );
+  });
+});
+
+describe('§5.5/§10.4 — InMemoryProposalRepository.findExpiredProposalsByType', () => {
   const NOW = Date.now();
-  const types = ['create_appointment', 'create_booking', 'reschedule_appointment'] as const;
+  const types = EXPIRING_PROPOSAL_TYPES;
 
   async function seedExpired(repo: InMemoryProposalRepository, opts: { type: ProposalType; ageMs: number; tenantId?: string }) {
     const p = createProposal({
@@ -695,22 +786,24 @@ describe('§5.5 — InMemoryProposalRepository.findExpiredScheduleProposals', ()
     return p;
   }
 
-  it('returns only schedule, in-window, this-tenant expired rows, newest-first and capped', async () => {
+  it('returns schedule + message, in-window, this-tenant expired rows, newest-first and capped', async () => {
     const repo = new InMemoryProposalRepository();
     const since = new Date(NOW - 7 * 24 * 60 * 60 * 1000);
     await seedExpired(repo, { type: 'create_appointment', ageMs: 60 * 60 * 1000 }); // 1h ago (recent)
+    await seedExpired(repo, { type: 'send_invoice', ageMs: 90 * 60 * 1000 }); // 1.5h ago (message — §10.4)
     await seedExpired(repo, { type: 'create_booking', ageMs: 2 * 60 * 60 * 1000 }); // 2h ago
     await seedExpired(repo, { type: 'reschedule_appointment', ageMs: 8 * 24 * 60 * 60 * 1000 }); // 8d ago (out of window)
     await seedExpired(repo, { type: 'create_appointment', ageMs: 30 * 60 * 1000, tenantId: 'other' }); // other tenant
 
-    const rows = await repo.findExpiredScheduleProposals('tenant-1', types, since, 10);
+    const rows = await repo.findExpiredProposalsByType('tenant-1', types, since, 10);
     expect(rows.map((r) => r.summary)).toEqual([
       'create_appointment@3600000', // 1h ago first (newest expiresAt)
-      'create_booking@7200000',     // 2h ago second
+      'send_invoice@5400000',       // 1.5h ago — message proposal surfaced too
+      'create_booking@7200000',     // 2h ago third
     ]);
 
     // limit is honored
-    const capped = await repo.findExpiredScheduleProposals('tenant-1', types, since, 1);
+    const capped = await repo.findExpiredProposalsByType('tenant-1', types, since, 1);
     expect(capped).toHaveLength(1);
     expect(capped[0].summary).toBe('create_appointment@3600000');
   });

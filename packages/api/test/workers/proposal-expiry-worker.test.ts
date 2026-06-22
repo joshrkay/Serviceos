@@ -18,7 +18,7 @@ const NOW = new Date('2026-05-14T12:00:00Z');
 const PAST = new Date(NOW.getTime() - 60 * 60 * 1000); // 1h ago
 const FUTURE = new Date(NOW.getTime() + 60 * 60 * 1000); // 1h ahead
 
-describe('runProposalExpirySweep (§5.5)', () => {
+describe('runProposalExpirySweep (§5.5 + §10.4)', () => {
   let proposalRepo: InMemoryProposalRepository;
   let auditRepo: InMemoryAuditRepository;
 
@@ -73,6 +73,16 @@ describe('runProposalExpirySweep (§5.5)', () => {
     expect((await proposalRepo.findById('t1', p.id))?.status).toBe('expired');
   });
 
+  it('expires a stale message proposal too (§10.4) and emits an audit event', async () => {
+    // notify_delay is comms-class → a message proposal that lapses after 48h.
+    const p = await seed('notify_delay', { expiresAt: PAST });
+    const res = await runProposalExpirySweep(deps());
+    expect(res.expired).toBe(1);
+    expect((await proposalRepo.findById('t1', p.id))?.status).toBe('expired');
+    const events = await auditRepo.findByEntity('t1', 'proposal', p.id);
+    expect(events.some((e) => e.eventType === 'proposal.expired')).toBe(true);
+  });
+
   it('leaves a schedule proposal whose 48h window is still open', async () => {
     const p = await seed('reschedule_appointment', { expiresAt: FUTURE });
     const res = await runProposalExpirySweep(deps());
@@ -80,7 +90,7 @@ describe('runProposalExpirySweep (§5.5)', () => {
     expect((await proposalRepo.findById('t1', p.id))?.status).toBe('draft');
   });
 
-  it('never expires a non-schedule proposal (no expiry → persists indefinitely)', async () => {
+  it('never expires a persisting (non-schedule, non-message) proposal — no expiry, lives indefinitely', async () => {
     const p = await seed('draft_estimate');
     expect(p.expiresAt).toBeUndefined();
     const res = await runProposalExpirySweep(deps());
