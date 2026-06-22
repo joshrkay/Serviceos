@@ -178,7 +178,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     });
   }
 
-  async findExpiredScheduleProposals(
+  async findExpiredProposalsByType(
     tenantId: string,
     proposalTypes: readonly ProposalType[],
     since: Date,

@@ -1,5 +1,5 @@
 /**
- * Proposal auto-expiry sweeper (§5.5).
+ * Proposal auto-expiry sweeper (§5.5 + §10.4).
  *
  * Mirrors the cross-tenant sweep pattern from estimate-expiry-worker.ts: a
  * per-tenant try/catch so one tenant's failure never crashes the loop, plus a
@@ -8,11 +8,11 @@
  * ready_for_review) whose `expiresAt` has passed, transitions them to
  * 'expired', and emits an audit event.
  *
- * Only schedule proposal cards carry an `expiresAt` (set at creation by
- * `defaultProposalExpiry`), so every other proposal type is invisible to this
- * sweep and persists indefinitely — exactly the §5.5 contract. An expired card
- * is terminal; the operator re-proposes by creating a fresh proposal (the
- * inbox surfaces the expired one as re-proposable).
+ * Only schedule (§5.5) and outbound-message (§10.4) proposal cards carry an
+ * `expiresAt` (set at creation by `defaultProposalExpiry`), so every other
+ * proposal type is invisible to this sweep and persists indefinitely. An
+ * expired card is terminal; the operator re-proposes by creating a fresh
+ * proposal (the inbox surfaces the expired one as re-proposable).
  *
  * The sweep cadence is owned by app.ts (a setInterval driver). Tests exercise
  * this function directly with an in-memory repo and a fixed clock.

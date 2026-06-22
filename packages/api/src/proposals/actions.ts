@@ -1,4 +1,4 @@
-import { Proposal, ProposalRepository, missingFieldsFor, actionClassForProposalType, createProposal, isScheduleProposalType } from './proposal';
+import { Proposal, ProposalRepository, missingFieldsFor, actionClassForProposalType, createProposal, isExpiringProposalType } from './proposal';
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from './lifecycle';
 import { validateProposalPayload } from './contracts';
 import { Role, hasPermission } from '../auth/rbac';
@@ -632,12 +632,13 @@ export async function editProposal(
 }
 
 /**
- * §5.5 Re-propose an expired schedule proposal. Expired is terminal, so the
- * operator doesn't revive the old card — they mint a fresh draft carrying the
- * same intent (proposalType + payload + summary + target), which gets a new
- * 48h expiry from `createProposal`'s schedule default and re-enters the inbox
- * for approval. Tenant-scoped; the source must be an expired schedule proposal;
- * audited as `proposal.reproposed` against the new proposal.
+ * §5.5/§10.4 Re-propose an expired schedule or message proposal. Expired is
+ * terminal, so the operator doesn't revive the old card — they mint a fresh
+ * draft carrying the same intent (proposalType + payload + summary + target),
+ * which gets a new 48h expiry from `createProposal`'s schedule/message default
+ * and re-enters the inbox for approval. Tenant-scoped; the source must be an
+ * expired expiring proposal; audited as `proposal.reproposed` against the new
+ * proposal.
  */
 export async function reproposeProposal(
   proposalRepo: ProposalRepository,
@@ -654,10 +655,10 @@ export async function reproposeProposal(
       `Only an expired proposal can be re-proposed (current status: '${source.status}')`,
     );
   }
-  if (!isScheduleProposalType(source.proposalType)) {
-    // Defensive: only schedule proposals ever carry an expiry, so a
-    // non-schedule expired proposal would be an anomaly — never re-propose it.
-    throw new ValidationError('Only schedule proposals can be re-proposed');
+  if (!isExpiringProposalType(source.proposalType)) {
+    // Defensive: only schedule + message proposals ever carry an expiry, so a
+    // non-expiring expired proposal would be an anomaly — never re-propose it.
+    throw new ValidationError('Only schedule or message proposals can be re-proposed');
   }
 
   const replacement = createProposal({
@@ -678,7 +679,7 @@ export async function reproposeProposal(
     // with outstanding missingFields, and dropping them here would let the
     // clone be approved with the same incomplete payload.
     missingFields: missingFieldsFor(source),
-    // A fresh 48h expiry is applied by createProposal's schedule-type default.
+    // A fresh 48h expiry is applied by createProposal's schedule/message default.
     // chainId is intentionally NOT carried: a re-proposal is a standalone card
     // (the original chain's siblings have also expired), so it must not link
     // back into a dead chain.

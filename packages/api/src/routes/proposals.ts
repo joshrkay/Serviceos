@@ -6,7 +6,7 @@ import { asyncRoute } from '../middleware/async-route';
 import { toErrorResponse } from '../shared/errors';
 import { validate } from '../shared/validation';
 import { Role } from '../auth/rbac';
-import { ProposalRepository, isScheduleProposalType, SCHEDULE_PROPOSAL_TYPES } from '../proposals/proposal';
+import { ProposalRepository, isExpiringProposalType, EXPIRING_PROPOSAL_TYPES } from '../proposals/proposal';
 import { AppointmentRepository } from '../appointments/appointment';
 import { AuditRepository } from '../audit/audit';
 import { ProposalFilter } from '../proposals/proposal-contracts';
@@ -163,20 +163,20 @@ export function createProposalsRouter(
         // both need to be approvable from the inbox. The 100-item cap keeps
         // the payload small; for a solo operator the inbox is single-digit
         // dozens, not hundreds.
-        // §5.5 — surface recently-expired schedule proposal cards so the operator
-        // can see what lapsed and re-propose it. Bounded in the DB (WHERE on type
-        // + a recent window, ORDER BY recency, LIMIT) so the inbox can't degrade
-        // as expired history accumulates; operators re-propose recent lapses, not
-        // ancient ones. Falls back to an in-memory trim for repos that predate
-        // the bounded query.
+        // §5.5/§10.4 — surface recently-expired schedule + message proposal cards
+        // so the operator can see what lapsed and re-propose it. Bounded in the DB
+        // (WHERE on type + a recent window, ORDER BY recency, LIMIT) so the inbox
+        // can't degrade as expired history accumulates; operators re-propose recent
+        // lapses, not ancient ones. Falls back to an in-memory trim for repos that
+        // predate the bounded query.
         const since = new Date(Date.now() - EXPIRED_INBOX_WINDOW_MS);
         const [drafts, ready, expiredRows] = await Promise.all([
           proposalRepo.findByStatus(req.auth!.tenantId, 'draft'),
           proposalRepo.findByStatus(req.auth!.tenantId, 'ready_for_review'),
-          proposalRepo.findExpiredScheduleProposals
-            ? proposalRepo.findExpiredScheduleProposals(
+          proposalRepo.findExpiredProposalsByType
+            ? proposalRepo.findExpiredProposalsByType(
                 req.auth!.tenantId,
-                SCHEDULE_PROPOSAL_TYPES,
+                EXPIRING_PROPOSAL_TYPES,
                 since,
                 EXPIRED_INBOX_LIMIT,
               )
@@ -184,7 +184,7 @@ export function createProposalsRouter(
                 all
                   .filter(
                     (p) =>
-                      isScheduleProposalType(p.proposalType) &&
+                      isExpiringProposalType(p.proposalType) &&
                       (p.expiresAt?.getTime() ?? 0) >= since.getTime(),
                   )
                   .sort((a, b) => (b.expiresAt?.getTime() ?? 0) - (a.expiresAt?.getTime() ?? 0))
