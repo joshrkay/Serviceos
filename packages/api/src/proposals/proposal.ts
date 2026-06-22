@@ -11,6 +11,7 @@ import { payloadHeadlineCents } from './payload-money';
 import { getSupervisorCreationHook } from './supervisor/hook';
 import { payloadWithSupervisorMarker } from './supervisor/marker';
 import { capInitialStatus, type InitialProposalStatus } from './supervisor/policy';
+import { getProposalApprovalAuditor } from './approval-audit-hook';
 
 export type ProposalStatus =
   | 'draft'
@@ -722,6 +723,24 @@ export function createProposal(input: CreateProposalInput): Proposal {
   // a down audit store can't break proposal creation.
   if (supervisorHook && supervisorDecision && supervisorDecision.verdict !== 'allow') {
     supervisorHook.onDecision(proposal, supervisorDecision);
+  }
+  // Governed Autonomy (D-014): an auto-approval at decide time emits an
+  // explicit approval audit attributing the policy actor + provenance, so
+  // the trail matches the reworded "every approval is audited" invariant.
+  // `status === 'approved'` here only ever means auto-approval — manual
+  // approvals run through proposals/actions.ts, never this builder. The
+  // auditor is a module-level fire-and-forget hook (null unless app.ts
+  // opts in), so tests/dev that don't configure it are byte-identical.
+  if (status === 'approved') {
+    void getProposalApprovalAuditor()?.recordAutoApproval(proposal, {
+      supervisorMode: input.supervisorMode,
+      threshold: resolveAutoApproveThreshold({
+        supervisorMode: input.supervisorMode,
+        supervisorPresent: input.supervisorPresent,
+        tenantOverride: input.tenantThresholdOverride,
+      }),
+      sourceTrustTier: input.sourceTrustTier,
+    });
   }
   return proposal;
 }

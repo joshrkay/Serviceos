@@ -459,6 +459,11 @@ import { requireTwilioSignature } from './telephony/twilio-signature';
 import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation';
 import { InMemoryProposalRepository, createProposal as buildProposalRow } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
+// Governed Autonomy (D-014): explicit policy-actor audit on every auto-approval.
+import {
+  configureProposalApprovalAuditor,
+  createProposalApprovalAuditor,
+} from './proposals/approval-audit-hook';
 // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy hook + advisory annotator).
 import {
   configureSupervisorCreationHook,
@@ -5003,6 +5008,10 @@ export function createApp(): express.Express {
   // Never uninstalled on shutdown — benign: fail-open + fire-and-forget.
   // Tests must reset via configureSupervisorCreationHook(null).
   configureSupervisorCreationHook(supervisorService);
+  // Governed Autonomy (D-014): emit an explicit policy-actor approval audit
+  // on every auto-approval. Same process-global, fire-and-forget contract as
+  // the supervisor hook; tests reset via configureProposalApprovalAuditor(null).
+  configureProposalApprovalAuditor(createProposalApprovalAuditor(auditRepo));
   // Close the executed-spend loop declared next to the ProposalExecutor.
   supervisorSpendRecorder = (tenantId, proposalId) =>
     recordExecutedProposalSpend({
