@@ -332,11 +332,15 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['207_jobs_status_canonical_lifecycle', '6e4e921973b79047ed517efbb629b80c293cb1586698464551a09324c718bba5'],
   // Per-user owner-notification opt-outs (U10).
   ['208_create_notification_preferences', 'df14c6514d98aaaadb7b320f9c3834029057841068c7d03ec707300c1f913048'],
+  // Story 3.9: raw per-field proposal-edit corrections log (intent + field +
+  // before/after), queryable per tenant and per intent; FORCE RLS. Renumbered
+  // 207 -> 208 -> 209 across successive main-merge collisions (SQL unchanged → hash preserved).
+  ['209_create_corrections', '37eac96b01f69d24106801716fbc9e5ed12d9b708e66877bcda4e7f3781e66d9'],
   // Story 10.5 — tenant-scoped customer message templates (renumbered to clear
   // migration-number collisions with main on merge; SQL value unchanged).
-  ['209_create_message_templates', 'a38dc2fba90473aec17537126a25c71fbf8461b012531c94ea55c858aa85f71d'],
+  ['210_create_message_templates', 'a38dc2fba90473aec17537126a25c71fbf8461b012531c94ea55c858aa85f71d'],
   // Story 10.2 — tenant-configurable reminder cadence/offsets (renumbered).
-  ['210_tenant_settings_reminder_offsets', '7043e4a221b59d530abd0a9d74ac8dd1a7f13379eeefb9b1749cc2b98368442a'],
+  ['211_tenant_settings_reminder_offsets', '7043e4a221b59d530abd0a9d74ac8dd1a7f13379eeefb9b1749cc2b98368442a'],
 ];
 
 function hashMigration(value: string): string {
