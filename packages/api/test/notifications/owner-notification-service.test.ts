@@ -86,6 +86,25 @@ describe('OwnerNotificationService', () => {
     expect(provider.sent.map((m) => m.to)).toEqual(['ExponentPushToken[owner]']);
   });
 
+  it('drops the device of a user who muted the notification type (U10)', async () => {
+    await repo.register({ tenantId: TENANT, userId: 'owner-a', expoPushToken: 'ExponentPushToken[a]', platform: 'ios' });
+    await repo.register({ tenantId: TENANT, userId: 'owner-b', expoPushToken: 'ExponentPushToken[b]', platform: 'ios' });
+    const withMute = new OwnerNotificationService({
+      deviceTokenRepo: repo,
+      provider,
+      // owner-a muted inbound_sms; owner-b did not.
+      resolveMutedUserIds: async () => new Set(['owner-a']),
+    });
+
+    await withMute.notify(TENANT, 'inbound_sms', {
+      conversationId: 'c1',
+      customerName: 'Acme',
+      preview: 'hi',
+    });
+
+    expect(provider.sent.map((m) => m.to)).toEqual(['ExponentPushToken[b]']);
+  });
+
   it('no tokens → no send (no-op)', async () => {
     await service.notify(TENANT, 'lead_captured', { leadId: 'c1', leadLabel: 'A new lead' });
     expect(provider.sent).toHaveLength(0);

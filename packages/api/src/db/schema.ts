@@ -5030,6 +5030,35 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_maintenance_contracts ON maintenance_contracts
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
+  // Per-user owner-notification opt-outs (U10). Absence of a row = enabled
+  // (opt-out model), so a fresh tenant gets every notification by default and a
+  // row is written only when a user mutes a category. The `app.system_lookup`
+  // escape hatch (same as device_tokens 199) lets the notifier read a user's
+  // mute state at send time, when there is no per-request tenant context.
+  '208_create_notification_preferences': `
+    CREATE TABLE IF NOT EXISTS notification_preferences (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      notification_type TEXT NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, user_id, notification_type)
+    );
+    CREATE INDEX IF NOT EXISTS idx_notification_preferences_tenant_user
+      ON notification_preferences (tenant_id, user_id);
+    CREATE INDEX IF NOT EXISTS idx_notification_preferences_muted
+      ON notification_preferences (tenant_id, notification_type) WHERE enabled = FALSE;
+    ALTER TABLE notification_preferences ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE notification_preferences FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_notification_preferences ON notification_preferences;
+    CREATE POLICY tenant_isolation_notification_preferences ON notification_preferences
+      USING (
+        tenant_id = current_setting('app.current_tenant_id', true)::UUID
+        OR current_setting('app.system_lookup', true) = 'true'
+      );
+  `,
   // Onboarding email lifecycle (welcome / setup-reminder / trial-ending).
   //   1. tenants.trial_ends_at — cached mirror of the Stripe subscription's
   //      trial_end, written by the customer.subscription.* webhook alongside
@@ -5084,6 +5113,91 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS auth_token_primary_enc TEXT;
     ALTER TABLE tenant_integrations
       ADD COLUMN IF NOT EXISTS auth_token_secondary_enc TEXT;
+  `,
+
+  // Epic 5.1 — canonical seven-state job lifecycle. The original CREATE TABLE
+  // (016) constrained jobs.status to five states; this widens the CHECK to the
+  // full canonical set by adding 'dispatched', 'invoiced', and 'closed'. It is a
+  // pure superset of the old set, so every existing row already satisfies it —
+  // no data backfill is needed. The named ADD CONSTRAINT is made re-run-safe by
+  // getMigrationSQL's DROP-CONSTRAINT rewriter (which targets the constraint
+  // name PostgreSQL auto-assigned to the inline CHECK, `jobs_status_check`).
+  // This is the authoritative jobs.status CHECK; status.test.ts pins it against
+  // jobStatusSchema.
+  '207_jobs_status_canonical_lifecycle': `
+    ALTER TABLE jobs
+      ADD CONSTRAINT jobs_status_check
+      CHECK (status IN ('new', 'scheduled', 'dispatched', 'in_progress', 'completed', 'invoiced', 'closed', 'canceled'));
+  `,
+
+  '209_create_corrections': `
+    -- Story 3.9 (correction capture) — a RAW, per-field edit log: every field a
+    -- user changes on a proposal writes one row (intent + field + before/after).
+    -- This is DISTINCT from correction_lessons (migration 185): that table holds
+    -- conservative, cascading config "lessons" (labor rate, SKU price, banned
+    -- phrase, scope) recorded only on succeeded execution and queryable by
+    -- day/source-proposal. This table is the unfiltered training signal that
+    -- feeds prompt/routing improvement, queryable per tenant AND per intent.
+    -- intent = the proposal_type that was corrected (maps to the intent taxonomy).
+    -- before/after are JSONB so any payload value shape round-trips losslessly.
+    -- Tenant-scoped with FORCE RLS like every other tenant table.
+    CREATE TABLE IF NOT EXISTS corrections (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID NOT NULL,
+      intent TEXT NOT NULL,
+      field TEXT NOT NULL,
+      before_value JSONB,
+      after_value JSONB,
+      actor_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_corrections_tenant
+      ON corrections(tenant_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_corrections_intent
+      ON corrections(tenant_id, intent, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_corrections_proposal
+      ON corrections(tenant_id, proposal_id);
+    ALTER TABLE corrections ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE corrections FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_corrections ON corrections
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+  `,
+
+  // Story 10.5 — tenant-scoped customer message templates with `{{variable}}`
+  // placeholders. Distinct from estimate_templates (estimate copy); these are
+  // reusable SMS/email texts shared by the agent draft path and humans.
+  // (Renumbered repeatedly to clear migration-number collisions as main merged.)
+  '210_create_message_templates': `
+    CREATE TABLE IF NOT EXISTS message_templates (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'general'
+        CHECK (category IN ('general', 'appointment', 'estimate', 'invoice', 'followup', 'review')),
+      channel TEXT NOT NULL DEFAULT 'sms'
+        CHECK (channel IN ('sms', 'email')),
+      body TEXT NOT NULL,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_templates_tenant
+      ON message_templates(tenant_id, channel);
+    ALTER TABLE message_templates ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE message_templates FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_message_templates ON message_templates
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+  `,
+
+  // Story 10.2 — tenant-configurable reminder cadence. Hours-before-start at
+  // which an appointment reminder fires (e.g. [24, 2]). Default [24] preserves
+  // the legacy single T-24h reminder exactly. (Renumbered for the same reason.)
+  '211_tenant_settings_reminder_offsets': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS appointment_reminder_offsets_hours JSONB NOT NULL DEFAULT '[24]'::jsonb;
   `,
 };
 

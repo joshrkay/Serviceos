@@ -169,3 +169,77 @@ describe('CommsInboxPage', () => {
     expect(await screen.findByTestId('comms-inbox-empty')).toBeInTheDocument();
   });
 });
+
+describe('CommsInboxPage — history search (Story 3.11)', () => {
+  const THREAD2: InboxThread = {
+    ...THREAD,
+    conversation: { ...THREAD.conversation, id: 'conv-2', title: 'Bob Smith', entityId: 'cust-2' },
+    customerName: 'Bob Smith',
+    lastMessagePreview: 'invoice please',
+    lastMessageAt: '2026-06-16T09:00:00Z',
+  };
+
+  // /search must be matched before the generic GET /api/conversations branch.
+  function routeSearch(url: string, init?: RequestInit): Response {
+    const u = String(url);
+    if (u.includes('/api/conversations/search')) {
+      const q = new URL(`http://x${u.startsWith('/') ? u : `/${u}`}`).searchParams.get('q')?.toLowerCase() ?? '';
+      const results = q.includes('rooftop')
+        ? [
+            {
+              message: { ...MESSAGES[0], conversationId: 'conv-2', content: 'rooftop unit replaced' },
+              conversation: { id: 'conv-2', title: 'Bob Smith', entityType: 'customer', entityId: 'cust-2' },
+            },
+          ]
+        : [];
+      return jsonResponse({ results });
+    }
+    if (u.includes('/api/conversations') && (init?.method ?? 'GET') === 'GET') {
+      return jsonResponse({ threads: [THREAD, THREAD2] });
+    }
+    return routeApi(u, init);
+  }
+
+  beforeEach(() => {
+    apiFetchMock.mockReset();
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => routeSearch(url, init));
+  });
+
+  it('filters by customer name instantly (client-side)', async () => {
+    render(<CommsInboxPage />);
+    await screen.findByText('Dana Diaz');
+    expect(screen.getByText('Bob Smith')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId('search-input'), { target: { value: 'dana' } });
+    fireEvent.click(screen.getByTestId('search-button'));
+
+    await waitFor(() => expect(screen.queryByText('Bob Smith')).toBeNull());
+    expect(screen.getByText('Dana Diaz')).toBeInTheDocument();
+  });
+
+  it('filters by message content via the search endpoint', async () => {
+    render(<CommsInboxPage />);
+    await screen.findByText('Bob Smith');
+
+    // 'rooftop' is in no customer name or preview — only the server content hit
+    // (conv-2) keeps Bob Smith in the list.
+    fireEvent.change(screen.getByTestId('search-input'), { target: { value: 'rooftop' } });
+    fireEvent.click(screen.getByTestId('search-button'));
+
+    await waitFor(() => expect(screen.getByText('Bob Smith')).toBeInTheDocument());
+    expect(screen.queryByText('Dana Diaz')).toBeNull();
+    expect(
+      apiFetchMock.mock.calls.some(([u]) => String(u).includes('/api/conversations/search?')),
+    ).toBe(true);
+  });
+
+  it('shows a no-matches state when nothing matches', async () => {
+    render(<CommsInboxPage />);
+    await screen.findByText('Dana Diaz');
+
+    fireEvent.change(screen.getByTestId('search-input'), { target: { value: 'zzzznomatch' } });
+    fireEvent.click(screen.getByTestId('search-button'));
+
+    expect(await screen.findByTestId('comms-inbox-no-matches')).toBeInTheDocument();
+  });
+});

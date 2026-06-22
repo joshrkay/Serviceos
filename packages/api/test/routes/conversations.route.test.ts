@@ -109,3 +109,71 @@ describe('POST /api/conversations/:id/suggest-reply', () => {
     expect(msgs).toHaveLength(1);
   });
 });
+
+describe('GET /api/conversations/search — Story 3.11 history search', () => {
+  async function seedLinked(repo: InMemoryConversationRepository) {
+    const custConv = await repo.createConversation({
+      tenantId: TENANT_ID,
+      createdBy: USER_ID,
+      entityType: 'customer',
+      entityId: 'cust-7',
+    });
+    await repo.addMessage({
+      tenantId: TENANT_ID,
+      conversationId: custConv.id,
+      messageType: 'text',
+      content: 'Send the Rodriguez invoice',
+      senderId: USER_ID,
+      senderRole: 'user',
+    });
+    const jobConv = await repo.createConversation({
+      tenantId: TENANT_ID,
+      createdBy: USER_ID,
+      entityType: 'job',
+      entityId: 'job-3',
+    });
+    await repo.addMessage({
+      tenantId: TENANT_ID,
+      conversationId: jobConv.id,
+      messageType: 'text',
+      content: 'Crew running late on the roof job',
+      senderId: USER_ID,
+      senderRole: 'user',
+    });
+  }
+
+  it('searches by free text', async () => {
+    const { app, conversationRepo } = buildApp({ withGateway: false });
+    await seedLinked(conversationRepo);
+    const res = await request(app).get('/api/conversations/search').query({ q: 'rodriguez' });
+    expect(res.status).toBe(200);
+    expect(res.body.results).toHaveLength(1);
+    expect(res.body.results[0].message.content).toContain('Rodriguez');
+    expect(res.body.results[0].conversation.entityId).toBe('cust-7');
+  });
+
+  it('searches by linked customer and by linked job', async () => {
+    const { app, conversationRepo } = buildApp({ withGateway: false });
+    await seedLinked(conversationRepo);
+    const byCustomer = await request(app).get('/api/conversations/search').query({ customerId: 'cust-7' });
+    expect(byCustomer.body.results).toHaveLength(1);
+    const byJob = await request(app).get('/api/conversations/search').query({ jobId: 'job-3' });
+    expect(byJob.body.results).toHaveLength(1);
+    expect(byJob.body.results[0].message.content).toContain('roof');
+  });
+
+  it('400s when no search criterion is supplied', async () => {
+    const { app } = buildApp({ withGateway: false });
+    const res = await request(app).get('/api/conversations/search');
+    expect(res.status).toBe(400);
+  });
+
+  it('does not collide with GET /:id (search is its own route)', async () => {
+    const { app, conversationRepo } = buildApp({ withGateway: false });
+    await seedLinked(conversationRepo);
+    // 'search' must not be treated as a conversation id (which would 404).
+    const res = await request(app).get('/api/conversations/search').query({ q: 'crew' });
+    expect(res.status).toBe(200);
+    expect(res.body.results).toHaveLength(1);
+  });
+});

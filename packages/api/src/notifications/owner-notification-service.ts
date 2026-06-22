@@ -251,6 +251,11 @@ export interface OwnerNotificationServiceDeps {
    * permission. Omit to send to every tenant device (back-compat).
    */
   resolveUserIds?: (tenantId: string, permission: Permission) => Promise<Set<string>>;
+  /**
+   * User ids in the tenant who have MUTED this notification type (U10). Their
+   * devices are dropped from the recipient set. Omit to mute nobody.
+   */
+  resolveMutedUserIds?: (tenantId: string, type: NotificationType) => Promise<Set<string>>;
   logger?: Logger;
 }
 
@@ -268,7 +273,7 @@ export class OwnerNotificationService {
   ): Promise<void> {
     const descriptor = NOTIFICATION_DESCRIPTORS[type];
     const built = descriptor.build(ctx);
-    await this.dispatch(tenantId, descriptor.permission, built);
+    await this.dispatch(tenantId, type, descriptor.permission, built);
   }
 
   /**
@@ -297,6 +302,7 @@ export class OwnerNotificationService {
 
   private async dispatch(
     tenantId: string,
+    type: NotificationType,
     permission: Permission,
     built: BuiltNotification,
   ): Promise<void> {
@@ -309,11 +315,12 @@ export class OwnerNotificationService {
         const allowed = await this.deps.resolveUserIds(tenantId, permission);
         recipients = tokens.filter((t) => allowed.has(t.userId));
       }
-      await this.send(tenantId, recipients, built);
-    } catch (err) {
-      this.logFailure(tenantId, built, err);
-    }
-  }
+      // U10 — drop devices of users who muted this notification type.
+      if (this.deps.resolveMutedUserIds && recipients.length > 0) {
+        const muted = await this.deps.resolveMutedUserIds(tenantId, type);
+        if (muted.size > 0) recipients = recipients.filter((t) => !muted.has(t.userId));
+      }
+      if (recipients.length === 0) return;
 
   /** Send to a resolved recipient set and prune dead tokens. */
   private async send(

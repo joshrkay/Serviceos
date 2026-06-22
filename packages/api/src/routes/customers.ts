@@ -38,6 +38,7 @@ import {
   setCustomFieldValue,
   listResolvedCustomFields,
 } from '../customers/custom-field';
+import { CustomerMergeRepository, mergeCustomers } from '../customers/merge';
 import {
   createCustomerContactSchema,
   updateCustomerContactSchema,
@@ -64,7 +65,9 @@ export function createCustomerRouter(
   // U2 (CRM Jobber parity) — customer tags + per-customer custom-field values.
   // Optional, same quietly-404 pattern.
   tagRepo?: TagRepository,
-  customFieldRepo?: CustomFieldRepository
+  customFieldRepo?: CustomFieldRepository,
+  // Story 4.6 — customer merge. Optional, same quietly-404 pattern.
+  mergeRepo?: CustomerMergeRepository
 ): Router {
   const router = Router();
 
@@ -112,6 +115,7 @@ export function createCustomerRouter(
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const includeArchived = req.query.includeArchived === 'true';
       const search = req.query.search as string | undefined;
+      const tag = req.query.tag as string | undefined;
       const sort: 'asc' | 'desc' = req.query.sort === 'desc' ? 'desc' : 'asc';
 
       // P1-018: when `paginated=true` (or limit/offset are present) we
@@ -146,6 +150,7 @@ export function createCustomerRouter(
         const result = await listCustomersWithMeta(req.auth!.tenantId, customerRepo, {
           includeArchived,
           search,
+          tag,
           limit,
           offset,
           sort,
@@ -157,6 +162,7 @@ export function createCustomerRouter(
       const result = await listCustomers(req.auth!.tenantId, customerRepo, {
         includeArchived,
         search,
+        tag,
         sort,
       });
       res.json(result);
@@ -220,6 +226,41 @@ export function createCustomerRouter(
       res.json(result);
     })
   );
+
+  // Story 4.6 — merge a duplicate (the losing record) into this customer
+  // (the survivor, :id). The survivor is chosen explicitly by the URL; the
+  // loser rides in the body. Re-parents jobs/invoices/conversations/etc.
+  // onto the survivor, archives the loser, and records a `customer.merged`
+  // audit event. Quietly 404s when no merge repo is wired.
+  if (mergeRepo) {
+    router.post(
+      '/:id/merge',
+      requireAuth,
+      requireTenant,
+      requirePermission('customers:update'),
+      asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+        const losingId = (req.body?.losingId ?? '') as string;
+        if (typeof losingId !== 'string' || losingId.trim() === '') {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: 'losingId is required',
+          });
+          return;
+        }
+        const result = await mergeCustomers(
+          req.auth!.tenantId,
+          {
+            survivingId: req.params.id,
+            losingId,
+            actorId: req.auth!.userId,
+            actorRole: req.auth!.role,
+          },
+          { customerRepo, mergeRepo, auditRepo }
+        );
+        res.json(result);
+      })
+    );
+  }
 
   // P9-002 — Unified communication timeline. Read-only aggregator across
   // notes, jobs, estimates, invoices, payments, conversations, and

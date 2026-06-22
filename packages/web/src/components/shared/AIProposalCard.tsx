@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import {
   Check, Pencil, X, Sparkles, ChevronDown, ChevronUp,
@@ -53,6 +54,29 @@ const INTENT_LABELS: Record<string, string> = {
   send_invoice: 'Send invoice',
   record_payment: 'Record payment',
 };
+
+/**
+ * Story 3.11 — deep-link an approved proposal to the entity it created.
+ * `relatedId` carries the backend proposal's resultEntityId. We only link
+ * types whose id maps to a real detail route; everything else returns null so
+ * the card never renders a "View" button that goes nowhere.
+ */
+function entityRouteFor(type: ProposalType, relatedId: string): string | null {
+  switch (type) {
+    // 'Invoice' = a created invoice; 'Send' = an existing invoice being sent —
+    // both carry an invoice id in relatedId.
+    case 'Invoice':
+    case 'Send':
+      return `/invoices/${relatedId}`;
+    case 'Estimate':
+      return `/estimates/${relatedId}`;
+    case 'Customer':
+      return `/customers/${relatedId}`;
+    // Payment/Schedule/Note/etc. have no unambiguous detail route here — no link.
+    default:
+      return null;
+  }
+}
 
 interface ConfidenceDisplay {
   bar: string; track: string; width: string;
@@ -113,6 +137,7 @@ interface Props {
 }
 
 export function AIProposalCard({ proposal, compact, onApprove, onReject }: Props) {
+  const navigate = useNavigate();
   const [status,       setStatus]       = useState<'Pending' | 'Approved' | 'Rejected'>(proposal.status);
   const [showReason,   setShowReason]   = useState(false);
   const [editing,      setEditing]      = useState(false);
@@ -184,8 +209,12 @@ export function AIProposalCard({ proposal, compact, onApprove, onReject }: Props
           <p className="text-sm text-green-900">{proposal.title}</p>
           <p className="text-xs text-green-600 mt-0.5">Applied successfully</p>
         </div>
-        {proposal.relatedId && (
-          <button className="flex items-center gap-1 text-xs text-green-700 hover:text-green-900 transition-colors shrink-0">
+        {proposal.relatedId && entityRouteFor(proposal.type, proposal.relatedId) && (
+          <button
+            type="button"
+            onClick={() => navigate(entityRouteFor(proposal.type, proposal.relatedId!)!)}
+            className="flex items-center gap-1 min-h-11 px-2 -my-1 text-xs text-green-700 hover:text-green-900 transition-colors shrink-0"
+          >
             View <ArrowUpRight size={11} />
           </button>
         )}

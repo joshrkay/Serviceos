@@ -17,12 +17,18 @@ import { AppointmentRepository, Appointment } from '../appointments/appointment'
 import { TransactionalCommsService } from '../notifications/transactional-comms-service';
 import { JobRepository } from '../jobs/job';
 import { CustomerRepository } from '../customers/customer';
-import { SettingsRepository } from '../settings/settings';
+import {
+  SettingsRepository,
+  DEFAULT_REMINDER_OFFSETS_HOURS,
+  normalizeReminderOffsets,
+} from '../settings/settings';
 import { DispatchRepository } from '../notifications/dispatch-repository';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
 
 /** Default reminder lead time (24 hours before start). */
 export const APPOINTMENT_REMINDER_LEAD_MS = 24 * 60 * 60 * 1000;
+
+const HOUR_MS = 60 * 60 * 1000;
 
 /** Window width around the target fire time (±30 minutes). */
 export const APPOINTMENT_REMINDER_WINDOW_MS = 30 * 60 * 1000;
@@ -155,6 +161,24 @@ export async function notifyOwnerAppointmentReminder(
   }
 }
 
+/**
+ * Resolve a tenant's reminder cadence. Falls back to the conservative default
+ * [24] when settings aren't wired or can't be read — the sweep must never fail
+ * a whole tenant over a settings lookup.
+ */
+async function resolveReminderOffsets(
+  tenantId: string,
+  deps: AppointmentReminderWorkerDeps,
+): Promise<number[]> {
+  if (!deps.settingsRepo) return [...DEFAULT_REMINDER_OFFSETS_HOURS];
+  try {
+    const settings = await deps.settingsRepo.findByTenant(tenantId);
+    return normalizeReminderOffsets(settings?.appointmentReminderOffsetsHours);
+  } catch {
+    return [...DEFAULT_REMINDER_OFFSETS_HOURS];
+  }
+}
+
 export async function runAppointmentReminderSweep(
   deps: AppointmentReminderWorkerDeps,
 ): Promise<{ tenants: number; reminders: number; failed: number }> {
@@ -171,28 +195,43 @@ export async function runAppointmentReminderSweep(
   }
 
   const asOf = now().getTime();
-  const windowStart = new Date(asOf + APPOINTMENT_REMINDER_LEAD_MS - APPOINTMENT_REMINDER_WINDOW_MS);
-  const windowEnd = new Date(asOf + APPOINTMENT_REMINDER_LEAD_MS + APPOINTMENT_REMINDER_WINDOW_MS);
 
   let reminders = 0;
   let failed = 0;
 
   for (const tenantId of tenantIds) {
     try {
-      const appointments = await deps.appointmentRepo.findByDateRange(
-        tenantId,
-        windowStart,
-        windowEnd,
-      );
-      for (const appointment of appointments) {
-        if (appointment.status === 'canceled' || appointment.holdPendingApproval) {
-          continue;
+      // Story 10.2 — per-tenant cadence. Default [24] keeps the legacy single
+      // T-24h reminder. A single offset uses the legacy (offset-agnostic)
+      // idempotency key; multiple offsets key per offset so each fires once.
+      const offsets = await resolveReminderOffsets(tenantId, deps);
+      const singleOffset = offsets.length === 1;
+
+      for (const offsetHours of offsets) {
+        const center = asOf + offsetHours * HOUR_MS;
+        const windowStart = new Date(center - APPOINTMENT_REMINDER_WINDOW_MS);
+        const windowEnd = new Date(center + APPOINTMENT_REMINDER_WINDOW_MS);
+
+        const appointments = await deps.appointmentRepo.findByDateRange(
+          tenantId,
+          windowStart,
+          windowEnd,
+        );
+        for (const appointment of appointments) {
+          if (appointment.status === 'canceled' || appointment.holdPendingApproval) {
+            continue;
+          }
+          await deps.transactionalComms.notifyReminder(
+            tenantId,
+            appointment.id,
+            singleOffset ? undefined : offsetHours,
+          );
+          // U4 — owner push alongside the customer reminder. Independently
+          // idempotent (separate, offset-agnostic dispatch key), so a multi-
+          // offset cadence still pushes the owner at most once per appointment.
+          await notifyOwnerAppointmentReminder(tenantId, appointment, deps);
+          reminders++;
         }
-        await deps.transactionalComms.notifyReminder(tenantId, appointment.id);
-        // U4 — owner push alongside the customer reminder. Independently
-        // idempotent (separate dispatch key); failure-isolated internally.
-        await notifyOwnerAppointmentReminder(tenantId, appointment, deps);
-        reminders++;
       }
     } catch (err) {
       failed++;

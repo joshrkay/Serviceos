@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router';
-import { MapPin } from 'lucide-react';
+import { Link, useNavigate } from 'react-router';
+import { MapPin, CalendarPlus, FileText, MessageSquare } from 'lucide-react';
 import { toast } from 'sonner';
 import { DetailPage } from '../../components/DetailPage';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
@@ -11,6 +11,7 @@ import { LanguageBadge } from '../../components/customers/LanguageBadge';
 import { ContactsPanel } from '../../components/customers/ContactsPanel';
 import { TagsPanel } from '../../components/customers/TagsPanel';
 import { CustomFieldsPanel } from '../../components/customers/CustomFieldsPanel';
+import { MergeCustomerPanel } from '../../components/customers/MergeCustomerPanel';
 import { apiFetch } from '../../utils/api-fetch';
 import {
   Badge,
@@ -31,6 +32,9 @@ interface Customer {
   primaryPhone?: string;
   secondaryPhone?: string;
   preferredChannel: string;
+  smsConsent?: boolean;
+  /** Derived opt-out rollup (Story 10.6). 'revoked' => opted out. */
+  consentStatus?: 'granted' | 'revoked' | 'unknown';
   communicationNotes?: string;
   isArchived: boolean;
   originatingLeadId?: string;
@@ -96,6 +100,7 @@ export function CustomerDetail({
   onEdit,
   onArchived,
 }: CustomerDetailProps) {
+  const navigate = useNavigate();
   const { data, isLoading, error, refetch } = useDetailQuery<Customer>(
     '/api/customers',
     customerId,
@@ -288,6 +293,45 @@ export function CustomerDetail({
       ]}
       sections={[
         {
+          // 4.5 — quick actions: schedule, estimate, message. Each deep-links
+          // into the matching create/compose flow with this customer attached.
+          title: 'Quick Actions',
+          content: (
+            <div className="grid grid-cols-3 gap-2" data-testid="customer-quick-actions">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  navigate(`/jobs/new?customerId=${encodeURIComponent(customerId)}`)
+                }
+              >
+                <CalendarPlus size={14} className="mr-1.5" />
+                Schedule
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  navigate(`/estimates/new?customerId=${encodeURIComponent(customerId)}`)
+                }
+              >
+                <FileText size={14} className="mr-1.5" />
+                Estimate
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  navigate(`/comms-inbox?customerId=${encodeURIComponent(customerId)}`)
+                }
+              >
+                <MessageSquare size={14} className="mr-1.5" />
+                Message
+              </Button>
+            </div>
+          ),
+        },
+        {
           title: 'Contact Information',
           content: (
             <dl className="flex flex-col gap-2 text-sm">
@@ -307,6 +351,18 @@ export function CustomerDetail({
                 <dt className="text-slate-400">Preferred channel</dt>
                 <dd className="text-slate-800 capitalize">
                   {data.preferredChannel}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <dt className="text-slate-400">Messaging</dt>
+                <dd>
+                  {data.consentStatus === 'revoked' ? (
+                    <Badge variant="danger">Opted out</Badge>
+                  ) : data.smsConsent === false ? (
+                    <Badge variant="warning">No SMS consent</Badge>
+                  ) : (
+                    <Badge variant="success">Subscribed</Badge>
+                  )}
                 </dd>
               </div>
               <div className="flex justify-between gap-4">
@@ -382,6 +438,17 @@ export function CustomerDetail({
         {
           title: 'Custom Fields',
           content: <CustomFieldsPanel customerId={customerId} />,
+        },
+        {
+          // 4.6 — merge a duplicate into this (surviving) record.
+          title: 'Merge Duplicate',
+          content: (
+            <MergeCustomerPanel
+              survivingId={customerId}
+              survivingName={data.displayName}
+              onMerged={refetch}
+            />
+          ),
         },
         {
           title: 'Service Locations',
