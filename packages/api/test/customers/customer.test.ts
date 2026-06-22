@@ -379,6 +379,23 @@ describe('P1-019 — createCustomer attaches dedup warnings (advisory, never blo
       const matches = await repo.findByPhoneNormalized('tenant-1', '12345');
       expect(matches).toEqual([]);
     });
+
+    it('matches the secondary phone, not just the primary (4.7)', async () => {
+      await createCustomer(
+        {
+          tenantId: 'tenant-1',
+          firstName: 'Two',
+          lastName: 'Lines',
+          primaryPhone: '(555) 111-2222',
+          secondaryPhone: '+1 555-333-4444',
+          createdBy: 'u-1',
+        },
+        repo
+      );
+      const matches = await repo.findByPhoneNormalized('tenant-1', '5553334444');
+      expect(matches).toHaveLength(1);
+      expect(matches[0].displayName).toBe('Two Lines');
+    });
   });
 
   it('createCustomer.duplicate — creation is NEVER blocked (advisory only)', async () => {
@@ -400,5 +417,56 @@ describe('P1-019 — createCustomer attaches dedup warnings (advisory, never blo
     const after = await repo.findByTenant('tenant-1');
     expect(after.length).toBe(beforeCount + 1);
     expect(created.warnings!.length).toBeGreaterThan(0);
+  });
+});
+
+describe('Customer source (acquisition channel — Jobber parity)', () => {
+  let repo: InMemoryCustomerRepository;
+
+  beforeEach(() => {
+    repo = new InMemoryCustomerRepository();
+  });
+
+  it('persists a valid source on create', async () => {
+    const created = await createCustomer(
+      { tenantId: 't1', firstName: 'Pat', lastName: 'Lee', createdBy: 'u1', source: 'referral' },
+      repo,
+    );
+    expect(created.source).toBe('referral');
+    const read = await getCustomer('t1', created.id, repo);
+    expect(read?.source).toBe('referral');
+  });
+
+  it('leaves source undefined when not provided', async () => {
+    const created = await createCustomer(
+      { tenantId: 't1', firstName: 'Pat', lastName: 'Lee', createdBy: 'u1' },
+      repo,
+    );
+    expect(created.source).toBeUndefined();
+  });
+
+  it('accepts every documented source value', () => {
+    for (const source of ['website', 'referral', 'google', 'social_media', 'advertising', 'repeat_client', 'other'] as const) {
+      const errors = validateCustomerInput({ tenantId: 't1', firstName: 'A', lastName: 'B', createdBy: 'u1', source });
+      expect(errors).toHaveLength(0);
+    }
+  });
+
+  it('rejects an unknown source value', () => {
+    const errors = validateCustomerInput({
+      tenantId: 't1', firstName: 'A', lastName: 'B', createdBy: 'u1',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      source: 'tiktok' as any,
+    });
+    expect(errors).toContain('Invalid source');
+  });
+
+  it('updates the source on an existing customer', async () => {
+    const created = await createCustomer(
+      { tenantId: 't1', firstName: 'Pat', lastName: 'Lee', createdBy: 'u1', source: 'website' },
+      repo,
+    );
+    const updated = await updateCustomer('t1', created.id, { source: 'google' }, repo);
+    expect(updated?.source).toBe('google');
   });
 });

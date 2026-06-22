@@ -105,7 +105,7 @@ export const openApiSpec = {
           jobNumber: { type: 'string' as const },
           summary: { type: 'string' as const },
           problemDescription: { type: 'string' as const },
-          status: { type: 'string' as const, enum: ['new', 'scheduled', 'in_progress', 'completed', 'canceled'] },
+          status: { type: 'string' as const, enum: ['new', 'scheduled', 'dispatched', 'in_progress', 'completed', 'invoiced', 'closed', 'canceled'] },
           priority: { type: 'string' as const, enum: ['low', 'normal', 'high', 'urgent'] },
           assignedTechnicianId: { type: 'string' as const },
           createdBy: { type: 'string' as const },
@@ -496,7 +496,7 @@ export const openApiSpec = {
         tags: ['Jobs'],
         summary: 'List jobs',
         parameters: [
-          { name: 'status', in: 'query' as const, schema: { type: 'string' as const, enum: ['new', 'scheduled', 'in_progress', 'completed', 'canceled'] } },
+          { name: 'status', in: 'query' as const, schema: { type: 'string' as const, enum: ['new', 'scheduled', 'dispatched', 'in_progress', 'completed', 'invoiced', 'closed', 'canceled'] } },
           { name: 'customerId', in: 'query' as const, schema: { type: 'string' as const } },
           { name: 'technicianId', in: 'query' as const, schema: { type: 'string' as const } },
           { name: 'search', in: 'query' as const, schema: { type: 'string' as const } },
@@ -531,11 +531,11 @@ export const openApiSpec = {
       post: {
         tags: ['Jobs'],
         summary: 'Transition job status',
-        description: 'Valid transitions: new→scheduled|canceled, scheduled→in_progress|canceled, in_progress→completed|scheduled|canceled, canceled→new',
+        description: 'Forward transitions: new→scheduled, scheduled→dispatched|in_progress, dispatched→in_progress, in_progress→completed, completed→invoiced|closed, invoiced→closed; any active status→canceled; canceled→new. Backward moves (e.g. in_progress→scheduled) are owner-only and require `reason`; moves out of completed/invoiced/closed are refused.',
         parameters: [{ name: 'id', in: 'path' as const, required: true, schema: { type: 'string' as const, format: 'uuid' } }],
         requestBody: {
           required: true,
-          content: { 'application/json': { schema: { type: 'object' as const, required: ['status'], properties: { status: { type: 'string' as const, enum: ['new', 'scheduled', 'in_progress', 'completed', 'canceled'] } } } } },
+          content: { 'application/json': { schema: { type: 'object' as const, required: ['status'], properties: { status: { type: 'string' as const, enum: ['new', 'scheduled', 'dispatched', 'in_progress', 'completed', 'invoiced', 'closed', 'canceled'] }, reason: { type: 'string' as const, description: 'Required for backward status moves (owner only); recorded on the timeline and audit event.' } } } } },
         },
         responses: { '200': { description: 'Status transitioned' } },
       },

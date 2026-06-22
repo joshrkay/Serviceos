@@ -42,6 +42,15 @@ describe('P0-010 — File upload and attachment storage', () => {
     expect(errors).toHaveLength(0);
   });
 
+  it('validation — accepts native mobile audio (audio/mp4, audio/x-m4a)', () => {
+    // expo-audio / AVFoundation record AAC-in-MP4 (.m4a). The voice-capture
+    // upload-url path sends `audio/mp4`; some platforms report `audio/x-m4a`.
+    for (const contentType of ['audio/mp4', 'audio/x-m4a', 'audio/mp4;codecs=mp4a.40.2']) {
+      const errors = validateUpload({ ...validRequest, filename: 'voice.m4a', contentType });
+      expect(errors).toHaveLength(0);
+    }
+  });
+
   it('normalizeContentType — strips codec params and lowercases', () => {
     expect(normalizeContentType('audio/webm;codecs=opus')).toBe('audio/webm');
     expect(normalizeContentType('AUDIO/WEBM')).toBe('audio/webm');

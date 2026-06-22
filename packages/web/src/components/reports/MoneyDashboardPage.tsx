@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useApiClient } from '../../lib/apiClient';
 import { Spinner } from '../ui';
 import { ErrorState } from '../ErrorState';
+import { formatUsdCentsWhole } from '@ai-service-os/shared';
 
 interface MoneyDashboardSummary {
   month: string;
@@ -13,12 +14,7 @@ interface MoneyDashboardSummary {
   overdueCents: number;
 }
 
-function formatCents(cents: number): string {
-  const sign = cents < 0 ? '-' : '';
-  return `${sign}$${Math.abs(cents / 100).toLocaleString(undefined, {
-    maximumFractionDigits: 0,
-  })}`;
-}
+const formatCents = formatUsdCentsWhole;
 
 /** Current UTC month as 'YYYY-MM'. */
 function currentMonth(): string {

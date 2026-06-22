@@ -301,6 +301,46 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // U1 (PRD gap closure): onboarding_session table for the conversational
   // FSM (ENABLE + FORCE RLS per gemini-code-assist review on PR #594).
   ['195_onboarding_session', '4ca725aa5bd1d9e3c516282f67349e3fc5f47f0228bdc0a5e2ee6ed995d2834d'],
+  ['196_create_device_tokens', '5bfc2853156c6d14fcc313d8ad51c0b010499a205838a042c19941ae8d61b29a'],
+  // Token-exclusive device ownership: widen device_tokens RLS with the
+  // app.system_lookup escape hatch so register() can cross-tenant-delete a token.
+  ['197_device_tokens_system_lookup_rls', '2aff868a1307b6afe4398eb50141fa60fdf55a682fe8eb08c2d26bc854a20ba2'],
+  // One OPEN conversation per (tenant, customer): pre-index dedup + partial
+  // unique index that makes the customer get-or-create thread path race-safe.
+  ['198_conversations_one_open_thread_per_customer', '88e49474bf50962a612e2a2294d1901c91c0d2267430447e30c9315d22953ddc'],
+  // Null-safe (missing_ok) device_tokens system-lookup policy — avoids a UUID
+  // cast error on a connection with no app.current_tenant_id set.
+  ['199_device_tokens_system_lookup_null_safe', '23cd9a92fdccdc0bca9367833c2f1ce66463b60db925a49e73af0cdfabbf345a'],
+  // Extend the one-open-thread guarantee to 'lead' and 'sms_unmatched' so the
+  // inbound-capture 23505 recovery is atomic for every SMS target type, not
+  // just customer (migration 198).
+  ['200_conversations_one_open_thread_noncustomer', '9af90c1b55544fe8451246c42a6c7cd80dd8ed6fae054050bcc070548e253a0f'],
+  // Jobber-parity CRM: customer acquisition channel (additive nullable column).
+  ['201_customers_source', '2add8937ddc606a7bfe86b59be879b3dceeb6a9730d6ff414f3798a47c362a05'],
+  // Jobber-parity invoice processing-fee surcharge (additive nullable columns).
+  ['202_invoices_processing_fee', '3f1dd0227fd3b18342e06e1bda51f60e83b8a8ab5057da78d2b72986e4cd72cf'],
+  // Graduate maintenance contracts to a real tenant-scoped table.
+  ['203_create_maintenance_contracts', 'f0f77a5ba2060be02849eccd0f75066a43813c2f0004c3fb591a8a5f76ca78a6'],
+  // Onboarding email lifecycle (welcome / setup-reminder / trial-ending).
+  ['204_lifecycle_emails_and_trial_ends', '1fc6cc3a631858d987771d9db0c268c355995cfe19effa726018d6dd13445f45'],
+  // Story 15.2 — speed-to-lead first-response opt-in settings (renumbered 204→205 on a main-merge collision).
+  ['205_tenant_settings_speed_to_lead', '571411ab97bf29e4992cf08bb54555d0916e35fd1bc60f5f1c0f783b227bac21'],
+  // Add tenant_integrations.auth_token_{primary,secondary}_enc, never created on
+  // fresh DBs because a duplicate 070 CREATE shadowed the _enc definition (the
+  // column all provisioning/webhook code uses). Additive ALTER, no-op on prod.
+  ['206_tenant_integrations_auth_token_enc_columns', '21416ab18ca77cd08ca4f1d76d2f13f756f586b36fe90f1dd7adb2b9041fff28'],
+  ['207_jobs_status_canonical_lifecycle', '6e4e921973b79047ed517efbb629b80c293cb1586698464551a09324c718bba5'],
+  // Per-user owner-notification opt-outs (U10).
+  ['208_create_notification_preferences', 'df14c6514d98aaaadb7b320f9c3834029057841068c7d03ec707300c1f913048'],
+  // Story 3.9: raw per-field proposal-edit corrections log (intent + field +
+  // before/after), queryable per tenant and per intent; FORCE RLS. Renumbered
+  // 207 -> 208 -> 209 across successive main-merge collisions (SQL unchanged → hash preserved).
+  ['209_create_corrections', '37eac96b01f69d24106801716fbc9e5ed12d9b708e66877bcda4e7f3781e66d9'],
+  // Story 10.5 — tenant-scoped customer message templates (renumbered to clear
+  // migration-number collisions with main on merge; SQL value unchanged).
+  ['210_create_message_templates', 'a38dc2fba90473aec17537126a25c71fbf8461b012531c94ea55c858aa85f71d'],
+  // Story 10.2 — tenant-configurable reminder cadence/offsets (renumbered).
+  ['211_tenant_settings_reminder_offsets', '7043e4a221b59d530abd0a9d74ac8dd1a7f13379eeefb9b1749cc2b98368442a'],
 ];
 
 function hashMigration(value: string): string {

@@ -5,13 +5,32 @@ import {
   CustomerDuplicateLoader,
   DuplicateWarning,
   isCustomerDuplicateLoader,
+  nameSimilarity,
   normalizeEmail,
+  normalizeName,
   normalizePhone,
 } from './dedup';
 
 export type CustomerWithWarnings = Customer & { warnings?: DuplicateWarning[] };
 
 export type PreferredChannel = 'phone' | 'email' | 'sms' | 'none';
+
+/**
+ * Jobber-parity "How did you hear about us?" attribution. Distinct from
+ * `originatingLeadId` (which links a specific converted lead): `source` is the
+ * marketing channel the customer came in through, set at creation and editable
+ * later, so revenue can be rolled up by acquisition channel.
+ */
+export const CUSTOMER_SOURCES = [
+  'website',
+  'referral',
+  'google',
+  'social_media',
+  'advertising',
+  'repeat_client',
+  'other',
+] as const;
+export type CustomerSource = (typeof CUSTOMER_SOURCES)[number];
 
 export interface Customer {
   id: string;
@@ -26,6 +45,12 @@ export interface Customer {
   email?: string;
   preferredChannel: PreferredChannel;
   smsConsent: boolean;
+  /**
+   * Derived consent rollup (migration 132), maintained by the compliance
+   * layer. 'revoked' means the customer opted out (STOP / manual). Surfaced
+   * read-only on the record so opt-out state is visible (Story 10.6).
+   */
+  consentStatus?: 'granted' | 'revoked' | 'unknown';
   communicationNotes?: string;
   // Archive support
   isArchived: boolean;
@@ -37,6 +62,8 @@ export interface Customer {
    * back to the originating campaign with a single join.
    */
   originatingLeadId?: string;
+  /** Acquisition channel ("How did you hear about us?"). See CUSTOMER_SOURCES. */
+  source?: CustomerSource;
   /**
    * Phase 4c: BCP-47 short code (e.g. 'en', 'es', 'vi') the operator or
    * caller-ID-resolution layer recorded as this customer's preferred
@@ -86,6 +113,7 @@ export interface CreateCustomerInput {
   preferredChannel?: PreferredChannel;
   smsConsent?: boolean;
   communicationNotes?: string;
+  source?: CustomerSource;
   createdBy: string;
   actorRole?: string;
 }
@@ -100,11 +128,20 @@ export interface UpdateCustomerInput {
   preferredChannel?: PreferredChannel;
   smsConsent?: boolean;
   communicationNotes?: string;
+  source?: CustomerSource;
 }
 
 export interface CustomerListOptions {
   includeArchived?: boolean;
   search?: string;
+  /**
+   * U2 (4.8) — filter the list to customers carrying this exact tag.
+   * Implemented as an `EXISTS` join against `customer_tags` in the Pg
+   * repository (so the paginated data and total count agree). The
+   * in-memory customer store holds no tags, so it ignores this filter —
+   * the behavior is proven by the customer-tags integration test.
+   */
+  tag?: string;
   /** Pagination cap. Default 50, hard-capped server-side at 200. */
   limit?: number;
   /** Pagination offset. Default 0. */
@@ -141,7 +178,7 @@ export interface CustomerRepository {
    */
   findDuplicates?(
     tenantId: string,
-    criteria: { phone?: string; email?: string }
+    criteria: { phone?: string; email?: string; name?: string }
   ): Promise<Customer[]>;
   /**
    * VQ-006 follow-up (PR #265 review): push the lookup-by-phone filter
@@ -213,6 +250,7 @@ interface CustomerFieldValues {
   secondaryPhone?: string;
   email?: string;
   preferredChannel?: string;
+  source?: string;
 }
 
 /**
@@ -249,6 +287,9 @@ function validateCustomerFields(
   ) {
     errors.push('Invalid preferredChannel');
   }
+  if (fields.source && !CUSTOMER_SOURCES.includes(fields.source as CustomerSource)) {
+    errors.push('Invalid source');
+  }
   return errors;
 }
 
@@ -273,6 +314,7 @@ export function validateCustomerUpdateInput(
       secondaryPhone: input.secondaryPhone ?? existing.secondaryPhone,
       email: input.email ?? existing.email,
       preferredChannel: input.preferredChannel ?? existing.preferredChannel,
+      source: input.source ?? existing.source,
     },
     true
   );
@@ -293,7 +335,7 @@ export async function createCustomer(
   // the existing 201 response contract.
   let warnings: DuplicateWarning[] | undefined;
   if (
-    (input.primaryPhone || input.email) &&
+    (input.primaryPhone || input.email || input.firstName || input.companyName) &&
     isCustomerDuplicateLoader(repository)
   ) {
     const found = await checkCustomerDuplicatesPg(
@@ -301,6 +343,7 @@ export async function createCustomer(
         tenantId: input.tenantId,
         firstName: input.firstName,
         lastName: input.lastName,
+        companyName: input.companyName,
         primaryPhone: input.primaryPhone,
         email: input.email,
       },
@@ -322,6 +365,7 @@ export async function createCustomer(
     preferredChannel: input.preferredChannel || 'none',
     smsConsent: input.smsConsent ?? false,
     communicationNotes: input.communicationNotes,
+    source: input.source,
     isArchived: false,
     createdBy: input.createdBy,
     createdAt: new Date(),
@@ -570,6 +614,11 @@ export class InMemoryCustomerRepository implements CustomerRepository {
    * skill: stored.endsWith(target) || target.endsWith(stored). Includes
    * archived rows so callers can decide. Returns multiple matches when
    * a phone is shared (e.g. household lines).
+   *
+   * U7 (4.7) — matches the customer's primary AND secondary phone. The
+   * Pg repo additionally matches contact phones (customer_contacts); the
+   * in-memory customer store has no contacts, so contact-phone matching
+   * is proven by the Pg integration test, not here.
    */
   async findByPhoneNormalized(
     tenantId: string,
@@ -577,13 +626,15 @@ export class InMemoryCustomerRepository implements CustomerRepository {
   ): Promise<Customer[]> {
     if (!phoneNormalized || phoneNormalized.length < 7) return [];
     const target = phoneNormalized.slice(-10);
+    const tolerantMatch = (raw?: string): boolean => {
+      if (!raw) return false;
+      const stored = normalizePhone(raw);
+      if (stored.length < 7) return false;
+      return stored.endsWith(target) || target.endsWith(stored);
+    };
     return Array.from(this.customers.values())
       .filter((c) => c.tenantId === tenantId)
-      .filter((c) => {
-        if (!c.primaryPhone) return false;
-        const stored = normalizePhone(c.primaryPhone);
-        return stored.endsWith(target) || target.endsWith(stored);
-      })
+      .filter((c) => tolerantMatch(c.primaryPhone) || tolerantMatch(c.secondaryPhone))
       .map((c) => ({ ...c }));
   }
 
@@ -593,11 +644,12 @@ export class InMemoryCustomerRepository implements CustomerRepository {
    */
   async findDuplicates(
     tenantId: string,
-    criteria: { phone?: string; email?: string }
+    criteria: { phone?: string; email?: string; name?: string }
   ): Promise<Customer[]> {
     const phoneNorm = criteria.phone ? normalizePhone(criteria.phone) : '';
     const emailNorm = criteria.email ? normalizeEmail(criteria.email) : '';
-    if (!phoneNorm && !emailNorm) return [];
+    const nameNorm = criteria.name ? normalizeName(criteria.name) : '';
+    if (!phoneNorm && !emailNorm && !nameNorm) return [];
     return Array.from(this.customers.values())
       .filter((c) => c.tenantId === tenantId && !c.isArchived)
       .filter((c) => {
@@ -607,7 +659,15 @@ export class InMemoryCustomerRepository implements CustomerRepository {
           normalizePhone(c.primaryPhone) === phoneNorm;
         const emailMatch =
           !!emailNorm && c.email && normalizeEmail(c.email) === emailNorm;
-        return phoneMatch || emailMatch;
+        // Mirror the Pg `%` pre-filter: include name-similar candidates at/above
+        // pg_trgm's default threshold (0.3). The scorer makes the final 0.4 call.
+        const existingName =
+          [c.firstName, c.lastName].filter(Boolean).join(' ').trim() || c.displayName;
+        const nameMatch =
+          nameNorm.length >= 2 &&
+          !!existingName &&
+          nameSimilarity(nameNorm, normalizeName(existingName)) >= 0.3;
+        return phoneMatch || emailMatch || nameMatch;
       })
       .map((c) => ({ ...c }));
   }

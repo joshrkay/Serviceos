@@ -56,6 +56,14 @@ export interface TaskContext {
    * `new Date()` at point of use. Injectable so scheduling is testable.
    */
   now?: Date;
+  /**
+   * Story 7.2 — how many clarification loops the Estimate Agent has already
+   * run for this estimate (0 on the first pass). Threaded from conversation
+   * state by the voice/orchestration entry-point so the draft handler can
+   * enforce the hard 3-loop cap and flag the final draft for review. Absent
+   * (undefined) → treated as 0 (first pass).
+   */
+  clarificationCount?: number;
 }
 
 export interface TaskResult {

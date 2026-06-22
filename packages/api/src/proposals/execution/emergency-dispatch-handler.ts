@@ -45,6 +45,7 @@ import { AppointmentRepository, createAppointment } from '../../appointments/app
 import type { AssignmentRepository } from '../../appointments/assignment';
 import { findBookableSlots } from '../../scheduling/booking-availability';
 import { isValidTimezone } from '../../shared/timezone';
+import { notifyOwner } from '../../notifications/owner-notifications-instance';
 
 /** Duration of the tentatively-held emergency slot. */
 const EMERGENCY_SLOT_DURATION_MIN = 60;
@@ -383,6 +384,15 @@ export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
         error: `Emergency dispatch could not act: job=${jobSkipReason ?? 'skipped'}, page=${pageError ?? 'skipped'}`,
       };
     }
+
+    // U6 — owner `emergency` push alongside the SMS page. Best-effort and
+    // failure-isolated by the notifier; never blocks the life-safety dispatch.
+    await notifyOwner(context.tenantId, 'emergency', {
+      reason: fields.emergencyDescription,
+      proposalId: proposal.id,
+      ...(fields.customerId ? { customerId: fields.customerId } : {}),
+    });
+
     return { success: true, ...(jobId ? { resultEntityId: jobId } : {}) };
   }
 }

@@ -4,7 +4,11 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createConversationSchema, createMessageSchema } from '../shared/contracts';
-import { createConversationWithAudit, ConversationRepository } from '../conversations/conversation-service';
+import {
+  createConversationWithAudit,
+  getOrCreateCustomerConversation,
+  ConversationRepository,
+} from '../conversations/conversation-service';
 import {
   sendConversationReply,
   ConversationReplyError,
@@ -54,6 +58,17 @@ const inboxQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
 
+// Story 3.11 — history search: by free text (q), and/or by linked entity. The
+// customerId/jobId convenience params map to the conversation's entity link.
+const searchQuerySchema = z.object({
+  q: z.string().trim().min(1).optional(),
+  entityType: z.string().optional(),
+  entityId: z.string().optional(),
+  customerId: z.string().optional(),
+  jobId: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+
 /** Map a reply-service failure to an HTTP status the UI can act on. */
 const REPLY_ERROR_STATUS: Record<ConversationReplyErrorCode, number> = {
   not_found: 404,
@@ -68,8 +83,40 @@ export function createConversationRouter(
   auditRepo?: AuditRepository,
   aiDeps?: ConversationRouterAiDeps,
   replyDeps?: ConversationReplyRouterDeps,
+  // When present, the get-or-create customer-thread route verifies the
+  // customer exists (404s otherwise); omitted ⇒ the route still creates.
+  customerLookup?: Pick<CustomerRepository, 'findById'>,
 ): Router {
   const router = Router();
+
+  // Open (or lazily create) a customer's comms thread so the mobile app can
+  // start texting a customer who has never messaged in. Idempotent: reuses the
+  // existing thread, returning the same conversation on repeat taps.
+  router.post(
+    '/customer/:customerId',
+    requireAuth,
+    requireTenant,
+    // Lazily creates a conversation when none exists, so gate on the write
+    // permission (matches POST /), not the read-only conversations:view.
+    requirePermission('conversations:create'),
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const tenantId = req.auth!.tenantId;
+      const customerId = req.params.customerId;
+      if (customerLookup) {
+        const customer = await customerLookup.findById(tenantId, customerId);
+        if (!customer) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
+          return;
+        }
+      }
+      const { conversation } = await getOrCreateCustomerConversation(
+        conversationRepo,
+        { tenantId, customerId, createdBy: req.auth!.userId, actorRole: req.auth!.role },
+        auditRepo,
+      );
+      res.status(200).json({ conversation });
+    }),
+  );
 
   router.post(
     '/',
@@ -108,6 +155,43 @@ export function createConversationRouter(
       });
       res.json({ threads });
     })
+  );
+
+  // Story 3.11 — search conversation history by customer, job, or text.
+  // MUST precede '/:id' so Express doesn't treat 'search' as a conversation id.
+  router.get(
+    '/search',
+    requireAuth,
+    requireTenant,
+    requirePermission('conversations:view'),
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const query = searchQuerySchema.parse(req.query);
+      // Convenience params resolve to the conversation's entity link.
+      let entityType = query.entityType;
+      let entityId = query.entityId;
+      if (query.customerId) {
+        entityType = 'customer';
+        entityId = query.customerId;
+      } else if (query.jobId) {
+        entityType = 'job';
+        entityId = query.jobId;
+      }
+      // Require at least one criterion so search never dumps the whole tenant.
+      if (!query.q && !entityType) {
+        res.status(400).json({
+          error: 'BAD_REQUEST',
+          message: 'Provide q (text), customerId, or jobId to search.',
+        });
+        return;
+      }
+      const results = await conversationRepo.searchMessages(req.auth!.tenantId, {
+        ...(query.q ? { text: query.q } : {}),
+        ...(entityType ? { entityType } : {}),
+        ...(entityId ? { entityId } : {}),
+        ...(query.limit !== undefined ? { limit: query.limit } : {}),
+      });
+      res.json({ results });
+    }),
   );
 
   router.get(

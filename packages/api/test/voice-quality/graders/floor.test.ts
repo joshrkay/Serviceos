@@ -7,7 +7,7 @@
  * depend on the harness, runner, or any LLM/cassette path.
  */
 import { describe, it, expect } from 'vitest';
-import { gradeFloor } from '../../../src/ai/voice-quality/graders/floor';
+import { gradeFloor, hangupHandled } from '../../../src/ai/voice-quality/graders/floor';
 import type { Observation } from '../../../src/ai/voice-quality/observation';
 import type { VoiceQualityScript } from '../../../src/ai/voice-quality/schema';
 import type { VoiceSessionEvent } from '../../../src/ai/agents/customer-calling/voice-session-store';
@@ -61,7 +61,7 @@ function makeScript(partial: Partial<VoiceQualityScript> = {}): VoiceQualityScri
     turns: partial.turns ?? [],
     grading: partial.grading ?? { appliesFloor: [1, 2, 3, 4, 5, 6, 7, 8], appliesDisposition: [] },
     layer2Eligible: partial.layer2Eligible ?? false,
-    expectedCallerMetrics: partial.expectedCallerMetrics,
+    layer2Only: partial.layer2Only ?? false,
   };
 }
 
@@ -346,6 +346,46 @@ describe('VQ-020 — gradeFloor', () => {
     expect(result.passed).toBe(false);
     expect(result.failedCriteria).toContain(8);
     expect(result.reasons[8]).toMatch(/hangup|terminat/i);
+  });
+
+  // The "no proposal_created after hangup" rule ordered by `ts`, but
+  // proposal_created events carry no `ts`, so the check never fired. It now
+  // orders by causal log position (see eventLogIndex) — these pin the
+  // revived behavior. hangupHandled is tested directly so a minimal
+  // observation doesn't trip the other seven floor checks.
+  it('VQ-020 — hangupHandled fails when a proposal is logged AFTER the hangup (same ts)', () => {
+    const script = makeScript({
+      turns: [{ caller: 'bye', expected: { intent: 'lookup-customer' }, hangupAfter: true }],
+    });
+    const obs = makeObservation({
+      events: [
+        sessionTerminated('hangup', 999),
+        proposalCreated('p-post', 999), // same millisecond, later in the log
+      ],
+      sessionEndedAs: 'terminated',
+      hangupOccurred: true,
+    });
+
+    const result = hangupHandled(obs, script);
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toMatch(/after caller hangup/i);
+  });
+
+  it('VQ-020 — hangupHandled passes when the only proposal precedes the hangup', () => {
+    const script = makeScript({
+      turns: [{ caller: 'bye', expected: { intent: 'lookup-customer' }, hangupAfter: true }],
+    });
+    const obs = makeObservation({
+      events: [
+        proposalCreated('p-pre', 999),
+        sessionTerminated('hangup', 999),
+      ],
+      sessionEndedAs: 'terminated',
+      hangupOccurred: true,
+    });
+
+    expect(hangupHandled(obs, script).passed).toBe(true);
   });
 
   it('PR#265 review — noPiiLeak treats underscored skill names (lookup_customer / lookup_account_summary) as identity-resolving', () => {

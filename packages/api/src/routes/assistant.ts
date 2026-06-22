@@ -1,10 +1,16 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
+import { v4 as uuidv4 } from 'uuid';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { toErrorResponse } from '../shared/errors';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository } from '../proposals/proposal';
+import type { AuditRepository } from '../audit/audit';
+import {
+  recordAssistantTurn,
+  type ConversationRepository,
+} from '../conversations/conversation-service';
 import { classifyIntent } from '../ai/orchestration/intent-classifier';
 import { CreateCustomerTaskHandler } from '../ai/tasks/task-handlers';
 import type { TaskHandler } from '../ai/tasks/task-handlers';
@@ -66,6 +72,9 @@ const assistantReplySchema = z.object({
 const assistantChatRequestSchema = z.object({
   messages: z.array(assistantMessageSchema).min(1),
   stream: z.boolean().optional(),
+  // Story 3.11 — the client pins the running conversation so each turn persists
+  // to the same thread; omitted on the first turn (server opens a new one).
+  conversationId: z.string().optional(),
 });
 
 function inferTaskType(text: string): string {
@@ -148,6 +157,14 @@ export interface AssistantRouterDeps {
    * Optional; absent -> marker skipped.
    */
   estimateRepo?: Pick<EstimateRepository, 'findById' | 'findByTenant'>;
+  /**
+   * Story 3.11 — persist each chat turn (operator message + agent reply) so the
+   * running conversation survives reload and is searchable. Optional so tests
+   * without a repo keep working (persistence simply skipped).
+   */
+  conversationRepo?: ConversationRepository;
+  /** Audit sink for the conversation.created event on first persist. */
+  auditRepo?: AuditRepository;
 }
 
 type AssistantProposal = z.infer<typeof assistantProposalSchema>;
@@ -270,7 +287,8 @@ async function generateAssistantReply(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   tenantId: string,
   userId: string,
-  deps: AssistantRouterDeps
+  deps: AssistantRouterDeps,
+  correlationId: string,
 ) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   const lastUserText = lastUser?.content ?? '';
@@ -517,7 +535,7 @@ async function generateAssistantReply(
       ],
       temperature: 0.2,
       maxTokens: 700,
-      metadata: { source: 'assistant-chat-route', tenantId },
+      metadata: { source: 'assistant-chat-route', tenantId, correlationId },
     });
 
     const parsed = assistantReplySchema.parse(JSON.parse(response.content));
@@ -538,6 +556,7 @@ async function generateAssistantReply(
     // the degraded envelope, so without this the root cause (missing/invalid
     // provider key, JSON parse failure, provider outage) is invisible.
     logger.error('assistant/chat: LLM completion failed', {
+      correlationId,
       taskType,
       tenantId,
       error: err instanceof Error ? err.message : String(err),
@@ -571,14 +590,52 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
     requireTenant,
     requirePermission('ai:run'),
     async (req: AuthenticatedRequest, res: Response) => {
+      // Story 3.12 — one correlation id per chat turn, threaded into the gateway
+      // call + every error log so a failure is traceable end-to-end. Honors an
+      // inbound x-correlation-id when the caller supplies one.
+      const correlationId =
+        req.header('x-correlation-id') || `assistant-${req.auth!.userId}-${uuidv4()}`;
       try {
         const parsed = assistantChatRequestSchema.parse(req.body);
         const result = await generateAssistantReply(
           parsed.messages,
           req.auth!.tenantId,
           req.auth!.userId,
-          deps
+          deps,
+          correlationId,
         );
+
+        // Story 3.11 — persist the turn so the conversation survives reload and
+        // is searchable. Failure-soft: a persistence error must not drop the
+        // reply the operator is waiting on.
+        let conversationId = parsed.conversationId;
+        if (deps.conversationRepo) {
+          try {
+            const lastUserText =
+              [...parsed.messages].reverse().find((m) => m.role === 'user')?.content ?? '';
+            conversationId = await recordAssistantTurn(
+              deps.conversationRepo,
+              {
+                tenantId: req.auth!.tenantId,
+                userId: req.auth!.userId,
+                conversationId: parsed.conversationId,
+                userText: lastUserText,
+                assistantText: result.message.content,
+              },
+              deps.auditRepo,
+            );
+          } catch (persistErr) {
+            logger.error('assistant/chat: conversation persist failed', {
+              correlationId,
+              tenantId: req.auth!.tenantId,
+              error: persistErr instanceof Error ? persistErr.message : String(persistErr),
+            });
+          }
+        }
+
+        // The reply envelope carries the conversation id (so the client pins the
+        // thread) and the correlation id (traceability).
+        const envelope = { ...result, conversationId, correlationId };
 
         if (parsed.stream) {
           res.setHeader('Content-Type', 'text/event-stream');
@@ -593,7 +650,6 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
           // in the same tenant don't see each other's tokens.
           const { publish } = await import('../ws/client-gateway');
           const userTarget = req.auth!.userId;
-          const correlationId = `assistant-${userTarget}-${Date.now()}`;
           for (const chunk of chunks) {
             writeSse(res, 'token', { delta: chunk });
             publish(
@@ -609,7 +665,7 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
               req.auth!.tenantId,
             );
           }
-          writeSse(res, 'done', result);
+          writeSse(res, 'done', envelope);
           publish(
             'assistant',
             userTarget,
@@ -627,8 +683,13 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
           return;
         }
 
-        res.json(result);
+        res.json(envelope);
       } catch (err) {
+        logger.error('assistant/chat: request failed', {
+          correlationId,
+          tenantId: req.auth?.tenantId,
+          error: err instanceof Error ? err.message : String(err),
+        });
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
       }

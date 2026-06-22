@@ -23,6 +23,7 @@
  * accounting and suppression stay uniform across transactional and
  * conversational sends.
  */
+import { createHash } from 'crypto';
 import { createAuditEvent, AuditRepository } from '../audit/audit';
 import { DncRepository, normalizePhone } from '../compliance/dnc';
 import {
@@ -172,12 +173,20 @@ async function resolveTarget(
 function buildIdempotencyKey(
   conversationId: string,
   channel: ReplyChannel,
+  body: string,
   nowMs: number,
 ): string {
-  // Quantise to a 1-minute window so a double-tap dedupes at the provider and
-  // the dispatch ledger, while a deliberate re-send minutes later is new.
+  // Quantise to a 1-minute window so a true double-tap (same reply text fired
+  // twice) dedupes at the provider and the dispatch ledger, while a deliberate
+  // re-send minutes later is new. The body hash disambiguates DIFFERENT replies
+  // sent in the same minute: without it, two distinct messages collided on one
+  // key and the second hit the message_dispatches unique (tenant_id,
+  // idempotency_key) constraint — dropped or mis-threaded. A short sha256 of
+  // the trimmed body keeps identical re-taps colliding (intended dedupe) while
+  // separating non-identical sends.
   const minute = Math.floor(nowMs / 60_000);
-  return `conversation_reply:${conversationId}:${channel}:${minute}`;
+  const bodyHash = createHash('sha256').update(body).digest('hex').slice(0, 16);
+  return `conversation_reply:${conversationId}:${channel}:${minute}:${bodyHash}`;
 }
 
 export async function sendConversationReply(
@@ -220,7 +229,12 @@ export async function sendConversationReply(
   }
 
   const nowMs = (deps.now ?? (() => new Date()))().getTime();
-  const idempotencyKey = buildIdempotencyKey(input.conversationId, target.channel, nowMs);
+  const idempotencyKey = buildIdempotencyKey(
+    input.conversationId,
+    target.channel,
+    body,
+    nowMs,
+  );
 
   let provider: string;
   let providerMessageId: string;

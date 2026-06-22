@@ -56,6 +56,7 @@ import type { InvoiceRepository } from '../invoices/invoice';
 import type { DunningConfigRepository } from '../invoices/dunning-config';
 import type { AgreementRepository } from '../agreements/agreement';
 import type { CustomerRepository } from '../customers/customer';
+import { isCustomerDuplicateLoader } from '../customers/dedup';
 import type { EstimateRepository } from '../estimates/estimate';
 import type { DailyDigestRepository } from '../digest/digest-service';
 import type { LookupEventService } from '../lookup-events/lookup-event-service';
@@ -64,6 +65,9 @@ import { discloseRecording } from '../ai/skills/disclose-recording';
 import { t, type Language } from '../ai/i18n/i18n';
 import { identifyCaller } from '../ai/skills/identify-caller';
 import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
+import type { ConversationRepository } from '../conversations/conversation-service';
+import { logInboundCallOnCustomerTimeline } from './inbound-call-log';
+import { notifyOwner } from '../notifications/owner-notifications-instance';
 import { assembleB2bAccountContext } from '../ai/agents/customer-calling/b2b-account-context';
 import { confirmIntent } from '../ai/skills/confirm-intent';
 import { summarizeSession } from '../ai/skills/summarize-session';
@@ -227,6 +231,13 @@ export interface TwilioAdapterDeps {
   agreementRepo?: AgreementRepository;
   /** VQ-006: read-only customer + estimate lookups. */
   customerRepo?: CustomerRepository;
+  /**
+   * When wired, an identified inbound caller's call is logged on their
+   * conversation timeline (channel=call, direction=inbound) — the inbound
+   * mirror of the outbound click-to-call log, so the customer's history shows
+   * both directions. Best-effort: a logging failure never fails the call.
+   */
+  conversationRepo?: ConversationRepository;
   /**
    * N-003 (P2-036) — threaded through to the voice-turn processor so a live-call
    * negotiation callback can carry the caller's LTV/recency.
@@ -476,6 +487,37 @@ export function isBlockedCallerId(from: string | undefined): boolean {
     v === 'anonymous' ||
     v === 'unavailable'
   );
+}
+
+/**
+ * Fire exactly one `incoming_call` owner push for an inbound call (best-effort).
+ *
+ * Known caller → deep-links to their customer record with their name; an
+ * unknown caller has only a CRM lead (a separate id space with no mobile detail
+ * route), so the push omits the customer id and the client routes to the
+ * customers list (never a dead `/customers/<leadId>` link). Blocked/withheld
+ * caller-id degrades to a generic "New caller". Always fires — an inbound call
+ * is always worth surfacing. Never throws — `notifyOwner` is itself
+ * failure-isolated; this wrapper only assembles the typed context.
+ */
+export async function notifyOwnerOfIncomingCall(opts: {
+  tenantId: string;
+  /** Resolved customer id (known caller only). Omitted for unknown callers. */
+  customerId?: string;
+  /** Known caller's display name, when matched. */
+  customerName?: string;
+  /** Raw caller phone (Twilio `From`); may be blocked/withheld. */
+  fromPhone?: string;
+}): Promise<void> {
+  const callerLabel = opts.customerName?.trim()
+    ? opts.customerName.trim()
+    : isBlockedCallerId(opts.fromPhone) || !opts.fromPhone?.trim()
+      ? 'New caller'
+      : `New caller: ${opts.fromPhone.trim()}`;
+  await notifyOwner(opts.tenantId, 'incoming_call', {
+    ...(opts.customerId ? { customerId: opts.customerId } : {}),
+    callerLabel,
+  });
 }
 
 /** Escape a string for safe inclusion in TwiML. */
@@ -1444,6 +1486,9 @@ export class TwilioGatherAdapter {
     // the create_customer voice flow can use it as the new customer's
     // primaryPhone without re-prompting.
     this.callerIdBySession.set(session.id, opts.from ?? '');
+    // Also pin it on the session so the voice-turn processor's ask_caller wire
+    // can find-or-create a CUSTOMER by phone for an unknown caller who books.
+    if (opts.from) session.callerPhone = opts.from;
 
     // P11-002: resolve spoken language + TTS voice (tenant default) and pin
     // them on the session so the greeting, disclosure, and every TwiML build
@@ -1535,6 +1580,27 @@ export class TwilioGatherAdapter {
 
     if (callerKnown) {
       session.customerId = callerKnown.customerId;
+      // Log the inbound call on the customer's timeline (best-effort) so it
+      // shows up in their conversation history / unified inbox alongside the
+      // outbound click-to-call log. Never let a logging failure fail the call.
+      if (this.deps.conversationRepo) {
+        try {
+          await logInboundCallOnCustomerTimeline({
+            conversationRepo: this.deps.conversationRepo,
+            tenantId: opts.tenantId,
+            customerId: callerKnown.customerId,
+            fromPhone: opts.from,
+            callSid: opts.callSid,
+            actorId: this.deps.systemActorId ?? 'system:inbound-call',
+            ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+          });
+        } catch (err) {
+          logger.error('inbound call timeline log failed', {
+            callSid: opts.callSid,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       // U4 — assemble B2B priority routing context for a business / property-
       // manager caller before driving the FSM forward.
       await this.loadB2bAccountContext(session, opts.tenantId, callerKnown.customerId);
@@ -1579,6 +1645,16 @@ export class TwilioGatherAdapter {
       }
       expanded.push(...session.machine.dispatch({ type: 'unknown_caller' }));
     }
+
+    // U2 — fire ONE owner "incoming call" push per inbound call (best-effort,
+    // after the caller is identified above). Known caller deep-links to their
+    // customer with their name; an unknown caller routes to the customers list
+    // (a lead has no mobile detail route). notifyOwner is failure-isolated.
+    await notifyOwnerOfIncomingCall({
+      tenantId: opts.tenantId,
+      ...(callerKnown ? { customerId: callerKnown.customerId, customerName: callerKnown.customerName } : {}),
+      ...(opts.from ? { fromPhone: opts.from } : {}),
+    });
 
     // 6. Execute non-TwiML side effects (audit_log, create_proposal,
     //    notify_oncall) against the wired repos.
@@ -2467,7 +2543,13 @@ export class TwilioGatherAdapter {
     const phoneBlocked = isBlockedCallerId(callerIdRaw);
     const callerIdPhone = phoneBlocked ? undefined : callerIdRaw;
 
-    const handler = new CreateCustomerVoiceTaskHandler();
+    // 4.3 — wire the read-only dedup loader so the proposal card surfaces
+    // "possible duplicate" before a human approves the write.
+    const duplicateLoader =
+      this.deps.customerRepo && isCustomerDuplicateLoader(this.deps.customerRepo)
+        ? this.deps.customerRepo
+        : undefined;
+    const handler = new CreateCustomerVoiceTaskHandler({ duplicateLoader });
     const outcome = await handler.run({
       tenantId: opts.tenantId,
       message: opts.speechResult,

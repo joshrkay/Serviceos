@@ -244,6 +244,17 @@ describe('PgEstimateRepository list filters + pagination', () => {
     expect(q.params).toEqual([TENANT, 'sent', JOB_ID, '%roof%']);
   });
 
+  it('builds a job_id = ANY(...) predicate for the customer (jobIds) filter', async () => {
+    const { pool, calls } = makeMockPool((sql) => (isContext(sql) ? [] : []));
+    await new PgEstimateRepository(pool).findByTenant(TENANT, {
+      status: 'sent',
+      jobIds: ['job-a', 'job-b'],
+    });
+    const q = calls.find((c) => c.sql.includes('FROM estimates'))!;
+    expect(q.sql).toMatch(/job_id\s*=\s*ANY\(\$3\)/);
+    expect(q.params).toEqual([TENANT, 'sent', ['job-a', 'job-b']]);
+  });
+
   it('applies ascending sort when sort=asc', async () => {
     const { pool, calls } = makeMockPool((sql) => (isContext(sql) ? [] : []));
     await new PgEstimateRepository(pool).findByTenant(TENANT, { sort: 'asc', limit: 10 });

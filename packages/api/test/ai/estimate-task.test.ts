@@ -204,6 +204,70 @@ describe('P2-016 — Estimate draft proposal generation', () => {
   });
 });
 
+// ─── 7.2: Clarifying questions (max 3 loops) ─────────────────────────────
+describe('7.2 — EstimateTaskHandler clarification policy', () => {
+  // No customerId + a zero-quantity line → genuinely ambiguous.
+  const ambiguousJson = JSON.stringify({
+    lineItems: [{ description: 'AC repair', quantity: 0, unitPrice: 12000 }],
+    confidence_score: 0.95,
+  });
+
+  it('a grounded estimate needs no clarification', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: validEstimateJson });
+    const handler = new EstimateTaskHandler(makeGateway(stub));
+
+    const { proposal } = await handler.handle(makeContext());
+
+    const clar = proposal.payload.clarification as {
+      needed: boolean; flaggedForReview: boolean; questions: string[];
+    };
+    expect(clar.needed).toBe(false);
+    expect(clar.flaggedForReview).toBe(false);
+    expect(clar.questions).toEqual([]);
+  });
+
+  it('an ambiguous draft asks targeted questions and cannot auto-approve', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: ambiguousJson });
+    const handler = new EstimateTaskHandler(makeGateway(stub));
+
+    const { proposal } = await handler.handle(
+      makeContext({ message: 'AC repair for the upstairs unit' }),
+    );
+
+    const clar = proposal.payload.clarification as {
+      needed: boolean; questions: string[]; flaggedForReview: boolean; capped: boolean;
+    };
+    expect(clar.needed).toBe(true);
+    expect(clar.capped).toBe(false);
+    expect(clar.flaggedForReview).toBe(false);
+    expect(clar.questions.length).toBeGreaterThan(0);
+    // Despite the model's 0.95, an open-questions draft is held for review.
+    expect(proposal.status).not.toBe('approved');
+    expect(proposal.confidenceFactors).toContain('clarification_pending');
+  });
+
+  it('after the 3-loop cap, proposes a best-effort estimate flagged for review', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: ambiguousJson });
+    const handler = new EstimateTaskHandler(makeGateway(stub));
+
+    const { proposal } = await handler.handle(
+      makeContext({ message: 'AC repair for the upstairs unit', clarificationCount: 3 }),
+    );
+
+    const clar = proposal.payload.clarification as {
+      needed: boolean; flaggedForReview: boolean; capped: boolean;
+    };
+    expect(clar.capped).toBe(true);
+    expect(clar.flaggedForReview).toBe(true);
+    expect(clar.needed).toBe(false); // stops asking — drafts instead
+    expect(proposal.status).not.toBe('approved');
+    expect(proposal.confidenceFactors).toContain('flagged_for_review');
+  });
+});
+
 // ─── P22: catalog grounding (mirror of the invoice handler cases; this
 // contract's price field is `unitPrice`, integer cents) ─────────────────
 describe('P22 — EstimateTaskHandler catalog grounding', () => {

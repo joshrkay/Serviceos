@@ -10,6 +10,8 @@ import {
   InboxThreadSummary,
   ListInboxThreadsOptions,
   Message,
+  MessageSearchHit,
+  MessageSearchParams,
 } from './conversation-service';
 
 function mapConversationRow(row: Record<string, unknown>): Conversation {
@@ -119,6 +121,60 @@ export class PgConversationRepository extends PgBaseRepository implements Conver
     });
   }
 
+  // Story 3.11 follow-up (U9) — atomically insert the conversation + its first
+  // messages in ONE transaction so a failed message insert rolls back the
+  // conversation too (no orphaned empty thread). Mirrors the column lists of
+  // createConversation/addMessage.
+  async createConversationWithMessages(
+    conversation: CreateConversationInput,
+    messages: Array<Omit<CreateMessageInput, 'conversationId'>>,
+  ): Promise<{ conversation: Conversation; messages: Message[] }> {
+    const convId = uuidv4();
+    const now = new Date();
+    return this.withTenantTransaction(conversation.tenantId, async (client) => {
+      const convResult = await client.query(
+        `INSERT INTO conversations (id, tenant_id, title, entity_type, entity_id, status, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING *`,
+        [
+          convId,
+          conversation.tenantId,
+          conversation.title ?? null,
+          conversation.entityType ?? null,
+          conversation.entityId ?? null,
+          'open',
+          conversation.createdBy,
+          now,
+          now,
+        ]
+      );
+      const created = mapConversationRow(convResult.rows[0]);
+      const out: Message[] = [];
+      for (const m of messages) {
+        const msgResult = await client.query(
+          `INSERT INTO messages (id, tenant_id, conversation_id, message_type, content, sender_id, sender_role, file_id, source, metadata, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           RETURNING *`,
+          [
+            uuidv4(),
+            m.tenantId,
+            convId,
+            m.messageType,
+            m.content ?? null,
+            m.senderId,
+            m.senderRole,
+            m.fileId ?? null,
+            m.source ?? null,
+            m.metadata ? JSON.stringify(m.metadata) : null,
+            new Date(),
+          ]
+        );
+        out.push(mapMessageRow(msgResult.rows[0]));
+      }
+      return { conversation: created, messages: out };
+    });
+  }
+
   async updateMessageMetadata(
     tenantId: string,
     messageId: string,
@@ -134,6 +190,63 @@ export class PgConversationRepository extends PgBaseRepository implements Conver
       );
       if (result.rows.length === 0) return null;
       return mapMessageRow(result.rows[0]);
+    });
+  }
+
+  async searchMessages(
+    tenantId: string,
+    params: MessageSearchParams,
+  ): Promise<MessageSearchHit[]> {
+    const limit = params.limit ?? 50;
+    return this.withTenant(tenantId, async (client) => {
+      // tenant_id is the first predicate (defense-in-depth alongside RLS).
+      // Optional content ILIKE (text) and linked-entity filters are appended
+      // positionally so the parameterized query stays injection-safe.
+      const sqlParams: unknown[] = [tenantId];
+      let textClause = '';
+      if (params.text && params.text.trim().length > 0) {
+        sqlParams.push(`%${params.text.trim()}%`);
+        textClause = `AND m.content ILIKE $${sqlParams.length}`;
+      }
+      let entityTypeClause = '';
+      if (params.entityType) {
+        sqlParams.push(params.entityType);
+        entityTypeClause = `AND c.entity_type = $${sqlParams.length}`;
+      }
+      let entityIdClause = '';
+      if (params.entityId) {
+        sqlParams.push(params.entityId);
+        entityIdClause = `AND c.entity_id = $${sqlParams.length}`;
+      }
+      sqlParams.push(limit);
+      const limitParam = `$${sqlParams.length}`;
+
+      const sql = `
+        SELECT
+          m.*,
+          c.title AS conv_title,
+          c.entity_type AS conv_entity_type,
+          c.entity_id AS conv_entity_id
+        FROM messages m
+        JOIN conversations c
+          ON c.id = m.conversation_id AND c.tenant_id = m.tenant_id
+        WHERE m.tenant_id = $1
+          ${textClause}
+          ${entityTypeClause}
+          ${entityIdClause}
+        ORDER BY m.created_at DESC
+        LIMIT ${limitParam}
+      `;
+      const { rows } = await client.query(sql, sqlParams);
+      return rows.map((row) => ({
+        message: mapMessageRow(row),
+        conversation: {
+          id: row.conversation_id as string,
+          title: row.conv_title as string | undefined,
+          entityType: row.conv_entity_type as string | undefined,
+          entityId: row.conv_entity_id as string | undefined,
+        },
+      }));
     });
   }
 

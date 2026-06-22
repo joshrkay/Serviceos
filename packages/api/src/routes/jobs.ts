@@ -324,7 +324,7 @@ export function createJobRouter(
     requirePermission('jobs:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const { status } = req.body;
+        const { status, reason } = req.body;
         if (!status) {
           res.status(400).json({ error: 'VALIDATION_ERROR', message: 'status is required' });
           return;
@@ -337,7 +337,9 @@ export function createJobRouter(
           req.auth!.role,
           jobRepo,
           timelineRepo,
-          auditRepo
+          auditRepo,
+          // §5.8 — required for backward moves; the lifecycle gates it.
+          typeof reason === 'string' ? reason : undefined
         );
 
         if (status === 'completed') {

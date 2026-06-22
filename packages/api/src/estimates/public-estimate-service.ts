@@ -45,6 +45,13 @@ export interface PublicEstimateView {
   businessName: string;
   businessPhone?: string;
   businessEmail?: string;
+  /**
+   * Tenant's customer-facing document word (e.g. 'Quote', 'Bid'), resolved
+   * from terminologyPreferences.estimateTerm. Defaults to 'Estimate'. The
+   * canonical entity is unchanged — this only relabels what the customer
+   * sees on the public approval page (Story 7.4).
+   */
+  estimateLabel: string;
   lineItems: Array<{
     id: string;
     description: string;
@@ -599,6 +606,10 @@ export class PublicEstimateService {
       // that surfaces a null value.
       businessPhone: settings?.businessPhone ?? undefined,
       businessEmail: settings?.businessEmail ?? undefined,
+      // Story 7.4 — flow the tenant's document word into the customer-facing
+      // page. `settings` is already loaded above (businessName), so this adds
+      // no extra query. Falls back to the canonical 'Estimate'.
+      estimateLabel: settings?.terminologyPreferences?.estimateTerm?.trim() || 'Estimate',
       lineItems: displayItems.map((li) => ({
         id: li.id,
         description: li.description,

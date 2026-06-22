@@ -152,9 +152,20 @@ interface InboxSummary {
   truncated: boolean;
 }
 
+// §5.5 — an expired schedule proposal card the operator can re-propose.
+interface ExpiredCard {
+  id: string;
+  proposalType: string;
+  summary: string;
+  status: string;
+  expiresAt?: string;
+  createdAt: string;
+}
+
 interface InboxResponse {
   data: InboxProposalRow[];
   summary: InboxSummary;
+  expired?: ExpiredCard[];
 }
 
 const URGENCY_BADGE: Record<Urgency, { label: string; classes: string }> = {
@@ -257,6 +268,7 @@ export function InboxPage() {
   const tz = useTenantTimezone();
   const [rows, setRows] = useState<InboxProposalRow[]>([]);
   const [summary, setSummary] = useState<InboxSummary | null>(null);
+  const [expired, setExpired] = useState<ExpiredCard[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -271,6 +283,7 @@ export function InboxPage() {
         if (!cancelled) {
           setRows(body.data);
           setSummary(body.summary);
+          setExpired(body.expired ?? []);
         }
       })
       .catch((err) => {
@@ -294,6 +307,26 @@ export function InboxPage() {
     } catch (err) {
       if (removed) setRows((prev) => [removed, ...prev]);
       setError(err instanceof Error ? err.message : `${action} failed`);
+    }
+  }
+
+  /**
+   * §5.5 — re-propose an expired schedule card: POSTs to the re-propose
+   * endpoint, which mints a fresh draft (new 48h clock). Optimistically removes
+   * the expired card; restores it on failure. The new draft appears in the
+   * pending feed on the next poll / refresh.
+   */
+  async function repropose(id: string): Promise<void> {
+    const removed = expired.find((c) => c.id === id);
+    setExpired((prev) => prev.filter((c) => c.id !== id));
+    try {
+      const res = await apiFetch(`/api/proposals/${id}/re-propose`, { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setError(null);
+      emitProposalsChanged();
+    } catch (err) {
+      if (removed) setExpired((prev) => [removed, ...prev]);
+      setError(err instanceof Error ? err.message : 'Re-propose failed');
     }
   }
 
@@ -388,7 +421,7 @@ export function InboxPage() {
         {isLoading && <p className="text-sm text-slate-500">Loading…</p>}
         {error && <p className="text-sm text-red-600">{error}</p>}
 
-        {!isLoading && !error && rows.length === 0 && (
+        {!isLoading && !error && rows.length === 0 && expired.length === 0 && (
           <div className="rounded-xl border border-slate-200 bg-white px-6 py-12 text-center">
             <p className="text-sm text-slate-700 font-medium">Nothing waiting.</p>
             <p className="text-xs text-slate-500 mt-1">
@@ -453,6 +486,41 @@ export function InboxPage() {
             );
           })}
         </ul>
+
+        {/* §5.5 — expired schedule proposal cards, clearly marked and re-proposable. */}
+        {expired.length > 0 && (
+          <div className="mt-8" data-testid="expired-section">
+            <h2 className="text-sm font-semibold text-slate-700 mb-2">Expired schedule proposals</h2>
+            <ul className="space-y-2">
+              {expired.map((card) => (
+                <li
+                  key={card.id}
+                  data-testid="expired-row"
+                  className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded border bg-slate-100 text-slate-500 border-slate-200">
+                          Expired
+                        </span>
+                        <span className="text-xs text-slate-500">{card.proposalType}</span>
+                      </div>
+                      <p className="text-sm text-slate-700 font-medium truncate">{card.summary}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => repropose(card.id)}
+                      className="rounded-lg border border-slate-300 bg-white text-slate-700 text-sm px-3 py-1.5 hover:bg-slate-50 shrink-0"
+                    >
+                      Re-propose
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
     </div>
   );

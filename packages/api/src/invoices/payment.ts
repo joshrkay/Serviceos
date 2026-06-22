@@ -1,8 +1,48 @@
 import { v4 as uuidv4 } from 'uuid';
+import { formatUsdCents } from '@ai-service-os/shared';
 import { Invoice, InvoiceRepository } from './invoice';
 import { ValidationError } from '../shared/errors';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { notifyOwner } from '../notifications/owner-notifications-instance';
+import { resolveInvoiceCustomerName } from '../notifications/owner-notification-name-resolver';
+
+/**
+ * U6 — resolve the customer's display name for the owner `payment_received`
+ * push. Best-effort: callers that don't wire it (or can't resolve a name) get
+ * a generic label so the push still goes out without blocking the payment.
+ */
+export type PaymentCustomerNameResolver = (
+  tenantId: string,
+  invoiceId: string,
+) => Promise<string | undefined>;
+
+/**
+ * Fire the owner `payment_received` push (best-effort). amountLabel is formatted
+ * from INTEGER CENTS via the shared money formatter — never floats. Never
+ * throws: a resolution/notify failure must not disturb the recorded payment.
+ * Exported for focused unit testing.
+ */
+export async function notifyOwnerPaymentReceived(
+  tenantId: string,
+  invoiceId: string,
+  amountCents: number,
+  customerNameResolver?: PaymentCustomerNameResolver,
+): Promise<void> {
+  try {
+    const customerName =
+      (customerNameResolver
+        ? await customerNameResolver(tenantId, invoiceId)
+        : await resolveInvoiceCustomerName(tenantId, invoiceId)) ?? 'A customer';
+    await notifyOwner(tenantId, 'payment_received', {
+      invoiceId,
+      customerName,
+      amountLabel: formatUsdCents(amountCents),
+    });
+  } catch {
+    // Best-effort: the payment already committed; the push must not bounce it.
+  }
+}
 
 /**
  * Optional audit context for `recordPayment`. When `auditRepo` is wired,
@@ -249,6 +289,12 @@ export async function recordPayment(
   paymentReceiptNotifier?: PaymentReceiptNotifier,
   auditRepo?: AuditRepository,
   auditContext?: RecordPaymentAuditContext,
+  /**
+   * U6 — resolves the customer name for the owner `payment_received` push.
+   * Trailing + optional so existing positional callers are unaffected; absent
+   * → the owner push still fires with a generic label.
+   */
+  customerNameResolver?: PaymentCustomerNameResolver,
 ): Promise<{ payment: Payment; invoice: Invoice }> {
   const errors = validatePaymentInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
@@ -370,6 +416,17 @@ export async function recordPayment(
       input.tenantId,
       input.invoiceId,
       input.amountCents,
+    );
+  }
+
+  // U6 — owner `payment_received` push alongside the customer receipt.
+  // Best-effort and failure-isolated; never blocks the recorded payment.
+  if (updatedInvoice) {
+    await notifyOwnerPaymentReceived(
+      input.tenantId,
+      input.invoiceId,
+      input.amountCents,
+      customerNameResolver,
     );
   }
 

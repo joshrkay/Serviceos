@@ -58,7 +58,10 @@ function buildMe(overrides: Partial<MeResponse> = {}): MeResponse {
     can_field_serve: true,
     current_mode: 'supervisor',
     mode_changed_at: null,
-    permissions: [],
+    // Default to an owner who holds the billing/office view permissions so
+    // the permission-gated nav (Invoices/Estimates/Money) renders. Per-case
+    // overrides drop these to exercise the technician path.
+    permissions: ['invoices:view', 'estimates:view', 'payments:view'],
     backup_supervisor_user_id: null,
     unsupervised_proposal_routing: 'queue_and_sms',
     ...overrides,
@@ -154,6 +157,26 @@ describe('P12-002 — Shell mode-aware nav + toggle visibility', () => {
     expect(screen.queryByText('Leads')).toBeNull();
     expect(screen.queryByText('Interactions')).toBeNull();
     expect(screen.queryByText('Assistant')).toBeNull();
+  });
+
+  it('hides office/billing nav from a technician — even when stuck in the supervisor-mode default', () => {
+    // A technician's mode toggle is hidden, and an unset current_mode falls
+    // back to 'supervisor'. The permission gate (not mode) is what must keep
+    // billing surfaces away: a technician holds no invoices/estimates view.
+    mockMe(
+      buildMe({
+        role: 'technician',
+        can_field_serve: false,
+        current_mode: 'supervisor',
+        permissions: ['jobs:view', 'customers:view', 'appointments:view', 'notes:view'],
+      }),
+    );
+    renderShell();
+    expect(screen.queryByText('Invoices')).toBeNull();
+    expect(screen.queryByText('Estimates')).toBeNull();
+    expect(screen.queryByText('Money')).toBeNull();
+    expect(screen.queryByText('Bills')).toBeNull();
+    expect(screen.queryByText('Quotes')).toBeNull();
   });
 
   it('renders both-mode nav (Assistant + Today + My jobs together)', () => {
