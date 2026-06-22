@@ -32,6 +32,9 @@ interface Customer {
   primaryPhone?: string;
   secondaryPhone?: string;
   preferredChannel: string;
+  smsConsent?: boolean;
+  /** Derived opt-out rollup (Story 10.6). 'revoked' => opted out. */
+  consentStatus?: 'granted' | 'revoked' | 'unknown';
   communicationNotes?: string;
   isArchived: boolean;
   originatingLeadId?: string;
@@ -348,6 +351,18 @@ export function CustomerDetail({
                 <dt className="text-slate-400">Preferred channel</dt>
                 <dd className="text-slate-800 capitalize">
                   {data.preferredChannel}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <dt className="text-slate-400">Messaging</dt>
+                <dd>
+                  {data.consentStatus === 'revoked' ? (
+                    <Badge variant="danger">Opted out</Badge>
+                  ) : data.smsConsent === false ? (
+                    <Badge variant="warning">No SMS consent</Badge>
+                  ) : (
+                    <Badge variant="success">Subscribed</Badge>
+                  )}
                 </dd>
               </div>
               <div className="flex justify-between gap-4">

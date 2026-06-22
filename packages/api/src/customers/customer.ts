@@ -45,6 +45,12 @@ export interface Customer {
   email?: string;
   preferredChannel: PreferredChannel;
   smsConsent: boolean;
+  /**
+   * Derived consent rollup (migration 132), maintained by the compliance
+   * layer. 'revoked' means the customer opted out (STOP / manual). Surfaced
+   * read-only on the record so opt-out state is visible (Story 10.6).
+   */
+  consentStatus?: 'granted' | 'revoked' | 'unknown';
   communicationNotes?: string;
   // Archive support
   isArchived: boolean;

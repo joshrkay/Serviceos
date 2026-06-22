@@ -375,6 +375,9 @@ import { createAgreementsRouter } from './routes/agreements';
 import { createMaintenanceContractsRouter } from './routes/maintenance-contracts';
 import { PgMaintenanceContractRepository } from './maintenance-contracts/pg-maintenance-contract';
 import { InMemoryMaintenanceContractRepository } from './maintenance-contracts/maintenance-contract';
+import { createMessageTemplateRouter } from './messaging/message-template-router';
+import { PgMessageTemplateRepository } from './messaging/pg-message-template';
+import { InMemoryMessageTemplateRepository } from './messaging/message-template';
 import {
   InMemoryPortalSessionRepository,
   PortalSessionRepository,
@@ -847,8 +850,9 @@ export function createApp(): express.Express {
   // handlers, which mutate tenant_dnc_list. Suppression at outbound-send
   // time is layered on top in send-service / appointment-confirmation-notifier.
   const dncRepo = pool ? new PgDncRepository(pool) : new InMemoryDncRepository();
-  registerKeywordHandler(buildStopKeywordHandler({ dncRepo }), { overwrite: true });
-  registerKeywordHandler(buildStartKeywordHandler({ dncRepo }), { overwrite: true });
+  // STOP/START handler registration is deferred until the consent ledger and
+  // customer repos exist (Story 10.6 unifies DNC + consent_events + the
+  // customers.consent_status rollup) — see registration below.
 
   // Resolves per-tenant integration credentials for inbound webhook signature
   // verification. Returns null when no row exists or the integration provider
@@ -1002,6 +1006,7 @@ export function createApp(): express.Express {
   // setup_intent.succeeded can persist the card — mirrors paymentReceiptNotifier.
   webhookRouterDeps.customerPaymentMethodRepo = customerPaymentMethodRepo;
   const templateRepo       = pool ? new PgEstimateTemplateRepository(pool) : new InMemoryEstimateTemplateRepository();
+  const messageTemplateRepo = pool ? new PgMessageTemplateRepository(pool) : new InMemoryMessageTemplateRepository();
   const bundleRepo         = pool ? new PgServiceBundleRepository(pool)  : new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = pool ? new PgQualityMetricsRepository(pool) : new InMemoryQualityMetricsRepository();
   const voiceRepo          = pool ? new PgVoiceRepository(pool)          : new InMemoryVoiceRepository();
@@ -1795,6 +1800,8 @@ export function createApp(): express.Express {
     queue,
     new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
     delayNoticeStateRepo,
+    undefined, // internalAlertSink — keep the default no-op sink
+    dncRepo, // Story 10.3 — DNC suppression on the SMS delay/en-route path
   );
   const delayNotificationWorker = createDelayNotificationWorker({
     service: delayNotificationService,
@@ -2543,6 +2550,16 @@ export function createApp(): express.Express {
   const consentEventRepo = pool
     ? new PgConsentEventRepository(pool)
     : new InMemoryConsentEventRepository();
+  // Story 10.6 — register STOP/START now that DNC, the consent ledger, and the
+  // customer repo all exist, so an opt-out updates every store at once.
+  registerKeywordHandler(
+    buildStopKeywordHandler({ dncRepo, consentRepo: consentEventRepo, customerRepo, pool }),
+    { overwrite: true },
+  );
+  registerKeywordHandler(
+    buildStartKeywordHandler({ dncRepo, consentRepo: consentEventRepo, customerRepo, pool }),
+    { overwrite: true },
+  );
   const twilioRecordingControl =
     process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
       ? new TwilioRecordingControl(
@@ -3997,6 +4014,7 @@ export function createApp(): express.Express {
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
   app.use('/api/vertical-training-assets', createVerticalTrainingAssetsRouter(trainingAssetService));
   app.use('/api/templates', createTemplateRouter(templateRepo, auditRepo));
+  app.use('/api/message-templates', createMessageTemplateRouter(messageTemplateRepo, settingsRepo, auditRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo, auditRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
 
