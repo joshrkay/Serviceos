@@ -88,6 +88,10 @@ import {
 import { OwnerNotificationService } from './notifications/owner-notification-service';
 import { userIdsWithPermissionResolver } from './notifications/user-targeting';
 import { setOwnerNotifications } from './notifications/owner-notifications-instance';
+import { setOwnerNotificationNameResolvers } from './notifications/owner-notification-name-resolver';
+import { createNotificationPreferencesRouter } from './routes/notification-preferences';
+import { InMemoryNotificationPreferenceRepository } from './notifications/notification-preferences-service';
+import { PgNotificationPreferenceRepository } from './notifications/pg-notification-preferences-repository';
 import {
   createMeRouter,
   DEFAULT_TENANT_TIMEZONE,
@@ -3875,6 +3879,16 @@ export function createApp(): express.Express {
     : new InMemoryDeviceTokenRepository();
   app.use('/api/devices', createDevicesRouter(deviceTokenRepo, auditRepo));
 
+  // U10 — per-user owner-notification opt-outs. GET/PUT for the settings UI;
+  // the fan-out below consults `listMutedUserIds` to drop muted recipients.
+  const notificationPreferenceRepo = pool
+    ? new PgNotificationPreferenceRepository(pool)
+    : new InMemoryNotificationPreferenceRepository();
+  app.use(
+    '/api/notification-preferences',
+    createNotificationPreferencesRouter(notificationPreferenceRepo, auditRepo),
+  );
+
   // U7 — bind the push notifiers into the late-bound slots now that the
   // device-token repo exists.
   const expoPushProvider = new ExpoPushDeliveryProvider(fetch, process.env.EXPO_ACCESS_TOKEN);
@@ -3900,8 +3914,31 @@ export function createApp(): express.Express {
       deviceTokenRepo,
       provider: expoPushProvider,
       resolveUserIds: userIdsWithPermissionResolver(userRepo),
+      resolveMutedUserIds: (tenantId, type) =>
+        notificationPreferenceRepo.listMutedUserIds(tenantId, type),
     }),
   );
+  // Render the real customer name in payment/cancellation pushes (best-effort;
+  // falls back to "A customer" on any miss) without threading a resolver
+  // through every recordPayment / cancellation call site.
+  setOwnerNotificationNameResolvers({
+    invoiceCustomerName: async (tid, invoiceId) => {
+      const invoice = await invoiceRepo.findById(tid, invoiceId);
+      if (!invoice?.jobId) return undefined;
+      const job = await jobRepo.findById(tid, invoice.jobId);
+      if (!job?.customerId) return undefined;
+      const customer = await customerRepo.findById(tid, job.customerId);
+      return customer?.displayName;
+    },
+    appointmentCustomerName: async (tid, appointmentId) => {
+      const appointment = await appointmentRepo.findById(tid, appointmentId);
+      if (!appointment?.jobId) return undefined;
+      const job = await jobRepo.findById(tid, appointment.jobId);
+      if (!job?.customerId) return undefined;
+      const customer = await customerRepo.findById(tid, job.customerId);
+      return customer?.displayName;
+    },
+  });
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use(
     '/api/conversations',

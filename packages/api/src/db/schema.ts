@@ -5030,7 +5030,35 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_maintenance_contracts ON maintenance_contracts
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
-
+  // Per-user owner-notification opt-outs (U10). Absence of a row = enabled
+  // (opt-out model), so a fresh tenant gets every notification by default and a
+  // row is written only when a user mutes a category. The `app.system_lookup`
+  // escape hatch (same as device_tokens 199) lets the notifier read a user's
+  // mute state at send time, when there is no per-request tenant context.
+  '208_create_notification_preferences': `
+    CREATE TABLE IF NOT EXISTS notification_preferences (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      notification_type TEXT NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, user_id, notification_type)
+    );
+    CREATE INDEX IF NOT EXISTS idx_notification_preferences_tenant_user
+      ON notification_preferences (tenant_id, user_id);
+    CREATE INDEX IF NOT EXISTS idx_notification_preferences_muted
+      ON notification_preferences (tenant_id, notification_type) WHERE enabled = FALSE;
+    ALTER TABLE notification_preferences ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE notification_preferences FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_notification_preferences ON notification_preferences;
+    CREATE POLICY tenant_isolation_notification_preferences ON notification_preferences
+      USING (
+        tenant_id = current_setting('app.current_tenant_id', true)::UUID
+        OR current_setting('app.system_lookup', true) = 'true'
+      );
+  `,
   // Onboarding email lifecycle (welcome / setup-reminder / trial-ending).
   //   1. tenants.trial_ends_at — cached mirror of the Stripe subscription's
   //      trial_end, written by the customer.subscription.* webhook alongside

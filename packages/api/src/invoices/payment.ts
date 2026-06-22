@@ -5,6 +5,7 @@ import { ValidationError } from '../shared/errors';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
+import { resolveInvoiceCustomerName } from '../notifications/owner-notification-name-resolver';
 
 /**
  * U6 — resolve the customer's display name for the owner `payment_received`
@@ -32,7 +33,7 @@ export async function notifyOwnerPaymentReceived(
     const customerName =
       (customerNameResolver
         ? await customerNameResolver(tenantId, invoiceId)
-        : undefined) ?? 'A customer';
+        : await resolveInvoiceCustomerName(tenantId, invoiceId)) ?? 'A customer';
     await notifyOwner(tenantId, 'payment_received', {
       invoiceId,
       customerName,

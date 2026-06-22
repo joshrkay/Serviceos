@@ -34,6 +34,15 @@ vi.mock('../calls/callbackStorage', () => ({
   getCallbackNumber: h.getCallbackNumber,
   saveCallbackNumber: h.saveCallbackNumber,
 }));
+vi.mock('../hooks/useNotificationPreferences', () => ({
+  useNotificationPreferences: () => ({
+    preferences: {},
+    isLoading: false,
+    error: null,
+    setEnabled: vi.fn(),
+    reload: vi.fn(),
+  }),
+}));
 
 // eslint-disable-next-line import/first
 import Settings from '../../app/settings';
