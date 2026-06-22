@@ -189,9 +189,11 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     // Phase 1
     'customers:view',
     'locations:view',
-    'estimates:view',
-    'invoices:view',
-    'payments:view',
+    // Epic 6 / non-goal: technicians must not see office/billing surfaces.
+    // estimates:view, invoices:view, and payments:view are intentionally
+    // withheld (see notifications/user-targeting.ts — billing pushes target
+    // permission-holders, "never a technician's device"). The field surfaces
+    // (TechJobView, TechnicianDayView) read only jobs/notes/appointments.
     'appointments:view',
     'notes:create',
     'notes:view',

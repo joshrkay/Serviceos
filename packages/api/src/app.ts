@@ -93,6 +93,10 @@ import { createNotificationPreferencesRouter } from './routes/notification-prefe
 import { InMemoryNotificationPreferenceRepository } from './notifications/notification-preferences-service';
 import { PgNotificationPreferenceRepository } from './notifications/pg-notification-preferences-repository';
 import {
+  TechnicianAssignmentNotifier,
+  setTechnicianAssignmentNotifier,
+} from './appointments/assignment-notifications';
+import {
   createMeRouter,
   DEFAULT_TENANT_TIMEZONE,
   InMemoryUserModeService,
@@ -3935,13 +3939,38 @@ export function createApp(): express.Express {
   // producer seams (inbound call/SMS, appointment reminder/cancellation,
   // payment, lead, escalation). Each type targets the permission its descriptor
   // declares (owner+dispatcher, never a technician device).
-  setOwnerNotifications(
-    new OwnerNotificationService({
-      deviceTokenRepo,
-      provider: expoPushProvider,
-      resolveUserIds: userIdsWithPermissionResolver(userRepo),
-      resolveMutedUserIds: (tenantId, type) =>
-        notificationPreferenceRepo.listMutedUserIds(tenantId, type),
+  const ownerNotificationService = new OwnerNotificationService({
+    deviceTokenRepo,
+    provider: expoPushProvider,
+    resolveUserIds: userIdsWithPermissionResolver(userRepo),
+  });
+  setOwnerNotifications(ownerNotificationService);
+  // Epic 6 — technician assignment notifications (in-app push to the assigned
+  // tech). Reuses the owner-notification service's user-targeted send; the
+  // producer resolves customer/time/service from the appointment. Wired into
+  // assignTechnician / unassignTechnician via the process-wide accessor.
+  setTechnicianAssignmentNotifier(
+    new TechnicianAssignmentNotifier({
+      appointmentRepo,
+      jobRepo,
+      customerRepo,
+      userRepo,
+      locationRepo,
+      notifier: ownerNotificationService,
+      // Staff direct-send: the tech's own job text goes through the raw
+      // delivery provider, NOT the customer message-delivery service — an
+      // internal/transactional text must not be gated by customer DNC/consent
+      // (mirrors emergency owner-cell paging). No provider → in-app push only.
+      ...(messageDelivery
+        ? {
+            smsSender: (input: {
+              to: string;
+              body: string;
+              tenantId: string;
+              idempotencyKey?: string;
+            }) => messageDelivery!.sendSms(input),
+          }
+        : {}),
     }),
   );
   // Render the real customer name in payment/cancellation pushes (best-effort;

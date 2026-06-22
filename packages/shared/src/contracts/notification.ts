@@ -18,6 +18,11 @@ export const NOTIFICATION_TYPES = [
   'inbound_sms',
   'appointment_reminder',
   'appointment_cancellation',
+  // Epic 6 — technician dispatch. User-targeted (the assigned tech), not
+  // permission-broadcast: 'appointment_assigned' tells a tech they have a new
+  // job; 'appointment_unassigned' tells a tech a job was moved off them.
+  'appointment_assigned',
+  'appointment_unassigned',
   'payment_received',
   'invoice_overdue',
   'lead_captured',

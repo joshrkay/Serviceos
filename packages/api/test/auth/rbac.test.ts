@@ -35,6 +35,37 @@ describe('P0-003 — RBAC for owner / dispatcher / technician', () => {
     expect(hasPermission('technician', 'jobs:delete')).toBe(false);
   });
 
+  // Epic 6 (Dispatch & Technician Experience) non-goal: "Do not expose
+  // office/billing surfaces to the technician role."
+  it('billing isolation — technician has no estimates/invoices/payments view', () => {
+    const billing: Permission[] = ['estimates:view', 'invoices:view', 'payments:view'];
+    for (const perm of billing) {
+      expect(hasPermission('technician', perm)).toBe(false);
+      expect(getPermissions('technician')).not.toContain(perm);
+    }
+    // Owner and dispatcher run the office and keep billing visibility.
+    for (const perm of billing) {
+      expect(hasPermission('owner', perm)).toBe(true);
+      expect(hasPermission('dispatcher', perm)).toBe(true);
+    }
+  });
+
+  it('billing isolation — technician keeps the field surfaces it needs on site', () => {
+    const fieldPerms: Permission[] = [
+      'jobs:view',
+      'jobs:update',
+      'customers:view',
+      'locations:view',
+      'appointments:view',
+      'notes:create',
+      'notes:view',
+      'availability:view',
+    ];
+    for (const perm of fieldPerms) {
+      expect(hasPermission('technician', perm)).toBe(true);
+    }
+  });
+
   it('role escalation test — dispatcher cannot manage tenant', () => {
     expect(hasPermission('dispatcher', 'tenant:manage')).toBe(false);
     expect(hasPermission('dispatcher', 'users:invite')).toBe(false);

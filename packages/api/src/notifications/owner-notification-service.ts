@@ -31,6 +31,17 @@ export interface NotificationContextMap {
   inbound_sms: { conversationId: string; customerName: string; preview: string };
   appointment_reminder: { appointmentId: string; customerName: string; whenLabel: string };
   appointment_cancellation: { appointmentId: string; customerName: string; whenLabel: string };
+  appointment_assigned: {
+    appointmentId: string;
+    customerName: string;
+    whenLabel: string;
+    serviceLabel: string;
+  };
+  appointment_unassigned: {
+    appointmentId: string;
+    customerName: string;
+    whenLabel: string;
+  };
   payment_received: { invoiceId: string; customerName: string; amountLabel: string };
   invoice_overdue: { invoiceId: string; customerName: string; amountLabel: string };
   lead_captured: { leadId: string; leadLabel: string };
@@ -137,6 +148,37 @@ export const NOTIFICATION_DESCRIPTORS: DescriptorMap = {
       },
     }),
   },
+  appointment_assigned: {
+    // User-targeted via notifyUser(); the permission gate is unused on that
+    // path but kept for the descriptor contract. 'appointments:view' is held
+    // by the technician role, so a permission-broadcast fallback would still
+    // only reach field-capable staff.
+    permission: 'appointments:view',
+    build: (ctx) => ({
+      title: 'New job assigned',
+      body: `${ctx.customerName} — ${ctx.whenLabel} · ${ctx.serviceLabel}`,
+      data: {
+        type: 'appointment_assigned',
+        // The mobile day view (/schedule) lists the tech's assigned jobs in
+        // time order; the new job appears at its slot. (/jobs/<id> is not in
+        // the mobile deep-link allowlist.)
+        screen: '/schedule',
+        entityId: ctx.appointmentId,
+      },
+    }),
+  },
+  appointment_unassigned: {
+    permission: 'appointments:view',
+    build: (ctx) => ({
+      title: 'Job reassigned',
+      body: `${ctx.customerName}'s job (${ctx.whenLabel}) was moved to another tech.`,
+      data: {
+        type: 'appointment_unassigned',
+        screen: '/schedule',
+        entityId: ctx.appointmentId,
+      },
+    }),
+  },
   payment_received: {
     permission: 'payments:create',
     build: (ctx) => ({
@@ -234,6 +276,30 @@ export class OwnerNotificationService {
     await this.dispatch(tenantId, type, descriptor.permission, built);
   }
 
+  /**
+   * Send the push for `type` to ONE specific user's devices (by Clerk user id),
+   * regardless of the descriptor's permission. Used for user-targeted kinds
+   * like a technician's own job assignment, where the recipient is the assigned
+   * person — not "everyone who holds permission X". Failure-isolated like
+   * {@link notify}.
+   */
+  async notifyUser<K extends NotificationType>(
+    tenantId: string,
+    userId: string,
+    type: K,
+    ctx: NotificationContextMap[K],
+  ): Promise<void> {
+    if (!userId) return;
+    const built = NOTIFICATION_DESCRIPTORS[type].build(ctx);
+    try {
+      const tokens = await this.deps.deviceTokenRepo.listByTenant(tenantId);
+      const recipients = tokens.filter((t) => t.userId === userId);
+      await this.send(tenantId, recipients, built);
+    } catch (err) {
+      this.logFailure(tenantId, built, err);
+    }
+  }
+
   private async dispatch(
     tenantId: string,
     type: NotificationType,
@@ -256,30 +322,44 @@ export class OwnerNotificationService {
       }
       if (recipients.length === 0) return;
 
-      const messages: PushMessage[] = recipients.map((t) => ({
-        to: t.expoPushToken,
-        title: built.title,
-        body: built.body,
-        data: built.data,
-      }));
-      const results = await this.deps.provider.sendPush(messages);
+      await this.send(tenantId, recipients, built);
+    } catch (err) {
+      this.logFailure(tenantId, built, err);
+    }
+  }
 
-      for (const r of results) {
-        if (r.deviceNotRegistered) {
-          try {
-            await this.deps.deviceTokenRepo.remove(tenantId, r.to);
-          } catch {
-            // pruning is best-effort
-          }
+  /** Send to a resolved recipient set and prune dead tokens. */
+  private async send(
+    tenantId: string,
+    recipients: Array<{ expoPushToken: string }>,
+    built: BuiltNotification,
+  ): Promise<void> {
+    if (recipients.length === 0) return;
+
+    const messages: PushMessage[] = recipients.map((t) => ({
+      to: t.expoPushToken,
+      title: built.title,
+      body: built.body,
+      data: built.data,
+    }));
+    const results = await this.deps.provider.sendPush(messages);
+
+    for (const r of results) {
+      if (r.deviceNotRegistered) {
+        try {
+          await this.deps.deviceTokenRepo.remove(tenantId, r.to);
+        } catch {
+          // pruning is best-effort
         }
       }
-    } catch (err) {
-      this.deps.logger?.warn('owner notification failed', {
-        tenantId,
-        permission,
-        type: built.data.type,
-        error: err instanceof Error ? err.message : String(err),
-      });
     }
+  }
+
+  private logFailure(tenantId: string, built: BuiltNotification, err: unknown): void {
+    this.deps.logger?.warn('owner notification failed', {
+      tenantId,
+      type: built.data.type,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
