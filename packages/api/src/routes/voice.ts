@@ -15,6 +15,10 @@ import {
   TranscribeAudioFn,
 } from '../voice/voice-service';
 import { Queue } from '../queues/queue';
+import {
+  mintDeepgramStreamToken,
+  DeepgramTokenUnavailableError,
+} from '../voice/deepgram-token';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { Logger } from '../logging/logger';
 import type { FileRepository, StorageProvider } from '../files/file-service';
@@ -65,6 +69,43 @@ export function createVoiceRouter(
   opts?: VoiceRouterOpts,
 ): Router {
   const router = Router();
+
+  /**
+   * POST /stream-token — Story 3.2: mint a 30s Deepgram grant token for the
+   * browser dictation client. The long-lived DEEPGRAM_API_KEY never leaves the
+   * server; the browser opens the streaming WebSocket with this short-lived
+   * token. Authenticated + tenant-scoped like every other voice route.
+   */
+  router.post(
+    '/stream-token',
+    requireAuth,
+    requireTenant,
+    asyncRoute(async (_req: Request, res: Response) => {
+      try {
+        const minted = await mintDeepgramStreamToken({ apiKey: process.env.DEEPGRAM_API_KEY });
+        res.json({
+          token: minted.token,
+          expiresIn: minted.expiresInSeconds,
+          model: minted.model,
+        });
+      } catch (err) {
+        if (err instanceof DeepgramTokenUnavailableError) {
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Live transcription is not configured',
+          });
+          return;
+        }
+        logger?.error('voice.stream-token: mint failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        res.status(502).json({
+          error: 'TOKEN_MINT_FAILED',
+          message: 'Could not start live transcription. Please try again.',
+        });
+      }
+    }),
+  );
 
   /**
    * POST /transcribe — Synchronous transcription.

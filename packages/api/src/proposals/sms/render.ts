@@ -26,6 +26,7 @@
  */
 import type { ProposalType } from '../proposal';
 import { actionClassForProposalType } from '../proposal';
+import { formatUsdCentsFixed } from '@ai-service-os/shared';
 import { CONFIDENCE_LEVELS, type ConfidenceLevel } from '../../ai/guardrails/confidence';
 import { AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS } from '../auto-approve';
 
@@ -66,12 +67,7 @@ export interface RenderProposalSmsOptions {
   reapproval?: boolean;
 }
 
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toLocaleString('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
-}
+const formatCents = formatUsdCentsFixed;
 
 /** Payload keys that carry the proposal's headline amount, in priority order. */
 const MONEY_KEYS = ['totalCents', 'totalAmountCents', 'amountCents'] as const;

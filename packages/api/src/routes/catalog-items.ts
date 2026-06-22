@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requirePermission, requireTenant } from '../middleware/auth';
 import { createCatalogItemSchema, updateCatalogItemSchema } from '../shared/contracts';
-import { toErrorResponse } from '../shared/errors';
+import { asyncRoute } from '../middleware/async-route';
 import { z } from 'zod';
 import {
   CatalogCategory,
@@ -52,26 +52,21 @@ export function createCatalogItemsRouter(
     requireAuth,
     requireTenant,
     requirePermission('settings:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const query = listCatalogItemsQuerySchema.parse(req.query);
-        const items = await catalogRepo.listByTenant(req.auth!.tenantId, {
-          search: query.search,
-          category: query.category as CatalogCategory | undefined,
-          includeArchived: query.includeArchived,
-        });
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const query = listCatalogItemsQuerySchema.parse(req.query);
+      const items = await catalogRepo.listByTenant(req.auth!.tenantId, {
+        search: query.search,
+        category: query.category as CatalogCategory | undefined,
+        includeArchived: query.includeArchived,
+      });
 
-        const page = query.page;
-        const pageSize = query.pageSize;
-        const start = (page - 1) * pageSize;
-        const data = items.slice(start, start + pageSize).map(toApiModel);
+      const page = query.page;
+      const pageSize = query.pageSize;
+      const start = (page - 1) * pageSize;
+      const data = items.slice(start, start + pageSize).map(toApiModel);
 
-        res.json({ data, total: items.length, page, pageSize });
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+      res.json({ data, total: items.length, page, pageSize });
+    })
   );
 
   router.post(
@@ -79,25 +74,20 @@ export function createCatalogItemsRouter(
     requireAuth,
     requireTenant,
     requirePermission('settings:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = createCatalogItemSchema.parse(req.body);
-        const created = await persistCatalogItem(
-          catalogRepo,
-          createCatalogItem({
-            tenantId: req.auth!.tenantId,
-            ...parsed,
-          }),
-          { userId: req.auth!.userId, role: req.auth!.role },
-          auditRepo,
-        );
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = createCatalogItemSchema.parse(req.body);
+      const created = await persistCatalogItem(
+        catalogRepo,
+        createCatalogItem({
+          tenantId: req.auth!.tenantId,
+          ...parsed,
+        }),
+        { userId: req.auth!.userId, role: req.auth!.role },
+        auditRepo,
+      );
 
-        res.status(201).json(toApiModel(created));
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+      res.status(201).json(toApiModel(created));
+    })
   );
 
   router.put(
@@ -105,33 +95,28 @@ export function createCatalogItemsRouter(
     requireAuth,
     requireTenant,
     requirePermission('settings:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = updateCatalogItemSchema.parse(req.body);
-        if (Object.keys(parsed).length === 0) {
-          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'At least one field is required' });
-          return;
-        }
-        const updated = await updateCatalogItem(
-          catalogRepo,
-          req.auth!.tenantId,
-          req.params.id,
-          parsed,
-          { userId: req.auth!.userId, role: req.auth!.role },
-          auditRepo,
-        );
-
-        if (!updated) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Catalog item not found' });
-          return;
-        }
-
-        res.json(toApiModel(updated));
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = updateCatalogItemSchema.parse(req.body);
+      if (Object.keys(parsed).length === 0) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'At least one field is required' });
+        return;
       }
-    }
+      const updated = await updateCatalogItem(
+        catalogRepo,
+        req.auth!.tenantId,
+        req.params.id,
+        parsed,
+        { userId: req.auth!.userId, role: req.auth!.role },
+        auditRepo,
+      );
+
+      if (!updated) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Catalog item not found' });
+        return;
+      }
+
+      res.json(toApiModel(updated));
+    })
   );
 
   router.delete(
@@ -139,25 +124,20 @@ export function createCatalogItemsRouter(
     requireAuth,
     requireTenant,
     requirePermission('settings:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const archived = await archiveCatalogItem(
-          catalogRepo,
-          req.auth!.tenantId,
-          req.params.id,
-          { userId: req.auth!.userId, role: req.auth!.role },
-          auditRepo,
-        );
-        if (!archived) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Catalog item not found' });
-          return;
-        }
-        res.status(204).send();
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const archived = await archiveCatalogItem(
+        catalogRepo,
+        req.auth!.tenantId,
+        req.params.id,
+        { userId: req.auth!.userId, role: req.auth!.role },
+        auditRepo,
+      );
+      if (!archived) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Catalog item not found' });
+        return;
       }
-    }
+      res.status(204).send();
+    })
   );
 
   return router;

@@ -14,7 +14,7 @@ import { ErrorState } from '../ErrorState';
 import { apiFetch } from '../../utils/api-fetch';
 import { printEstimateDocument } from '../../lib/estimatePdf';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
-import { useEntityLabels } from '../../hooks/useEntityLabels';
+import { useEstimateTerm } from '../../hooks/useEstimateTerm';
 import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
@@ -473,6 +473,7 @@ function LineItemsEditor({ items, editable, onChange, onAddRow }: {
 function EstimateDocPreview({ est, lineItems, onClose }: {
   est: EstCompat; lineItems: LineItem[]; onClose: () => void;
 }) {
+  const estimateTerm = useEstimateTerm();
   const total    = lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
   const [copied, setCopied] = useState(false);
   const link = `rivet.ai/e/${est.estimateNumber.toLowerCase().replace('-', '')}`;
@@ -498,6 +499,7 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
                 businessContact: 'Austin, TX · (512) 555-0000',
                 description: est.description,
                 validUntil: est.validUntil,
+                documentLabel: estimateTerm,
                 lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate })),
               })}
               className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 transition-colors"
@@ -522,7 +524,7 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
               <p className="text-xs text-slate-400">Austin, TX · (512) 555-0000</p>
             </div>
             <div className="text-right">
-              <p className="text-xs text-slate-400">Estimate</p>
+              <p className="text-xs text-slate-400">{estimateTerm}</p>
               <p className="text-sm text-slate-900">{est.estimateNumber}</p>
               {est.validUntil && <p className="text-xs text-slate-400 mt-0.5">Valid until {est.validUntil}</p>}
             </div>
@@ -564,7 +566,7 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
 
           {/* CTA */}
           <div className="rounded-xl bg-blue-600 px-4 py-4 text-center mb-4">
-            <p className="text-white text-sm">Accept this estimate</p>
+            <p className="text-white text-sm">Accept this {estimateTerm.toLowerCase()}</p>
             <p className="text-white/60 text-xs mt-0.5">{link}</p>
           </div>
 
@@ -590,6 +592,7 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
   /** When set, the sheet calls the real /api/estimates/:id/send endpoint. */
   apiId?: string;
 }) {
+  const estimateTerm = useEstimateTerm();
   const [channel, setChannel] = useState<'sms' | 'email'>('sms');
   const [recipient, setRecipient] = useState<string>('');
   const [sending, setSending] = useState(false);
@@ -639,7 +642,7 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
       <div className="bg-white rounded-t-2xl max-h-[90vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
           <div>
-            <p className="text-sm text-slate-900">Send estimate</p>
+            <p className="text-sm text-slate-900">Send {estimateTerm.toLowerCase()}</p>
             <p className="text-xs text-slate-400">{est.estimateNumber} · {est.customer}</p>
           </div>
           <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100">
@@ -703,7 +706,7 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
           {/* Valid until */}
           {est.validUntil && (
             <p className="text-xs text-slate-400 flex items-center gap-1.5">
-              <Clock size={11} /> Estimate valid until {est.validUntil}
+              <Clock size={11} /> {estimateTerm} valid until {est.validUntil}
             </p>
           )}
 
@@ -721,7 +724,99 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
                         'bg-blue-600  text-white hover:bg-blue-700'
             }`}
           >
-            {sent ? <><Check size={15} /> Sent!</> : sending ? 'Sending…' : <><Send size={15} /> Send estimate</>}
+            {sent ? <><Check size={15} /> Sent!</> : sending ? 'Sending…' : <><Send size={15} /> Send {estimateTerm.toLowerCase()}</>}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Save as Template Sheet (7.9) ─────────────────────────────────────────
+function SaveAsTemplateSheet({ estimateId, estimateNumber, onClose, onSaved }: {
+  estimateId: string; estimateNumber: string; onClose: () => void; onSaved: () => void;
+}) {
+  const [name, setName] = useState('');
+  const [verticalType, setVerticalType] = useState<'hvac' | 'plumbing' | 'electrical' | 'painting'>('hvac');
+  const [categoryId, setCategoryId] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSave() {
+    if (!name.trim() || !categoryId.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/estimates/${estimateId}/save-as-template`, {
+        method: 'POST',
+        body: JSON.stringify({ name: name.trim(), verticalType, categoryId: categoryId.trim() }),
+      });
+      if (!res.ok) throw new Error(`Could not save template (HTTP ${res.status})`);
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save template');
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col justify-end" onClick={onClose}>
+      <div className="bg-white rounded-t-2xl max-h-[90vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+          <div>
+            <p className="text-sm text-slate-900">Save as template</p>
+            <p className="text-xs text-slate-400">Reuse {estimateNumber}’s lines on future estimates</p>
+          </div>
+          <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100">
+            <X size={15} className="text-slate-500" />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 flex flex-col gap-4">
+          <div>
+            <p className="text-xs text-slate-500 mb-1.5">Template name</p>
+            <input
+              value={name}
+              onChange={e => setName(e.target.value)}
+              aria-label="Template name"
+              placeholder="e.g. Standard AC tune-up"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-blue-400 bg-white"
+            />
+          </div>
+          <div>
+            <p className="text-xs text-slate-500 mb-1.5">Trade</p>
+            <select
+              value={verticalType}
+              onChange={e => setVerticalType(e.target.value as typeof verticalType)}
+              aria-label="Template trade"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-blue-400 bg-white"
+            >
+              <option value="hvac">HVAC</option>
+              <option value="plumbing">Plumbing</option>
+              <option value="electrical">Electrical</option>
+              <option value="painting">Painting</option>
+            </select>
+          </div>
+          <div>
+            <p className="text-xs text-slate-500 mb-1.5">Category</p>
+            <input
+              value={categoryId}
+              onChange={e => setCategoryId(e.target.value)}
+              aria-label="Template category"
+              placeholder="e.g. ac-repair"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-blue-400 bg-white"
+            />
+          </div>
+
+          {error && <p className="text-xs text-red-600 -mt-1">{error}</p>}
+
+          <button
+            onClick={handleSave}
+            disabled={saving || !name.trim() || !categoryId.trim()}
+            className="flex items-center justify-center gap-2 w-full rounded-xl bg-slate-900 text-white py-3.5 text-sm hover:bg-slate-700 disabled:opacity-50 transition-colors"
+          >
+            {saving ? 'Saving…' : <><FileText size={15} /> Save as template</>}
           </button>
         </div>
       </div>
@@ -733,6 +828,7 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
 function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: () => void }) {
   const navigate = useNavigate();
   const tz = useTenantTimezone();
+  const estimateTerm = useEstimateTerm();
   const { data: est, isLoading, error, refetch } = useDetailQuery<EstimateResponse>('/api/estimates', estimateId);
   const { mutate: updateEstimate } = useMutation<Record<string, unknown>, EstimateResponse>('PUT', `/api/estimates/${estimateId}`);
   const { mutate: transitionEstimate } = useMutation<{ status: string }, EstimateResponse>('POST', `/api/estimates/${estimateId}/transition`);
@@ -743,6 +839,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   const [wasSent,      setWasSent]      = useState(false);
   const [convertOpen,  setConvertOpen]  = useState(false);
   const [convertJobOpen, setConvertJobOpen] = useState(false);
+  const [templateOpen, setTemplateOpen] = useState(false);
   const [actionBusy,   setActionBusy]   = useState(false);
   const [actionError,  setActionError]  = useState<string | null>(null);
 
@@ -829,6 +926,16 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
       .catch(() => setNotesLoaded(true));
   }, [estimateId]);
 
+  // Change history (7.10): edit deltas recorded between persisted versions.
+  const [history, setHistory] = useState<Array<{ id: string; summary: string; createdAt: string }>>([]);
+  useEffect(() => {
+    apiFetch(`/api/estimates/${estimateId}/history`)
+      .then(r => r.ok ? r.json() : [])
+      .then((data: Array<{ id: string; summary: string; createdAt: string }>) =>
+        setHistory(Array.isArray(data) ? data : []))
+      .catch(() => { /* history is best-effort; absence just hides the card */ });
+  }, [estimateId]);
+
   async function saveNote() {
     if (!noteText.trim()) return;
     setSavingNote(true);
@@ -874,7 +981,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   if (isLoading) {
     return (
       <div className="h-full flex items-center justify-center">
-        <Spinner size="md" className="text-slate-900" label="Loading estimate" />
+        <Spinner size="md" className="text-slate-900" label={`Loading ${estimateTerm.toLowerCase()}`} />
       </div>
     );
   }
@@ -882,7 +989,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   if (error || !est) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-3">
-        <p className="text-sm text-red-500">Failed to load estimate</p>
+        <p className="text-sm text-red-500">Failed to load {estimateTerm.toLowerCase()}</p>
         <button onClick={onBack} className="text-xs text-blue-500 hover:underline">Go back</button>
       </div>
     );
@@ -913,7 +1020,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
         <div className="max-w-5xl mx-auto px-4 md:px-6 py-4 md:py-6">
           {/* Back */}
           <button onClick={onBack} className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition-colors mb-5">
-            <ArrowLeft size={14} /> Back to Estimates
+            <ArrowLeft size={14} /> Back to {estimateTerm}s
           </button>
 
           {/* Header */}
@@ -1004,6 +1111,25 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                   </button>
                 </div>
               </div>
+
+              {/* Change history (7.10) */}
+              {history.length > 0 && (
+                <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
+                  <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100">
+                    <Clock size={13} className="text-slate-400" />
+                    <p className="text-sm text-slate-700">Change history</p>
+                    <span className="ml-auto text-xs text-slate-400">{history.length}</span>
+                  </div>
+                  <div className="divide-y divide-slate-50">
+                    {history.map(h => (
+                      <div key={h.id} className="px-4 py-3">
+                        <p className="text-sm text-slate-700 leading-snug">{h.summary}</p>
+                        <p className="text-xs text-slate-400 mt-1">{formatDateTimeInTenantTz(h.createdAt, tz)}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* ── Right rail ── */}
@@ -1105,6 +1231,12 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                 >
                   <Eye size={14} /> Preview document
                 </button>
+                <button
+                  onClick={() => setTemplateOpen(true)}
+                  className="flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-slate-700 py-3 text-sm hover:bg-slate-50 transition-colors"
+                >
+                  <FileText size={14} /> Save as template
+                </button>
                 <div className="flex gap-2">
                   <button
                     onClick={() => void handleClone()}
@@ -1179,6 +1311,14 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
           onClose={() => setPreviewOpen(false)}
         />
       )}
+      {templateOpen && est && (
+        <SaveAsTemplateSheet
+          estimateId={est.id}
+          estimateNumber={est.estimateNumber}
+          onClose={() => setTemplateOpen(false)}
+          onSaved={() => toast.success('Saved as template')}
+        />
+      )}
       {convertJobOpen && est && (
         <ConvertToJobSheet
           input={{
@@ -1243,8 +1383,10 @@ const TABS: { label: string; value: EstimateStatus | 'All' }[] = [
 export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {
   const navigate = useNavigate();
   const tz = useTenantTimezone();
-  const labels = useEntityLabels();
+  const estimateTerm = useEstimateTerm();
+  const estimateTermPlural = `${estimateTerm}s`;
   const [tab,              setTab]           = useState<EstimateStatus | 'All'>('All');
+  const [customerFilter,   setCustomerFilter] = useState<string>('all');
   const [selected,         setSelected]      = useState<string | null>(defaultSelectedId ?? null);
   const [newEstimateOpen,  setNewEstimate]   = useState(false);
 
@@ -1269,9 +1411,23 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
     uiStatus: normalizeEstimateStatus(e.status) as EstimateStatus,
   }));
 
-  const filtered = tab === 'All'
-    ? normalizedData
-    : normalizedData.filter(e => e.uiStatus === tab);
+  // Customer filter (7.10). Options are the distinct customers present in the
+  // loaded estimates, so no extra fetch is needed; filtering is client-side,
+  // matching how the status tabs also narrow the loaded list.
+  const customerOptions = Array.from(
+    new Map(
+      normalizedData
+        .filter(e => e.customer?.id)
+        .map(e => [
+          e.customer!.id,
+          e.customer!.displayName || [e.customer!.firstName, e.customer!.lastName].filter(Boolean).join(' ') || 'Customer',
+        ] as const)
+    ).entries()
+  ).map(([id, name]) => ({ id, name }));
+
+  const filtered = normalizedData
+    .filter(e => (tab === 'All' ? true : e.uiStatus === tab))
+    .filter(e => (customerFilter === 'all' ? true : e.customer?.id === customerFilter));
 
   const pendingCount  = normalizedData.filter(e => e.uiStatus === 'Sent' || e.uiStatus === 'Viewed').length;
   const approvedCount = normalizedData.filter(e => e.uiStatus === 'Approved').length;
@@ -1281,12 +1437,12 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
       <div className="px-4 md:px-6 py-4 md:py-6 max-w-3xl mx-auto">
         <div className="flex items-center justify-between mb-5">
-          <h1 className="text-slate-900">{labels.label('estimateTerm', { plural: true })}</h1>
+          <h1 className="text-slate-900">{estimateTermPlural}</h1>
           <button
             onClick={() => setNewEstimate(true)}
             className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors"
           >
-            <Plus size={14} /> New {labels.label('estimateTerm').toLowerCase()}
+            <Plus size={14} /> New {estimateTerm.toLowerCase()}
           </button>
         </div>
 
@@ -1303,6 +1459,23 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
             </div>
           ))}
         </div>
+
+        {/* Customer filter */}
+        {customerOptions.length > 1 && (
+          <div className="mb-3">
+            <select
+              aria-label="Filter by customer"
+              value={customerFilter}
+              onChange={e => setCustomerFilter(e.target.value)}
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:border-blue-400"
+            >
+              <option value="all">All customers</option>
+              {customerOptions.map(c => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {/* Tabs */}
         <div className="flex gap-1 mb-4 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
@@ -1328,11 +1501,11 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
         {/* Loading / Error */}
         {isLoading && (
           <div className="flex items-center justify-center py-16">
-            <Spinner size="md" className="text-slate-900" label="Loading estimates" />
+            <Spinner size="md" className="text-slate-900" label={`Loading ${estimateTermPlural.toLowerCase()}`} />
           </div>
         )}
         {error && (
-          <ErrorState message="Failed to load estimates" onRetry={refetch} />
+          <ErrorState message={`Failed to load ${estimateTermPlural.toLowerCase()}`} onRetry={refetch} />
         )}
 
         {/* List */}
@@ -1384,7 +1557,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
               );
             })}
             {filtered.length === 0 && (
-              <EmptyState title="No estimates" />
+              <EmptyState title={`No ${estimateTermPlural.toLowerCase()}`} />
             )}
           </div>
         )}

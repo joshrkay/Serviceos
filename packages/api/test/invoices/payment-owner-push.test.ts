@@ -10,6 +10,7 @@ import { OwnerNotificationService } from '../../src/notifications/owner-notifica
 import { InMemoryPushDeliveryProvider } from '../../src/notifications/push-delivery-provider';
 import { InMemoryDeviceTokenRepository } from '../../src/push/device-token-service';
 import { setOwnerNotifications } from '../../src/notifications/owner-notifications-instance';
+import { setOwnerNotificationNameResolvers } from '../../src/notifications/owner-notification-name-resolver';
 
 const TENANT = 'tenant-pay-1';
 
@@ -52,6 +53,23 @@ describe('payment owner push (U6 payment_received)', () => {
 
   afterEach(() => {
     setOwnerNotifications(undefined);
+    setOwnerNotificationNameResolvers({});
+  });
+
+  it('uses the process-wide name resolver when no explicit resolver is passed', async () => {
+    setOwnerNotificationNameResolvers({
+      invoiceCustomerName: async (_t, id) => (id === invoiceId ? 'Globally Resolved Co' : undefined),
+    });
+
+    await recordPayment(
+      { tenantId: TENANT, invoiceId, amountCents: 5000, method: 'cash', processedBy: 'u-1' },
+      invoiceRepo,
+      paymentRepo,
+    );
+
+    expect(provider.sent).toHaveLength(1);
+    expect(provider.sent[0].body).toContain('Globally Resolved Co');
+    expect(provider.sent[0].body).not.toContain('A customer');
   });
 
   it('fires payment_received with a cents-formatted amount and the resolved customer name', async () => {

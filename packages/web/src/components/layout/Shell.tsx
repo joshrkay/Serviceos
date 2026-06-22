@@ -23,6 +23,8 @@ import {
 } from '../../hooks/useActiveSessions';
 import { UpgradeNudgeBanner } from '../onboarding/v2/UpgradeNudgeBanner';
 import { ActivationCelebrationBanner } from '../onboarding/v2/ActivationCelebrationBanner';
+import { WelcomeWalkthrough } from '../walkthrough/WelcomeWalkthrough';
+import { WhatsNewModal } from '../walkthrough/WhatsNewModal';
 import { PastDueBanner } from '../billing/PastDueBanner';
 import { EscalationPanelHost } from '../dispatch/EscalationPanelHost';
 import {
@@ -34,6 +36,15 @@ interface NavItem {
   to: string;
   label: string;
   icon: typeof Home;
+  /**
+   * Permission required to see this item. Office/billing surfaces are tagged
+   * so a viewer who lacks the permission (notably the technician role, which
+   * holds no invoices/estimates/payments view) never sees the nav entry — in
+   * ANY mode, including the supervisor default an unset technician falls back
+   * to. The RBAC removal is the real gate; this keeps the UI consistent so a
+   * tagged item never deep-links to a 403. Untagged items are always shown.
+   */
+  requires?: string;
 }
 
 /**
@@ -48,15 +59,14 @@ interface NavItem {
 function getNav(mode: Mode): NavItem[] {
   switch (mode) {
     case 'tech':
+      // Field view — stripped of office/billing surfaces (Epic 6 non-goal:
+      // "do not expose office/billing surfaces to the technician role").
       return [
         { to: '/technician/day', label: 'Today',     icon: Wrench   },
         { to: '/jobs',           label: 'My jobs',   icon: Briefcase },
         { to: '/customers',      label: 'Customers', icon: Users    },
         { to: '/comms-inbox',    label: 'Messages',  icon: Mail     },
-        { to: '/estimates',      label: 'Estimates', icon: FileText },
-        { to: '/invoices',       label: 'Invoices',  icon: Receipt  },
         { to: '/inbox',          label: 'Inbox',     icon: Bell     },
-        { to: '/reports/money',  label: 'Money',     icon: TrendingUp },
         { to: '/settings',       label: 'Settings',  icon: Settings },
       ];
     case 'both':
@@ -69,8 +79,8 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/jobs',           label: 'My jobs',      icon: Briefcase     },
         { to: '/schedule',       label: 'Schedule',     icon: Calendar      },
         { to: '/customers',      label: 'Customers',    icon: Users         },
-        { to: '/estimates',      label: 'Estimates',    icon: FileText      },
-        { to: '/invoices',       label: 'Invoices',     icon: Receipt       },
+        { to: '/estimates',      label: 'Estimates',    icon: FileText, requires: 'estimates:view' },
+        { to: '/invoices',       label: 'Invoices',     icon: Receipt, requires: 'invoices:view' },
         { to: '/settings',       label: 'Settings',     icon: Settings      },
       ];
     case 'supervisor':
@@ -88,8 +98,8 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/customers',     label: 'Customers',    icon: Users         },
         { to: '/comms-inbox',   label: 'Messages',     icon: Mail          },
         { to: '/leads',         label: 'Leads',        icon: TrendingUp    },
-        { to: '/estimates',     label: 'Estimates',    icon: FileText      },
-        { to: '/invoices',      label: 'Invoices',     icon: Receipt       },
+        { to: '/estimates',     label: 'Estimates',    icon: FileText, requires: 'estimates:view' },
+        { to: '/invoices',      label: 'Invoices',     icon: Receipt, requires: 'invoices:view' },
         { to: '/interactions',  label: 'Interactions', icon: Layers        },
         { to: '/settings',      label: 'Settings',     icon: Settings      },
       ];
@@ -99,19 +109,20 @@ function getNav(mode: Mode): NavItem[] {
 function getBottomNav(mode: Mode): NavItem[] {
   switch (mode) {
     case 'tech':
+      // Field view — no Money/Bills/Quotes (Epic 6 non-goal).
       return [
-        { to: '/technician/day', label: 'Today',  icon: Wrench     },
-        { to: '/inbox',          label: 'Inbox',  icon: Bell       },
-        { to: '/reports/money',  label: 'Money',  icon: TrendingUp },
-        { to: '/invoices',       label: 'Bills',  icon: Receipt    },
-        { to: '/estimates',      label: 'Quotes', icon: FileText   },
+        { to: '/technician/day', label: 'Today',     icon: Wrench     },
+        { to: '/jobs',           label: 'My jobs',   icon: Briefcase  },
+        { to: '/customers',      label: 'Customers', icon: Users      },
+        { to: '/comms-inbox',    label: 'Messages',  icon: Mail       },
+        { to: '/inbox',          label: 'Inbox',     icon: Bell       },
       ];
     case 'both':
       return [
         { to: '/technician/day', label: 'Today',  icon: Wrench        },
         { to: '/inbox',          label: 'Inbox',  icon: Bell          },
-        { to: '/reports/money',  label: 'Money',  icon: TrendingUp    },
-        { to: '/invoices',       label: 'Bills',  icon: Receipt       },
+        { to: '/reports/money',  label: 'Money',  icon: TrendingUp, requires: 'invoices:view' },
+        { to: '/invoices',       label: 'Bills',  icon: Receipt, requires: 'invoices:view' },
         { to: '/assistant',      label: 'AI',     icon: MessageSquare },
       ];
     case 'supervisor':
@@ -123,7 +134,7 @@ function getBottomNav(mode: Mode): NavItem[] {
         { to: '/jobs',       label: 'Jobs',      icon: Briefcase     },
         { to: '/leads',      label: 'Leads',     icon: TrendingUp    },
         { to: '/customers',  label: 'Customers', icon: Users         },
-        { to: '/invoices',   label: 'Invoices',  icon: Receipt       },
+        { to: '/invoices',   label: 'Invoices',  icon: Receipt, requires: 'invoices:view' },
       ];
   }
 }
@@ -340,8 +351,15 @@ function ShellInner() {
   const showModeToggle = isOwner || canFieldServe;
   const roleLabel = formatRoleLabel(role) || 'Owner';
 
-  const nav = getNav(currentMode);
-  const bottomNav = getBottomNav(currentMode);
+  // Permission-gate nav items. Office/billing entries carry `requires`; a
+  // viewer who lacks the permission (notably the technician role) never sees
+  // them — in any mode, including the supervisor default an unset technician
+  // falls back to. Untagged items are always shown.
+  const grantedPermissions = new Set(me?.permissions ?? []);
+  const visibleItems = (items: NavItem[]): NavItem[] =>
+    items.filter((item) => !item.requires || grantedPermissions.has(item.requires));
+  const nav = visibleItems(getNav(currentMode));
+  const bottomNav = visibleItems(getBottomNav(currentMode));
 
   // The mode toggle calls this; if the destination crosses out of
   // supervisor coverage, we surface the confirmation modal instead of
@@ -384,6 +402,12 @@ function ShellInner() {
           30-minute trial threshold has fired (and onboarding is otherwise
           complete). */}
       <UpgradeNudgeBanner />
+
+      {/* First-run product tour (new accounts) + what's-new changelog
+          (existing users). Both portal to <body>; gated so a brand-new
+          account sees only the welcome tour on day one. */}
+      <WelcomeWalkthrough />
+      <WhatsNewModal />
 
       <div className="flex flex-1 overflow-hidden">
 

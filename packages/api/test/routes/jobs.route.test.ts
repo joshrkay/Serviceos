@@ -470,6 +470,31 @@ describe('POST /api/jobs/:id/transition', () => {
     expect(res.body.error).toBe('VALIDATION_ERROR');
   });
 
+  it('§5.8 — owner can move a job backward with a reason', async () => {
+    const created = await request(app).post('/api/jobs').send({
+      customerId: 'c1',
+      locationId: 'l1',
+      summary: 'Backward move',
+    });
+    const id = created.body.id;
+    await request(app).post(`/api/jobs/${id}/transition`).send({ status: 'scheduled' });
+    await request(app).post(`/api/jobs/${id}/transition`).send({ status: 'in_progress' });
+
+    // missing reason → 400 (the test harness authenticates as owner)
+    const noReason = await request(app)
+      .post(`/api/jobs/${id}/transition`)
+      .send({ status: 'scheduled' });
+    expect(noReason.status).toBe(400);
+    expect(noReason.body.error).toBe('VALIDATION_ERROR');
+
+    // with reason → 200 and the move lands
+    const withReason = await request(app)
+      .post(`/api/jobs/${id}/transition`)
+      .send({ status: 'scheduled', reason: 'Customer pushed the visit' });
+    expect(withReason.status).toBe(200);
+    expect(withReason.body.job.status).toBe('scheduled');
+  });
+
   it('full lifecycle: new → scheduled → in_progress → completed', async () => {
     const created = await request(app).post('/api/jobs').send({
       customerId: 'c1',

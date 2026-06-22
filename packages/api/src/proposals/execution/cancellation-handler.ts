@@ -11,6 +11,7 @@ import { TransactionalCommsService } from '../../notifications/transactional-com
 import { notifyDispatchBoardChanged } from '../../dispatch/board-notify';
 import { isValidTimezone } from '../../shared/timezone';
 import { notifyOwner } from '../../notifications/owner-notifications-instance';
+import { resolveAppointmentCustomerName } from '../../notifications/owner-notification-name-resolver';
 
 /**
  * Resolve the customer display name for the owner cancellation push. The
@@ -130,7 +131,8 @@ export class CancelAppointmentExecutionHandler implements ExecutionHandler {
         const customerName =
           (this.resolveCustomerName
             ? await this.resolveCustomerName(context.tenantId, appointmentId)
-            : undefined) || 'A customer';
+            : await resolveAppointmentCustomerName(context.tenantId, appointmentId)) ||
+          'A customer';
         await notifyOwner(context.tenantId, 'appointment_cancellation', {
           appointmentId,
           customerName,

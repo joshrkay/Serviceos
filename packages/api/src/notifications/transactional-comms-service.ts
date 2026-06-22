@@ -95,24 +95,48 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
     );
   }
 
-  async notifyReminder(tenantId: string, appointmentId: string): Promise<void> {
+  /**
+   * Send the T-minus reminder for one appointment.
+   *
+   * Story 10.2 — when `offsetHours` is provided (tenant configured MULTIPLE
+   * reminder offsets), the dispatch idempotency key is scoped per offset so
+   * each configured reminder (e.g. 24h and 2h out) fires exactly once. When
+   * omitted (the single-offset / legacy default), behavior is unchanged: any
+   * prior reminder dispatch suppresses a resend.
+   */
+  async notifyReminder(
+    tenantId: string,
+    appointmentId: string,
+    offsetHours?: number,
+  ): Promise<void> {
     const settings = await this.deps.settingsRepo.findByTenant(tenantId);
     if (settings?.autoSendAppointmentReminders === false) {
       return;
     }
+    const prefix =
+      offsetHours != null
+        ? `appt-reminder:${appointmentId}:${offsetHours}h`
+        : `appt-reminder:${appointmentId}`;
     const prior = await this.deps.dispatchRepo.findByEntity(
       tenantId,
       'appointment_reminder',
       appointmentId,
     );
-    if (prior.length > 0) {
-      return;
+    if (offsetHours == null) {
+      // Legacy single-reminder dedup: any prior reminder dispatch blocks.
+      if (prior.length > 0) return;
+    } else {
+      // Per-offset dedup: only this offset's reminder blocks a resend.
+      const offsetKeys = [`${prefix}:sms`, `${prefix}:email`];
+      if (prior.some((d) => d.idempotencyKey != null && offsetKeys.includes(d.idempotencyKey))) {
+        return;
+      }
     }
     await this.sendAppointmentNotice(
       tenantId,
       appointmentId,
       'appointment_reminder',
-      `appt-reminder:${appointmentId}`,
+      prefix,
       renderAppointmentReminderSms,
     );
   }

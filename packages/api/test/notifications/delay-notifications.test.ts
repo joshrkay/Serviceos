@@ -15,6 +15,7 @@ import {
   selectDelayTemplate,
 } from '../../src/notifications/delay-notifications';
 import { InMemoryDispatchAnalyticsRepository } from '../../src/dispatch/analytics';
+import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
 import { createLogger } from '../../src/logging/logger';
 
 const tenantId = '550e8400-e29b-41d4-a716-446655440000';
@@ -346,6 +347,50 @@ describe('en-route notification flow', () => {
     // Re-tap is idempotent — no second job.
     await coordinator.enqueueEnRouteNotice({ tenantId, appointmentId: appt.id });
     expect(await queue.receive()).toBeNull();
+  });
+
+  it('suppresses the en-route SMS when the number is on DNC (Story 10.3)', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const customerRepo = new InMemoryCustomerRepository();
+    const queue = new InMemoryQueue();
+    const stateRepo = new InMemoryDelayNoticeStateRepository();
+    const dncRepo = new InMemoryDncRepository();
+
+    const phone = '+15555550199';
+    const customer = await createCustomer({
+      tenantId,
+      firstName: 'Jordan',
+      lastName: 'Doe',
+      primaryPhone: phone,
+      preferredChannel: 'sms',
+      smsConsent: true,
+      createdBy: 'dispatcher',
+    }, customerRepo);
+    dncRepo.add(tenantId, normalizePhone(phone));
+    const job = await createJob({ tenantId, customerId: customer.id, locationId: 'loc-1', summary: 'Repair', createdBy: 'dispatcher' }, jobRepo);
+    const appt = await createAppointment({
+      tenantId,
+      jobId: job.id,
+      scheduledStart: new Date('2026-04-20T13:00:00Z'),
+      scheduledEnd: new Date('2026-04-20T14:00:00Z'),
+      timezone: 'UTC',
+      createdBy: 'dispatcher',
+    }, appointmentRepo);
+
+    const coordinator = new DelayNotificationCoordinator(
+      queue,
+      new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
+      stateRepo,
+      undefined,
+      dncRepo,
+    );
+
+    const key = await coordinator.enqueueEnRouteNotice({ tenantId, appointmentId: appt.id, technicianName: 'Taylor' });
+    expect(key).toBeNull();
+    expect(await queue.receive()).toBeNull();
+    expect(await stateRepo.findByKey(`${appt.id}:en_route`)).toBeNull();
   });
 
   it('falls back to in_app when the customer has no SMS consent and no email', async () => {

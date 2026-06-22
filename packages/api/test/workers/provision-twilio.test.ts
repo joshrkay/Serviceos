@@ -7,6 +7,8 @@ import {
 } from '../../src/workers/provision-twilio';
 import { createLogger } from '../../src/logging/logger';
 import { QueueMessage } from '../../src/queues/queue';
+import type { VapiClient } from '../../src/integrations/vapi/client';
+import type { VapiAssistantConfig } from '../../src/integrations/vapi/assistant-config';
 
 const TENANT = '11111111-1111-1111-1111-111111111111';
 // 64-char hex = 32 bytes, the format TENANT_ENCRYPTION_KEY requires.
@@ -40,7 +42,14 @@ interface Call {
  * row so the worker provisions from scratch, and every write is recorded so
  * tests can assert what was persisted.
  */
-function makePool(opts: { selectRow?: Record<string, unknown>; failOnStatusFailed?: boolean } = {}) {
+function makePool(
+  opts: {
+    selectRow?: Record<string, unknown>;
+    failOnStatusFailed?: boolean;
+    /** Row returned for the Step 4.5 `SELECT ... FROM tenant_settings`. */
+    settingsRow?: Record<string, unknown>;
+  } = {},
+) {
   const calls: Call[] = [];
   const client = {
     query: vi.fn(async (sql: unknown, params: unknown[] = []) => {
@@ -58,12 +67,44 @@ function makePool(opts: { selectRow?: Record<string, unknown>; failOnStatusFaile
       if (/^\s*SELECT\s+status/i.test(s)) {
         return { rows: opts.selectRow ? [opts.selectRow] : [] };
       }
+      // Step 4.5 reads the tenant's voice config to build the Vapi assistant.
+      if (/^\s*SELECT\b[\s\S]*\bFROM tenant_settings\b/i.test(s)) {
+        return { rows: opts.settingsRow ? [opts.settingsRow] : [] };
+      }
       return { rows: [], rowCount: 1 };
     }),
     release: vi.fn(),
   };
   const pool = { connect: vi.fn(async () => client) } as unknown as Pool;
   return { pool, calls };
+}
+
+/**
+ * Mock Vapi client injected into the worker so Step 4.5 (assistant creation)
+ * is exercised without real HTTP. Returns the spies so tests can assert the
+ * agent was actually built + linked.
+ */
+function makeVapiMock(
+  opts: { createAssistant?: () => Promise<{ assistantId: string }> } = {},
+) {
+  const impl = opts.createAssistant ?? (async () => ({ assistantId: 'asst_test_123' }));
+  // Typed `_config` param so `.mock.calls[0][0]` is a VapiAssistantConfig.
+  const createAssistant = vi.fn((_config: VapiAssistantConfig) => impl());
+  const linkPhoneNumber = vi.fn(async () => ({ phoneNumberId: 'pn_test_1' }));
+  const updateAssistant = vi.fn(async () => undefined);
+  const client = { createAssistant, linkPhoneNumber, updateAssistant } as unknown as VapiClient;
+  return { client, createAssistant, linkPhoneNumber, updateAssistant };
+}
+
+/** The five Twilio fetch responses for a full provision through "attach". */
+function twilioHappyPath(): Parameters<typeof mockFetch> {
+  return [
+    { body: { sid: 'ACsub', auth_token: 'subtoken' } }, // create subaccount
+    { body: { sid: 'MG123' } }, // messaging service
+    { body: { incoming_phone_numbers: [] } }, // list owned (none yet)
+    { body: { sid: 'PN555', phone_number: '+15125550123' } }, // purchase preferred
+    { body: {} }, // attach to messaging service
+  ];
 }
 
 function buildMessage(payload: ProvisionTwilioPayload): QueueMessage<ProvisionTwilioPayload> {
@@ -256,5 +297,129 @@ describe('provision-twilio worker — number picker', () => {
 
     // The early-return guard fired: no subaccount created, no number bought.
     expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  // ─── Step 4.5: Vapi assistant (the voice agent) creation ──────────────────
+
+  it('creates the Vapi assistant, links the number, and persists vapi_assistant_id', async () => {
+    configureTwilio();
+    mockFetch(...twilioHappyPath());
+
+    const { pool, calls } = makePool({
+      settingsRow: {
+        business_name: "Bob's Plumbing",
+        voice_greeting: null,
+        voice_id: 'adam',
+        services_offered: ['drain cleaning', 'water heaters'],
+        vapi_assistant_id: null,
+      },
+    });
+    const vapi = makeVapiMock();
+    const worker = createProvisionTwilioWorker({ pool, vapiClient: vapi.client });
+
+    await worker.handle(
+      buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test', phoneNumber: '+15125550123' }),
+      logger,
+    );
+
+    // The assistant is built from the tenant's voice config: 'adam' preset →
+    // its ElevenLabs id, business name in the assistant name, and the greeting
+    // auto-generated from the services offered.
+    expect(vapi.createAssistant).toHaveBeenCalledTimes(1);
+    const cfg = vapi.createAssistant.mock.calls[0][0];
+    expect(cfg.name).toContain("Bob's Plumbing");
+    expect(cfg.voiceId).toBe('pNInz6obpgDQGcFmaJgB'); // adam → ElevenLabs voice id
+    expect(cfg.firstMessage).toContain('We handle drain cleaning and water heaters');
+    expect(cfg.serverUrl).toBe(`https://api.test/webhooks/vapi/${TENANT}`);
+
+    // The freshly created assistant is linked to the provisioned number.
+    expect(vapi.linkPhoneNumber).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assistantId: 'asst_test_123',
+        phoneE164: '+15125550123',
+        twilioPhoneNumberSid: 'PN555',
+      }),
+    );
+
+    // The assistant id is written back to the tenant so the next run is idempotent…
+    const settingsWrite = calls.find(
+      (c) =>
+        /UPDATE tenant_settings SET vapi_assistant_id/i.test(c.sql) &&
+        JSON.stringify(c.params).includes('asst_test_123'),
+    );
+    expect(settingsWrite).toBeDefined();
+
+    // …and mirrored onto the integration row's provider_data.
+    const integrationWrite = calls.find(
+      (c) =>
+        /UPDATE tenant_integrations/i.test(c.sql) &&
+        JSON.stringify(c.params).includes('vapiAssistantId') &&
+        JSON.stringify(c.params).includes('asst_test_123'),
+    );
+    expect(integrationWrite).toBeDefined();
+  });
+
+  it('skips assistant creation when the tenant already has a vapi_assistant_id', async () => {
+    configureTwilio();
+    mockFetch(...twilioHappyPath());
+
+    const { pool } = makePool({
+      settingsRow: {
+        business_name: "Bob's Plumbing",
+        voice_greeting: null,
+        voice_id: 'adam',
+        services_offered: [],
+        vapi_assistant_id: 'asst_already_there',
+      },
+    });
+    const vapi = makeVapiMock();
+    const worker = createProvisionTwilioWorker({ pool, vapiClient: vapi.client });
+
+    await worker.handle(
+      buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test', phoneNumber: '+15125550123' }),
+      logger,
+    );
+
+    // Idempotent: an existing assistant is neither recreated nor re-linked.
+    expect(vapi.createAssistant).not.toHaveBeenCalled();
+    expect(vapi.linkPhoneNumber).not.toHaveBeenCalled();
+  });
+
+  it('does not fail Twilio provisioning when Vapi assistant creation throws (best-effort)', async () => {
+    configureTwilio();
+    mockFetch(...twilioHappyPath());
+
+    const { pool, calls } = makePool({
+      settingsRow: {
+        business_name: "Bob's Plumbing",
+        voice_greeting: null,
+        voice_id: 'adam',
+        services_offered: [],
+        vapi_assistant_id: null,
+      },
+    });
+    const vapi = makeVapiMock({
+      createAssistant: async () => {
+        throw new Error('vapi 500');
+      },
+    });
+    const worker = createProvisionTwilioWorker({ pool, vapiClient: vapi.client });
+
+    // A Vapi hiccup must NOT throw — SMS/voice readiness is unaffected.
+    await expect(
+      worker.handle(
+        buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test', phoneNumber: '+15125550123' }),
+        logger,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(vapi.createAssistant).toHaveBeenCalledTimes(1);
+    // Provisioning still reached the active state despite the Vapi failure.
+    const activeWrite = calls.find(
+      (c) =>
+        /provisioned_at = NOW\(\)/i.test(c.sql) &&
+        JSON.stringify(c.params).includes('full_readiness'),
+    );
+    expect(activeWrite).toBeDefined();
   });
 });

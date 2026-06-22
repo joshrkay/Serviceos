@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import { useListQuery } from '../../hooks/useListQuery';
+import { useEstimateTerm } from '../../hooks/useEstimateTerm';
 
 type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
 
@@ -1014,6 +1015,7 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
 }) {
   const { user } = useUser();
   const apiClient = useApiClient();
+  const estimateTerm = useEstimateTerm();
   const { data: apiCustomers } = useListQuery<ApiCustomer>('/api/customers');
   const customers = mapApiCustomers(apiCustomers);
   const [businessName, setBusinessName] = useState('');
@@ -1138,9 +1140,9 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
               </div>
             )}
             <p className="text-sm text-slate-600">
-              {step === 'start'    ? 'New estimate' :
+              {step === 'start'    ? `New ${estimateTerm.toLowerCase()}` :
                step === 'describe' ? 'Describe the job' :
-               step === 'send'     ? 'Send estimate' : 'Review & send'}
+               step === 'send'     ? `Send ${estimateTerm.toLowerCase()}` : 'Review & send'}
             </p>
           </div>
           <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100 transition-colors">
@@ -1167,7 +1169,7 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
                 </div>
               )}
 
-              <p className="text-sm text-slate-500 mb-1">How would you like to build this estimate?</p>
+              <p className="text-sm text-slate-500 mb-1">How would you like to build this {estimateTerm.toLowerCase()}?</p>
 
               {/* Speak it */}
               <button
@@ -1393,7 +1395,7 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
                   <div className="flex size-12 items-center justify-center rounded-full bg-green-100">
                     <Check size={20} className="text-green-600" />
                   </div>
-                  <p className="text-slate-800">Estimate sent!</p>
+                  <p className="text-slate-800">{estimateTerm} sent!</p>
                   <p className="text-xs text-slate-400">{estNum} · {customer?.name}</p>
                 </div>
               ) : (

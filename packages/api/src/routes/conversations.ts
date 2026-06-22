@@ -58,6 +58,17 @@ const inboxQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
 
+// Story 3.11 — history search: by free text (q), and/or by linked entity. The
+// customerId/jobId convenience params map to the conversation's entity link.
+const searchQuerySchema = z.object({
+  q: z.string().trim().min(1).optional(),
+  entityType: z.string().optional(),
+  entityId: z.string().optional(),
+  customerId: z.string().optional(),
+  jobId: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+
 /** Map a reply-service failure to an HTTP status the UI can act on. */
 const REPLY_ERROR_STATUS: Record<ConversationReplyErrorCode, number> = {
   not_found: 404,
@@ -144,6 +155,43 @@ export function createConversationRouter(
       });
       res.json({ threads });
     })
+  );
+
+  // Story 3.11 — search conversation history by customer, job, or text.
+  // MUST precede '/:id' so Express doesn't treat 'search' as a conversation id.
+  router.get(
+    '/search',
+    requireAuth,
+    requireTenant,
+    requirePermission('conversations:view'),
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const query = searchQuerySchema.parse(req.query);
+      // Convenience params resolve to the conversation's entity link.
+      let entityType = query.entityType;
+      let entityId = query.entityId;
+      if (query.customerId) {
+        entityType = 'customer';
+        entityId = query.customerId;
+      } else if (query.jobId) {
+        entityType = 'job';
+        entityId = query.jobId;
+      }
+      // Require at least one criterion so search never dumps the whole tenant.
+      if (!query.q && !entityType) {
+        res.status(400).json({
+          error: 'BAD_REQUEST',
+          message: 'Provide q (text), customerId, or jobId to search.',
+        });
+        return;
+      }
+      const results = await conversationRepo.searchMessages(req.auth!.tenantId, {
+        ...(query.q ? { text: query.q } : {}),
+        ...(entityType ? { entityType } : {}),
+        ...(entityId ? { entityId } : {}),
+        ...(query.limit !== undefined ? { limit: query.limit } : {}),
+      });
+      res.json({ results });
+    }),
   );
 
   router.get(

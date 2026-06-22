@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createCustomerSchema } from '../shared/contracts';
-import { toErrorResponse } from '../shared/errors';
+import { asyncRoute } from '../middleware/async-route';
 import {
   createCustomer,
   getCustomer,
@@ -38,6 +38,7 @@ import {
   setCustomFieldValue,
   listResolvedCustomFields,
 } from '../customers/custom-field';
+import { CustomerMergeRepository, mergeCustomers } from '../customers/merge';
 import {
   createCustomerContactSchema,
   updateCustomerContactSchema,
@@ -64,7 +65,9 @@ export function createCustomerRouter(
   // U2 (CRM Jobber parity) — customer tags + per-customer custom-field values.
   // Optional, same quietly-404 pattern.
   tagRepo?: TagRepository,
-  customFieldRepo?: CustomFieldRepository
+  customFieldRepo?: CustomFieldRepository,
+  // Story 4.6 — customer merge. Optional, same quietly-404 pattern.
+  mergeRepo?: CustomerMergeRepository
 ): Router {
   const router = Router();
 
@@ -88,25 +91,20 @@ export function createCustomerRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:create'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = createCustomerSchema.parse(req.body);
-        const result = await createCustomer(
-          {
-            ...parsed,
-            tenantId: req.auth!.tenantId,
-            createdBy: req.auth!.userId,
-            actorRole: req.auth!.role,
-          },
-          customerRepo,
-          auditRepo
-        );
-        res.status(201).json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = createCustomerSchema.parse(req.body);
+      const result = await createCustomer(
+        {
+          ...parsed,
+          tenantId: req.auth!.tenantId,
+          createdBy: req.auth!.userId,
+          actorRole: req.auth!.role,
+        },
+        customerRepo,
+        auditRepo
+      );
+      res.status(201).json(result);
+    })
   );
 
   router.get(
@@ -114,63 +112,61 @@ export function createCustomerRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const includeArchived = req.query.includeArchived === 'true';
-        const search = req.query.search as string | undefined;
-        const sort: 'asc' | 'desc' = req.query.sort === 'desc' ? 'desc' : 'asc';
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const includeArchived = req.query.includeArchived === 'true';
+      const search = req.query.search as string | undefined;
+      const tag = req.query.tag as string | undefined;
+      const sort: 'asc' | 'desc' = req.query.sort === 'desc' ? 'desc' : 'asc';
 
-        // P1-018: when `paginated=true` (or limit/offset are present) we
-        // return `{ data, total }` so the frontend can drive UI pagination.
-        // Without those query params we keep the legacy bare-array shape so
-        // existing list consumers don't need changes.
-        const wantsPaginated =
-          req.query.paginated === 'true' ||
-          req.query.limit !== undefined ||
-          req.query.offset !== undefined;
+      // P1-018: when `paginated=true` (or limit/offset are present) we
+      // return `{ data, total }` so the frontend can drive UI pagination.
+      // Without those query params we keep the legacy bare-array shape so
+      // existing list consumers don't need changes.
+      const wantsPaginated =
+        req.query.paginated === 'true' ||
+        req.query.limit !== undefined ||
+        req.query.offset !== undefined;
 
-        const limitRaw = req.query.limit as string | undefined;
-        const offsetRaw = req.query.offset as string | undefined;
-        const limit = limitRaw !== undefined ? parseInt(limitRaw, 10) : DEFAULT_LIST_LIMIT;
-        const offset = offsetRaw !== undefined ? parseInt(offsetRaw, 10) : 0;
-        if (limitRaw !== undefined && (Number.isNaN(limit) || limit < 1 || limit > MAX_LIST_LIMIT)) {
-          res.status(400).json({
-            error: 'VALIDATION_ERROR',
-            message: `limit must be between 1 and ${MAX_LIST_LIMIT}`,
-          });
-          return;
-        }
-        if (offsetRaw !== undefined && (Number.isNaN(offset) || offset < 0)) {
-          res.status(400).json({
-            error: 'VALIDATION_ERROR',
-            message: 'offset must be a non-negative integer',
-          });
-          return;
-        }
+      const limitRaw = req.query.limit as string | undefined;
+      const offsetRaw = req.query.offset as string | undefined;
+      const limit = limitRaw !== undefined ? parseInt(limitRaw, 10) : DEFAULT_LIST_LIMIT;
+      const offset = offsetRaw !== undefined ? parseInt(offsetRaw, 10) : 0;
+      if (limitRaw !== undefined && (Number.isNaN(limit) || limit < 1 || limit > MAX_LIST_LIMIT)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: `limit must be between 1 and ${MAX_LIST_LIMIT}`,
+        });
+        return;
+      }
+      if (offsetRaw !== undefined && (Number.isNaN(offset) || offset < 0)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'offset must be a non-negative integer',
+        });
+        return;
+      }
 
-        if (wantsPaginated) {
-          const result = await listCustomersWithMeta(req.auth!.tenantId, customerRepo, {
-            includeArchived,
-            search,
-            limit,
-            offset,
-            sort,
-          });
-          res.json(result);
-          return;
-        }
-
-        const result = await listCustomers(req.auth!.tenantId, customerRepo, {
+      if (wantsPaginated) {
+        const result = await listCustomersWithMeta(req.auth!.tenantId, customerRepo, {
           includeArchived,
           search,
+          tag,
+          limit,
+          offset,
           sort,
         });
         res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+        return;
       }
-    }
+
+      const result = await listCustomers(req.auth!.tenantId, customerRepo, {
+        includeArchived,
+        search,
+        tag,
+        sort,
+      });
+      res.json(result);
+    })
   );
 
   router.get(
@@ -178,19 +174,14 @@ export function createCustomerRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await getCustomer(req.auth!.tenantId, req.params.id, customerRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await getCustomer(req.auth!.tenantId, req.params.id, customerRepo);
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
+        return;
       }
-    }
+      res.json(result);
+    })
   );
 
   router.put(
@@ -198,26 +189,21 @@ export function createCustomerRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await updateCustomer(
-          req.auth!.tenantId,
-          req.params.id,
-          req.body,
-          customerRepo,
-          req.auth!.userId,
-          auditRepo
-        );
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await updateCustomer(
+        req.auth!.tenantId,
+        req.params.id,
+        req.body,
+        customerRepo,
+        req.auth!.userId,
+        auditRepo
+      );
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
+        return;
       }
-    }
+      res.json(result);
+    })
   );
 
   router.post(
@@ -225,26 +211,56 @@ export function createCustomerRouter(
     requireAuth,
     requireTenant,
     requirePermission('customers:delete'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await archiveCustomer(
-          req.auth!.tenantId,
-          req.params.id,
-          customerRepo,
-          req.auth!.userId,
-          auditRepo
-        );
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await archiveCustomer(
+        req.auth!.tenantId,
+        req.params.id,
+        customerRepo,
+        req.auth!.userId,
+        auditRepo
+      );
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
+        return;
+      }
+      res.json(result);
+    })
+  );
+
+  // Story 4.6 — merge a duplicate (the losing record) into this customer
+  // (the survivor, :id). The survivor is chosen explicitly by the URL; the
+  // loser rides in the body. Re-parents jobs/invoices/conversations/etc.
+  // onto the survivor, archives the loser, and records a `customer.merged`
+  // audit event. Quietly 404s when no merge repo is wired.
+  if (mergeRepo) {
+    router.post(
+      '/:id/merge',
+      requireAuth,
+      requireTenant,
+      requirePermission('customers:update'),
+      asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+        const losingId = (req.body?.losingId ?? '') as string;
+        if (typeof losingId !== 'string' || losingId.trim() === '') {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: 'losingId is required',
+          });
           return;
         }
+        const result = await mergeCustomers(
+          req.auth!.tenantId,
+          {
+            survivingId: req.params.id,
+            losingId,
+            actorId: req.auth!.userId,
+            actorRole: req.auth!.role,
+          },
+          { customerRepo, mergeRepo, auditRepo }
+        );
         res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
-  );
+      })
+    );
+  }
 
   // P9-002 — Unified communication timeline. Read-only aggregator across
   // notes, jobs, estimates, invoices, payments, conversations, and
@@ -256,34 +272,29 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:view'),
-      async (req: AuthenticatedRequest, res: Response) => {
-        try {
-          const customer = await getCustomer(
-            req.auth!.tenantId,
-            req.params.id,
-            customerRepo
-          );
-          if (!customer) {
-            res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
-            return;
-          }
-          const parsed = timelineQuerySchema.parse(req.query);
-          const result = await getCustomerTimeline(
-            req.auth!.tenantId,
-            req.params.id,
-            timelineDeps,
-            {
-              before: parsed.before,
-              limit: parsed.limit,
-              kinds: parsed.kinds,
-            }
-          );
-          res.json(result);
-        } catch (err) {
-          const { statusCode, body } = toErrorResponse(err);
-          res.status(statusCode).json(body);
+      asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+        const customer = await getCustomer(
+          req.auth!.tenantId,
+          req.params.id,
+          customerRepo
+        );
+        if (!customer) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
+          return;
         }
-      }
+        const parsed = timelineQuerySchema.parse(req.query);
+        const result = await getCustomerTimeline(
+          req.auth!.tenantId,
+          req.params.id,
+          timelineDeps,
+          {
+            before: parsed.before,
+            limit: parsed.limit,
+            kinds: parsed.kinds,
+          }
+        );
+        res.json(result);
+      })
     );
   }
 
@@ -297,22 +308,17 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:view'),
-      async (req: AuthenticatedRequest, res: Response) => {
-        try {
-          if (!(await loadCustomerOr404(req, res))) return;
-          const includeArchived = req.query.includeArchived === 'true';
-          const contacts = await listContacts(
-            req.auth!.tenantId,
-            req.params.id,
-            contactRepo,
-            includeArchived
-          );
-          res.json(contacts);
-        } catch (err) {
-          const { statusCode, body } = toErrorResponse(err);
-          res.status(statusCode).json(body);
-        }
-      }
+      asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+        if (!(await loadCustomerOr404(req, res))) return;
+        const includeArchived = req.query.includeArchived === 'true';
+        const contacts = await listContacts(
+          req.auth!.tenantId,
+          req.params.id,
+          contactRepo,
+          includeArchived
+        );
+        res.json(contacts);
+      })
     );
 
     router.post(
@@ -320,27 +326,22 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:update'),
-      async (req: AuthenticatedRequest, res: Response) => {
-        try {
-          if (!(await loadCustomerOr404(req, res))) return;
-          const parsed = createCustomerContactSchema.parse(req.body);
-          const contact = await createContact(
-            {
-              ...parsed,
-              tenantId: req.auth!.tenantId,
-              customerId: req.params.id,
-              createdBy: req.auth!.userId,
-              actorRole: req.auth!.role,
-            },
-            contactRepo,
-            auditRepo
-          );
-          res.status(201).json(contact);
-        } catch (err) {
-          const { statusCode, body } = toErrorResponse(err);
-          res.status(statusCode).json(body);
-        }
-      }
+      asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+        if (!(await loadCustomerOr404(req, res))) return;
+        const parsed = createCustomerContactSchema.parse(req.body);
+        const contact = await createContact(
+          {
+            ...parsed,
+            tenantId: req.auth!.tenantId,
+            customerId: req.params.id,
+            createdBy: req.auth!.userId,
+            actorRole: req.auth!.role,
+          },
+          contactRepo,
+          auditRepo
+        );
+        res.status(201).json(contact);
+      })
     );
 
     router.put(
@@ -348,29 +349,24 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:update'),
-      async (req: AuthenticatedRequest, res: Response) => {
-        try {
-          if (!(await loadCustomerOr404(req, res))) return;
-          const parsed = updateCustomerContactSchema.parse(req.body);
-          const existing = await contactRepo.findById(req.auth!.tenantId, req.params.contactId);
-          if (!existing || existing.customerId !== req.params.id) {
-            res.status(404).json({ error: 'NOT_FOUND', message: 'Contact not found' });
-            return;
-          }
-          const updated = await updateContact(
-            req.auth!.tenantId,
-            req.params.contactId,
-            parsed,
-            contactRepo,
-            req.auth!.userId,
-            auditRepo
-          );
-          res.json(updated);
-        } catch (err) {
-          const { statusCode, body } = toErrorResponse(err);
-          res.status(statusCode).json(body);
+      asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+        if (!(await loadCustomerOr404(req, res))) return;
+        const parsed = updateCustomerContactSchema.parse(req.body);
+        const existing = await contactRepo.findById(req.auth!.tenantId, req.params.contactId);
+        if (!existing || existing.customerId !== req.params.id) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Contact not found' });
+          return;
         }
-      }
+        const updated = await updateContact(
+          req.auth!.tenantId,
+          req.params.contactId,
+          parsed,
+          contactRepo,
+          req.auth!.userId,
+          auditRepo
+        );
+        res.json(updated);
+      })
     );
 
     router.post(
@@ -378,27 +374,22 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:update'),
-      async (req: AuthenticatedRequest, res: Response) => {
-        try {
-          if (!(await loadCustomerOr404(req, res))) return;
-          const existing = await contactRepo.findById(req.auth!.tenantId, req.params.contactId);
-          if (!existing || existing.customerId !== req.params.id) {
-            res.status(404).json({ error: 'NOT_FOUND', message: 'Contact not found' });
-            return;
-          }
-          const archived = await archiveContact(
-            req.auth!.tenantId,
-            req.params.contactId,
-            contactRepo,
-            req.auth!.userId,
-            auditRepo
-          );
-          res.json(archived);
-        } catch (err) {
-          const { statusCode, body } = toErrorResponse(err);
-          res.status(statusCode).json(body);
+      asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+        if (!(await loadCustomerOr404(req, res))) return;
+        const existing = await contactRepo.findById(req.auth!.tenantId, req.params.contactId);
+        if (!existing || existing.customerId !== req.params.id) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Contact not found' });
+          return;
         }
-      }
+        const archived = await archiveContact(
+          req.auth!.tenantId,
+          req.params.contactId,
+          contactRepo,
+          req.auth!.userId,
+          auditRepo
+        );
+        res.json(archived);
+      })
     );
   }
 
@@ -409,16 +400,11 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:view'),
-      async (req: AuthenticatedRequest, res: Response) => {
-        try {
-          if (!(await loadCustomerOr404(req, res))) return;
-          const tags = await listCustomerTags(req.auth!.tenantId, req.params.id, tagRepo);
-          res.json(tags);
-        } catch (err) {
-          const { statusCode, body } = toErrorResponse(err);
-          res.status(statusCode).json(body);
-        }
-      }
+      asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+        if (!(await loadCustomerOr404(req, res))) return;
+        const tags = await listCustomerTags(req.auth!.tenantId, req.params.id, tagRepo);
+        res.json(tags);
+      })
     );
 
     router.post(
@@ -426,25 +412,20 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:update'),
-      async (req: AuthenticatedRequest, res: Response) => {
-        try {
-          if (!(await loadCustomerOr404(req, res))) return;
-          const { tag } = addCustomerTagSchema.parse(req.body);
-          await addCustomerTag(
-            req.auth!.tenantId,
-            req.params.id,
-            tag,
-            tagRepo,
-            req.auth!.userId,
-            auditRepo
-          );
-          const tags = await listCustomerTags(req.auth!.tenantId, req.params.id, tagRepo);
-          res.status(201).json(tags);
-        } catch (err) {
-          const { statusCode, body } = toErrorResponse(err);
-          res.status(statusCode).json(body);
-        }
-      }
+      asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+        if (!(await loadCustomerOr404(req, res))) return;
+        const { tag } = addCustomerTagSchema.parse(req.body);
+        await addCustomerTag(
+          req.auth!.tenantId,
+          req.params.id,
+          tag,
+          tagRepo,
+          req.auth!.userId,
+          auditRepo
+        );
+        const tags = await listCustomerTags(req.auth!.tenantId, req.params.id, tagRepo);
+        res.status(201).json(tags);
+      })
     );
 
     router.delete(
@@ -452,24 +433,19 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:update'),
-      async (req: AuthenticatedRequest, res: Response) => {
-        try {
-          if (!(await loadCustomerOr404(req, res))) return;
-          await removeCustomerTag(
-            req.auth!.tenantId,
-            req.params.id,
-            decodeURIComponent(req.params.tag),
-            tagRepo,
-            req.auth!.userId,
-            auditRepo
-          );
-          const tags = await listCustomerTags(req.auth!.tenantId, req.params.id, tagRepo);
-          res.json(tags);
-        } catch (err) {
-          const { statusCode, body } = toErrorResponse(err);
-          res.status(statusCode).json(body);
-        }
-      }
+      asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+        if (!(await loadCustomerOr404(req, res))) return;
+        await removeCustomerTag(
+          req.auth!.tenantId,
+          req.params.id,
+          decodeURIComponent(req.params.tag),
+          tagRepo,
+          req.auth!.userId,
+          auditRepo
+        );
+        const tags = await listCustomerTags(req.auth!.tenantId, req.params.id, tagRepo);
+        res.json(tags);
+      })
     );
   }
 
@@ -481,20 +457,15 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:view'),
-      async (req: AuthenticatedRequest, res: Response) => {
-        try {
-          if (!(await loadCustomerOr404(req, res))) return;
-          const fields = await listResolvedCustomFields(
-            req.auth!.tenantId,
-            req.params.id,
-            customFieldRepo
-          );
-          res.json(fields);
-        } catch (err) {
-          const { statusCode, body } = toErrorResponse(err);
-          res.status(statusCode).json(body);
-        }
-      }
+      asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+        if (!(await loadCustomerOr404(req, res))) return;
+        const fields = await listResolvedCustomFields(
+          req.auth!.tenantId,
+          req.params.id,
+          customFieldRepo
+        );
+        res.json(fields);
+      })
     );
 
     router.put(
@@ -502,30 +473,25 @@ export function createCustomerRouter(
       requireAuth,
       requireTenant,
       requirePermission('customers:update'),
-      async (req: AuthenticatedRequest, res: Response) => {
-        try {
-          if (!(await loadCustomerOr404(req, res))) return;
-          const { value } = setCustomFieldValueSchema.parse(req.body);
-          await setCustomFieldValue(
-            req.auth!.tenantId,
-            req.params.id,
-            req.params.fieldDefId,
-            value,
-            customFieldRepo,
-            req.auth!.userId,
-            auditRepo
-          );
-          const fields = await listResolvedCustomFields(
-            req.auth!.tenantId,
-            req.params.id,
-            customFieldRepo
-          );
-          res.json(fields);
-        } catch (err) {
-          const { statusCode, body } = toErrorResponse(err);
-          res.status(statusCode).json(body);
-        }
-      }
+      asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+        if (!(await loadCustomerOr404(req, res))) return;
+        const { value } = setCustomFieldValueSchema.parse(req.body);
+        await setCustomFieldValue(
+          req.auth!.tenantId,
+          req.params.id,
+          req.params.fieldDefId,
+          value,
+          customFieldRepo,
+          req.auth!.userId,
+          auditRepo
+        );
+        const fields = await listResolvedCustomFields(
+          req.auth!.tenantId,
+          req.params.id,
+          customFieldRepo
+        );
+        res.json(fields);
+      })
     );
   }
 

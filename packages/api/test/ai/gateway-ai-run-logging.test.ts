@@ -177,4 +177,30 @@ describe('P2-027 Gap 1 — gateway AI-run logging', () => {
     const response = await gateway.complete(makeRequest());
     expect(response.content).toBe('no repo');
   });
+
+  it('Story 3.12 — logs the correlationId on a provider failure', async () => {
+    const errorLog = vi.fn();
+    const logger = { info: vi.fn(), error: errorLog };
+    const failingProvider: LLMProvider = {
+      name: 'failing',
+      async complete() {
+        throw new Error('boom');
+      },
+      async isAvailable() {
+        return true;
+      },
+    };
+    const providers = new Map<string, LLMProvider>();
+    providers.set('failing', failingProvider);
+    const config: LLMGatewayConfig = { defaultProvider: 'failing', defaultModel: 'test-model' };
+    const gateway = new LLMGateway(config, providers, logger);
+
+    await expect(
+      gateway.complete(makeRequest({ metadata: { correlationId: 'corr-xyz' } })),
+    ).rejects.toThrow();
+
+    const failLog = errorLog.mock.calls.find(([msg]) => msg === 'LLM completion failed');
+    expect(failLog).toBeTruthy();
+    expect(failLog![1]).toMatchObject({ correlationId: 'corr-xyz' });
+  });
 });

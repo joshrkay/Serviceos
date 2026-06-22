@@ -9,7 +9,7 @@ import type { ServiceType } from '../../data/mock-data';
 import type { Customer, CustomerListItem } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useMutation } from '../../hooks/useMutation';
-import { useEntityLabels } from '../../hooks/useEntityLabels';
+import { nameSimilarity, FUZZY_NAME_THRESHOLD } from '../../utils/name-similarity';
 import { Spinner, EmptyState } from '../ui';
 import { ErrorState } from '../ErrorState';
 import { NewEstimateFlow } from '../estimates/NewEstimateFlow';
@@ -82,8 +82,22 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
   const emailMatch = !dismissedDupe && emailNorm.length >= 5 && emailNorm.includes('@')
     ? existingCustomers.find(c => (c.email ?? '').toLowerCase() === emailNorm)
     : null;
-  const duplicate = phoneMatch ?? emailMatch;
-  const matchReason = phoneMatch ? 'Same phone number' : 'Same email address';
+  // 4.4 — fuzzy name match (pg_trgm parity). Only a fallback when phone/email
+  // didn't already pin an exact match, so the card surfaces the strongest
+  // signal. The server re-checks on save (authoritative).
+  const nameTrim = form.name.trim();
+  const nameMatch = !dismissedDupe && !phoneMatch && !emailMatch && nameTrim.length >= 3
+    ? existingCustomers.find(c => nameSimilarity(nameTrim, customerDisplayName(c)) >= FUZZY_NAME_THRESHOLD)
+    : null;
+  const duplicate = phoneMatch ?? emailMatch ?? nameMatch;
+  const matchReason = phoneMatch
+    ? 'Same phone number'
+    : emailMatch
+      ? 'Same email address'
+      : 'Similar name';
+  // A fuzzy name hit is a "possible" duplicate; an exact phone/email hit is
+  // definite.
+  const isFuzzyMatch = !phoneMatch && !emailMatch && !!nameMatch;
 
   function toggleSvc(s: ServiceType) {
     setForm(f => ({
@@ -165,10 +179,12 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
                   </div>
                   <input
                     value={form.name}
-                    onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                    onChange={e => { setDismissedDupe(false); setForm(f => ({ ...f, name: e.target.value })); }}
                     placeholder="Full name *"
                     autoFocus
-                    className="w-full rounded-xl border border-slate-200 pl-10 pr-4 py-3 text-sm focus:outline-none focus:border-blue-400 transition-colors"
+                    className={`w-full rounded-xl border pl-10 pr-4 py-3 text-sm focus:outline-none transition-colors ${
+                      nameMatch && !dismissedDupe ? 'border-amber-300 bg-amber-50/50 focus:border-amber-400' : 'border-slate-200 focus:border-blue-400'
+                    }`}
                   />
                 </div>
 
@@ -229,7 +245,9 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
                       <AlertTriangle size={13} className="text-amber-700" />
                     </div>
                     <div>
-                      <p className="text-sm text-amber-900">Already in your system</p>
+                      <p className="text-sm text-amber-900">
+                        {isFuzzyMatch ? 'Possible duplicate' : 'Already in your system'}
+                      </p>
                       <p className="text-xs text-amber-600 mt-0.5">{matchReason} matches an existing customer</p>
                     </div>
                   </div>
@@ -438,16 +456,25 @@ export function CustomersPage() {
   const navigate = useNavigate();
   const labels = useEntityLabels();
   const [filter,       setFilter]       = useState<Filter>('All');
+  const [tagFilter,    setTagFilter]    = useState<string>('');
   const [showAdd,      setShowAdd]      = useState(false);
   const [showEstimate, setShowEstimate] = useState(false);
   const [showJob,      setShowJob]      = useState(false);
 
   const { data, total, isLoading, error, setSearch, refetch } = useListQuery<CustomerListItem>('/api/customers');
 
+  // 4.8 — tags filterable in the list. Distinct tags across the loaded set
+  // drive the chips; selection narrows the list (client-side, mirroring the
+  // service-type filter above).
+  const availableTags = [...new Set(data.flatMap(c => c.tags ?? []))].sort();
+
   // Client-side service type filter (API doesn't support this filter)
-  const filtered = filter === 'All'
+  let filtered = filter === 'All'
     ? data
     : data.filter(c => customerServiceTypes(c).includes(filter));
+  if (tagFilter) {
+    filtered = filtered.filter(c => (c.tags ?? []).includes(tagFilter));
+  }
 
   const totalLocations = data.reduce((n, c) => n + (c.locations?.length ?? 0), 0);
 
@@ -495,6 +522,39 @@ export function CustomersPage() {
           ))}
         </div>
 
+        {/* 4.8 — tag filter chips (only shown when the loaded set has tags) */}
+        {availableTags.length > 0 && (
+          <div
+            className="flex gap-2 mt-2 overflow-x-auto pb-1"
+            style={{ scrollbarWidth: 'none' }}
+            data-testid="tag-filters"
+          >
+            <button
+              onClick={() => setTagFilter('')}
+              className={`rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
+                tagFilter === ''
+                  ? 'bg-indigo-600 border-indigo-600 text-white'
+                  : 'border-slate-200 text-slate-500 hover:border-slate-400'
+              }`}
+            >
+              All tags
+            </button>
+            {availableTags.map(tag => (
+              <button
+                key={tag}
+                onClick={() => setTagFilter(t => (t === tag ? '' : tag))}
+                className={`rounded-full border px-3.5 py-1.5 text-xs whitespace-nowrap transition-all shrink-0 ${
+                  tagFilter === tag
+                    ? 'bg-indigo-600 border-indigo-600 text-white'
+                    : 'border-slate-200 text-slate-500 hover:border-slate-400'
+                }`}
+              >
+                #{tag}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* list */}
         {isLoading && (
           <div className="flex items-center justify-center py-16">
@@ -533,6 +593,12 @@ export function CustomersPage() {
                         </span>
                       )}
                     </div>
+                    {c.primaryPhone && (
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <Phone size={10} className="text-slate-400 shrink-0" />
+                        <p className="text-xs text-slate-500 truncate">{c.primaryPhone}</p>
+                      </div>
+                    )}
                     <div className="flex items-center gap-1.5 mt-0.5">
                       <MapPin size={10} className="text-slate-400 shrink-0" />
                       <p className="text-xs text-slate-400 truncate">
