@@ -45,7 +45,14 @@ export function OnboardingConversation({ onComplete }: OnboardingConversationPro
 
   // Open the session on mount. A turn with no sessionId/userMessage
   // returns the assistant's opening line without consuming a turn.
+  //
+  // Guarded so it runs exactly once: `apiFetch` is normally a stable
+  // useCallback, but if its identity ever changed (e.g. Clerk re-issuing
+  // getToken) the effect would re-fire and reset the live conversation.
+  const startedRef = useRef(false);
   useEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
     let alive = true;
     (async () => {
       try {

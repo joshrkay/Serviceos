@@ -75,6 +75,10 @@ export interface ResolveLabelOptions {
  * an override of "Quote" without shipping a dependency.
  */
 function pluralize(word: string): string {
+  // "Tech" ends in "ch" but is pronounced with a hard /k/, so it takes a
+  // plain "-s" ("Techs", not "Teches"). It's one of the documented
+  // override labels, so special-case it before the sibilant rule.
+  if (/tech$/i.test(word)) return `${word}s`;
   if (/(?:s|x|z|ch|sh)$/i.test(word)) return `${word}es`;
   if (/[^aeiou]y$/i.test(word)) return `${word.slice(0, -1)}ies`;
   return `${word}s`;

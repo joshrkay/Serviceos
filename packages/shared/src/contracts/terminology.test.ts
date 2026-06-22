@@ -53,6 +53,8 @@ describe('resolveEntityLabel — render direction', () => {
     // -y → -ies and sibilant → -es paths
     expect(resolveEntityLabel({ workerTerm: 'Buddy' }, 'workerTerm', { plural: true })).toBe('Buddies');
     expect(resolveEntityLabel({ appointmentTerm: 'Dispatch' }, 'appointmentTerm', { plural: true })).toBe('Dispatches');
+    // "Tech" ends in "ch" but takes a plain -s (hard /k/), not "Teches".
+    expect(resolveEntityLabel({ workerTerm: 'Tech' }, 'workerTerm', { plural: true })).toBe('Techs');
   });
 });
 
