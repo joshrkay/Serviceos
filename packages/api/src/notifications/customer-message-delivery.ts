@@ -1,7 +1,13 @@
 import { MessageDeliveryProvider } from './delivery-provider';
 import { DispatchRepository, DispatchEntityType } from './dispatch-repository';
 import { DncRepository, normalizePhone } from '../compliance/dnc';
+import {
+  type ConsentEventRepository,
+  normalizeConsentPhone,
+} from '../compliance/consent-events';
+import { resolveSmsConsentForOutbound, type SmsComplianceBlockReason } from '../compliance/sms-consent-gate';
 import { Customer } from '../customers/customer';
+import { type AuditRepository, createAuditEvent } from '../audit/audit';
 
 export type CustomerMessageChannel = 'sms' | 'email';
 
@@ -9,6 +15,8 @@ export interface CustomerMessageDeliveryDeps {
   delivery: MessageDeliveryProvider;
   dispatchRepo: DispatchRepository;
   dncRepo: DncRepository;
+  consentRepo?: ConsentEventRepository;
+  auditRepo?: AuditRepository;
 }
 
 export interface SendCustomerMessageInput {
@@ -24,6 +32,29 @@ export interface SendCustomerMessageInput {
   idempotencyKeyPrefix: string;
 }
 
+async function logSmsBlocked(
+  deps: CustomerMessageDeliveryDeps,
+  input: SendCustomerMessageInput,
+  reason: SmsComplianceBlockReason,
+): Promise<void> {
+  if (!deps.auditRepo) return;
+  await deps.auditRepo.create(
+    createAuditEvent({
+      tenantId: input.tenantId,
+      actorId: 'system:sms_compliance_gate',
+      actorRole: 'system',
+      eventType: 'sms_blocked_by_compliance',
+      entityType: input.entityType,
+      entityId: input.entityId,
+      metadata: {
+        customerId: input.customer.id,
+        reason,
+        phone: input.customer.primaryPhone ? normalizeConsentPhone(input.customer.primaryPhone) : null,
+      },
+    }),
+  );
+}
+
 /**
  * Best-effort SMS/email send with sms_consent + DNC gates and dispatch logging.
  * Failures are swallowed so transactional comms never block business mutations.
@@ -35,10 +66,18 @@ export async function sendCustomerMessage(
   const { customer, tenantId, channels } = input;
 
   if (channels.includes('sms') && input.smsBody && customer.primaryPhone) {
-    if (customer.smsConsent === true) {
-      const phone = normalizePhone(customer.primaryPhone);
-      const onDnc = await deps.dncRepo.isOnDnc(tenantId, phone);
-      if (!onDnc) {
+    const phone = normalizePhone(customer.primaryPhone);
+    const onDnc = await deps.dncRepo.isOnDnc(tenantId, phone);
+    if (onDnc) {
+      await logSmsBlocked(deps, input, 'dnc');
+    } else {
+      const ledgerEvents = deps.consentRepo
+        ? await deps.consentRepo.listByPhone(tenantId, customer.primaryPhone)
+        : [];
+      const consent = resolveSmsConsentForOutbound(customer, ledgerEvents);
+      if (!consent.allowed) {
+        await logSmsBlocked(deps, input, consent.reason);
+      } else {
         const idempotencyKey = `${input.idempotencyKeyPrefix}:sms`;
         try {
           const result = await deps.delivery.sendSms({

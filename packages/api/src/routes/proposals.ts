@@ -6,7 +6,7 @@ import { asyncRoute } from '../middleware/async-route';
 import { toErrorResponse } from '../shared/errors';
 import { validate } from '../shared/validation';
 import { Role } from '../auth/rbac';
-import { ProposalRepository, isScheduleProposalType, SCHEDULE_PROPOSAL_TYPES } from '../proposals/proposal';
+import { ProposalRepository, isExpirableProposalType, SCHEDULE_PROPOSAL_TYPES } from '../proposals/proposal';
 import { AppointmentRepository } from '../appointments/appointment';
 import { AuditRepository } from '../audit/audit';
 import { ProposalFilter } from '../proposals/proposal-contracts';
@@ -30,6 +30,7 @@ import {
 import { FeasibilityDependencies } from '../scheduling/feasibility-types';
 import { createSchedulingProposal } from '../proposals/create-scheduling';
 import type { CorrectionRepository } from '../proposals/corrections/correction';
+import type { CatalogItemRepository } from '../catalog/catalog-item';
 
 // P2-035 — Batch approval body schema. Lives inline rather than in
 // proposal-contracts.ts so this story stays within its allowed-files
@@ -66,6 +67,7 @@ export function createProposalsRouter(
   // Story 3.9 — when supplied, editing a proposal logs each changed field
   // (intent + field + before/after) to the corrections training table.
   correctionRepo?: CorrectionRepository,
+  catalogRepo?: CatalogItemRepository,
 ): Router {
   const router = Router();
 
@@ -184,7 +186,7 @@ export function createProposalsRouter(
                 all
                   .filter(
                     (p) =>
-                      isScheduleProposalType(p.proposalType) &&
+                      isExpirableProposalType(p.proposalType) &&
                       (p.expiresAt?.getTime() ?? 0) >= since.getTime(),
                   )
                   .sort((a, b) => (b.expiresAt?.getTime() ?? 0) - (a.expiresAt?.getTime() ?? 0))
@@ -371,6 +373,7 @@ export function createProposalsRouter(
           parsed.edits,
           auditRepo,
           correctionRepo,
+          catalogRepo,
         );
         res.json(result);
       } catch (err) {

@@ -1,21 +1,15 @@
 import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
-import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
+import { getConfidenceLevel } from '../guardrails/confidence';
 import type { ProposalConfidenceMeta } from '../../proposals/contracts';
 import { CatalogItemRepository } from '../../catalog/catalog-item';
-import {
-  applyCatalogPricing,
-  CatalogPricingOutcome,
-  lineItemConfidenceSignals,
-  resolveLineItems,
-  UNCATALOGUED_CONFIDENCE_CAP,
-} from '../resolution/catalog-resolver';
 import {
   detectEstimateAmbiguities,
   decideEstimateClarification,
   EstimateDraftSignals,
 } from '../clarification/estimate-clarification';
+import { recomputePricedProposal } from './recompute-priced-proposal';
 
 /**
  * Story 7.2 — confidence ceiling for a draft that still has open clarifications
@@ -111,40 +105,16 @@ export class EstimateTaskHandler implements TaskHandler {
     const parsed = tryParseEstimateJson(llmResponse.content);
     const payload = buildPartialPayload(parsed);
 
-    // P22 catalog grounding: same pass as the invoice handler, but this
-    // contract's price field is `unitPrice` (integer cents) and carries
-    // no per-line totals. A catalog read failure degrades to LLM pricing
-    // (still human-reviewed via the proposal gate).
-    let catalogOutcome: CatalogPricingOutcome | undefined;
-    const lineItems = payload.lineItems as Array<Record<string, unknown>>;
-    if (this.catalogRepo && Array.isArray(lineItems) && lineItems.length > 0) {
-      try {
-        const items = (await this.catalogRepo.listByTenant(context.tenantId)).filter(
-          (i) => i.archivedAt === null,
-        );
-        if (items.length > 0) {
-          const resolutions = resolveLineItems(
-            lineItems.map((li) => String(li.description ?? '')),
-            items,
-          );
-          catalogOutcome = applyCatalogPricing(lineItems, resolutions, 'unitPrice');
-          payload.lineItems = catalogOutcome.lineItems;
-        }
-      } catch {
-        catalogOutcome = undefined;
-      }
-    }
-
-    const confidence = assessConfidence(parsed ?? {});
-    let confidenceScore = confidence.score;
-    const confidenceFactors = [...confidence.factors];
-    if (catalogOutcome?.anyCatalogPriced) confidenceFactors.push('catalog_priced');
-    if (catalogOutcome?.anyUncatalogued) {
-      confidenceFactors.push('uncatalogued_line_item');
-      // Money-correctness gate: an AI-invented price must never ride a
-      // ≥0.9 confidence score into autonomous auto-approval.
-      confidenceScore = Math.min(confidenceScore, UNCATALOGUED_CONFIDENCE_CAP);
-    }
+    const priced = await recomputePricedProposal(this.catalogRepo, {
+      tenantId: context.tenantId,
+      proposalType: this.taskType,
+      payload,
+      parsedForConfidence: parsed ?? {},
+    });
+    Object.assign(payload, priced.payload);
+    let confidenceScore = priced.confidenceScore;
+    const confidenceFactors = priced.confidenceFactors;
+    const catalogOutcome = priced.catalogOutcome;
 
     // Story 7.2 — clarifying-questions policy. Detect what's ambiguous about
     // this draft and decide whether to ask (under the 3-loop cap) or finalize.
@@ -189,30 +159,14 @@ export class EstimateTaskHandler implements TaskHandler {
       confidenceScore = Math.min(confidenceScore, CLARIFICATION_REVIEW_CONFIDENCE_CAP);
       confidenceFactors.push('flagged_for_review');
     } else if (clarification.action === 'clarify') {
-      // Open questions remain — keep the best-effort draft out of auto-approve
-      // until they're answered.
       confidenceScore = Math.min(confidenceScore, CLARIFICATION_REVIEW_CONFIDENCE_CAP);
       confidenceFactors.push('clarification_pending');
     }
 
-    // RV-007 — Confidence Marker `_meta`. Overall level is the mapped
-    // task confidence (post-cap); per-field signals translate the
-    // catalog resolver's pricingSource outcomes (uncatalogued/ambiguous
-    // lines → 'low' + a marker). No new confidence computation.
-    const signals = lineItemConfidenceSignals(
-      Array.isArray(payload.lineItems)
-        ? (payload.lineItems as Array<Record<string, unknown>>)
-        : [],
-      'unitPrice',
-    );
-    const meta: ProposalConfidenceMeta = {
-      overallConfidence: getConfidenceLevel(confidenceScore),
-      ...(Object.keys(signals.fieldConfidence).length > 0
-        ? { fieldConfidence: signals.fieldConfidence }
-        : {}),
-      ...(signals.markers.length > 0 ? { markers: signals.markers } : {}),
-    };
-    payload._meta = meta;
+    const meta = payload._meta as ProposalConfidenceMeta | undefined;
+    if (meta) {
+      meta.overallConfidence = getConfidenceLevel(confidenceScore);
+    }
 
     const sourceContext: Record<string, unknown> = {
       ...(context.conversationId ? { conversationId: context.conversationId } : {}),
@@ -232,8 +186,8 @@ export class EstimateTaskHandler implements TaskHandler {
       createdBy: context.userId,
       // Ambiguous catalog matches require the operator to pick the item —
       // forces 'draft' regardless of trust tier / confidence.
-      ...(catalogOutcome && catalogOutcome.missingFields.length > 0
-        ? { missingFields: catalogOutcome.missingFields }
+      ...(priced.missingFields && priced.missingFields.length > 0
+        ? { missingFields: priced.missingFields }
         : {}),
       // D3: this handler is called by the CaptureAgent pipeline. Drafting
       // an estimate is capture-class (no money is moved). Passing the

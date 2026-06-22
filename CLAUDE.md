@@ -27,7 +27,13 @@ README explaining why):
 - All entities: tenant_id column + RLS
 - All mutations: emit audit events
 - All AI calls: route through LLM gateway (packages/api/src/ai/gateway)
-- All proposals: typed payloads validated by Zod contracts
+- All proposals: typed payloads validated by Zod contracts; explicit human approval
+  is the default. **Governed auto-approve** is permitted only when all hold:
+  capture-class action (never comms/money/irreversible); a supervisor is present;
+  overall confidence ≥ mode threshold (0.90/0.92/0.95, tenant-tunable); no
+  low/very_low confidence marker; all lines catalog-grounded; within supervisor
+  spend budget; and a 5-second undo window applies. Every auto-approval is
+  audited to a policy actor (see D-014).
 - All AI-drafted line-item prices: grounded in the tenant catalog via
   packages/api/src/ai/resolution/catalog-resolver.ts — never trust an
   LLM-emitted price without resolution (uncatalogued lines must cap
@@ -57,7 +63,9 @@ README explaining why):
 ## Story Execution Rules
 - Only modify files listed in "Allowed files/modules"
 - Run automated checks before requesting review
-- Never auto-execute proposals — all require human approval
+- Proposals require explicit human approval by default; governed auto-approve
+  applies only under the fenced rules in Core Patterns (never for comms/money/
+  irreversible). See D-014.
 - Use the shared billing engine for all financial calculations
 - Use the async worker pattern (P0-009) for background jobs
 - Use the webhook base (P0-014) for all external webhook handlers

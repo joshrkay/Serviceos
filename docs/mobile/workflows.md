@@ -39,7 +39,7 @@ is then a thin specialization of it.
 | **Capture** | Owner-spoken: hold-to-talk → record → upload → transcribe | `routes/voice.ts` `POST /api/voice/recordings`; mirror `components/shared/VoiceBar.tsx` |
 | **Understand** | Classify intent, resolve free-text refs to entities, ground prices in the catalog | `ai/orchestration/intent-classifier.ts` (`IntentType`, τ_int=0.75); `ai/resolution/entity-resolver.ts` (τ=0.80); `ai/resolution/catalog-resolver.ts` |
 | **Propose** | Mint a typed, Zod-validated proposal carrying confidence + "what I wasn't sure about" markers | `ai/tasks/*` task handlers → `proposals/proposal.ts` (44 `ProposalType`s) |
-| **Decide** | Auto-approve (only `capture` class, autonomous, conf ≥ mode threshold) or route to the owner; 5-second undo after approval | `proposals/auto-approve.ts` `decideInitialStatus`; never auto-execute (**D-004**) |
+| **Decide** | Governed auto-approve (capture-class only, supervised, conf ≥ mode threshold) or route to the owner; 5-second undo after approval; every machine approval audited to policy actor | `proposals/auto-approve.ts` `decideInitialStatus`; D-004 + D-014 |
 | **Notify** | Tell the owner it needs them / it's done | **net-new push** (M4) + existing SMS one-tap (`proposals/sms/*`) |
 | **Execute** | Deterministic side-effect (write a row, send a message, issue an invoice) | `proposals/execution/handlers.ts` + per-type handlers |
 | **Account** | Emit an audit event; every mutation is logged | `audit/audit.ts` `createAuditEvent` |

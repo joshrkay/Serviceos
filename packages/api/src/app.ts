@@ -471,7 +471,8 @@ import { whisperRouter } from './telephony/whisper-route';
 import { WhisperCache } from './telephony/whisper-cache';
 import { requireTwilioSignature } from './telephony/twilio-signature';
 import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation';
-import { InMemoryProposalRepository, createProposal as buildProposalRow } from './proposals/proposal';
+import { InMemoryProposalRepository, createProposal as buildProposalRow, type ProposalRepository } from './proposals/proposal';
+import { AuditingProposalRepository } from './proposals/proposal-persistence';
 import { PgProposalRepository } from './proposals/pg-proposal';
 // Rivet P2 F-1 — Supervisor Agent v1 (deterministic policy hook + advisory annotator).
 import {
@@ -864,6 +865,9 @@ export function createApp(): express.Express {
   // handlers, which mutate tenant_dnc_list. Suppression at outbound-send
   // time is layered on top in send-service / appointment-confirmation-notifier.
   const dncRepo = pool ? new PgDncRepository(pool) : new InMemoryDncRepository();
+  const consentEventRepo = pool
+    ? new PgConsentEventRepository(pool)
+    : new InMemoryConsentEventRepository();
   // STOP/START handler registration is deferred until the consent ledger and
   // customer repos exist (Story 10.6 unifies DNC + consent_events + the
   // customers.consent_status rollup) — see registration below.
@@ -1440,11 +1444,11 @@ export function createApp(): express.Express {
   // undo window and hands them to the executor. Closes the operational
   // question from the D9 undo-window slice: "who kicks execution after
   // the window closes?" The answer is this poll, on a 1-second interval.
-  let proposalRepo: InMemoryProposalRepository | PgProposalRepository;
+  let proposalRepo: ProposalRepository;
   if (pool) {
-    proposalRepo = new PgProposalRepository(pool);
+    proposalRepo = new AuditingProposalRepository(new PgProposalRepository(pool), auditRepo);
   } else {
-    proposalRepo = new InMemoryProposalRepository();
+    proposalRepo = new AuditingProposalRepository(new InMemoryProposalRepository(), auditRepo);
     if (config.NODE_ENV !== 'test') {
       // Loud warning: silent InMemory fallback in dev causes "works in dev,
       // broken in prod" bugs (proposals disappear on restart, no RLS enforcement,
@@ -1513,6 +1517,7 @@ export function createApp(): express.Express {
       settingsRepo,
       userRepo,
       auditRepo,
+      catalogRepo,
       appointmentRepo,
       ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
       interpretEdit: createLlmEditInterpreter(llmGateway),
@@ -1567,6 +1572,8 @@ export function createApp(): express.Express {
         invoiceRepo,
         dispatchRepo,
         dncRepo,
+        consentRepo: consentEventRepo,
+        auditRepo,
       })
     : undefined;
   if (transactionalComms) {
@@ -2560,12 +2567,8 @@ export function createApp(): express.Express {
     { overwrite: true },
   );
 
-  // RV-130 — consent ledger + recording control. The ledger appends
-  // implicit recording consent at disclosure and revocations on a
-  // "stop recording" objection; the control pauses the live recording.
-  const consentEventRepo = pool
-    ? new PgConsentEventRepository(pool)
-    : new InMemoryConsentEventRepository();
+  // RV-130 — consent ledger (also used by outbound SMS compliance gate).
+  // STOP/START registration remains below once customerRepo exists.
   // Story 10.6 — register STOP/START now that DNC, the consent ledger, and the
   // customer repo all exist, so an opt-out updates every store at once.
   registerKeywordHandler(
@@ -4149,14 +4152,11 @@ export function createApp(): express.Express {
       appointmentRepo,
       auditRepo,
       feasibilityDeps,
-      // N-009 / P2-038 — undoing a proposal reverses the structured correction
-      // lessons it recorded. Pool-gated: only present when lessons can persist.
       correctionLessonRepo
         ? { lessonRepo: correctionLessonRepo, ports: correctionConfigPorts }
         : undefined,
-      // Story 3.9 — editing a proposal logs each changed field to the
-      // corrections training table (intent + field + before/after).
       correctionRepo,
+      catalogRepo,
     ),
   );
   if (pool) {

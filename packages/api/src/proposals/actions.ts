@@ -1,4 +1,4 @@
-import { Proposal, ProposalRepository, missingFieldsFor, actionClassForProposalType, createProposal, isScheduleProposalType } from './proposal';
+import { Proposal, ProposalRepository, missingFieldsFor, actionClassForProposalType, createProposal, isExpirableProposalType } from './proposal';
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from './lifecycle';
 import { validateProposalPayload } from './contracts';
 import { Role, hasPermission } from '../auth/rbac';
@@ -6,6 +6,8 @@ import { AppError, ConflictError, ForbiddenError, ValidationError, NotFoundError
 import { AppointmentRepository, updateAppointment } from '../appointments/appointment';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { logProposalEvent } from './audit';
+import type { CatalogItemRepository } from '../catalog/catalog-item';
+import { recomputePricedProposalOnEdit } from '../ai/tasks/recompute-priced-proposal';
 import { confidenceMetaBlocksAutoApprove } from './auto-approve';
 import { chainMetaFor } from './chain';
 import { undoCorrectionLesson } from '../learning/corrections/apply-undo';
@@ -548,6 +550,7 @@ export async function editProposal(
   // table (intent + field + before/after) as the training signal for prompt/
   // routing improvement. Capture is failure-soft (see below).
   correctionRepo?: CorrectionRepository,
+  catalogRepo?: CatalogItemRepository,
 ): Promise<{ proposal: Proposal; editedFields: string[] }> {
   if (!hasPermission(actorRole, 'proposals:edit')) {
     throw new ForbiddenError();
@@ -569,12 +572,22 @@ export async function editProposal(
     throw new ValidationError('Invalid payload after edit', { errors: validation.errors });
   }
 
+  const recomputed = await recomputePricedProposalOnEdit(catalogRepo, {
+    tenantId,
+    proposalType: proposal.proposalType,
+    payload: updatedPayload,
+    confidenceScore: proposal.confidenceScore,
+    confidenceFactors: proposal.confidenceFactors,
+  });
+
   const editedFields = Object.keys(edits).filter(
     (key) => JSON.stringify(proposal.payload[key]) !== JSON.stringify(edits[key])
   );
 
   const updated = await proposalRepo.update(tenantId, proposalId, {
-    payload: updatedPayload,
+    payload: recomputed.payload,
+    confidenceScore: recomputed.confidenceScore,
+    confidenceFactors: recomputed.confidenceFactors,
   });
   if (!updated) {
     throw new NotFoundError('Proposal', proposalId);
@@ -614,7 +627,7 @@ export async function editProposal(
         actorId,
         fields: editedFields,
         before: proposal.payload,
-        after: updatedPayload,
+        after: recomputed.payload,
       });
       if (corrections.length > 0) {
         await correctionRepo.recordMany(corrections);
@@ -654,10 +667,8 @@ export async function reproposeProposal(
       `Only an expired proposal can be re-proposed (current status: '${source.status}')`,
     );
   }
-  if (!isScheduleProposalType(source.proposalType)) {
-    // Defensive: only schedule proposals ever carry an expiry, so a
-    // non-schedule expired proposal would be an anomaly — never re-propose it.
-    throw new ValidationError('Only schedule proposals can be re-proposed');
+  if (!isExpirableProposalType(source.proposalType)) {
+    throw new ValidationError('Only expirable proposals can be re-proposed');
   }
 
   const replacement = createProposal({

@@ -1254,6 +1254,13 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.info('Settled in-flight ACH payment via payment_intent.succeeded', {
             tenantId, invoiceId, paymentIntentId: piId, settled: result.settled,
           });
+          if (result.settled && result.payment && deps.paymentReceiptNotifier) {
+            await deps.paymentReceiptNotifier.notifyPaymentReceived(
+              tenantId,
+              invoiceId,
+              result.payment.amountCents,
+            );
+          }
           await webhookRepo.updateStatus(webhookEvent.id, 'processed');
           return res.status(200).json({ received: true, settled: result.settled });
         }

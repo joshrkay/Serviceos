@@ -1,8 +1,11 @@
 import { useState, useEffect, useRef, useCallback, useImperativeHandle, forwardRef } from 'react';
 import { Mic, X, Send, Sparkles } from 'lucide-react';
-import { useNavigate } from 'react-router';
+import { useNavigate, useLocation } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
 import { matchVoiceCommand } from '../../hooks/useVoiceCommands';
+import { useVoiceSuggestions } from '../../hooks/useVoiceSuggestions';
+import { useOnboardingVoice } from '../../hooks/useOnboardingVoice';
+import { VoiceSuggestionsStrip } from './VoiceSuggestionsStrip';
 import { useTTS } from '../../hooks/useTTS';
 
 type BarPhase = 'idle' | 'listening' | 'transcribing' | 'transcript' | 'sending';
@@ -122,6 +125,9 @@ interface VoiceBarProps {
 
 export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function VoiceBar({ variant = 'mobile' }, ref) {
   const navigate = useNavigate();
+  const location = useLocation();
+  const suggestions = useVoiceSuggestions(location.pathname);
+  const onboardingVoice = useOnboardingVoice();
   const [phase, setPhase] = useState<BarPhase>('idle');
   const [transcript, setTranscript] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -290,6 +296,25 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   function handleSend() {
     if (!transcript.trim()) return;
 
+    if (location.pathname.startsWith('/onboarding')) {
+      if (onboardingVoice.completed) return;
+      setPhase('sending');
+      void onboardingVoice
+        .sendTurn(transcript.trim())
+        .then(() => {
+          setPhase('idle');
+          setTranscript('');
+          setError(null);
+          setCanRetry(false);
+        })
+        .catch(() => {
+          setError('Onboarding voice failed. Please try again.');
+          setCanRetry(true);
+          setPhase('idle');
+        });
+      return;
+    }
+
     // Check for voice navigation commands first
     const command = matchVoiceCommand(transcript.trim());
     if (command) {
@@ -348,7 +373,15 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
       )}
 
       {phase === 'idle' && (
-        <button
+        <>
+          <VoiceSuggestionsStrip
+            suggestions={suggestions}
+            onSelect={(text) => {
+              setTranscript(text);
+              setPhase('transcript');
+            }}
+          />
+          <button
           onClick={startListening}
           className={`
             flex items-center gap-3 w-full text-left transition-all
@@ -364,6 +397,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
           <span className="text-sm text-slate-400 flex-1">Ask Rivet AI anything…</span>
           <span className="text-xs text-slate-300">tap to speak</span>
         </button>
+        </>
       )}
 
       {phase === 'listening' && (
