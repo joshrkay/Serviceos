@@ -131,4 +131,43 @@ describe('OwnerNotificationService', () => {
     expect(provider.sent[0].data.screen).toBe('/proposals/p7');
     expect(provider.sent[1].data.screen).toBe('/approvals');
   });
+
+  it('U10 — drops devices of users who muted the category', async () => {
+    await repo.register({ tenantId: TENANT, userId: 'owner-1', expoPushToken: 'ExponentPushToken[on]', platform: 'ios' });
+    await repo.register({ tenantId: TENANT, userId: 'owner-2', expoPushToken: 'ExponentPushToken[muted]', platform: 'ios' });
+
+    const muted = new OwnerNotificationService({
+      deviceTokenRepo: repo,
+      provider,
+      // owner-2 muted payment_received.
+      resolveMutedUserIds: async (_t, type) =>
+        type === 'payment_received' ? new Set(['owner-2']) : new Set<string>(),
+    });
+
+    await muted.notify(TENANT, 'payment_received', {
+      invoiceId: 'inv-9',
+      customerName: 'Acme',
+      amountLabel: '$10.00',
+    });
+
+    expect(provider.sent.map((m) => m.to)).toEqual(['ExponentPushToken[on]']);
+  });
+
+  it('U10 — a different muted category does not suppress this one', async () => {
+    await repo.register({ tenantId: TENANT, userId: 'owner-1', expoPushToken: 'ExponentPushToken[on]', platform: 'ios' });
+    const muted = new OwnerNotificationService({
+      deviceTokenRepo: repo,
+      provider,
+      resolveMutedUserIds: async (_t, type) =>
+        type === 'invoice_overdue' ? new Set(['owner-1']) : new Set<string>(),
+    });
+
+    await muted.notify(TENANT, 'payment_received', {
+      invoiceId: 'inv-9',
+      customerName: 'Acme',
+      amountLabel: '$10.00',
+    });
+
+    expect(provider.sent).toHaveLength(1);
+  });
 });

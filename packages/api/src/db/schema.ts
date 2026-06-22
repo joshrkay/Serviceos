@@ -5093,6 +5093,29 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS weekly_feedback_enabled BOOLEAN NOT NULL DEFAULT true;
   `,
+
+  // U10 — per-user notification preferences (opt-out by category). Default-on:
+  // the ABSENCE of a row means enabled, so a fresh user gets every push until
+  // they explicitly mute a category. Tenant-scoped + FORCE RLS like every other
+  // tenant table; unique per (tenant, user, type) so a toggle upserts.
+  '208_create_notification_preferences': `
+    CREATE TABLE IF NOT EXISTS notification_preferences (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      notification_type TEXT NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, user_id, notification_type)
+    );
+    CREATE INDEX IF NOT EXISTS idx_notification_preferences_tenant_user
+      ON notification_preferences (tenant_id, user_id);
+    ALTER TABLE notification_preferences ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE notification_preferences FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_notification_preferences ON notification_preferences
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -331,6 +331,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // Epic 12.6 — weekly feedback email opt-out (renumbered 204→207 on main-merge
   // collision; hash unchanged since the migration body is identical).
   ['207_tenant_settings_weekly_feedback', '3e78d143c8b22d97a2db02d551166f3ffaa23e12bb8c15b90dbc79340b6ef70f'],
+  // U10 — per-user notification preferences (opt-out by category).
+  ['208_create_notification_preferences', 'c5fa7320634f1216bf8bddd13965e1d8560c6e0cec1a1083ea1687b37793fcd0'],
 ];
 
 function hashMigration(value: string): string {

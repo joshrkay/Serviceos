@@ -209,6 +209,11 @@ export interface OwnerNotificationServiceDeps {
    * permission. Omit to send to every tenant device (back-compat).
    */
   resolveUserIds?: (tenantId: string, permission: Permission) => Promise<Set<string>>;
+  /**
+   * U10 — user ids (within the tenant) who have muted this notification type.
+   * Their devices are dropped before sending. Omit for "all categories on".
+   */
+  resolveMutedUserIds?: (tenantId: string, type: NotificationType) => Promise<Set<string>>;
   logger?: Logger;
 }
 
@@ -244,6 +249,16 @@ export class OwnerNotificationService {
         recipients = tokens.filter((t) => allowed.has(t.userId));
       }
       if (recipients.length === 0) return;
+
+      // U10 — drop devices of users who muted this category (default-on, so
+      // only users with an explicit opt-out row are excluded).
+      if (this.deps.resolveMutedUserIds) {
+        const muted = await this.deps.resolveMutedUserIds(tenantId, built.data.type);
+        if (muted.size > 0) {
+          recipients = recipients.filter((t) => !muted.has(t.userId));
+          if (recipients.length === 0) return;
+        }
+      }
 
       const messages: PushMessage[] = recipients.map((t) => ({
         to: t.expoPushToken,

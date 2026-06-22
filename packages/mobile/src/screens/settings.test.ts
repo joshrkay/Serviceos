@@ -34,6 +34,21 @@ vi.mock('../calls/callbackStorage', () => ({
   getCallbackNumber: h.getCallbackNumber,
   saveCallbackNumber: h.saveCallbackNumber,
 }));
+// U10 — stub the preferences hook so the screen renders without the
+// api-client/Toast context this screen test doesn't mount.
+vi.mock('../hooks/useNotificationPreferences', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return {
+    ...actual,
+    useNotificationPreferences: () => ({
+      preferences: {},
+      isLoading: false,
+      error: null,
+      setPreference: vi.fn(),
+      reload: vi.fn(),
+    }),
+  };
+});
 
 // eslint-disable-next-line import/first
 import Settings from '../../app/settings';
