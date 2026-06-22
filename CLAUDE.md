@@ -57,7 +57,7 @@ README explaining why):
 ## Story Execution Rules
 - Only modify files listed in "Allowed files/modules"
 - Run automated checks before requesting review
-- Never auto-execute proposals — all require human approval
+- Proposals are never auto-executed without an audited approval; comms/money/irreversible always require explicit human approval. Capture-class proposals may be auto-approved only under governed limits (autonomous tier, supervisor present, confidence ≥ mode threshold, catalog-grounded, within budget) with a 5s undo before execution — see docs/decisions.md D-014. Every approval (human or policy) is audited.
 - Use the shared billing engine for all financial calculations
 - Use the async worker pattern (P0-009) for background jobs
 - Use the webhook base (P0-014) for all external webhook handlers

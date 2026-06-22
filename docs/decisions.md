@@ -32,7 +32,7 @@ When implementing a story and facing an architectural choice not covered by the 
 **Date:** Pre-Phase 0
 **Decision:** AI never writes directly to operational entities. All AI output goes through typed proposals that require human approval before deterministic execution.
 **Rationale:** Trust is the product's core differentiator in a market where service businesses don't trust software with their money and schedules.
-**Constraints:** No auto-execution in beta, even for high-confidence proposals.
+**Constraints:** Execution is always gated by an approved proposal plus a 5s undo window. **Amended by D-014 (2026-06-22):** capture-class proposals may be *auto-approved* under governed limits; comms/money/irreversible always require explicit human approval.
 
 ### D-005: Provider-agnostic LLM gateway
 **Date:** Phase 2 planning
@@ -178,7 +178,36 @@ source of truth — a false "not built" understates the product.
 **Follow-up:** §6.5, §6.12, and §8 (P23) still call QuickBooks "Wave 3" — refresh for
 internal consistency in a later pass.
 
-### D-014: [Template — copy for new decisions]
+### D-014: Governed Autonomy — auto-approve is an audited, fenced exception (amends D-004)
+**Date:** 2026-06-22
+**Decision:** Reconcile the "a human approves every state change" prose with the
+shipped, fenced auto-approve path. The proposal-first model (D-004) holds: every AI
+mutation is a typed, Zod-validated proposal, and deterministic execution runs only on
+an *approved* proposal behind a 5s undo window. The amendment: **approval may be
+granted by a governed auto-approve policy, not only an explicit human tap** — but only
+for **capture-class** proposals and only when *all* governed limits hold: autonomous
+trust tier, a supervisor present, overall confidence ≥ the mode threshold
+(0.90/0.92/0.95, tenant-tunable), no `low`/`very_low` confidence marker, all line items
+catalog-grounded (uncatalogued caps confidence at 0.85 < 0.90), and within the
+supervisor spend budget. **Comms, money, and irreversible actions always require an
+explicit human approval**, regardless of confidence. Every approval — human or policy —
+emits an audit event attributing the approver; the policy actor carries provenance
+(supervisor mode, threshold, confidence score, undo-window).
+**Rationale:** The §11 latency budgets and owner throughput demand a fast path for
+safe, routine, catalog-grounded captures (e.g. logging a known customer, a confirmed
+booking). Trust is preserved by the narrow fence (capture-only), the supervisor gate,
+catalog grounding, the undo window, and — new in this decision — an explicit, queryable
+approval audit. This makes the shipped behavior honest in both the docs and the audit
+trail instead of contradicting the "human approval always" wording.
+**Story:** Interaction Model reconciliation (spec ↔ code), 2026-06-22.
+**Alternatives rejected:**
+- Docs-only ratification (reword and change nothing). Rejected: leaves the audit trail
+  dishonest — auto-approved proposals carried no explicit approval event / approver.
+- Enforce strict human tap on every proposal (block all auto-approval). Rejected: a
+  product regression that removes the governed throughput tenants rely on; the spec's
+  own latency budgets argue against it.
+
+### D-015: [Template — copy for new decisions]
 **Date:** YYYY-MM-DD
 **Decision:** [What was decided]
 **Rationale:** [Why this choice over alternatives]
