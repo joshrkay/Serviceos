@@ -119,6 +119,17 @@ export interface ConversationRepository {
    * (customer/job). Tenant-scoped; newest first. Drives the history search UI.
    */
   searchMessages(tenantId: string, params: MessageSearchParams): Promise<MessageSearchHit[]>;
+  /**
+   * Story 3.11 follow-up (U9) — atomically create a conversation and its first
+   * messages in a single transaction, so a failed message insert can't leave an
+   * orphaned empty conversation. Optional capability: callers fall back to a
+   * sequential create + addMessage when a repo doesn't implement it (only the
+   * Postgres repo needs real transactional atomicity).
+   */
+  createConversationWithMessages?(
+    conversation: CreateConversationInput,
+    messages: Array<Omit<CreateMessageInput, 'conversationId'>>,
+  ): Promise<{ conversation: Conversation; messages: Message[] }>;
 }
 
 /**
@@ -140,26 +151,16 @@ export async function recordAssistantTurn(
   },
   auditRepo?: AuditRepository,
 ): Promise<string> {
-  let conversation =
+  const existing =
     input.conversationId != null
       ? await repository.findById(input.tenantId, input.conversationId)
       : null;
-  if (!conversation) {
-    conversation = await createConversationWithAudit(
-      {
-        tenantId: input.tenantId,
-        createdBy: input.userId,
-        ...(input.userText ? { title: input.userText.slice(0, 80) } : {}),
-      },
-      repository,
-      auditRepo,
-      'owner',
-    );
-  }
+
+  // The turn's messages (operator first, then agent when present).
+  const turnMessages: Array<Omit<CreateMessageInput, 'conversationId'>> = [];
   if (input.userText) {
-    await repository.addMessage({
+    turnMessages.push({
       tenantId: input.tenantId,
-      conversationId: conversation.id,
       messageType: 'text',
       content: input.userText,
       senderId: input.userId,
@@ -168,9 +169,8 @@ export async function recordAssistantTurn(
     });
   }
   if (input.assistantText) {
-    await repository.addMessage({
+    turnMessages.push({
       tenantId: input.tenantId,
-      conversationId: conversation.id,
       messageType: 'text',
       content: input.assistantText,
       senderId: 'assistant',
@@ -178,6 +178,58 @@ export async function recordAssistantTurn(
       source: 'assistant',
     });
   }
+
+  // Existing thread: append in place (no orphan risk — the conversation already
+  // exists, so a failed message insert can't leave a dangling empty thread).
+  if (existing) {
+    for (const m of turnMessages) {
+      await repository.addMessage({ ...m, conversationId: existing.id });
+    }
+    return existing.id;
+  }
+
+  // New thread: create the conversation and its first messages ATOMICALLY when
+  // the repo supports it, so a failed message insert can't orphan an empty
+  // conversation. Fall back to sequential create + addMessage otherwise.
+  const conversationInput: CreateConversationInput = {
+    tenantId: input.tenantId,
+    createdBy: input.userId,
+    ...(input.userText ? { title: input.userText.slice(0, 80) } : {}),
+  };
+
+  let conversation: Conversation;
+  if (repository.createConversationWithMessages) {
+    const result = await repository.createConversationWithMessages(
+      conversationInput,
+      turnMessages,
+    );
+    conversation = result.conversation;
+  } else {
+    conversation = await repository.createConversation(conversationInput);
+    for (const m of turnMessages) {
+      await repository.addMessage({ ...m, conversationId: conversation.id });
+    }
+  }
+
+  // Emit the conversation.created audit (mirrors createConversationWithAudit;
+  // emitted after the create so an audit failure never rolls back the thread).
+  if (auditRepo) {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId: input.tenantId,
+        actorId: input.userId,
+        actorRole: 'owner',
+        eventType: 'conversation.created',
+        entityType: 'conversation',
+        entityId: conversation.id,
+        metadata: {
+          entityType: conversation.entityType,
+          entityId: conversation.entityId,
+        },
+      }),
+    );
+  }
+
   return conversation.id;
 }
 
@@ -344,6 +396,18 @@ export class InMemoryConversationRepository implements ConversationRepository {
     };
     this.messages.push(msg);
     return msg;
+  }
+
+  async createConversationWithMessages(
+    conversation: CreateConversationInput,
+    messages: Array<Omit<CreateMessageInput, 'conversationId'>>,
+  ): Promise<{ conversation: Conversation; messages: Message[] }> {
+    const created = await this.createConversation(conversation);
+    const out: Message[] = [];
+    for (const m of messages) {
+      out.push(await this.addMessage({ ...m, conversationId: created.id }));
+    }
+    return { conversation: created, messages: out };
   }
 
   async getMessages(tenantId: string, conversationId: string): Promise<Message[]> {

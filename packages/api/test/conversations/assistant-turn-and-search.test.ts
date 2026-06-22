@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   InMemoryConversationRepository,
   recordAssistantTurn,
+  type ConversationRepository,
 } from '../../src/conversations/conversation-service';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 
 const TENANT = 'tenant-1';
 const USER = 'user-1';
@@ -72,6 +74,46 @@ describe('Story 3.11 — recordAssistantTurn', () => {
     const messages = await repo.getMessages(TENANT, id);
     expect(messages).toHaveLength(1);
     expect(messages[0].senderRole).toBe('user');
+  });
+
+  // U9 follow-up — atomic new-thread create + the conversation.created audit.
+  it('creates a new thread via the atomic path and emits conversation.created audit', async () => {
+    const repo = new InMemoryConversationRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const id = await recordAssistantTurn(
+      repo,
+      { tenantId: TENANT, userId: USER, userText: 'Invoice Acme', assistantText: 'Drafted it.' },
+      auditRepo,
+    );
+    expect(await repo.getMessages(TENANT, id)).toHaveLength(2);
+    const events = await auditRepo.findByEntity(TENANT, 'conversation', id);
+    expect(events.some((e) => e.eventType === 'conversation.created')).toBe(true);
+  });
+
+  it('does not emit a second conversation.created when appending to an existing thread', async () => {
+    const repo = new InMemoryConversationRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const id = await recordAssistantTurn(repo, { tenantId: TENANT, userId: USER, userText: 'Hi', assistantText: 'Hello' }, auditRepo);
+    await recordAssistantTurn(repo, { tenantId: TENANT, userId: USER, conversationId: id, userText: 'More', assistantText: 'Sure' }, auditRepo);
+    const created = (await auditRepo.findByEntity(TENANT, 'conversation', id)).filter(
+      (e) => e.eventType === 'conversation.created',
+    );
+    expect(created).toHaveLength(1);
+    expect(await repo.getMessages(TENANT, id)).toHaveLength(4);
+  });
+
+  it('falls back to sequential create + addMessage when the repo lacks the atomic method', async () => {
+    const repo = new InMemoryConversationRepository();
+    // Shadow the optional capability so the fallback branch is exercised.
+    (repo as { createConversationWithMessages?: unknown }).createConversationWithMessages = undefined;
+    const id = await recordAssistantTurn(repo as ConversationRepository, {
+      tenantId: TENANT,
+      userId: USER,
+      userText: 'Schedule Lee',
+      assistantText: 'Drafted a booking.',
+    });
+    const messages = await repo.getMessages(TENANT, id);
+    expect(messages.map((m) => m.senderRole)).toEqual(['user', 'assistant']);
   });
 });
 

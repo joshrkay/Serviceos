@@ -121,6 +121,60 @@ export class PgConversationRepository extends PgBaseRepository implements Conver
     });
   }
 
+  // Story 3.11 follow-up (U9) — atomically insert the conversation + its first
+  // messages in ONE transaction so a failed message insert rolls back the
+  // conversation too (no orphaned empty thread). Mirrors the column lists of
+  // createConversation/addMessage.
+  async createConversationWithMessages(
+    conversation: CreateConversationInput,
+    messages: Array<Omit<CreateMessageInput, 'conversationId'>>,
+  ): Promise<{ conversation: Conversation; messages: Message[] }> {
+    const convId = uuidv4();
+    const now = new Date();
+    return this.withTenantTransaction(conversation.tenantId, async (client) => {
+      const convResult = await client.query(
+        `INSERT INTO conversations (id, tenant_id, title, entity_type, entity_id, status, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING *`,
+        [
+          convId,
+          conversation.tenantId,
+          conversation.title ?? null,
+          conversation.entityType ?? null,
+          conversation.entityId ?? null,
+          'open',
+          conversation.createdBy,
+          now,
+          now,
+        ]
+      );
+      const created = mapConversationRow(convResult.rows[0]);
+      const out: Message[] = [];
+      for (const m of messages) {
+        const msgResult = await client.query(
+          `INSERT INTO messages (id, tenant_id, conversation_id, message_type, content, sender_id, sender_role, file_id, source, metadata, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           RETURNING *`,
+          [
+            uuidv4(),
+            m.tenantId,
+            convId,
+            m.messageType,
+            m.content ?? null,
+            m.senderId,
+            m.senderRole,
+            m.fileId ?? null,
+            m.source ?? null,
+            m.metadata ? JSON.stringify(m.metadata) : null,
+            new Date(),
+          ]
+        );
+        out.push(mapMessageRow(msgResult.rows[0]));
+      }
+      return { conversation: created, messages: out };
+    });
+  }
+
   async updateMessageMetadata(
     tenantId: string,
     messageId: string,
