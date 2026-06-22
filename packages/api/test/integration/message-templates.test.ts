@@ -1,6 +1,6 @@
 /**
  * Postgres integration — message templates persist to a real, tenant-scoped
- * table (migration 208). Pins the real columns and proves cross-tenant
+ * table (migration 209). Pins the real columns and proves cross-tenant
  * isolation under FORCE RLS (Story 10.5).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
