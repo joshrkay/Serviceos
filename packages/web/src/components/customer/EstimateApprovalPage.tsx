@@ -40,6 +40,8 @@ interface PublicEstimateView {
   businessName: string;
   businessPhone?: string;
   businessEmail?: string;
+  /** Tenant's document word (Quote/Bid/Estimate). Defaults to 'Estimate'. */
+  estimateLabel?: string;
   lineItems: Array<{
     id: string;
     description: string;
@@ -765,6 +767,7 @@ export function EstimateApprovalPage() {
   // from the real public API, never from fixtures.
   const estimateNumber  = apiView.estimateNumber;
   const businessName    = apiView.businessName;
+  const estimateLabel   = apiView.estimateLabel?.trim() || 'Estimate';
   const businessPhone   = apiView.businessPhone ?? '';
   const customerName    = apiView.customerName;
   const customerAddress = apiView.customerAddress ?? '';
@@ -895,7 +898,7 @@ export function EstimateApprovalPage() {
         <div className="max-w-lg mx-auto px-5 py-6 pb-32">
           {/* Estimate badge */}
           <div className="flex items-center justify-between mb-1">
-            <span className="text-xs text-slate-500 uppercase tracking-widest">Estimate</span>
+            <span className="text-xs text-slate-500 uppercase tracking-widest">{estimateLabel}</span>
             <span className="text-xs text-slate-500">{estimateNumber}</span>
           </div>
 
@@ -1164,7 +1167,7 @@ export function EstimateApprovalPage() {
                   onClick={() => setAppr(true)}
                   className="w-full flex items-center justify-center gap-2 rounded-2xl bg-slate-900 text-white py-4 text-sm hover:bg-slate-700 active:scale-[0.98] transition-all shadow-xl shadow-slate-900/20"
                 >
-                  <Check size={16} /> Accept this estimate
+                  <Check size={16} /> Accept this {estimateLabel.toLowerCase()}
                 </button>
                 {id && (
                   <DeclineButton

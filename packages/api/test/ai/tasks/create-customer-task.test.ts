@@ -463,3 +463,97 @@ describe('RV-007 — create-customer task populates payload._meta', () => {
     expect(out.proposal!.payload._meta).toBeUndefined();
   });
 });
+
+describe('4.3 — duplicate check before the proposal card', () => {
+  // Minimal duplicate loader stub: returns a single same-tenant customer
+  // whose phone matches, so checkCustomerDuplicatesPg scores a high-confidence
+  // phone warning. Mirrors the CustomerDuplicateLoader contract.
+  function loaderWithMatch(): {
+    findDuplicates: (
+      tenantId: string,
+      criteria: { phone?: string; email?: string; name?: string }
+    ) => Promise<Array<Record<string, unknown>>>;
+  } {
+    return {
+      findDuplicates: async (tenantId: string) => [
+        {
+          id: 'existing-cust-1',
+          tenantId,
+          firstName: 'Alex',
+          lastName: 'Smith',
+          displayName: 'Alex Smith',
+          primaryPhone: '+15551230100',
+          preferredChannel: 'phone',
+          smsConsent: false,
+          isArchived: false,
+          createdBy: 'u',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      ],
+    };
+  }
+
+  it('embeds duplicateWarnings in sourceContext when a loader is wired and a match exists', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      duplicateLoader: loaderWithMatch() as any,
+    });
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up as a new customer",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Alex Smith',
+        callerIdPhone: '+15551230100',
+      },
+    });
+    expect(out.status).toBe('proposal_drafted');
+    const ctx = out.proposal!.sourceContext as Record<string, unknown>;
+    expect(ctx.hasPossibleDuplicates).toBe(true);
+    const warnings = ctx.duplicateWarnings as Array<{ matchType: string; existingId: string }>;
+    expect(warnings.length).toBeGreaterThanOrEqual(1);
+    expect(warnings.find((w) => w.matchType === 'phone')?.existingId).toBe('existing-cust-1');
+  });
+
+  it('omits duplicate fields when no loader is wired (unchanged behavior)', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler();
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up as a new customer",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Alex Smith',
+        callerIdPhone: '+15551230100',
+      },
+    });
+    const ctx = out.proposal!.sourceContext as Record<string, unknown>;
+    expect(ctx.hasPossibleDuplicates).toBeUndefined();
+    expect(ctx.duplicateWarnings).toBeUndefined();
+  });
+
+  it('still drafts the proposal when the loader throws (best-effort, non-blocking)', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler({
+      duplicateLoader: {
+        findDuplicates: async () => {
+          throw new Error('db down');
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+    });
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Alex Smith',
+        callerIdPhone: '+15551230100',
+      },
+    });
+    expect(out.status).toBe('proposal_drafted');
+    expect(out.proposal).toBeDefined();
+  });
+});

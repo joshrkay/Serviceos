@@ -5035,7 +5035,7 @@ export const MIGRATIONS = {
   // row is written only when a user mutes a category. The `app.system_lookup`
   // escape hatch (same as device_tokens 199) lets the notifier read a user's
   // mute state at send time, when there is no per-request tenant context.
-  '207_create_notification_preferences': `
+  '208_create_notification_preferences': `
     CREATE TABLE IF NOT EXISTS notification_preferences (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -5113,6 +5113,21 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS auth_token_primary_enc TEXT;
     ALTER TABLE tenant_integrations
       ADD COLUMN IF NOT EXISTS auth_token_secondary_enc TEXT;
+  `,
+
+  // Epic 5.1 — canonical seven-state job lifecycle. The original CREATE TABLE
+  // (016) constrained jobs.status to five states; this widens the CHECK to the
+  // full canonical set by adding 'dispatched', 'invoiced', and 'closed'. It is a
+  // pure superset of the old set, so every existing row already satisfies it —
+  // no data backfill is needed. The named ADD CONSTRAINT is made re-run-safe by
+  // getMigrationSQL's DROP-CONSTRAINT rewriter (which targets the constraint
+  // name PostgreSQL auto-assigned to the inline CHECK, `jobs_status_check`).
+  // This is the authoritative jobs.status CHECK; status.test.ts pins it against
+  // jobStatusSchema.
+  '207_jobs_status_canonical_lifecycle': `
+    ALTER TABLE jobs
+      ADD CONSTRAINT jobs_status_check
+      CHECK (status IN ('new', 'scheduled', 'dispatched', 'in_progress', 'completed', 'invoiced', 'closed', 'canceled'));
   `,
 };
 

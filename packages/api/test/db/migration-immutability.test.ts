@@ -329,8 +329,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // fresh DBs because a duplicate 070 CREATE shadowed the _enc definition (the
   // column all provisioning/webhook code uses). Additive ALTER, no-op on prod.
   ['206_tenant_integrations_auth_token_enc_columns', '21416ab18ca77cd08ca4f1d76d2f13f756f586b36fe90f1dd7adb2b9041fff28'],
-  // Per-user owner-notification opt-outs (U10; renumbered to 207 after main-merge collisions).
-  ['207_create_notification_preferences', 'df14c6514d98aaaadb7b320f9c3834029057841068c7d03ec707300c1f913048'],
+  ['207_jobs_status_canonical_lifecycle', '6e4e921973b79047ed517efbb629b80c293cb1586698464551a09324c718bba5'],
+  // Per-user owner-notification opt-outs (U10; renumbered to 208 after repeated main-merge collisions).
+  ['208_create_notification_preferences', 'df14c6514d98aaaadb7b320f9c3834029057841068c7d03ec707300c1f913048'],
 ];
 
 function hashMigration(value: string): string {

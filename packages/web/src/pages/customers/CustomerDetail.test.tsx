@@ -27,6 +27,9 @@ vi.mock('../../components/customers/TagsPanel', () => ({
 vi.mock('../../components/customers/CustomFieldsPanel', () => ({
   CustomFieldsPanel: () => <div>CustomFieldsPanel</div>,
 }));
+vi.mock('../../components/customers/MergeCustomerPanel', () => ({
+  MergeCustomerPanel: () => <div>MergeCustomerPanel</div>,
+}));
 
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { apiFetch } from '../../utils/api-fetch';
@@ -72,6 +75,18 @@ describe('CustomerDetail', () => {
     renderCustomerDetail();
     expect(screen.getByText('Alice')).toBeInTheDocument();
     expect(screen.getByText('Contact Information')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/locations?customerId=1');
+    });
+  });
+
+  it('offers schedule / estimate / message quick actions (4.5)', async () => {
+    renderCustomerDetail();
+    const quickActions = screen.getByTestId('customer-quick-actions');
+    expect(quickActions).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Schedule/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Estimate/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Message/ })).toBeInTheDocument();
     await waitFor(() => {
       expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/locations?customerId=1');
     });

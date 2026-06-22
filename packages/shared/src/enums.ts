@@ -32,8 +32,11 @@ export enum PreferredChannel {
 export enum JobStatus {
   NEW = 'new',
   SCHEDULED = 'scheduled',
+  DISPATCHED = 'dispatched',
   IN_PROGRESS = 'in_progress',
   COMPLETED = 'completed',
+  INVOICED = 'invoiced',
+  CLOSED = 'closed',
   CANCELED = 'canceled',
 }
 
