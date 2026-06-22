@@ -341,6 +341,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['210_create_message_templates', 'a38dc2fba90473aec17537126a25c71fbf8461b012531c94ea55c858aa85f71d'],
   // Story 10.2 — tenant-configurable reminder cadence/offsets (renumbered).
   ['211_tenant_settings_reminder_offsets', '7043e4a221b59d530abd0a9d74ac8dd1a7f13379eeefb9b1749cc2b98368442a'],
+  // Epic 12.6 — weekly feedback email opt-out (renumbered 204→207→212; body unchanged → hash preserved).
+  ['212_tenant_settings_weekly_feedback', '3e78d143c8b22d97a2db02d551166f3ffaa23e12bb8c15b90dbc79340b6ef70f'],
 ];
 
 function hashMigration(value: string): string {

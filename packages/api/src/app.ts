@@ -86,12 +86,12 @@ import {
   notifyNeedsApproval as notifyNeedsApprovalPush_,
 } from './notifications/proposal-push-notifier';
 import { OwnerNotificationService } from './notifications/owner-notification-service';
+import { InMemoryNotificationPreferenceRepository } from './notifications/notification-preferences-service';
+import { PgNotificationPreferenceRepository } from './notifications/pg-notification-preferences-repository';
+import { createNotificationPreferencesRouter } from './routes/notification-preferences';
 import { userIdsWithPermissionResolver } from './notifications/user-targeting';
 import { setOwnerNotifications } from './notifications/owner-notifications-instance';
 import { setOwnerNotificationNameResolvers } from './notifications/owner-notification-name-resolver';
-import { createNotificationPreferencesRouter } from './routes/notification-preferences';
-import { InMemoryNotificationPreferenceRepository } from './notifications/notification-preferences-service';
-import { PgNotificationPreferenceRepository } from './notifications/pg-notification-preferences-repository';
 import {
   TechnicianAssignmentNotifier,
   setTechnicianAssignmentNotifier,
@@ -151,6 +151,13 @@ import { createPublicBookingRouter } from './routes/public-booking';
 import { createReportsRouter } from './routes/reports';
 import { createDigestsRouter } from './routes/digests';
 import { RepoBackedTimeGivenBackReporter } from './reports/time-given-back';
+import { RepoBackedVoiceRoiReporter } from './analytics/voice-roi';
+import { createVoiceRoiRouter } from './analytics/voice-roi-router';
+import { PgJobsBookedReporter } from './analytics/jobs-booked';
+import { createJobsBookedRouter } from './analytics/jobs-booked-router';
+import { RepoBackedActivityFeedReporter } from './analytics/activity-feed';
+import { createActivityFeedRouter } from './analytics/activity-feed-router';
+import { loadTenantBusinessHours } from './telephony/business-hours-loader';
 import { createTimeEntriesRouter } from './routes/time-entries';
 import { InMemoryTimeEntryRepository } from './time-tracking/time-entry';
 import { PgTimeEntryRepository } from './time-tracking/pg-time-entry';
@@ -349,6 +356,9 @@ import { InMemoryDailyDigestRepository, type DailyDigestPayload } from './digest
 import { composeBrandVoiceMessage } from './ai/brand-voice/composer';
 import { runOverdueInvoiceSweep } from './workers/overdue-invoice-worker';
 import { runHfcrWeeklySendSweep } from './workers/hfcr-weekly-send-worker';
+import { runWeeklyFeedbackSweep } from './workers/weekly-feedback-worker';
+import { buildWeeklyFeedbackSnapshot } from './digest/weekly-feedback-builder';
+import { buildSuggestionsPrompt, parseSuggestions } from './digest/weekly-feedback';
 import {
   PgHfcrWeeklySendRepository,
   InMemoryHfcrWeeklySendRepository,
@@ -1862,6 +1872,8 @@ export function createApp(): express.Express {
     trialReminder: 590018,
     // §5.5 — schedule proposal cards expire after 48h.
     proposalExpiry: 590019,
+    // Epic 12.6 — weekly feedback email sweep (590019 taken by proposalExpiry on main).
+    weeklyFeedback: 590020,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -3773,6 +3785,29 @@ export function createApp(): express.Express {
       },
     }),
   );
+
+  // Epic 12.5 — Voice ROI headline (inbound / answered / booked / after-hours /
+  // would-have-hit-voicemail). Composes the existing voice-session + proposal
+  // repos with the tenant business-hours loader (after-hours attribution). The
+  // loader is only wired when a pool exists; the in-memory boot path leaves it
+  // undefined, so after-hours fails open (counts as zero) rather than erroring.
+  const voiceRoiReporter = new RepoBackedVoiceRoiReporter(
+    voiceSessionRepo,
+    proposalRepo,
+    pool ? (tenantId: string) => loadTenantBusinessHours(pool, tenantId) : undefined,
+  );
+  app.use('/api/analytics/voice-roi', createVoiceRoiRouter({ voiceRoiReporter }));
+
+  // Epic 12.4 — jobs-booked KPI (this month vs last). Pool-backed RLS-scoped
+  // counts; left unwired (→ 503) on the in-memory boot path that has no pool.
+  const jobsBookedReporter = pool ? new PgJobsBookedReporter(pool) : undefined;
+  app.use('/api/analytics/jobs-booked', createJobsBookedRouter({ jobsBookedReporter }));
+
+  // Epic 12.7 — tenant-wide activity feed over the audit log (both the Pg and
+  // in-memory audit repos support findRecentByTenant).
+  const activityFeedReporter = new RepoBackedActivityFeedReporter(auditRepo);
+  app.use('/api/analytics/activity', createActivityFeedRouter({ activityFeedReporter }));
+
   // RV-062 — end-of-day digest web view (SMS deep link target).
   app.use('/api/digests', createDigestsRouter({ digestRepo: dailyDigestRepo }));
   app.use(
@@ -3909,8 +3944,7 @@ export function createApp(): express.Express {
     : new InMemoryDeviceTokenRepository();
   app.use('/api/devices', createDevicesRouter(deviceTokenRepo, auditRepo));
 
-  // U10 — per-user owner-notification opt-outs. GET/PUT for the settings UI;
-  // the fan-out below consults `listMutedUserIds` to drop muted recipients.
+  // U10 — per-user notification preferences (opt-out by category).
   const notificationPreferenceRepo = pool
     ? new PgNotificationPreferenceRepository(pool)
     : new InMemoryNotificationPreferenceRepository();
@@ -3939,38 +3973,14 @@ export function createApp(): express.Express {
   // producer seams (inbound call/SMS, appointment reminder/cancellation,
   // payment, lead, escalation). Each type targets the permission its descriptor
   // declares (owner+dispatcher, never a technician device).
-  const ownerNotificationService = new OwnerNotificationService({
-    deviceTokenRepo,
-    provider: expoPushProvider,
-    resolveUserIds: userIdsWithPermissionResolver(userRepo),
-  });
-  setOwnerNotifications(ownerNotificationService);
-  // Epic 6 — technician assignment notifications (in-app push to the assigned
-  // tech). Reuses the owner-notification service's user-targeted send; the
-  // producer resolves customer/time/service from the appointment. Wired into
-  // assignTechnician / unassignTechnician via the process-wide accessor.
-  setTechnicianAssignmentNotifier(
-    new TechnicianAssignmentNotifier({
-      appointmentRepo,
-      jobRepo,
-      customerRepo,
-      userRepo,
-      locationRepo,
-      notifier: ownerNotificationService,
-      // Staff direct-send: the tech's own job text goes through the raw
-      // delivery provider, NOT the customer message-delivery service — an
-      // internal/transactional text must not be gated by customer DNC/consent
-      // (mirrors emergency owner-cell paging). No provider → in-app push only.
-      ...(messageDelivery
-        ? {
-            smsSender: (input: {
-              to: string;
-              body: string;
-              tenantId: string;
-              idempotencyKey?: string;
-            }) => messageDelivery!.sendSms(input),
-          }
-        : {}),
+  setOwnerNotifications(
+    new OwnerNotificationService({
+      deviceTokenRepo,
+      provider: expoPushProvider,
+      resolveUserIds: userIdsWithPermissionResolver(userRepo),
+      // U10 — honor per-user category opt-outs before sending.
+      resolveMutedUserIds: (tenantId, type) =>
+        notificationPreferenceRepo.listMutedUserIds(tenantId, type),
     }),
   );
   // Render the real customer name in payment/cancellation pushes (best-effort;
@@ -4579,6 +4589,81 @@ export function createApp(): express.Express {
         });
       }, 24 * 60 * 60_000),
     );
+  }
+
+  // Epic 12.6 — weekly feedback email. One advisor email per tenant per
+  // completed week (performance snapshot + wins/misses/actions), idempotent
+  // via a `weekly_feedback_email` audit event. Daily tick for restart-safety
+  // (like the HFCR weekly sweep). Needs email delivery + a pool; suggestions
+  // go through the LLM gateway only when a real provider is configured (the
+  // mock gateway must not produce owner-facing text), else deterministic.
+  if (messageDelivery && pool) {
+    const weeklyFeedbackPool = pool;
+    const weeklyFeedbackDelivery = messageDelivery;
+    const weeklyFeedbackLogger = createLogger({
+      service: 'weekly-feedback-worker',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const runWeeklyFeedback = () => {
+        void runAsLeader(SWEEP_LOCK.weeklyFeedback, async () => {
+          await runWeeklyFeedbackSweep({
+            auditRepo,
+            buildSnapshot: (tenantId, weekStart, weekEnd) =>
+              buildWeeklyFeedbackSnapshot(weeklyFeedbackPool, tenantId, weekStart, weekEnd),
+            resolveOwnerEmail: async (tenantId) => {
+              const r = await weeklyFeedbackPool.query(
+                'SELECT owner_email FROM tenants WHERE id = $1',
+                [tenantId],
+              );
+              return (r.rows[0]?.owner_email as string | undefined) ?? null;
+            },
+            isFeedbackEnabled: async (tenantId) => {
+              const s = await settingsRepo.findByTenant(tenantId);
+              return s?.weeklyFeedbackEnabled !== false;
+            },
+            resolveBusinessName: async (tenantId) => {
+              const s = await settingsRepo.findByTenant(tenantId);
+              return s?.businessName ?? null;
+            },
+            sendEmail: (args) =>
+              weeklyFeedbackDelivery.sendEmail({
+                to: args.to,
+                subject: args.subject,
+                text: args.text,
+                html: args.html,
+              }),
+            listTenantIds: async () => {
+              const r = await weeklyFeedbackPool.query('SELECT id FROM tenants');
+              return r.rows.map((row: { id: string }) => row.id);
+            },
+            logger: weeklyFeedbackLogger,
+            ...(config.AI_PROVIDER_API_KEY
+              ? {
+                  composeSuggestions: async (tenantId, snapshot) => {
+                    const res = await llmGateway.complete({
+                      taskType: 'weekly_feedback_suggestions',
+                      messages: [{ role: 'user', content: buildSuggestionsPrompt(snapshot) }],
+                      responseFormat: 'json',
+                      temperature: 0.4,
+                      maxTokens: 400,
+                      tenantId,
+                    });
+                    return parseSuggestions(res.content);
+                  },
+                }
+              : {}),
+          });
+        }).catch((err) => {
+          weeklyFeedbackLogger.error('Weekly feedback sweep failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+    };
+    // Run once on boot so frequent redeploys don't postpone the weekly send
+    // indefinitely (a pure 24h setInterval never elapses if the process keeps
+    // restarting). The per-week audit gate keeps this to one email per week.
+    runWeeklyFeedback();
+    registerInterval(setInterval(runWeeklyFeedback, 24 * 60 * 60_000));
   }
 
   // F17 — push paid invoices + customers to QuickBooks every 5 minutes.

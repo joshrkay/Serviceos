@@ -5199,6 +5199,13 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS appointment_reminder_offsets_hours JSONB NOT NULL DEFAULT '[24]'::jsonb;
   `,
+
+  // Epic 12.6 — weekly feedback email opt-out (renumbered 204→207→212 across
+  // successive main-merge collisions; SQL body unchanged → hash preserved).
+  '212_tenant_settings_weekly_feedback': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS weekly_feedback_enabled BOOLEAN NOT NULL DEFAULT true;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

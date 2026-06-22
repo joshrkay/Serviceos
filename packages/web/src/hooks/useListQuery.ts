@@ -9,6 +9,14 @@ export interface ListQueryOptions {
   pageSize?: number;
   sortBy?: string;
   sortOrder?: 'asc' | 'desc';
+  /**
+   * Epic 12.2 — when set, re-fetch on this interval (ms) so a surface like
+   * the HomePage "today" snapshot updates live. Polling pauses while the tab
+   * is hidden and fires a one-shot catch-up refetch on refocus, so a
+   * backgrounded tab doesn't burn requests. Omit (the default) for the
+   * original fetch-once-per-change behavior.
+   */
+  refetchInterval?: number;
 }
 
 export interface ListQueryResult<T> {
@@ -119,6 +127,51 @@ export function useListQuery<T>(
   useEffect(() => {
     refetch();
   }, [refetch]);
+
+  // Epic 12.2 — optional live polling. Held in a ref so the interval doesn't
+  // tear down and re-fire on every refetch identity change; pauses while the
+  // tab is hidden and catches up on refocus (mirrors usePendingProposals).
+  const refetchRef = useRef(refetch);
+  useEffect(() => {
+    refetchRef.current = refetch;
+  }, [refetch]);
+
+  const refetchInterval = initialOptions.refetchInterval;
+  useEffect(() => {
+    if (!enabled || !refetchInterval || refetchInterval <= 0) return;
+
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+    const start = () => {
+      if (intervalId !== null) return;
+      intervalId = setInterval(() => void refetchRef.current(), refetchInterval);
+    };
+    const stop = () => {
+      if (intervalId === null) return;
+      clearInterval(intervalId);
+      intervalId = null;
+    };
+
+    if (typeof document === 'undefined' || !document.hidden) start();
+
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        stop();
+      } else {
+        void refetchRef.current();
+        start();
+      }
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibilityChange);
+    }
+
+    return () => {
+      stop();
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+      }
+    };
+  }, [enabled, refetchInterval]);
 
   return { data, total, page, pageSize, isLoading, error, refetch, setPage, setSearch, setFilters };
 }
