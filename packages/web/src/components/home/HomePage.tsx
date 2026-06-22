@@ -20,6 +20,7 @@ import { StatusBadge } from '../shared/StatusBadge';
 import { TimeGivenBackCard } from './TimeGivenBackCard';
 import { MoneyLoopHomeCard } from './MoneyLoopHomeCard';
 import { HfcrHeroCard } from './HfcrHeroCard';
+import { HomeConversationPanel } from './HomeConversationPanel';
 import { ErrorState } from '../ErrorState';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import {
@@ -412,6 +413,10 @@ export function HomePage() {
             </button>
           </div>
         </div>
+
+        {/* Story 3.1 — the running conversation, surfaced prominently on Home
+            (alongside the dashboard, not replacing it). */}
+        <HomeConversationPanel />
 
         <HfcrHeroCard />
 

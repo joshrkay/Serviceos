@@ -404,6 +404,9 @@ import {
 import { PgCorrectionLessonRepository } from './learning/corrections/pg-correction-lesson';
 import type { ConfigPorts } from './learning/corrections/lesson-applicator';
 import { recordCorrectionLessonsOnExecution } from './learning/corrections/record-on-execution';
+// Story 3.9 — raw per-field proposal-edit corrections log.
+import { InMemoryCorrectionRepository } from './proposals/corrections/correction';
+import { PgCorrectionRepository } from './proposals/corrections/pg-correction';
 import {
   runRecordingRetentionSweep,
   PgRecordingRetentionRepository,
@@ -1146,6 +1149,12 @@ export function createApp(): express.Express {
   const correctionLessonRepo = pool
     ? new PgCorrectionLessonRepository(pool)
     : new InMemoryCorrectionLessonRepository();
+  // Story 3.9 — raw per-field proposal-edit log (intent + field + before/after),
+  // queryable per tenant and per intent; the training signal for prompt/routing
+  // improvement. Distinct from correction_lessons (cascading config above).
+  const correctionRepo = pool
+    ? new PgCorrectionRepository(pool)
+    : new InMemoryCorrectionRepository();
   const correctionConfigPorts: ConfigPorts = {
     async setLaborRateCents(tenantId, cents) {
       await settingsRepo.update(tenantId, { laborRateCentsPerHour: cents });
@@ -4086,6 +4095,10 @@ export function createApp(): express.Express {
       // shim with the voice-action-router so the same vertical context
       // reaches both text and voice classification paths.
       verticalPromptResolver: operatorVerticalResolverShim,
+      // Story 3.11 — persist each chat turn so the running conversation
+      // survives reload and is searchable.
+      conversationRepo,
+      auditRepo,
     }),
   );
   // D2-1c — audit-log proposal approve / reject / edit / undo.
@@ -4102,6 +4115,9 @@ export function createApp(): express.Express {
       correctionLessonRepo
         ? { lessonRepo: correctionLessonRepo, ports: correctionConfigPorts }
         : undefined,
+      // Story 3.9 — editing a proposal logs each changed field to the
+      // corrections training table (intent + field + before/after).
+      correctionRepo,
     ),
   );
   if (pool) {

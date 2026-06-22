@@ -62,20 +62,23 @@ const SUGGESTIONS = [
 // Send user messages to the backend conversation API and receive real AI responses.
 // Falls back to a simple echo if the API is unavailable.
 async function sendToConversationAPI(
-  _conversationId: string | null,
+  conversationId: string | null,
   text: string,
   history: Array<{ role: 'user' | 'assistant'; content: string }>,
-): Promise<{ content: string; reasoning?: string; proposal?: AIProposal; autoApplied?: boolean; newConversationId?: string }> {
+): Promise<{ content: string; reasoning?: string; proposal?: AIProposal; autoApplied?: boolean; newConversationId?: string; failed?: boolean }> {
   try {
     // AST-01b: chat → /api/assistant/chat. The server runs intent
     // classification first; recognized actions (e.g. create_customer)
     // come back as a proposal the UI renders inline instead of as free
     // text. Everything else falls through to the generic LLM reply.
+    // Story 3.11 — pin the running conversation so each turn persists to the
+    // same thread (server opens one on the first turn and echoes its id).
     const res = await apiFetch('/api/assistant/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         messages: [...history, { role: 'user', content: text }],
+        ...(conversationId ? { conversationId } : {}),
       }),
     });
 
@@ -90,6 +93,7 @@ async function sendToConversationAPI(
       reasoning: msg.reasoning,
       proposal: msg.proposal,
       autoApplied: msg.autoApplied,
+      newConversationId: data.conversationId,
     };
   } catch (err) {
     // Network/auth failure reaching the assistant API. Surface an accurate,
@@ -98,6 +102,7 @@ async function sendToConversationAPI(
     return {
       content: 'Unable to connect to AI service — please try again or contact support.',
       reasoning: 'Could not reach the AI service.',
+      failed: true,
     };
   }
 }
@@ -732,6 +737,13 @@ export function AssistantPage() {
   const [attachPickerOpen, setAttachPickerOpen] = useState(false);
   const [pendingAttachment, setPendingAttachment] = useState<Message['attachments']>([]);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
+  // Story 3.12 — when a turn fails (model/tool/network), keep the failed input
+  // so the operator can RETRY in one tap instead of re-typing. Cleared on the
+  // next attempt and on success.
+  const [failedSend, setFailedSend] = useState<{
+    text: string;
+    opts?: { inputMode?: 'voice' | 'photo'; voiceDuration?: number; attachments?: Message['attachments'] };
+  } | null>(null);
   const [ttsEnabled, setTtsEnabled]   = useState(() => localStorage.getItem('rivet:tts-enabled') === 'true');
   const { speak, stop: stopTTS, isSpeaking } = useTTS({ rate: 1.0 });
   const lastInputWasVoiceRef = useRef(false);
@@ -808,14 +820,16 @@ export function AssistantPage() {
     setMessages(prev => [...prev, userMsg]);
     setInput('');
     setPendingAttachment([]);
+    setFailedSend(null); // a fresh attempt clears any prior retry affordance
     setTyping(true);
     setTypingReason('Thinking…');
 
     try {
       const reply = await sendToConversationAPI(conversationId, text, history);
 
-      // If a new conversation was created, store it
-      if (reply.newConversationId && !conversationId) {
+      // Story 3.11 — pin the server's conversation id so the next turn appends
+      // to the same persisted thread (and survives reload).
+      if (reply.newConversationId) {
         localStorage.setItem('conversationId', reply.newConversationId);
       }
 
@@ -829,6 +843,13 @@ export function AssistantPage() {
       };
       setMessages(prev => [...prev, aiMsg]);
 
+      // Story 3.12 — the assistant API swallows transport failures into a
+      // degraded reply (failed:true) so the error renders inline; surface a
+      // one-tap RETRY for the failed input alongside it.
+      if (reply.failed) {
+        setFailedSend({ text, opts });
+      }
+
       // Speak the response if TTS enabled or input was via voice
       if ((ttsEnabled || lastInputWasVoiceRef.current) && reply.content) {
         speak(reply.content);
@@ -837,14 +858,24 @@ export function AssistantPage() {
       setMessages(prev => [...prev, {
         id: uid(),
         role: 'assistant',
-        content: 'Sorry, something went wrong. Please try again.',
+        content: 'Sorry, something went wrong.',
         time: now(),
       }]);
+      // Keep the failed input so the operator can retry in one tap (3.12) —
+      // never a silent partial write: nothing was persisted on this turn.
+      setFailedSend({ text, opts });
     } finally {
       setTyping(false);
       setTypingReason('');
     }
   }, [conversationId, ttsEnabled, speak]);
+
+  const retryFailed = useCallback(() => {
+    if (!failedSend) return;
+    const { text, opts } = failedSend;
+    setFailedSend(null);
+    void send(text, opts);
+  }, [failedSend, send]);
 
   function handleSend() {
     if (pendingAttachment && pendingAttachment.length > 0) {
@@ -996,6 +1027,27 @@ export function AssistantPage() {
                 {text}
               </button>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Retry strip (Story 3.12) — surfaced when a turn fails ── */}
+      {failedSend && !typing && (
+        <div className="shrink-0 bg-white border-t border-slate-100 px-4 md:px-6 py-2">
+          <div className="max-w-3xl mx-auto flex items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <AlertCircle size={14} className="text-amber-600 shrink-0" />
+              <span className="text-sm text-amber-800 truncate">
+                Couldn’t reach the assistant.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={retryFailed}
+              className="flex items-center gap-1.5 min-h-11 rounded-lg bg-amber-600 px-3 text-sm text-white hover:bg-amber-700 transition-colors shrink-0"
+            >
+              Retry
+            </button>
           </div>
         </div>
       )}

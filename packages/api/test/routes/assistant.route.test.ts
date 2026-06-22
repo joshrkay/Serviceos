@@ -11,6 +11,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createAssistantRouter } from '../../src/routes/assistant';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
@@ -280,5 +281,88 @@ describe('P20-005 — degraded path: server logging and accurate user-facing cop
         line.includes('"level":"error"')
     );
     expect(hasErrorLog).toBe(true);
+  });
+});
+
+describe('Story 3.11/3.12 — assistant chat persistence + correlation id', () => {
+  function buildAppWithConvo(
+    gateway: LLMGateway,
+    proposalRepo: InMemoryProposalRepository,
+    conversationRepo: InMemoryConversationRepository,
+  ) {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo, conversationRepo }));
+    return app;
+  }
+
+  // classify → 'unknown' (fall through), then a generic LLM reply.
+  function replyGateway() {
+    return scriptedGateway([
+      JSON.stringify({ intentType: 'unknown', confidence: 0.9 }),
+      JSON.stringify({ content: 'Summary: 3 jobs today.' }),
+    ]);
+  }
+
+  it('persists the operator + agent turn and returns conversationId + correlationId', async () => {
+    const conversationRepo = new InMemoryConversationRepository();
+    const app = buildAppWithConvo(replyGateway(), new InMemoryProposalRepository(), conversationRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'summarize my day' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.conversationId).toBeTruthy();
+    expect(res.body.correlationId).toBeTruthy();
+
+    const messages = await conversationRepo.getMessages(TEST_TENANT, res.body.conversationId);
+    expect(messages.map((m) => m.senderRole)).toEqual(['user', 'assistant']);
+    expect(messages[0].content).toBe('summarize my day');
+    expect(messages[1].content).toBe('Summary: 3 jobs today.');
+  });
+
+  it('appends to the same conversation when conversationId is supplied', async () => {
+    const conversationRepo = new InMemoryConversationRepository();
+    const app = buildAppWithConvo(replyGateway(), new InMemoryProposalRepository(), conversationRepo);
+
+    const first = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'hi' }] });
+    const conversationId = first.body.conversationId;
+
+    const second = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'and again' }], conversationId });
+
+    expect(second.body.conversationId).toBe(conversationId);
+    expect(await conversationRepo.getMessages(TEST_TENANT, conversationId)).toHaveLength(4);
+  });
+
+  it('honors an inbound x-correlation-id', async () => {
+    const app = buildAppWithConvo(replyGateway(), new InMemoryProposalRepository(), new InMemoryConversationRepository());
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .set('x-correlation-id', 'corr-test-123')
+      .send({ messages: [{ role: 'user', content: 'summarize my day' }] });
+    expect(res.body.correlationId).toBe('corr-test-123');
+  });
+
+  it('still returns a reply (degraded) with a correlationId when persistence has no repo', async () => {
+    const app = buildApp(replyGateway(), new InMemoryProposalRepository());
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'summarize my day' }] });
+    expect(res.status).toBe(200);
+    expect(res.body.correlationId).toBeTruthy();
   });
 });
