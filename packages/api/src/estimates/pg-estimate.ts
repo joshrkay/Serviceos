@@ -115,6 +115,14 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
       paramIndex++;
     }
 
+    if (options?.jobIds) {
+      // Customer filter: the route resolved a customerId to these jobIds.
+      // An empty array must match nothing (= ANY('{}') yields no rows).
+      conditions.push(`job_id = ANY($${paramIndex})`);
+      params.push(options.jobIds);
+      paramIndex++;
+    }
+
     if (options?.search) {
       const searchParam = `%${options.search}%`;
       conditions.push(

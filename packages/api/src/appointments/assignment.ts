@@ -4,6 +4,7 @@ import { ValidationError, ConflictError } from '../shared/errors';
 import { AppointmentRepository, AppointmentStatus } from './appointment';
 import { detectOverlappingAppointments } from '../dispatch/validation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { notifyTechnicianAssignmentChange } from './assignment-notifications';
 
 /**
  * Optional dependencies for `assignTechnician`.
@@ -191,6 +192,15 @@ export async function assignTechnician(
     );
   }
 
+  // Story 6.1/6.3 — notify the assigned technician (in-app push). Failure-
+  // isolated: a notification problem never breaks the assignment write.
+  await notifyTechnicianAssignmentChange({
+    tenantId: input.tenantId,
+    appointmentId: input.appointmentId,
+    technicianId: input.technicianId,
+    kind: 'assigned',
+  });
+
   return created;
 }
 
@@ -217,6 +227,18 @@ export async function unassignTechnician(
         },
       }),
     );
+  }
+
+  // Story 6.8 — notify the technician a job was moved off them. Requires the
+  // appointment + technician ids in deps (the reassignment handler supplies
+  // both). Failure-isolated.
+  if (removed && deps.appointmentId && deps.technicianId) {
+    await notifyTechnicianAssignmentChange({
+      tenantId,
+      appointmentId: deps.appointmentId,
+      technicianId: deps.technicianId,
+      kind: 'unassigned',
+    });
   }
 
   return removed;

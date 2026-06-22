@@ -1,20 +1,14 @@
-/**
- * Postgres integration — notification_preferences (U10).
- *
- * Pins the real columns, the upsert, default-on semantics, and cross-tenant
- * RLS isolation against real Postgres (the unit tests use the in-memory repo,
- * which can't prove the SQL or RLS).
- */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
-import { getSharedTestDb, createTestTenant, closeSharedTestDb, type TestTenant } from './shared';
+import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgNotificationPreferenceRepository } from '../../src/notifications/pg-notification-preferences-repository';
+import { effectivePreferences } from '../../src/notifications/notification-preferences-service';
 
-describe('Postgres integration — notification_preferences', () => {
+describe('Postgres integration — notification preferences (U10)', () => {
   let pool: Pool;
   let repo: PgNotificationPreferenceRepository;
-  let tenant: TestTenant;
-  let other: TestTenant;
+  let tenant: { tenantId: string; userId: string };
+  let other: { tenantId: string; userId: string };
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
@@ -27,27 +21,44 @@ describe('Postgres integration — notification_preferences', () => {
     await closeSharedTestDb();
   });
 
-  it('defaults to enabled (no rows) and upserts a toggle', async () => {
-    expect(await repo.listByUser(tenant.tenantId, 'u1')).toEqual([]);
-    expect((await repo.listMutedUserIds(tenant.tenantId, 'payment_received')).size).toBe(0);
-
-    await repo.set(tenant.tenantId, 'u1', 'payment_received', false);
-    let muted = await repo.listMutedUserIds(tenant.tenantId, 'payment_received');
-    expect(muted.has('u1')).toBe(true);
-
-    // Upsert (not duplicate insert) on the unique (tenant,user,type).
-    await repo.set(tenant.tenantId, 'u1', 'payment_received', true);
-    muted = await repo.listMutedUserIds(tenant.tenantId, 'payment_received');
-    expect(muted.has('u1')).toBe(false);
-    const rows = await repo.listByUser(tenant.tenantId, 'u1');
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ notificationType: 'payment_received', enabled: true });
+  it('no rows → effective preferences default every type to enabled (real columns)', async () => {
+    const prefs = await effectivePreferences(repo, tenant.tenantId, tenant.userId);
+    expect(prefs.incoming_call).toBe(true);
+    expect(prefs.payment_received).toBe(true);
   });
 
-  it('isolates preferences across tenants (FORCE RLS)', async () => {
-    await repo.set(tenant.tenantId, 'shared-user', 'emergency', false);
-    // Same user id, different tenant — must not see the other tenant's row.
-    expect(await repo.listByUser(other.tenantId, 'shared-user')).toEqual([]);
-    expect((await repo.listMutedUserIds(other.tenantId, 'emergency')).size).toBe(0);
+  it('setEnabled persists a real row and listForUser reads it back', async () => {
+    await repo.setEnabled(tenant.tenantId, tenant.userId, 'inbound_sms', false);
+    const rows = await repo.listForUser(tenant.tenantId, tenant.userId);
+    const row = rows.find((r) => r.notificationType === 'inbound_sms');
+    expect(row).toBeDefined();
+    expect(row!.enabled).toBe(false);
+    expect(row!.tenantId).toBe(tenant.tenantId);
+    expect(row!.userId).toBe(tenant.userId);
+  });
+
+  it('upserts on (tenant, user, type) — toggling updates, never duplicates', async () => {
+    await repo.setEnabled(tenant.tenantId, tenant.userId, 'inbound_sms', false);
+    await repo.setEnabled(tenant.tenantId, tenant.userId, 'inbound_sms', true);
+    const rows = await repo.listForUser(tenant.tenantId, tenant.userId);
+    expect(rows.filter((r) => r.notificationType === 'inbound_sms')).toHaveLength(1);
+    expect(rows.find((r) => r.notificationType === 'inbound_sms')!.enabled).toBe(true);
+  });
+
+  it('listMutedUserIds returns only users who muted the type', async () => {
+    await repo.setEnabled(tenant.tenantId, 'owner-x', 'payment_received', false);
+    await repo.setEnabled(tenant.tenantId, 'owner-y', 'payment_received', true);
+    const muted = await repo.listMutedUserIds(tenant.tenantId, 'payment_received');
+    expect(muted.has('owner-x')).toBe(true);
+    expect(muted.has('owner-y')).toBe(false);
+  });
+
+  it('RLS isolates preferences across tenants', async () => {
+    await repo.setEnabled(tenant.tenantId, 'shared-user', 'emergency', false);
+    // The other tenant must not see tenant's rows (own current_tenant_id).
+    const theirs = await repo.listMutedUserIds(other.tenantId, 'emergency');
+    expect(theirs.has('shared-user')).toBe(false);
+    const theirRows = await repo.listForUser(other.tenantId, 'shared-user');
+    expect(theirRows).toHaveLength(0);
   });
 });

@@ -379,6 +379,23 @@ describe('P1-019 — createCustomer attaches dedup warnings (advisory, never blo
       const matches = await repo.findByPhoneNormalized('tenant-1', '12345');
       expect(matches).toEqual([]);
     });
+
+    it('matches the secondary phone, not just the primary (4.7)', async () => {
+      await createCustomer(
+        {
+          tenantId: 'tenant-1',
+          firstName: 'Two',
+          lastName: 'Lines',
+          primaryPhone: '(555) 111-2222',
+          secondaryPhone: '+1 555-333-4444',
+          createdBy: 'u-1',
+        },
+        repo
+      );
+      const matches = await repo.findByPhoneNormalized('tenant-1', '5553334444');
+      expect(matches).toHaveLength(1);
+      expect(matches[0].displayName).toBe('Two Lines');
+    });
   });
 
   it('createCustomer.duplicate — creation is NEVER blocked (advisory only)', async () => {

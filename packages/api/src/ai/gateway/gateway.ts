@@ -433,6 +433,9 @@ export class LLMGateway {
         latencyMs,
       );
       this.logger?.error('LLM completion failed', {
+        // Story 3.12 — correlationId on the failure log so a model/tool error
+        // is traceable end-to-end (it keys the ai_runs row written below).
+        correlationId,
         taskType: request.taskType,
         provider: providerName,
         model: resolvedModel,
@@ -454,6 +457,7 @@ export class LLMGateway {
           });
         } catch (repoErr) {
           this.logger?.error('AI-run failure logging failed (best-effort)', {
+            correlationId,
             error: repoErr instanceof Error ? repoErr.message : String(repoErr),
           });
         }

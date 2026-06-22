@@ -1,19 +1,25 @@
 /**
- * `GET /api/notification-preferences` — the authed user's per-category push
- * preferences (default-on; absent categories read as enabled).
- * `PUT /api/notification-preferences` — toggle one category; emits
- * `notification.preferences.updated`. Each user manages only their own
- * preferences (keyed on the JWT's userId), tenant-scoped by RLS.
+ * `GET /api/notification-preferences` — the authenticated user's effective
+ * mute settings (every notification type with its enabled flag; absent = on).
+ * `PUT /api/notification-preferences` — set one category enabled/disabled.
+ *
+ * Per-user + tenant-scoped (RLS). A mutation emits a
+ * `notification.preferences.updated` audit event. The owner-notification
+ * fan-out reads these at send time to drop muted recipients (U10).
  */
 import { Router, Response } from 'express';
+import { NOTIFICATION_TYPES, type NotificationType } from '@ai-service-os/shared';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant } from '../middleware/auth';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import {
+  effectivePreferences,
   type NotificationPreferenceRepository,
-  isNotificationType,
-  toPreferenceMap,
 } from '../notifications/notification-preferences-service';
+
+function isNotificationType(value: unknown): value is NotificationType {
+  return typeof value === 'string' && (NOTIFICATION_TYPES as readonly string[]).includes(value);
+}
 
 export function createNotificationPreferencesRouter(
   repo: NotificationPreferenceRepository,
@@ -24,8 +30,8 @@ export function createNotificationPreferencesRouter(
   router.get('/', requireAuth, requireTenant, async (req: AuthenticatedRequest, res: Response) => {
     try {
       const auth = req.auth!;
-      const rows = await repo.listByUser(auth.tenantId, auth.userId);
-      res.json({ preferences: toPreferenceMap(rows) });
+      const preferences = await effectivePreferences(repo, auth.tenantId, auth.userId);
+      res.status(200).json({ preferences });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load preferences';
       res.status(500).json({ error: 'INTERNAL_ERROR', message });
@@ -37,17 +43,18 @@ export function createNotificationPreferencesRouter(
       const auth = req.auth!;
       const body = (req.body ?? {}) as { notificationType?: unknown; enabled?: unknown };
       if (!isNotificationType(body.notificationType)) {
-        res
-          .status(400)
-          .json({ error: 'VALIDATION_ERROR', message: 'Unknown notificationType' });
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: `notificationType must be one of: ${NOTIFICATION_TYPES.join(', ')}`,
+        });
         return;
       }
       if (typeof body.enabled !== 'boolean') {
-        res.status(400).json({ error: 'VALIDATION_ERROR', message: '`enabled` must be a boolean' });
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'enabled must be a boolean' });
         return;
       }
 
-      const pref = await repo.set(auth.tenantId, auth.userId, body.notificationType, body.enabled);
+      await repo.setEnabled(auth.tenantId, auth.userId, body.notificationType, body.enabled);
       await auditRepo.create(
         createAuditEvent({
           tenantId: auth.tenantId,
@@ -55,13 +62,13 @@ export function createNotificationPreferencesRouter(
           actorRole: auth.role,
           eventType: 'notification.preferences.updated',
           entityType: 'notification_preference',
-          entityId: `${auth.userId}:${pref.notificationType}`,
-          metadata: { notificationType: pref.notificationType, enabled: pref.enabled },
+          entityId: `${auth.userId}:${body.notificationType}`,
+          metadata: { notificationType: body.notificationType, enabled: body.enabled },
         }),
       );
 
-      const rows = await repo.listByUser(auth.tenantId, auth.userId);
-      res.json({ preferences: toPreferenceMap(rows) });
+      const preferences = await effectivePreferences(repo, auth.tenantId, auth.userId);
+      res.status(200).json({ preferences });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to update preferences';
       res.status(500).json({ error: 'INTERNAL_ERROR', message });

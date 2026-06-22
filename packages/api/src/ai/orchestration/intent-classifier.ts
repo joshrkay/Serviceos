@@ -186,6 +186,25 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
 ] as const;
 
 /**
+ * Story 3.4 — versioned intent taxonomy. Every classification is stamped with
+ * this version (see `classifyIntent`) so downstream consumers — correction
+ * analytics (story 3.9), routing observability, evaluation snapshots — can tell
+ * which taxonomy produced an intent and detect drift across deploys.
+ *
+ * BUMP THIS whenever `SUPPORTED_INTENTS` changes (an intent added, removed, or
+ * its meaning materially changed) or a deterministic intent mapping changes.
+ * Semantics: MAJOR = an intent removed or its meaning changed (consumers must
+ * re-map); MINOR = an intent added or coverage extended (additive,
+ * backward-compatible).
+ *
+ * Changelog:
+ *   1.0.0 — initial versioned taxonomy.
+ *   1.1.0 — "log inventory" phrasings recognized and mapped to log_expense
+ *           (no inventory domain; see isInventoryLoggingPhrasing).
+ */
+export const INTENT_TAXONOMY_VERSION = '1.1.0';
+
+/**
  * P11-001: convenience predicate the FSM adapter uses to route
  * `lookup_*` intents to the read-only skill family instead of the
  * proposal-draft pipeline.
@@ -361,6 +380,12 @@ export interface IntentClassification {
    * short-circuits without an LLM call.
    */
   tokenUsage?: { input: number; output: number };
+  /**
+   * Story 3.4 — the intent-taxonomy version that produced this classification
+   * (`INTENT_TAXONOMY_VERSION`). Stamped on every result by `classifyIntent`;
+   * lets observability / correction analytics detect taxonomy drift.
+   */
+  taxonomyVersion?: string;
 }
 
 export interface ClassifyContext {
@@ -1279,7 +1304,41 @@ export function isCreateCustomerSignupPhrasing(transcript: string): boolean {
   return CREATE_CUSTOMER_SIGNUP_PATTERNS.some((rx) => rx.test(transcript));
 }
 
+/**
+ * Story 3.4 — "log inventory" is recognized but, per product decision, mapped
+ * to expense logging (the app has no inventory/stock domain; recording
+ * material/stock intake is an expense). This guard fires ONLY for clear
+ * inventory-LOGGING phrasings, never for a stock QUERY ("how much stock is
+ * left", "check inventory") — those stay on their own path.
+ */
+const INVENTORY_LOG_QUERY_GUARD =
+  /\b(?:check|how\s+much|how\s+many|what(?:'s|\s+is)|do\s+we\s+have|is\s+there|level|remaining|left|in\s+stock)\b/i;
+const INVENTORY_LOGGING_PATTERNS: ReadonlyArray<RegExp> = [
+  /\b(?:log|record|enter|add|update|track|adjust)\b[^.?!]{0,40}\b(?:inventory|stock)\b/i,
+  /\b(?:inventory|stock)\b[^.?!]{0,24}\b(?:count|log|update|adjustment|intake|received)\b/i,
+  /\b(?:received|restocked|bought|purchased|picked\s+up)\b[^.?!]{0,40}\b(?:inventory|stock|materials|supplies|parts)\b/i,
+];
+
+export function isInventoryLoggingPhrasing(transcript: string): boolean {
+  if (!transcript) return false;
+  if (INVENTORY_LOG_QUERY_GUARD.test(transcript)) return false;
+  return INVENTORY_LOGGING_PATTERNS.some((rx) => rx.test(transcript));
+}
+
 export async function classifyIntent(
+  transcript: string,
+  context: ClassifyContext,
+  gateway: LLMGateway
+): Promise<IntentClassification> {
+  // Story 3.4 — single choke point that stamps the taxonomy version on every
+  // classification, regardless of which of classifyIntentRaw's return paths
+  // (short-circuit, override, low-confidence, unknown, success) produced it.
+  const result = await classifyIntentRaw(transcript, context, gateway);
+  result.taxonomyVersion = INTENT_TAXONOMY_VERSION;
+  return result;
+}
+
+async function classifyIntentRaw(
   transcript: string,
   context: ClassifyContext,
   gateway: LLMGateway
@@ -1401,6 +1460,27 @@ export async function classifyIntent(
     };
     if (tokenUsage) overridden.tokenUsage = tokenUsage;
     return overridden;
+  }
+
+  // Story 3.4 — "log inventory" maps to expense logging (product decision: no
+  // inventory domain exists; material/stock intake is recorded as an expense).
+  // Deterministic, post-parse: when the transcript is a clear inventory-LOGGING
+  // phrasing (not a stock query) and the LLM did not already land on
+  // log_expense, map it to log_expense — preserving any amount/vendor the LLM
+  // extracted and defaulting the category to 'materials'. Result is a DRAFT
+  // proposal a human approves; nothing is auto-executed. No prompt bytes
+  // change, so classify_intent cassettes / cache keys are unaffected.
+  if (parsed.intentType !== 'log_expense' && isInventoryLoggingPhrasing(transcript)) {
+    const entities: ExtractedEntities = { ...(parsed.extractedEntities ?? {}) };
+    if (!entities.expenseCategory) entities.expenseCategory = 'materials';
+    const mapped: IntentClassification = {
+      intentType: 'log_expense',
+      confidence: Math.max(parsed.confidence, 0.8),
+      reasoning: 'inventory-logging phrasing mapped to expense (no inventory domain)',
+      extractedEntities: entities,
+    };
+    if (tokenUsage) mapped.tokenUsage = tokenUsage;
+    return mapped;
   }
 
   // Final guardrail: low confidence → unknown, even if the LLM picked an intent.

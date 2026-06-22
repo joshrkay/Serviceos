@@ -1,12 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useUser } from '@clerk/clerk-react';
 import {
   AlertCircle, Clock, ChevronRight, ArrowRight,
   DollarSign, FileText, Send, Eye, Briefcase,
-  CheckCircle2, Mic, TrendingUp, UserPlus, CalendarPlus,
+  CheckCircle2, Mic, TrendingUp, Bell, MessageSquare,
 } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
+import { listInboxThreads, type InboxThread } from '../../api/conversations';
 import { StatCard } from '../ui';
 import {
   normalizeJobStatus,
@@ -23,6 +24,7 @@ import { VoiceRoiCard } from './VoiceRoiCard';
 import { CoreKpisCard } from './CoreKpisCard';
 import { PendingProposalsCard } from './PendingProposalsCard';
 import { ActivityFeedCard } from './ActivityFeedCard';
+import { HomeConversationPanel } from './HomeConversationPanel';
 import { ErrorState } from '../ErrorState';
 import { EmptyState } from '../EmptyState';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
@@ -286,13 +288,21 @@ export function HomePage() {
   const today = todayIso();
   const todayDate = new Date(); todayDate.setHours(0, 0, 0, 0);
 
-  // Epic 12.2 — the "today" snapshot updates live: each list re-polls on this
-  // interval (paused while the tab is hidden, see useListQuery).
-  const LIVE_REFETCH_MS = 60_000;
-  const jobsQuery = useListQuery<ApiJob>('/api/jobs', { filters: { scheduledDate: today }, refetchInterval: LIVE_REFETCH_MS });
-  const estimatesQuery = useListQuery<ApiEstimate>('/api/estimates', { filters: { status: 'sent' }, refetchInterval: LIVE_REFETCH_MS });
-  const invoicesQuery = useListQuery<ApiInvoice>('/api/invoices', { filters: { status: 'open' }, refetchInterval: LIVE_REFETCH_MS });
-  const leadsQuery = useListQuery<ApiLead>('/api/leads', { filters: { limit: '50' }, refetchInterval: LIVE_REFETCH_MS });
+  // Story 10.7 — surface unread customer replies (newest message inbound) on
+  // the home page so two-way threads needing a response aren't missed.
+  const [unreadThreads, setUnreadThreads] = useState<InboxThread[]>([]);
+  useEffect(() => {
+    let active = true;
+    listInboxThreads({ needsReplyOnly: true, limit: 20 })
+      .then((threads) => { if (active) setUnreadThreads(threads); })
+      .catch(() => { if (active) setUnreadThreads([]); });
+    return () => { active = false; };
+  }, []);
+
+  const jobsQuery = useListQuery<ApiJob>('/api/jobs', { filters: { scheduledDate: today } });
+  const estimatesQuery = useListQuery<ApiEstimate>('/api/estimates', { filters: { status: 'sent' } });
+  const invoicesQuery = useListQuery<ApiInvoice>('/api/invoices', { filters: { status: 'open' } });
+  const leadsQuery = useListQuery<ApiLead>('/api/leads', { filters: { limit: '50' } });
   const leads = leadsQuery.data ?? [];
 
   const todayJobs    = jobsQuery.data.filter(j => normalizeJobStatus(j.status) !== 'Canceled');
@@ -314,6 +324,12 @@ export function HomePage() {
 
   // Build attention items
   const attentionItems = [
+    ...unreadThreads.map(t => ({
+      id: `reply-${t.conversation.id}`, type: 'reply' as const,
+      message: `${t.customerName ?? 'Customer'} replied`,
+      sub: t.lastMessagePreview || 'New message',
+      action: 'Reply', to: '/comms-inbox',
+    })),
     ...overdueInvs.map(i => ({
       id: `inv-${i.id}`, type: 'overdue' as const,
       message: `${customerName(i.customer)} — invoice overdue`,
@@ -331,6 +347,7 @@ export function HomePage() {
   const ATTN_STYLE = {
     overdue:  { icon: AlertCircle,  ic: 'text-red-500',    border: 'border-red-100',   bg: 'bg-red-50'    },
     followup: { icon: Eye,          ic: 'text-violet-500', border: 'border-violet-100',bg: 'bg-violet-50/50' },
+    reply:    { icon: MessageSquare,ic: 'text-blue-500',   border: 'border-blue-100',  bg: 'bg-blue-50'   },
   };
 
   return (
@@ -404,9 +421,9 @@ export function HomePage() {
           </div>
         </div>
 
-        {/* Awaiting-decision queue first — the command surface leads with
-            what needs the owner now (Epic 12.3 / 12.1). */}
-        <PendingProposalsCard />
+        {/* Story 3.1 — the running conversation, surfaced prominently on Home
+            (alongside the dashboard, not replacing it). */}
+        <HomeConversationPanel />
 
         <HfcrHeroCard />
 

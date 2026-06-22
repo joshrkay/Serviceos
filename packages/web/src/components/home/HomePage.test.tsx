@@ -10,7 +10,14 @@ vi.mock('./MoneyLoopHomeCard', () => ({
   MoneyLoopHomeCard: () => <div data-testid="money-loop-home-card" />,
 }));
 
+// Story 10.7 — unread replies surfacing. Default to none so existing tests are
+// unaffected; individual tests override the resolved value.
+vi.mock('../../api/conversations', () => ({
+  listInboxThreads: vi.fn().mockResolvedValue([]),
+}));
+
 import { useListQuery } from '../../hooks/useListQuery';
+import { listInboxThreads } from '../../api/conversations';
 
 const today = new Date().toISOString().split('T')[0];
 const pastDate = '2026-01-01';
@@ -125,6 +132,28 @@ describe('HomePage', () => {
     renderPage();
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(/Ada/);
     expect(screen.queryByText(/Mike/)).toBeNull();
+  });
+
+  it('surfaces an unread customer reply as an attention item (Story 10.7)', async () => {
+    vi.mocked(listInboxThreads).mockResolvedValueOnce([
+      {
+        conversation: {
+          id: 'conv-1',
+          status: 'open',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        lastMessageAt: new Date().toISOString(),
+        lastMessagePreview: 'Is 2pm still good?',
+        lastMessageDirection: 'inbound',
+        needsReply: true,
+        messageCount: 3,
+        customerName: 'Dana Rivera',
+      },
+    ]);
+    renderPage();
+    expect(await screen.findByText('Dana Rivera replied')).toBeInTheDocument();
+    expect(screen.getByText('Is 2pm still good?')).toBeInTheDocument();
   });
 
   it("renders today's jobs section", () => {

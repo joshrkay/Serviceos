@@ -2,6 +2,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
+import { PgContactRepository } from '../../src/customers/pg-contact';
+import { createContact } from '../../src/customers/contact';
 
 describe('Postgres integration — customers', () => {
   let pool: Pool;
@@ -135,6 +137,158 @@ describe('Postgres integration — customers', () => {
 
       const found = await repo.findById(otherTenant.tenantId, customer.id);
       expect(found).toBeNull();
+    });
+  });
+
+  // P4-004 — fuzzy name dedup. Pins the real pg_trgm `%` operator + the
+  // GIN index `idx_customers_name_trgm` (mocked tests can't prove either).
+  describe('findDuplicates — fuzzy name (pg_trgm)', () => {
+    it('returns a name-similar candidate via the pg_trgm `%` operator', async () => {
+      const dedupTenant = await createTestTenant(pool);
+      await repo.create({
+        id: crypto.randomUUID(),
+        tenantId: dedupTenant.tenantId,
+        firstName: 'Jonathan',
+        lastName: 'Doe',
+        displayName: 'Jonathan Doe',
+        preferredChannel: 'phone',
+        smsConsent: false,
+        isArchived: false,
+        createdBy: dedupTenant.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const candidates = await repo.findDuplicates(dedupTenant.tenantId, {
+        name: 'Jonathon Doe',
+      });
+      expect(candidates.map((c) => c.displayName)).toContain('Jonathan Doe');
+    });
+
+    it('does NOT return an unrelated name', async () => {
+      const dedupTenant = await createTestTenant(pool);
+      await repo.create({
+        id: crypto.randomUUID(),
+        tenantId: dedupTenant.tenantId,
+        firstName: 'Jonathan',
+        lastName: 'Doe',
+        displayName: 'Jonathan Doe',
+        preferredChannel: 'phone',
+        smsConsent: false,
+        isArchived: false,
+        createdBy: dedupTenant.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const candidates = await repo.findDuplicates(dedupTenant.tenantId, {
+        name: 'Maria Gonzalez',
+      });
+      expect(candidates).toHaveLength(0);
+    });
+
+    it('is tenant-isolated — a close name on another tenant is not returned', async () => {
+      const tenantA = await createTestTenant(pool);
+      const tenantB = await createTestTenant(pool);
+      await repo.create({
+        id: crypto.randomUUID(),
+        tenantId: tenantA.tenantId,
+        firstName: 'Jonathan',
+        lastName: 'Doe',
+        displayName: 'Jonathan Doe',
+        preferredChannel: 'phone',
+        smsConsent: false,
+        isArchived: false,
+        createdBy: tenantA.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const candidates = await repo.findDuplicates(tenantB.tenantId, {
+        name: 'Jonathon Doe',
+      });
+      expect(candidates).toHaveLength(0);
+    });
+  });
+
+  // 4.7 — caller-ID is matched against ALL of a customer's phones. A mocked
+  // Pool can't prove the secondary-phone inline normalization or the
+  // customer_contacts join, so these run against real Postgres.
+  describe('findByPhoneNormalized — all phones (4.7)', () => {
+    it('matches the secondary phone', async () => {
+      const t = await createTestTenant(pool);
+      await repo.create({
+        id: crypto.randomUUID(),
+        tenantId: t.tenantId,
+        firstName: 'Two',
+        lastName: 'Lines',
+        displayName: 'Two Lines',
+        primaryPhone: '(555) 111-2222',
+        secondaryPhone: '+1 555-333-4444',
+        preferredChannel: 'phone',
+        smsConsent: false,
+        isArchived: false,
+        createdBy: t.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const matches = await repo.findByPhoneNormalized(t.tenantId, '5553334444');
+      expect(matches.map((c) => c.displayName)).toContain('Two Lines');
+    });
+
+    it('matches a non-archived contact phone', async () => {
+      const t = await createTestTenant(pool);
+      const contacts = new PgContactRepository(pool);
+      const customer = await repo.create({
+        id: crypto.randomUUID(),
+        tenantId: t.tenantId,
+        firstName: 'Multi',
+        lastName: 'Contact',
+        displayName: 'Multi Contact',
+        primaryPhone: '(555) 777-8888',
+        preferredChannel: 'phone',
+        smsConsent: false,
+        isArchived: false,
+        createdBy: t.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      await createContact(
+        {
+          tenantId: t.tenantId,
+          customerId: customer.id,
+          name: 'Site Manager',
+          role: 'site',
+          phone: '555-999-0000',
+          createdBy: t.userId,
+        },
+        contacts
+      );
+
+      const matches = await repo.findByPhoneNormalized(t.tenantId, '5559990000');
+      expect(matches.map((c) => c.id)).toContain(customer.id);
+    });
+
+    it('is tenant-isolated', async () => {
+      const tenantA = await createTestTenant(pool);
+      const tenantB = await createTestTenant(pool);
+      await repo.create({
+        id: crypto.randomUUID(),
+        tenantId: tenantA.tenantId,
+        firstName: 'Iso',
+        lastName: 'Lated',
+        displayName: 'Iso Lated',
+        secondaryPhone: '555-444-3333',
+        preferredChannel: 'phone',
+        smsConsent: false,
+        isArchived: false,
+        createdBy: tenantA.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      const fromB = await repo.findByPhoneNormalized(tenantB.tenantId, '5554443333');
+      expect(fromB).toHaveLength(0);
     });
   });
 });

@@ -86,6 +86,25 @@ describe('OwnerNotificationService', () => {
     expect(provider.sent.map((m) => m.to)).toEqual(['ExponentPushToken[owner]']);
   });
 
+  it('drops the device of a user who muted the notification type (U10)', async () => {
+    await repo.register({ tenantId: TENANT, userId: 'owner-a', expoPushToken: 'ExponentPushToken[a]', platform: 'ios' });
+    await repo.register({ tenantId: TENANT, userId: 'owner-b', expoPushToken: 'ExponentPushToken[b]', platform: 'ios' });
+    const withMute = new OwnerNotificationService({
+      deviceTokenRepo: repo,
+      provider,
+      // owner-a muted inbound_sms; owner-b did not.
+      resolveMutedUserIds: async () => new Set(['owner-a']),
+    });
+
+    await withMute.notify(TENANT, 'inbound_sms', {
+      conversationId: 'c1',
+      customerName: 'Acme',
+      preview: 'hi',
+    });
+
+    expect(provider.sent.map((m) => m.to)).toEqual(['ExponentPushToken[b]']);
+  });
+
   it('no tokens → no send (no-op)', async () => {
     await service.notify(TENANT, 'lead_captured', { leadId: 'c1', leadLabel: 'A new lead' });
     expect(provider.sent).toHaveLength(0);
@@ -132,42 +151,67 @@ describe('OwnerNotificationService', () => {
     expect(provider.sent[1].data.screen).toBe('/approvals');
   });
 
-  it('U10 — drops devices of users who muted the category', async () => {
-    await repo.register({ tenantId: TENANT, userId: 'owner-1', expoPushToken: 'ExponentPushToken[on]', platform: 'ios' });
-    await repo.register({ tenantId: TENANT, userId: 'owner-2', expoPushToken: 'ExponentPushToken[muted]', platform: 'ios' });
+  describe('notifyUser (user-targeted — Epic 6 technician assignment)', () => {
+    it('sends only to the targeted user\'s devices, not other users', async () => {
+      await repo.register({ tenantId: TENANT, userId: 'tech-clerk', expoPushToken: 'ExponentPushToken[tech]', platform: 'ios' });
+      await repo.register({ tenantId: TENANT, userId: 'other-clerk', expoPushToken: 'ExponentPushToken[other]', platform: 'android' });
 
-    const muted = new OwnerNotificationService({
-      deviceTokenRepo: repo,
-      provider,
-      // owner-2 muted payment_received.
-      resolveMutedUserIds: async (_t, type) =>
-        type === 'payment_received' ? new Set(['owner-2']) : new Set<string>(),
+      await service.notifyUser(TENANT, 'tech-clerk', 'appointment_assigned', {
+        appointmentId: 'appt-1',
+        customerName: 'Acme Co',
+        whenLabel: 'Mon, Jun 23, 2:00 PM',
+        serviceLabel: 'AC repair',
+      });
+
+      expect(provider.sent.map((m) => m.to)).toEqual(['ExponentPushToken[tech]']);
+      expect(provider.sent[0].title).toBe('New job assigned');
+      expect(provider.sent[0].body).toBe('Acme Co — Mon, Jun 23, 2:00 PM · AC repair');
+      expect(provider.sent[0].data).toEqual({
+        type: 'appointment_assigned',
+        screen: '/schedule',
+        entityId: 'appt-1',
+      });
     });
 
-    await muted.notify(TENANT, 'payment_received', {
-      invoiceId: 'inv-9',
-      customerName: 'Acme',
-      amountLabel: '$10.00',
+    it('appointment_unassigned targets the removed tech with the move-off copy', async () => {
+      await repo.register({ tenantId: TENANT, userId: 'tech-clerk', expoPushToken: 'ExponentPushToken[tech]', platform: 'ios' });
+
+      await service.notifyUser(TENANT, 'tech-clerk', 'appointment_unassigned', {
+        appointmentId: 'appt-2',
+        customerName: 'Beta LLC',
+        whenLabel: 'Tue, Jun 24, 9:00 AM',
+      });
+
+      expect(provider.sent).toHaveLength(1);
+      expect(provider.sent[0].title).toBe('Job reassigned');
+      expect(provider.sent[0].data.type).toBe('appointment_unassigned');
     });
 
-    expect(provider.sent.map((m) => m.to)).toEqual(['ExponentPushToken[on]']);
-  });
-
-  it('U10 — a different muted category does not suppress this one', async () => {
-    await repo.register({ tenantId: TENANT, userId: 'owner-1', expoPushToken: 'ExponentPushToken[on]', platform: 'ios' });
-    const muted = new OwnerNotificationService({
-      deviceTokenRepo: repo,
-      provider,
-      resolveMutedUserIds: async (_t, type) =>
-        type === 'invoice_overdue' ? new Set(['owner-1']) : new Set<string>(),
+    it('no device for the targeted user → no send (no-op)', async () => {
+      await repo.register({ tenantId: TENANT, userId: 'someone-else', expoPushToken: 'ExponentPushToken[x]', platform: 'ios' });
+      await service.notifyUser(TENANT, 'tech-clerk', 'appointment_assigned', {
+        appointmentId: 'a', customerName: 'C', whenLabel: 'w', serviceLabel: 's',
+      });
+      expect(provider.sent).toHaveLength(0);
     });
 
-    await muted.notify(TENANT, 'payment_received', {
-      invoiceId: 'inv-9',
-      customerName: 'Acme',
-      amountLabel: '$10.00',
+    it('empty userId → no send (no-op)', async () => {
+      await repo.register({ tenantId: TENANT, userId: 'tech-clerk', expoPushToken: 'ExponentPushToken[tech]', platform: 'ios' });
+      await service.notifyUser(TENANT, '', 'appointment_assigned', {
+        appointmentId: 'a', customerName: 'C', whenLabel: 'w', serviceLabel: 's',
+      });
+      expect(provider.sent).toHaveLength(0);
     });
 
-    expect(provider.sent).toHaveLength(1);
+    it('prunes a dead token on the user-targeted path', async () => {
+      await repo.register({ tenantId: TENANT, userId: 'tech-clerk', expoPushToken: 'ExponentPushToken[dead]', platform: 'ios' });
+      provider.deadTokens.add('ExponentPushToken[dead]');
+
+      await service.notifyUser(TENANT, 'tech-clerk', 'appointment_assigned', {
+        appointmentId: 'a', customerName: 'C', whenLabel: 'w', serviceLabel: 's',
+      });
+
+      expect(await repo.listByTenant(TENANT)).toHaveLength(0);
+    });
   });
 });

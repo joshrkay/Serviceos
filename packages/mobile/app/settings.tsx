@@ -6,7 +6,7 @@ import { useSignOut } from '../src/push/useSignOut';
 import { getCallbackNumber, saveCallbackNumber } from '../src/calls/callbackStorage';
 import { ErrorState } from '../src/components/ErrorState';
 import { PushDeniedNotice } from '../src/components/PushDeniedNotice';
-import { NotificationPreferencesSection } from '../src/components/NotificationPreferencesSection';
+import { NotificationPreferences } from '../src/components/NotificationPreferences';
 
 export default function Settings() {
   const router = useRouter();
@@ -103,7 +103,7 @@ export default function Settings() {
           <Text className="text-base font-semibold text-primaryForeground">Save</Text>
         </Pressable>
 
-        <NotificationPreferencesSection className="mt-8" />
+        <NotificationPreferences className="mt-8" />
 
         <Pressable
           accessibilityRole="button"

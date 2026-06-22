@@ -3,9 +3,10 @@ import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { asyncRoute } from '../middleware/async-route';
+import { toErrorResponse } from '../shared/errors';
 import { validate } from '../shared/validation';
 import { Role } from '../auth/rbac';
-import { ProposalRepository } from '../proposals/proposal';
+import { ProposalRepository, isScheduleProposalType, SCHEDULE_PROPOSAL_TYPES } from '../proposals/proposal';
 import { AppointmentRepository } from '../appointments/appointment';
 import { AuditRepository } from '../audit/audit';
 import { ProposalFilter } from '../proposals/proposal-contracts';
@@ -17,6 +18,7 @@ import {
   rejectProposal,
   editProposal,
   undoProposal,
+  reproposeProposal,
   type UndoCorrectionLoopDeps,
 } from '../proposals/actions';
 import { resolveProposalLine } from '../proposals/resolve-line';
@@ -27,6 +29,7 @@ import {
 } from '../proposals/proposal-contracts';
 import { FeasibilityDependencies } from '../scheduling/feasibility-types';
 import { createSchedulingProposal } from '../proposals/create-scheduling';
+import type { CorrectionRepository } from '../proposals/corrections/correction';
 
 // P2-035 — Batch approval body schema. Lives inline rather than in
 // proposal-contracts.ts so this story stays within its allowed-files
@@ -37,6 +40,13 @@ import { createSchedulingProposal } from '../proposals/create-scheduling';
 const approveBatchBodySchema = z.object({
   proposalIds: z.array(z.string().uuid()).min(1).max(50),
 });
+
+// §5.5 — how far back the inbox surfaces expired schedule cards. Operators
+// re-propose recent lapses; bounding the window keeps the response from growing
+// as expired history accumulates (the cards are still re-proposable via the
+// list endpoint by id).
+const EXPIRED_INBOX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const EXPIRED_INBOX_LIMIT = 20;
 
 // U2 (P2-035) — resolve an ambiguous catalog line by picking one of the
 // line's surfaced candidates. Patches the draft; never approves (D-004).
@@ -53,6 +63,9 @@ export function createProposalsRouter(
   // N-009 / P2-038 — when supplied, undoing a proposal also reverses the
   // structured correction lessons it recorded (and the config each cascaded).
   undoCorrectionLoop?: UndoCorrectionLoopDeps,
+  // Story 3.9 — when supplied, editing a proposal logs each changed field
+  // (intent + field + before/after) to the corrections training table.
+  correctionRepo?: CorrectionRepository,
 ): Router {
   const router = Router();
 
@@ -140,22 +153,59 @@ export function createProposalsRouter(
     requireAuth,
     requireTenant,
     requirePermission('proposals:view'),
-    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      // Inbox fetches the open proposals awaiting operator action and
-      // runs `prioritizeProposals` over them. Both 'draft' and
-      // 'ready_for_review' are surfaced: voice proposals are created in
-      // 'draft' (see decideInitialStatus), and chained dependents are
-      // forced to 'draft' so they can't auto-execute ahead of a parent —
-      // both need to be approvable from the inbox. The 100-item cap keeps
-      // the payload small; for a solo operator the inbox is single-digit
-      // dozens, not hundreds.
-      const [drafts, ready] = await Promise.all([
-        proposalRepo.findByStatus(req.auth!.tenantId, 'draft'),
-        proposalRepo.findByStatus(req.auth!.tenantId, 'ready_for_review'),
-      ]);
-      const inbox = buildInboxPayload([...ready, ...drafts], 100);
-      res.json(inbox);
-    }),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        // Inbox fetches the open proposals awaiting operator action and
+        // runs `prioritizeProposals` over them. Both 'draft' and
+        // 'ready_for_review' are surfaced: voice proposals are created in
+        // 'draft' (see decideInitialStatus), and chained dependents are
+        // forced to 'draft' so they can't auto-execute ahead of a parent —
+        // both need to be approvable from the inbox. The 100-item cap keeps
+        // the payload small; for a solo operator the inbox is single-digit
+        // dozens, not hundreds.
+        // §5.5 — surface recently-expired schedule proposal cards so the operator
+        // can see what lapsed and re-propose it. Bounded in the DB (WHERE on type
+        // + a recent window, ORDER BY recency, LIMIT) so the inbox can't degrade
+        // as expired history accumulates; operators re-propose recent lapses, not
+        // ancient ones. Falls back to an in-memory trim for repos that predate
+        // the bounded query.
+        const since = new Date(Date.now() - EXPIRED_INBOX_WINDOW_MS);
+        const [drafts, ready, expiredRows] = await Promise.all([
+          proposalRepo.findByStatus(req.auth!.tenantId, 'draft'),
+          proposalRepo.findByStatus(req.auth!.tenantId, 'ready_for_review'),
+          proposalRepo.findExpiredScheduleProposals
+            ? proposalRepo.findExpiredScheduleProposals(
+                req.auth!.tenantId,
+                SCHEDULE_PROPOSAL_TYPES,
+                since,
+                EXPIRED_INBOX_LIMIT,
+              )
+            : proposalRepo.findByStatus(req.auth!.tenantId, 'expired').then((all) =>
+                all
+                  .filter(
+                    (p) =>
+                      isScheduleProposalType(p.proposalType) &&
+                      (p.expiresAt?.getTime() ?? 0) >= since.getTime(),
+                  )
+                  .sort((a, b) => (b.expiresAt?.getTime() ?? 0) - (a.expiresAt?.getTime() ?? 0))
+                  .slice(0, EXPIRED_INBOX_LIMIT),
+              ),
+        ]);
+        const inbox = buildInboxPayload([...ready, ...drafts], 100);
+        const expired = expiredRows.map((p) => ({
+          id: p.id,
+          proposalType: p.proposalType,
+          summary: p.summary,
+          status: p.status,
+          expiresAt: p.expiresAt?.toISOString(),
+          createdAt: p.createdAt.toISOString(),
+        }));
+        res.json({ ...inbox, expired });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
   );
 
   router.get(
@@ -279,24 +329,55 @@ export function createProposalsRouter(
     })
   );
 
+  // §5.5 — re-propose an expired schedule proposal card. Mints a fresh draft
+  // (new 48h clock) carrying the same intent; the expired source is untouched.
+  router.post(
+    '/:id/re-propose',
+    requireAuth,
+    requireTenant,
+    requirePermission('proposals:approve'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const result = await reproposeProposal(
+          proposalRepo,
+          req.auth!.tenantId,
+          req.params.id,
+          req.auth!.userId,
+          req.auth!.role as Role,
+          auditRepo,
+        );
+        res.status(201).json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
   router.put(
     '/:id',
     requireAuth,
     requireTenant,
     requirePermission('proposals:edit'),
-    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const parsed = validate(editProposalBodySchema, req.body);
-      const result = await editProposal(
-        proposalRepo,
-        req.auth!.tenantId,
-        req.params.id,
-        req.auth!.userId,
-        req.auth!.role as Role,
-        parsed.edits,
-        auditRepo,
-      );
-      res.json(result);
-    })
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const parsed = validate(editProposalBodySchema, req.body);
+        const result = await editProposal(
+          proposalRepo,
+          req.auth!.tenantId,
+          req.params.id,
+          req.auth!.userId,
+          req.auth!.role as Role,
+          parsed.edits,
+          auditRepo,
+          correctionRepo,
+        );
+        res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
   );
 
   return router;
