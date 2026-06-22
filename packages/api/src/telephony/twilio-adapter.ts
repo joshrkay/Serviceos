@@ -56,6 +56,7 @@ import type { InvoiceRepository } from '../invoices/invoice';
 import type { DunningConfigRepository } from '../invoices/dunning-config';
 import type { AgreementRepository } from '../agreements/agreement';
 import type { CustomerRepository } from '../customers/customer';
+import { isCustomerDuplicateLoader } from '../customers/dedup';
 import type { EstimateRepository } from '../estimates/estimate';
 import type { DailyDigestRepository } from '../digest/digest-service';
 import type { LookupEventService } from '../lookup-events/lookup-event-service';
@@ -2542,7 +2543,13 @@ export class TwilioGatherAdapter {
     const phoneBlocked = isBlockedCallerId(callerIdRaw);
     const callerIdPhone = phoneBlocked ? undefined : callerIdRaw;
 
-    const handler = new CreateCustomerVoiceTaskHandler();
+    // 4.3 — wire the read-only dedup loader so the proposal card surfaces
+    // "possible duplicate" before a human approves the write.
+    const duplicateLoader =
+      this.deps.customerRepo && isCustomerDuplicateLoader(this.deps.customerRepo)
+        ? this.deps.customerRepo
+        : undefined;
+    const handler = new CreateCustomerVoiceTaskHandler({ duplicateLoader });
     const outcome = await handler.run({
       tenantId: opts.tenantId,
       message: opts.speechResult,

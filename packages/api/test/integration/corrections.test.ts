@@ -16,7 +16,7 @@ import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgCorrectionRepository } from '../../src/proposals/corrections/pg-correction';
 import { computeCorrections } from '../../src/proposals/corrections/correction';
 
-describe('Postgres integration — corrections (migration 207)', () => {
+describe('Postgres integration — corrections (migration 208)', () => {
   let pool: Pool;
   let repo: PgCorrectionRepository;
   let tenant: { tenantId: string; userId: string };

@@ -1,5 +1,5 @@
 /**
- * Story 3.9 — Postgres-backed `corrections` repository (migration 207).
+ * Story 3.9 — Postgres-backed `corrections` repository (migration 208).
  *
  * Tenant-scoped via RLS (tenant_id + FORCE ROW LEVEL SECURITY). All
  * reads/writes go through `withTenant` so the `app.current_tenant_id` GUC

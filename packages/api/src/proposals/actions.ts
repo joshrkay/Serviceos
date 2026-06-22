@@ -1,8 +1,8 @@
-import { Proposal, ProposalRepository, missingFieldsFor, actionClassForProposalType } from './proposal';
+import { Proposal, ProposalRepository, missingFieldsFor, actionClassForProposalType, createProposal, isScheduleProposalType } from './proposal';
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from './lifecycle';
 import { validateProposalPayload } from './contracts';
 import { Role, hasPermission } from '../auth/rbac';
-import { AppError, ForbiddenError, ValidationError, NotFoundError } from '../shared/errors';
+import { AppError, ConflictError, ForbiddenError, ValidationError, NotFoundError } from '../shared/errors';
 import { AppointmentRepository, updateAppointment } from '../appointments/appointment';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { logProposalEvent } from './audit';
@@ -629,4 +629,74 @@ export async function editProposal(
   }
 
   return { proposal: updated, editedFields };
+}
+
+/**
+ * §5.5 Re-propose an expired schedule proposal. Expired is terminal, so the
+ * operator doesn't revive the old card — they mint a fresh draft carrying the
+ * same intent (proposalType + payload + summary + target), which gets a new
+ * 48h expiry from `createProposal`'s schedule default and re-enters the inbox
+ * for approval. Tenant-scoped; the source must be an expired schedule proposal;
+ * audited as `proposal.reproposed` against the new proposal.
+ */
+export async function reproposeProposal(
+  proposalRepo: ProposalRepository,
+  tenantId: string,
+  id: string,
+  actorId: string,
+  actorRole: Role,
+  auditRepo?: AuditRepository,
+): Promise<Proposal> {
+  const source = await proposalRepo.findById(tenantId, id);
+  if (!source) throw new NotFoundError('Proposal', id);
+  if (source.status !== 'expired') {
+    throw new ConflictError(
+      `Only an expired proposal can be re-proposed (current status: '${source.status}')`,
+    );
+  }
+  if (!isScheduleProposalType(source.proposalType)) {
+    // Defensive: only schedule proposals ever carry an expiry, so a
+    // non-schedule expired proposal would be an anomaly — never re-propose it.
+    throw new ValidationError('Only schedule proposals can be re-proposed');
+  }
+
+  const replacement = createProposal({
+    tenantId,
+    proposalType: source.proposalType,
+    // Deep-clone so the new draft's payload doesn't alias the expired source's
+    // (a later edit to one must not mutate the other). Payloads are JSON values
+    // — the same shape that round-trips through the JSONB column — so a
+    // structured clone is faithful.
+    payload: structuredClone(source.payload),
+    summary: source.summary,
+    explanation: source.explanation,
+    targetEntityType: source.targetEntityType,
+    targetEntityId: source.targetEntityId,
+    createdBy: actorId,
+    // Carry the source's unfilled required fields forward so a re-proposed
+    // draft that was incomplete stays gated — approveProposal refuses a draft
+    // with outstanding missingFields, and dropping them here would let the
+    // clone be approved with the same incomplete payload.
+    missingFields: missingFieldsFor(source),
+    // A fresh 48h expiry is applied by createProposal's schedule-type default.
+    // chainId is intentionally NOT carried: a re-proposal is a standalone card
+    // (the original chain's siblings have also expired), so it must not link
+    // back into a dead chain.
+  });
+  const created = await proposalRepo.create(replacement);
+
+  if (auditRepo) {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId,
+        actorRole,
+        eventType: 'proposal.reproposed',
+        entityType: 'proposal',
+        entityId: created.id,
+        metadata: { sourceProposalId: source.id, proposalType: source.proposalType },
+      }),
+    );
+  }
+  return created;
 }

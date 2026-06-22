@@ -135,6 +135,13 @@ export interface EstimateMutationDeps {
 export interface EstimateListOptions {
   status?: EstimateStatus;
   jobId?: string;
+  /**
+   * Restrict to estimates on any of these jobs. Used by the list route to
+   * filter by customer: the route resolves a customerId to the customer's
+   * jobIds (jobs carry customer_id; estimates only carry job_id) and passes
+   * them here. An empty array matches nothing.
+   */
+  jobIds?: string[];
   /** ILIKE search on estimate_number / customer_message. */
   search?: string;
   /** Pagination cap. Default 50, hard-capped server-side at 200. */
@@ -823,6 +830,10 @@ export class InMemoryEstimateRepository implements EstimateRepository {
     let results = Array.from(this.estimates.values()).filter((e) => e.tenantId === tenantId && !e.deletedAt);
     if (options?.status) results = results.filter((e) => e.status === options.status);
     if (options?.jobId) results = results.filter((e) => e.jobId === options.jobId);
+    if (options?.jobIds) {
+      const wanted = new Set(options.jobIds);
+      results = results.filter((e) => wanted.has(e.jobId));
+    }
     if (options?.sentBefore) {
       const cutoff = options.sentBefore.getTime();
       results = results.filter((e) => e.sentAt !== undefined && e.sentAt.getTime() < cutoff);

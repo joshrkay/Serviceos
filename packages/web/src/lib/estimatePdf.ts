@@ -22,6 +22,12 @@ export interface EstimatePrintData {
   lineItems: EstimatePrintLineItem[];
   /** Optional override total in dollars; defaults to sum of line items. */
   totalDollars?: number;
+  /**
+   * Tenant-facing document label (e.g. 'Quote', 'Bid'). Defaults to
+   * 'Estimate'. The canonical entity is unchanged — this only relabels the
+   * printed document so it matches how the tenant talks to customers.
+   */
+  documentLabel?: string;
 }
 
 function escapeHtml(value: string): string {
@@ -44,6 +50,7 @@ function usd(amount: number): string {
  */
 export function printEstimateDocument(data: EstimatePrintData): boolean {
   const total = data.totalDollars ?? data.lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
+  const documentLabel = data.documentLabel?.trim() || 'Estimate';
 
   const rows = data.lineItems
     .map(
@@ -64,7 +71,7 @@ export function printEstimateDocument(data: EstimatePrintData): boolean {
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Estimate ${escapeHtml(data.estimateNumber)}</title>
+  <title>${escapeHtml(documentLabel)} ${escapeHtml(data.estimateNumber)}</title>
   <style>
     * { box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #0f172a; margin: 0; padding: 40px; }
@@ -92,7 +99,7 @@ export function printEstimateDocument(data: EstimatePrintData): boolean {
       ${data.businessContact ? `<div class="muted">${escapeHtml(data.businessContact)}</div>` : ''}
     </div>
     <div class="doc-meta">
-      <div class="label">Estimate</div>
+      <div class="label">${escapeHtml(documentLabel)}</div>
       <div class="num">${escapeHtml(data.estimateNumber)}</div>
       ${data.validUntil ? `<div class="muted">Valid until ${escapeHtml(data.validUntil)}</div>` : ''}
     </div>

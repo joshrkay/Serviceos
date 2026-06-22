@@ -5031,6 +5031,20 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
 
+  // Onboarding email lifecycle (welcome / setup-reminder / trial-ending).
+  //   1. tenants.trial_ends_at — cached mirror of the Stripe subscription's
+  //      trial_end, written by the customer.subscription.* webhook alongside
+  //      subscription_status. The trial-reminder sweep reads it to decide the
+  //      3d/1d/day-of windows without a Stripe round-trip.
+  //   2. lifecycle_emails — the at-most-once ledger for every lifecycle email.
+  //      One row per (tenant, kind); the send path claims a row with
+  //      INSERT … ON CONFLICT DO NOTHING and only sends when it created the row,
+  //      so the welcome event, the sweeps, and webhook retries can never double
+  //      send. Tenant-scoped, so it FORCEs RLS like every other tenant table;
+  //      the cross-tenant sweeps reach it via the same RLS-bypassing pool the
+  //      thank-you/overdue sweeps use, while request-path reads are isolated by
+  //      the null-safe tenant policy. Null-safe USING (missing GUC → no rows)
+  //      mirrors migration 199/203.
   '204_lifecycle_emails_and_trial_ends': `
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMPTZ;
     CREATE TABLE IF NOT EXISTS lifecycle_emails (
@@ -5073,7 +5087,22 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS auth_token_secondary_enc TEXT;
   `,
 
-  '207_create_corrections': `
+  // Epic 5.1 — canonical seven-state job lifecycle. The original CREATE TABLE
+  // (016) constrained jobs.status to five states; this widens the CHECK to the
+  // full canonical set by adding 'dispatched', 'invoiced', and 'closed'. It is a
+  // pure superset of the old set, so every existing row already satisfies it —
+  // no data backfill is needed. The named ADD CONSTRAINT is made re-run-safe by
+  // getMigrationSQL's DROP-CONSTRAINT rewriter (which targets the constraint
+  // name PostgreSQL auto-assigned to the inline CHECK, `jobs_status_check`).
+  // This is the authoritative jobs.status CHECK; status.test.ts pins it against
+  // jobStatusSchema.
+  '207_jobs_status_canonical_lifecycle': `
+    ALTER TABLE jobs
+      ADD CONSTRAINT jobs_status_check
+      CHECK (status IN ('new', 'scheduled', 'dispatched', 'in_progress', 'completed', 'invoiced', 'closed', 'canceled'));
+  `,
+
+  '208_create_corrections': `
     -- Story 3.9 (correction capture) — a RAW, per-field edit log: every field a
     -- user changes on a proposal writes one row (intent + field + before/after).
     -- This is DISTINCT from correction_lessons (migration 185): that table holds
