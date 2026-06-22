@@ -322,6 +322,12 @@ export class OwnerNotificationService {
       }
       if (recipients.length === 0) return;
 
+      await this.send(tenantId, recipients, built);
+    } catch (err) {
+      this.logFailure(tenantId, built, err);
+    }
+  }
+
   /** Send to a resolved recipient set and prune dead tokens. */
   private async send(
     tenantId: string,
