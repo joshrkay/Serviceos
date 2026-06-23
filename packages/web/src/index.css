@@ -7,6 +7,12 @@
    tokens.js). Dark values are derived (the prototype is light-only). */
 :root {
   --font-size: 16px;
+  /* Path A typography: Hanken Grotesk for UI/body, Bricolage Grotesque for
+     display/headings. Loaded in index.html; system fallbacks keep text legible
+     if the webfont is unavailable. */
+  --font-sans: 'Hanken Grotesk', ui-sans-serif, system-ui, -apple-system, 'Segoe UI',
+    Roboto, Helvetica, Arial, sans-serif;
+  --font-display: 'Bricolage Grotesque', var(--font-sans);
   --background: #f6f4ef;
   --foreground: #16202e;
   --card: #ffffff;
@@ -131,10 +137,24 @@
 
   body {
     @apply bg-background text-foreground;
+    font-family: var(--font-sans);
   }
 
   html {
     font-size: var(--font-size);
+  }
+
+  /* Semantic headings render in the display face; component "headings" that use
+     styled spans/divs opt in with the `.font-display` utility below. */
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-display);
+  }
+
+  .font-display {
+    font-family: var(--font-display);
   }
 
   h1 {
