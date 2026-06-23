@@ -15,7 +15,7 @@ import { calcMaterialsTotal, calcEstimateTotalFromLines } from '../../utils/job-
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { useApiClient } from '../../lib/apiClient';
-import { useWorkerTerm } from '../../hooks/useWorkerTerm';
+import { useEntityLabels } from '../../hooks/useEntityLabels';
 import { normalizeJobStatus } from '../../utils/statusNormalize';
 import { apiFetch } from '../../utils/api-fetch';
 import { firstNameFromUser } from '../../utils/greeting';
@@ -942,7 +942,7 @@ function MediaLightbox({ media, index, onIndexChange, onDelete, onClose }: {
 export function JobDetailView({ id }: { id: string }) {
   const navigate = useNavigate();
   const apiFetch = useApiClient();
-  const workerTerm = useWorkerTerm();
+  const workerTerm = useEntityLabels().label('workerTerm');
   const { user } = useUser();
   const ownerLabel = `${firstNameFromUser(user?.fullName, user?.primaryEmailAddress?.emailAddress)} (owner)`;
 
