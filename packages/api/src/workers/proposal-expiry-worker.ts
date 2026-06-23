@@ -8,11 +8,12 @@
  * ready_for_review) whose `expiresAt` has passed, transitions them to
  * 'expired', and emits an audit event.
  *
- * Only schedule proposal cards carry an `expiresAt` (set at creation by
- * `defaultProposalExpiry`), so every other proposal type is invisible to this
- * sweep and persists indefinitely — exactly the §5.5 contract. An expired card
- * is terminal; the operator re-proposes by creating a fresh proposal (the
- * inbox surfaces the expired one as re-proposable).
+ * Only expirable proposals (schedule cards + time-sensitive message proposals)
+ * carry an `expiresAt` (set at creation by `defaultProposalExpiry`), so every
+ * other proposal type is invisible to this sweep and persists indefinitely —
+ * exactly the §5.5 contract. An expired card is terminal; the operator
+ * re-proposes by creating a fresh proposal (the inbox surfaces the expired one
+ * as re-proposable).
  *
  * The sweep cadence is owned by app.ts (a setInterval driver). Tests exercise
  * this function directly with an in-memory repo and a fixed clock.
@@ -27,7 +28,7 @@ export const EXPIRABLE_PROPOSAL_STATUSES: readonly ProposalStatus[] = ['draft', 
 
 /**
  * True when `proposal` is a pending proposal whose 48h window has elapsed as of
- * `asOf`. Proposals with no `expiresAt` (every non-schedule type) never expire,
+ * `asOf`. Proposals with no `expiresAt` (every non-expirable type) never expire,
  * and already-decided proposals (approved/executed/rejected/…) are left alone.
  */
 export function isProposalExpired(proposal: Proposal, asOf: Date): boolean {

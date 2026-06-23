@@ -7,6 +7,10 @@ import {
   Proposal,
   decideInitialStatus,
   actionClassForProposalType,
+  isScheduleProposalType,
+  isMessageProposalType,
+  isExpirableProposalType,
+  MESSAGE_PROPOSAL_TYPES,
 } from '../../src/proposals/proposal';
 import { ConflictError } from '../../src/shared/errors';
 
@@ -675,6 +679,52 @@ describe('§5.5 — schedule proposals carry a 48h expiry at creation', () => {
       expiresAt: explicit,
     });
     expect(p.expiresAt).toEqual(explicit);
+  });
+});
+
+describe('U4 — time-sensitive message proposals carry a 48h expiry at creation', () => {
+  const FORTY_EIGHT_H_MS = 48 * 60 * 60 * 1000;
+
+  it.each([...MESSAGE_PROPOSAL_TYPES])('defaults expiresAt to ~48h for %s', (proposalType) => {
+    const before = Date.now();
+    const p = createProposal({
+      tenantId: 'tenant-1',
+      proposalType,
+      payload: {},
+      summary: 's',
+      createdBy: 'u1',
+    });
+    expect(p.expiresAt).toBeInstanceOf(Date);
+    const delta = p.expiresAt!.getTime() - before;
+    expect(delta).toBeGreaterThanOrEqual(FORTY_EIGHT_H_MS - 5000);
+    expect(delta).toBeLessThanOrEqual(FORTY_EIGHT_H_MS + 5000);
+  });
+
+  it('leaves the persistent comms (send_estimate / send_invoice) unset — they are not time-critical', () => {
+    for (const proposalType of ['send_estimate', 'send_invoice'] as const) {
+      const p = createProposal({
+        tenantId: 'tenant-1',
+        proposalType,
+        payload: {},
+        summary: 's',
+        createdBy: 'u1',
+      });
+      expect(p.expiresAt, `${proposalType} should persist`).toBeUndefined();
+    }
+  });
+
+  it('type predicates: message types are expirable but not schedule types', () => {
+    for (const t of MESSAGE_PROPOSAL_TYPES) {
+      expect(isMessageProposalType(t)).toBe(true);
+      expect(isExpirableProposalType(t)).toBe(true);
+      expect(isScheduleProposalType(t)).toBe(false);
+    }
+    // Schedule types are expirable too, but not message types.
+    expect(isExpirableProposalType('create_appointment')).toBe(true);
+    expect(isMessageProposalType('create_appointment')).toBe(false);
+    // Persistent comms are neither.
+    expect(isExpirableProposalType('send_invoice')).toBe(false);
+    expect(isExpirableProposalType('send_estimate')).toBe(false);
   });
 });
 

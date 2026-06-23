@@ -6,7 +6,7 @@ import { asyncRoute } from '../middleware/async-route';
 import { toErrorResponse } from '../shared/errors';
 import { validate } from '../shared/validation';
 import { Role } from '../auth/rbac';
-import { ProposalRepository, isScheduleProposalType, SCHEDULE_PROPOSAL_TYPES } from '../proposals/proposal';
+import { ProposalRepository, isExpirableProposalType, EXPIRABLE_PROPOSAL_TYPES } from '../proposals/proposal';
 import { AppointmentRepository } from '../appointments/appointment';
 import { AuditRepository } from '../audit/audit';
 import { ProposalFilter } from '../proposals/proposal-contracts';
@@ -180,7 +180,7 @@ export function createProposalsRouter(
           proposalRepo.findExpiredScheduleProposals
             ? proposalRepo.findExpiredScheduleProposals(
                 req.auth!.tenantId,
-                SCHEDULE_PROPOSAL_TYPES,
+                EXPIRABLE_PROPOSAL_TYPES,
                 since,
                 EXPIRED_INBOX_LIMIT,
               )
@@ -188,7 +188,7 @@ export function createProposalsRouter(
                 all
                   .filter(
                     (p) =>
-                      isScheduleProposalType(p.proposalType) &&
+                      isExpirableProposalType(p.proposalType) &&
                       (p.expiresAt?.getTime() ?? 0) >= since.getTime(),
                   )
                   .sort((a, b) => (b.expiresAt?.getTime() ?? 0) - (a.expiresAt?.getTime() ?? 0))

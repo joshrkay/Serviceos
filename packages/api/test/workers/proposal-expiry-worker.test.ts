@@ -73,6 +73,20 @@ describe('runProposalExpirySweep (§5.5)', () => {
     expect((await proposalRepo.findById('t1', p.id))?.status).toBe('expired');
   });
 
+  it('expires a stale message proposal too (U4) and emits an audit event', async () => {
+    // A dunning reminder that sat unapproved past its 48h window — sending it
+    // late is wrong, so the sweep expires it like a schedule card.
+    const p = await seed('send_payment_reminder', {
+      expiresAt: PAST,
+      status: 'ready_for_review',
+    });
+    const res = await runProposalExpirySweep(deps());
+    expect(res.expired).toBe(1);
+    expect((await proposalRepo.findById('t1', p.id))?.status).toBe('expired');
+    const events = await auditRepo.findByEntity('t1', 'proposal', p.id);
+    expect(events.some((e) => e.eventType === 'proposal.expired')).toBe(true);
+  });
+
   it('leaves a schedule proposal whose 48h window is still open', async () => {
     const p = await seed('reschedule_appointment', { expiresAt: FUTURE });
     const res = await runProposalExpirySweep(deps());

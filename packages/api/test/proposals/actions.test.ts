@@ -10,6 +10,7 @@ import {
   rejectProposal,
   editProposal,
   undoProposal,
+  reproposeProposal,
 } from '../../src/proposals/actions';
 import { UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
 import { AppError, ForbiddenError, ValidationError, NotFoundError } from '../../src/shared/errors';
@@ -729,5 +730,48 @@ describe('Track E — chain-set approval', () => {
     expect(result.skipped).toEqual([]);
     expect((await repo.findById(tenantId, customer.id))?.status).toBe('ready_for_review');
     expect((await repo.findById(tenantId, sendEstimate.id))?.status).toBe('draft');
+  });
+});
+
+describe('U4 — reproposeProposal accepts expired message proposals', () => {
+  const tenantId = 't-repropose';
+
+  async function seedExpired(repo: InMemoryProposalRepository, type: Proposal['proposalType']) {
+    const p = createProposal({
+      tenantId,
+      proposalType: type,
+      payload: { customerId: 'c-1' },
+      summary: `${type} reminder`,
+      createdBy: 'worker',
+    } as CreateProposalInput);
+    await repo.create({ ...p, status: 'expired' });
+    return p;
+  }
+
+  it('re-proposes an expired message proposal into a fresh pending draft with a new 48h expiry', async () => {
+    const repo = new InMemoryProposalRepository();
+    const source = await seedExpired(repo, 'send_payment_reminder');
+
+    const before = Date.now();
+    const replacement = await reproposeProposal(repo, tenantId, source.id, 'owner-1', 'owner');
+
+    expect(replacement.id).not.toBe(source.id);
+    expect(replacement.proposalType).toBe('send_payment_reminder');
+    expect(replacement.status).not.toBe('expired'); // fresh, re-enters the inbox
+    // A new 48h window is applied (expirable-type default), not carried stale.
+    const delta = replacement.expiresAt!.getTime() - before;
+    expect(delta).toBeGreaterThanOrEqual(48 * 60 * 60 * 1000 - 5000);
+    expect(delta).toBeLessThanOrEqual(48 * 60 * 60 * 1000 + 5000);
+  });
+
+  it('still refuses to re-propose a non-expirable (persistent) proposal type', async () => {
+    const repo = new InMemoryProposalRepository();
+    // send_invoice is comms but persistent — it should never have expired, and
+    // re-proposing one is an anomaly the guard rejects.
+    const source = await seedExpired(repo, 'send_invoice');
+
+    await expect(
+      reproposeProposal(repo, tenantId, source.id, 'owner-1', 'owner'),
+    ).rejects.toThrow(ValidationError);
   });
 });

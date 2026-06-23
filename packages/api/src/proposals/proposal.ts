@@ -81,11 +81,9 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
  * Every OTHER proposal type persists indefinitely (its `expiresAt` is left
  * unset). This list is the single source of truth for the expiry policy.
  *
- * Note: the product also speaks of "message schedule" proposals, but the live
- * stack has no distinct scheduled-message proposal type — outbound messages
- * (send_estimate/send_invoice/etc.) are comms proposals that intentionally
- * persist until an operator acts. If a scheduled-message type is added later,
- * add it here.
+ * Time-sensitive customer-message proposals share the same 48h expiry — see
+ * MESSAGE_PROPOSAL_TYPES below. The persistent comms (send_estimate /
+ * send_invoice) are business actions, not time-critical, so they stay unset.
  */
 export const SCHEDULE_PROPOSAL_TYPES: readonly ProposalType[] = [
   'create_appointment',
@@ -93,7 +91,7 @@ export const SCHEDULE_PROPOSAL_TYPES: readonly ProposalType[] = [
   'reschedule_appointment',
 ];
 
-/** §5.5 — 48 hours, in milliseconds. */
+/** §5.5 — 48 hours, in milliseconds. Shared by schedule + message expiry. */
 export const SCHEDULE_PROPOSAL_EXPIRY_MS = 48 * 60 * 60 * 1000;
 
 export function isScheduleProposalType(type: ProposalType): boolean {
@@ -101,12 +99,51 @@ export function isScheduleProposalType(type: ProposalType): boolean {
 }
 
 /**
- * §5.5 Default expiry for a newly created proposal: schedule proposals get a
- * 48-hour TTL from `now`; everything else persists (returns undefined). An
- * explicit `expiresAt` supplied by the caller always takes precedence.
+ * U4 — time-sensitive customer-message proposals that expire on the same 48h
+ * TTL as schedule cards. All four are comms-class (never auto-approve, always
+ * created pending) AND have a closing send-window, so a stale-pending one is
+ * wrong to send later: it should expire and be re-proposable, not linger.
+ *   - send_payment_reminder — dunning cadence step (overdue-invoice sweep)
+ *   - notify_delay          — the delay window is appointment-bound
+ *   - send_estimate_nudge   — 48h estimate follow-up; stales fast
+ *   - request_feedback      — the post-job feedback window closes
+ * The persistent comms (send_estimate / send_invoice) are deliberately absent.
+ */
+export const MESSAGE_PROPOSAL_TYPES: readonly ProposalType[] = [
+  'send_payment_reminder',
+  'notify_delay',
+  'send_estimate_nudge',
+  'request_feedback',
+];
+
+export function isMessageProposalType(type: ProposalType): boolean {
+  return MESSAGE_PROPOSAL_TYPES.includes(type);
+}
+
+/**
+ * Proposal types that carry a 48h TTL and are re-proposable once expired:
+ * schedule cards (the slot goes stale) ∪ time-sensitive message proposals (the
+ * send window closes). Every other type persists until an operator acts. This
+ * is the single source of truth the expiry default, the sweep, the re-propose
+ * path, and the expired-inbox query all key off.
+ */
+export const EXPIRABLE_PROPOSAL_TYPES: readonly ProposalType[] = [
+  ...SCHEDULE_PROPOSAL_TYPES,
+  ...MESSAGE_PROPOSAL_TYPES,
+];
+
+export function isExpirableProposalType(type: ProposalType): boolean {
+  return isScheduleProposalType(type) || isMessageProposalType(type);
+}
+
+/**
+ * §5.5 Default expiry for a newly created proposal: expirable proposals
+ * (schedule cards + time-sensitive message proposals) get a 48-hour TTL from
+ * `now`; everything else persists (returns undefined). An explicit `expiresAt`
+ * supplied by the caller always takes precedence.
  */
 export function defaultProposalExpiry(type: ProposalType, now: Date): Date | undefined {
-  return isScheduleProposalType(type)
+  return isExpirableProposalType(type)
     ? new Date(now.getTime() + SCHEDULE_PROPOSAL_EXPIRY_MS)
     : undefined;
 }
