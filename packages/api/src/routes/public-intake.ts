@@ -19,7 +19,7 @@
 import { Request, Router, Response } from 'express';
 import type { Pool } from 'pg';
 import { z } from 'zod';
-import { toErrorResponse } from '../shared/errors';
+import { asyncRoute } from '../middleware/async-route';
 import { LeadRepository } from '../leads/lead';
 import { createLead } from '../leads/lead-service';
 import { AuditRepository } from '../audit/audit';
@@ -90,30 +90,20 @@ export function createPublicIntakeRouter(
 ): Router {
   const router = Router();
 
-  router.post('/:tenantId/leads', async (req: Request, res: Response) => {
-    try {
-      const tenantId = req.params.tenantId;
-      if (!TENANT_UUID.test(tenantId)) {
-        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid tenantId' });
-        return;
-      }
+  router.post('/:tenantId/leads', asyncRoute(async (req: Request, res: Response) => {
+    const tenantId = req.params.tenantId;
+    if (!TENANT_UUID.test(tenantId)) {
+      res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid tenantId' });
+      return;
+    }
 
-      const tenant = await tenantRepo.findById(tenantId);
-      if (!tenant) {
-        // Don't differentiate "tenant doesn't exist" vs other validation
-        // failures to avoid acting as a tenant-existence oracle.
-        res.status(404).json({ error: 'NOT_FOUND', message: 'Intake form not found' });
-        return;
-      }
-
-      const parsed = intakeSchema.parse(req.body ?? {});
-
-      // Honeypot tripped — return 200 so bots think it worked, but never
-      // write the row.
-      if (parsed._company_url && parsed._company_url.trim().length > 0) {
-        res.status(200).json({ ok: true });
-        return;
-      }
+    const tenant = await tenantRepo.findById(tenantId);
+    if (!tenant) {
+      // Don't differentiate "tenant doesn't exist" vs other validation
+      // failures to avoid acting as a tenant-existence oracle.
+      res.status(404).json({ error: 'NOT_FOUND', message: 'Intake form not found' });
+      return;
+    }
 
       const lead = await createLead(
         {
@@ -138,105 +128,125 @@ export function createPublicIntakeRouter(
         leadRepo,
         auditRepo
       );
+    const parsed = intakeSchema.parse(req.body ?? {});
 
-      // Don't echo the full lead back — public callers don't need ids.
-      res.status(201).json({ ok: true, leadId: lead.id });
-    } catch (err) {
-      const { statusCode, body } = toErrorResponse(err);
-      res.status(statusCode).json(body);
+    // Honeypot tripped — return 200 so bots think it worked, but never
+    // write the row.
+    if (parsed._company_url && parsed._company_url.trim().length > 0) {
+      res.status(200).json({ ok: true });
+      return;
     }
-  });
+
+    const lead = await createLead(
+      {
+        tenantId,
+        firstName: parsed.firstName,
+        lastName: parsed.lastName,
+        companyName: undefined,
+        primaryPhone: parsed.primaryPhone,
+        email: parsed.email,
+        source: PUBLIC_INTAKE_SOURCE,
+        sourceDetail: buildSourceDetail(parsed),
+        utmSource: parsed.utmSource,
+        utmMedium: parsed.utmMedium,
+        utmCampaign: parsed.utmCampaign,
+        attribution: parsed.attribution,
+        createdBy: PUBLIC_INTAKE_ACTOR_ID,
+        actorRole: PUBLIC_INTAKE_ACTOR_ROLE,
+      },
+      leadRepo,
+      auditRepo
+    );
+
+    // Don't echo the full lead back — public callers don't need ids.
+    res.status(201).json({ ok: true, leadId: lead.id });
+  }));
 
   // Public tenant info for the intake form header + service-type list.
   // Read-only; same UUID-in-path validation and rate limiting as the POST.
-  router.get('/:tenantId', async (req: Request, res: Response) => {
-    try {
-      const tenantId = req.params.tenantId;
-      if (!TENANT_UUID.test(tenantId)) {
-        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid tenantId' });
-        return;
-      }
-
-      const tenant = await tenantRepo.findById(tenantId);
-      if (!tenant) {
-        res.status(404).json({ error: 'NOT_FOUND', message: 'Intake form not found' });
-        return;
-      }
-
-      const settings = await settingsRepo.findByTenant(tenantId);
-
-      const serviceTypes: { verticalType: string; displayName: string }[] = [];
-      const seenVerticals = new Set<string>();
-      for (const packId of settings?.activeVerticalPacks ?? []) {
-        let pack = await packRegistry.getByPackId(packId);
-        if (!pack && isValidVerticalType(packId)) {
-          const candidates = await packRegistry.findByVertical(packId);
-          pack =
-            candidates
-              .filter((p) => p.status === 'active')
-              .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0] ?? null;
-        }
-        if (pack && !seenVerticals.has(pack.verticalType)) {
-          seenVerticals.add(pack.verticalType);
-          serviceTypes.push({
-            verticalType: pack.verticalType,
-            displayName: pack.displayName,
-          });
-        }
-      }
-
-      let businessPhone = settings?.businessPhone?.trim() || null;
-      if (!businessPhone && pool) {
-        const twilioRow = await pool.query<{ phone: string | null }>(
-          `SELECT provider_data->>'phoneE164' AS phone
-           FROM tenant_integrations
-           WHERE tenant_id = $1 AND provider = 'twilio'
-           LIMIT 1`,
-          [tenantId],
-        );
-        businessPhone = twilioRow.rows[0]?.phone?.trim() || null;
-      }
-
-      let businessHours: unknown = null;
-      if (pool) {
-        const tsRow = await pool.query<{ business_hours: unknown }>(
-          `SELECT business_hours FROM tenant_settings WHERE tenant_id=$1`,
-          [tenantId],
-        );
-        businessHours = tsRow.rows[0]?.business_hours ?? null;
-      }
-
-      let averageRating: number | undefined;
-      let reviewCount: number | undefined;
-      if (pool) {
-        const rev = await pool.query<{ avg: string | null; c: string }>(
-          `SELECT AVG(rating)::float AS avg, COUNT(*)::int AS c
-           FROM google_reviews WHERE tenant_id = $1`,
-          [tenantId],
-        );
-        const count = Number(rev.rows[0]?.c ?? 0);
-        if (count > 0) {
-          reviewCount = count;
-          averageRating = Math.round(Number(rev.rows[0]?.avg ?? 0) * 10) / 10;
-        }
-      }
-
-      res.status(200).json({
-        businessName: settings?.businessName ?? tenant.name,
-        businessPhone,
-        serviceTypes,
-        businessHoursSummary: formatBusinessHoursSummary(
-          businessHours,
-          settings?.timezone,
-        ),
-        intakeTagline: null,
-        ...(averageRating !== undefined ? { averageRating, reviewCount } : {}),
-      });
-    } catch (err) {
-      const { statusCode, body } = toErrorResponse(err);
-      res.status(statusCode).json(body);
+  router.get('/:tenantId', asyncRoute(async (req: Request, res: Response) => {
+    const tenantId = req.params.tenantId;
+    if (!TENANT_UUID.test(tenantId)) {
+      res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid tenantId' });
+      return;
     }
-  });
+
+    const tenant = await tenantRepo.findById(tenantId);
+    if (!tenant) {
+      res.status(404).json({ error: 'NOT_FOUND', message: 'Intake form not found' });
+      return;
+    }
+
+    const settings = await settingsRepo.findByTenant(tenantId);
+
+    const serviceTypes: { verticalType: string; displayName: string }[] = [];
+    const seenVerticals = new Set<string>();
+    for (const packId of settings?.activeVerticalPacks ?? []) {
+      let pack = await packRegistry.getByPackId(packId);
+      if (!pack && isValidVerticalType(packId)) {
+        const candidates = await packRegistry.findByVertical(packId);
+        pack =
+          candidates
+            .filter((p) => p.status === 'active')
+            .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0] ?? null;
+      }
+      if (pack && !seenVerticals.has(pack.verticalType)) {
+        seenVerticals.add(pack.verticalType);
+        serviceTypes.push({
+          verticalType: pack.verticalType,
+          displayName: pack.displayName,
+        });
+      }
+    }
+
+    let businessPhone = settings?.businessPhone?.trim() || null;
+    if (!businessPhone && pool) {
+      const twilioRow = await pool.query<{ phone: string | null }>(
+        `SELECT provider_data->>'phoneE164' AS phone
+         FROM tenant_integrations
+         WHERE tenant_id = $1 AND provider = 'twilio'
+         LIMIT 1`,
+        [tenantId],
+      );
+      businessPhone = twilioRow.rows[0]?.phone?.trim() || null;
+    }
+
+    let businessHours: unknown = null;
+    if (pool) {
+      const tsRow = await pool.query<{ business_hours: unknown }>(
+        `SELECT business_hours FROM tenant_settings WHERE tenant_id=$1`,
+        [tenantId],
+      );
+      businessHours = tsRow.rows[0]?.business_hours ?? null;
+    }
+
+    let averageRating: number | undefined;
+    let reviewCount: number | undefined;
+    if (pool) {
+      const rev = await pool.query<{ avg: string | null; c: string }>(
+        `SELECT AVG(rating)::float AS avg, COUNT(*)::int AS c
+         FROM google_reviews WHERE tenant_id = $1`,
+        [tenantId],
+      );
+      const count = Number(rev.rows[0]?.c ?? 0);
+      if (count > 0) {
+        reviewCount = count;
+        averageRating = Math.round(Number(rev.rows[0]?.avg ?? 0) * 10) / 10;
+      }
+    }
+
+    res.status(200).json({
+      businessName: settings?.businessName ?? tenant.name,
+      businessPhone,
+      serviceTypes,
+      businessHoursSummary: formatBusinessHoursSummary(
+        businessHours,
+        settings?.timezone,
+      ),
+      intakeTagline: null,
+      ...(averageRating !== undefined ? { averageRating, reviewCount } : {}),
+    });
+  }));
 
   return router;
 }

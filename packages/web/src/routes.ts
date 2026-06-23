@@ -1,7 +1,7 @@
 import { createBrowserRouter } from 'react-router';
 import { Shell } from './components/layout/Shell';
 import { RouteErrorElement } from './components/layout/RouteErrorElement';
-import { HomePage } from './components/home/HomePage';
+import { RoleHome } from './components/home/RoleHome';
 import { AssistantPage } from './components/assistant/AssistantPage';
 import { JobsPage } from './components/jobs/JobsPage';
 import { SchedulePage } from './components/schedule/SchedulePage';
@@ -29,6 +29,13 @@ import { LeadCreate } from './pages/leads/LeadCreate';
 import { LoginPage } from './components/auth/LoginPage';
 import { SignupPage } from './components/auth/SignupPage';
 import { ProtectedRoute } from './components/auth/ProtectedRoute';
+import { MarketingLayout } from './components/marketing/MarketingLayout';
+import { FeaturesPage } from './components/marketing/FeaturesPage';
+import { PricingPage } from './components/marketing/PricingPage';
+import { AboutPage } from './components/marketing/AboutPage';
+import { DownloadPage } from './components/marketing/DownloadPage';
+import { PrivacyPage } from './components/marketing/PrivacyPage';
+import { TermsPage } from './components/marketing/TermsPage';
 import { TechnicianDayPage } from './components/technician/TechnicianDayPage';
 import { MaintenanceContractsPage } from './components/contracts/MaintenanceContractsPage';
 import { ContractDetailPage } from './components/contracts/ContractDetailPage';
@@ -134,6 +141,22 @@ export const router = createBrowserRouter([
   { path: '/login',  Component: LoginPage,  ErrorBoundary: RouteErrorElement },
   { path: '/signup', Component: SignupPage, ErrorBoundary: RouteErrorElement },
 
+  // ── Public marketing site (shared header/footer, no auth) ──────────────
+  // Standalone pages the LandingPage (at "/") and footers link to. Public so
+  // they render signed-out and signed-in; "/" itself stays on ProtectedRoute.
+  {
+    Component: MarketingLayout,
+    ErrorBoundary: RouteErrorElement,
+    children: [
+      { path: '/features', Component: FeaturesPage },
+      { path: '/pricing',  Component: PricingPage  },
+      { path: '/about',    Component: AboutPage    },
+      { path: '/download', Component: DownloadPage },
+      { path: '/privacy',  Component: PrivacyPage  },
+      { path: '/terms',    Component: TermsPage    },
+    ],
+  },
+
   // ── Fullscreen flows (no Shell chrome) ─────────────────────────────────
   // §10 onboarding — v2 sidebar shell (the legacy v1 wizard was retired).
   {
@@ -157,7 +180,7 @@ export const router = createBrowserRouter([
       path: '/',
       Component: Shell,
       children: [
-      { index: true,            Component: HomePage        },
+      { index: true,            Component: RoleHome        },
       { path: 'assistant',      Component: AssistantPage   },
       { path: 'jobs',           Component: JobsPage        },
       { path: 'jobs/new',       Component: JobCreate       },

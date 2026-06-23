@@ -38,6 +38,7 @@
  */
 import type { Proposal, ProposalRepository } from '../../proposals/proposal';
 import { actionClassForProposalType } from '../../proposals/proposal';
+import { formatUsdCentsFixed } from '@ai-service-os/shared';
 import {
   approveChainSet,
   type ApproveChainSetResult,
@@ -235,12 +236,7 @@ export interface VoiceApprovalSessionRef {
 
 // ─── Readback (payload-derived, never utterance-derived) ────────────────────
 
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toLocaleString('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
-}
+const formatCents = formatUsdCentsFixed;
 
 function payloadCustomerName(payload: Record<string, unknown>): string | null {
   for (const key of ['customerName', 'displayName', 'name']) {

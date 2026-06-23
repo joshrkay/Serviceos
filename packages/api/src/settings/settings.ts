@@ -8,6 +8,27 @@ import { isValidTimezone } from '../shared/timezone';
  *  settings→ai module dependency. */
 export type Language = 'en' | 'es';
 
+/** Story 10.2 — default reminder cadence: a single reminder 24h before. */
+export const DEFAULT_REMINDER_OFFSETS_HOURS: readonly number[] = [24];
+
+/**
+ * Story 10.2 — sanitize tenant-supplied reminder offsets into a safe,
+ * deterministic list: integer hours in [1, 720], deduped, sorted descending
+ * (soonest-configured reminder fires last), capped at 5. Anything invalid or
+ * empty falls back to the conservative default [24]. Used on both the write
+ * path (before persist) and the read path (defensive), so the worker never
+ * sees garbage.
+ */
+export function normalizeReminderOffsets(input: unknown): number[] {
+  if (!Array.isArray(input)) return [...DEFAULT_REMINDER_OFFSETS_HOURS];
+  const cleaned = input
+    .map((v) => Number(v))
+    .filter((n) => Number.isFinite(n) && n >= 1 && n <= 720)
+    .map((n) => Math.round(n));
+  const unique = Array.from(new Set(cleaned)).sort((a, b) => b - a);
+  return unique.length > 0 ? unique.slice(0, 5) : [...DEFAULT_REMINDER_OFFSETS_HOURS];
+}
+
 /**
  * F8 — per-tenant escalation channel + trigger flags.
  *
@@ -204,6 +225,14 @@ export interface TenantSettings {
    */
   autoSendAppointmentReminders?: boolean;
   /**
+   * Story 10.2 — tenant-configurable reminder cadence. Hours-before-start
+   * at which an appointment reminder fires; e.g. [24, 2] sends a reminder a
+   * day ahead and again two hours out. Normalized (deduped, 1..720h, ≤5
+   * entries, descending). Defaults to [24]. A single entry preserves the
+   * legacy one-shot behavior exactly.
+   */
+  appointmentReminderOffsetsHours?: number[];
+  /**
    * P20-001 — when true, completing a job auto-drafts an invoice (as a
    * proposal the owner approves to send). Default false (opt-in).
    */
@@ -343,6 +372,30 @@ export interface TenantSettings {
    */
   voiceGreeting?: string | null;
   /**
+   * Feature 4 (migration 147) — the chosen ElevenLabs preset voice key
+   * (e.g. 'rachel'/'adam'/'bella'), persisted onto the tenant's Vapi
+   * assistant and mirrored here. Null/undefined = not yet configured (the
+   * default preset applies).
+   */
+  voiceId?: string | null;
+  /**
+   * Feature 4 (migration 147) — the tenant's bound Vapi assistant id, set
+   * during Twilio/Vapi provisioning (workers/provision-twilio.ts) once the
+   * assistant is created. Null/undefined until then. Read-only projection:
+   * written by the provisioning worker + voice-config save via raw SQL, not
+   * the generic settings update path (mirrors the serviceArea* fields).
+   */
+  vapiAssistantId?: string | null;
+  /**
+   * Story 15.2 — Speed-to-lead instant response. When true, a new web/
+   * marketplace lead gets an immediate templated SMS (the "answer before
+   * voicemail" thesis). OFF by default (opt-in) for TCPA/consent safety; the
+   * send still routes through the DNC/consent gate. Migration 205.
+   */
+  speedToLeadEnabled?: boolean;
+  /** Story 15.2 — first-response SMS template ({first_name}/{business_name}); null/undefined → built-in default. */
+  speedToLeadTemplate?: string | null;
+  /**
    * F8 — per-tenant escalation channel + trigger flags. When absent,
    * `resolveEscalationSettings` returns `DEFAULT_ESCALATION_SETTINGS`.
    */
@@ -407,6 +460,13 @@ export interface TenantSettings {
   digestEnabled?: boolean;
   digestTime?: string;
   digestChannel?: DigestChannel;
+  /**
+   * Epic 12.6 — weekly feedback email. Opt-OUT (column defaults true,
+   * migration 204), so pilots receive it unless they turn it off. Optional
+   * on the type so pre-migration rows / legacy fixtures read as "on" via
+   * `?? true`.
+   */
+  weeklyFeedbackEnabled?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -470,6 +530,8 @@ export interface UpdateSettingsInput {
   autoApplyInternalUpdates?: boolean;
   /** Tier 4 — auto-text customers ~2h before scheduled appointments. */
   autoSendAppointmentReminders?: boolean;
+  /** Story 10.2 — reminder cadence (hours-before-start); e.g. [24, 2]. */
+  appointmentReminderOffsetsHours?: number[];
   /** P20-001 — auto-draft an invoice (as a proposal) on job completion. */
   autoInvoiceOnCompletion?: boolean;
   /** Post-job 2hr thank-you SMS. Default true. */
@@ -501,6 +563,10 @@ export interface UpdateSettingsInput {
   voiceAgentName?: string | null;
   /** B1 — custom greeting text; null clears the field. */
   voiceGreeting?: string | null;
+  /** Story 15.2 — enable the speed-to-lead first-response SMS (opt-in). */
+  speedToLeadEnabled?: boolean;
+  /** Story 15.2 — first-response SMS template; null clears (→ built-in default). */
+  speedToLeadTemplate?: string | null;
   /** F8 — per-tenant escalation settings; partial — missing keys fall back to DEFAULT_ESCALATION_SETTINGS. */
   escalationSettings?: Partial<EscalationSettings>;
   /** P4-015 — per-tenant brand voice tone; null clears the field. */
@@ -526,6 +592,8 @@ export interface UpdateSettingsInput {
   digestTime?: string;
   /** RV-063 — 'sms' (owner SMS) or 'none' (store/web only). */
   digestChannel?: DigestChannel;
+  /** Epic 12.6 — opt out of the weekly feedback email (column default true). */
+  weeklyFeedbackEnabled?: boolean;
 }
 
 export interface SettingsRepository {

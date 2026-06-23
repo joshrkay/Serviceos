@@ -321,9 +321,28 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['202_invoices_processing_fee', '3f1dd0227fd3b18342e06e1bda51f60e83b8a8ab5057da78d2b72986e4cd72cf'],
   // Graduate maintenance contracts to a real tenant-scoped table.
   ['203_create_maintenance_contracts', 'f0f77a5ba2060be02849eccd0f75066a43813c2f0004c3fb591a8a5f76ca78a6'],
-  ['204_leads_raw_payload', '57d0335e79323f5631ffa0e70e40cbd9331ba3f913cf20e2e0cfc2ce2fce7bf8'],
-  ['205_leads_sms_consent', 'ff9f0ad23f6a9b3bef655fea1cc30845e9b9659d47e9faac75f26edc02946e78'],
-  ['206_dispatch_entity_lead_auto_response', '1253f337ed352340bcf8ddce5f28571bd4cdf74f780893b295c55fd617d7da97'],
+  // Onboarding email lifecycle (welcome / setup-reminder / trial-ending).
+  ['204_lifecycle_emails_and_trial_ends', '1fc6cc3a631858d987771d9db0c268c355995cfe19effa726018d6dd13445f45'],
+  // Story 15.2 — speed-to-lead first-response opt-in settings (renumbered 204→205 on a main-merge collision).
+  ['205_tenant_settings_speed_to_lead', '571411ab97bf29e4992cf08bb54555d0916e35fd1bc60f5f1c0f783b227bac21'],
+  // Add tenant_integrations.auth_token_{primary,secondary}_enc, never created on
+  // fresh DBs because a duplicate 070 CREATE shadowed the _enc definition (the
+  // column all provisioning/webhook code uses). Additive ALTER, no-op on prod.
+  ['206_tenant_integrations_auth_token_enc_columns', '21416ab18ca77cd08ca4f1d76d2f13f756f586b36fe90f1dd7adb2b9041fff28'],
+  ['207_jobs_status_canonical_lifecycle', '6e4e921973b79047ed517efbb629b80c293cb1586698464551a09324c718bba5'],
+  // Per-user owner-notification opt-outs (U10).
+  ['208_create_notification_preferences', 'df14c6514d98aaaadb7b320f9c3834029057841068c7d03ec707300c1f913048'],
+  // Story 3.9: raw per-field proposal-edit corrections log (intent + field +
+  // before/after), queryable per tenant and per intent; FORCE RLS. Renumbered
+  // 207 -> 208 -> 209 across successive main-merge collisions (SQL unchanged → hash preserved).
+  ['209_create_corrections', '37eac96b01f69d24106801716fbc9e5ed12d9b708e66877bcda4e7f3781e66d9'],
+  // Story 10.5 — tenant-scoped customer message templates (renumbered to clear
+  // migration-number collisions with main on merge; SQL value unchanged).
+  ['210_create_message_templates', 'a38dc2fba90473aec17537126a25c71fbf8461b012531c94ea55c858aa85f71d'],
+  // Story 10.2 — tenant-configurable reminder cadence/offsets (renumbered).
+  ['211_tenant_settings_reminder_offsets', '7043e4a221b59d530abd0a9d74ac8dd1a7f13379eeefb9b1749cc2b98368442a'],
+  // Epic 12.6 — weekly feedback email opt-out (renumbered 204→207→212; body unchanged → hash preserved).
+  ['212_tenant_settings_weekly_feedback', '3e78d143c8b22d97a2db02d551166f3ffaa23e12bb8c15b90dbc79340b6ef70f'],
 ];
 
 function hashMigration(value: string): string {

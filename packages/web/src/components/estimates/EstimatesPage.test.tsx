@@ -7,6 +7,7 @@ import { EstimatesPage } from './EstimatesPage';
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
 vi.mock('../../hooks/useDetailQuery', () => ({ useDetailQuery: vi.fn() }));
 vi.mock('../../hooks/useMutation', () => ({ useMutation: vi.fn() }));
+vi.mock('../../hooks/useEstimateTerm', () => ({ useEstimateTerm: vi.fn(() => 'Estimate') }));
 vi.mock('./NewEstimateFlow', () => ({ NewEstimateFlow: () => null }));
 vi.mock('./ConvertToInvoiceSheet', () => ({ ConvertToInvoiceSheet: () => null }));
 vi.mock('../shared/CameraCapture', () => ({
@@ -16,6 +17,7 @@ vi.mock('../shared/CameraCapture', () => ({
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
+import { useEstimateTerm } from '../../hooks/useEstimateTerm';
 
 // Money lives under nested `totals` to match the API's serialized Estimate
 // entity (GET /api/estimates returns estimate.totals.totalCents, not a flat
@@ -74,6 +76,7 @@ beforeEach(() => {
   vi.mocked(useListQuery).mockReturnValue(defaultListResult);
   vi.mocked(useDetailQuery).mockReturnValue({ data: null, isLoading: false, error: null, refetch: vi.fn() });
   vi.mocked(useMutation).mockReturnValue({ mutate: vi.fn(), isLoading: false, error: null });
+  vi.mocked(useEstimateTerm).mockReturnValue('Estimate');
 });
 
 function renderPage() {
@@ -87,9 +90,10 @@ function renderPage() {
 describe('EstimatesPage', () => {
   it('renders estimate list with customer names', () => {
     renderPage();
-    expect(screen.getByText('Alice Smith')).toBeInTheDocument();
-    expect(screen.getByText('Bob Jones')).toBeInTheDocument();
-    expect(screen.getByText('Carol White')).toBeInTheDocument();
+    // Names also appear in the customer-filter <option>s, so allow >1 match.
+    expect(screen.getAllByText('Alice Smith').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Bob Jones').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Carol White').length).toBeGreaterThan(0);
   });
 
   it('renders estimate numbers', () => {
@@ -170,6 +174,34 @@ describe('EstimatesPage', () => {
     vi.mocked(useListQuery).mockReturnValue({ ...defaultListResult, data: [], total: 0 });
     renderPage();
     expect(screen.getByText('No estimates')).toBeInTheDocument();
+  });
+
+  it('renders the tenant terminology label (Quote) instead of the canonical noun', () => {
+    // 7.4 — tenant's word (Quote/Bid/Estimate) flows into the document & UI.
+    vi.mocked(useEstimateTerm).mockReturnValue('Quote');
+    renderPage();
+    expect(screen.getByRole('heading', { name: 'Quotes' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /New quote/i })).toBeInTheDocument();
+  });
+
+  it('filters the list by customer (7.10)', () => {
+    renderPage();
+    // Assert on estimate numbers (unique to list rows; not in the dropdown).
+    expect(screen.getByText('EST-001')).toBeInTheDocument(); // Alice
+    expect(screen.getByText('EST-002')).toBeInTheDocument(); // Bob
+    expect(screen.getByText('EST-003')).toBeInTheDocument(); // Carol
+    // Select Bob (c2) → only his estimate row remains.
+    fireEvent.change(screen.getByLabelText('Filter by customer'), { target: { value: 'c2' } });
+    expect(screen.getByText('EST-002')).toBeInTheDocument();
+    expect(screen.queryByText('EST-001')).not.toBeInTheDocument();
+    expect(screen.queryByText('EST-003')).not.toBeInTheDocument();
+  });
+
+  it('uses the tenant label in the empty state', () => {
+    vi.mocked(useEstimateTerm).mockReturnValue('Bid');
+    vi.mocked(useListQuery).mockReturnValue({ ...defaultListResult, data: [], total: 0 });
+    renderPage();
+    expect(screen.getByText('No bids')).toBeInTheDocument();
   });
 
   it('uses /api/estimates endpoint', () => {

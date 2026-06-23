@@ -40,6 +40,14 @@ describe('deriveOnboardingStatus', () => {
     expect(r.isComplete).toBe(false);
   });
 
+  it('emits accountCreatedAt only when tenantCreatedAt is set', () => {
+    expect(deriveOnboardingStatus(facts()).accountCreatedAt).toBeUndefined();
+    const created = new Date('2026-06-01T00:00:00.000Z');
+    expect(deriveOnboardingStatus(facts({ tenantCreatedAt: created })).accountCreatedAt).toBe(
+      created.toISOString(),
+    );
+  });
+
   it('identity done: pack becomes current', () => {
     const r = deriveOnboardingStatus(facts({
       identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000 },

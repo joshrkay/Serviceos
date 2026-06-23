@@ -64,4 +64,18 @@ export class PgAuditRepository extends PgBaseRepository implements AuditReposito
       return result.rows.map(mapRow);
     });
   }
+
+  async findRecentByTenant(
+    tenantId: string,
+    opts: { limit?: number } = {},
+  ): Promise<AuditEvent[]> {
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM audit_events WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2`,
+        [tenantId, limit]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
 }

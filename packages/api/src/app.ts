@@ -86,8 +86,16 @@ import {
   notifyNeedsApproval as notifyNeedsApprovalPush_,
 } from './notifications/proposal-push-notifier';
 import { OwnerNotificationService } from './notifications/owner-notification-service';
+import { InMemoryNotificationPreferenceRepository } from './notifications/notification-preferences-service';
+import { PgNotificationPreferenceRepository } from './notifications/pg-notification-preferences-repository';
+import { createNotificationPreferencesRouter } from './routes/notification-preferences';
 import { userIdsWithPermissionResolver } from './notifications/user-targeting';
 import { setOwnerNotifications } from './notifications/owner-notifications-instance';
+import { setOwnerNotificationNameResolvers } from './notifications/owner-notification-name-resolver';
+import {
+  TechnicianAssignmentNotifier,
+  setTechnicianAssignmentNotifier,
+} from './appointments/assignment-notifications';
 import {
   createMeRouter,
   DEFAULT_TENANT_TIMEZONE,
@@ -144,6 +152,13 @@ import { createPublicBookingRouter } from './routes/public-booking';
 import { createReportsRouter } from './routes/reports';
 import { createDigestsRouter } from './routes/digests';
 import { RepoBackedTimeGivenBackReporter } from './reports/time-given-back';
+import { RepoBackedVoiceRoiReporter } from './analytics/voice-roi';
+import { createVoiceRoiRouter } from './analytics/voice-roi-router';
+import { PgJobsBookedReporter } from './analytics/jobs-booked';
+import { createJobsBookedRouter } from './analytics/jobs-booked-router';
+import { RepoBackedActivityFeedReporter } from './analytics/activity-feed';
+import { createActivityFeedRouter } from './analytics/activity-feed-router';
+import { loadTenantBusinessHours } from './telephony/business-hours-loader';
 import { createTimeEntriesRouter } from './routes/time-entries';
 import { InMemoryTimeEntryRepository } from './time-tracking/time-entry';
 import { PgTimeEntryRepository } from './time-tracking/pg-time-entry';
@@ -165,6 +180,8 @@ import { InMemoryTagRepository } from './customers/tag';
 import { PgTagRepository } from './customers/pg-tag';
 import { InMemoryCustomFieldRepository } from './customers/custom-field';
 import { PgCustomFieldRepository } from './customers/pg-custom-field';
+import { InMemoryCustomerMergeRepository } from './customers/merge';
+import { PgCustomerMergeRepository } from './customers/pg-merge';
 import { createCustomerCustomFieldRouter } from './routes/customer-custom-fields';
 import { InMemoryLeadRepository } from './leads/lead';
 import { InMemoryLocationRepository } from './locations/location';
@@ -341,12 +358,18 @@ import { InMemoryDailyDigestRepository, type DailyDigestPayload } from './digest
 import { composeBrandVoiceMessage } from './ai/brand-voice/composer';
 import { runOverdueInvoiceSweep } from './workers/overdue-invoice-worker';
 import { runHfcrWeeklySendSweep } from './workers/hfcr-weekly-send-worker';
+import { runWeeklyFeedbackSweep } from './workers/weekly-feedback-worker';
+import { buildWeeklyFeedbackSnapshot } from './digest/weekly-feedback-builder';
+import { buildSuggestionsPrompt, parseSuggestions } from './digest/weekly-feedback';
 import {
   PgHfcrWeeklySendRepository,
   InMemoryHfcrWeeklySendRepository,
 } from './metrics/hfcr-weekly-send';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
 import { runThankYouSmsSweep } from './workers/thank-you-sms-worker';
+import { createLifecycleEmailWorker } from './workers/lifecycle-email-worker';
+import { runSetupReminderSweep } from './workers/setup-reminder-sweep';
+import { runTrialReminderSweep } from './workers/trial-reminder-sweep';
 import { PgReviewRepository } from './reputation/pg-review';
 import { PgReviewPollStateRepository } from './reputation/poll-state';
 import { PgServiceCreditRepository } from './reputation/pg-service-credit';
@@ -368,6 +391,9 @@ import { createAgreementsRouter } from './routes/agreements';
 import { createMaintenanceContractsRouter } from './routes/maintenance-contracts';
 import { PgMaintenanceContractRepository } from './maintenance-contracts/pg-maintenance-contract';
 import { InMemoryMaintenanceContractRepository } from './maintenance-contracts/maintenance-contract';
+import { createMessageTemplateRouter } from './messaging/message-template-router';
+import { PgMessageTemplateRepository } from './messaging/pg-message-template';
+import { InMemoryMessageTemplateRepository } from './messaging/message-template';
 import {
   InMemoryPortalSessionRepository,
   PortalSessionRepository,
@@ -394,6 +420,9 @@ import {
 import { PgCorrectionLessonRepository } from './learning/corrections/pg-correction-lesson';
 import type { ConfigPorts } from './learning/corrections/lesson-applicator';
 import { recordCorrectionLessonsOnExecution } from './learning/corrections/record-on-execution';
+// Story 3.9 — raw per-field proposal-edit corrections log.
+import { InMemoryCorrectionRepository } from './proposals/corrections/correction';
+import { PgCorrectionRepository } from './proposals/corrections/pg-correction';
 import {
   runRecordingRetentionSweep,
   PgRecordingRetentionRepository,
@@ -506,6 +535,7 @@ import { runAppointmentReminderSweep } from './workers/appointment-reminder-work
 import { runHoldReaperSweep } from './workers/hold-reaper-worker';
 import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
 import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
+import { runProposalExpirySweep } from './workers/proposal-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import {
@@ -840,8 +870,9 @@ export function createApp(): express.Express {
   // handlers, which mutate tenant_dnc_list. Suppression at outbound-send
   // time is layered on top in send-service / appointment-confirmation-notifier.
   const dncRepo = pool ? new PgDncRepository(pool) : new InMemoryDncRepository();
-  registerKeywordHandler(buildStopKeywordHandler({ dncRepo }), { overwrite: true });
-  registerKeywordHandler(buildStartKeywordHandler({ dncRepo }), { overwrite: true });
+  // STOP/START handler registration is deferred until the consent ledger and
+  // customer repos exist (Story 10.6 unifies DNC + consent_events + the
+  // customers.consent_status rollup) — see registration below.
 
   // Resolves per-tenant integration credentials for inbound webhook signature
   // verification. Returns null when no row exists or the integration provider
@@ -896,6 +927,11 @@ export function createApp(): express.Express {
   // U2 (CRM Jobber parity) — customer tags + tenant-defined custom fields.
   const customerTagRepo     = pool ? new PgTagRepository(pool)           : new InMemoryTagRepository();
   const customerCustomFieldRepo = pool ? new PgCustomFieldRepository(pool) : new InMemoryCustomFieldRepository();
+  // Story 4.6 — customer merge. Pg re-parents child rows + archives the loser
+  // in one transaction; the no-DB dev path only archives (no child tables).
+  const customerMergeRepo = pool
+    ? new PgCustomerMergeRepository(pool)
+    : new InMemoryCustomerMergeRepository(customerRepo);
   // N-003 (P2-036) — caller LTV/recency for the negotiation guardrail callback.
   const customerNegotiationContextProvider = pool
     ? new PgCustomerNegotiationContextProvider(pool)
@@ -990,6 +1026,7 @@ export function createApp(): express.Express {
   // setup_intent.succeeded can persist the card — mirrors paymentReceiptNotifier.
   webhookRouterDeps.customerPaymentMethodRepo = customerPaymentMethodRepo;
   const templateRepo       = pool ? new PgEstimateTemplateRepository(pool) : new InMemoryEstimateTemplateRepository();
+  const messageTemplateRepo = pool ? new PgMessageTemplateRepository(pool) : new InMemoryMessageTemplateRepository();
   const bundleRepo         = pool ? new PgServiceBundleRepository(pool)  : new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = pool ? new PgQualityMetricsRepository(pool) : new InMemoryQualityMetricsRepository();
   const voiceRepo          = pool ? new PgVoiceRepository(pool)          : new InMemoryVoiceRepository();
@@ -1132,6 +1169,12 @@ export function createApp(): express.Express {
   const correctionLessonRepo = pool
     ? new PgCorrectionLessonRepository(pool)
     : new InMemoryCorrectionLessonRepository();
+  // Story 3.9 — raw per-field proposal-edit log (intent + field + before/after),
+  // queryable per tenant and per intent; the training signal for prompt/routing
+  // improvement. Distinct from correction_lessons (cascading config above).
+  const correctionRepo = pool
+    ? new PgCorrectionRepository(pool)
+    : new InMemoryCorrectionRepository();
   const correctionConfigPorts: ConfigPorts = {
     async setLaborRateCents(tenantId, cents) {
       await settingsRepo.update(tenantId, { laborRateCentsPerHour: cents });
@@ -1374,6 +1417,29 @@ export function createApp(): express.Express {
   workerRegistry.set(
     imagePostProcessWorker.type,
     imagePostProcessWorker as import('./queues/queue').WorkerHandler<unknown>
+  );
+
+  // ── Onboarding lifecycle emails. The frontend origin backs the CTA links
+  // (/onboarding, /settings) and the support address backs the footer ask;
+  // shared by the welcome worker (below) and the setup/trial sweeps.
+  const lifecycleEmailAppBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
+  const lifecycleEmailSupportEmail =
+    process.env.SUPPORT_EMAIL ?? process.env.SENDGRID_REPLY_TO_EMAIL ?? 'support@rivet.ai';
+  const lifecycleEmailWorker = createLifecycleEmailWorker({
+    delivery: messageDelivery,
+    pool: pool ?? null,
+    settingsRepo,
+    auditRepo,
+    appBaseUrl: lifecycleEmailAppBaseUrl,
+    supportEmail: lifecycleEmailSupportEmail,
+    logger: createLogger({
+      service: 'lifecycle-email-worker',
+      environment: process.env.NODE_ENV || 'development',
+    }),
+  });
+  workerRegistry.set(
+    lifecycleEmailWorker.type,
+    lifecycleEmailWorker as import('./queues/queue').WorkerHandler<unknown>
   );
 
   // ── Auto-delivery worker: sweeps approved proposals past the 5-second
@@ -1754,6 +1820,8 @@ export function createApp(): express.Express {
     queue,
     new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
     delayNoticeStateRepo,
+    undefined, // internalAlertSink — keep the default no-op sink
+    dncRepo, // Story 10.3 — DNC suppression on the SMS delay/en-route path
   );
   const delayNotificationWorker = createDelayNotificationWorker({
     service: delayNotificationService,
@@ -1806,6 +1874,12 @@ export function createApp(): express.Express {
     hfcrWeeklySend: 590014,
     holdReaper: 590015,
     thankYouSms: 590016,
+    setupReminder: 590017,
+    trialReminder: 590018,
+    // §5.5 — schedule proposal cards expire after 48h.
+    proposalExpiry: 590019,
+    // Epic 12.6 — weekly feedback email sweep (590019 taken by proposalExpiry on main).
+    weeklyFeedback: 590020,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -2532,6 +2606,16 @@ export function createApp(): express.Express {
   const consentEventRepo = pool
     ? new PgConsentEventRepository(pool)
     : new InMemoryConsentEventRepository();
+  // Story 10.6 — register STOP/START now that DNC, the consent ledger, and the
+  // customer repo all exist, so an opt-out updates every store at once.
+  registerKeywordHandler(
+    buildStopKeywordHandler({ dncRepo, consentRepo: consentEventRepo, customerRepo, pool }),
+    { overwrite: true },
+  );
+  registerKeywordHandler(
+    buildStartKeywordHandler({ dncRepo, consentRepo: consentEventRepo, customerRepo, pool }),
+    { overwrite: true },
+  );
   const twilioRecordingControl =
     process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
       ? new TwilioRecordingControl(
@@ -3396,10 +3480,23 @@ export function createApp(): express.Express {
     createCustomerRouter(
       customerRepo,
       auditRepo,
-      undefined,
+      // P9-002 / Story 4.9 — wire the unified customer timeline so
+      // GET /api/customers/:id/timeline (consumed by the web
+      // CommunicationTimeline) resolves instead of quietly 404ing.
+      {
+        noteRepo,
+        jobRepo,
+        jobTimelineRepo: timelineRepo,
+        estimateRepo,
+        invoiceRepo,
+        paymentRepo,
+        conversationRepo,
+        appointmentRepo,
+      },
       customerContactRepo,
       customerTagRepo,
-      customerCustomFieldRepo
+      customerCustomFieldRepo,
+      customerMergeRepo
     )
   );
   app.use(
@@ -3627,6 +3724,7 @@ export function createApp(): express.Express {
       { docRevisionRepo: documentRevisionRepo, editDeltaRepo: deltaRepo },
       paymentRepo,
       agreementRepo,
+      templateRepo,
     ),
   );
   app.use(
@@ -3727,6 +3825,29 @@ export function createApp(): express.Express {
       },
     }),
   );
+
+  // Epic 12.5 — Voice ROI headline (inbound / answered / booked / after-hours /
+  // would-have-hit-voicemail). Composes the existing voice-session + proposal
+  // repos with the tenant business-hours loader (after-hours attribution). The
+  // loader is only wired when a pool exists; the in-memory boot path leaves it
+  // undefined, so after-hours fails open (counts as zero) rather than erroring.
+  const voiceRoiReporter = new RepoBackedVoiceRoiReporter(
+    voiceSessionRepo,
+    proposalRepo,
+    pool ? (tenantId: string) => loadTenantBusinessHours(pool, tenantId) : undefined,
+  );
+  app.use('/api/analytics/voice-roi', createVoiceRoiRouter({ voiceRoiReporter }));
+
+  // Epic 12.4 — jobs-booked KPI (this month vs last). Pool-backed RLS-scoped
+  // counts; left unwired (→ 503) on the in-memory boot path that has no pool.
+  const jobsBookedReporter = pool ? new PgJobsBookedReporter(pool) : undefined;
+  app.use('/api/analytics/jobs-booked', createJobsBookedRouter({ jobsBookedReporter }));
+
+  // Epic 12.7 — tenant-wide activity feed over the audit log (both the Pg and
+  // in-memory audit repos support findRecentByTenant).
+  const activityFeedReporter = new RepoBackedActivityFeedReporter(auditRepo);
+  app.use('/api/analytics/activity', createActivityFeedRouter({ activityFeedReporter }));
+
   // RV-062 — end-of-day digest web view (SMS deep link target).
   app.use('/api/digests', createDigestsRouter({ digestRepo: dailyDigestRepo }));
   app.use(
@@ -3863,6 +3984,15 @@ export function createApp(): express.Express {
     : new InMemoryDeviceTokenRepository();
   app.use('/api/devices', createDevicesRouter(deviceTokenRepo, auditRepo));
 
+  // U10 — per-user notification preferences (opt-out by category).
+  const notificationPreferenceRepo = pool
+    ? new PgNotificationPreferenceRepository(pool)
+    : new InMemoryNotificationPreferenceRepository();
+  app.use(
+    '/api/notification-preferences',
+    createNotificationPreferencesRouter(notificationPreferenceRepo, auditRepo),
+  );
+
   // U7 — bind the push notifiers into the late-bound slots now that the
   // device-token repo exists.
   const expoPushProvider = new ExpoPushDeliveryProvider(fetch, process.env.EXPO_ACCESS_TOKEN);
@@ -3888,8 +4018,32 @@ export function createApp(): express.Express {
       deviceTokenRepo,
       provider: expoPushProvider,
       resolveUserIds: userIdsWithPermissionResolver(userRepo),
+      // U10 — honor per-user category opt-outs before sending.
+      resolveMutedUserIds: (tenantId, type) =>
+        notificationPreferenceRepo.listMutedUserIds(tenantId, type),
     }),
   );
+  // Render the real customer name in payment/cancellation pushes (best-effort;
+  // falls back to "A customer" on any miss) without threading a resolver
+  // through every recordPayment / cancellation call site.
+  setOwnerNotificationNameResolvers({
+    invoiceCustomerName: async (tid, invoiceId) => {
+      const invoice = await invoiceRepo.findById(tid, invoiceId);
+      if (!invoice?.jobId) return undefined;
+      const job = await jobRepo.findById(tid, invoice.jobId);
+      if (!job?.customerId) return undefined;
+      const customer = await customerRepo.findById(tid, job.customerId);
+      return customer?.displayName;
+    },
+    appointmentCustomerName: async (tid, appointmentId) => {
+      const appointment = await appointmentRepo.findById(tid, appointmentId);
+      if (!appointment?.jobId) return undefined;
+      const job = await jobRepo.findById(tid, appointment.jobId);
+      if (!job?.customerId) return undefined;
+      const customer = await customerRepo.findById(tid, job.customerId);
+      return customer?.displayName;
+    },
+  });
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use(
     '/api/conversations',
@@ -3939,6 +4093,7 @@ export function createApp(): express.Express {
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
   app.use('/api/vertical-training-assets', createVerticalTrainingAssetsRouter(trainingAssetService));
   app.use('/api/templates', createTemplateRouter(templateRepo, auditRepo));
+  app.use('/api/message-templates', createMessageTemplateRouter(messageTemplateRepo, settingsRepo, auditRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo, auditRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
 
@@ -4019,6 +4174,10 @@ export function createApp(): express.Express {
       // shim with the voice-action-router so the same vertical context
       // reaches both text and voice classification paths.
       verticalPromptResolver: operatorVerticalResolverShim,
+      // Story 3.11 — persist each chat turn so the running conversation
+      // survives reload and is searchable.
+      conversationRepo,
+      auditRepo,
     }),
   );
   // D2-1c — audit-log proposal approve / reject / edit / undo.
@@ -4035,6 +4194,9 @@ export function createApp(): express.Express {
       correctionLessonRepo
         ? { lessonRepo: correctionLessonRepo, ports: correctionConfigPorts }
         : undefined,
+      // Story 3.9 — editing a proposal logs each changed field to the
+      // corrections training table (intent + field + before/after).
+      correctionRepo,
     ),
   );
   if (pool) {
@@ -4469,6 +4631,81 @@ export function createApp(): express.Express {
     );
   }
 
+  // Epic 12.6 — weekly feedback email. One advisor email per tenant per
+  // completed week (performance snapshot + wins/misses/actions), idempotent
+  // via a `weekly_feedback_email` audit event. Daily tick for restart-safety
+  // (like the HFCR weekly sweep). Needs email delivery + a pool; suggestions
+  // go through the LLM gateway only when a real provider is configured (the
+  // mock gateway must not produce owner-facing text), else deterministic.
+  if (messageDelivery && pool) {
+    const weeklyFeedbackPool = pool;
+    const weeklyFeedbackDelivery = messageDelivery;
+    const weeklyFeedbackLogger = createLogger({
+      service: 'weekly-feedback-worker',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const runWeeklyFeedback = () => {
+        void runAsLeader(SWEEP_LOCK.weeklyFeedback, async () => {
+          await runWeeklyFeedbackSweep({
+            auditRepo,
+            buildSnapshot: (tenantId, weekStart, weekEnd) =>
+              buildWeeklyFeedbackSnapshot(weeklyFeedbackPool, tenantId, weekStart, weekEnd),
+            resolveOwnerEmail: async (tenantId) => {
+              const r = await weeklyFeedbackPool.query(
+                'SELECT owner_email FROM tenants WHERE id = $1',
+                [tenantId],
+              );
+              return (r.rows[0]?.owner_email as string | undefined) ?? null;
+            },
+            isFeedbackEnabled: async (tenantId) => {
+              const s = await settingsRepo.findByTenant(tenantId);
+              return s?.weeklyFeedbackEnabled !== false;
+            },
+            resolveBusinessName: async (tenantId) => {
+              const s = await settingsRepo.findByTenant(tenantId);
+              return s?.businessName ?? null;
+            },
+            sendEmail: (args) =>
+              weeklyFeedbackDelivery.sendEmail({
+                to: args.to,
+                subject: args.subject,
+                text: args.text,
+                html: args.html,
+              }),
+            listTenantIds: async () => {
+              const r = await weeklyFeedbackPool.query('SELECT id FROM tenants');
+              return r.rows.map((row: { id: string }) => row.id);
+            },
+            logger: weeklyFeedbackLogger,
+            ...(config.AI_PROVIDER_API_KEY
+              ? {
+                  composeSuggestions: async (tenantId, snapshot) => {
+                    const res = await llmGateway.complete({
+                      taskType: 'weekly_feedback_suggestions',
+                      messages: [{ role: 'user', content: buildSuggestionsPrompt(snapshot) }],
+                      responseFormat: 'json',
+                      temperature: 0.4,
+                      maxTokens: 400,
+                      tenantId,
+                    });
+                    return parseSuggestions(res.content);
+                  },
+                }
+              : {}),
+          });
+        }).catch((err) => {
+          weeklyFeedbackLogger.error('Weekly feedback sweep failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+    };
+    // Run once on boot so frequent redeploys don't postpone the weekly send
+    // indefinitely (a pure 24h setInterval never elapses if the process keeps
+    // restarting). The per-week audit gate keeps this to one email per week.
+    runWeeklyFeedback();
+    registerInterval(setInterval(runWeeklyFeedback, 24 * 60 * 60_000));
+  }
+
   // F17 — push paid invoices + customers to QuickBooks every 5 minutes.
   if (qboConfig) {
     const accountingSyncLogger = createLogger({
@@ -4609,6 +4846,34 @@ export function createApp(): express.Express {
     });
   }, 60 * 60_000));
 
+  // §5.5 Proposal-expiry worker — transitions schedule proposal cards
+  // (create_appointment / create_booking / reschedule_appointment) past their
+  // 48h `expiresAt` to 'expired' so stale bookings don't linger in the inbox.
+  // Every other proposal type carries no expiry and is untouched. Hourly; no
+  // SendService dependency (it only changes status).
+  const proposalExpiryLogger = createLogger({
+    service: 'proposal-expiry-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.proposalExpiry, async () => {
+      await runProposalExpirySweep({
+        proposalRepo,
+        auditRepo,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        logger: proposalExpiryLogger,
+      });
+    }).catch((err) => {
+      proposalExpiryLogger.error('Proposal-expiry sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 60 * 60_000));
+
   // P7-026 PR a: Google Business reviews polling. Every 15 minutes
   // we sweep every tenant with an active `google_business`
   // integration and persist new reviews idempotently. One tenant's
@@ -4709,6 +4974,49 @@ export function createApp(): express.Express {
       });
     });
   }, 10 * 60_000));
+
+  // Onboarding lifecycle email sweeps (setup reminder + trial-ending). Same
+  // P0-009 sweep idiom; the pool guard inside each no-ops when running
+  // in-memory, and each send claims the lifecycle_emails ledger so a re-tick
+  // never double-sends.
+  const lifecycleSweepLogger = createLogger({
+    service: 'lifecycle-email-sweep',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.setupReminder, async () => {
+      await runSetupReminderSweep({
+        pool: pool ?? null,
+        settingsRepo,
+        delivery: messageDelivery,
+        auditRepo,
+        appBaseUrl: lifecycleEmailAppBaseUrl,
+        supportEmail: lifecycleEmailSupportEmail,
+        logger: lifecycleSweepLogger,
+      });
+    }).catch((err) => {
+      lifecycleSweepLogger.error('Setup-reminder sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 60 * 60_000));
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.trialReminder, async () => {
+      await runTrialReminderSweep({
+        pool: pool ?? null,
+        settingsRepo,
+        delivery: messageDelivery,
+        auditRepo,
+        appBaseUrl: lifecycleEmailAppBaseUrl,
+        supportEmail: lifecycleEmailSupportEmail,
+        logger: lifecycleSweepLogger,
+      });
+    }).catch((err) => {
+      lifecycleSweepLogger.error('Trial-reminder sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 60 * 60_000));
 
   // U5 — the redundant P5-020 hourly digest worker was removed; the daily
   // digest (RV-063 runDailyDigestSweep, scheduled above on the dailyDigest

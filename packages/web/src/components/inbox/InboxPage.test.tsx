@@ -85,6 +85,37 @@ describe('InboxPage', () => {
     );
   });
 
+  it('§5.5 — marks expired schedule cards and re-proposes one optimistically', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [],
+        summary: { totalCount: 0, criticalCount: 0, highCount: 0, normalCount: 0, lowCount: 0, truncated: false },
+        expired: [
+          { id: 'exp-1', proposalType: 'create_appointment', summary: 'Tuesday 2pm with Jordan', status: 'expired', createdAt: new Date().toISOString() },
+        ],
+      }),
+    );
+    apiFetch.mockResolvedValueOnce(jsonResponse({ id: 'new-1', status: 'draft' }, { status: 201 }));
+
+    render(<InboxPage />);
+    await waitFor(() => screen.getByTestId('expired-section'));
+    expect(screen.getByText('Tuesday 2pm with Jordan')).toBeInTheDocument();
+    // the "Expired" badge marks the card (distinct from the section heading)
+    expect(screen.getByText('Expired')).toBeInTheDocument();
+    // not the empty-state, even though there are no pending rows
+    expect(screen.queryByText(/nothing waiting/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /re-propose/i }));
+
+    await waitFor(() => {
+      expect(screen.queryByText('Tuesday 2pm with Jordan')).not.toBeInTheDocument();
+    });
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/proposals/exp-1/re-propose',
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
   it('renders confidence + pricing-source markers and a one-tap picker for an ambiguous line (U2)', async () => {
     apiFetch.mockResolvedValueOnce(
       jsonResponse({

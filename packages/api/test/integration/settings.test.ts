@@ -45,13 +45,13 @@ describe('Postgres integration — settings', () => {
       expect(found!.timezone).toBe('America/Chicago');
     });
 
-    it('LC-6 — surfaces service_area_zips from the real column (read mapping)', async () => {
+    it('defaults reminder offsets to [24] and normalizes on update (Story 10.2)', async () => {
       const tenant = await createTestTenant(pool);
       const now = new Date();
       await settingsRepo.create({
         id: crypto.randomUUID(),
         tenantId: tenant.tenantId,
-        businessName: 'Zip Co',
+        businessName: 'Cadence Co',
         timezone: 'UTC',
         estimatePrefix: 'EST',
         invoicePrefix: 'INV',
@@ -62,20 +62,18 @@ describe('Postgres integration — settings', () => {
         updatedAt: now,
       });
 
-      // Empty array default surfaces as undefined.
-      const before = await settingsRepo.findByTenant(tenant.tenantId);
-      expect(before!.serviceAreaZips).toBeUndefined();
+      // DB default column value.
+      const created = await settingsRepo.findByTenant(tenant.tenantId);
+      expect(created!.appointmentReminderOffsetsHours).toEqual([24]);
 
-      // service_area_zips is written by the onboarding flow's raw SQL; write it
-      // directly here, then prove the settings read mapping resolves the real
-      // TEXT[] column (not a mocked field).
-      await pool.query(
-        `UPDATE tenant_settings SET service_area_zips = $1 WHERE tenant_id = $2`,
-        [['78701', '78702'], tenant.tenantId],
-      );
+      // Update normalizes: dedupe + clamp + sort descending.
+      const updated = await settingsRepo.update(tenant.tenantId, {
+        appointmentReminderOffsetsHours: [2, 24, 24, 0, 9999],
+      });
+      expect(updated!.appointmentReminderOffsetsHours).toEqual([24, 2]);
 
       const found = await settingsRepo.findByTenant(tenant.tenantId);
-      expect(found!.serviceAreaZips).toEqual(['78701', '78702']);
+      expect(found!.appointmentReminderOffsetsHours).toEqual([24, 2]);
     });
 
     it('updates settings and reflects in findByTenant', async () => {
@@ -115,6 +113,76 @@ describe('Postgres integration — settings', () => {
       const otherTenant = await createTestTenant(pool);
       const found = await settingsRepo.findByTenant(otherTenant.tenantId);
       expect(found).toBeNull();
+    });
+  });
+
+  describe('voice-agent binding columns (migration 147)', () => {
+    it('projects voice_id + vapi_assistant_id onto TenantSettings (real columns)', async () => {
+      const tenant = await createTestTenant(pool);
+      const now = new Date();
+      await settingsRepo.create({
+        id: crypto.randomUUID(),
+        tenantId: tenant.tenantId,
+        businessName: 'Voice Co',
+        timezone: 'America/New_York',
+        estimatePrefix: 'EST',
+        invoicePrefix: 'INV',
+        nextEstimateNumber: 1,
+        nextInvoiceNumber: 1,
+        defaultPaymentTermDays: 30,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      // Unset on a fresh row → undefined (NULL → undefined convention).
+      const fresh = await settingsRepo.findByTenant(tenant.tenantId);
+      expect(fresh!.voiceId).toBeUndefined();
+      expect(fresh!.vapiAssistantId).toBeUndefined();
+
+      // The provisioning / voice-config paths write these via raw SQL. Once
+      // set, findByTenant must surface them — this pins the real column names
+      // through SELECT * + mapRow: a wrong column name would still read as
+      // undefined here even after the UPDATE (the entity-resolver lesson).
+      await pool.query(
+        `UPDATE tenant_settings SET voice_id = $1, vapi_assistant_id = $2 WHERE tenant_id = $3`,
+        ['adam', 'asst_real_123', tenant.tenantId],
+      );
+      const bound = await settingsRepo.findByTenant(tenant.tenantId);
+      expect(bound!.voiceId).toBe('adam');
+      expect(bound!.vapiAssistantId).toBe('asst_real_123');
+    });
+  });
+
+  describe('speed-to-lead settings (migration 205)', () => {
+    it('round-trips speed_to_lead_enabled + template through update/find (real columns)', async () => {
+      const tenant = await createTestTenant(pool);
+      const now = new Date();
+      await settingsRepo.create({
+        id: crypto.randomUUID(),
+        tenantId: tenant.tenantId,
+        businessName: 'Lead Co',
+        timezone: 'America/New_York',
+        estimatePrefix: 'EST',
+        invoicePrefix: 'INV',
+        nextEstimateNumber: 1,
+        nextInvoiceNumber: 1,
+        defaultPaymentTermDays: 30,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      // Opt-in default: OFF, template unset.
+      const fresh = await settingsRepo.findByTenant(tenant.tenantId);
+      expect(fresh!.speedToLeadEnabled).toBe(false);
+      expect(fresh!.speedToLeadTemplate).toBeUndefined();
+
+      await settingsRepo.update(tenant.tenantId, {
+        speedToLeadEnabled: true,
+        speedToLeadTemplate: 'Hi {first_name}, {business_name} here.',
+      });
+      const updated = await settingsRepo.findByTenant(tenant.tenantId);
+      expect(updated!.speedToLeadEnabled).toBe(true);
+      expect(updated!.speedToLeadTemplate).toBe('Hi {first_name}, {business_name} here.');
     });
   });
 });

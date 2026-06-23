@@ -5030,45 +5030,181 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_maintenance_contracts ON maintenance_contracts
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
-
-  // LC-1 — retain the full, untouched inbound payload for every lead. The
-  // unified inbox needs to show exactly what the web form / partner channel
-  // submitted, and downstream attribution can be re-derived without
-  // re-parsing the flattened `source_detail` blob. `attribution` stays the
-  // curated, size-capped marketing bag; `raw_payload` is the verbatim
-  // submission (also size-capped at the Zod layer on the way in). Defaults to
-  // '{}' so existing rows and manual CRM creates converge without a backfill.
-  '204_leads_raw_payload': `
-    ALTER TABLE leads
-      ADD COLUMN IF NOT EXISTS raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb;
+  // Per-user owner-notification opt-outs (U10). Absence of a row = enabled
+  // (opt-out model), so a fresh tenant gets every notification by default and a
+  // row is written only when a user mutes a category. The `app.system_lookup`
+  // escape hatch (same as device_tokens 199) lets the notifier read a user's
+  // mute state at send time, when there is no per-request tenant context.
+  '208_create_notification_preferences': `
+    CREATE TABLE IF NOT EXISTS notification_preferences (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      notification_type TEXT NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, user_id, notification_type)
+    );
+    CREATE INDEX IF NOT EXISTS idx_notification_preferences_tenant_user
+      ON notification_preferences (tenant_id, user_id);
+    CREATE INDEX IF NOT EXISTS idx_notification_preferences_muted
+      ON notification_preferences (tenant_id, notification_type) WHERE enabled = FALSE;
+    ALTER TABLE notification_preferences ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE notification_preferences FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_notification_preferences ON notification_preferences;
+    CREATE POLICY tenant_isolation_notification_preferences ON notification_preferences
+      USING (
+        tenant_id = current_setting('app.current_tenant_id', true)::UUID
+        OR current_setting('app.system_lookup', true) = 'true'
+      );
+  `,
+  // Onboarding email lifecycle (welcome / setup-reminder / trial-ending).
+  //   1. tenants.trial_ends_at — cached mirror of the Stripe subscription's
+  //      trial_end, written by the customer.subscription.* webhook alongside
+  //      subscription_status. The trial-reminder sweep reads it to decide the
+  //      3d/1d/day-of windows without a Stripe round-trip.
+  //   2. lifecycle_emails — the at-most-once ledger for every lifecycle email.
+  //      One row per (tenant, kind); the send path claims a row with
+  //      INSERT … ON CONFLICT DO NOTHING and only sends when it created the row,
+  //      so the welcome event, the sweeps, and webhook retries can never double
+  //      send. Tenant-scoped, so it FORCEs RLS like every other tenant table;
+  //      the cross-tenant sweeps reach it via the same RLS-bypassing pool the
+  //      thank-you/overdue sweeps use, while request-path reads are isolated by
+  //      the null-safe tenant policy. Null-safe USING (missing GUC → no rows)
+  //      mirrors migration 199/203.
+  '204_lifecycle_emails_and_trial_ends': `
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMPTZ;
+    CREATE TABLE IF NOT EXISTS lifecycle_emails (
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      kind TEXT NOT NULL,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (tenant_id, kind)
+    );
+    ALTER TABLE lifecycle_emails ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE lifecycle_emails FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_lifecycle_emails ON lifecycle_emails
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+  `,
+  // Story 15.2 — speed-to-lead first-response. Opt-in (default false) for
+  // TCPA/consent safety; the send still routes through the DNC/consent gate.
+  '205_tenant_settings_speed_to_lead': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS speed_to_lead_enabled BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS speed_to_lead_template TEXT;
   `,
 
-  // LC-3 — explicit SMS consent captured at intake. Speed-to-lead auto-
-  // responses route through the consent/DNC-gated delivery service, which
-  // only sends SMS when the contact has consented. A web-form lead has no
-  // consent unless the form captured it, so persist the form's disclosure
-  // here (default FALSE — never assume consent). Email auto-response is
-  // unaffected (no consent gate on email).
-  '205_leads_sms_consent': `
-    ALTER TABLE leads
-      ADD COLUMN IF NOT EXISTS sms_consent BOOLEAN NOT NULL DEFAULT FALSE;
+  // Reconcile a duplicate-CREATE divergence on tenant_integrations. Two
+  // migration keys both run `CREATE TABLE IF NOT EXISTS tenant_integrations`:
+  // `070_tenant_location_and_integrations` (earlier in source order, so it
+  // wins) defines auth_token_primary_secret_ref / _secondary_secret_ref, while
+  // `070_tenant_integrations` (later, a no-op CREATE) defines the _enc columns
+  // that ALL production code actually uses (provision-twilio worker,
+  // integration-resolver, deprovision, credentials, app.ts). On a fresh
+  // database the _enc columns therefore never get created and any provisioning
+  // / webhook-resolution query fails with `column "auth_token_primary_enc"
+  // does not exist`. Production survived only because its table predates the
+  // duplicate; CI's ephemeral Postgres exposed it. We cannot edit the shipped
+  // 070 migrations (immutability), so add the columns idempotently here — a
+  // no-op where they already exist (mirrors migration 155's credentials fix).
+  '206_tenant_integrations_auth_token_enc_columns': `
+    ALTER TABLE tenant_integrations
+      ADD COLUMN IF NOT EXISTS auth_token_primary_enc TEXT;
+    ALTER TABLE tenant_integrations
+      ADD COLUMN IF NOT EXISTS auth_token_secondary_enc TEXT;
   `,
 
-  // LC-3 — widen the message_dispatches entity_type CHECK so the speed-to-
-  // lead auto-response logs a first-class dispatch row (entity_id = lead.id),
-  // keeping source-attributed comms queryable. Mirrors the prior widenings
-  // (092 / 125 / 164 / 190); carries the full set forward.
-  '206_dispatch_entity_lead_auto_response': `
-    ALTER TABLE message_dispatches
-      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
-    ALTER TABLE message_dispatches
-      ADD CONSTRAINT message_dispatches_entity_type_check
-        CHECK (entity_type IN (
-          'estimate', 'invoice', 'appointment_confirmation',
-          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
-          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
-          'daily_digest', 'conversation_reply', 'lead_auto_response'
-        ));
+  // Epic 5.1 — canonical seven-state job lifecycle. The original CREATE TABLE
+  // (016) constrained jobs.status to five states; this widens the CHECK to the
+  // full canonical set by adding 'dispatched', 'invoiced', and 'closed'. It is a
+  // pure superset of the old set, so every existing row already satisfies it —
+  // no data backfill is needed. The named ADD CONSTRAINT is made re-run-safe by
+  // getMigrationSQL's DROP-CONSTRAINT rewriter (which targets the constraint
+  // name PostgreSQL auto-assigned to the inline CHECK, `jobs_status_check`).
+  // This is the authoritative jobs.status CHECK; status.test.ts pins it against
+  // jobStatusSchema.
+  '207_jobs_status_canonical_lifecycle': `
+    ALTER TABLE jobs
+      ADD CONSTRAINT jobs_status_check
+      CHECK (status IN ('new', 'scheduled', 'dispatched', 'in_progress', 'completed', 'invoiced', 'closed', 'canceled'));
+  `,
+
+  '209_create_corrections': `
+    -- Story 3.9 (correction capture) — a RAW, per-field edit log: every field a
+    -- user changes on a proposal writes one row (intent + field + before/after).
+    -- This is DISTINCT from correction_lessons (migration 185): that table holds
+    -- conservative, cascading config "lessons" (labor rate, SKU price, banned
+    -- phrase, scope) recorded only on succeeded execution and queryable by
+    -- day/source-proposal. This table is the unfiltered training signal that
+    -- feeds prompt/routing improvement, queryable per tenant AND per intent.
+    -- intent = the proposal_type that was corrected (maps to the intent taxonomy).
+    -- before/after are JSONB so any payload value shape round-trips losslessly.
+    -- Tenant-scoped with FORCE RLS like every other tenant table.
+    CREATE TABLE IF NOT EXISTS corrections (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID NOT NULL,
+      intent TEXT NOT NULL,
+      field TEXT NOT NULL,
+      before_value JSONB,
+      after_value JSONB,
+      actor_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_corrections_tenant
+      ON corrections(tenant_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_corrections_intent
+      ON corrections(tenant_id, intent, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_corrections_proposal
+      ON corrections(tenant_id, proposal_id);
+    ALTER TABLE corrections ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE corrections FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_corrections ON corrections
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+  `,
+
+  // Story 10.5 — tenant-scoped customer message templates with `{{variable}}`
+  // placeholders. Distinct from estimate_templates (estimate copy); these are
+  // reusable SMS/email texts shared by the agent draft path and humans.
+  // (Renumbered repeatedly to clear migration-number collisions as main merged.)
+  '210_create_message_templates': `
+    CREATE TABLE IF NOT EXISTS message_templates (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'general'
+        CHECK (category IN ('general', 'appointment', 'estimate', 'invoice', 'followup', 'review')),
+      channel TEXT NOT NULL DEFAULT 'sms'
+        CHECK (channel IN ('sms', 'email')),
+      body TEXT NOT NULL,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_templates_tenant
+      ON message_templates(tenant_id, channel);
+    ALTER TABLE message_templates ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE message_templates FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_message_templates ON message_templates
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+  `,
+
+  // Story 10.2 — tenant-configurable reminder cadence. Hours-before-start at
+  // which an appointment reminder fires (e.g. [24, 2]). Default [24] preserves
+  // the legacy single T-24h reminder exactly. (Renumbered for the same reason.)
+  '211_tenant_settings_reminder_offsets': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS appointment_reminder_offsets_hours JSONB NOT NULL DEFAULT '[24]'::jsonb;
+  `,
+
+  // Epic 12.6 — weekly feedback email opt-out (renumbered 204→207→212 across
+  // successive main-merge collisions; SQL body unchanged → hash preserved).
+  '212_tenant_settings_weekly_feedback': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS weekly_feedback_enabled BOOLEAN NOT NULL DEFAULT true;
   `,
 };
 

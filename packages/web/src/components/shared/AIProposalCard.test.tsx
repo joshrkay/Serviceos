@@ -1,11 +1,19 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, within, fireEvent } from '@testing-library/react';
 import { AIProposalCard } from './AIProposalCard';
 import type { AIProposal, ProposalConfidenceLevel } from '../../data/mock-data';
 
 // sonner's <Toaster> isn't mounted in unit tests — the card imports
 // `toast` at module scope, so stub it to keep the render side-effect-free.
 vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
+
+// The card calls useNavigate (Story 3.11 deep-link). Mock it so renders need
+// no Router wrapper and the navigation target is assertable.
+const navigateMock = vi.fn();
+vi.mock('react-router', async (orig) => {
+  const actual = await (orig() as Promise<typeof import('react-router')>);
+  return { ...actual, useNavigate: () => navigateMock };
+});
 
 function makeProposal(overrides: Partial<AIProposal> = {}): AIProposal {
   return {
@@ -120,5 +128,49 @@ describe('P2-035 (U2) AIProposalCard confidence markers', () => {
       />,
     );
     expect(screen.queryByTestId('pricing-source-badges')).toBeNull();
+  });
+});
+
+describe('Story 3.11 — approved proposal deep-links to the created entity', () => {
+  beforeEach(() => navigateMock.mockReset());
+
+  it.each([
+    ['Invoice', 'inv-1', '/invoices/inv-1'],
+    ['Send', 'inv-9', '/invoices/inv-9'],
+    ['Estimate', 'est-2', '/estimates/est-2'],
+    ['Customer', 'cus-3', '/customers/cus-3'],
+  ] as const)('navigates a %s card to its entity', (type, relatedId, route) => {
+    render(
+      <AIProposalCard
+        proposal={makeProposal({ status: 'Approved', type, relatedId })}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /view/i }));
+    expect(navigateMock).toHaveBeenCalledWith(route);
+  });
+
+  it('shows no View button for a type without a detail route', () => {
+    render(
+      <AIProposalCard
+        proposal={makeProposal({ status: 'Approved', type: 'Schedule', relatedId: 'appt-1' })}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /view/i })).toBeNull();
+  });
+
+  it('shows no View button when relatedId is absent', () => {
+    render(
+      <AIProposalCard proposal={makeProposal({ status: 'Approved', type: 'Invoice' })} />,
+    );
+    expect(screen.queryByRole('button', { name: /view/i })).toBeNull();
+  });
+
+  it('keeps the View tap target ≥44px (min-h-11)', () => {
+    render(
+      <AIProposalCard
+        proposal={makeProposal({ status: 'Approved', type: 'Invoice', relatedId: 'inv-1' })}
+      />,
+    );
+    expect(screen.getByRole('button', { name: /view/i }).className).toContain('min-h-11');
   });
 });

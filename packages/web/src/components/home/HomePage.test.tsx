@@ -10,7 +10,14 @@ vi.mock('./MoneyLoopHomeCard', () => ({
   MoneyLoopHomeCard: () => <div data-testid="money-loop-home-card" />,
 }));
 
+// Story 10.7 — unread replies surfacing. Default to none so existing tests are
+// unaffected; individual tests override the resolved value.
+vi.mock('../../api/conversations', () => ({
+  listInboxThreads: vi.fn().mockResolvedValue([]),
+}));
+
 import { useListQuery } from '../../hooks/useListQuery';
+import { listInboxThreads } from '../../api/conversations';
 
 const today = new Date().toISOString().split('T')[0];
 const pastDate = '2026-01-01';
@@ -127,6 +134,28 @@ describe('HomePage', () => {
     expect(screen.queryByText(/Mike/)).toBeNull();
   });
 
+  it('surfaces an unread customer reply as an attention item (Story 10.7)', async () => {
+    vi.mocked(listInboxThreads).mockResolvedValueOnce([
+      {
+        conversation: {
+          id: 'conv-1',
+          status: 'open',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        lastMessageAt: new Date().toISOString(),
+        lastMessagePreview: 'Is 2pm still good?',
+        lastMessageDirection: 'inbound',
+        needsReply: true,
+        messageCount: 3,
+        customerName: 'Dana Rivera',
+      },
+    ]);
+    renderPage();
+    expect(await screen.findByText('Dana Rivera replied')).toBeInTheDocument();
+    expect(screen.getByText('Is 2pm still good?')).toBeInTheDocument();
+  });
+
   it("renders today's jobs section", () => {
     renderPage();
     expect(screen.getByText("Today's jobs")).toBeInTheDocument();
@@ -173,13 +202,16 @@ describe('HomePage', () => {
     expect(screen.getAllByText('$1,250').length).toBeGreaterThan(0);
   });
 
-  it('renders money loop hub and quick actions', () => {
+  it('renders money loop hub and conversational quick actions', () => {
     renderPage();
     expect(screen.getByTestId('money-loop-home-card')).toBeInTheDocument();
-    expect(screen.getByText('Approval inbox')).toBeInTheDocument();
-    expect(screen.getAllByText('Money summary').length).toBeGreaterThan(0);
+    // Epic 12.8 — quick actions open the conversational flow.
+    expect(screen.getByText('Add customer')).toBeInTheDocument();
+    expect(screen.getByText('Schedule')).toBeInTheDocument();
     expect(screen.getByText('New estimate')).toBeInTheDocument();
     expect(screen.getByText('New invoice')).toBeInTheDocument();
+    const addCustomer = screen.getByText('Add customer').closest('button')!;
+    expect(addCustomer).toBeInTheDocument();
   });
 
   it('queries /api/jobs with today scheduledDate filter', () => {
@@ -238,7 +270,24 @@ describe('HomePage', () => {
       return makeListResult([]) as ReturnType<typeof useListQuery>;
     });
     renderPage();
+    // Epic 12.9 — the empty state points to a first action (no dead end).
     expect(screen.getByText('No jobs scheduled today')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /schedule a job/i })).toBeInTheDocument();
+  });
+
+  it('[12.2] surfaces unassigned work with a path to the dispatch board', () => {
+    // mockJobs j2 (Bob Jones) has no technician → counts as unassigned today.
+    renderPage();
+    const unassigned = screen.getByTestId('home-unassigned');
+    expect(unassigned).toHaveTextContent(/1 unassigned job/i);
+  });
+
+  it('[12.2] passes a live refetch interval to the today queries', () => {
+    renderPage();
+    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith(
+      '/api/jobs',
+      expect.objectContaining({ refetchInterval: expect.any(Number) }),
+    );
   });
 
   // ── P20-004: Error states for authenticated data panels ──────────────────

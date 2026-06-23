@@ -33,6 +33,25 @@ import {
 } from '../../proposals/contracts/create-customer-contract';
 import { assertValidProposalPayload } from '../../proposals/contracts';
 import { getConfidenceLevel } from '../guardrails/confidence';
+import {
+  checkCustomerDuplicatesPg,
+  CustomerDuplicateLoader,
+  DuplicateWarning,
+} from '../../customers/dedup';
+
+/**
+ * Optional dependencies for the create_customer voice handler.
+ */
+export interface CreateCustomerTaskDeps {
+  /**
+   * Read-only duplicate loader. When wired (4.3 / 4.4), the handler runs a
+   * dedup check against existing customers BEFORE the proposal card is
+   * drafted and embeds any matches in `sourceContext.duplicateWarnings` so
+   * the human-approval card can offer "merge" vs "keep both". The query is
+   * read-only — the handler still mutates no state and never auto-executes.
+   */
+  duplicateLoader?: CustomerDuplicateLoader;
+}
 
 /**
  * Voice-call signals the FSM forwards into TaskContext.existingEntities.
@@ -144,6 +163,11 @@ function readEntities(context: TaskContext): CreateCustomerEntities {
 
 export class CreateCustomerVoiceTaskHandler implements TaskHandler {
   readonly taskType: ProposalType = 'create_customer';
+  private readonly duplicateLoader?: CustomerDuplicateLoader;
+
+  constructor(deps: CreateCustomerTaskDeps = {}) {
+    this.duplicateLoader = deps.duplicateLoader;
+  }
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const outcome = await this.run(context);
@@ -244,6 +268,28 @@ export class CreateCustomerVoiceTaskHandler implements TaskHandler {
 
     const correlationId = ents.correlationId ?? context.conversationId;
 
+    // 4.3 / 4.4 — run the duplicate check BEFORE the proposal card is drafted
+    // so the approver sees "possible duplicate — merge or keep both" rather
+    // than discovering it after the write. Read-only and advisory: a match
+    // never blocks the draft (the human decides on the card). Best-effort —
+    // a loader failure must not sink the create flow.
+    let duplicateWarnings: DuplicateWarning[] = [];
+    if (this.duplicateLoader) {
+      try {
+        duplicateWarnings = await checkCustomerDuplicatesPg(
+          {
+            tenantId: context.tenantId,
+            firstName: name,
+            email: ents.email,
+            primaryPhone: phone,
+          },
+          this.duplicateLoader
+        );
+      } catch {
+        duplicateWarnings = [];
+      }
+    }
+
     const sourceContext: Record<string, unknown> = {
       source: 'voice',
       intent: 'create_customer',
@@ -254,6 +300,9 @@ export class CreateCustomerVoiceTaskHandler implements TaskHandler {
       ...(ents.callSid ? { callSid: ents.callSid } : {}),
       ...(ents.existingLeadId ? { existingLeadId: ents.existingLeadId, suggestLeadConversion: true } : {}),
       ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+      ...(duplicateWarnings.length > 0
+        ? { duplicateWarnings, hasPossibleDuplicates: true }
+        : {}),
     };
 
     const summaryEmail = payload.email ? `, ${payload.email}` : '';

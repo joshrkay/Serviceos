@@ -5,7 +5,23 @@ import {
   EscalationSettings,
   SettingsRepository,
   TenantSettings,
+  normalizeReminderOffsets,
 } from './settings';
+
+/**
+ * node-pg returns JSONB already parsed, but tolerate a string form too so a
+ * stringified column (e.g. via some drivers/migrations) still yields an array.
+ */
+function parseJsonbArray(value: unknown): unknown {
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  return value;
+}
 
 function mapRow(row: Record<string, unknown>): TenantSettings {
   const terminologyRaw = row.terminology_preferences as Record<string, unknown> | null;
@@ -50,6 +66,9 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // DEFAULT value.
     autoApplyInternalUpdates: row.auto_apply_internal_updates as boolean | undefined,
     autoSendAppointmentReminders: row.auto_send_appointment_reminders as boolean | undefined,
+    appointmentReminderOffsetsHours: normalizeReminderOffsets(
+      parseJsonbArray(row.appointment_reminder_offsets_hours),
+    ),
     autoInvoiceOnCompletion: row.auto_invoice_on_completion as boolean | undefined,
     // Migration 194 — DEFAULT TRUE at the column level so legacy rows
     // surface as `true` (matches the "built-in, included" framing).
@@ -119,6 +138,16 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // convention as all other nullable optional columns here).
     voiceAgentName: (row.voice_agent_name as string | null) ?? undefined,
     voiceGreeting: (row.voice_greeting as string | null) ?? undefined,
+    // Feature 4 — migration 147. Vapi binding columns. findByTenant uses
+    // SELECT *, so the row carries these; NULL → undefined per this mapper's
+    // convention. Read-only projection (set by the provisioning worker /
+    // voice-config raw SQL, not the update fieldMap below).
+    voiceId: (row.voice_id as string | null) ?? undefined,
+    vapiAssistantId: (row.vapi_assistant_id as string | null) ?? undefined,
+    // Story 15.2 — migration 205. speed_to_lead_enabled is NOT NULL DEFAULT
+    // false so legacy rows read false; template NULL → undefined.
+    speedToLeadEnabled: (row.speed_to_lead_enabled as boolean | null) ?? false,
+    speedToLeadTemplate: (row.speed_to_lead_template as string | null) ?? undefined,
     escalationSettings: (() => {
       const raw = row.escalation_settings as Partial<EscalationSettings> | null | undefined;
       if (!raw || typeof raw !== 'object' || Object.keys(raw).length === 0) {
@@ -163,6 +192,9 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     digestEnabled: (row.digest_enabled as boolean | null) ?? false,
     digestTime: normalizeDigestTime(row.digest_time),
     digestChannel: (row.digest_channel as 'sms' | 'none' | null) ?? 'sms',
+    // Epic 12.6 — migration 204. Opt-out: column defaults true, so a
+    // pre-migration row reads as enabled.
+    weeklyFeedbackEnabled: (row.weekly_feedback_enabled as boolean | null) ?? true,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -338,12 +370,17 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         transferNumber: 'transfer_number',
         // Migration 120 — per-tenant AI model override.
         aiModel: 'ai_model',
+        // Story 15.2 — migration 205.
+        speedToLeadEnabled: 'speed_to_lead_enabled',
+        speedToLeadTemplate: 'speed_to_lead_template',
         // RV-063 — migration 163. digest_time accepts 'HH:MM' (Postgres
         // casts to TIME); digest_channel is CHECK-constrained in the DB
         // and validated at the route boundary.
         digestEnabled: 'digest_enabled',
         digestTime: 'digest_time',
         digestChannel: 'digest_channel',
+        // Epic 12.6 — migration 204.
+        weeklyFeedbackEnabled: 'weekly_feedback_enabled',
         updatedAt: 'updated_at',
       };
 
@@ -361,6 +398,15 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           setClauses.push(`auto_approve_threshold = $${paramIndex}::jsonb`);
           const v = value as Record<string, number> | undefined | null;
           params.push(v && Object.keys(v).length > 0 ? JSON.stringify(v) : '{}');
+          paramIndex++;
+          continue;
+        }
+        // Story 10.2 — appointment_reminder_offsets_hours is JSONB. Normalize
+        // (dedupe/clamp/sort/cap) before persist so the column never holds an
+        // out-of-range or duplicate cadence; a cleared write resets to [24].
+        if (key === 'appointmentReminderOffsetsHours') {
+          setClauses.push(`appointment_reminder_offsets_hours = $${paramIndex}::jsonb`);
+          params.push(JSON.stringify(normalizeReminderOffsets(value)));
           paramIndex++;
           continue;
         }
