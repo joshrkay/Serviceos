@@ -3,6 +3,8 @@ import { Mic, X, Send, Sparkles } from 'lucide-react';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
 import { matchVoiceCommand } from '../../hooks/useVoiceCommands';
+import { useVoiceSuggestions } from '../../hooks/useVoiceSuggestions';
+import { VoiceSuggestionsStrip } from './VoiceSuggestionsStrip';
 import { useTTS } from '../../hooks/useTTS';
 
 type BarPhase = 'idle' | 'listening' | 'transcribing' | 'transcript' | 'sending';
@@ -131,6 +133,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   const streamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const { speak } = useTTS({ rate: 1.05 });
+  const suggestions = useVoiceSuggestions();
 
   // Expose imperative handle so parent (Shell) can trigger via keyboard shortcut
   useImperativeHandle(ref, () => ({
@@ -287,6 +290,15 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
     stopStream();
   }, [stopStream]);
 
+  // A tapped "you can say…" suggestion pre-fills the transcript (review-then-send),
+  // reusing the exact dispatch path a spoken transcript takes.
+  function handlePickSuggestion(text: string) {
+    setError(null);
+    setCanRetry(false);
+    setTranscript(text);
+    setPhase('transcript');
+  }
+
   function handleSend() {
     if (!transcript.trim()) return;
 
@@ -348,22 +360,25 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
       )}
 
       {phase === 'idle' && (
-        <button
-          onClick={startListening}
-          className={`
-            flex items-center gap-3 w-full text-left transition-all
-            rounded-2xl border border-slate-200 bg-slate-50 px-4
-            hover:border-blue-300 hover:bg-blue-50/40 active:scale-[0.99]
-            group
-            ${isDesktop ? 'py-2.5' : 'py-3'}
-          `}
-        >
-          <span className="flex shrink-0 size-7 items-center justify-center rounded-full bg-blue-600 shadow-sm group-hover:bg-blue-700 transition-colors">
-            <Mic size={14} className="text-white" />
-          </span>
-          <span className="text-sm text-slate-400 flex-1">Ask Rivet AI anything…</span>
-          <span className="text-xs text-slate-300">tap to speak</span>
-        </button>
+        <>
+          <button
+            onClick={startListening}
+            className={`
+              flex items-center gap-3 w-full text-left transition-all
+              rounded-2xl border border-slate-200 bg-slate-50 px-4
+              hover:border-blue-300 hover:bg-blue-50/40 active:scale-[0.99]
+              group
+              ${isDesktop ? 'py-2.5' : 'py-3'}
+            `}
+          >
+            <span className="flex shrink-0 size-7 items-center justify-center rounded-full bg-blue-600 shadow-sm group-hover:bg-blue-700 transition-colors">
+              <Mic size={14} className="text-white" />
+            </span>
+            <span className="text-sm text-slate-400 flex-1">Ask Rivet AI anything…</span>
+            <span className="text-xs text-slate-300">tap to speak</span>
+          </button>
+          <VoiceSuggestionsStrip suggestions={suggestions} onPick={handlePickSuggestion} />
+        </>
       )}
 
       {phase === 'listening' && (
