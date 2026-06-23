@@ -12,6 +12,7 @@ import { useNotificationRouter } from '../src/push/useNotificationRouter';
 import { ErrorBoundary } from '../src/components/ErrorBoundary';
 import { ToastProvider } from '../src/components/Toast';
 import { OfflineBanner } from '../src/components/OfflineBanner';
+import { AppChrome } from '../src/components/AppChrome';
 import { PushStatusProvider } from '../src/push/pushStatusContext';
 
 // Redirect between the auth flow and the app based on Clerk's session state.
@@ -45,7 +46,11 @@ function AuthGate() {
 
   return (
     <PushStatusProvider status={pushStatus}>
-      <Slot />
+      {/* The persistent tab bar + voice overlay live here, around the routed
+          content, and only render once signed in. */}
+      <AppChrome enabled={Boolean(isSignedIn)}>
+        <Slot />
+      </AppChrome>
     </PushStatusProvider>
   );
 }
