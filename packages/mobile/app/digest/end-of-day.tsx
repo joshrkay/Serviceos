@@ -1,12 +1,13 @@
-import { Text } from 'react-native';
+import { DigestBody } from '../../src/components/DigestBody';
 import { ScreenShell } from '../../src/components/ScreenShell';
+import { useDigest } from '../../src/hooks/useDigest';
 
 export default function EndOfDayDigest() {
+  const { data, isLoading, error, refetch } = useDigest('latest');
+
   return (
     <ScreenShell title="End of day review" backLabel="‹ Settings" subtitle="Close-out checklist">
-      <Text className="text-base text-mutedForeground">
-        Review today&apos;s jobs, time entries, and open approvals before you sign off.
-      </Text>
+      <DigestBody data={data} isLoading={isLoading} error={error} refetch={refetch} />
     </ScreenShell>
   );
 }

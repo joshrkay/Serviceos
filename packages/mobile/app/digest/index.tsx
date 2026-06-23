@@ -1,12 +1,13 @@
-import { Text } from 'react-native';
+import { DigestBody } from '../../src/components/DigestBody';
 import { ScreenShell } from '../../src/components/ScreenShell';
+import { useDigest } from '../../src/hooks/useDigest';
 
 export default function WeeklyDigest() {
+  const { data, isLoading, error, refetch } = useDigest('latest');
+
   return (
     <ScreenShell title="Weekly digest" backLabel="‹ Settings" subtitle="Owner summary">
-      <Text className="text-base text-mutedForeground">
-        Your weekly business summary — revenue, jobs booked, and outstanding approvals — will appear here.
-      </Text>
+      <DigestBody data={data} isLoading={isLoading} error={error} refetch={refetch} />
     </ScreenShell>
   );
 }
