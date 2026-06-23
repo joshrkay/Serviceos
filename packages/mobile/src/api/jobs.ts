@@ -35,10 +35,15 @@ export async function clockTimeEntry(
   jobId: string,
   action: 'clock_in' | 'clock_out',
 ): Promise<void> {
-  const res = await client('/api/time-entries', {
+  const path =
+    action === 'clock_in' ? '/api/time-entries/clock-in' : '/api/time-entries/clock-out';
+  const body =
+    action === 'clock_in' ? { jobId, entryType: 'job' as const } : {};
+
+  const res = await client(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jobId, action }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`clockTimeEntry: ${res.status}`);
 }
