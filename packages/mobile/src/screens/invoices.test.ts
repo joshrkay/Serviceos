@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render } from '@testing-library/react';
+import { cleanup, fireEvent, render } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -12,13 +12,14 @@ interface Invoice {
 }
 
 const h = vi.hoisted(() => ({
+  push: vi.fn(),
   data: [] as Invoice[],
   isLoading: false,
   error: null as string | null,
 }));
 
 vi.mock('expo-router', () => ({
-  useRouter: () => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: h.push, back: vi.fn(), replace: vi.fn() }),
 }));
 vi.mock('../hooks/useListQuery', () => ({
   useListQuery: () => ({
@@ -62,5 +63,25 @@ describe('Invoices screen', () => {
   it('shows the empty state when there are no invoices', () => {
     const { getByText } = render(createElement(Invoices));
     expect(getByText('No invoices yet.')).toBeTruthy();
+  });
+
+  it('filters invoices by search query and opens detail rows', () => {
+    h.data = [
+      { id: 'i1', invoiceNumber: 'INV-100', totals: { totalCents: 1000 }, status: 'open' },
+      { id: 'i2', invoiceNumber: 'INV-200', totals: { totalCents: 2000 }, status: 'draft' },
+    ];
+    const { getByPlaceholderText, getByText, queryByText } = render(createElement(Invoices));
+    fireEvent.change(getByPlaceholderText('Search invoices…'), { target: { value: '200' } });
+    expect(queryByText(/INV-100/)).toBeNull();
+    fireEvent.click(getByText(/INV-200/).closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/invoices/i2');
+  });
+
+  it('renders a >=44px new-invoice control', () => {
+    const { getByText } = render(createElement(Invoices));
+    const add = getByText('+ New').closest('button')!;
+    expect(add.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(add);
+    expect(h.push).toHaveBeenCalledWith('/invoices/new');
   });
 });
