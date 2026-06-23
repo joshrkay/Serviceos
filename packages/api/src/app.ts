@@ -1551,6 +1551,13 @@ export function createApp(): express.Express {
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
     : new InMemoryDispatchAnalyticsRepository();
+  // RV-130 / U7 — the SMS-consent ledger is the source of truth for outbound
+  // consent (a STOP revokes even when customers.sms_consent is stale-true).
+  // Built here so the transactional-comms gate AND the STOP/START handlers
+  // below share one instance.
+  const consentEventRepo = pool
+    ? new PgConsentEventRepository(pool)
+    : new InMemoryConsentEventRepository();
   const transactionalComms = messageDelivery
     ? new TransactionalCommsService({
         delivery: messageDelivery,
@@ -1561,6 +1568,10 @@ export function createApp(): express.Express {
         invoiceRepo,
         dispatchRepo,
         dncRepo,
+        // U7 — ledger-authoritative SMS consent + a suppression audit so a
+        // blocked send is observable instead of silently dropped.
+        consentRepo: consentEventRepo,
+        auditRepo,
       })
     : undefined;
   if (transactionalComms) {
@@ -2552,14 +2563,9 @@ export function createApp(): express.Express {
     { overwrite: true },
   );
 
-  // RV-130 — consent ledger + recording control. The ledger appends
-  // implicit recording consent at disclosure and revocations on a
-  // "stop recording" objection; the control pauses the live recording.
-  const consentEventRepo = pool
-    ? new PgConsentEventRepository(pool)
-    : new InMemoryConsentEventRepository();
-  // Story 10.6 — register STOP/START now that DNC, the consent ledger, and the
-  // customer repo all exist, so an opt-out updates every store at once.
+  // Story 10.6 — register STOP/START now that DNC, the consent ledger
+  // (consentEventRepo, built earlier with the comms gate), and the customer
+  // repo all exist, so an opt-out updates every store at once.
   registerKeywordHandler(
     buildStopKeywordHandler({ dncRepo, consentRepo: consentEventRepo, customerRepo, pool }),
     { overwrite: true },

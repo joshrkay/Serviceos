@@ -75,6 +75,22 @@ function piSucceeded(opts: { piId: string; amount: number; methodType?: string }
   };
 }
 
+function piProcessing(opts: { piId: string; amount: number }) {
+  return {
+    id: `evt_${uuidv4()}`,
+    type: 'payment_intent.processing',
+    data: {
+      object: {
+        id: opts.piId,
+        amount: opts.amount,
+        amount_received: 0, // funds not yet cleared
+        metadata: { tenant_id: TENANT, invoice_id: INVOICE_ID },
+        charges: { data: [{ payment_method_details: { type: 'us_bank_account' } }] },
+      },
+    },
+  };
+}
+
 function piFailed(opts: { piId: string; amount: number }) {
   return {
     id: `evt_${uuidv4()}`,
@@ -188,6 +204,55 @@ describe('payment_intent.succeeded — async (ACH/bank) settlement', () => {
     expect(res.status).toBe(200);
     expect(res.body.skipped).toBe(true);
     expect(await paymentRepo.findByInvoice(TENANT, INVOICE_ID)).toHaveLength(0);
+  });
+});
+
+describe('payment_intent.succeeded — ACH settlement fires the customer receipt (U7)', () => {
+  let invoiceRepo: InMemoryInvoiceRepository;
+  let paymentRepo: InMemoryPaymentRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let app: express.Express;
+  let receipts: Array<{ tenantId: string; invoiceId: string; amountCents: number }>;
+
+  beforeEach(async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    paymentRepo = new InMemoryPaymentRepository();
+    auditRepo = new InMemoryAuditRepository();
+    receipts = [];
+    await invoiceRepo.create(makeOpenInvoice());
+    app = buildApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+      paymentReceiptNotifier: {
+        notifyPaymentReceived: async (tenantId: string, invoiceId: string, amountCents: number) => {
+          receipts.push({ tenantId, invoiceId, amountCents });
+        },
+      },
+    });
+  });
+
+  it('sends NO receipt at processing time and exactly one at settlement', async () => {
+    // 1. ACH initiated → processing: an in-flight row, but funds have not
+    //    cleared, so the customer must NOT be told "payment received" yet.
+    const p = await postSigned(app, piProcessing({ piId: 'pi_ach_settle', amount: 10000 }));
+    expect(p.status).toBe(200);
+    expect(receipts).toHaveLength(0);
+
+    // 2. ACH clears → succeeded → settle: the receipt fires now.
+    const s = await postSigned(app, piSucceeded({ piId: 'pi_ach_settle', amount: 10000 }));
+    expect(s.status).toBe(200);
+    expect(s.body.settled).toBe(true);
+    expect(receipts).toEqual([{ tenantId: TENANT, invoiceId: INVOICE_ID, amountCents: 10000 }]);
+  });
+
+  it('does not double-send the receipt on a duplicate succeeded', async () => {
+    await postSigned(app, piProcessing({ piId: 'pi_ach_dup', amount: 10000 }));
+    await postSigned(app, piSucceeded({ piId: 'pi_ach_dup', amount: 10000 }));
+    const dup = await postSigned(app, piSucceeded({ piId: 'pi_ach_dup', amount: 10000 }));
+    expect(dup.body.duplicate).toBe(true);
+    expect(receipts).toHaveLength(1);
   });
 });
 

@@ -1254,6 +1254,27 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.info('Settled in-flight ACH payment via payment_intent.succeeded', {
             tenantId, invoiceId, paymentIntentId: piId, settled: result.settled,
           });
+          // U7 — the customer receipt fires at SETTLEMENT, not at processing.
+          // recordProcessingPayment (payment_intent.processing) intentionally
+          // sends nothing — funds have not cleared — and the card path fires its
+          // receipt via recordPayment. Without this, an ACH customer never gets
+          // a "payment received" confirmation when their debit actually clears.
+          // Best-effort + idempotent: a duplicate succeeded hits the
+          // already-completed short-circuit above and never re-sends.
+          if (result.settled && deps.paymentReceiptNotifier) {
+            try {
+              await deps.paymentReceiptNotifier.notifyPaymentReceived(
+                tenantId,
+                invoiceId,
+                result.payment?.amountCents ?? amountCents,
+              );
+            } catch (notifyErr) {
+              logger.warn('ACH settlement receipt notification failed (best-effort)', {
+                tenantId, invoiceId, paymentIntentId: piId,
+                error: notifyErr instanceof Error ? notifyErr.message : String(notifyErr),
+              });
+            }
+          }
           await webhookRepo.updateStatus(webhookEvent.id, 'processed');
           return res.status(200).json({ received: true, settled: result.settled });
         }

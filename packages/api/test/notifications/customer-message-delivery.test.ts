@@ -11,6 +11,8 @@ import { sendCustomerMessage } from '../../src/notifications/customer-message-de
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
 import { InMemoryDispatchRepository } from '../../src/notifications/dispatch-repository';
 import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
+import { InMemoryConsentEventRepository } from '../../src/compliance/consent-events';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { Customer } from '../../src/customers/customer';
 
 const TENANT = 'tenant-1';
@@ -106,6 +108,86 @@ describe('sendCustomerMessage — SMS consent + DNC gates', () => {
       channels: ['sms'],
     });
     expect(deps.delivery.sentSms).toHaveLength(0);
+  });
+});
+
+describe('sendCustomerMessage — ledger-authoritative SMS consent + suppression audit (U7)', () => {
+  const PHONE = '+15559876543';
+
+  function makeComplianceDeps() {
+    return {
+      delivery: new InMemoryDeliveryProvider(),
+      dispatchRepo: new InMemoryDispatchRepository(),
+      dncRepo: new InMemoryDncRepository(),
+      consentRepo: new InMemoryConsentEventRepository(),
+      auditRepo: new InMemoryAuditRepository(),
+    };
+  }
+
+  function blockAudits(deps: ReturnType<typeof makeComplianceDeps>) {
+    return deps.auditRepo.getAll().filter((e) => e.eventType === 'sms_blocked_by_compliance');
+  }
+
+  it('blocks the send when the ledger shows a revoked SMS consent, even if smsConsent is stale-true', async () => {
+    const deps = makeComplianceDeps();
+    // The customer texted STOP (ledger revoked) but the denormalized boolean
+    // was never updated — the ledger is authoritative.
+    await deps.consentRepo.append({ tenantId: TENANT, phone: PHONE, kind: 'sms', state: 'revoked', source: 'sms' });
+
+    await sendCustomerMessage(deps, { ...baseInput, customer: makeCustomer({ smsConsent: true }), channels: ['sms'] });
+
+    expect(deps.delivery.sentSms).toHaveLength(0);
+    const audits = blockAudits(deps);
+    expect(audits).toHaveLength(1);
+    expect(audits[0].metadata).toMatchObject({ reason: 'consent_revoked', channel: 'sms', customerId: 'cust-1' });
+  });
+
+  it('allows the send when the ledger shows a granted SMS consent, even if smsConsent is stale-false', async () => {
+    const deps = makeComplianceDeps();
+    await deps.consentRepo.append({ tenantId: TENANT, phone: PHONE, kind: 'sms', state: 'granted', source: 'sms' });
+
+    await sendCustomerMessage(deps, { ...baseInput, customer: makeCustomer({ smsConsent: false }), channels: ['sms'] });
+
+    expect(deps.delivery.sentSms).toHaveLength(1);
+    expect(blockAudits(deps)).toHaveLength(0);
+  });
+
+  it('uses the latest SMS event — a later STOP overrides an earlier grant', async () => {
+    const deps = makeComplianceDeps();
+    await deps.consentRepo.append({ tenantId: TENANT, phone: PHONE, kind: 'sms', state: 'granted', source: 'sms' });
+    await deps.consentRepo.append({ tenantId: TENANT, phone: PHONE, kind: 'sms', state: 'revoked', source: 'sms' });
+
+    await sendCustomerMessage(deps, { ...baseInput, customer: makeCustomer({ smsConsent: true }), channels: ['sms'] });
+
+    expect(deps.delivery.sentSms).toHaveLength(0);
+    expect(blockAudits(deps)[0].metadata).toMatchObject({ reason: 'consent_revoked' });
+  });
+
+  it('falls back to the boolean when the ledger has no SMS event (a recording grant is not text consent)', async () => {
+    const deps = makeComplianceDeps();
+    await deps.consentRepo.append({ tenantId: TENANT, phone: PHONE, kind: 'recording', state: 'granted', source: 'voice' });
+
+    await sendCustomerMessage(deps, { ...baseInput, customer: makeCustomer({ smsConsent: true }), channels: ['sms'] });
+
+    expect(deps.delivery.sentSms).toHaveLength(1);
+  });
+
+  it('emits a no_consent audit when the boolean is false and the ledger is silent', async () => {
+    const deps = makeComplianceDeps();
+    await sendCustomerMessage(deps, { ...baseInput, customer: makeCustomer({ smsConsent: false }), channels: ['sms'] });
+
+    expect(deps.delivery.sentSms).toHaveLength(0);
+    expect(blockAudits(deps)[0].metadata).toMatchObject({ reason: 'no_consent' });
+  });
+
+  it('emits a dnc audit when an otherwise-consented customer is on the DNC list', async () => {
+    const deps = makeComplianceDeps();
+    await deps.dncRepo.addToDnc(TENANT, normalizePhone(PHONE), 'test');
+
+    await sendCustomerMessage(deps, { ...baseInput, customer: makeCustomer({ smsConsent: true }), channels: ['sms'] });
+
+    expect(deps.delivery.sentSms).toHaveLength(0);
+    expect(blockAudits(deps)[0].metadata).toMatchObject({ reason: 'dnc' });
   });
 });
 
