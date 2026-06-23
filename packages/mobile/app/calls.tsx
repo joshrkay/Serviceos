@@ -1,20 +1,30 @@
 import { useRouter } from 'expo-router';
 import { EntityList } from '../src/components/EntityList';
-import { useListQuery } from '../src/hooks/useListQuery';
+import { useInteractionsList } from '../src/hooks/useInteractionsList';
 import { formatShortDate } from '../src/lib/format';
+import type { InteractionSummary } from '../src/api/interactions';
 
-interface CallLogEntry {
-  id: string;
-  direction?: string;
-  fromNumber?: string;
-  toNumber?: string;
-  startedAt?: string;
-  durationSec?: number;
+function channelLabel(channel: string): string {
+  if (channel === 'voice_inbound') return 'Inbound call';
+  if (channel === 'inapp_voice') return 'In-app voice';
+  return channel;
+}
+
+function rowPrimary(interaction: InteractionSummary): string {
+  return interaction.customer?.displayName ?? channelLabel(interaction.channel);
+}
+
+function rowSecondary(interaction: InteractionSummary): string | undefined {
+  const parts: string[] = [];
+  if (interaction.startedAt) parts.push(formatShortDate(interaction.startedAt));
+  const excerpt = interaction.excerpt ?? interaction.outcome;
+  if (excerpt) parts.push(excerpt);
+  return parts.length > 0 ? parts.join(' · ') : undefined;
 }
 
 export default function Calls() {
   const router = useRouter();
-  const { data, isLoading, error, refetch } = useListQuery<CallLogEntry>('/api/calls');
+  const { data, isLoading, error, refetch } = useInteractionsList();
 
   return (
     <EntityList
@@ -25,8 +35,8 @@ export default function Calls() {
       onRefresh={() => void refetch()}
       keyOf={(c) => c.id}
       renderRow={(c) => ({
-        primary: c.direction ? `${c.direction} · ${c.fromNumber ?? c.toNumber ?? 'Unknown'}` : 'Call',
-        secondary: c.startedAt ? formatShortDate(c.startedAt) : undefined,
+        primary: rowPrimary(c),
+        secondary: rowSecondary(c),
       })}
       onPressRow={(c) => router.push(`/calls/${c.id}`)}
       emptyText="No calls logged yet."
