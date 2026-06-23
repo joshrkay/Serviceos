@@ -6,17 +6,11 @@ import { getInteraction, type InteractionDetail } from '../../src/api/interactio
 import { ErrorState } from '../../src/components/ErrorState';
 import { LabelValueTable } from '../../src/components/LabelValueTable';
 import { ScreenShell } from '../../src/components/ScreenShell';
+import { deriveDurationSeconds, formatDuration, formatShortDate } from '../../src/lib/format';
 import { useApiClient } from '../../src/lib/useApiClient';
 
 function firstParam(value: string | string[] | undefined): string {
   return (Array.isArray(value) ? value[0] : value) ?? '';
-}
-
-function formatDuration(seconds: number | null): string {
-  if (seconds === null) return '—';
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
 function parseTranscriptLine(line: string): { speaker: string; text: string; isAgent: boolean } {
@@ -72,9 +66,14 @@ export default function CallDetail() {
           <LabelValueTable
             rows={[
               { label: 'Customer', value: customerName },
-              { label: 'Duration', value: formatDuration(detail.durationSeconds) },
+              {
+                label: 'Duration',
+                value: formatDuration(
+                  deriveDurationSeconds(detail.durationSeconds, detail.startedAt, detail.endedAt),
+                ),
+              },
               { label: 'Outcome', value: detail.outcome },
-              { label: 'Started', value: detail.startedAt },
+              { label: 'Started', value: formatShortDate(detail.startedAt) },
             ]}
           />
 

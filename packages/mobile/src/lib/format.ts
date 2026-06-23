@@ -38,6 +38,31 @@ export function formatShortDate(
   }).format(d);
 }
 
+/** Seconds → "5m 30s" / "45s", or "—" when unknown. */
+export function formatDuration(seconds: number | null): string {
+  if (seconds === null) return '—';
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+/**
+ * Prefer server-provided duration; otherwise derive from endedAt − startedAt when both
+ * timestamps are present (detail endpoint may omit durationSeconds).
+ */
+export function deriveDurationSeconds(
+  durationSeconds: number | null,
+  startedAt: string | null | undefined,
+  endedAt: string | null | undefined,
+): number | null {
+  if (durationSeconds !== null) return durationSeconds;
+  if (!startedAt || !endedAt) return null;
+  const startMs = new Date(startedAt).getTime();
+  const endMs = new Date(endedAt).getTime();
+  if (Number.isNaN(startMs) || Number.isNaN(endMs) || endMs < startMs) return null;
+  return Math.round((endMs - startMs) / 1000);
+}
+
 /** Long weekday + short date for the dashboard header, e.g. "Saturday, Jun 20". */
 export function formatWeekdayDate(
   value: string | number | Date | null | undefined,

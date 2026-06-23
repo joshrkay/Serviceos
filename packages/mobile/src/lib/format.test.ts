@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { formatMoneyCents, formatMoneyShort, formatShortDate, formatWeekdayDate } from './format';
+import {
+  deriveDurationSeconds,
+  formatDuration,
+  formatMoneyCents,
+  formatMoneyShort,
+  formatShortDate,
+  formatWeekdayDate,
+} from './format';
 
 describe('formatMoneyCents', () => {
   it('renders integer cents as dollars with thousands separators', () => {
@@ -45,5 +52,32 @@ describe('formatShortDate', () => {
     expect(formatShortDate(null)).toBe('');
     expect(formatShortDate(undefined)).toBe('');
     expect(formatShortDate('not-a-date')).toBe('');
+  });
+});
+
+describe('formatDuration', () => {
+  it('renders minutes and seconds or seconds only', () => {
+    expect(formatDuration(null)).toBe('—');
+    expect(formatDuration(45)).toBe('45s');
+    expect(formatDuration(125)).toBe('2m 5s');
+  });
+});
+
+describe('deriveDurationSeconds', () => {
+  it('prefers server-provided durationSeconds', () => {
+    expect(deriveDurationSeconds(90, '2026-06-20T10:00:00Z', '2026-06-20T10:05:00Z')).toBe(90);
+  });
+
+  it('derives from startedAt and endedAt when durationSeconds is null', () => {
+    expect(
+      deriveDurationSeconds(null, '2026-06-20T10:00:00Z', '2026-06-20T10:05:30Z'),
+    ).toBe(330);
+  });
+
+  it('returns null when timestamps are missing or invalid', () => {
+    expect(deriveDurationSeconds(null, '2026-06-20T10:00:00Z', null)).toBeNull();
+    expect(deriveDurationSeconds(null, null, '2026-06-20T10:05:00Z')).toBeNull();
+    expect(deriveDurationSeconds(null, 'bad', '2026-06-20T10:05:00Z')).toBeNull();
+    expect(deriveDurationSeconds(null, '2026-06-20T10:05:00Z', '2026-06-20T10:00:00Z')).toBeNull();
   });
 });
