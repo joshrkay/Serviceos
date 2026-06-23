@@ -10,64 +10,67 @@
 // the nearest hex here (the source OKLch is noted in a comment); hex/rgba
 // values are carried through verbatim. Keep in sync with the web theme.
 
+// Path A brand (design handoff). Warm canvas + brand blue + ink. Light values
+// are the prototype's; dark values are derived (the prototype is light-only) to
+// keep dark mode real and contrast-safe — refine when a dark comp lands.
 /** @type {Record<string, string>} */
 const light = {
-  background: '#ffffff',
-  foreground: '#252525', // oklch(0.145 0 0)
+  background: '#f6f4ef', // warm page canvas
+  foreground: '#16202e', // ink
   card: '#ffffff',
-  cardForeground: '#252525', // oklch(0.145 0 0)
-  popover: '#ffffff', // oklch(1 0 0)
-  popoverForeground: '#252525', // oklch(0.145 0 0)
-  primary: '#030213',
-  primaryForeground: '#ffffff', // oklch(1 0 0)
-  secondary: '#f1f1f4', // oklch(0.95 0.0058 264.53)
-  secondaryForeground: '#030213',
-  muted: '#ececf0',
-  mutedForeground: '#717182',
-  accent: '#e9ebef',
-  accentForeground: '#030213',
-  destructive: '#d4183d',
+  cardForeground: '#16202e',
+  popover: '#ffffff',
+  popoverForeground: '#16202e',
+  primary: '#1f5fd6', // brand blue
+  primaryForeground: '#ffffff',
+  secondary: '#ece8e0', // warm neutral fill (chips, inactive)
+  secondaryForeground: '#28323f',
+  muted: '#efece5',
+  mutedForeground: '#5b6675', // secondary text
+  accent: '#e7eefb', // light brand-blue tint
+  accentForeground: '#1a4fb5',
+  destructive: '#c23b3b',
   destructiveForeground: '#ffffff',
-  border: 'rgba(0, 0, 0, 0.1)',
-  input: '#f3f3f5', // --input-background
-  ring: '#b5b5b5', // oklch(0.708 0 0)
+  border: '#e2ded4', // warm hairline
+  input: '#f0eee7', // input background
+  ring: '#1f5fd6', // focus ring = brand
   chart1: '#e0703a', // oklch(0.646 0.222 41.116)
   chart2: '#2a9d8f', // oklch(0.6 0.118 184.704)
   chart3: '#3a5a78', // oklch(0.398 0.07 227.392)
   chart4: '#e2c044', // oklch(0.828 0.189 84.429)
   chart5: '#e8a838', // oklch(0.769 0.188 70.08)
-  success: '#16a34a',
-  warning: '#d97706',
+  success: '#1f8a5b',
+  warning: '#b5642e',
 };
 
 /** @type {Record<string, string>} */
 const dark = {
-  background: '#252525', // oklch(0.145 0 0)
-  foreground: '#fafafa', // oklch(0.985 0 0)
-  card: '#252525',
-  cardForeground: '#fafafa',
-  popover: '#252525',
-  popoverForeground: '#fafafa',
-  primary: '#fafafa', // oklch(0.985 0 0)
-  primaryForeground: '#333333', // oklch(0.205 0 0)
-  secondary: '#404040', // oklch(0.269 0 0)
-  secondaryForeground: '#fafafa',
-  muted: '#404040',
-  mutedForeground: '#b5b5b5', // oklch(0.708 0 0)
-  accent: '#404040',
-  accentForeground: '#fafafa',
-  destructive: '#7a2d2a', // oklch(0.396 0.141 25.723)
-  destructiveForeground: '#e06a5f', // oklch(0.637 0.237 25.331)
-  border: '#404040',
-  input: '#404040',
-  ring: '#6f6f6f', // oklch(0.439 0 0)
+  background: '#16202e', // ink becomes the dark canvas
+  foreground: '#f4f6f9',
+  card: '#1c2836',
+  cardForeground: '#f4f6f9',
+  popover: '#1c2836',
+  popoverForeground: '#f4f6f9',
+  primary: '#5b8def', // lighter blue for contrast on dark
+  primaryForeground: '#ffffff',
+  secondary: '#243244',
+  secondaryForeground: '#f4f6f9',
+  muted: '#243244',
+  mutedForeground: '#9aa6b4',
+  accent: '#1e3a5f',
+  accentForeground: '#cfe0ff',
+  destructive: '#d14343',
+  destructiveForeground: '#ffffff',
+  border: '#2c3a4c',
+  input: '#243244',
+  ring: '#5b8def',
   chart1: '#5a6fe0',
   chart2: '#3fcaa0',
   chart3: '#e8a838',
   chart4: '#a065e8',
   chart5: '#e85f7a',
-  success: '#22c55e',
-  warning: '#f59e0b',
+  success: '#2fa56f',
+  warning: '#d08a4a',
 };
 
 // --radius: 0.625rem = 10px (lg). sm/md/xl mirror the web `@theme inline`

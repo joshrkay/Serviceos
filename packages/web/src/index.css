@@ -2,67 +2,70 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Path A brand (design handoff): warm canvas + brand blue + ink. Shared token
+   values are kept in sync with the mobile palette (packages/mobile/src/theme/
+   tokens.js). Dark values are derived (the prototype is light-only). */
 :root {
   --font-size: 16px;
-  --background: #ffffff;
-  --foreground: oklch(0.145 0 0);
+  --background: #f6f4ef;
+  --foreground: #16202e;
   --card: #ffffff;
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: #030213;
-  --primary-foreground: oklch(1 0 0);
-  --secondary: oklch(0.95 0.0058 264.53);
-  --secondary-foreground: #030213;
-  --muted: #ececf0;
-  --muted-foreground: #717182;
-  --accent: #e9ebef;
-  --accent-foreground: #030213;
-  --destructive: #d4183d;
+  --card-foreground: #16202e;
+  --popover: #ffffff;
+  --popover-foreground: #16202e;
+  --primary: #1f5fd6;
+  --primary-foreground: #ffffff;
+  --secondary: #ece8e0;
+  --secondary-foreground: #28323f;
+  --muted: #efece5;
+  --muted-foreground: #5b6675;
+  --accent: #e7eefb;
+  --accent-foreground: #1a4fb5;
+  --destructive: #c23b3b;
   --destructive-foreground: #ffffff;
-  --border: rgba(0, 0, 0, 0.1);
+  --border: #e2ded4;
   --input: transparent;
-  --input-background: #f3f3f5;
+  --input-background: #f0eee7;
   --switch-background: #cbced4;
   --font-weight-medium: 500;
   --font-weight-normal: 400;
-  --ring: oklch(0.708 0 0);
+  --ring: #1f5fd6;
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
   --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: #030213;
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar: #ffffff;
+  --sidebar-foreground: #16202e;
+  --sidebar-primary: #1f5fd6;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #f1efe9;
+  --sidebar-accent-foreground: #16202e;
+  --sidebar-border: #e2ded4;
+  --sidebar-ring: #1f5fd6;
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.145 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.145 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.985 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.396 0.141 25.723);
-  --destructive-foreground: oklch(0.637 0.237 25.331);
-  --border: oklch(0.269 0 0);
-  --input: oklch(0.269 0 0);
-  --ring: oklch(0.439 0 0);
+  --background: #16202e;
+  --foreground: #f4f6f9;
+  --card: #1c2836;
+  --card-foreground: #f4f6f9;
+  --popover: #1c2836;
+  --popover-foreground: #f4f6f9;
+  --primary: #5b8def;
+  --primary-foreground: #ffffff;
+  --secondary: #243244;
+  --secondary-foreground: #f4f6f9;
+  --muted: #243244;
+  --muted-foreground: #9aa6b4;
+  --accent: #1e3a5f;
+  --accent-foreground: #cfe0ff;
+  --destructive: #d14343;
+  --destructive-foreground: #ffffff;
+  --border: #2c3a4c;
+  --input: #243244;
+  --ring: #5b8def;
   --font-weight-medium: 500;
   --font-weight-normal: 400;
   --chart-1: oklch(0.488 0.243 264.376);
@@ -70,14 +73,14 @@
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(0.269 0 0);
-  --sidebar-ring: oklch(0.439 0 0);
+  --sidebar: #1c2836;
+  --sidebar-foreground: #f4f6f9;
+  --sidebar-primary: #5b8def;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #243244;
+  --sidebar-accent-foreground: #f4f6f9;
+  --sidebar-border: #2c3a4c;
+  --sidebar-ring: #5b8def;
 }
 
 @theme inline {

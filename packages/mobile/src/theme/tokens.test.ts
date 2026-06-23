@@ -29,8 +29,8 @@ describe('mobile design tokens', () => {
     expect(tapTarget).toBe(44);
   });
 
-  it('keeps the brand primary in sync with the web theme (#030213)', () => {
-    expect(light.primary).toBe('#030213');
+  it('keeps the brand primary in sync with the web theme (#1f5fd6)', () => {
+    expect(light.primary).toBe('#1f5fd6');
   });
 
   it('differs between light and dark for the core surfaces (dark mode is real)', () => {
