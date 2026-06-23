@@ -30,6 +30,7 @@ export default function ProposalReviewScreen() {
     useProposalReview(id);
   const [showRejectForm, setShowRejectForm] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
+  const [entityPickLabel, setEntityPickLabel] = useState<string | null>(null);
 
   const entityCandidates =
     proposal?.proposalType === 'voice_clarification'
@@ -98,6 +99,7 @@ export default function ProposalReviewScreen() {
                     description: c.hint,
                   }))}
                   onSelect={(option) => {
+                    setEntityPickLabel(option.label);
                     void reject('entity_selected', option.id);
                   }}
                 />
@@ -125,19 +127,21 @@ export default function ProposalReviewScreen() {
             {/* Review → Approve / Reject */}
             {phase === 'review' || phase === 'approving' || phase === 'rejecting' ? (
               <View className="mt-8 gap-3">
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Approve"
-                  onPress={() => void approve()}
-                  disabled={phase === 'approving' || phase === 'rejecting'}
-                  className="min-h-11 items-center justify-center rounded-md bg-primary px-4 py-3"
-                >
-                  {phase === 'approving' ? (
-                    <ActivityIndicator color="#ffffff" />
-                  ) : (
-                    <Text className="text-base font-semibold text-primaryForeground">Approve</Text>
-                  )}
-                </Pressable>
+                {proposal.proposalType !== 'voice_clarification' ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Approve"
+                    onPress={() => void approve()}
+                    disabled={phase === 'approving' || phase === 'rejecting'}
+                    className="min-h-11 items-center justify-center rounded-md bg-primary px-4 py-3"
+                  >
+                    {phase === 'approving' ? (
+                      <ActivityIndicator color="#ffffff" />
+                    ) : (
+                      <Text className="text-base font-semibold text-primaryForeground">Approve</Text>
+                    )}
+                  </Pressable>
+                ) : null}
 
                 {!showRejectForm ? (
                   <Pressable
@@ -239,12 +243,18 @@ export default function ProposalReviewScreen() {
             {phase === 'undone' ? (
               <View className="mt-8">
                 <Text className="text-base text-foreground">
-                  {proposal.status === 'rejected' ? '✓ Rejected' : '✓ Undone'}
+                  {entityPickLabel
+                    ? `✓ Recorded: ${entityPickLabel}`
+                    : proposal.status === 'rejected'
+                      ? '✓ Rejected'
+                      : '✓ Undone'}
                 </Text>
                 <Text className="mt-1 text-base text-mutedForeground">
-                  {proposal.status === 'rejected'
-                    ? 'Nothing was executed. Your feedback helps the AI improve.'
-                    : 'Nothing was executed. You can speak a new action anytime.'}
+                  {entityPickLabel
+                    ? 'Speak your request again — we will use that match next time.'
+                    : proposal.status === 'rejected'
+                      ? 'Nothing was executed. Your feedback helps the AI improve.'
+                      : 'Nothing was executed. You can speak a new action anytime.'}
                 </Text>
                 <Pressable
                   accessibilityRole="button"

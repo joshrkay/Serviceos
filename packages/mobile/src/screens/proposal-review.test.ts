@@ -132,9 +132,10 @@ describe('Proposal review screen', () => {
       },
       approvedAt: null,
     };
-    const { getByText } = render(createElement(ProposalReviewScreen));
+    const { getByText, queryByText } = render(createElement(ProposalReviewScreen));
     expect(getByText('Which one did you mean?')).toBeTruthy();
     expect(getByText('Bob Smith')).toBeTruthy();
+    expect(queryByText('Approve')).toBeNull();
     fireEvent.click(getByText('Bob Smith').closest('button')!);
     expect(h.reject).toHaveBeenCalledWith('entity_selected', 'c1');
   });

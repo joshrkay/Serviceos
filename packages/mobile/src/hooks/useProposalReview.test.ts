@@ -207,4 +207,21 @@ describe('useProposalReview', () => {
     expect(result.current.phase).toBe('review');
     expect(result.current.proposal?.status).toBe('ready_for_review');
   });
+
+  it('surfaces resolve-line failures in the error phase', async () => {
+    h.api.mockImplementation((url: string, opts?: { method?: string }) => {
+      if (url === '/api/proposals/p1/resolve-line' && opts?.method === 'POST') {
+        return Promise.resolve(err(400, { error: 'VALIDATION_ERROR', message: 'Bad catalog pick' }));
+      }
+      return Promise.resolve(okJson(proposal()));
+    });
+
+    const { result } = renderHook(() => useProposalReview('p1'));
+    await settle();
+    await act(async () => {
+      await result.current.resolveLine(0, 'cat-b');
+    });
+    expect(result.current.phase).toBe('error');
+    expect(result.current.error).toBe('Bad catalog pick');
+  });
 });

@@ -175,7 +175,7 @@ export function useProposalReview(id: string): UseProposalReviewResult {
         setPhase(phaseForStatus(p.status, p.approvedAt ?? null));
       } catch (e) {
         setError(message(e));
-        throw e;
+        setPhase('error');
       }
     },
     [api, id],
