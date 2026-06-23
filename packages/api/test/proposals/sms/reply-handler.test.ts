@@ -28,6 +28,10 @@ import {
 } from '../../../src/proposals/proposal';
 import { applyChainMetadata } from '../../../src/proposals/chain';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
+import {
+  InMemoryCatalogItemRepository,
+  createCatalogItem,
+} from '../../../src/catalog/catalog-item';
 import type { SettingsRepository } from '../../../src/settings/settings';
 import type { UserRepository } from '../../../src/users/user';
 import type { InboundSmsContext } from '../../../src/sms/inbound-dispatch';
@@ -529,6 +533,54 @@ describe('edit session flow', () => {
     // The next Y approves the edited proposal.
     const approval = await handleProposalSmsReply(ctx('Y'), h.deps);
     expect(approval).toMatchObject({ handled: true, reason: 'approved' });
+  });
+
+  it('U3 — re-grounds a priced draft on SMS edit so an uncatalogued change drops confidence below auto-approve', async () => {
+    const catalogRepo = new InMemoryCatalogItemRepository();
+    await catalogRepo.create(
+      createCatalogItem({
+        tenantId: TENANT,
+        name: 'Diagnostic Fee',
+        category: 'Labor',
+        unit: 'each',
+        unitPriceCents: 9900,
+      }),
+    );
+    const h = makeHarness({
+      catalogRepo,
+      // The owner texts a change that turns the catalog-grounded line into an
+      // uncatalogued (AI-priced) one.
+      interpretEdit: async () => ({
+        lineItems: [{ description: 'Custom unicorn service', quantity: 1, unitPrice: 50_000 }],
+      }),
+    });
+    const proposal = await seedPendingProposal(h, TENANT, {
+      proposalType: 'draft_estimate',
+      payload: {
+        customerId: '6f9619ff-8b86-d011-b42d-00c04fc964ff',
+        lineItems: [
+          { description: 'Diagnostic Fee', quantity: 1, unitPrice: 9900, pricingSource: 'catalog' },
+        ],
+      },
+      summary: 'Estimate for diagnostic',
+      confidenceScore: 0.95,
+      confidenceFactors: ['catalog_priced'],
+    });
+    await handleProposalSmsReply(ctx('EDIT'), h.deps);
+
+    const result = await handleProposalSmsFallback(
+      ctx('make it a custom unicorn service'),
+      h.deps,
+    );
+
+    expect(result).toMatchObject({ handled: true, reason: 'edited' });
+    const updated = await h.proposalRepo.findById(TENANT, proposal.id);
+    // The catalog re-grounding (threaded via deps.catalogRepo) capped confidence
+    // below the 0.90 auto-approve floor — an SMS edit can't leave stale
+    // auto-approve eligibility on an un-grounded price.
+    expect(updated?.confidenceScore).toBeLessThanOrEqual(0.85);
+    const li = (updated?.payload.lineItems as Array<Record<string, unknown>>)[0];
+    expect(li.pricingSource).toBe('uncatalogued');
   });
 
   it('falls back honestly when interpretation fails', async () => {

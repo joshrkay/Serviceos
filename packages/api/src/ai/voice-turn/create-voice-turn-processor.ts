@@ -124,6 +124,7 @@ import type { TenantCredentialResolver } from '../../integrations/credentials';
 import type { JobRepository } from '../../jobs/job';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { InvoiceRepository } from '../../invoices/invoice';
+import type { CatalogItemRepository } from '../../catalog/catalog-item';
 import type { AgreementRepository } from '../../agreements/agreement';
 import type { CustomerRepository } from '../../customers/customer';
 import type { ConversationRepository } from '../../conversations/conversation-service';
@@ -249,6 +250,11 @@ export interface VoiceTurnProcessorDeps {
   jobRepo?: JobRepository;
   appointmentRepo?: AppointmentRepository;
   invoiceRepo?: InvoiceRepository;
+  /**
+   * U3 — forwarded to the voice approval edit dialogue so a dictated edit of a
+   * priced draft re-grounds against the catalog and recomputes confidence.
+   */
+  catalogRepo?: CatalogItemRepository;
   agreementRepo?: AgreementRepository;
   customerRepo?: CustomerRepository;
   /**
@@ -1208,6 +1214,7 @@ export function createVoiceTurnProcessor(
       ...(deps.settingsRepo ? { settingsRepo: deps.settingsRepo } : {}),
       ...(deps.smsEventRepo ? { smsEventRepo: deps.smsEventRepo } : {}),
       ...(deps.appointmentRepo ? { appointmentRepo: deps.appointmentRepo } : {}),
+      ...(deps.catalogRepo ? { catalogRepo: deps.catalogRepo } : {}),
       ...(deps.voiceApprovalOneTap ? { oneTapFallback: deps.voiceApprovalOneTap } : {}),
       // RV-225 — the voice edit dialogue interprets deltas through the
       // SAME LLM seam as the SMS EDIT reply (proposals/edit-interpreter.ts).

@@ -54,6 +54,7 @@ import { confidenceMetaBlocksAutoApprove } from '../auto-approve';
 import { chainRefFieldsTouchedByDelta } from '../edit-interpreter';
 import type { SettingsRepository } from '../../settings/settings';
 import type { AppointmentRepository } from '../../appointments/appointment';
+import type { CatalogItemRepository } from '../../catalog/catalog-item';
 import type { UserRepository } from '../../users/user';
 import { type AuditRepository, createAuditEvent } from '../../audit/audit';
 import { ValidationError } from '../../shared/errors';
@@ -90,6 +91,14 @@ export interface ProposalSmsReplyDeps {
   sendSms?: (to: string, body: string) => Promise<void>;
   /** Lets a rejected create_booking release its held calendar slot. */
   appointmentRepo?: AppointmentRepository;
+  /**
+   * U3 — when supplied, an SMS edit of a priced draft (estimate/invoice)
+   * re-grounds line items against the live catalog and recomputes confidence
+   * before re-approval, so a "make it $200" text can't leave stale
+   * auto-approve eligibility on an un-grounded price. Omitting it preserves
+   * the prior no-recompute behavior.
+   */
+  catalogRepo?: CatalogItemRepository;
   /**
    * LLM seam: turn a free-text instruction into a payload delta for
    * `editProposal` (which Zod-validates the result — a bad delta can
@@ -753,6 +762,8 @@ async function applyEditInstruction(
           'owner',
           edits,
           deps.auditRepo,
+          undefined,
+          deps.catalogRepo,
         );
         // Shared with the voice-edit re-render (proposal-approval-task):
         // echoes the owner's instruction so the change is explicit and the

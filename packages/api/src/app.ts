@@ -1505,6 +1505,9 @@ export function createApp(): express.Express {
       userRepo,
       auditRepo,
       appointmentRepo,
+      // U3 — re-ground priced drafts on an SMS edit so a "make it $200" reply
+      // recomputes confidence and can't leave stale auto-approve eligibility.
+      catalogRepo,
       ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
       interpretEdit: createLlmEditInterpreter(llmGateway),
     },
@@ -4123,6 +4126,8 @@ export function createApp(): express.Express {
       // Story 3.9 — editing a proposal logs each changed field to the
       // corrections training table (intent + field + before/after).
       correctionRepo,
+      // U3 — re-ground priced drafts + recompute confidence on edit.
+      catalogRepo,
     ),
   );
   if (pool) {

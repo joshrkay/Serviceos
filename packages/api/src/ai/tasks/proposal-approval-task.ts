@@ -60,6 +60,7 @@ import {
   createProposalSmsEvent,
 } from '../../proposals/sms/sms-event';
 import type { AppointmentRepository } from '../../appointments/appointment';
+import type { CatalogItemRepository } from '../../catalog/catalog-item';
 import { createAuditEvent, type AuditRepository } from '../../audit/audit';
 import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
@@ -214,6 +215,13 @@ export interface VoiceApprovalDeps {
     Partial<Pick<ProposalSmsEventRepository, 'create'>>;
   /** Lets a rejected create_booking release its held calendar slot. */
   appointmentRepo?: AppointmentRepository;
+  /**
+   * U3 — when supplied, a voice edit of a priced draft (estimate/invoice)
+   * re-grounds line items against the live catalog and recomputes confidence
+   * before re-approval, so a dictated "make it $200" can't leave stale
+   * auto-approve eligibility on an un-grounded price.
+   */
+  catalogRepo?: CatalogItemRepository;
   /** One-tap SMS fallback for refused money/irreversible approvals. */
   oneTapFallback?: OneTapFallbackDeps;
   /**
@@ -1048,6 +1056,8 @@ export async function startVoiceEdit(
           'owner',
           delta,
           deps.auditRepo,
+          undefined,
+          deps.catalogRepo,
         );
         const speak = composeEditedReadback(updated);
         // Clears hasUnappliedEditRequest (insertion order decides). When the

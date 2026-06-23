@@ -1,16 +1,9 @@
 import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
-import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
-import type { ProposalConfidenceMeta } from '../../proposals/contracts';
+import { assessConfidence } from '../guardrails/confidence';
 import type { CatalogItem, CatalogItemRepository } from '../../catalog/catalog-item';
-import {
-  applyCatalogPricing,
-  CatalogPricingOutcome,
-  lineItemConfidenceSignals,
-  resolveLineItems,
-  UNCATALOGUED_CONFIDENCE_CAP,
-} from '../resolution/catalog-resolver';
+import { applyCatalogGrounding, buildConfidenceMeta } from './recompute-priced-proposal';
 import { buildCatalogPromptSection } from './catalog-resolution';
 
 const INVOICE_SYSTEM_PROMPT = `You are an invoice generation assistant for a field service company.
@@ -157,31 +150,25 @@ export class InvoiceTaskHandler implements TaskHandler {
       });
     }
 
-    // P22 catalog grounding: resolve each drafted description against the
-    // tenant's active catalog. Matched prices override the LLM's numbers;
-    // ambiguous matches force 'draft' via missingFields; uncatalogued lines
-    // keep the LLM price but cap confidence below auto-approve. A catalog
-    // read failure must never block drafting — degrade to LLM pricing
-    // (which the proposal gate still reviews).
-    let catalogOutcome: CatalogPricingOutcome | undefined;
-    const lineItems = payload.lineItems as Array<Record<string, unknown>>;
-    if (this.catalogRepo && Array.isArray(lineItems) && lineItems.length > 0) {
-      try {
-        const items = (await this.catalogRepo.listByTenant(context.tenantId)).filter(
-          (i) => i.archivedAt === null,
-        );
-        if (items.length > 0) {
-          const resolutions = resolveLineItems(
-            lineItems.map((li) => String(li.description ?? '')),
-            items,
-          );
-          catalogOutcome = applyCatalogPricing(lineItems, resolutions, 'unitPriceCents');
-          payload.lineItems = catalogOutcome.lineItems;
-        }
-      } catch {
-        catalogOutcome = undefined;
-      }
-    }
+    // P22 catalog grounding via the shared helper, reusing the catalog already
+    // fetched above for the prompt (one read per draft — no second listByTenant).
+    // Matched prices override the LLM's; ambiguous matches force 'draft' via
+    // missingFields; uncatalogued lines keep the LLM price but cap confidence
+    // below auto-approve. The SAME grounding the edit path uses.
+    const assess = assessConfidence(parsed ?? {});
+    const grounded = applyCatalogGrounding({
+      lineItems: Array.isArray(payload.lineItems)
+        ? (payload.lineItems as Array<Record<string, unknown>>)
+        : [],
+      catalogItems,
+      priceField: 'unitPriceCents',
+      baseScore: assess.score,
+      baseFactors: [...assess.factors],
+    });
+    payload.lineItems = grounded.lineItems;
+    const confidenceScore = grounded.confidenceScore;
+    const confidenceFactors = grounded.confidenceFactors;
+    const catalogOutcome = grounded.outcome;
 
     // Drop lines still lacking a valid price (LLM emitted garbage and the
     // catalog couldn't rescue them) — same terminal behavior as before
@@ -192,37 +179,14 @@ export class InvoiceTaskHandler implements TaskHandler {
       );
     }
 
-    const confidence = assessConfidence(parsed ?? {});
-    let confidenceScore = confidence.score;
-    const confidenceFactors = [...confidence.factors];
-    if (catalogOutcome?.anyCatalogPriced) confidenceFactors.push('catalog_priced');
-    if (catalogOutcome?.anyUncatalogued) {
-      confidenceFactors.push('uncatalogued_line_item');
-      // Money-correctness gate: an AI-invented price must never ride a
-      // ≥0.9 confidence score into autonomous auto-approval.
-      confidenceScore = Math.min(confidenceScore, UNCATALOGUED_CONFIDENCE_CAP);
-    }
-
-    // RV-007 — Confidence Marker `_meta`. Overall level is the mapped
-    // task confidence (post-cap); per-field signals translate the
-    // catalog resolver's pricingSource outcomes (uncatalogued/ambiguous
-    // lines → 'low' + a marker). Computed from the FINAL line items —
-    // after the drop-unpriced filter above — so the paths index the
-    // stored payload. No new confidence computation.
-    const signals = lineItemConfidenceSignals(
+    // RV-007 — Confidence Marker `_meta` from the FINAL (post-drop) line items.
+    payload._meta = buildConfidenceMeta(
       Array.isArray(payload.lineItems)
         ? (payload.lineItems as Array<Record<string, unknown>>)
         : [],
       'unitPriceCents',
+      confidenceScore,
     );
-    const meta: ProposalConfidenceMeta = {
-      overallConfidence: getConfidenceLevel(confidenceScore),
-      ...(Object.keys(signals.fieldConfidence).length > 0
-        ? { fieldConfidence: signals.fieldConfidence }
-        : {}),
-      ...(signals.markers.length > 0 ? { markers: signals.markers } : {}),
-    };
-    payload._meta = meta;
 
     const sourceContext: Record<string, unknown> = {
       ...(context.conversationId ? { conversationId: context.conversationId } : {}),

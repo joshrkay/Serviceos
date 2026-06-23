@@ -14,6 +14,11 @@ import type { ConfigPorts } from '../learning/corrections/lesson-applicator';
 import { createLogger } from '../logging/logger';
 import { computeCorrections } from './corrections/correction';
 import type { CorrectionRepository } from './corrections/correction';
+import {
+  recomputePricedProposalOnEdit,
+  isPricedDraftType,
+} from '../ai/tasks/recompute-priced-proposal';
+import type { CatalogItemRepository } from '../catalog/catalog-item';
 
 const logger = createLogger({
   service: 'proposals.actions',
@@ -548,6 +553,11 @@ export async function editProposal(
   // table (intent + field + before/after) as the training signal for prompt/
   // routing improvement. Capture is failure-soft (see below).
   correctionRepo?: CorrectionRepository,
+  // U3 — when supplied, priced drafts (draft_estimate/draft_invoice) are
+  // re-grounded against the live catalog on edit so confidence/`_meta` are
+  // recomputed before re-approval (a human edit can't keep stale auto-approve
+  // eligibility on an un-grounded price). Omitting it preserves prior behavior.
+  catalogRepo?: CatalogItemRepository,
 ): Promise<{ proposal: Proposal; editedFields: string[] }> {
   if (!hasPermission(actorRole, 'proposals:edit')) {
     throw new ForbiddenError();
@@ -573,8 +583,31 @@ export async function editProposal(
     (key) => JSON.stringify(proposal.payload[key]) !== JSON.stringify(edits[key])
   );
 
+  // U3 — re-ground priced drafts + recompute confidence before persisting.
+  // Shape is already validated above; this re-prices line items against the
+  // live catalog and refreshes `_meta`/confidence so the next approval reads
+  // fresh values. Confidence is only held or lowered, never raised.
+  let payloadToPersist: Record<string, unknown> = updatedPayload;
+  const confidenceUpdate: { confidenceScore?: number; confidenceFactors?: string[] } = {};
+  if (catalogRepo && isPricedDraftType(proposal.proposalType)) {
+    const catalogItems = (await catalogRepo.listByTenant(tenantId)).filter(
+      (i) => i.archivedAt === null,
+    );
+    const recomputed = recomputePricedProposalOnEdit({
+      proposalType: proposal.proposalType,
+      payload: updatedPayload,
+      catalogItems,
+      currentConfidenceScore: proposal.confidenceScore,
+      currentConfidenceFactors: proposal.confidenceFactors,
+    });
+    payloadToPersist = recomputed.payload;
+    confidenceUpdate.confidenceScore = recomputed.confidenceScore;
+    confidenceUpdate.confidenceFactors = recomputed.confidenceFactors;
+  }
+
   const updated = await proposalRepo.update(tenantId, proposalId, {
-    payload: updatedPayload,
+    payload: payloadToPersist,
+    ...confidenceUpdate,
   });
   if (!updated) {
     throw new NotFoundError('Proposal', proposalId);

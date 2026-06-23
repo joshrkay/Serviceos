@@ -30,6 +30,7 @@ import {
 import { FeasibilityDependencies } from '../scheduling/feasibility-types';
 import { createSchedulingProposal } from '../proposals/create-scheduling';
 import type { CorrectionRepository } from '../proposals/corrections/correction';
+import type { CatalogItemRepository } from '../catalog/catalog-item';
 
 // P2-035 — Batch approval body schema. Lives inline rather than in
 // proposal-contracts.ts so this story stays within its allowed-files
@@ -66,6 +67,9 @@ export function createProposalsRouter(
   // Story 3.9 — when supplied, editing a proposal logs each changed field
   // (intent + field + before/after) to the corrections training table.
   correctionRepo?: CorrectionRepository,
+  // U3 — when supplied, editing a priced draft re-grounds line items against
+  // the live catalog and recomputes confidence/`_meta` before re-approval.
+  catalogItemRepo?: CatalogItemRepository,
 ): Router {
   const router = Router();
 
@@ -371,6 +375,7 @@ export function createProposalsRouter(
           parsed.edits,
           auditRepo,
           correctionRepo,
+          catalogItemRepo,
         );
         res.json(result);
       } catch (err) {
