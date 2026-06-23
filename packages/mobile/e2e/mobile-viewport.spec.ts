@@ -5,11 +5,6 @@ import { test, expect, type Page } from '@playwright/test';
  * CLAUDE.md mobile-UI rule that jsdom can't measure: no horizontal overflow at
  * 320px. The tap-target half is also covered here against real layout, and in
  * the jsdom screen contract tests (src/screens/*).
- *
- * The app is Clerk-gated at the root: content renders only when
- * EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY points at a reachable Clerk instance (CI).
- * Without it the export serves a blank shell — the no-overflow invariant still
- * holds and is asserted; content/tap-target checks skip with a clear reason.
  */
 
 async function appRendered(page: Page): Promise<boolean> {
@@ -22,16 +17,19 @@ async function horizontalOverflowPx(page: Page): Promise<number> {
   );
 }
 
+const ROUTES = ['/', '/sign-in', '/customers/new', '/notifications', '/digest'];
+
 for (const width of [320, 390]) {
   test.describe(`mobile web @ ${width}px`, () => {
     test.use({ viewport: { width, height: 760 } });
 
-    test('no horizontal overflow', async ({ page }) => {
-      await page.goto('/', { waitUntil: 'networkidle' });
-      await page.waitForTimeout(1500);
-      // <= 1px tolerates sub-pixel rounding; a real overflow is many px.
-      expect(await horizontalOverflowPx(page)).toBeLessThanOrEqual(1);
-    });
+    for (const route of ROUTES) {
+      test(`no horizontal overflow on ${route}`, async ({ page }) => {
+        await page.goto(route, { waitUntil: 'networkidle' });
+        await page.waitForTimeout(1500);
+        expect(await horizontalOverflowPx(page)).toBeLessThanOrEqual(1);
+      });
+    }
 
     test('actionable controls are >=44px tall (skips if Clerk did not load)', async ({ page }) => {
       await page.goto('/', { waitUntil: 'networkidle' });
@@ -41,8 +39,6 @@ for (const width of [320, 390]) {
         'app shell is blank — no reachable Clerk instance in this environment',
       );
 
-      // react-native-web renders Pressable as role="button"; every actionable
-      // control on the reached (sign-in) screen must meet the glove target.
       const buttons = page.locator('[role="button"], button');
       const count = await buttons.count();
       expect(count).toBeGreaterThan(0);

@@ -322,7 +322,7 @@ function PaymentForm({
         className={`w-full flex items-center justify-center gap-2 rounded-2xl py-4 text-sm transition-all ${
           disabled
             ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
-            : 'bg-slate-900 text-white hover:bg-slate-700 active:scale-[0.98] shadow-lg shadow-slate-900/20'
+            : 'bg-primary text-primary-foreground hover:opacity-90 active:scale-[0.98] shadow-lg'
         }`}
       >
         {status === 'processing'
@@ -483,7 +483,7 @@ export function InvoicePaymentPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-background">
       {/* Header */}
       <div className="bg-white border-b border-slate-200 px-5 py-4">
         <div className="max-w-lg mx-auto flex items-center justify-between">

@@ -76,7 +76,7 @@ vi.mock('../hooks/useMoneyDashboard', () => ({
 }));
 
 // eslint-disable-next-line import/first
-import Home from '../../app/index';
+import Home from '../../app/(tabs)/index';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -108,7 +108,7 @@ describe('Home / Today dashboard', () => {
   it('renders every tap target at the >=44px contract (min-h-11)', () => {
     const { container } = render(createElement(Home));
     const buttons = Array.from(container.querySelectorAll('button'));
-    // speak + approvals + money + 3 modes + 6 nav tiles
+    // speak + approvals + money + 3 modes + 6 quick links
     expect(buttons.length).toBeGreaterThanOrEqual(8);
     for (const b of buttons) {
       expect(b.className).toMatch(/\bmin-h-11\b/);
@@ -163,12 +163,12 @@ describe('Home / Today dashboard', () => {
     expect(getByText(/Couldn.t load money summary/)).toBeTruthy();
   });
 
-  it('navigates to the read screens and settings', () => {
+  it('navigates to quick links from the dashboard', () => {
     const { getByText } = render(createElement(Home));
-    fireEvent.click(getByText('Customers').closest('button')!);
-    expect(h.push).toHaveBeenCalledWith('/customers');
-    fireEvent.click(getByText('Settings').closest('button')!);
-    expect(h.push).toHaveBeenCalledWith('/settings');
+    fireEvent.click(getByText('Messages').closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/messages');
+    fireEvent.click(getByText('Approvals').closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/approvals');
   });
 
   it('shows a loading spinner and no actions while /api/me is loading', () => {

@@ -1,17 +1,19 @@
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
-import { useVoiceCapture } from '../src/voice/useVoiceCapture';
+import { useRouter } from 'expo-router';
+import { useVoiceCapture } from '../../src/voice/useVoiceCapture';
 
 // Hold-to-talk capture screen. Owner presses the mic, speaks one action,
 // releases; the clip uploads + transcribes and the AI drafts proposals
 // (surfaced in approvals — a later unit). Dirty-hands UX: one large target.
 export default function VoiceScreen() {
+  const router = useRouter();
   const { phase, transcript, error, startRecording, stopAndTranscribe, reset } = useVoiceCapture();
   const listening = phase === 'listening';
   const busy = phase === 'transcribing';
 
   return (
-    <View className="flex-1 bg-background px-6 pt-16">
-      <Text className="text-2xl font-semibold text-foreground">Speak an action</Text>
+    <View className="flex-1 bg-background px-6 pb-20 pt-24">
+      <Text className="font-heading text-2xl font-semibold text-foreground">Speak an action</Text>
       <Text className="mt-1 text-base text-mutedForeground">
         Hold the mic, say what happened, release. We&apos;ll draft it for your approval.
       </Text>
@@ -26,10 +28,20 @@ export default function VoiceScreen() {
             </Text>
             <Pressable
               accessibilityRole="button"
-              onPress={reset}
+              onPress={() => {
+                reset();
+                router.push('/approvals');
+              }}
               className="mt-6 min-h-11 items-center justify-center rounded-md bg-primary px-4 py-3"
             >
-              <Text className="text-base font-semibold text-primaryForeground">Speak again</Text>
+              <Text className="text-base font-semibold text-primaryForeground">View approvals</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={reset}
+              className="mt-3 min-h-11 items-center justify-center rounded-md border border-border px-4 py-3"
+            >
+              <Text className="text-base text-foreground">Speak again</Text>
             </Pressable>
           </View>
         ) : (

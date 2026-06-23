@@ -35,7 +35,7 @@ vi.mock('../hooks/useListQuery', () => ({
 }));
 
 // eslint-disable-next-line import/first
-import Customers from '../../app/customers';
+import Customers from '../../app/(tabs)/customers';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -47,12 +47,13 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('Customers screen', () => {
-  it('Back is a >=44px tap target and returns to the prior screen', () => {
-    const { getByText } = render(createElement(Customers));
-    const back = getByText('‹ Back').closest('button')!;
-    expect(back.className).toMatch(/\bmin-h-11\b/);
-    fireEvent.click(back);
-    expect(h.back).toHaveBeenCalledTimes(1);
+  it('renders search and add controls on the tab screen', () => {
+    const { getByPlaceholderText, getByText } = render(createElement(Customers));
+    expect(getByPlaceholderText('Search customers…')).toBeTruthy();
+    const add = getByText('+ Add').closest('button')!;
+    expect(add.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(add);
+    expect(h.push).toHaveBeenCalledWith('/customers/new');
   });
 
   it('shows the empty state when there are no customers', () => {
