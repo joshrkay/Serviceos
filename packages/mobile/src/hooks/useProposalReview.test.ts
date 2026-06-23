@@ -143,4 +143,68 @@ describe('useProposalReview', () => {
     expect(result.current.phase).toBe('error');
     expect(result.current.error).toBe('Load failed');
   });
+
+  it('rejects with reason and lands in the terminal undone phase', async () => {
+    h.api.mockImplementation((url: string, opts?: { method?: string; body?: string }) => {
+      if (url === '/api/proposals/p1/reject' && opts?.method === 'POST') {
+        expect(JSON.parse(opts.body ?? '{}')).toEqual({
+          reason: 'wrong customer',
+          details: 'not Acme',
+        });
+        return Promise.resolve(okJson(proposal({ status: 'rejected' })));
+      }
+      return Promise.resolve(okJson(proposal()));
+    });
+
+    const { result } = renderHook(() => useProposalReview('p1'));
+    await settle();
+    await act(async () => {
+      await result.current.reject('wrong customer', 'not Acme');
+    });
+    expect(result.current.phase).toBe('undone');
+    expect(result.current.proposal?.status).toBe('rejected');
+  });
+
+  it('resolve-line patches the proposal and keeps review open when still draft', async () => {
+    h.api.mockImplementation((url: string, opts?: { method?: string; body?: string }) => {
+      if (url === '/api/proposals/p1/resolve-line' && opts?.method === 'POST') {
+        expect(JSON.parse(opts.body ?? '{}')).toEqual({
+          lineIndex: 0,
+          catalogItemId: 'cat-b',
+        });
+        return Promise.resolve(
+          okJson(
+            proposal({
+              status: 'ready_for_review',
+              payload: { lineItems: [{ description: 'Flush valve', pricingSource: 'catalog' }] },
+              sourceContext: { catalogResolution: {} },
+            }),
+          ),
+        );
+      }
+      return Promise.resolve(
+        okJson(
+          proposal({
+            status: 'draft',
+            payload: {
+              lineItems: [{ description: 'Flush valve', pricingSource: 'ambiguous' }],
+            },
+            sourceContext: {
+              catalogResolution: {
+                '0': [{ id: 'cat-b', name: 'Premium valve', unitPriceCents: 8200, score: 0.6 }],
+              },
+            },
+          }),
+        ),
+      );
+    });
+
+    const { result } = renderHook(() => useProposalReview('p1'));
+    await settle();
+    await act(async () => {
+      await result.current.resolveLine(0, 'cat-b');
+    });
+    expect(result.current.phase).toBe('review');
+    expect(result.current.proposal?.status).toBe('ready_for_review');
+  });
 });
