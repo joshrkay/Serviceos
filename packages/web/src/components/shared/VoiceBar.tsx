@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useCallback, useImperativeHandle, forwardRef } from 'react';
 import { Mic, X, Send, Sparkles } from 'lucide-react';
-import { useNavigate } from 'react-router';
+import { useNavigate, useLocation } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
 import { matchVoiceCommand } from '../../hooks/useVoiceCommands';
 import { useVoiceSuggestions } from '../../hooks/useVoiceSuggestions';
+import { useOnboardingVoice } from '../../hooks/useOnboardingVoice';
 import { VoiceSuggestionsStrip } from './VoiceSuggestionsStrip';
 import { useTTS } from '../../hooks/useTTS';
 
@@ -134,6 +135,11 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   const audioChunksRef = useRef<Blob[]>([]);
   const { speak } = useTTS({ rate: 1.05 });
   const suggestions = useVoiceSuggestions();
+  const location = useLocation();
+  // U6 — during onboarding the mic talks to the conversational Onboarding Agent
+  // (session-stateful) instead of navigating to /assistant.
+  const isOnboarding = location.pathname.startsWith('/onboarding');
+  const onboardingVoice = useOnboardingVoice();
 
   // Expose imperative handle so parent (Shell) can trigger via keyboard shortcut
   useImperativeHandle(ref, () => ({
@@ -301,6 +307,22 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
 
   function handleSend() {
     if (!transcript.trim()) return;
+
+    // U6 — on /onboarding, drive the conversational Onboarding Agent in place
+    // (no navigation away from the wizard). The agent's reply is spoken back so
+    // setup stays voice-first; the wizard's form updates via its status poll.
+    if (isOnboarding) {
+      const text = transcript.trim();
+      setPhase('sending');
+      void onboardingVoice.sendTurn(text).then((turn) => {
+        if (turn?.assistantMessage) speak(turn.assistantMessage);
+        else if (onboardingVoice.error) setError(onboardingVoice.error);
+        setPhase('idle');
+        setTranscript('');
+        setCanRetry(false);
+      });
+      return;
+    }
 
     // Check for voice navigation commands first
     const command = matchVoiceCommand(transcript.trim());

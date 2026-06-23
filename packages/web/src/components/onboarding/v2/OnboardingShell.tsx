@@ -7,6 +7,7 @@ import { useApiClient } from '../../../lib/apiClient';
 import { useOnboardingStatus } from '../../../hooks/useOnboardingStatus';
 import { track, trackFunnel, type AnalyticsEvent } from '../../../lib/analytics';
 import { Button, Spinner } from '../../ui';
+import { VoiceBar } from '../../shared/VoiceBar';
 import { Sidebar } from './Sidebar';
 import { MobileProgress } from './MobileProgress';
 import { IdentityStep } from './steps/IdentityStep';
@@ -210,7 +211,8 @@ export function OnboardingShell() {
       <Sidebar status={data} activeId={activeId} onSelect={setOverride} />
       <main className="flex-1">
         <MobileProgress status={data} activeId={activeId} />
-        <div className="p-6 md:p-8 max-w-3xl">
+        {/* pb-28 leaves room for the fixed voice bar so it never covers a step's CTA. */}
+        <div className="p-6 md:p-8 max-w-3xl pb-28">
           {activeId === 'identity' && <IdentityStep onSaved={() => void refetch()} />}
           {activeId === 'pack' && <PackStep onSaved={() => void refetch()} />}
           {activeId === 'phone' && (
@@ -239,6 +241,16 @@ export function OnboardingShell() {
           )}
         </div>
       </main>
+      {/* U6 — the persistent mic is reachable during onboarding and routes voice
+          to the conversational onboarding agent (not /assistant). */}
+      <div
+        data-testid="onboarding-voice-bar"
+        className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white shadow-[0_-1px_4px_rgba(0,0,0,0.04)]"
+      >
+        <div className="mx-auto w-full max-w-3xl">
+          <VoiceBar variant="mobile" />
+        </div>
+      </div>
     </div>
   );
 }

@@ -19,8 +19,13 @@ describe('suggestionsForPath', () => {
     expect(suggestionsForPath('/invoices/inv-1')).toContain('Any overdue invoices?');
   });
 
+  it('returns onboarding-relevant setup answers on /onboarding', () => {
+    expect(suggestionsForPath('/onboarding')).toContain('My business is Acme Plumbing');
+    expect(suggestionsForPath('/onboarding')).not.toEqual(suggestionsForPath('/'));
+  });
+
   it('gives every route 2–3 suggestions', () => {
-    for (const p of ['/', '/jobs', '/schedule', '/customers', '/estimates', '/invoices', '/inbox', '/whatever']) {
+    for (const p of ['/', '/onboarding', '/jobs', '/schedule', '/customers', '/estimates', '/invoices', '/inbox', '/whatever']) {
       const s = suggestionsForPath(p);
       expect(s.length, p).toBeGreaterThanOrEqual(2);
       expect(s.length, p).toBeLessThanOrEqual(3);

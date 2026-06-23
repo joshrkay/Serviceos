@@ -29,6 +29,11 @@ const startsWith = (...prefixes: string[]) => (pathname: string) =>
  */
 const ROUTE_SUGGESTIONS: readonly RouteSuggestions[] = [
   {
+    // U6 — onboarding answers the conversational setup agent extracts.
+    match: startsWith('/onboarding'),
+    suggestions: ['My business is Acme Plumbing', 'I do HVAC and electrical', 'My hours are 8 to 5'],
+  },
+  {
     match: startsWith('/schedule', '/dispatch'),
     suggestions: [
       "What's on tomorrow's schedule?",
