@@ -206,7 +206,7 @@ function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
       role="radiogroup"
       aria-label="Operator mode"
       data-testid="mode-toggle"
-      className="flex rounded-md border border-slate-200 bg-slate-50 overflow-hidden"
+      className="flex rounded-md border border-border bg-secondary overflow-hidden"
     >
       {options.map(({ mode, label, fullLabel }) => {
         const active = current === mode;
@@ -223,8 +223,8 @@ function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
             onClick={() => handleClick(mode)}
             className={`${sizeClass} flex-1 transition-colors ${
               active
-                ? 'bg-white text-slate-900 shadow-sm'
-                : 'text-slate-500 hover:text-slate-700'
+                ? 'bg-card text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
             } ${isPending ? 'opacity-60' : ''}`}
           >
             {label}
@@ -388,7 +388,7 @@ function ShellInner() {
 
   return (
     <ErrorBoundary>
-    <div className="flex flex-col h-screen bg-slate-50 overflow-hidden">
+    <div className="flex flex-col h-screen bg-background overflow-hidden">
 
       {/* Payment problem — renders only when the Stripe subscription is
           past_due. Blocking, not dismissible. */}
@@ -417,19 +417,19 @@ function ShellInner() {
       <Toaster richColors position="top-right" />
 
       {/* ── Desktop Sidebar ── */}
-      <aside className="hidden md:flex flex-col w-56 shrink-0 bg-white border-r border-slate-100 z-10">
+      <aside className="hidden md:flex flex-col w-56 shrink-0 bg-card border-r border-border z-10">
         {/* Logo */}
-        <div className="flex items-center gap-2 px-5 pt-5 pb-4 border-b border-slate-100">
-          <span className="flex size-7 items-center justify-center rounded-lg bg-slate-900">
-            <Zap size={14} className="text-white" />
+        <div className="flex items-center gap-2 px-5 pt-5 pb-4 border-b border-border">
+          <span className="flex size-7 items-center justify-center rounded-lg bg-primary">
+            <Zap size={14} className="text-primary-foreground" />
           </span>
-          <span className="text-sm text-slate-900 tracking-tight">Rivet</span>
+          <span className="text-sm text-foreground tracking-tight">Rivet</span>
           {pendingProposalCount > 0 && (
             <NavLink
               to="/inbox"
               aria-label={`${pendingProposalCount} pending proposal${pendingProposalCount === 1 ? '' : 's'} — open inbox`}
               data-testid="pending-proposal-badge"
-              className="ml-auto flex size-5 items-center justify-center rounded-full bg-blue-600 text-white"
+              className="ml-auto flex size-5 items-center justify-center rounded-full bg-primary text-primary-foreground"
               style={{ fontSize: 10 }}
             >
               {pendingProposalCount > 9 ? '9+' : pendingProposalCount}
@@ -447,15 +447,15 @@ function ShellInner() {
                 to={to}
                 className={`flex items-center gap-3 rounded-lg px-3 py-2 mb-0.5 text-sm transition-colors ${
                   active
-                    ? 'bg-slate-100 text-slate-900'
-                    : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'
+                    ? 'bg-secondary text-foreground'
+                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
                 }`}
               >
-                <Icon size={16} className={active ? 'text-blue-600' : ''} />
+                <Icon size={16} className={active ? 'text-primary' : ''} />
                 {label}
                 {to === '/inbox' && pendingProposalCount > 0 && (
                   <span
-                    className="ml-auto flex min-w-[18px] h-[18px] items-center justify-center rounded-full bg-blue-600 text-white px-1"
+                    className="ml-auto flex min-w-[18px] h-[18px] items-center justify-center rounded-full bg-primary text-primary-foreground px-1"
                     style={{ fontSize: 9 }}
                     data-testid="sidebar-inbox-badge"
                   >
@@ -490,16 +490,16 @@ function ShellInner() {
         )}
 
         {/* User */}
-        <div className="border-t border-slate-100 px-4 py-3">
+        <div className="border-t border-border px-4 py-3">
           <div className="flex items-center gap-2.5">
-            <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-slate-800 text-white text-xs">{initials}</span>
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-secondary text-secondary-foreground text-xs">{initials}</span>
             <div className="min-w-0">
-              <p className="text-xs text-slate-800 truncate">{displayName}</p>
-              <p className="text-xs text-slate-400 truncate">{roleLabel}</p>
+              <p className="text-xs text-foreground truncate">{displayName}</p>
+              <p className="text-xs text-muted-foreground truncate">{roleLabel}</p>
             </div>
             <button
               onClick={() => signOut({ redirectUrl: '/login' })}
-              className="ml-auto shrink-0 text-slate-400 hover:text-slate-600 cursor-pointer"
+              className="ml-auto shrink-0 text-muted-foreground hover:text-foreground cursor-pointer"
               title="Sign out"
             >
               <LogOut size={15} />
@@ -512,12 +512,12 @@ function ShellInner() {
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
 
         {/* Mobile top bar */}
-        <div className="md:hidden flex items-center justify-between px-4 py-3 bg-white border-b border-slate-100 shrink-0">
+        <div className="md:hidden flex items-center justify-between px-4 py-3 bg-card border-b border-border shrink-0">
           <div className="flex items-center gap-2">
-            <span className="flex size-6 items-center justify-center rounded-lg bg-slate-900">
-              <Zap size={12} className="text-white" />
+            <span className="flex size-6 items-center justify-center rounded-lg bg-primary">
+              <Zap size={12} className="text-primary-foreground" />
             </span>
-            <span className="text-sm text-slate-900">Rivet</span>
+            <span className="text-sm text-foreground">Rivet</span>
           </div>
           <div className="flex items-center gap-3">
             {showModeToggle && (
@@ -543,13 +543,13 @@ function ShellInner() {
                   : 'Open approval inbox'
               }
               data-testid="mobile-inbox-bell"
-              className="relative flex items-center justify-center text-slate-500"
+              className="relative flex items-center justify-center text-muted-foreground"
             >
               <Bell size={18} />
               {pendingProposalCount > 0 && (
                 <span
                   data-testid="mobile-inbox-badge"
-                  className="absolute -top-1.5 -right-1.5 flex size-3.5 min-w-3.5 items-center justify-center rounded-full bg-blue-600 px-0.5 text-white"
+                  className="absolute -top-1.5 -right-1.5 flex size-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-0.5 text-primary-foreground"
                   style={{ fontSize: 9 }}
                 >
                   {pendingProposalCount > 9 ? '9+' : pendingProposalCount}
@@ -559,13 +559,13 @@ function ShellInner() {
             <NavLink to="/settings" className="relative flex items-center justify-center">
               <span className={`flex size-7 items-center justify-center rounded-full text-xs transition-all ${
                 location.pathname.startsWith('/settings')
-                  ? 'bg-blue-600 text-white ring-2 ring-blue-200'
-                  : 'bg-slate-800 text-white'
+                  ? 'bg-primary text-primary-foreground ring-2 ring-primary/30'
+                  : 'bg-secondary text-secondary-foreground'
               }`}>{initials}</span>
-              <span className={`absolute -bottom-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full border border-white ${
-                location.pathname.startsWith('/settings') ? 'bg-blue-600' : 'bg-slate-600'
+              <span className={`absolute -bottom-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full border border-card ${
+                location.pathname.startsWith('/settings') ? 'bg-primary' : 'bg-muted-foreground'
               }`}>
-                <Settings size={8} className="text-white" />
+                <Settings size={8} className="text-primary-foreground" />
               </span>
             </NavLink>
           </div>
@@ -588,7 +588,7 @@ function ShellInner() {
         </div>
 
         {/* ── Mobile bottom tab bar (in flow, not fixed) ── */}
-        <div className="md:hidden shrink-0 bg-white border-t border-slate-200">
+        <div className="md:hidden shrink-0 bg-card border-t border-border">
           <div className="flex">
             {bottomNav.map(({ to, label, icon: Icon }) => {
               const active = isExact(to);
@@ -598,13 +598,13 @@ function ShellInner() {
                   key={to}
                   to={to}
                   className={`relative flex flex-1 flex-col items-center justify-center gap-0.5 py-2 transition-colors ${
-                    active ? 'text-blue-600' : 'text-slate-400 hover:text-slate-600'
+                    active ? 'text-primary' : 'text-muted-foreground hover:text-foreground'
                   }`}
                 >
                   <Icon size={18} />
                   {showInboxBadge && (
                     <span
-                      className="absolute top-1 right-[calc(50%-18px)] flex size-4 items-center justify-center rounded-full bg-blue-600 text-white"
+                      className="absolute top-1 right-[calc(50%-18px)] flex size-4 items-center justify-center rounded-full bg-primary text-primary-foreground"
                       style={{ fontSize: 8 }}
                       data-testid="mobile-inbox-badge"
                     >
