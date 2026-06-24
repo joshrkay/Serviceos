@@ -182,4 +182,26 @@ describe('CustomersPage', () => {
     fireEvent.change(select, { target: { value: 'referral' } });
     expect(select.value).toBe('referral');
   });
+
+  // U7a — Path A class contract: the cluster renders on brand tokens only, and
+  // the service-type chip collapses to the calm neutral token (the per-type
+  // hue distinction is carried by the emoji + label, not colour).
+  it('renders on Path A tokens — no raw Tailwind palette leaks', () => {
+    const { container } = renderPage();
+    expect(container.innerHTML).not.toMatch(
+      /(bg|text|border)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
+    );
+  });
+
+  it('uses the neutral service-type chip token (not a per-type hue)', () => {
+    const { container } = renderPage();
+    // Row chips render "<emoji> <ServiceType>"; the filter pills render the
+    // emoji in a child span with no trailing space, so this finds the chip.
+    const chip = Array.from(container.querySelectorAll('span')).find((el) =>
+      /^(❄️|🔧|🎨)\s/.test(el.textContent ?? ''),
+    );
+    expect(chip).toBeDefined();
+    expect(chip?.className).toContain('bg-secondary');
+    expect(chip?.className).not.toMatch(/(bg|text|border)-(blue|green|violet)-\d{2,3}/);
+  });
 });

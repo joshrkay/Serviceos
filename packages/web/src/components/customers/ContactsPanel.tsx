@@ -111,7 +111,7 @@ export function ContactsPanel({ customerId }: { customerId: string }) {
   return (
     <div className="flex flex-col gap-4">
       {error && (
-        <p role="alert" className="text-sm text-red-600">
+        <p role="alert" className="text-sm text-destructive">
           {error}
         </p>
       )}
@@ -120,9 +120,9 @@ export function ContactsPanel({ customerId }: { customerId: string }) {
         {contacts.map((contact) => (
           <div
             key={contact.id}
-            className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 p-3"
+            className="flex flex-wrap items-center gap-2 rounded-xl border border-border p-3"
           >
-            <span className="text-sm font-medium text-slate-900">{contact.name}</span>
+            <span className="text-sm font-medium text-foreground">{contact.name}</span>
             <Badge variant={contact.isPrimary ? 'info' : 'neutral'}>
               {ROLE_LABELS[contact.role]}
             </Badge>
@@ -131,7 +131,7 @@ export function ContactsPanel({ customerId }: { customerId: string }) {
             {contact.isPrimary && contact.role !== 'primary' && (
               <Badge variant="success">Primary</Badge>
             )}
-            <span className="text-sm text-slate-500">
+            <span className="text-sm text-muted-foreground">
               {[contact.phone, contact.email].filter(Boolean).join(' · ') || '—'}
             </span>
             <div className="ml-auto flex gap-2">
@@ -156,7 +156,7 @@ export function ContactsPanel({ customerId }: { customerId: string }) {
           </div>
         ))}
         {contacts.length === 0 && (
-          <p className="text-sm text-slate-400">No additional contacts yet.</p>
+          <p className="text-sm text-muted-foreground">No additional contacts yet.</p>
         )}
       </div>
 
