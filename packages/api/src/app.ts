@@ -147,6 +147,7 @@ import { PgAttachmentRepository } from './attachments/pg-attachment';
 import { createDispatchRoutes } from './dispatch/routes';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
+import { createLeadIntakeRouter } from './routes/lead-intake';
 import { createPublicBookingRouter } from './routes/public-booking';
 import { createReportsRouter } from './routes/reports';
 import { createDigestsRouter } from './routes/digests';
@@ -349,6 +350,7 @@ import { createPublicInvoicesRouter } from './routes/public-invoices';
 import { createPublicPaymentsRouter } from './routes/public-payments';
 import { createOneTapApproveRouter } from './routes/one-tap-approve';
 import { createFeedbackSendWorker } from './workers/feedback-send';
+import { createLeadAutoResponseWorker } from './workers/lead-auto-response';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
 import { runDailyDigestSweep, DIGEST_SWEEP_INTERVAL_MS } from './workers/daily-digest-worker';
 import { PgDailyDigestRepository } from './digest/pg-daily-digest';
@@ -654,6 +656,10 @@ export function createApp(): express.Express {
   // before global express.json() so /webhooks/twilio/* routes get populated
   // req.body fields (used for signature verification + AccountSid match).
   app.use('/webhooks/twilio', express.urlencoded({ extended: false }));
+
+  // LC-2 — signed lead-intake webhook. HMAC verification needs the exact
+  // signed bytes, so capture the raw Buffer here before global express.json().
+  app.use('/webhooks/lead-intake', express.raw({ type: 'application/json' }));
 
   // Body parsing for all other routes
   app.use(express.json());
@@ -2021,6 +2027,24 @@ export function createApp(): express.Express {
     feedbackSendWorker as import('./queues/queue').WorkerHandler<unknown>
   );
 
+  // LC-3 — speed-to-lead auto-response. Gateway/delivery are optional: without
+  // an AI key copy falls back to a deterministic template; without a delivery
+  // provider the reply is logged to the lead thread but not sent.
+  const leadAutoResponseWorker = createLeadAutoResponseWorker({
+    leadRepo,
+    settingsRepo,
+    conversationRepo,
+    dispatchRepo,
+    dncRepo,
+    auditRepo,
+    gateway: llmGateway ?? undefined,
+    delivery: messageDelivery,
+  });
+  workerRegistry.set(
+    leadAutoResponseWorker.type,
+    leadAutoResponseWorker as import('./queues/queue').WorkerHandler<unknown>
+  );
+
   if (pool) {
     const provisionTwilioWorker = createProvisionTwilioWorker({ pool });
     workerRegistry.set(
@@ -2123,7 +2147,23 @@ export function createApp(): express.Express {
       standardHeaders: true,
       legacyHeaders: false,
     }),
-    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo, settingsRepo, canonicalPackRegistry, pool)
+    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo, settingsRepo, canonicalPackRegistry, pool, queue)
+  );
+
+  // LC-2 — signed lead-intake webhook (server-to-server form/partner relay).
+  // Raw-body parser for this path is mounted up top (before express.json()).
+  // Reuses the single tenantRepo + the durable webhookRepo idempotency store.
+  app.use(
+    '/webhooks/lead-intake',
+    createLeadIntakeRouter({
+      leadRepo,
+      tenantRepo: intakeTenantRepo,
+      auditRepo,
+      customerRepo,
+      signingSecret: config.WEBHOOK_SIGNING_SECRET,
+      webhookRepo,
+      queue,
+    }),
   );
 
   // Public unauthenticated estimate approval flow (token-authenticated).

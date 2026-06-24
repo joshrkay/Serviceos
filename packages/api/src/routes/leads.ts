@@ -110,6 +110,33 @@ export function createLeadsRouter(
     })
   );
 
+  // LC-8 — source-attribution analytics for the digest/dashboard: lead +
+  // converted counts grouped by source over an optional [from, to) window.
+  // Declared before '/:id' so 'counts-by-source' isn't captured as an id.
+  router.get(
+    '/counts-by-source',
+    requireAuth,
+    requireTenant,
+    requirePermission('customers:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const fromRaw = req.query.from as string | undefined;
+        const toRaw = req.query.to as string | undefined;
+        const from = fromRaw ? new Date(fromRaw) : undefined;
+        const to = toRaw ? new Date(toRaw) : undefined;
+        if ((fromRaw && Number.isNaN(from!.getTime())) || (toRaw && Number.isNaN(to!.getTime()))) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'from/to must be ISO dates' });
+          return;
+        }
+        const counts = await leadRepo.countBySource(req.auth!.tenantId, { from, to });
+        res.json({ from: from?.toISOString() ?? null, to: to?.toISOString() ?? null, counts });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
   router.get(
     '/:id',
     requireAuth,

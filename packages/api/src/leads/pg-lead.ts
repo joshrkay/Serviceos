@@ -6,6 +6,8 @@ import {
   LeadListOptions,
   LeadListResult,
   LeadRepository,
+  LeadSourceCount,
+  LeadSourceCountOptions,
   MAX_LIST_LIMIT,
 } from './lead';
 import { LeadSource, LeadStage } from './enums';
@@ -31,6 +33,16 @@ function mapRow(row: Record<string, unknown>): Lead {
   const attributionFinal =
     attribution && Object.keys(attribution).length > 0 ? attribution : undefined;
 
+  // LC-1 — raw_payload defaults to '{}' (NOT NULL); surface as undefined when
+  // empty so the entity stays clean for manually-created CRM leads.
+  const rawPayloadRaw = row.raw_payload;
+  const rawPayload =
+    rawPayloadRaw && typeof rawPayloadRaw === 'object'
+      ? (rawPayloadRaw as Record<string, unknown>)
+      : undefined;
+  const rawPayloadFinal =
+    rawPayload && Object.keys(rawPayload).length > 0 ? rawPayload : undefined;
+
   return {
     id: row.id as string,
     tenantId: row.tenant_id as string,
@@ -45,6 +57,8 @@ function mapRow(row: Record<string, unknown>): Lead {
     utmMedium: (row.utm_medium as string) ?? undefined,
     utmCampaign: (row.utm_campaign as string) ?? undefined,
     attribution: attributionFinal,
+    rawPayload: rawPayloadFinal,
+    smsConsent: row.sms_consent === true,
     stage: row.stage as LeadStage,
     estimatedValueCents,
     notes: (row.notes as string) ?? undefined,
@@ -70,10 +84,10 @@ export class PgLeadRepository extends PgBaseRepository implements LeadRepository
         `INSERT INTO leads (
           id, tenant_id, first_name, last_name, company_name, primary_phone, email,
           source, source_detail, utm_source, utm_medium, utm_campaign, attribution,
-          stage, estimated_value_cents, notes, assigned_user_id,
+          raw_payload, sms_consent, stage, estimated_value_cents, notes, assigned_user_id,
           converted_customer_id, lost_reason, created_by, created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb,
-                  $14, $15, $16, $17, $18, $19, $20, $21, $22)
+                  $14::jsonb, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
         RETURNING *`,
         [
           lead.id,
@@ -89,6 +103,8 @@ export class PgLeadRepository extends PgBaseRepository implements LeadRepository
           lead.utmMedium ?? null,
           lead.utmCampaign ?? null,
           JSON.stringify(lead.attribution ?? {}),
+          JSON.stringify(lead.rawPayload ?? {}),
+          lead.smsConsent ?? false,
           lead.stage,
           lead.estimatedValueCents ?? null,
           lead.notes ?? null,
@@ -195,6 +211,39 @@ export class PgLeadRepository extends PgBaseRepository implements LeadRepository
         params
       );
       return { data, total: countResult.rows[0].total as number };
+    });
+  }
+
+  async countBySource(
+    tenantId: string,
+    options?: LeadSourceCountOptions,
+  ): Promise<LeadSourceCount[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const conditions: string[] = ['tenant_id = $1'];
+      const params: unknown[] = [tenantId];
+      if (options?.from) {
+        params.push(options.from);
+        conditions.push(`created_at >= $${params.length}`);
+      }
+      if (options?.to) {
+        params.push(options.to);
+        conditions.push(`created_at < $${params.length}`);
+      }
+      const result = await client.query(
+        `SELECT source,
+                COUNT(*)::int AS lead_count,
+                COUNT(converted_customer_id)::int AS converted_count
+         FROM leads
+         WHERE ${conditions.join(' AND ')}
+         GROUP BY source
+         ORDER BY lead_count DESC`,
+        params,
+      );
+      return result.rows.map((r: Record<string, unknown>) => ({
+        source: r.source as LeadSource,
+        leadCount: r.lead_count as number,
+        convertedCount: r.converted_count as number,
+      }));
     });
   }
 

@@ -55,6 +55,7 @@ describe('Postgres integration — leads', () => {
           utmMedium: 'cpc',
           utmCampaign: 'spring',
           attribution: { gclid: 'abc123', landing: '/pricing' },
+          rawPayload: { form_id: 'contact-2', message: 'leaky faucet', nested: { urgency: 'high' } },
         }),
       );
 
@@ -66,12 +67,24 @@ describe('Postgres integration — leads', () => {
       expect(typeof found!.estimatedValueCents).toBe('number');
       expect(found!.utmCampaign).toBe('spring');
       expect(found!.attribution).toEqual({ gclid: 'abc123', landing: '/pricing' });
+      // LC-1 — raw_payload JSONB round-trips verbatim (real column, not mocked).
+      expect(found!.rawPayload).toEqual({
+        form_id: 'contact-2',
+        message: 'leaky faucet',
+        nested: { urgency: 'high' },
+      });
     });
 
     it('drops an empty attribution object back to undefined', async () => {
       const created = await repo.create(makeLead(tenant.tenantId, tenant.userId));
       const found = await repo.findById(tenant.tenantId, created.id);
       expect(found!.attribution).toBeUndefined();
+    });
+
+    it('defaults raw_payload to undefined when no payload is supplied', async () => {
+      const created = await repo.create(makeLead(tenant.tenantId, tenant.userId));
+      const found = await repo.findById(tenant.tenantId, created.id);
+      expect(found!.rawPayload).toBeUndefined();
     });
 
     it('does not leak a lead across tenants (tenant-scoped predicate)', async () => {
@@ -123,6 +136,16 @@ describe('Postgres integration — leads', () => {
       const result = await repo.listWithMeta(filterTenant.tenantId, { limit: 1 });
       expect(result.data).toHaveLength(1);
       expect(result.total).toBe(3);
+    });
+
+    it('LC-8 — countBySource groups by source, tenant-scoped (real columns)', async () => {
+      const counts = await repo.countBySource(filterTenant.tenantId);
+      const bySource = Object.fromEntries(counts.map((c) => [c.source, c]));
+      // filterTenant seeded: referral x1, web_form x1, phone_call x1.
+      expect(bySource['referral']?.leadCount).toBe(1);
+      expect(bySource['web_form']?.leadCount).toBe(1);
+      expect(bySource['phone_call']?.leadCount).toBe(1);
+      expect(counts.reduce((n, c) => n + c.leadCount, 0)).toBe(3);
     });
   });
 

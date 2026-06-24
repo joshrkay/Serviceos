@@ -26,6 +26,7 @@ import { AuditRepository } from '../audit/audit';
 import { TenantRepository } from '../auth/clerk';
 import { attributionSchema, LeadSource } from '../leads/enums';
 import { SettingsRepository } from '../settings/settings';
+import { Queue } from '../queues/queue';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { formatBusinessHoursSummary } from '../public-intake/format-business-hours';
 import { isValidVerticalType } from '../shared/vertical-types';
@@ -52,6 +53,9 @@ const intakeSchema = z.object({
   utmMedium: z.string().trim().max(200).optional(),
   utmCampaign: z.string().trim().max(200).optional(),
   attribution: attributionSchema.optional(),
+  // LC-3 — explicit SMS consent checkbox. Only true enables the speed-to-lead
+  // SMS auto-response; absent/false ⇒ no SMS (DNC always honored regardless).
+  smsConsent: z.boolean().optional(),
   // Honeypot — must be empty/absent. Real users never fill this; bots do.
   _company_url: z.string().max(500).optional(),
 }).refine(
@@ -81,6 +85,8 @@ export function createPublicIntakeRouter(
   settingsRepo: SettingsRepository,
   packRegistry: VerticalPackRegistry,
   pool?: Pool,
+  // LC-3 — when wired, createLead enqueues a speed-to-lead auto-response.
+  queue?: Queue,
 ): Router {
   const router = Router();
 
@@ -99,6 +105,29 @@ export function createPublicIntakeRouter(
       return;
     }
 
+      const lead = await createLead(
+        {
+          tenantId,
+          firstName: parsed.firstName,
+          lastName: parsed.lastName,
+          companyName: undefined,
+          primaryPhone: parsed.primaryPhone,
+          email: parsed.email,
+          source: PUBLIC_INTAKE_SOURCE,
+          sourceDetail: buildSourceDetail(parsed),
+          utmSource: parsed.utmSource,
+          utmMedium: parsed.utmMedium,
+          utmCampaign: parsed.utmCampaign,
+          attribution: parsed.attribution,
+          rawPayload: parsed,
+          smsConsent: parsed.smsConsent,
+          createdBy: PUBLIC_INTAKE_ACTOR_ID,
+          actorRole: PUBLIC_INTAKE_ACTOR_ROLE,
+          queue,
+        },
+        leadRepo,
+        auditRepo
+      );
     const parsed = intakeSchema.parse(req.body ?? {});
 
     // Honeypot tripped — return 200 so bots think it worked, but never

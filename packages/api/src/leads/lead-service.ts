@@ -13,10 +13,39 @@ import {
   PreferredChannel,
 } from '../customers/customer';
 import { ValidationError } from '../shared/errors';
+import {
+  checkCustomerDuplicates,
+  checkCustomerDuplicatesPg,
+  isCustomerDuplicateLoader,
+} from '../customers/dedup';
 import { CreateLeadInput, Lead, LeadRepository, UpdateLeadInput } from './lead';
 import { LeadSource, LeadStage } from './enums';
 import { buildAttributionMetadata } from './attribution-metadata';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
+import {
+  LEAD_AUTO_RESPONSE_JOB_TYPE,
+  type LeadAutoResponsePayload,
+} from '../workers/lead-auto-response';
+
+/**
+ * LC-3 — lead sources that warrant an immediate customer-facing auto-response
+ * (speed-to-lead). Inbound web/partner inquiries where the customer is waiting
+ * for a reply; excludes phone_call (the call handles it), sms (the SMS reply
+ * handler owns the thread), walk_in (in person) and customer_portal (already a
+ * logged-in customer). Matches the externally-submittable inbound source set.
+ */
+const AUTO_RESPONSE_LEAD_SOURCES: ReadonlySet<LeadSource> = new Set([
+  'web_form',
+  'marketplace',
+  'referral',
+  'other',
+]);
+
+export function shouldAutoRespondToLead(lead: Pick<Lead, 'source' | 'primaryPhone' | 'email'>): boolean {
+  if (!AUTO_RESPONSE_LEAD_SOURCES.has(lead.source)) return false;
+  // No contact channel ⇒ nothing to send.
+  return Boolean(lead.primaryPhone || lead.email);
+}
 
 /**
  * U6 dedupe — lead sources that originate on the inbound PHONE/CALL channel.
@@ -96,6 +125,8 @@ export async function createLead(
     utmMedium: input.utmMedium,
     utmCampaign: input.utmCampaign,
     attribution: input.attribution,
+    rawPayload: input.rawPayload,
+    smsConsent: input.smsConsent ?? false,
     stage: 'new',
     estimatedValueCents: input.estimatedValueCents,
     notes: input.notes,
@@ -126,6 +157,22 @@ export async function createLead(
   // U6 — owner `lead_captured` push (best-effort; suppressed for
   // phone-originated leads, which fire `incoming_call` instead).
   await notifyOwnerLeadCaptured(input.tenantId, created);
+
+  // LC-3 — speed-to-lead: enqueue an immediate customer-facing auto-response
+  // for inbound channels. Best-effort + idempotent (one job per lead) so a
+  // queue hiccup never bounces the capture; consent/DNC gating happens in the
+  // worker via the delivery service.
+  if (input.queue && shouldAutoRespondToLead(created)) {
+    try {
+      await input.queue.send<LeadAutoResponsePayload>(
+        LEAD_AUTO_RESPONSE_JOB_TYPE,
+        { tenantId: created.tenantId, leadId: created.id },
+        `${LEAD_AUTO_RESPONSE_JOB_TYPE}:${created.id}`,
+      );
+    } catch {
+      // Best-effort: the lead persisted; a missed auto-response must not bounce it.
+    }
+  }
 
   return created;
 }
@@ -270,6 +317,39 @@ export async function loseLead(
 export interface ConversionResult {
   lead: Lead;
   customer: Customer;
+  /** LC-5: true when conversion linked to an existing customer (dedup) rather
+   *  than creating a new one. */
+  linked?: boolean;
+  /** LC-5: true when the call was an idempotent replay of a prior conversion. */
+  alreadyConverted?: boolean;
+}
+
+/**
+ * LC-5 dedup — find an existing customer to LINK this lead to instead of
+ * minting a duplicate. Only a HIGH-confidence match (exact normalized phone or
+ * email) is linkable; a name-only (medium) match is too weak to auto-merge and
+ * is left for the owner to reconcile. Reuses the shared customer dedup (Pg-aware
+ * loader when available, full-scan otherwise) so the rule matches createCustomer.
+ */
+async function findLinkableCustomer(
+  tenantId: string,
+  lead: Lead,
+  customerRepo: CustomerRepository,
+): Promise<Customer | null> {
+  if (!lead.primaryPhone && !lead.email) return null;
+  const input = {
+    tenantId,
+    firstName: lead.firstName || undefined,
+    lastName: lead.lastName || undefined,
+    email: lead.email,
+    primaryPhone: lead.primaryPhone,
+  };
+  const warnings = isCustomerDuplicateLoader(customerRepo)
+    ? await checkCustomerDuplicatesPg(input, customerRepo)
+    : await checkCustomerDuplicates(input, customerRepo);
+  const strong = warnings.find((w) => w.confidence === 'high');
+  if (!strong) return null;
+  return customerRepo.findById(tenantId, strong.existingId);
 }
 
 /**
@@ -298,12 +378,70 @@ export async function convertToCustomer(
 ): Promise<ConversionResult | null> {
   const existing = await leadRepo.findById(tenantId, leadId);
   if (!existing) return null;
+
+  // LC-5 idempotency: a re-convert returns the prior result instead of
+  // throwing, so a double-tap / retry is a safe no-op.
   if (existing.convertedCustomerId) {
-    throw new ValidationError('Lead has already been converted');
+    const prior = await customerRepo.findById(tenantId, existing.convertedCustomerId);
+    if (prior) return { lead: existing, customer: prior, alreadyConverted: true };
+    throw new ValidationError(
+      'Lead already converted but the linked customer is missing',
+    );
   }
 
   const correlationId = uuidv4();
   const now = new Date();
+
+  // LC-5 dedup: link to an existing high-confidence customer match rather than
+  // minting a duplicate. Attribution is preserved via the conversion audit (the
+  // existing customer's own columns are left untouched).
+  const linkTarget = await findLinkableCustomer(tenantId, existing, customerRepo);
+  if (linkTarget) {
+    const runLink = async (): Promise<ConversionResult> => {
+      const updated = await leadRepo.update(tenantId, leadId, {
+        convertedCustomerId: linkTarget.id,
+        stage: 'won',
+        updatedAt: new Date(),
+      });
+      if (!updated) throw new Error('Lead disappeared mid-conversion');
+      if (auditRepo) {
+        const attributionMeta = buildAttributionMetadata(existing);
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId,
+            actorRole,
+            eventType: 'lead.converted',
+            entityType: 'lead',
+            entityId: leadId,
+            correlationId,
+            metadata: {
+              customerId: linkTarget.id,
+              fromStage: existing.stage,
+              linked: true,
+              ...attributionMeta,
+            },
+          }),
+        );
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId,
+            actorRole,
+            eventType: 'customer.linked_from_lead',
+            entityType: 'customer',
+            entityId: linkTarget.id,
+            correlationId,
+            metadata: { leadId, ...attributionMeta },
+          }),
+        );
+      }
+      return { lead: updated, customer: linkTarget, linked: true };
+    };
+    return isTransactional(leadRepo)
+      ? leadRepo.withTransaction(tenantId, runLink)
+      : runLink();
+  }
 
   const buildCustomer = (): Customer => {
     const firstName = existing.firstName ?? '';

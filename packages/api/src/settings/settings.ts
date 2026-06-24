@@ -339,6 +339,12 @@ export interface TenantSettings {
    */
   serviceAreaText?: string | null;
   serviceAreaRadius?: number | null;
+  /**
+   * LC-6 — the ZIP/postal codes this tenant serves (captured at onboarding,
+   * column `service_area_zips`). When non-empty, the public booking surface
+   * gates availability + booking on it (in-area only); empty ⇒ no geofencing.
+   */
+  serviceAreaZips?: string[];
   businessHours?: Record<string, { open: string; close: string } | null> | null;
   jobBufferMinutes?: number | null;
   /**

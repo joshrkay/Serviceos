@@ -25,7 +25,9 @@ export type DispatchEntityType =
   | 'daily_digest'
   // U6 (CRM Jobber parity, Phase 2) — owner-authored conversation reply
   // (free-text SMS/email from the unified inbox; entity_id = conversations.id).
-  | 'conversation_reply';
+  | 'conversation_reply'
+  // LC-3 — speed-to-lead auto-response (entity_id = leads.id).
+  | 'lead_auto_response';
 export type DispatchChannel = 'sms' | 'email';
 export type DispatchStatus = 'sent' | 'delivered' | 'failed' | 'bounced';
 

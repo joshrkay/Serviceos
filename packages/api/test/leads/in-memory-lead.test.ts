@@ -59,6 +59,31 @@ describe('VQ-002 — InMemoryLeadRepository (canonical module)', () => {
     expect(typeof asInterface.findByPhoneNormalized).toBe('function');
   });
 
+  it('LC-8 — countBySource groups by source with converted + period window', async () => {
+    const jan = new Date('2026-01-15T00:00:00Z');
+    const feb = new Date('2026-02-15T00:00:00Z');
+    await repo.create(makeLead({ id: 'l1', source: 'web_form', createdAt: jan }));
+    await repo.create(
+      makeLead({ id: 'l2', source: 'web_form', createdAt: feb, convertedCustomerId: 'cust-1' }),
+    );
+    await repo.create(makeLead({ id: 'l3', source: 'referral', createdAt: feb }));
+    await repo.create(makeLead({ id: 'l4', tenantId: tenantB, source: 'web_form', createdAt: feb }));
+
+    const all = await repo.countBySource(tenantA);
+    expect(all.find((c) => c.source === 'web_form')).toEqual({
+      source: 'web_form',
+      leadCount: 2,
+      convertedCount: 1,
+    });
+    expect(all.find((c) => c.source === 'referral')?.leadCount).toBe(1);
+    // Tenant B's lead is excluded.
+    expect(all.reduce((n, c) => n + c.leadCount, 0)).toBe(3);
+
+    // Period window [feb, now) drops the January web_form lead.
+    const since = await repo.countBySource(tenantA, { from: feb });
+    expect(since.find((c) => c.source === 'web_form')?.leadCount).toBe(1);
+  });
+
   it('VQ-002 — happy path: create + findById round-trip', async () => {
     const lead = makeLead({ id: 'lead-001', firstName: 'Alice' });
     await repo.create(lead);

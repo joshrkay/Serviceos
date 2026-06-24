@@ -27,6 +27,20 @@ export interface Lead {
    * 20 entries, 500 chars each by the Zod layer.
    */
   attribution?: Record<string, string>;
+  /**
+   * LC-1: the verbatim inbound submission (web form / partner channel),
+   * stored as JSONB. Distinct from `attribution` (curated marketing bag) —
+   * this is the untouched payload so the inbox can show exactly what was
+   * received. Set once at intake; never mutated thereafter. Size-capped by
+   * the inbound contract (packages/shared inboundLeadSchema).
+   */
+  rawPayload?: Record<string, unknown>;
+  /**
+   * LC-3: explicit SMS consent captured at intake (default false). Gates the
+   * speed-to-lead SMS auto-response via the consent/DNC delivery service —
+   * never assume consent for an inbound lead.
+   */
+  smsConsent?: boolean;
   stage: LeadStage;
   /** integer cents — never float */
   estimatedValueCents?: number;
@@ -61,11 +75,21 @@ export interface CreateLeadInput {
   utmMedium?: string;
   utmCampaign?: string;
   attribution?: Record<string, string>;
+  /** LC-1: verbatim inbound payload (web form / partner channel). */
+  rawPayload?: Record<string, unknown>;
+  /** LC-3: explicit SMS consent captured at intake (default false). */
+  smsConsent?: boolean;
   estimatedValueCents?: number;
   notes?: string;
   assignedUserId?: string;
   createdBy: string;
   actorRole?: string;
+  /**
+   * LC-3: when provided, createLead enqueues a speed-to-lead auto-response
+   * job for inbound channels (web_form/marketplace/referral/other). Optional
+   * so the CRM / voice / portal callers that don't want an auto-reply omit it.
+   */
+  queue?: import('../queues/queue').Queue;
 }
 
 export interface UpdateLeadInput {
@@ -104,6 +128,22 @@ export interface LeadListResult {
   total: number;
 }
 
+/** LC-8 — per-source lead counts for the digest/dashboard analytics hook. */
+export interface LeadSourceCount {
+  source: LeadSource;
+  /** Leads created in the window with this source. */
+  leadCount: number;
+  /** Of those, how many have been converted to a customer. */
+  convertedCount: number;
+}
+
+/** Window for source analytics (inclusive `from`, exclusive `to`), by
+ *  `created_at`. Both bounds optional — omit for all-time. */
+export interface LeadSourceCountOptions {
+  from?: Date;
+  to?: Date;
+}
+
 export interface LeadRepository {
   create(lead: Lead): Promise<Lead>;
   findById(tenantId: string, id: string): Promise<Lead | null>;
@@ -118,6 +158,15 @@ export interface LeadRepository {
    * normalizes `primaryPhone` on the fly.
    */
   findByPhoneNormalized(tenantId: string, phoneNormalized: string): Promise<Lead | null>;
+  /**
+   * LC-8 — count leads grouped by source within an optional [from, to)
+   * created-at window, with how many of each converted. Powers the
+   * source-attribution analytics for the digest/dashboard.
+   */
+  countBySource(
+    tenantId: string,
+    options?: LeadSourceCountOptions,
+  ): Promise<LeadSourceCount[]>;
 }
 
 export const DEFAULT_LIST_LIMIT = 50;

@@ -118,6 +118,10 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // this mapper's convention.
     serviceAreaText: (row.service_area_text as string | null) ?? undefined,
     serviceAreaRadius: (row.service_area_radius as number | null) ?? undefined,
+    // LC-6 — served ZIPs (TEXT[] DEFAULT '{}'); surfaced for in-area gating.
+    serviceAreaZips: Array.isArray(row.service_area_zips)
+      ? (row.service_area_zips as string[])
+      : undefined,
     businessHours: (() => {
       const raw = row.business_hours as
         | Record<string, { open: string; close: string } | null>
