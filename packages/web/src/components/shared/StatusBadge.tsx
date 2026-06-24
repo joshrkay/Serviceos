@@ -2,31 +2,50 @@ import type { JobStatus, EstimateStatus, InvoiceStatus } from '../../data/mock-d
 
 type Status = JobStatus | EstimateStatus | InvoiceStatus | 'Urgent' | 'Normal';
 
-const CONFIG: Record<string, { dot: string; bg: string; text: string; label?: string }> = {
-  Active:        { dot: 'bg-blue-500',   bg: 'bg-blue-50',   text: 'text-blue-700' },
-  'In Progress': { dot: 'bg-blue-500',   bg: 'bg-blue-50',   text: 'text-blue-700' },
-  Scheduled:     { dot: 'bg-amber-500',  bg: 'bg-amber-50',  text: 'text-amber-700' },
-  Unscheduled:   { dot: 'bg-slate-400',  bg: 'bg-slate-100', text: 'text-slate-600' },
-  Dispatched:    { dot: 'bg-indigo-500', bg: 'bg-indigo-50', text: 'text-indigo-700' },
-  Completed:     { dot: 'bg-green-500',  bg: 'bg-green-50',  text: 'text-green-700' },
-  Invoiced:      { dot: 'bg-teal-500',   bg: 'bg-teal-50',   text: 'text-teal-700' },
-  Closed:        { dot: 'bg-slate-500',  bg: 'bg-slate-100', text: 'text-slate-700' },
-  Canceled:      { dot: 'bg-red-400',    bg: 'bg-red-50',    text: 'text-red-600' },
-  'No Show':     { dot: 'bg-orange-400', bg: 'bg-orange-50', text: 'text-orange-700' },
-  Draft:         { dot: 'bg-slate-400',  bg: 'bg-slate-100', text: 'text-slate-600' },
-  Sent:          { dot: 'bg-blue-500',   bg: 'bg-blue-50',   text: 'text-blue-700' },
-  Viewed:        { dot: 'bg-violet-500', bg: 'bg-violet-50', text: 'text-violet-700' },
-  Approved:      { dot: 'bg-green-500',  bg: 'bg-green-50',  text: 'text-green-700' },
-  Declined:      { dot: 'bg-red-500',    bg: 'bg-red-50',    text: 'text-red-700' },
-  Expired:       { dot: 'bg-slate-400',  bg: 'bg-slate-100', text: 'text-slate-500' },
-  Unpaid:        { dot: 'bg-amber-500',  bg: 'bg-amber-50',  text: 'text-amber-700' },
-  Paid:          { dot: 'bg-green-500',  bg: 'bg-green-50',  text: 'text-green-700' },
-  Overdue:       { dot: 'bg-red-500',    bg: 'bg-red-50',    text: 'text-red-700' },
-  'Estimate sent':     { dot: 'bg-blue-500',   bg: 'bg-blue-50',   text: 'text-blue-700' },
-  'Estimate approved': { dot: 'bg-green-500',  bg: 'bg-green-50',  text: 'text-green-700' },
-  Urgent:        { dot: 'bg-red-500',    bg: 'bg-red-50',    text: 'text-red-700' },
-  Normal:        { dot: 'bg-slate-400',  bg: 'bg-slate-100', text: 'text-slate-600' },
+export type StatusTone = 'info' | 'success' | 'warning' | 'destructive' | 'neutral';
+
+// Branded status vocabulary: the per-status rainbow collapses to the design's
+// calm tone set (info = in-flight, success = done, warning = needs-attention,
+// destructive = bad, neutral = inert), driven by semantic tokens so every list
+// that renders a StatusBadge adopts Path A at once.
+const TONE_CLASSES: Record<StatusTone, { dot: string; bg: string; text: string }> = {
+  info: { dot: 'bg-primary', bg: 'bg-primary/10', text: 'text-primary' },
+  success: { dot: 'bg-success', bg: 'bg-success/10', text: 'text-success' },
+  warning: { dot: 'bg-warning', bg: 'bg-warning/10', text: 'text-warning' },
+  destructive: { dot: 'bg-destructive', bg: 'bg-destructive/10', text: 'text-destructive' },
+  neutral: { dot: 'bg-muted-foreground', bg: 'bg-secondary', text: 'text-muted-foreground' },
 };
+
+const STATUS_TONE: Record<string, StatusTone> = {
+  Active: 'info',
+  'In Progress': 'info',
+  Scheduled: 'warning',
+  Unscheduled: 'neutral',
+  Dispatched: 'info',
+  Completed: 'success',
+  Invoiced: 'success',
+  Closed: 'neutral',
+  Canceled: 'destructive',
+  'No Show': 'warning',
+  Draft: 'neutral',
+  Sent: 'info',
+  Viewed: 'info',
+  Approved: 'success',
+  Declined: 'destructive',
+  Expired: 'neutral',
+  Unpaid: 'warning',
+  Paid: 'success',
+  Overdue: 'destructive',
+  'Estimate sent': 'info',
+  'Estimate approved': 'success',
+  Urgent: 'destructive',
+  Normal: 'neutral',
+};
+
+/** Tone for a status label; unknown → neutral. */
+export function toneForStatus(status: string): StatusTone {
+  return STATUS_TONE[status] ?? 'neutral';
+}
 
 interface Props {
   status: Status;
@@ -35,9 +54,9 @@ interface Props {
 }
 
 export function StatusBadge({ status, size = 'md', noBackground }: Props) {
-  const cfg = CONFIG[status] ?? CONFIG.Normal;
+  const cfg = TONE_CLASSES[toneForStatus(status)];
   const padding = size === 'sm' ? 'px-2 py-0.5' : 'px-2.5 py-1';
-  const textSize = size === 'sm' ? 'text-xs' : 'text-xs';
+  const textSize = 'text-xs';
 
   if (noBackground) {
     return (
@@ -49,7 +68,9 @@ export function StatusBadge({ status, size = 'md', noBackground }: Props) {
   }
 
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full ${padding} ${textSize} ${cfg.bg} ${cfg.text}`}>
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full ${padding} ${textSize} ${cfg.bg} ${cfg.text}`}
+    >
       <span className={`inline-block size-1.5 rounded-full ${cfg.dot}`} />
       {status}
     </span>
