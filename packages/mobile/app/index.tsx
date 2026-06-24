@@ -12,24 +12,34 @@ import { useReconnectRetry } from '../src/lib/useReconnectRetry';
 
 const MODES: Mode[] = ['supervisor', 'both', 'tech'];
 
-// Secondary destinations — the approval inbox + money are surfaced as hero
-// cards above, so the grid is the remaining read screens.
-const NAV: Array<{ label: string; route: Href }> = [
-  { label: 'Messages', route: '/messages' },
-  { label: 'Customers', route: '/customers' },
+// Secondary destinations that are NOT on the bottom tab bar (Home / Assistant /
+// Customers / Jobs / Settings live there). Surfaced here so nothing becomes
+// unreachable until later slices reach them contextually.
+const QUICK_LINKS: Array<{ label: string; route: Href }> = [
   { label: 'Schedule', route: '/schedule' },
   { label: 'Estimates', route: '/estimates' },
   { label: 'Invoices', route: '/invoices' },
-  { label: 'Jobs', route: '/jobs' },
-  { label: 'Settings', route: '/settings' },
+  { label: 'Messages', route: '/messages' },
 ];
 
-// Home / Today: the owner's at-a-glance pulse — speak an action, what's
-// waiting for approval, and this month's money — over the existing API.
+// The dashboard previews the top of the queue; the full list is one tap away.
+const MAX_APPROVAL_ROWS = 3;
+
+/** Whole hours until `iso`, clamped at 0; null when there's no expiry to show. */
+function hoursUntil(iso: string | undefined): number | null {
+  if (!iso) return null;
+  const ms = new Date(iso).getTime() - Date.now();
+  if (Number.isNaN(ms)) return null;
+  return Math.max(0, Math.round(ms / 3_600_000));
+}
+
+// Home / Today: the owner's at-a-glance dashboard — what's waiting for approval
+// (the human gate, front and center), this month's money, and quick links —
+// all over the existing API hooks.
 export default function Home() {
   const router = useRouter();
   const { me, isLoading, error, switchMode, refetch } = useMe();
-  const { count: approvalsCount, isLoading: approvalsLoading } = usePendingProposals();
+  const { count: approvalsCount, proposals } = usePendingProposals();
   const money = useMoneyDashboard();
   const { showErrorToast } = useToast();
 
@@ -53,6 +63,7 @@ export default function Home() {
   }
 
   const trendUp = (money.summary?.revenueTrendCents ?? 0) >= 0;
+  const topProposals = proposals.slice(0, MAX_APPROVAL_ROWS);
 
   return (
     <ScrollView
@@ -71,35 +82,60 @@ export default function Home() {
         <Text className="text-base font-semibold text-primaryForeground">Speak an action</Text>
       </Pressable>
 
+      {/* Pending approvals — the human-approval gate, front and center, with a
+          preview of the top of the queue. */}
       <Text className="mt-7 mb-2 text-xs font-medium uppercase tracking-wide text-mutedForeground">
-        Money &amp; approvals
+        Pending approvals
       </Text>
-
-      {/* Approval inbox — the human-approval gate, with a live count. */}
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Approval inbox"
-        onPress={() => router.push('/approvals')}
-        className="min-h-11 flex-row items-center justify-between rounded-lg border border-border p-4"
-      >
-        <View className="flex-1 pr-3">
-          <Text className="text-base font-medium text-foreground">Approval inbox</Text>
-          <Text className="mt-0.5 text-sm text-mutedForeground">
-            {approvalsLoading && approvalsCount === 0
-              ? 'Checking…'
-              : approvalsCount > 0
+      <View className="rounded-xl border border-border bg-card p-4">
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Approval inbox"
+          onPress={() => router.push('/approvals')}
+          className="min-h-11 flex-row items-center justify-between"
+        >
+          <View className="flex-1 pr-3">
+            <Text className="text-base font-medium text-foreground">Approval inbox</Text>
+            <Text className="mt-0.5 text-sm text-mutedForeground">
+              {approvalsCount > 0
                 ? `${approvalsCount} waiting for your tap`
                 : "Nothing waiting — you're caught up"}
-          </Text>
-        </View>
-        {approvalsCount > 0 ? (
-          <View className="h-7 min-w-7 items-center justify-center rounded-full bg-primary px-2">
-            <Text className="text-sm font-semibold text-primaryForeground">
-              {approvalsCount > 9 ? '9+' : approvalsCount}
             </Text>
           </View>
+          {approvalsCount > 0 ? (
+            <View className="h-7 min-w-7 items-center justify-center rounded-full bg-primary px-2">
+              <Text className="text-sm font-semibold text-primaryForeground">
+                {approvalsCount > 9 ? '9+' : approvalsCount}
+              </Text>
+            </View>
+          ) : null}
+        </Pressable>
+
+        {topProposals.length > 0 ? (
+          <View className="mt-3 border-t border-border">
+            {topProposals.map((p) => {
+              const hrs = hoursUntil(p.expiresAt);
+              return (
+                <Pressable
+                  key={p.id}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Review: ${p.summary}`}
+                  onPress={() => router.push(`/proposals/${p.id}`)}
+                  className="min-h-11 flex-row items-center justify-between border-b border-border py-2"
+                >
+                  <Text className="flex-1 pr-3 text-sm text-foreground" numberOfLines={1}>
+                    {p.summary}
+                  </Text>
+                  {hrs !== null ? (
+                    <Text className="mr-3 text-xs text-mutedForeground">{hrs}h</Text>
+                  ) : null}
+                  <Text className="text-sm font-medium text-primary">Review</Text>
+                </Pressable>
+              );
+            })}
+          </View>
         ) : null}
-      </Pressable>
+      </View>
 
       {/* This month's money — hidden entirely when the report isn't configured. */}
       {money.notConfigured ? null : (
@@ -107,7 +143,7 @@ export default function Home() {
           accessibilityRole="button"
           accessibilityLabel="Money summary"
           onPress={() => router.push('/invoices')}
-          className="mt-3 min-h-11 rounded-lg border border-border p-4"
+          className="mt-7 min-h-11 rounded-xl border border-border bg-card p-4"
         >
           <Text className="text-base font-medium text-foreground">This month</Text>
           {money.isLoading ? (
@@ -164,16 +200,16 @@ export default function Home() {
       <PushDeniedNotice className="mt-6" />
 
       <Text className="mt-7 mb-2 text-xs font-medium uppercase tracking-wide text-mutedForeground">
-        More
+        Quick links
       </Text>
       <View className="flex-row flex-wrap justify-between">
-        {NAV.map((n) => (
+        {QUICK_LINKS.map((n) => (
           <Pressable
             key={n.label}
             accessibilityRole="button"
             accessibilityLabel={n.label}
             onPress={() => router.push(n.route)}
-            className="mb-3 min-h-11 items-center justify-center rounded-md border border-border px-4 py-3"
+            className="mb-3 min-h-11 items-center justify-center rounded-md border border-border bg-card px-4 py-3"
             style={{ width: '47%' }}
           >
             <Text className="text-base text-foreground">{n.label}</Text>
