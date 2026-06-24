@@ -32,6 +32,13 @@ describe('useApproveBatch', () => {
     expect(res.failed).toEqual([{ id: 'c', reason: 'VALIDATION_ERROR' }]);
   });
 
+  it('short-circuits an empty id list without calling the API', async () => {
+    const { result } = renderHook(() => useApproveBatch());
+    const res = await result.current([]);
+    expect(res).toEqual({ approved: [], failed: [] });
+    expect(h.api).not.toHaveBeenCalled();
+  });
+
   it('throws the decoded backend message on a non-ok response', async () => {
     h.api.mockResolvedValue({
       ok: false,

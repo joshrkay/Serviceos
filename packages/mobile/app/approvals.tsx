@@ -46,11 +46,14 @@ export default function Approvals() {
     setSubmitting(true);
     try {
       const result = await approveBatch(eligible.map((p) => p.id));
+      const approved = result.approved.length;
       const failed = result.failed.length;
+      // When the whole batch fails, "Approved 0" would read as success — flip
+      // the title and tone (ToastTone is only 'info' | 'error').
       showToast({
-        title: `Approved ${result.approved.length}`,
+        title: approved > 0 ? `Approved ${approved}` : 'No proposals approved',
         body: failed > 0 ? `${failed} couldn't be approved — review individually.` : undefined,
-        tone: 'info',
+        tone: approved > 0 ? 'info' : 'error',
       });
       setSheetOpen(false);
       await refresh();

@@ -185,6 +185,23 @@ describe('Approvals screen', () => {
     );
   });
 
+  it('flips the toast to "No proposals approved" (error) when the whole batch fails', async () => {
+    h.approveBatch = vi.fn().mockResolvedValue({
+      approved: [],
+      failed: [{ id: 'elig', reason: 'VALIDATION_ERROR' }],
+    });
+    h.proposals = [elig('elig')];
+    h.count = 1;
+    const { getByText } = render(createElement(Approvals));
+    fireEvent.click(getByText('Approve all').closest('button')!);
+    fireEvent.click(getByText('Approve 1 eligible').closest('button')!);
+    await waitFor(() =>
+      expect(h.showToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'No proposals approved', tone: 'error' }),
+      ),
+    );
+  });
+
   it('keeps the sheet open and surfaces an error when the batch call fails', async () => {
     h.approveBatch = vi.fn().mockRejectedValue(new Error('HTTP 500'));
     h.proposals = [elig('elig')];

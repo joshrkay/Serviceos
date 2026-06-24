@@ -69,6 +69,7 @@ export function formatRelativeTime(
   const t = d.getTime();
   if (Number.isNaN(t)) return '';
   const sec = Math.floor((now - t) / 1000);
+  if (sec < -45) return formatShortDate(d, timeZone); // a genuine future date, not skew
   if (sec < 45) return 'now'; // also covers slightly-future clock skew
   const min = Math.floor(sec / 60);
   if (min < 60) return `${min}m`;

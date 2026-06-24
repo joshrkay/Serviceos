@@ -29,12 +29,12 @@ function apiCaptureTypes(source: string): Set<string> {
   const capture = new Set<string>();
   let pending: string[] = [];
   for (const line of body[1].split('\n')) {
-    const caseM = line.match(/case\s+'([^']+)'\s*:/);
+    const caseM = line.match(/case\s+['"]([^'"]+)['"]\s*:/);
     if (caseM) {
       pending.push(caseM[1]);
       continue;
     }
-    const retM = line.match(/return\s+'([^']+)'\s*;/);
+    const retM = line.match(/return\s+['"]([^'"]+)['"]\s*;/);
     if (retM) {
       if (retM[1] === 'capture') for (const t of pending) capture.add(t);
       pending = [];

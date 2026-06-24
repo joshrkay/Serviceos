@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useVoiceCapture } from '../voice/useVoiceCapture';
 
 // The contextual voice affordance the prototype puts on top of every screen
@@ -10,10 +11,15 @@ import { useVoiceCapture } from '../voice/useVoiceCapture';
 // shared shell so the assistant is reachable without leaving the screen.
 export function VoiceOverlay() {
   const [open, setOpen] = useState(false);
+  const insets = useSafeAreaInsets();
 
   return (
     <>
-      <View className="absolute left-0 right-0 top-2 items-center">
+      {/* Sit below the notch / status bar; keep a min when there's no inset. */}
+      <View
+        className="absolute left-0 right-0 items-center"
+        style={{ top: Math.max(insets.top, 8) }}
+      >
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Voice assistant"

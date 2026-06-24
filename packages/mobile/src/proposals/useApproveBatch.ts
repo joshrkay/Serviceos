@@ -20,6 +20,8 @@ export function useApproveBatch(): (proposalIds: string[]) => Promise<BatchAppro
   const api = useApiClient();
   return useCallback(
     async (proposalIds: string[]): Promise<BatchApproveResult> => {
+      // Nothing eligible → skip the round-trip (and a possible min(1) 400).
+      if (proposalIds.length === 0) return { approved: [], failed: [] };
       const res = await api('/api/proposals/approve-batch', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },

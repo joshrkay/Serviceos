@@ -1,5 +1,6 @@
 import { Pressable, Text, View } from 'react-native';
 import { type Href, usePathname, useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 // The five primary destinations from the prototype's shared bottom nav
 // (designs/Nav.dc.html): Home · Assistant · Customers · Jobs · Settings.
@@ -31,9 +32,14 @@ export function isTabActive(pathname: string, match: string): boolean {
 export function TabBar() {
   const router = useRouter();
   const pathname = usePathname();
+  const insets = useSafeAreaInsets();
 
   return (
-    <View className="flex-row border-t border-border bg-card pb-2">
+    <View
+      className="flex-row border-t border-border bg-card"
+      // Clear the home indicator on devices that have one; keep a min on the rest.
+      style={{ paddingBottom: Math.max(insets.bottom, 8) }}
+    >
       {TABS.map((tab) => {
         const active = isTabActive(pathname, tab.match);
         return (

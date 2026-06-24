@@ -4,6 +4,7 @@ import { Slot, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 import { View } from 'react-native';
+import { SafeAreaProvider, initialWindowMetrics } from 'react-native-safe-area-context';
 import { CLERK_PUBLISHABLE_KEY } from '../src/lib/env';
 import { tokenCache } from '../src/lib/tokenCache';
 import { usePushRegistration } from '../src/hooks/usePushRegistration';
@@ -63,19 +64,23 @@ export default function RootLayout() {
   //    (useApiClient raises the session-expired toast through it).
   return (
     <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY} tokenCache={tokenCache}>
-      <StatusBar style="auto" />
-      <ErrorBoundary>
-        <ToastProvider>
-          <View className="flex-1 bg-background">
-            <OfflineBanner />
-            <View className="flex-1">
-              <ClerkLoaded>
-                <AuthGate />
-              </ClerkLoaded>
+      {/* Provides safe-area insets to the tab bar + voice overlay; initialMetrics
+          avoids a first-frame flash before insets are measured. */}
+      <SafeAreaProvider initialMetrics={initialWindowMetrics}>
+        <StatusBar style="auto" />
+        <ErrorBoundary>
+          <ToastProvider>
+            <View className="flex-1 bg-background">
+              <OfflineBanner />
+              <View className="flex-1">
+                <ClerkLoaded>
+                  <AuthGate />
+                </ClerkLoaded>
+              </View>
             </View>
-          </View>
-        </ToastProvider>
-      </ErrorBoundary>
+          </ToastProvider>
+        </ErrorBoundary>
+      </SafeAreaProvider>
     </ClerkProvider>
   );
 }

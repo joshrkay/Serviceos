@@ -106,15 +106,18 @@ export default function Home() {
 
         {topProposals.length > 0 ? (
           <View className="mt-3 border-t border-border">
-            {topProposals.map((p) => {
+            {topProposals.map((p, index) => {
               const hrs = hoursUntilExpiry(p.expiresAt);
+              const isLast = index === topProposals.length - 1;
               return (
                 <Pressable
                   key={p.id}
                   accessibilityRole="button"
                   accessibilityLabel={`Review: ${p.summary}`}
                   onPress={() => router.push(`/proposals/${p.id}`)}
-                  className="min-h-11 flex-row items-center justify-between border-b border-border py-2"
+                  className={`min-h-11 flex-row items-center justify-between py-2 ${
+                    isLast ? '' : 'border-b border-border'
+                  }`}
                 >
                   <Text className="flex-1 pr-3 text-sm text-foreground" numberOfLines={1}>
                     {p.summary}

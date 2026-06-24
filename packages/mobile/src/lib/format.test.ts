@@ -69,8 +69,12 @@ describe('formatRelativeTime', () => {
     expect(formatRelativeTime('2026-06-10T12:00:00Z', NOW, 'UTC')).toBe('Jun 10, 2026');
   });
 
-  it('treats slight clock skew (future) as "now" and is empty for invalid input', () => {
-    expect(formatRelativeTime(at(-5_000), NOW)).toBe('now');
+  it('treats slight clock skew (future) as "now", but a genuine future date as a date', () => {
+    expect(formatRelativeTime(at(-5_000), NOW)).toBe('now'); // 5s future → skew
+    expect(formatRelativeTime('2026-06-27T12:00:00Z', NOW, 'UTC')).toBe('Jun 27, 2026'); // 3d future
+  });
+
+  it('is empty for invalid input', () => {
     expect(formatRelativeTime(null, NOW)).toBe('');
     expect(formatRelativeTime('not-a-date', NOW)).toBe('');
   });
