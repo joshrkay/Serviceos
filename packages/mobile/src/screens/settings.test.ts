@@ -56,8 +56,9 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('Settings screen', () => {
-  it('renders the business info rows from /api/me', () => {
+  it('renders the business info rows from /api/me under an Account section', () => {
     const { getByText } = render(createElement(Settings));
+    expect(getByText('Account')).toBeTruthy(); // brand section header
     expect(getByText('Role')).toBeTruthy();
     expect(getByText('supervisor')).toBeTruthy();
     expect(getByText('Field-capable')).toBeTruthy();
