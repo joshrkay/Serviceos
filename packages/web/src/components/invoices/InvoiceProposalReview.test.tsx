@@ -150,4 +150,29 @@ describe('P5-004A InvoiceProposalReview', () => {
     expect(screen.getByTestId('pricing-source-uncatalogued')).toBeDefined();
     expect(screen.queryByTestId('pricing-source-manual')).toBeNull();
   });
+
+  // U9e — the unitPrice (estimate-shaped) vs unitPriceCents (invoice-shaped)
+  // dual-read must survive the recolor; both resolve to the same line total.
+  it('reads estimate-shaped unitPrice into the line total', () => {
+    render(<InvoiceProposalReview proposal={makeProposal()} />); // Labor: 2 × 5000
+    expect(screen.getByTestId('line-item-0')).toHaveTextContent('$100.00');
+  });
+
+  it('reads invoice-shaped unitPriceCents into the line total', () => {
+    render(
+      <InvoiceProposalReview
+        proposal={makeProposal({
+          lineItems: [{ description: 'Labor', quantity: 2, unitPriceCents: 5000 }],
+        })}
+      />,
+    );
+    expect(screen.getByTestId('line-item-0')).toHaveTextContent('$100.00');
+  });
+
+  it('renders on Path A tokens — no raw Tailwind palette leaks', () => {
+    const { container } = render(<InvoiceProposalReview proposal={makeProposal()} />);
+    expect(container.innerHTML).not.toMatch(
+      /(bg|text|border|ring|divide)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
+    );
+  });
 });

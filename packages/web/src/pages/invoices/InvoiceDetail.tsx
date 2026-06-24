@@ -226,7 +226,7 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
                   data-testid="line-items-save"
                   onClick={saveLineItems}
                   disabled={lineItemSaving}
-                  className="rounded-lg bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800 disabled:opacity-50"
+                  className="rounded-lg bg-primary text-primary-foreground text-sm px-4 py-2 hover:bg-primary/90 disabled:opacity-50"
                 >
                   {lineItemSaving ? 'Saving…' : 'Save'}
                 </button>
@@ -234,7 +234,7 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
                   type="button"
                   data-testid="line-items-cancel"
                   onClick={cancelEditLineItems}
-                  className="rounded-lg border border-slate-200 text-slate-700 text-sm px-4 py-2 hover:bg-slate-50"
+                  className="rounded-lg border border-border text-foreground text-sm px-4 py-2 hover:bg-secondary"
                 >
                   Cancel
                 </button>
@@ -247,7 +247,7 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
                   type="button"
                   data-testid="line-items-edit-toggle"
                   onClick={startEditLineItems}
-                  className="rounded-md border border-slate-200 text-xs px-2 py-1 hover:bg-slate-50"
+                  className="rounded-md border border-border text-xs px-2 py-1 hover:bg-secondary"
                 >
                   Edit
                 </button>
