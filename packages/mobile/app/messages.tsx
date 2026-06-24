@@ -3,6 +3,8 @@ import { useState } from 'react';
 import { ActivityIndicator, FlatList, Pressable, RefreshControl, Text, View } from 'react-native';
 import { useConversations, type InboxThread } from '../src/messaging/useConversations';
 import { ErrorState } from '../src/components/ErrorState';
+import { initials } from '../src/lib/initials';
+import { formatRelativeTime } from '../src/lib/format';
 
 function threadName(t: InboxThread): string {
   // A friendly title wins; for unmatched-SMS threads the entityId is the phone.
@@ -62,18 +64,33 @@ export default function Messages() {
             accessibilityRole="button"
             accessibilityLabel={threadName(item)}
             onPress={() => open(item)}
-            className="mb-3 min-h-11 rounded-lg border border-border p-4"
+            className="mb-3 min-h-11 flex-row items-center rounded-lg border border-border bg-card p-4"
           >
-            <View className="flex-row items-center justify-between">
-              <Text className="text-base text-foreground">{threadName(item)}</Text>
-              {item.needsReply ? (
-                <View className="h-2.5 w-2.5 rounded-full bg-primary" accessibilityLabel="Needs reply" />
-              ) : null}
+            <View className="mr-3 h-10 w-10 items-center justify-center rounded-full bg-secondary">
+              <Text className="text-sm font-medium text-secondaryForeground">
+                {initials(threadName(item))}
+              </Text>
             </View>
-            <Text className="mt-1 text-sm text-mutedForeground" numberOfLines={1}>
-              {item.lastMessageDirection === 'outbound' ? 'You: ' : ''}
-              {item.lastMessagePreview}
-            </Text>
+            <View className="flex-1">
+              <View className="flex-row items-center justify-between">
+                <Text className="flex-1 pr-2 text-base text-foreground" numberOfLines={1}>
+                  {threadName(item)}
+                </Text>
+                <Text className="text-xs text-mutedForeground">
+                  {formatRelativeTime(item.lastMessageAt)}
+                </Text>
+                {item.needsReply ? (
+                  <View
+                    className="ml-2 h-2.5 w-2.5 rounded-full bg-primary"
+                    accessibilityLabel="Needs reply"
+                  />
+                ) : null}
+              </View>
+              <Text className="mt-1 text-sm text-mutedForeground" numberOfLines={1}>
+                {item.lastMessageDirection === 'outbound' ? 'You: ' : ''}
+                {item.lastMessagePreview}
+              </Text>
+            </View>
           </Pressable>
         )}
       />

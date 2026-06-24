@@ -1,6 +1,7 @@
 import { useRouter } from 'expo-router';
 import { EntityList, type EntityBadge } from '../src/components/EntityList';
 import { useListQuery } from '../src/hooks/useListQuery';
+import { initials } from '../src/lib/initials';
 
 interface Customer {
   id: string;
@@ -15,14 +16,6 @@ interface Customer {
 
 function customerName(c: Customer): string {
   return c.displayName || [c.firstName, c.lastName].filter(Boolean).join(' ') || 'Unnamed customer';
-}
-
-/** First letters of the first + last word (or first two chars of a single word). */
-function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return '?';
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
 /** Non-residential accounts get a segment tag; residential stays clean. */

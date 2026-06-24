@@ -18,6 +18,7 @@ import {
 } from '../../src/messaging/useConversationThread';
 import { ErrorState } from '../../src/components/ErrorState';
 import { useToast } from '../../src/components/Toast';
+import { formatRelativeTime } from '../../src/lib/format';
 
 function firstParam(value: string | string[] | undefined): string {
   return (Array.isArray(value) ? value[0] : value) ?? '';
@@ -108,9 +109,14 @@ export default function MessageThread() {
           }
           const outbound = isOutbound(item);
           return (
-            <View className={`mb-2 max-w-[80%] rounded-2xl px-4 py-2 ${outbound ? 'self-end bg-primary' : 'self-start bg-secondary'}`}>
-              <Text className={outbound ? 'text-base text-primaryForeground' : 'text-base text-secondaryForeground'}>
-                {item.content}
+            <View className={`mb-2 max-w-[80%] ${outbound ? 'self-end items-end' : 'self-start items-start'}`}>
+              <View className={`rounded-2xl px-4 py-2 ${outbound ? 'bg-primary' : 'bg-secondary'}`}>
+                <Text className={outbound ? 'text-base text-primaryForeground' : 'text-base text-secondaryForeground'}>
+                  {item.content}
+                </Text>
+              </View>
+              <Text className="mt-1 text-xs text-mutedForeground">
+                {formatRelativeTime(item.createdAt)}
               </Text>
             </View>
           );

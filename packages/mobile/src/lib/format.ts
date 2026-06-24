@@ -53,3 +53,28 @@ export function formatWeekdayDate(
     ...(timeZone ? { timeZone } : {}),
   }).format(d);
 }
+
+/**
+ * Compact relative time for inbox / thread timestamps: "now", "9m", "3h", "2d",
+ * then a short date once older than ~a week. `now` is injectable for
+ * deterministic tests; empty string for null/invalid input.
+ */
+export function formatRelativeTime(
+  value: string | number | Date | null | undefined,
+  now: number = Date.now(),
+  timeZone?: string,
+): string {
+  if (value === null || value === undefined) return '';
+  const d = value instanceof Date ? value : new Date(value);
+  const t = d.getTime();
+  if (Number.isNaN(t)) return '';
+  const sec = Math.floor((now - t) / 1000);
+  if (sec < 45) return 'now'; // also covers slightly-future clock skew
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}d`;
+  return formatShortDate(d, timeZone);
+}

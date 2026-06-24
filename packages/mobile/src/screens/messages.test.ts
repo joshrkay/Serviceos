@@ -68,6 +68,7 @@ describe('Messages inbox', () => {
     const { getByText } = render(createElement(Messages));
     expect(getByText('Acme Plumbing')).toBeTruthy();
     expect(getByText('My AC is out')).toBeTruthy();
+    expect(getByText('AP')).toBeTruthy(); // avatar initials
     const row = getByText('Acme Plumbing').closest('button')!;
     expect(row.className).toMatch(/\bmin-h-11\b/);
     fireEvent.click(row);
@@ -75,6 +76,13 @@ describe('Messages inbox', () => {
       pathname: '/messages/[id]',
       params: { id: 'c1', title: 'Acme Plumbing' },
     });
+  });
+
+  it('shows a compact relative time for the last message', () => {
+    // Offset from real now so the bucket is deterministic regardless of run date.
+    h.threads = [thread({ lastMessageAt: new Date(Date.now() - 9 * 60_000).toISOString() })];
+    const { getByText } = render(createElement(Messages));
+    expect(getByText('9m')).toBeTruthy();
   });
 
   it('prefixes the preview with "You:" for an outbound last message', () => {

@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { formatMoneyCents, formatMoneyShort, formatShortDate, formatWeekdayDate } from './format';
+import {
+  formatMoneyCents,
+  formatMoneyShort,
+  formatRelativeTime,
+  formatShortDate,
+  formatWeekdayDate,
+} from './format';
 
 describe('formatMoneyCents', () => {
   it('renders integer cents as dollars with thousands separators', () => {
@@ -45,5 +51,27 @@ describe('formatShortDate', () => {
     expect(formatShortDate(null)).toBe('');
     expect(formatShortDate(undefined)).toBe('');
     expect(formatShortDate('not-a-date')).toBe('');
+  });
+});
+
+describe('formatRelativeTime', () => {
+  const NOW = Date.UTC(2026, 5, 24, 12, 0, 0);
+  const at = (ms: number) => new Date(NOW - ms).toISOString();
+
+  it('renders compact buckets up to a week', () => {
+    expect(formatRelativeTime(at(10_000), NOW)).toBe('now'); // < 45s
+    expect(formatRelativeTime(at(9 * 60_000), NOW)).toBe('9m');
+    expect(formatRelativeTime(at(3 * 3_600_000), NOW)).toBe('3h');
+    expect(formatRelativeTime(at(2 * 86_400_000), NOW)).toBe('2d');
+  });
+
+  it('falls back to a short date once older than a week', () => {
+    expect(formatRelativeTime('2026-06-10T12:00:00Z', NOW, 'UTC')).toBe('Jun 10, 2026');
+  });
+
+  it('treats slight clock skew (future) as "now" and is empty for invalid input', () => {
+    expect(formatRelativeTime(at(-5_000), NOW)).toBe('now');
+    expect(formatRelativeTime(null, NOW)).toBe('');
+    expect(formatRelativeTime('not-a-date', NOW)).toBe('');
   });
 });

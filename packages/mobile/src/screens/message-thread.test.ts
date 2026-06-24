@@ -97,6 +97,13 @@ describe('Message thread', () => {
     expect(input.value).toBe('hi');
   });
 
+  it('stamps each bubble with a compact relative time', () => {
+    // Offset from real now so the bucket is deterministic regardless of run date.
+    h.messages = [msg({ id: 'm', content: 'On my way', createdAt: new Date(Date.now() - 2 * 3_600_000).toISOString() })];
+    const { getByText } = render(createElement(MessageThread));
+    expect(getByText('2h')).toBeTruthy();
+  });
+
   it('the Send control is a >=44px tap target', () => {
     const { getByText } = render(createElement(MessageThread));
     expect(getByText('Send').closest('button')!.className).toMatch(/\bmin-h-11\b/);
