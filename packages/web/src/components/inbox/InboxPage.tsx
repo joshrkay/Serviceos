@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { isCaptureProposalType } from '@ai-service-os/shared';
 import { useApiClient } from '../../lib/apiClient';
 import { emitProposalsChanged } from '../../lib/proposal-events';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
@@ -49,6 +50,10 @@ interface InboxProposalRow {
     status: string;
     createdAt: string;
     expiresAt?: string;
+    // Top-level 0–1 AI confidence (api proposal.ts:121). Drives the
+    // "approve all eligible" gate; preferred over the rarely-stamped
+    // payload._meta.overallConfidence string.
+    confidenceScore?: number;
     // Multi-action chaining: present on proposals decomposed from one
     // utterance. The inbox serializes the full proposal, so these ride
     // through without an API change.
@@ -166,6 +171,43 @@ interface InboxResponse {
   data: InboxProposalRow[];
   summary: InboxSummary;
   expired?: ExpiredCard[];
+}
+
+/** Per-id outcome of POST /api/proposals/approve-batch (mirrors the API's
+ *  BatchApproveResult). The server re-validates each id, so an ineligible or
+ *  blocked proposal lands in `failed` instead of failing the whole batch. */
+interface BatchApproveResult {
+  approved: string[];
+  failed: { id: string; reason: string }[];
+}
+
+/**
+ * Numeric confidence used by the "approve all eligible" gate. Prefer the
+ * top-level `confidenceScore` (api proposal.ts:121); fall back to the
+ * coarse `_meta.overallConfidence` string ONLY when there's no numeric score
+ * (an explicit 'high' means the model graded it ≥0.8). Absent confidence is
+ * treated as 0 — never swept into a bulk approval.
+ */
+function batchConfidence(proposal: InboxProposalRow['proposal']): number {
+  return (
+    proposal.confidenceScore ??
+    (proposal.payload?._meta?.overallConfidence === 'high' ? 1 : 0)
+  );
+}
+
+/**
+ * One-tap "approve all eligible" gate: capture-class action lane AND numeric
+ * confidence ≥0.8 (matches the API's getConfidenceLevel 'high' boundary).
+ * Money / customer-comms / irreversible proposals — and anything below 0.8 —
+ * are excluded; they must be reviewed individually (CLAUDE.md "Never
+ * auto-execute"). The server re-checks every id on approve, so this is the
+ * client-side affordance, not the authority.
+ */
+function isBatchEligibleRow(row: InboxProposalRow): boolean {
+  return (
+    isCaptureProposalType(row.proposal.proposalType) &&
+    batchConfidence(row.proposal) >= 0.8
+  );
 }
 
 const URGENCY_BADGE: Record<Urgency, { label: string; classes: string }> = {
@@ -387,6 +429,46 @@ export function InboxPage() {
   }
 
   /**
+   * "Approve all eligible" — one POST to the batch endpoint for every
+   * capture-class, high-confidence proposal. Unlike `approveChain`, this reads
+   * the per-id `{ approved, failed }` result: a partial failure restores ONLY
+   * the still-pending (failed) rows and leaves the approved ones gone, so a
+   * single blocked proposal doesn't bounce the whole batch back into the feed.
+   * A transport error (non-2xx) restores everything, like the per-row path.
+   */
+  async function approveEligible(ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    const idSet = new Set(ids);
+    const removed = rows.filter((r) => idSet.has(r.proposal.id));
+    setRows((prev) => prev.filter((r) => !idSet.has(r.proposal.id)));
+    try {
+      const res = await apiFetch('/api/proposals/approve-batch', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ proposalIds: ids }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const result = (await res.json()) as BatchApproveResult;
+      const failedIds = new Set(result.failed.map((f) => f.id));
+      if (failedIds.size > 0) {
+        const restore = removed.filter((r) => failedIds.has(r.proposal.id));
+        setRows((prev) => [...restore, ...prev]);
+        setError(
+          `${failedIds.size} couldn't be approved and ${
+            failedIds.size === 1 ? 'is' : 'are'
+          } still waiting.`,
+        );
+      } else {
+        setError(null);
+      }
+      emitProposalsChanged();
+    } catch (err) {
+      if (removed.length > 0) setRows((prev) => [...removed, ...prev]);
+      setError(err instanceof Error ? err.message : 'Approve all failed');
+    }
+  }
+
+  /**
    * Reject every member of a chain. There is no batch-reject endpoint —
    * a chain that shouldn't proceed is rejected member-by-member. Done
    * sequentially so a mid-chain failure surfaces and the rest are still
@@ -400,6 +482,7 @@ export function InboxPage() {
   }
 
   const feed = groupIntoFeed(rows);
+  const eligible = rows.filter(isBatchEligibleRow);
 
   return (
     <div className="h-full overflow-y-auto">
@@ -427,6 +510,32 @@ export function InboxPage() {
             <p className="text-xs text-muted-foreground mt-1">
               When the voice agent or the system needs your approval, it'll show up here.
             </p>
+          </div>
+        )}
+
+        {/* One-tap "approve all eligible" — only the capture-class,
+            high-confidence lane. Money / comms / irreversible and
+            anything below high confidence are deliberately excluded and
+            still require an individual tap (CLAUDE.md "Never auto-execute"). */}
+        {eligible.length > 0 && (
+          <div
+            data-testid="approve-all-eligible"
+            className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-primary/30 bg-primary/5 px-4 py-3"
+          >
+            <p className="text-xs text-muted-foreground">
+              <span className="font-medium text-foreground">
+                {eligible.length} high-confidence
+              </span>{' '}
+              eligible for one-tap approval. Money, messages, and irreversible
+              actions are excluded.
+            </p>
+            <button
+              type="button"
+              onClick={() => approveEligible(eligible.map((r) => r.proposal.id))}
+              className="min-h-11 shrink-0 rounded-lg bg-primary px-4 py-1.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90"
+            >
+              Approve all {eligible.length}
+            </button>
           </div>
         )}
 
