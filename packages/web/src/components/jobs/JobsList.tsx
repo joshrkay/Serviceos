@@ -8,7 +8,7 @@ import type { JobListItem } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { normalizeJobStatus } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
-import { Spinner, EmptyState } from '../ui';
+import { Spinner, EmptyState, Input } from '../ui';
 import { ErrorState } from '../ErrorState';
 import { NewJobFlow } from './NewJobFlow';
 
@@ -18,11 +18,11 @@ type JobStatus = 'New' | 'Scheduled' | 'In Progress' | 'Completed' | 'Canceled';
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
 const STATUS_BORDER: Partial<Record<string, string>> = {
-  'New':          'border-l-slate-300',
-  'In Progress':  'border-l-indigo-500',
-  'Scheduled':    'border-l-blue-400',
-  'Completed':    'border-l-slate-200',
-  'Canceled':     'border-l-red-300',
+  'New':          'border-l-border',
+  'In Progress':  'border-l-primary',
+  'Scheduled':    'border-l-primary',
+  'Completed':    'border-l-border',
+  'Canceled':     'border-l-destructive',
 };
 
 // UI tab label → API status value
@@ -82,12 +82,12 @@ export function JobsList() {
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h1 className="text-slate-900">Jobs</h1>
-            <p className="text-xs text-slate-400 mt-0.5">Mar 10, 2026</p>
+            <h1 className="text-foreground">Jobs</h1>
+            <p className="text-xs text-muted-foreground mt-0.5">Mar 10, 2026</p>
           </div>
           <button
             onClick={() => setShowNew(true)}
-            className="flex items-center gap-1.5 rounded-xl bg-slate-900 text-white px-3.5 py-2 text-sm hover:bg-slate-700 transition-colors">
+            className="flex items-center gap-1.5 rounded-xl bg-primary text-primary-foreground px-3.5 py-2 text-sm hover:bg-primary/90 transition-colors">
             <Plus size={14} /> New job
           </button>
         </div>
@@ -95,25 +95,25 @@ export function JobsList() {
         {/* Stats bar */}
         <div className="grid grid-cols-4 gap-2 mb-4">
           {[
-            { label: 'Active',    value: active,    color: 'text-green-600',  bg: 'bg-green-50  border-green-100' },
-            { label: 'Scheduled', value: scheduled, color: 'text-blue-600',   bg: 'bg-blue-50   border-blue-100' },
-            { label: 'Completed', value: completed, color: 'text-slate-600',  bg: 'bg-slate-50  border-slate-100' },
-            { label: 'Issues',    value: issues,    color: 'text-orange-600', bg: 'bg-orange-50 border-orange-100' },
+            { label: 'Active',    value: active,    color: 'text-success',  bg: 'bg-success/10  border-success/20' },
+            { label: 'Scheduled', value: scheduled, color: 'text-primary',   bg: 'bg-primary/10   border-primary/20' },
+            { label: 'Completed', value: completed, color: 'text-foreground',  bg: 'bg-secondary  border-border' },
+            { label: 'Issues',    value: issues,    color: 'text-warning', bg: 'bg-warning/10 border-warning/20' },
           ].map(({ label, value, color, bg }) => (
             <div key={label} className={`rounded-xl border px-2.5 py-2.5 ${bg}`}>
               <p className={`text-lg leading-none ${color}`}>{value}</p>
-              <p className="text-xs text-slate-400 mt-1">{label}</p>
+              <p className="text-xs text-muted-foreground mt-1">{label}</p>
             </div>
           ))}
         </div>
 
         {/* Search */}
-        <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5 mb-3 shadow-sm">
-          <Search size={15} className="text-slate-400 shrink-0" />
-          <input
+        <div className="mb-3">
+          <Input
+            leftIcon={<Search size={15} />}
             onChange={e => setSearch(e.target.value)}
             placeholder="Search by customer, description, or job #…"
-            className="flex-1 text-sm text-slate-700 placeholder-slate-400 outline-none bg-transparent"
+            className="min-h-11"
           />
         </div>
 
@@ -125,8 +125,8 @@ export function JobsList() {
               onClick={() => applyTabFilter(t.value)}
               className={`shrink-0 rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 tab === t.value
-                  ? 'bg-slate-900 text-white'
-                  : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-card border border-border text-foreground hover:bg-secondary'
               }`}
             >
               {t.label}
@@ -142,7 +142,7 @@ export function JobsList() {
         {/* Loading / Error */}
         {isLoading && (
           <div className="flex items-center justify-center py-16">
-            <Spinner size="md" className="text-slate-900" label="Loading jobs" />
+            <Spinner size="md" className="text-foreground" label="Loading jobs" />
           </div>
         )}
         {error && (
@@ -172,7 +172,7 @@ export function JobsList() {
                   role="button"
                   tabIndex={0}
                   onKeyDown={e => e.key === 'Enter' && navigate(`/jobs/${job.id}`)}
-                  className={`flex items-start gap-3 rounded-xl bg-white border border-slate-200 border-l-4 px-4 py-3.5 text-left hover:shadow-sm hover:border-slate-300 transition-all cursor-pointer ${STATUS_BORDER[uiStatus] ?? 'border-l-slate-200'} ${isMuted ? 'opacity-75' : ''}`}
+                  className={`flex items-start gap-3 rounded-xl bg-card border border-border border-l-4 px-4 py-3.5 text-left hover:shadow-sm hover:border-border transition-all cursor-pointer ${STATUS_BORDER[uiStatus] ?? 'border-l-border'} ${isMuted ? 'opacity-75' : ''}`}
                 >
                   {/* Service icon */}
                   <span className="text-xl shrink-0 mt-0.5">{SERVICE_ICON[job.serviceType ?? ''] ?? '🔧'}</span>
@@ -181,19 +181,19 @@ export function JobsList() {
                     <div className="flex items-start justify-between gap-2 mb-1">
                       <div className="min-w-0">
                         <div className="flex items-center gap-1.5">
-                          <p className="text-sm text-slate-900 truncate">{customerName}</p>
+                          <p className="text-sm text-foreground truncate">{customerName}</p>
                           {job.priority === 'urgent' && (
-                            <AlertCircle size={12} className="text-red-500 shrink-0" />
+                            <AlertCircle size={12} className="text-destructive shrink-0" />
                           )}
                         </div>
-                        <p className="text-xs text-slate-400 mt-0.5">
+                        <p className="text-xs text-muted-foreground mt-0.5">
                           #{job.jobNumber}
                         </p>
                       </div>
                       <StatusBadge status={uiStatus} size="sm" />
                     </div>
 
-                    <p className="text-xs text-slate-500 line-clamp-1 mb-2">{job.summary}</p>
+                    <p className="text-xs text-muted-foreground line-clamp-1 mb-2">{job.summary}</p>
 
                     {/* Footer row */}
                     <div className="flex items-center gap-3 flex-wrap">
@@ -201,18 +201,18 @@ export function JobsList() {
                       {techName && techInitials && (
                         <span className="flex items-center gap-1.5">
                           <span
-                            className="flex size-4 items-center justify-center rounded-full text-white shrink-0"
+                            className="flex size-4 items-center justify-center rounded-full text-primary-foreground shrink-0"
                             style={{ fontSize: 7, background: techColor }}
                           >
                             {techInitials}
                           </span>
-                          <span className="text-xs text-slate-400">{techName.split(' ')[0]}</span>
+                          <span className="text-xs text-muted-foreground">{techName.split(' ')[0]}</span>
                         </span>
                       )}
 
                       {/* Schedule */}
                       {job.scheduledStart && (
-                        <span className="flex items-center gap-1 text-xs text-slate-400">
+                        <span className="flex items-center gap-1 text-xs text-muted-foreground">
                           <Clock size={11} />
                           {new Date(job.scheduledStart).toLocaleDateString()}
                         </span>
@@ -220,7 +220,7 @@ export function JobsList() {
 
                       {/* Cancel reason */}
                       {isCanceled && (
-                        <span className="text-xs rounded-full px-2 py-0.5 bg-red-50 text-red-600">
+                        <span className="text-xs rounded-full px-2 py-0.5 bg-destructive/10 text-destructive">
                           Canceled
                         </span>
                       )}
@@ -229,7 +229,7 @@ export function JobsList() {
                       {techName && (uiStatus === 'Scheduled' || uiStatus === 'In Progress') && (
                         <button
                           onClick={e => { e.stopPropagation(); navigate(`/jobs/${job.id}?view=tech`); }}
-                          className="ml-auto flex items-center gap-1 text-xs bg-indigo-50 text-indigo-600 border border-indigo-200 rounded-full px-2 py-0.5 hover:bg-indigo-100 transition-colors shrink-0"
+                          className="ml-auto flex items-center gap-1 text-xs bg-primary/10 text-primary border border-primary/30 rounded-full px-2 py-0.5 hover:bg-primary/15 transition-colors shrink-0"
                         >
                           <Mic size={9} /> Field
                         </button>
@@ -237,7 +237,7 @@ export function JobsList() {
                     </div>
                   </div>
 
-                  <ChevronRight size={14} className="shrink-0 text-slate-300 mt-1" />
+                  <ChevronRight size={14} className="shrink-0 text-muted-foreground mt-1" />
                 </div>
               );
             })}

@@ -72,7 +72,7 @@ export function JobPhotos({
       <h1 className="text-xl font-semibold">Job photos</h1>
       <JobPhotoUploader jobId={jobId} onUploaded={handleUploaded} />
       {error ? (
-        <p data-testid="job-photos-error" role="alert" className="text-red-600 text-sm">
+        <p data-testid="job-photos-error" role="alert" className="text-destructive text-sm">
           {error}
         </p>
       ) : null}

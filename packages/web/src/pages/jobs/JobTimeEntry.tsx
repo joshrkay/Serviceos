@@ -52,17 +52,17 @@ export default function JobTimeEntry(): JSX.Element {
         userId={userId}
         onChange={() => void refresh()}
       />
-      {error && <p className="text-sm text-red-600">{error}</p>}
+      {error && <p className="text-sm text-destructive">{error}</p>}
       <div>
         <h2 className="mb-2 text-lg font-medium">Recent entries</h2>
         {entries.length === 0 ? (
-          <p className="text-sm text-slate-500">No entries yet for this job.</p>
+          <p className="text-sm text-muted-foreground">No entries yet for this job.</p>
         ) : (
           <ul className="space-y-1 text-sm">
             {entries.map((e) => (
               <li
                 key={e.id}
-                className="flex justify-between rounded border border-slate-200 px-3 py-2"
+                className="flex justify-between rounded border border-border px-3 py-2"
               >
                 <span>
                   {new Date(e.clockedInAt).toLocaleString()} —{' '}

@@ -52,7 +52,7 @@ export function JobPhotoGallery({
               data-testid={`job-photo-chip-${cat}`}
               onClick={() => onCategoryChange?.(cat)}
               className={`px-3 py-1 rounded-full text-sm border ${
-                active ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-700'
+                active ? 'bg-primary text-primary-foreground border-primary' : 'bg-card text-foreground'
               }`}
             >
               {CATEGORY_LABELS[cat]}
@@ -64,7 +64,7 @@ export function JobPhotoGallery({
       {loading ? (
         <p data-testid="job-photo-loading">Loading photos…</p>
       ) : filtered.length === 0 ? (
-        <p data-testid="job-photo-empty" className="text-sm text-slate-500">
+        <p data-testid="job-photo-empty" className="text-sm text-muted-foreground">
           No photos yet for this filter.
         </p>
       ) : (
@@ -76,7 +76,7 @@ export function JobPhotoGallery({
             <figure
               key={photo.id}
               data-testid={`job-photo-card-${photo.id}`}
-              className="border rounded overflow-hidden bg-white"
+              className="border rounded overflow-hidden bg-card"
             >
               <img
                 src={photo.downloadUrl}
@@ -84,7 +84,7 @@ export function JobPhotoGallery({
                 loading="lazy"
                 className="w-full h-32 object-cover"
               />
-              <figcaption className="p-2 text-xs text-slate-700">
+              <figcaption className="p-2 text-xs text-foreground">
                 <div className="font-medium">{CATEGORY_LABELS[photo.category]}</div>
                 {photo.notes ? <div className="truncate">{photo.notes}</div> : null}
                 {onDelete ? (
@@ -92,7 +92,7 @@ export function JobPhotoGallery({
                     type="button"
                     data-testid={`job-photo-delete-${photo.id}`}
                     onClick={() => onDelete(photo)}
-                    className="mt-1 text-red-600 underline"
+                    className="mt-1 text-destructive underline"
                   >
                     Delete
                   </button>

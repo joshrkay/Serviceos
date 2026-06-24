@@ -156,4 +156,16 @@ describe('JobsList', () => {
     fireEvent.click(screen.getByText('Mock create job'));
     expect(defaultListResult.setFilters).toHaveBeenCalledWith({ status: 'scheduled' });
   });
+
+  // U10a — Path A class contract: the list renders on brand tokens only, and
+  // the kit search input meets the 44px tap target.
+  it('renders on Path A tokens — no raw Tailwind palette leaks', () => {
+    const { container } = renderPage();
+    expect(container.innerHTML).not.toMatch(
+      /(bg|text|border|border-l|placeholder|ring|divide)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
+    );
+    expect(
+      screen.getByPlaceholderText('Search by customer, description, or job #…').className,
+    ).toContain('min-h-11');
+  });
 });

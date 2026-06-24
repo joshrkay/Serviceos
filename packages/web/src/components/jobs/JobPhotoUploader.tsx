@@ -72,7 +72,7 @@ export function JobPhotoUploader({
   }
 
   return (
-    <div data-testid="job-photo-uploader" className="border rounded p-3 bg-white">
+    <div data-testid="job-photo-uploader" className="border rounded p-3 bg-card">
       <label className="block text-sm font-medium mb-1" htmlFor="job-photo-category">
         Category
       </label>
@@ -119,12 +119,12 @@ export function JobPhotoUploader({
       />
 
       {busy ? (
-        <p data-testid="job-photo-uploading" className="text-sm text-slate-500 mt-2">
+        <p data-testid="job-photo-uploading" className="text-sm text-muted-foreground mt-2">
           Uploading…
         </p>
       ) : null}
       {error ? (
-        <p data-testid="job-photo-error" role="alert" className="text-sm text-red-600 mt-2">
+        <p data-testid="job-photo-error" role="alert" className="text-sm text-destructive mt-2">
           {error}
         </p>
       ) : null}
