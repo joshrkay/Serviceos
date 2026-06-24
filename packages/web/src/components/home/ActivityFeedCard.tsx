@@ -41,9 +41,9 @@ const ENTITY_ROUTE: Record<string, (id: string) => string> = {
 };
 
 const ACTOR_META: Record<ActorKind, { icon: typeof Bot; label: string; classes: string }> = {
-  agent: { icon: Bot, label: 'Agent', classes: 'bg-indigo-50 text-indigo-600' },
-  human: { icon: User, label: 'You', classes: 'bg-slate-100 text-slate-500' },
-  system: { icon: Cpu, label: 'System', classes: 'bg-slate-100 text-slate-400' },
+  agent: { icon: Bot, label: 'Agent', classes: 'bg-primary/10 text-primary' },
+  human: { icon: User, label: 'You', classes: 'bg-secondary text-muted-foreground' },
+  system: { icon: Cpu, label: 'System', classes: 'bg-secondary text-muted-foreground' },
 };
 
 function relativeTime(iso: string): string {
@@ -88,10 +88,10 @@ export function ActivityFeedCard() {
   return (
     <section data-testid="activity-feed" className="px-4 py-5">
       <div className="mb-2.5 flex items-center gap-2">
-        <Activity size={14} className="text-slate-500" />
-        <p className="text-sm text-slate-700">Recent activity</p>
+        <Activity size={14} className="text-muted-foreground" />
+        <p className="text-sm text-foreground">Recent activity</p>
       </div>
-      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
+      <div className="overflow-hidden rounded-xl border border-border bg-card divide-y divide-slate-100">
         {items.map((item) => {
           const meta = ACTOR_META[item.actorKind];
           const ActorIcon = meta.icon;
@@ -100,7 +100,7 @@ export function ActivityFeedCard() {
             <>
               <span
                 className={`flex size-7 shrink-0 items-center justify-center rounded-lg ${
-                  item.isEmergency ? 'bg-red-100 text-red-600' : meta.classes
+                  item.isEmergency ? 'bg-destructive/10 text-destructive' : meta.classes
                 }`}
               >
                 {item.isEmergency ? <AlertTriangle size={13} /> : <ActorIcon size={13} />}
@@ -108,17 +108,17 @@ export function ActivityFeedCard() {
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
                   {item.isEmergency && (
-                    <span className="rounded bg-red-100 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-red-700">
+                    <span className="rounded bg-destructive/10 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-destructive">
                       Emergency
                     </span>
                   )}
-                  <p className="truncate text-sm text-slate-800">{item.label}</p>
+                  <p className="truncate text-sm text-foreground">{item.label}</p>
                 </div>
-                <p className="mt-0.5 text-xs text-slate-400">
+                <p className="mt-0.5 text-xs text-muted-foreground">
                   {meta.label} · {relativeTime(item.createdAt)}
                 </p>
               </div>
-              {route && <ChevronRight size={13} className="shrink-0 text-slate-300" />}
+              {route && <ChevronRight size={13} className="shrink-0 text-muted-foreground" />}
             </>
           );
           return route ? (
@@ -126,7 +126,7 @@ export function ActivityFeedCard() {
               key={item.id}
               data-testid="activity-row"
               onClick={() => navigate(route)}
-              className="flex min-h-11 w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-slate-50"
+              className="flex min-h-11 w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-secondary"
             >
               {inner}
             </button>

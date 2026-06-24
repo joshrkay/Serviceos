@@ -83,19 +83,19 @@ export function HomeConversationPanel() {
       data-testid="home-conversation-panel"
       className="px-4 md:px-6 py-5"
     >
-      <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
+      <div className="rounded-2xl border border-border bg-card overflow-hidden">
         {/* Header */}
-        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-slate-100">
+        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-border">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-sm">
-              <Sparkles size={13} className="text-white" />
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary shadow-sm">
+              <Sparkles size={13} className="text-primary-foreground" />
             </span>
-            <p className="text-sm text-slate-800 truncate">Your conversation</p>
+            <p className="text-sm text-foreground truncate">Your conversation</p>
           </div>
           <button
             type="button"
             onClick={() => openThread()}
-            className="flex items-center gap-1 min-h-11 px-2 -mr-2 text-xs text-blue-600 hover:text-blue-700 transition-colors shrink-0"
+            className="flex items-center gap-1 min-h-11 px-2 -mr-2 text-xs text-primary hover:text-primary transition-colors shrink-0"
           >
             Open <ArrowRight size={12} />
           </button>
@@ -108,10 +108,10 @@ export function HomeConversationPanel() {
               type="button"
               onClick={() => openThread()}
               data-testid="home-conversation-empty"
-              className="flex w-full items-center gap-3 rounded-xl bg-slate-50 border border-slate-100 px-4 py-3 text-left hover:bg-slate-100 transition-colors min-h-11"
+              className="flex w-full items-center gap-3 rounded-xl bg-secondary border border-border px-4 py-3 text-left hover:bg-secondary transition-colors min-h-11"
             >
-              <MessageSquare size={16} className="text-slate-400 shrink-0" />
-              <span className="text-sm text-slate-500">
+              <MessageSquare size={16} className="text-muted-foreground shrink-0" />
+              <span className="text-sm text-muted-foreground">
                 Run your business by chat or voice — ask anything or give a command.
               </span>
             </button>
@@ -120,13 +120,13 @@ export function HomeConversationPanel() {
               {preview.map((m) =>
                 m.role === 'user' ? (
                   <div key={m.id} className="flex justify-end">
-                    <p className="max-w-[85%] rounded-2xl rounded-tr-sm bg-slate-900 px-3 py-2 text-sm text-white break-words">
+                    <p className="max-w-[85%] rounded-2xl rounded-tr-sm bg-primary px-3 py-2 text-sm text-primary-foreground break-words">
                       {m.content}
                     </p>
                   </div>
                 ) : (
                   <div key={m.id} className="flex justify-start">
-                    <p className="max-w-[85%] rounded-2xl rounded-tl-sm bg-slate-50 border border-slate-100 px-3 py-2 text-sm text-slate-700 break-words">
+                    <p className="max-w-[85%] rounded-2xl rounded-tl-sm bg-secondary border border-border px-3 py-2 text-sm text-foreground break-words">
                       {m.content}
                     </p>
                   </div>
@@ -138,21 +138,21 @@ export function HomeConversationPanel() {
 
         {/* Dictation error — surfaced, never silent */}
         {dictation.error && (
-          <p role="alert" className="px-4 pb-2 text-xs text-red-600">
+          <p role="alert" className="px-4 pb-2 text-xs text-destructive">
             {dictation.error}
           </p>
         )}
 
         {/* Composer — hands off to the persistent thread */}
         <div className="flex items-end gap-2 px-4 pb-4">
-          <div className="flex flex-1 items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-3 min-h-11">
+          <div className="flex flex-1 items-center gap-2 rounded-2xl border border-border bg-secondary px-3 min-h-11">
             <input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={dictation.isRecording ? 'Listening…' : 'Ask anything or give a command…'}
               aria-label="Message the assistant"
-              className="flex-1 bg-transparent text-sm text-slate-700 placeholder-slate-400 outline-none min-w-0 py-2"
+              className="flex-1 bg-transparent text-sm text-foreground placeholder-slate-400 outline-none min-w-0 py-2"
             />
             <button
               type="button"
@@ -161,8 +161,8 @@ export function HomeConversationPanel() {
               aria-pressed={dictation.isRecording}
               className={`flex size-9 shrink-0 items-center justify-center rounded-lg transition-colors ${
                 dictation.isRecording
-                  ? 'bg-red-50 text-red-600'
-                  : 'text-slate-400 hover:text-blue-600 hover:bg-blue-50'
+                  ? 'bg-destructive/10 text-destructive'
+                  : 'text-muted-foreground hover:text-primary hover:bg-primary/10'
               }`}
             >
               {dictation.isRecording ? <Square size={13} className="fill-current" /> : <Mic size={15} />}
@@ -175,8 +175,8 @@ export function HomeConversationPanel() {
             aria-label="Send"
             className={`flex size-11 shrink-0 items-center justify-center rounded-xl transition-all ${
               draft.trim().length > 0
-                ? 'bg-blue-600 text-white hover:bg-blue-700 shadow-sm active:scale-95'
-                : 'bg-slate-100 text-slate-300 cursor-not-allowed'
+                ? 'bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm active:scale-95'
+                : 'bg-secondary text-muted-foreground cursor-not-allowed'
             }`}
           >
             <Send size={15} />

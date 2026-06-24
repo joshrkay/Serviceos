@@ -88,24 +88,24 @@ export function PendingProposalsCard() {
   const remaining = visible.length - shown.length;
 
   return (
-    <section data-testid="pending-proposals" className="px-4 md:px-6 py-5 border-b border-slate-100">
+    <section data-testid="pending-proposals" className="px-4 md:px-6 py-5 border-b border-border">
       <div className="mb-2.5 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Bell size={14} className="text-blue-500" />
-          <p className="text-sm text-slate-700">Needs your approval</p>
-          <span className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-blue-100 px-1.5 text-xs text-blue-700">
+          <Bell size={14} className="text-primary" />
+          <p className="text-sm text-foreground">Needs your approval</p>
+          <span className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-primary/10 px-1.5 text-xs text-primary">
             {visible.length}
           </span>
         </div>
         <button
           onClick={() => navigate('/inbox')}
-          className="flex items-center gap-0.5 text-xs text-blue-600 transition-colors hover:text-blue-700"
+          className="flex items-center gap-0.5 text-xs text-primary transition-colors hover:text-primary"
         >
           View all <ArrowRight size={11} />
         </button>
       </div>
 
-      {error && <p className="mb-2 text-xs text-red-600">{error}</p>}
+      {error && <p className="mb-2 text-xs text-destructive">{error}</p>}
 
       <div className="flex flex-col gap-2">
         {shown.map((p: PendingProposalSummary) => {
@@ -115,29 +115,29 @@ export function PendingProposalsCard() {
             <div
               key={p.id}
               data-testid="pending-proposal-row"
-              className="rounded-xl border border-slate-200 bg-white px-4 py-3"
+              className="rounded-xl border border-border bg-card px-4 py-3"
             >
               <div className="mb-2 flex items-center gap-2">
-                <span className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-medium text-slate-600">
+                <span className="rounded border border-border bg-secondary px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
                   {humanizeType(p.proposalType)}
                 </span>
                 {expiry && (
                   <span
                     className={`flex items-center gap-1 text-[11px] ${
-                      expiry.critical ? 'text-red-600' : 'text-amber-700'
+                      expiry.critical ? 'text-destructive' : 'text-warning'
                     }`}
                   >
                     <Clock size={10} /> {expiry.text}
                   </span>
                 )}
               </div>
-              <p className="truncate text-sm text-slate-900">{p.summary}</p>
+              <p className="truncate text-sm text-foreground">{p.summary}</p>
               <div className="mt-2.5 flex items-center gap-2">
                 <button
                   type="button"
                   disabled={isActing}
                   onClick={() => act(p.id, 'reject')}
-                  className="min-h-11 flex-1 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50"
+                  className="min-h-11 flex-1 rounded-lg border border-border bg-card px-3 text-sm text-foreground transition-colors hover:bg-secondary disabled:opacity-50"
                 >
                   Reject
                 </button>
@@ -145,7 +145,7 @@ export function PendingProposalsCard() {
                   type="button"
                   disabled={isActing}
                   onClick={() => act(p.id, 'approve')}
-                  className="min-h-11 flex-1 rounded-lg bg-slate-900 px-3 text-sm text-white transition-colors hover:bg-slate-700 disabled:opacity-50"
+                  className="min-h-11 flex-1 rounded-lg bg-primary px-3 text-sm text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
                 >
                   Approve
                 </button>
@@ -158,7 +158,7 @@ export function PendingProposalsCard() {
       {remaining > 0 && (
         <button
           onClick={() => navigate('/inbox')}
-          className="mt-2 flex min-h-11 w-full items-center justify-center gap-1 rounded-xl border border-slate-200 bg-white px-3 text-sm text-blue-600 transition-colors hover:border-slate-300 hover:text-blue-700"
+          className="mt-2 flex min-h-11 w-full items-center justify-center gap-1 rounded-xl border border-border bg-card px-3 text-sm text-primary transition-colors hover:border-border hover:text-primary"
         >
           {remaining} more awaiting decision <ArrowRight size={13} />
         </button>

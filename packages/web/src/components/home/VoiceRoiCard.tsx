@@ -76,12 +76,12 @@ export function VoiceRoiCard() {
   if (inboundCalls === 0) {
     // Onboarding payoff: frame the first answered call rather than show zeros.
     return (
-      <section data-testid="voice-roi" className="px-4 md:px-6 py-5 border-b border-slate-100">
-        <div className="rounded-2xl border border-dashed border-indigo-300 bg-indigo-50/60 px-5 py-5">
-          <p className="text-xs font-medium uppercase tracking-wide text-indigo-700 flex items-center gap-1.5">
+      <section data-testid="voice-roi" className="px-4 md:px-6 py-5 border-b border-border">
+        <div className="rounded-2xl border border-dashed border-primary/40 bg-primary/10 px-5 py-5">
+          <p className="text-xs font-medium uppercase tracking-wide text-primary flex items-center gap-1.5">
             <PhoneIncoming size={13} /> Voice ROI
           </p>
-          <p className="mt-1.5 text-sm text-indigo-800">
+          <p className="mt-1.5 text-sm text-muted-foreground">
             Every call your agent answers — while you're on a job or after hours —
             will show up here, starting with the first one it catches.
           </p>
@@ -91,9 +91,9 @@ export function VoiceRoiCard() {
   }
 
   return (
-    <section data-testid="voice-roi" className="px-4 md:px-6 py-5 border-b border-slate-100">
-      <div className="rounded-2xl bg-gradient-to-br from-indigo-600 to-indigo-700 px-5 py-5 text-white">
-        <p className="text-xs font-medium uppercase tracking-wide text-indigo-100 flex items-center gap-1.5">
+    <section data-testid="voice-roi" className="px-4 md:px-6 py-5 border-b border-border">
+      <div className="rounded-2xl bg-primary px-5 py-5 text-primary-foreground">
+        <p className="text-xs font-medium uppercase tracking-wide text-primary-foreground/80 flex items-center gap-1.5">
           <Voicemail size={13} /> Calls saved from voicemail · last 30 days
         </p>
         <p
@@ -102,7 +102,7 @@ export function VoiceRoiCard() {
         >
           {wouldHaveHitVoicemail}
         </p>
-        <p className="mt-1 text-sm text-indigo-50">
+        <p className="mt-1 text-sm text-primary-foreground/80">
           {wouldHaveHitVoicemail > 0
             ? `Answered by your agent instead of going to voicemail${
                 afterHoursCaptures > 0 ? ` · ${afterHoursCaptures} after hours` : ''
@@ -145,7 +145,7 @@ export function VoiceRoiCard() {
       <button
         type="button"
         onClick={() => navigate('/interactions')}
-        className="mt-3 flex min-h-11 w-full items-center justify-center gap-1 rounded-xl border border-slate-200 bg-white px-3 text-sm text-blue-600 transition-colors hover:border-slate-300 hover:text-blue-700"
+        className="mt-3 flex min-h-11 w-full items-center justify-center gap-1 rounded-xl border border-border bg-card px-3 text-sm text-primary transition-colors hover:border-border hover:text-primary"
       >
         View call log <ArrowRight size={13} />
       </button>
