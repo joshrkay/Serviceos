@@ -6,6 +6,8 @@ import type { ReviewPhase } from '../hooks/useProposalReview';
 
 const h = vi.hoisted(() => ({
   approve: vi.fn(),
+  reject: vi.fn().mockResolvedValue(undefined),
+  resolveLine: vi.fn().mockResolvedValue(undefined),
   undo: vi.fn(),
   reload: vi.fn(),
   back: vi.fn(),
@@ -35,6 +37,8 @@ vi.mock('../hooks/useProposalReview', () => ({
     error: h.error,
     secondsLeft: h.secondsLeft,
     approve: h.approve,
+    reject: h.reject,
+    resolveLine: h.resolveLine,
     undo: h.undo,
     reload: h.reload,
   }),
@@ -98,5 +102,64 @@ describe('Proposal review screen', () => {
     expect(getByText('HTTP 500')).toBeTruthy();
     fireEvent.click(getByText('Try again').closest('button')!);
     expect(h.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a reject form and calls reject with the entered reason', () => {
+    const { getByText, getByPlaceholderText, getAllByText } = render(
+      createElement(ProposalReviewScreen),
+    );
+    fireEvent.click(getByText('Reject').closest('button')!);
+    fireEvent.change(getByPlaceholderText('Tell the AI what was wrong'), {
+      target: { value: 'Wrong customer' },
+    });
+    const confirmButtons = getAllByText('Reject').map((node) => node.closest('button')!);
+    fireEvent.click(confirmButtons[confirmButtons.length - 1]!);
+    expect(h.reject).toHaveBeenCalledWith('Wrong customer');
+  });
+
+  it('renders entity ClarifyPicker chips for voice_clarification proposals', () => {
+    h.proposal = {
+      id: 'p-clarify',
+      proposalType: 'voice_clarification',
+      status: 'draft',
+      summary: 'Which Bob?',
+      payload: {
+        reason: 'ambiguous_entity',
+        entityCandidates: [
+          { id: 'c1', label: 'Bob Smith', hint: '555-0100' },
+          { id: 'c2', label: 'Bob Jones' },
+        ],
+      },
+      approvedAt: null,
+    };
+    const { getByText, queryByText } = render(createElement(ProposalReviewScreen));
+    expect(getByText('Which one did you mean?')).toBeTruthy();
+    expect(getByText('Bob Smith')).toBeTruthy();
+    expect(queryByText('Approve')).toBeNull();
+    fireEvent.click(getByText('Bob Smith').closest('button')!);
+    expect(h.reject).toHaveBeenCalledWith('entity_selected', 'c1');
+  });
+
+  it('renders catalog resolve-line picker for ambiguous line items', () => {
+    h.proposal = {
+      id: 'p-est',
+      proposalType: 'draft_estimate',
+      status: 'draft',
+      summary: 'Estimate flush valve',
+      payload: {
+        lineItems: [{ description: 'Flush valve', pricingSource: 'ambiguous' }],
+      },
+      sourceContext: {
+        catalogResolution: {
+          '0': [{ id: 'cat-b', name: 'Premium valve', unitPriceCents: 8200, score: 0.6 }],
+        },
+      },
+      approvedAt: null,
+    };
+    const { getByText } = render(createElement(ProposalReviewScreen));
+    expect(getByText(/Which item for "Flush valve"/)).toBeTruthy();
+    expect(getByText('Premium valve')).toBeTruthy();
+    fireEvent.click(getByText('Premium valve').closest('button')!);
+    expect(h.resolveLine).toHaveBeenCalledWith(0, 'cat-b');
   });
 });

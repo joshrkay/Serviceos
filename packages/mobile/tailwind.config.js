@@ -25,6 +25,12 @@ module.exports = {
       minHeight: { 11: tapTarget },
       minWidth: { 11: tapTarget },
       spacing: { 11: tapTarget },
+      fontFamily: {
+        heading: ['BricolageGrotesque_600SemiBold', 'System'],
+        sans: ['HankenGrotesk_400Regular', 'System'],
+        medium: ['HankenGrotesk_500Medium', 'System'],
+        semibold: ['HankenGrotesk_600SemiBold', 'System'],
+      },
     },
   },
   plugins: [

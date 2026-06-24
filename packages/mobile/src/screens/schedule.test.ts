@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render } from '@testing-library/react';
+import { cleanup, fireEvent, render } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -64,5 +64,11 @@ describe('Schedule screen', () => {
   it('shows the empty state when nothing is scheduled', () => {
     const { getByText } = render(createElement(Schedule));
     expect(getByText('Nothing scheduled.')).toBeTruthy();
+  });
+
+  it('switches to the map view from the header toggle', () => {
+    const { getByText } = render(createElement(Schedule));
+    fireEvent.click(getByText('map').closest('button')!);
+    expect(getByText("Map view shows today's route order. Pull to refresh on List view for latest jobs.")).toBeTruthy();
   });
 });

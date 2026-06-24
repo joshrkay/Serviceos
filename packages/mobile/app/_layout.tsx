@@ -1,9 +1,21 @@
 import '../global.css';
+import {
+  BricolageGrotesque_600SemiBold,
+  BricolageGrotesque_700Bold,
+  useFonts as useBricolage,
+} from '@expo-google-fonts/bricolage-grotesque';
+import {
+  HankenGrotesk_400Regular,
+  HankenGrotesk_500Medium,
+  HankenGrotesk_600SemiBold,
+  useFonts as useHanken,
+} from '@expo-google-fonts/hanken-grotesk';
 import { ClerkLoaded, ClerkProvider, useAuth } from '@clerk/clerk-expo';
 import { Slot, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
-import { View } from 'react-native';
+import type { ReactNode } from 'react';
+import { ActivityIndicator, View } from 'react-native';
 import { CLERK_PUBLISHABLE_KEY } from '../src/lib/env';
 import { tokenCache } from '../src/lib/tokenCache';
 import { usePushRegistration } from '../src/hooks/usePushRegistration';
@@ -14,32 +26,26 @@ import { ToastProvider } from '../src/components/Toast';
 import { OfflineBanner } from '../src/components/OfflineBanner';
 import { PushStatusProvider } from '../src/push/pushStatusContext';
 
-// Redirect between the auth flow and the app based on Clerk's session state.
 function AuthGate() {
   const { isLoaded, isSignedIn } = useAuth();
   const segments = useSegments();
   const router = useRouter();
-
-  // Register this device for push once signed in (best-effort, fire-and-forget).
-  // The outcome is published so Settings/Home can nudge when permission was denied.
   const pushStatus = usePushRegistration(Boolean(isSignedIn));
-  // The approval-badge surface, mounted app-wide so a foreground push can
-  // refresh it without the owner being on a particular screen. `refresh` is a
-  // stable callback while enabled, so it's safe as the router's onForeground.
   const { refresh: refreshPendingProposals } = usePendingProposals({
     enabled: Boolean(isSignedIn),
   });
-  // Deep-link a tapped push to its target screen; refresh the approvals surface
-  // when a push lands while the app is already foregrounded.
   useNotificationRouter(refreshPendingProposals);
 
   useEffect(() => {
     if (!isLoaded) return;
     const inAuthGroup = segments[0] === '(auth)';
+    const inOnboarding = segments[0] === '(onboarding)';
     if (!isSignedIn && !inAuthGroup) {
       router.replace('/sign-in');
     } else if (isSignedIn && inAuthGroup) {
       router.replace('/');
+    } else if (isSignedIn && inOnboarding) {
+      // allow onboarding flow
     }
   }, [isLoaded, isSignedIn, segments, router]);
 
@@ -50,12 +56,29 @@ function AuthGate() {
   );
 }
 
+function FontGate({ children }: { children: ReactNode }) {
+  const [bricolageLoaded] = useBricolage({
+    BricolageGrotesque_600SemiBold,
+    BricolageGrotesque_700Bold,
+  });
+  const [hankenLoaded] = useHanken({
+    HankenGrotesk_400Regular,
+    HankenGrotesk_500Medium,
+    HankenGrotesk_600SemiBold,
+  });
+
+  if (!bricolageLoaded || !hankenLoaded) {
+    return (
+      <View className="flex-1 items-center justify-center bg-background">
+        <ActivityIndicator />
+      </View>
+    );
+  }
+
+  return <>{children}</>;
+}
+
 export default function RootLayout() {
-  // Provider order, outermost first:
-  //  - ErrorBoundary catches render throws anywhere below (incl. the toast/offline UI).
-  //  - OfflineBanner sits above the routed tree as a persistent, full-width strip.
-  //  - ToastProvider owns the transient action-error layer and the useToast() API
-  //    (useApiClient raises the session-expired toast through it).
   return (
     <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY} tokenCache={tokenCache}>
       <StatusBar style="auto" />
@@ -65,7 +88,9 @@ export default function RootLayout() {
             <OfflineBanner />
             <View className="flex-1">
               <ClerkLoaded>
-                <AuthGate />
+                <FontGate>
+                  <AuthGate />
+                </FontGate>
               </ClerkLoaded>
             </View>
           </View>

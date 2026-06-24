@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   UNDO_WINDOW_MS,
+  ambiguousCatalogLines,
+  entityCandidatesFromPayload,
   formatCents,
   humanizeKey,
   reviewRows,
@@ -71,5 +73,52 @@ describe('undoSecondsLeft', () => {
     expect(undoSecondsLeft(approvedAt, t0 + 9999)).toBe(0);
     expect(undoSecondsLeft(null, t0)).toBe(0);
     expect(undoSecondsLeft(undefined, t0)).toBe(0);
+  });
+});
+
+describe('entityCandidatesFromPayload', () => {
+  it('maps entityCandidates into id/label/hint rows', () => {
+    expect(
+      entityCandidatesFromPayload({
+        entityCandidates: [
+          { id: 'c1', label: 'Bob Smith', hint: '555-0100', score: 0.9 },
+          { id: 'c2', label: 'Bob Jones' },
+        ],
+      }),
+    ).toEqual([
+      { id: 'c1', label: 'Bob Smith', hint: '555-0100', score: 0.9 },
+      { id: 'c2', label: 'Bob Jones', hint: undefined, score: undefined },
+    ]);
+  });
+
+  it('returns [] when candidates are absent or malformed', () => {
+    expect(entityCandidatesFromPayload(undefined)).toEqual([]);
+    expect(entityCandidatesFromPayload({ entityCandidates: [{ bad: true }] })).toEqual([]);
+  });
+});
+
+describe('ambiguousCatalogLines', () => {
+  it('finds ambiguous lines with catalogResolution candidates', () => {
+    expect(
+      ambiguousCatalogLines(
+        {
+          lineItems: [
+            { description: 'Flush valve', pricingSource: 'ambiguous' },
+            { description: 'Labor', pricingSource: 'catalog' },
+          ],
+        },
+        {
+          catalogResolution: {
+            '0': [{ id: 'cat-b', name: 'Premium valve', unitPriceCents: 8200, score: 0.6 }],
+          },
+        },
+      ),
+    ).toEqual([
+      {
+        lineIndex: 0,
+        description: 'Flush valve',
+        candidates: [{ id: 'cat-b', name: 'Premium valve', unitPriceCents: 8200, score: 0.6 }],
+      },
+    ]);
   });
 });
