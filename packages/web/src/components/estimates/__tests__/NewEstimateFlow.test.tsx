@@ -35,7 +35,9 @@ function renderFlow(props: Partial<React.ComponentProps<typeof NewEstimateFlow>>
 }
 
 describe('NewEstimateFlow', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
 
   it('renders the start screen with both build modes', () => {
     renderFlow();
@@ -53,5 +55,18 @@ describe('NewEstimateFlow', () => {
   it('does not call onCreated before the flow completes', () => {
     const { onCreated } = renderFlow();
     expect(onCreated).not.toHaveBeenCalled();
+  });
+
+  // U8e — Path A class contract: the entry screen (the most-recolored surface,
+  // with the two build-mode cards) renders on brand tokens only.
+  it('renders on Path A tokens — no raw Tailwind palette leaks', () => {
+    const { container } = render(
+      <MemoryRouter>
+        <NewEstimateFlow onClose={vi.fn()} onCreated={vi.fn()} />
+      </MemoryRouter>,
+    );
+    expect(container.innerHTML).not.toMatch(
+      /(bg|text|border|ring|divide)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
+    );
   });
 });
