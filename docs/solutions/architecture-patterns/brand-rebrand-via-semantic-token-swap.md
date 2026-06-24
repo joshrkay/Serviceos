@@ -1,11 +1,12 @@
 ---
 title: "Rebrand both apps by swapping semantic token values, not markup"
 date: 2026-06-24
+last_updated: 2026-06-24
 track: knowledge
 problem_type: architecture-patterns
 module: packages/mobile/src/theme, packages/web/src/index.css
 tags: ["design-tokens", "theming", "nativewind", "tailwind", "rebrand", "tests", "dark-mode"]
-related: []
+related: ["docs/solutions/architecture-patterns/web-palette-to-token-class-migration.md"]
 ---
 
 ## Context
@@ -21,6 +22,14 @@ classes** (`bg-primary`, `text-foreground`, `border-border`, …) that resolve t
 CSS variables from a single source: `packages/mobile/src/theme/tokens.js`
 (mirrored to `packages/web/src/index.css`). A rebrand is therefore a *value*
 edit in those two files — not a per-screen restyle.
+
+> **Caveat (web):** this premise held for **mobile** but proved **false for
+> `packages/web`**, which hard-coded the raw Tailwind palette (`bg-slate-900`,
+> `text-blue-600`, …) in ~6,000 spots, bypassing the tokens. There the value
+> swap rebrands nothing; you must migrate the classes cluster by cluster — see
+> `web-palette-to-token-class-migration.md`. Grep a target file for
+> `-(slate|blue|green|amber|red)-\d` to tell which world you're in before
+> assuming a value swap suffices.
 
 ## Guidance
 
