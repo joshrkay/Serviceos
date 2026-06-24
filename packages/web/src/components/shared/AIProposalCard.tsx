@@ -119,7 +119,6 @@ const PRICING_SOURCE_BADGE: Record<'catalog' | 'ambiguous' | 'uncatalogued', { l
 
 interface Props {
   proposal: AIProposal;
-  compact?: boolean;
   /**
    * Invoked when the operator approves. May be async — the card awaits it
    * and treats a thrown error (or rejected promise) as a failure: the
@@ -136,7 +135,7 @@ interface Props {
   onReject?: () => void | Promise<void>;
 }
 
-export function AIProposalCard({ proposal, compact, onApprove, onReject }: Props) {
+export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
   const navigate = useNavigate();
   const [status,       setStatus]       = useState<'Pending' | 'Approved' | 'Rejected'>(proposal.status);
   const [showReason,   setShowReason]   = useState(false);

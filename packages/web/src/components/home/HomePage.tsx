@@ -4,7 +4,7 @@ import { useUser } from '@clerk/clerk-react';
 import {
   AlertCircle, Clock, ChevronRight, ArrowRight,
   DollarSign, FileText, Send, Eye, Briefcase,
-  CheckCircle2, Mic, TrendingUp, Bell, MessageSquare,
+  CheckCircle2, Mic, TrendingUp, MessageSquare,
   UserPlus, CalendarPlus,
 } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
@@ -23,7 +23,6 @@ import { MoneyLoopHomeCard } from './MoneyLoopHomeCard';
 import { HfcrHeroCard } from './HfcrHeroCard';
 import { VoiceRoiCard } from './VoiceRoiCard';
 import { CoreKpisCard } from './CoreKpisCard';
-import { PendingProposalsCard } from './PendingProposalsCard';
 import { ActivityFeedCard } from './ActivityFeedCard';
 import { HomeConversationPanel } from './HomeConversationPanel';
 import { ErrorState } from '../ErrorState';
@@ -243,7 +242,7 @@ function WeekStrip({ todayCount }: { todayCount: number }) {
   const WEEK = buildWeek(tz);
   return (
     <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: 'none' }}>
-      {WEEK.map((d, i) => {
+      {WEEK.map((d) => {
         const n = d.isToday ? todayCount : 0;
         return (
           <div
