@@ -45,4 +45,13 @@ export interface MeResponse {
     | 'queue_and_sms'
     | 'queue_only'
     | 'escalate_to_oncall';
+  /**
+   * The tenant's entity-label overrides (e.g. `{ estimateTerm: 'Quote' }`)
+   * from `tenant_settings.terminology_preferences`. Surfaced on the
+   * bootstrap call so the web client can render the tenant's own words
+   * everywhere via the shared terminology resolver (story 2.5). Absent
+   * keys fall back to the platform defaults. Optional: legacy callers and
+   * the timezone-only `/api/me` consumers ignore it.
+   */
+  terminology_preferences?: Record<string, string>;
 }

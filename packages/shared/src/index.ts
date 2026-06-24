@@ -8,6 +8,7 @@ export * from './contracts/review-response-proposal.js';
 export * from './contracts/proposal.js';
 export * from './contracts/status.js';
 export * from './contracts/appointment-type.js';
+export * from './contracts/terminology.js';
 export * from './contracts/job.js';
 export * from './contracts/customer.js';
 export * from './contracts/money.js';

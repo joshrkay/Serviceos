@@ -14,7 +14,7 @@ import { ErrorState } from '../ErrorState';
 import { apiFetch } from '../../utils/api-fetch';
 import { printEstimateDocument } from '../../lib/estimatePdf';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
-import { useEstimateTerm } from '../../hooks/useEstimateTerm';
+import { useEntityLabels } from '../../hooks/useEntityLabels';
 import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
@@ -473,7 +473,7 @@ function LineItemsEditor({ items, editable, onChange, onAddRow }: {
 function EstimateDocPreview({ est, lineItems, onClose }: {
   est: EstCompat; lineItems: LineItem[]; onClose: () => void;
 }) {
-  const estimateTerm = useEstimateTerm();
+  const estimateTerm = useEntityLabels().label('estimateTerm');
   const total    = lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
   const [copied, setCopied] = useState(false);
   const link = `rivet.ai/e/${est.estimateNumber.toLowerCase().replace('-', '')}`;
@@ -592,7 +592,7 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
   /** When set, the sheet calls the real /api/estimates/:id/send endpoint. */
   apiId?: string;
 }) {
-  const estimateTerm = useEstimateTerm();
+  const estimateTerm = useEntityLabels().label('estimateTerm');
   const [channel, setChannel] = useState<'sms' | 'email'>('sms');
   const [recipient, setRecipient] = useState<string>('');
   const [sending, setSending] = useState(false);
@@ -828,7 +828,7 @@ function SaveAsTemplateSheet({ estimateId, estimateNumber, onClose, onSaved }: {
 function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: () => void }) {
   const navigate = useNavigate();
   const tz = useTenantTimezone();
-  const estimateTerm = useEstimateTerm();
+  const estimateTerm = useEntityLabels().label('estimateTerm');
   const { data: est, isLoading, error, refetch } = useDetailQuery<EstimateResponse>('/api/estimates', estimateId);
   const { mutate: updateEstimate } = useMutation<Record<string, unknown>, EstimateResponse>('PUT', `/api/estimates/${estimateId}`);
   const { mutate: transitionEstimate } = useMutation<{ status: string }, EstimateResponse>('POST', `/api/estimates/${estimateId}/transition`);
@@ -1383,7 +1383,7 @@ const TABS: { label: string; value: EstimateStatus | 'All' }[] = [
 export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {
   const navigate = useNavigate();
   const tz = useTenantTimezone();
-  const estimateTerm = useEstimateTerm();
+  const estimateTerm = useEntityLabels().label('estimateTerm');
   const estimateTermPlural = `${estimateTerm}s`;
   const [tab,              setTab]           = useState<EstimateStatus | 'All'>('All');
   const [customerFilter,   setCustomerFilter] = useState<string>('all');

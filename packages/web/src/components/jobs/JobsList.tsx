@@ -11,6 +11,7 @@ import { StatusBadge } from '../shared/StatusBadge';
 import { Spinner, EmptyState } from '../ui';
 import { ErrorState } from '../ErrorState';
 import { NewJobFlow } from './NewJobFlow';
+import { useEntityLabels } from '../../hooks/useEntityLabels';
 
 // UI tab-label union (distinct from the API status values mapped in TAB_API_STATUS).
 type JobStatus = 'New' | 'Scheduled' | 'In Progress' | 'Completed' | 'Canceled';
@@ -45,6 +46,7 @@ const TABS: { label: string; value: JobStatus | 'All' }[] = [
 
 export function JobsList() {
   const navigate = useNavigate();
+  const labels = useEntityLabels();
   const [tab,     setTab]     = useState<JobStatus | 'All'>('All');
   const [showNew, setShowNew] = useState(false);
 
@@ -82,13 +84,13 @@ export function JobsList() {
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h1 className="text-slate-900">Jobs</h1>
+            <h1 className="text-slate-900">{labels.label('jobTerm', { plural: true })}</h1>
             <p className="text-xs text-slate-400 mt-0.5">Mar 10, 2026</p>
           </div>
           <button
             onClick={() => setShowNew(true)}
             className="flex items-center gap-1.5 rounded-xl bg-slate-900 text-white px-3.5 py-2 text-sm hover:bg-slate-700 transition-colors">
-            <Plus size={14} /> New job
+            <Plus size={14} /> New {labels.label('jobTerm').toLowerCase()}
           </button>
         </div>
 

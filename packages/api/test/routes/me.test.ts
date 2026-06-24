@@ -88,6 +88,38 @@ describe('P12-001 — /api/me', () => {
     expect(res.body.permissions).toEqual(getPermissions('owner'));
   });
 
+  it('GET /api/me surfaces the tenant terminology_preferences (story 2.5)', async () => {
+    const { app, service } = buildApp({ userId: 'user-owner', role: 'owner' });
+    service.upsertUser({
+      user_id: 'user-owner',
+      tenant_id: TENANT,
+      role: 'owner',
+      can_field_serve: true,
+      current_mode: 'supervisor',
+      mode_changed_at: null,
+    });
+    service.setTenantSettings(TENANT, {
+      backup_supervisor_user_id: null,
+      unsupervised_proposal_routing: 'queue_and_sms',
+      timezone: 'America/New_York',
+      terminology_preferences: { estimateTerm: 'Quote', jobTerm: 'Project' },
+    });
+
+    const res = await request(app).get('/api/me');
+    expect(res.status).toBe(200);
+    expect(res.body.terminology_preferences).toEqual({
+      estimateTerm: 'Quote',
+      jobTerm: 'Project',
+    });
+  });
+
+  it('GET /api/me defaults terminology_preferences to {} when unset', async () => {
+    const { app } = buildApp({ userId: 'user-owner', role: 'owner' });
+    const res = await request(app).get('/api/me');
+    expect(res.status).toBe(200);
+    expect(res.body.terminology_preferences).toEqual({});
+  });
+
   it("POST /api/me/mode accepts 'tech' for an owner and writes an audit row", async () => {
     const { app, service, audit } = buildApp({
       userId: 'user-owner',

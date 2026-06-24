@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import { useListQuery } from '../../hooks/useListQuery';
-import { useEstimateTerm } from '../../hooks/useEstimateTerm';
+import { useEntityLabels } from '../../hooks/useEntityLabels';
 
 type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
 
@@ -1015,7 +1015,7 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
 }) {
   const { user } = useUser();
   const apiClient = useApiClient();
-  const estimateTerm = useEstimateTerm();
+  const estimateTerm = useEntityLabels().label('estimateTerm');
   const { data: apiCustomers } = useListQuery<ApiCustomer>('/api/customers');
   const customers = mapApiCustomers(apiCustomers);
   const [businessName, setBusinessName] = useState('');

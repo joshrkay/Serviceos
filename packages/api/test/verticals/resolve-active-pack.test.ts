@@ -110,6 +110,65 @@ describe('buildVerticalPromptResolver', () => {
     expect(section).toContain('Repair');
   });
 
+  it('appends the tenant entity vocabulary after the vertical section (story 2.5)', async () => {
+    await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
+    const resolve = buildVerticalPromptResolver({
+      packActivationRepo,
+      canonicalPackRegistry,
+      cacheTtlMs: 0,
+      entityVocabularyResolver: async () => ({ estimateTerm: 'Quote', jobTerm: 'Project' }),
+    });
+    const section = await resolve(TENANT);
+    expect(section).toContain('Service vertical: HVAC Professional');
+    expect(section).toContain('Business terminology');
+    expect(section).toContain('Say "Quote" where you would normally say "Estimate".');
+    expect(section).toContain('Say "Project" where you would normally say "Job".');
+    expect(section!.indexOf('Service vertical:')).toBeLessThan(
+      section!.indexOf('Business terminology'),
+    );
+  });
+
+  it('returns the vocabulary directive alone when the tenant has no active pack', async () => {
+    const resolve = buildVerticalPromptResolver({
+      packActivationRepo,
+      canonicalPackRegistry,
+      cacheTtlMs: 0,
+      entityVocabularyResolver: async () => ({ estimateTerm: 'Bid' }),
+    });
+    const section = await resolve(TENANT);
+    expect(section).toBeDefined();
+    expect(section).toContain('Say "Bid" where you would normally say "Estimate".');
+  });
+
+  it('leaves the section byte-identical when the tenant has no overrides (cache-safe)', async () => {
+    await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
+    const baseline = await buildVerticalPromptResolver({
+      packActivationRepo,
+      canonicalPackRegistry,
+      cacheTtlMs: 0,
+    })(TENANT);
+    const withResolver = await buildVerticalPromptResolver({
+      packActivationRepo,
+      canonicalPackRegistry,
+      cacheTtlMs: 0,
+      entityVocabularyResolver: async () => ({}),
+    })(TENANT);
+    expect(withResolver).toBe(baseline);
+  });
+
+  it('still returns the vertical section when the vocabulary lookup throws', async () => {
+    await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
+    const resolve = buildVerticalPromptResolver({
+      packActivationRepo,
+      canonicalPackRegistry,
+      cacheTtlMs: 0,
+      entityVocabularyResolver: async () => {
+        throw new Error('settings unavailable');
+      },
+    });
+    await expect(resolve(TENANT)).resolves.toContain('Service vertical: HVAC Professional');
+  });
+
   it('appends active training assets after canonical vertical context', async () => {
     await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
     let capturedLimit: number | undefined;

@@ -11,6 +11,7 @@ import {
   PLUMBING_MISSING_ITEM_RULES,
 } from './missing-items';
 import { ApprovedEstimateContext, ApprovedEstimateRepository } from '../learning/approved-estimates';
+import { ENTITY_TERM_KEYS, DEFAULT_ENTITY_LABELS } from '@ai-service-os/shared';
 
 export interface VerticalContext {
   verticalPack: VerticalPack | null;
@@ -249,6 +250,41 @@ export function formatVerticalForCallerPrompt(
   }
 
   return lines.join('\n');
+}
+
+/**
+ * Story 2.5 (agent speech) — render the tenant's entity-label overrides as
+ * a directive the calling agent injects into its classifier prompt, so the
+ * AI uses the owner's own words ("Quote" not "Estimate", "Project" not
+ * "Job") when it talks to a caller.
+ *
+ * Only *overrides* are emitted — a term the tenant left at the platform
+ * default produces no line. A tenant with no overrides yields `''`, so
+ * their classifier prompt stays byte-identical to before this wiring
+ * existed (the resolver caches per-tenant and the gateway/cassette caches
+ * key on the prompt — see buildVerticalPromptResolver). Equipment
+ * terminology (furnace/AC) is handled separately by the vertical pack and
+ * is intentionally not duplicated here.
+ */
+export function formatEntityVocabularyForPrompt(
+  prefs: Record<string, string> | null | undefined,
+): string {
+  if (!prefs) return '';
+
+  const overrides: string[] = [];
+  for (const key of ENTITY_TERM_KEYS) {
+    const value = prefs[key]?.trim();
+    if (!value) continue;
+    const def = DEFAULT_ENTITY_LABELS[key].singular;
+    if (value.toLowerCase() === def.toLowerCase()) continue;
+    overrides.push(`  - Say "${value}" where you would normally say "${def}".`);
+  }
+  if (overrides.length === 0) return '';
+
+  return [
+    'Business terminology — use this shop’s own words when speaking with the caller:',
+    ...overrides,
+  ].join('\n');
 }
 
 export function buildContextPromptSection(context: VerticalContext): string {

@@ -22,6 +22,7 @@ import { Spinner, EmptyState } from '../ui';
 import { ErrorState } from '../ErrorState';
 import { apiFetch } from '../../utils/api-fetch';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { useEntityLabels } from '../../hooks/useEntityLabels';
 import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import { AttachmentSection } from '../attachments/AttachmentSection';
 
@@ -969,6 +970,7 @@ const INVOICE_LIST_REFRESH_MS = 30_000;
 export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {
   const navigate = useNavigate();
   const tz = useTenantTimezone();
+  const labels = useEntityLabels();
   const [tab,      setTab]      = useState<InvoiceStatus | 'All'>('All');
   const [selected, setSelected] = useState<string | null>(defaultSelectedId ?? null);
 
@@ -1033,12 +1035,12 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
       <div className="px-4 md:px-6 py-4 md:py-6 max-w-3xl mx-auto">
         <div className="flex items-center justify-between mb-5">
-          <h1 className="text-slate-900">Invoices</h1>
+          <h1 className="text-slate-900">{labels.label('invoiceTerm', { plural: true })}</h1>
           <button
             onClick={() => navigate('/invoices/new')}
             className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors"
           >
-            <Plus size={14} /> New invoice
+            <Plus size={14} /> New {labels.label('invoiceTerm').toLowerCase()}
           </button>
         </div>
 

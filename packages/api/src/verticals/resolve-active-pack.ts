@@ -33,6 +33,7 @@ import {
   formatVerticalForCallerPrompt,
   formatIntakeQuestionsForPrompt,
   formatObjectionScriptsForPrompt,
+  formatEntityVocabularyForPrompt,
 } from './context-assembly';
 import type { TrainingAssetRepository } from './training-assets';
 import { MAX_PROMPT_ASSETS, buildTrainingAssetPromptSection } from './training-assets';
@@ -63,6 +64,18 @@ export interface ResolveActivePackDeps {
   maxCacheEntries?: number;
   /** Injectable clock for tests. Defaults to Date.now. */
   now?: () => number;
+  /**
+   * Story 2.5 (agent speech) — resolves the tenant's entity-label
+   * overrides (`tenant_settings.terminology_preferences`) so the agent
+   * can speak the owner's words. When present, the resolved directive is
+   * appended to the vertical prompt section. Optional + best-effort: a
+   * lookup failure is swallowed and the vertical section is returned
+   * without it. Tenants with no overrides add nothing, keeping their
+   * classifier prompt byte-identical (cache-safe).
+   */
+  entityVocabularyResolver?: (
+    tenantId: string,
+  ) => Promise<Record<string, string> | null | undefined>;
   /**
    * Optional structured logger. Used to surface failures fetching
    * training assets — silent degradation in the privacy-sensitive
@@ -201,6 +214,23 @@ export function buildVerticalPromptResolver(
           canonicalPrompt,
           trainingAssetPrompt,
         });
+      }
+    }
+
+    // Story 2.5 (agent speech) — append the tenant's entity-label
+    // vocabulary so the calling agent uses the owner's own words. Only
+    // overrides emit text, so a default tenant's section is unchanged
+    // (byte-identical → cache/cassette safe). Best-effort: a lookup
+    // failure leaves the vertical section intact.
+    if (deps.entityVocabularyResolver) {
+      try {
+        const prefs = await deps.entityVocabularyResolver(tenantId);
+        const vocab = formatEntityVocabularyForPrompt(prefs);
+        if (vocab.length > 0) {
+          section = section && section.length > 0 ? `${section}\n\n${vocab}` : vocab;
+        }
+      } catch {
+        // Vocabulary is additive — never fail the classifier turn over it.
       }
     }
 
