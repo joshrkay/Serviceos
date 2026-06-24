@@ -3,6 +3,7 @@ import {
   normalizeJobStatus,
   normalizeEstimateStatus,
   normalizeInvoiceStatus,
+  deriveInvoiceUiStatus,
   centsToDisplay,
   JOB_STATUS_MAP,
   ESTIMATE_STATUS_MAP,
@@ -68,6 +69,21 @@ describe('normalizeInvoiceStatus', () => {
     for (const [key, value] of Object.entries(INVOICE_STATUS_MAP)) {
       expect(normalizeInvoiceStatus(key)).toBe(value);
     }
+  });
+});
+
+describe('deriveInvoiceUiStatus (derived overdue)', () => {
+  const NOW = new Date('2026-06-24T12:00:00Z').getTime();
+
+  it("surfaces 'Overdue' for an open invoice past its due date", () => {
+    expect(deriveInvoiceUiStatus('open', '2026-06-01', NOW)).toBe('Overdue');
+    expect(deriveInvoiceUiStatus('partially_paid', '2026-06-01', NOW)).toBe('Overdue');
+  });
+
+  it("falls back to the plain mapping when not overdue", () => {
+    expect(deriveInvoiceUiStatus('open', '2026-07-01', NOW)).toBe('Unpaid');
+    expect(deriveInvoiceUiStatus('paid', '2026-06-01', NOW)).toBe('Paid');
+    expect(deriveInvoiceUiStatus('open', undefined, NOW)).toBe('Unpaid');
   });
 });
 

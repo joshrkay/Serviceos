@@ -1,5 +1,6 @@
 // Pure (RN-free) mappers from an estimate/invoice status to a list-row badge.
 // Kept here so the branchy status→tone logic unit-tests without a renderer.
+import { isInvoiceOverdue } from '@ai-service-os/shared';
 import type { EntityBadge } from '../components/EntityList';
 
 function titleCase(s: string): string {
@@ -38,10 +39,9 @@ export function invoiceStatusBadge(
   dueDate?: string,
   now: number = Date.now(),
 ): EntityBadge | undefined {
-  if ((status === 'open' || status === 'partially_paid') && dueDate) {
-    const due = new Date(dueDate).getTime();
-    if (!Number.isNaN(due) && due < now) return { label: 'Overdue', tone: 'danger' };
-  }
+  // "Overdue" is derived via the shared rule (open/partially_paid + past due)
+  // so web and mobile can't disagree about which invoices read overdue.
+  if (isInvoiceOverdue(status, dueDate, now)) return { label: 'Overdue', tone: 'danger' };
   switch (status) {
     case 'paid':
       return { label: 'Paid', tone: 'success' };

@@ -7,6 +7,7 @@ export * from './contracts/email-templates.js';
 export * from './contracts/review-response-proposal.js';
 export * from './contracts/proposal.js';
 export * from './contracts/proposal-action-class.js';
+export * from './contracts/invoice-status.js';
 export * from './contracts/status.js';
 export * from './contracts/appointment-type.js';
 export * from './contracts/job.js';
