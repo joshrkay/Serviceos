@@ -39,6 +39,15 @@ describe('LineItemEditor (P11-006)', () => {
     expect(screen.getByTestId('line-item-row-1')).toBeInTheDocument();
   });
 
+  it('renders kit inputs/buttons that meet the 44px tap target (U8b)', () => {
+    render(<Harness initial={[emptyDraft()]} />);
+    // Row controls and the add/remove actions are kit components at ≥44px.
+    expect(screen.getByLabelText('description-0').className).toContain('min-h-11');
+    expect(screen.getByLabelText('unit-price-0').className).toContain('min-h-11');
+    expect(screen.getByText('+ Add row').className).toContain('min-h-11');
+    expect(screen.getByLabelText('remove-line-0').className).toContain('min-h-11');
+  });
+
   it('removes a row when the × button is clicked', () => {
     const initial: LineItemDraft[] = [emptyDraft(), emptyDraft()];
     render(<Harness initial={initial} />);

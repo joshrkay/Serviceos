@@ -1,5 +1,6 @@
-import React, { useCallback, useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
 import { formatCurrency as formatUSD } from '../../utils/currency';
+import { Input, Button } from '../ui';
 import { CatalogPicker } from './CatalogPicker';
 import { catalogItemToDraft } from './catalogToLineItem';
 
@@ -102,9 +103,6 @@ export function totalCents(items: LineItemDraft[]): number {
   }, 0);
 }
 
-const inputCls =
-  'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';
-
 export function LineItemEditor({
   items,
   onChange,
@@ -138,7 +136,7 @@ export function LineItemEditor({
   return (
     <div data-testid="line-item-editor" className="space-y-2">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm text-slate-700">Line items</h2>
+        <h2 className="text-sm text-foreground">Line items</h2>
         <div className="flex items-center gap-2">
           {enableCatalog && (
             <CatalogPicker
@@ -153,18 +151,14 @@ export function LineItemEditor({
               }}
             />
           )}
-          <button
-            type="button"
-            onClick={add}
-            className="text-xs rounded-md border border-slate-200 px-2 py-1 hover:bg-slate-50"
-          >
+          <Button type="button" variant="outline" size="sm" onClick={add} className="min-h-11">
             + Add row
-          </button>
+          </Button>
         </div>
       </div>
 
       {items.length === 0 && (
-        <p className="text-xs text-slate-500">No items yet.</p>
+        <p className="text-xs text-muted-foreground">No items yet.</p>
       )}
 
       {items.map((item, index) => {
@@ -180,22 +174,22 @@ export function LineItemEditor({
             data-testid={`line-item-row-${index}`}
             className="grid grid-cols-12 gap-2 items-center"
           >
-            <input
+            <Input
               aria-label={`description-${index}`}
               value={item.description}
               onChange={(e) => update(index, { description: e.target.value })}
               placeholder="Description"
-              className={`${inputCls} col-span-5`}
+              className="col-span-5 min-h-11"
             />
-            <input
+            <Input
               aria-label={`quantity-${index}`}
               value={item.quantity}
               onChange={(e) => update(index, { quantity: e.target.value })}
               inputMode="decimal"
               placeholder="Qty"
-              className={`${inputCls} col-span-2`}
+              className="col-span-2 min-h-11"
             />
-            <input
+            <Input
               aria-label={`unit-price-${index}`}
               value={item.unitPriceDollars}
               onChange={(e) =>
@@ -203,50 +197,54 @@ export function LineItemEditor({
               }
               inputMode="decimal"
               placeholder="0.00"
-              className={`${inputCls} col-span-2`}
+              className="col-span-2 min-h-11"
             />
             <div
               data-testid={`line-item-total-${index}`}
-              className="col-span-2 text-right text-sm text-slate-700"
+              className="col-span-2 text-right text-sm text-foreground"
             >
               {formatUSD(lineTotalCents)}
             </div>
-            <button
+            <Button
               type="button"
+              variant="outline"
+              size="sm"
               aria-label={`remove-line-${index}`}
               onClick={() => remove(index)}
-              className="col-span-1 rounded-md border border-slate-200 text-xs py-1 hover:bg-slate-50"
+              className="col-span-1 min-h-11"
             >
               ×
-            </button>
+            </Button>
             {enableOptions && (
               <div className="col-span-12 flex flex-wrap items-center gap-3 pl-1 pb-1">
-                <label className="flex items-center gap-1.5 text-xs text-slate-500">
+                <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
                   <input
                     type="checkbox"
                     aria-label={`optional-${index}`}
                     checked={item.isOptional ?? false}
                     onChange={(e) => update(index, { isOptional: e.target.checked })}
+                    className="accent-primary"
                   />
                   Optional add-on
                 </label>
-                <label className="flex items-center gap-1.5 text-xs text-slate-500">
+                <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
                   Tier group
-                  <input
+                  <Input
                     aria-label={`group-${index}`}
                     value={item.groupLabel ?? ''}
                     onChange={(e) => update(index, { groupLabel: e.target.value })}
                     placeholder="e.g. Plan"
-                    className="rounded-md border border-slate-200 px-2 py-1 text-xs w-28"
+                    className="w-28 text-xs min-h-11"
                   />
                 </label>
                 {(item.isOptional || (item.groupLabel ?? '').trim()) && (
-                  <label className="flex items-center gap-1.5 text-xs text-slate-500">
+                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
                     <input
                       type="checkbox"
                       aria-label={`default-selected-${index}`}
                       checked={item.isDefaultSelected ?? false}
                       onChange={(e) => update(index, { isDefaultSelected: e.target.checked })}
+                      className="accent-primary"
                     />
                     Pre-selected
                   </label>
@@ -257,8 +255,8 @@ export function LineItemEditor({
         );
       })}
 
-      <div className="flex justify-end pt-2 border-t border-slate-100 mt-2">
-        <div className="text-sm text-slate-700">
+      <div className="flex justify-end pt-2 border-t border-border mt-2">
+        <div className="text-sm text-foreground">
           Total:{' '}
           <span data-testid="line-items-total" className="font-medium">
             {formatUSD(grand)}
