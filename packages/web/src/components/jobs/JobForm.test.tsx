@@ -104,4 +104,16 @@ describe('JobForm (characterization, pre-kit-migration)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Summary is required.');
     expect(postCount()).toBe(0);
   });
+
+  it('renders on Path A tokens with ≥44px kit controls — no raw palette leaks', () => {
+    const { container } = render(<JobForm />);
+
+    // The migrated controls are kit inputs with a ≥44px tap target.
+    expect(screen.getByLabelText(/Summary/)).toHaveClass('min-h-11');
+    expect(screen.getByLabelText(/Problem description/)).toHaveClass('min-h-11');
+
+    expect(container.innerHTML).not.toMatch(
+      /(bg|text|border|border-l|placeholder|ring|divide|shadow)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
+    );
+  });
 });
