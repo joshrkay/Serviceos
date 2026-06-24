@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
+import { Field, Input, Select, Textarea, Button } from '../../components/ui';
 
 const CHANNELS = ['email', 'sms', 'phone', 'mail'] as const;
 
@@ -127,8 +128,6 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
     [form, customerId, onSaved]
   );
 
-  const inputCls = 'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';
-
   if (loading) {
     return (
       <div className="p-4 md:p-6 max-w-2xl mx-auto" data-testid="customer-edit-loading">
@@ -139,110 +138,94 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
 
   return (
     <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-2xl mx-auto" data-testid="customer-edit-form">
-      <h1 className="text-lg text-slate-900 mb-4">Edit Customer</h1>
+      <h1 className="text-lg text-foreground mb-4">Edit Customer</h1>
 
       {error && (
-        <div role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        <div role="alert" className="mb-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {error}
         </div>
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <label className="text-xs text-slate-500">
-          First name
-          <input
+        <Field label="First name">
+          <Input
             aria-label="firstName"
             value={form.firstName}
             onChange={(e) => setField('firstName', e.target.value)}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Last name
-          <input
+        </Field>
+        <Field label="Last name">
+          <Input
             aria-label="lastName"
             value={form.lastName}
             onChange={(e) => setField('lastName', e.target.value)}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500 md:col-span-2">
-          Company
-          <input
+        </Field>
+        <Field label="Company" className="md:col-span-2">
+          <Input
             aria-label="companyName"
             value={form.companyName}
             onChange={(e) => setField('companyName', e.target.value)}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Primary phone
-          <input
+        </Field>
+        <Field label="Primary phone">
+          <Input
             aria-label="primaryPhone"
             value={form.primaryPhone}
             onChange={(e) => setField('primaryPhone', e.target.value)}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Secondary phone
-          <input
+        </Field>
+        <Field label="Secondary phone">
+          <Input
             aria-label="secondaryPhone"
             value={form.secondaryPhone}
             onChange={(e) => setField('secondaryPhone', e.target.value)}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Email
-          <input
+        </Field>
+        <Field label="Email">
+          <Input
             aria-label="email"
             type="email"
             value={form.email}
             onChange={(e) => setField('email', e.target.value)}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Preferred channel
-          <select
+        </Field>
+        <Field label="Preferred channel">
+          <Select
             aria-label="preferredChannel"
             value={form.preferredChannel}
             onChange={(e) => setField('preferredChannel', e.target.value as FormState['preferredChannel'])}
-            className={inputCls}
+            className="min-h-11"
           >
             {CHANNELS.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
-          </select>
-        </label>
-        <label className="text-xs text-slate-500 md:col-span-2">
-          Customer notes
-          <textarea
+          </Select>
+        </Field>
+        <Field label="Customer notes" className="md:col-span-2">
+          <Textarea
             aria-label="communicationNotes"
             value={form.communicationNotes}
             onChange={(e) => setField('communicationNotes', e.target.value)}
             rows={4}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
+        </Field>
       </div>
 
       <div className="mt-4 flex gap-2">
-        <button
-          type="submit"
-          disabled={submitting}
-          className="rounded-lg bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800 disabled:opacity-50"
-        >
+        <Button type="submit" disabled={submitting} className="min-h-11">
           {submitting ? 'Saving…' : 'Save'}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="rounded-lg border border-slate-200 text-slate-700 text-sm px-4 py-2 hover:bg-slate-50"
-        >
+        </Button>
+        <Button type="button" variant="outline" onClick={onCancel} className="min-h-11">
           Cancel
-        </button>
+        </Button>
       </div>
     </form>
   );
