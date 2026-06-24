@@ -43,8 +43,8 @@ const STORES: Store[] = [
     mapsQuery: 'Home+Depot+5765+Airport+Blvd+Austin+TX',
     shopUrl: 'https://www.homedepot.com',
     logo: 'HD',
-    logoBg: 'bg-orange-500',
-    logoText: 'text-white',
+    logoBg: 'bg-warning',
+    logoText: 'text-primary-foreground',
     serviceTypes: ['HVAC', 'Plumbing', 'Painting'],
   },
   {
@@ -61,8 +61,8 @@ const STORES: Store[] = [
     mapsQuery: 'Home+Depot+4400+W+Slaughter+Ln+Austin+TX',
     shopUrl: 'https://www.homedepot.com',
     logo: 'HD',
-    logoBg: 'bg-orange-500',
-    logoText: 'text-white',
+    logoBg: 'bg-warning',
+    logoText: 'text-primary-foreground',
     serviceTypes: ['HVAC', 'Plumbing', 'Painting'],
   },
   {
@@ -79,8 +79,8 @@ const STORES: Store[] = [
     mapsQuery: "Lowes+4970+W+US+290+Austin+TX",
     shopUrl: 'https://www.lowes.com',
     logo: "L'S",
-    logoBg: 'bg-blue-700',
-    logoText: 'text-white',
+    logoBg: 'bg-primary',
+    logoText: 'text-primary-foreground',
     serviceTypes: ['HVAC', 'Plumbing', 'Painting'],
   },
   {
@@ -97,10 +97,10 @@ const STORES: Store[] = [
     mapsQuery: 'Ferguson+HVAC+Austin+TX+78753',
     shopUrl: 'https://www.ferguson.com',
     logo: 'FG',
-    logoBg: 'bg-red-600',
-    logoText: 'text-white',
+    logoBg: 'bg-destructive',
+    logoText: 'text-primary-foreground',
     badge: 'Contractor',
-    badgeColor: 'bg-red-100 text-red-700',
+    badgeColor: 'bg-destructive/15 text-destructive',
     serviceTypes: ['HVAC', 'Plumbing'],
   },
   {
@@ -117,10 +117,10 @@ const STORES: Store[] = [
     mapsQuery: 'Johnstone+Supply+Austin+TX',
     shopUrl: 'https://www.johnstonesupply.com',
     logo: 'JS',
-    logoBg: 'bg-sky-600',
-    logoText: 'text-white',
+    logoBg: 'bg-primary',
+    logoText: 'text-primary-foreground',
     badge: 'HVAC Only',
-    badgeColor: 'bg-sky-100 text-sky-700',
+    badgeColor: 'bg-primary/15 text-primary',
     serviceTypes: ['HVAC'],
   },
   {
@@ -137,10 +137,10 @@ const STORES: Store[] = [
     mapsQuery: 'Sherwin+Williams+2438+W+Anderson+Ln+Austin+TX',
     shopUrl: 'https://www.sherwin-williams.com',
     logo: 'SW',
-    logoBg: 'bg-red-700',
-    logoText: 'text-white',
+    logoBg: 'bg-destructive',
+    logoText: 'text-primary-foreground',
     badge: 'Paint Pro',
-    badgeColor: 'bg-red-100 text-red-700',
+    badgeColor: 'bg-destructive/15 text-destructive',
     serviceTypes: ['Painting'],
   },
   {
@@ -157,8 +157,8 @@ const STORES: Store[] = [
     mapsQuery: 'Sherwin+Williams+1717+S+Congress+Ave+Austin+TX',
     shopUrl: 'https://www.sherwin-williams.com',
     logo: 'SW',
-    logoBg: 'bg-red-700',
-    logoText: 'text-white',
+    logoBg: 'bg-destructive',
+    logoText: 'text-primary-foreground',
     serviceTypes: ['Painting'],
   },
   {
@@ -175,8 +175,8 @@ const STORES: Store[] = [
     mapsQuery: 'Benjamin+Moore+Bee+Cave+Rd+Austin+TX',
     shopUrl: 'https://www.benjaminmoore.com',
     logo: 'BM',
-    logoBg: 'bg-amber-700',
-    logoText: 'text-white',
+    logoBg: 'bg-warning',
+    logoText: 'text-primary-foreground',
     serviceTypes: ['Painting'],
   },
   {
@@ -193,10 +193,10 @@ const STORES: Store[] = [
     mapsQuery: 'Grainger+9521+Research+Blvd+Austin+TX',
     shopUrl: 'https://www.grainger.com',
     logo: 'GR',
-    logoBg: 'bg-slate-700',
-    logoText: 'text-white',
+    logoBg: 'bg-primary',
+    logoText: 'text-primary-foreground',
     badge: 'Industrial',
-    badgeColor: 'bg-slate-100 text-slate-700',
+    badgeColor: 'bg-secondary text-foreground',
     serviceTypes: ['HVAC', 'Plumbing'],
   },
   {
@@ -213,8 +213,8 @@ const STORES: Store[] = [
     mapsQuery: 'True+Value+N+Lamar+Blvd+Austin+TX',
     shopUrl: 'https://www.truevalue.com',
     logo: 'TV',
-    logoBg: 'bg-green-600',
-    logoText: 'text-white',
+    logoBg: 'bg-success',
+    logoText: 'text-primary-foreground',
     serviceTypes: ['HVAC', 'Plumbing', 'Painting'],
   },
 ];
@@ -237,7 +237,7 @@ function StoreCard({ store }: { store: Store }) {
   const mapsUrl = `https://maps.google.com/?q=${store.mapsQuery}`;
 
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
+    <div className="rounded-2xl border border-border bg-card overflow-hidden">
       {/* Header row */}
       <div className="flex items-start gap-3 px-4 pt-4 pb-3">
         {/* Logo */}
@@ -250,19 +250,19 @@ function StoreCard({ store }: { store: Store }) {
         {/* Info */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <p className="text-sm text-slate-900">{store.name}</p>
+            <p className="text-sm text-foreground">{store.name}</p>
             {store.badge && (
               <span className={`text-xs rounded-full px-2 py-0.5 ${store.badgeColor}`}>
                 {store.badge}
               </span>
             )}
           </div>
-          <p className="text-xs text-slate-400 mt-0.5">{store.category}</p>
-          <p className="text-xs text-slate-500 mt-1 leading-relaxed">{store.tagline}</p>
+          <p className="text-xs text-muted-foreground mt-0.5">{store.category}</p>
+          <p className="text-xs text-muted-foreground mt-1 leading-relaxed">{store.tagline}</p>
         </div>
 
         {/* Distance badge */}
-        <span className="shrink-0 text-xs bg-slate-100 text-slate-600 rounded-full px-2.5 py-1">
+        <span className="shrink-0 text-xs bg-secondary text-foreground rounded-full px-2.5 py-1">
           {store.distance}
         </span>
       </div>
@@ -270,44 +270,44 @@ function StoreCard({ store }: { store: Store }) {
       {/* Hours + address row */}
       <div className="flex items-center gap-3 px-4 pb-3 flex-wrap">
         <div className="flex items-center gap-1.5">
-          <Clock size={11} className={store.isOpen ? 'text-green-500' : 'text-slate-400'} />
-          <span className={`text-xs ${store.isOpen ? 'text-green-600' : 'text-slate-400'}`}>
+          <Clock size={11} className={store.isOpen ? 'text-success' : 'text-muted-foreground'} />
+          <span className={`text-xs ${store.isOpen ? 'text-success' : 'text-muted-foreground'}`}>
             {store.isOpen ? 'Open' : 'Closed'}
           </span>
-          <span className="text-xs text-slate-400">· closes {store.closingTime}</span>
+          <span className="text-xs text-muted-foreground">· closes {store.closingTime}</span>
         </div>
         <div className="flex items-center gap-1.5">
-          <MapPin size={11} className="text-slate-400 shrink-0" />
-          <span className="text-xs text-slate-400 truncate max-w-[200px]">{store.address.split(',')[0]}</span>
+          <MapPin size={11} className="text-muted-foreground shrink-0" />
+          <span className="text-xs text-muted-foreground truncate max-w-[200px]">{store.address.split(',')[0]}</span>
         </div>
       </div>
 
       {/* Action buttons */}
-      <div className="grid grid-cols-3 border-t border-slate-100 divide-x divide-slate-100">
+      <div className="grid grid-cols-3 border-t border-border divide-x divide-border">
         <a
           href={`tel:${store.phone.replace(/[^0-9]/g, '')}`}
-          className="flex flex-col items-center gap-1 py-3 hover:bg-slate-50 transition-colors group"
+          className="flex flex-col items-center gap-1 py-3 hover:bg-secondary transition-colors group"
         >
-          <Phone size={14} className="text-slate-400 group-hover:text-slate-600 transition-colors" />
-          <span className="text-xs text-slate-500">Call</span>
+          <Phone size={14} className="text-muted-foreground group-hover:text-foreground transition-colors" />
+          <span className="text-xs text-muted-foreground">Call</span>
         </a>
         <a
           href={mapsUrl}
           target="_blank"
           rel="noreferrer"
-          className="flex flex-col items-center gap-1 py-3 hover:bg-blue-50 transition-colors group"
+          className="flex flex-col items-center gap-1 py-3 hover:bg-primary/10 transition-colors group"
         >
-          <Navigation size={14} className="text-slate-400 group-hover:text-blue-600 transition-colors" />
-          <span className="text-xs text-slate-500 group-hover:text-blue-600 transition-colors">Directions</span>
+          <Navigation size={14} className="text-muted-foreground group-hover:text-primary transition-colors" />
+          <span className="text-xs text-muted-foreground group-hover:text-primary transition-colors">Directions</span>
         </a>
         <a
           href={store.shopUrl}
           target="_blank"
           rel="noreferrer"
-          className="flex flex-col items-center gap-1 py-3 hover:bg-indigo-50 transition-colors group"
+          className="flex flex-col items-center gap-1 py-3 hover:bg-primary/10 transition-colors group"
         >
-          <ExternalLink size={14} className="text-slate-400 group-hover:text-indigo-600 transition-colors" />
-          <span className="text-xs text-slate-500 group-hover:text-indigo-600 transition-colors">Shop online</span>
+          <ExternalLink size={14} className="text-muted-foreground group-hover:text-primary transition-colors" />
+          <span className="text-xs text-muted-foreground group-hover:text-primary transition-colors">Shop online</span>
         </a>
       </div>
     </div>
@@ -351,42 +351,42 @@ export function SuppliersSheet({
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-black/50" onClick={onClose}>
       <div
-        className="mt-auto bg-white rounded-t-3xl w-full max-h-[90vh] flex flex-col shadow-2xl"
+        className="mt-auto bg-card rounded-t-3xl w-full max-h-[90vh] flex flex-col shadow-2xl"
         style={{ animation: 'sheetUp 0.28s cubic-bezier(0.32,0.72,0,1)' }}
         onClick={e => e.stopPropagation()}
       >
         {/* Handle */}
         <div className="flex justify-center pt-3 shrink-0">
-          <div className="w-9 h-1 rounded-full bg-slate-200" />
+          <div className="w-9 h-1 rounded-full bg-border" />
         </div>
 
         {/* Header */}
-        <div className="flex items-center gap-3 px-5 py-3.5 shrink-0 border-b border-slate-100">
+        <div className="flex items-center gap-3 px-5 py-3.5 shrink-0 border-b border-border">
           <div className="flex-1">
-            <p className="text-slate-900 text-sm">Nearby Suppliers</p>
-            <p className="text-xs text-slate-400 mt-0.5">{SVC_LABEL[serviceType]} · Austin, TX</p>
+            <p className="text-foreground text-sm">Nearby Suppliers</p>
+            <p className="text-xs text-muted-foreground mt-0.5">{SVC_LABEL[serviceType]} · Austin, TX</p>
           </div>
           <button
             onClick={onClose}
-            className="flex size-8 items-center justify-center rounded-full hover:bg-slate-100 transition-colors"
+            className="flex size-8 items-center justify-center rounded-full hover:bg-secondary transition-colors"
           >
-            <X size={15} className="text-slate-500" />
+            <X size={15} className="text-muted-foreground" />
           </button>
         </div>
 
         {/* Search */}
         <div className="px-5 py-3 shrink-0">
-          <div className="flex items-center gap-2.5 rounded-xl bg-slate-100 px-3.5 py-2.5">
-            <Search size={14} className="text-slate-400 shrink-0" />
+          <div className="flex items-center gap-2.5 rounded-xl bg-secondary px-3.5 py-2.5">
+            <Search size={14} className="text-muted-foreground shrink-0" />
             <input
               value={search}
               onChange={e => setSearch(e.target.value)}
               placeholder="Search stores…"
-              className="flex-1 bg-transparent text-sm text-slate-700 placeholder-slate-400 outline-none"
+              className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none"
             />
             {search && (
               <button onClick={() => setSearch('')}>
-                <X size={12} className="text-slate-400" />
+                <X size={12} className="text-muted-foreground" />
               </button>
             )}
           </div>
@@ -394,10 +394,10 @@ export function SuppliersSheet({
 
         {/* All service-type tabs */}
         <div className="px-5 pb-2 flex gap-2 shrink-0">
-          <span className="text-xs bg-slate-900 text-white rounded-full px-3 py-1.5">
+          <span className="text-xs bg-primary text-primary-foreground rounded-full px-3 py-1.5">
             {SVC_LABEL[serviceType]}
           </span>
-          <span className="text-xs text-slate-400 flex items-center">
+          <span className="text-xs text-muted-foreground flex items-center">
             {relevant.length} stores nearby
           </span>
         </div>
@@ -406,17 +406,17 @@ export function SuppliersSheet({
         <div className="flex-1 overflow-y-auto px-5 pb-8 pt-2" style={{ scrollbarWidth: 'thin' }}>
           {Object.keys(groups).length === 0 ? (
             <div className="flex flex-col items-center gap-3 py-12 text-center">
-              <MapPin size={28} className="text-slate-200" />
-              <p className="text-sm text-slate-400">No stores match your search</p>
+              <MapPin size={28} className="text-muted-foreground" />
+              <p className="text-sm text-muted-foreground">No stores match your search</p>
             </div>
           ) : (
             Object.entries(groups).map(([category, stores]) => (
               <div key={category} className="mb-5">
                 {/* Category header */}
                 <div className="flex items-center gap-2 mb-3">
-                  <p className="text-xs text-slate-500">{category}</p>
-                  <div className="flex-1 h-px bg-slate-100" />
-                  <span className="text-xs text-slate-400">{stores.length}</span>
+                  <p className="text-xs text-muted-foreground">{category}</p>
+                  <div className="flex-1 h-px bg-secondary" />
+                  <span className="text-xs text-muted-foreground">{stores.length}</span>
                 </div>
                 <div className="flex flex-col gap-3">
                   {stores.map(store => (
@@ -428,11 +428,11 @@ export function SuppliersSheet({
           )}
 
           {/* Pro tip */}
-          <div className="rounded-xl bg-amber-50 border border-amber-100 px-4 py-3 mt-2">
+          <div className="rounded-xl bg-warning/10 border border-warning/20 px-4 py-3 mt-2">
             <div className="flex items-start gap-2.5">
-              <Star size={13} className="text-amber-500 shrink-0 mt-0.5" />
-              <p className="text-xs text-amber-700 leading-relaxed">
-                <span className="text-amber-800">Pro tip:</span> Ferguson and Johnstone offer contractor accounts with net-30 billing and volume discounts. Ask about a trade account when you visit.
+              <Star size={13} className="text-warning shrink-0 mt-0.5" />
+              <p className="text-xs text-warning leading-relaxed">
+                <span className="text-warning">Pro tip:</span> Ferguson and Johnstone offer contractor accounts with net-30 billing and volume discounts. Ask about a trade account when you visit.
               </p>
             </div>
           </div>

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { X, AlertTriangle, UserX, PhoneOff, RefreshCw, MessageSquare, Check } from 'lucide-react';
 import { SheetOverlay } from './JobSheets';
+import { Textarea } from '../ui';
 import type { Job } from '../../data/mock-data';
 
 type IssueType = 'cancel' | 'noshow' | 'other';
@@ -35,22 +36,22 @@ const TYPE_CONFIG: Record<IssueType, { label: string; icon: React.ElementType; c
   cancel: {
     label: 'Customer Canceled',
     icon: PhoneOff,
-    color: 'text-red-600',
-    bgColor: 'bg-red-50 border-red-200',
+    color: 'text-destructive',
+    bgColor: 'bg-destructive/10 border-destructive/30',
     desc: 'Customer called or texted to cancel',
   },
   noshow: {
     label: 'No-Show',
     icon: UserX,
-    color: 'text-orange-600',
-    bgColor: 'bg-orange-50 border-orange-200',
+    color: 'text-warning',
+    bgColor: 'bg-warning/10 border-warning/30',
     desc: 'Tech arrived but customer was not present',
   },
   other: {
     label: 'Other Issue',
     icon: AlertTriangle,
-    color: 'text-amber-600',
-    bgColor: 'bg-amber-50 border-amber-200',
+    color: 'text-warning',
+    bgColor: 'bg-warning/10 border-warning/30',
     desc: 'Internal issue or scope change',
   },
 };
@@ -85,12 +86,12 @@ export function CancelNoShowSheet({ job, customerName, customerPhone, onClose }:
     return (
       <SheetOverlay onClose={() => onClose()}>
         <div className="flex flex-col items-center gap-3 py-10">
-          <span className="flex size-14 items-center justify-center rounded-full bg-green-100">
-            <Check size={26} className="text-green-600" />
+          <span className="flex size-14 items-center justify-center rounded-full bg-success/15">
+            <Check size={26} className="text-success" />
           </span>
-          <p className="text-sm text-slate-900">Job marked as {issueType === 'noshow' ? 'No-Show' : issueType === 'cancel' ? 'Canceled' : 'closed'}</p>
-          {action === 'reschedule' && <p className="text-xs text-slate-400">Added to reschedule queue</p>}
-          {action === 'text' && <p className="text-xs text-slate-400">Message sent to {customerName.split(' ')[0]}</p>}
+          <p className="text-sm text-foreground">Job marked as {issueType === 'noshow' ? 'No-Show' : issueType === 'cancel' ? 'Canceled' : 'closed'}</p>
+          {action === 'reschedule' && <p className="text-xs text-muted-foreground">Added to reschedule queue</p>}
+          {action === 'text' && <p className="text-xs text-muted-foreground">Message sent to {customerName.split(' ')[0]}</p>}
         </div>
       </SheetOverlay>
     );
@@ -99,17 +100,17 @@ export function CancelNoShowSheet({ job, customerName, customerPhone, onClose }:
   return (
     <SheetOverlay onClose={() => onClose()}>
       <div className="flex items-center justify-between mb-1">
-        <p className="text-sm text-slate-900">Report Issue</p>
-        <button onClick={() => onClose()} className="p-1.5 rounded-lg hover:bg-slate-100">
-          <X size={16} className="text-slate-400" />
+        <p className="text-sm text-foreground">Report Issue</p>
+        <button onClick={() => onClose()} className="p-1.5 rounded-lg hover:bg-secondary">
+          <X size={16} className="text-muted-foreground" />
         </button>
       </div>
-      <p className="text-xs text-slate-400 mb-5">Job #{job.jobNumber} · {customerName}</p>
+      <p className="text-xs text-muted-foreground mb-5">Job #{job.jobNumber} · {customerName}</p>
 
       {/* Step 1: Type selection */}
       {step === 'type' && (
         <div className="flex flex-col gap-2.5">
-          <p className="text-xs text-slate-500 mb-1">What happened?</p>
+          <p className="text-xs text-muted-foreground mb-1">What happened?</p>
           {(Object.entries(TYPE_CONFIG) as [IssueType, typeof TYPE_CONFIG[IssueType]][]).map(([key, cfg]) => {
             const Icon = cfg.icon;
             return (
@@ -118,12 +119,12 @@ export function CancelNoShowSheet({ job, customerName, customerPhone, onClose }:
                 onClick={() => handleTypeSelect(key)}
                 className={`flex items-start gap-3 rounded-xl border px-4 py-3.5 text-left hover:shadow-sm transition-all ${cfg.bgColor}`}
               >
-                <span className={`flex size-9 items-center justify-center rounded-full bg-white shrink-0 mt-0.5`}>
+                <span className={`flex size-9 items-center justify-center rounded-full bg-card shrink-0 mt-0.5`}>
                   <Icon size={18} className={cfg.color} />
                 </span>
                 <div>
-                  <p className="text-sm text-slate-900">{cfg.label}</p>
-                  <p className="text-xs text-slate-500 mt-0.5">{cfg.desc}</p>
+                  <p className="text-sm text-foreground">{cfg.label}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">{cfg.desc}</p>
                 </div>
               </button>
             );
@@ -136,7 +137,7 @@ export function CancelNoShowSheet({ job, customerName, customerPhone, onClose }:
         <div className="flex flex-col gap-4">
           <button
             onClick={() => setStep('type')}
-            className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-600 transition-colors mb-1"
+            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors mb-1"
           >
             ← Back
           </button>
@@ -155,7 +156,7 @@ export function CancelNoShowSheet({ job, customerName, customerPhone, onClose }:
 
           {/* Reason chips */}
           <div>
-            <p className="text-xs text-slate-500 mb-2">Select reason</p>
+            <p className="text-xs text-muted-foreground mb-2">Select reason</p>
             <div className="flex flex-wrap gap-1.5">
               {REASONS[issueType].map(r => (
                 <button
@@ -163,8 +164,8 @@ export function CancelNoShowSheet({ job, customerName, customerPhone, onClose }:
                   onClick={() => setReason(r)}
                   className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
                     reason === r
-                      ? 'bg-slate-900 text-white'
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-secondary text-foreground hover:bg-border'
                   }`}
                 >
                   {r}
@@ -175,8 +176,8 @@ export function CancelNoShowSheet({ job, customerName, customerPhone, onClose }:
 
           {/* Notes */}
           <div>
-            <p className="text-xs text-slate-500 mb-2">Additional notes (optional)</p>
-            <textarea
+            <p className="text-xs text-muted-foreground mb-2">Additional notes (optional)</p>
+            <Textarea
               value={notes}
               onChange={e => setNotes(e.target.value)}
               placeholder={
@@ -185,13 +186,13 @@ export function CancelNoShowSheet({ job, customerName, customerPhone, onClose }:
                   : 'Any context that helps with rescheduling or follow-up…'
               }
               rows={3}
-              className="w-full rounded-xl border border-slate-200 px-3 py-3 text-sm text-slate-700 placeholder-slate-400 outline-none focus:border-blue-400 resize-none"
+              className="min-h-11 resize-none"
             />
           </div>
 
           {/* Action selection */}
           <div>
-            <p className="text-xs text-slate-500 mb-2">After marking</p>
+            <p className="text-xs text-muted-foreground mb-2">After marking</p>
             <div className="flex flex-col gap-1.5">
               {[
                 { key: 'close' as const,      icon: Check,          label: 'Mark and close' },
@@ -203,11 +204,11 @@ export function CancelNoShowSheet({ job, customerName, customerPhone, onClose }:
                   onClick={() => setAction(key)}
                   className={`flex items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left transition-colors ${
                     action === key
-                      ? 'border-slate-900 bg-slate-900 text-white'
-                      : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                      ? 'border-primary bg-primary text-primary-foreground'
+                      : 'border-border bg-card text-foreground hover:border-border'
                   }`}
                 >
-                  <Icon size={14} className={action === key ? 'text-white' : 'text-slate-400'} />
+                  <Icon size={14} className={action === key ? 'text-primary-foreground' : 'text-muted-foreground'} />
                   <span className="text-sm">{label}</span>
                 </button>
               ))}
@@ -217,7 +218,7 @@ export function CancelNoShowSheet({ job, customerName, customerPhone, onClose }:
           <button
             onClick={handleSubmit}
             disabled={!reason}
-            className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-red-600 text-white text-sm hover:bg-red-700 transition-colors disabled:opacity-40"
+            className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-destructive text-primary-foreground text-sm hover:bg-destructive transition-colors disabled:opacity-40"
           >
             <AlertTriangle size={14} /> Mark job
           </button>
