@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { X, Check, CalendarClock, Briefcase } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
-import { Button } from '../ui';
+import { Button, Input, Select } from '../ui';
 
 export interface ConvertToJobInput {
   estimateId: string;
@@ -78,19 +78,19 @@ export function ConvertToJobSheet({
   return (
     <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/40" onClick={onClose}>
       <div
-        className="bg-white rounded-t-2xl shadow-2xl overflow-y-auto max-h-[85vh]"
+        className="bg-card rounded-t-2xl shadow-2xl overflow-y-auto max-h-[85vh]"
         style={{ animation: 'slideUp 0.25s ease' }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex justify-center pt-3 pb-1">
-          <div className="w-8 h-1 rounded-full bg-slate-200" />
+          <div className="w-8 h-1 rounded-full bg-border" />
         </div>
 
         <div className="px-5 pb-8">
           <div className="flex items-center justify-between mb-5">
             <div>
-              <p className="text-slate-900" style={{ fontSize: '1rem' }}>Convert to job</p>
-              <p className="text-xs text-slate-400 mt-0.5">Schedule {input.estimateNumber}</p>
+              <p className="text-foreground" style={{ fontSize: '1rem' }}>Convert to job</p>
+              <p className="text-xs text-muted-foreground mt-0.5">Schedule {input.estimateNumber}</p>
             </div>
             <Button
               onClick={onClose}
@@ -106,25 +106,25 @@ export function ConvertToJobSheet({
 
           {done ? (
             <div className="flex flex-col items-center py-10 gap-3" style={{ animation: 'fadeUp 0.2s ease' }}>
-              <div className="flex size-14 items-center justify-center rounded-full bg-green-100">
-                <Check size={24} className="text-green-600" />
+              <div className="flex size-14 items-center justify-center rounded-full bg-success/15">
+                <Check size={24} className="text-success" />
               </div>
-              <p className="text-slate-800">Job scheduled</p>
-              <p className="text-xs text-slate-400">
+              <p className="text-foreground">Job scheduled</p>
+              <p className="text-xs text-muted-foreground">
                 Accepting estimate for {input.customerName.split(' ')[0]}
               </p>
             </div>
           ) : (
             <>
-              <div className="rounded-xl bg-slate-50 border border-slate-200 px-4 py-4 mb-4">
+              <div className="rounded-xl bg-secondary border border-border px-4 py-4 mb-4">
                 <div className="flex items-start gap-3">
-                  <Briefcase size={14} className="text-slate-400 mt-0.5 shrink-0" />
+                  <Briefcase size={14} className="text-muted-foreground mt-0.5 shrink-0" />
                   <div className="min-w-0">
-                    <p className="text-sm text-slate-800">{input.customerName}</p>
+                    <p className="text-sm text-foreground">{input.customerName}</p>
                     {input.description && (
-                      <p className="text-xs text-slate-400 mt-0.5 truncate">{input.description}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5 truncate">{input.description}</p>
                     )}
-                    <p className="text-xs text-slate-400 mt-1.5">
+                    <p className="text-xs text-muted-foreground mt-1.5">
                       Accepting this estimate schedules its job and assigns a technician.
                     </p>
                   </div>
@@ -134,43 +134,43 @@ export function ConvertToJobSheet({
               <button
                 type="button"
                 onClick={() => setShowOverride((v) => !v)}
-                className="flex w-full items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 text-left hover:bg-slate-50 transition-colors mb-3 min-h-11"
+                className="flex w-full items-center gap-2 rounded-xl border border-border bg-card px-4 py-3 text-left hover:bg-secondary transition-colors mb-3 min-h-11"
               >
-                <CalendarClock size={14} className="text-slate-400 shrink-0" />
-                <span className="text-sm text-slate-700 flex-1">
+                <CalendarClock size={14} className="text-muted-foreground shrink-0" />
+                <span className="text-sm text-foreground flex-1">
                   {showOverride ? 'Auto-schedule' : 'Pick technician & time'}
                 </span>
-                <span className="text-xs text-slate-400">{showOverride ? 'Hide' : 'Optional'}</span>
+                <span className="text-xs text-muted-foreground">{showOverride ? 'Hide' : 'Optional'}</span>
               </button>
 
               {showOverride && (
-                <div className="rounded-xl border border-slate-200 px-4 py-4 mb-4 flex flex-col gap-3">
+                <div className="rounded-xl border border-border px-4 py-4 mb-4 flex flex-col gap-3">
                   <label className="flex flex-col gap-1">
-                    <span className="text-xs text-slate-500">Technician</span>
-                    <select
+                    <span className="text-xs text-muted-foreground">Technician</span>
+                    <Select
                       value={technicianId}
                       onChange={(e) => setTechnicianId(e.target.value)}
-                      className="rounded-lg border border-slate-200 px-3 py-2 text-sm min-h-11"
+                      className="min-h-11"
                     >
                       <option value="">Auto-assign</option>
                       {technicians.map((t) => (
                         <option key={t.id} value={t.id}>{t.name}</option>
                       ))}
-                    </select>
+                    </Select>
                   </label>
                   <label className="flex flex-col gap-1">
-                    <span className="text-xs text-slate-500">Start time</span>
-                    <input
+                    <span className="text-xs text-muted-foreground">Start time</span>
+                    <Input
                       type="datetime-local"
                       value={scheduledStart}
                       onChange={(e) => setScheduledStart(e.target.value)}
-                      className="rounded-lg border border-slate-200 px-3 py-2 text-sm min-h-11"
+                      className="min-h-11"
                     />
                   </label>
                 </div>
               )}
 
-              {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+              {error && <p className="text-xs text-destructive mb-3">{error}</p>}
 
               <Button
                 onClick={() => void convert()}
