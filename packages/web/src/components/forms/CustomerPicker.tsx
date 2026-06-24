@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
+import { Input, Button } from '../ui';
 
 export interface CustomerOption {
   id: string;
@@ -21,8 +22,6 @@ function displayName(c: CustomerOption): string {
   if (human && c.companyName) return `${human} (${c.companyName})`;
   return human || c.companyName || c.id;
 }
-
-const inputCls = 'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';
 
 export function CustomerPicker({
   value,
@@ -91,7 +90,7 @@ export function CustomerPicker({
   return (
     <div data-testid="customer-picker" className="relative">
       <div className="flex gap-2">
-        <input
+        <Input
           aria-label="customer-search"
           value={value ? displayName(value) : query}
           onChange={(e) => {
@@ -101,25 +100,21 @@ export function CustomerPicker({
           }}
           onFocus={() => setOpen(true)}
           placeholder={required ? 'Search customer (required)' : 'Search customer'}
-          className={inputCls}
+          className="min-h-11"
         />
         {value && (
-          <button
-            type="button"
-            onClick={onClear}
-            className="rounded-md border border-slate-200 text-xs px-2 hover:bg-slate-50"
-          >
+          <Button type="button" variant="outline" size="sm" onClick={onClear} className="min-h-11">
             Clear
-          </button>
+          </Button>
         )}
       </div>
       {open && !value && (results.length > 0 || loading) && (
         <ul
           data-testid="customer-picker-results"
-          className="absolute z-10 mt-1 w-full rounded-lg border border-slate-200 bg-white shadow-sm max-h-60 overflow-auto"
+          className="absolute z-10 mt-1 w-full rounded-lg border border-border bg-card shadow-sm max-h-60 overflow-auto"
         >
           {loading && (
-            <li className="px-3 py-2 text-xs text-slate-500">Searching…</li>
+            <li className="px-3 py-2 text-xs text-muted-foreground">Searching…</li>
           )}
           {results.map((c) => (
             <li key={c.id}>
@@ -127,7 +122,7 @@ export function CustomerPicker({
                 type="button"
                 data-testid={`customer-option-${c.id}`}
                 onClick={() => onSelect(c)}
-                className="block w-full text-left px-3 py-2 text-sm hover:bg-slate-50"
+                className="block w-full text-left px-3 py-2 text-sm hover:bg-secondary"
               >
                 {displayName(c)}
               </button>
