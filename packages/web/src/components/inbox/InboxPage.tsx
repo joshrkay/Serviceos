@@ -29,10 +29,10 @@ interface ProposalMeta {
 // AIProposalCard) is where customer-MMS drafts are reviewed, so the urgency
 // marker must surface here too. Mirrors the assistant-card badge.
 const SEVERITY_CONFIG: Record<ProposalSeverity, { label: string; classes: string }> = {
-  TIER_1_EVACUATE:           { label: 'Evacuate',        classes: 'border-red-300 bg-red-100 text-red-800' },
-  TIER_2_EMERGENCY_DISPATCH: { label: 'Emergency',       classes: 'border-red-200 bg-red-50 text-red-700' },
-  TIER_3_SAME_DAY_URGENT:    { label: 'Same-day urgent', classes: 'border-amber-200 bg-amber-50 text-amber-700' },
-  TIER_4_SCHEDULE:           { label: 'Routine',         classes: 'border-slate-200 bg-slate-100 text-slate-600' },
+  TIER_1_EVACUATE:           { label: 'Evacuate',        classes: 'border-destructive/40 bg-destructive/10 text-destructive' },
+  TIER_2_EMERGENCY_DISPATCH: { label: 'Emergency',       classes: 'border-destructive/30 bg-destructive/10 text-destructive' },
+  TIER_3_SAME_DAY_URGENT:    { label: 'Same-day urgent', classes: 'border-warning/30 bg-warning/10 text-warning' },
+  TIER_4_SCHEDULE:           { label: 'Routine',         classes: 'border-border bg-secondary text-muted-foreground' },
 };
 
 interface LineItemView {
@@ -73,17 +73,17 @@ const CONFIDENCE_CONFIG: Record<
   ConfidenceLevel,
   { label: string; bar: string; track: string; width: string; labelColor: string }
 > = {
-  high: { label: 'High confidence', bar: 'bg-green-500', track: 'bg-green-100', width: 'w-full', labelColor: 'text-green-700' },
-  medium: { label: 'Review recommended', bar: 'bg-amber-400', track: 'bg-amber-100', width: 'w-3/5', labelColor: 'text-amber-700' },
-  low: { label: 'Low confidence', bar: 'bg-orange-500', track: 'bg-orange-100', width: 'w-2/5', labelColor: 'text-orange-700' },
-  very_low: { label: 'Very low — needs review', bar: 'bg-red-500', track: 'bg-red-100', width: 'w-1/5', labelColor: 'text-red-700' },
+  high: { label: 'High confidence', bar: 'bg-success', track: 'bg-success/10', width: 'w-full', labelColor: 'text-success' },
+  medium: { label: 'Review recommended', bar: 'bg-warning', track: 'bg-warning/10', width: 'w-3/5', labelColor: 'text-warning' },
+  low: { label: 'Low confidence', bar: 'bg-warning', track: 'bg-warning/10', width: 'w-2/5', labelColor: 'text-warning' },
+  very_low: { label: 'Very low — needs review', bar: 'bg-destructive', track: 'bg-destructive/10', width: 'w-1/5', labelColor: 'text-destructive' },
 };
 
 const PRICING_SOURCE_BADGE: Record<PricingSource, { label: string; classes: string }> = {
-  catalog: { label: 'Catalog price', classes: 'bg-green-50 text-green-700 border-green-200' },
-  ambiguous: { label: 'Needs a pick', classes: 'bg-amber-50 text-amber-800 border-amber-200' },
-  uncatalogued: { label: 'Not in catalog', classes: 'bg-orange-50 text-orange-700 border-orange-200' },
-  manual: { label: 'Manual price', classes: 'bg-slate-50 text-slate-600 border-slate-200' },
+  catalog: { label: 'Catalog price', classes: 'bg-success/10 text-success border-success/30' },
+  ambiguous: { label: 'Needs a pick', classes: 'bg-warning/10 text-warning border-warning/30' },
+  uncatalogued: { label: 'Not in catalog', classes: 'bg-warning/10 text-warning border-warning/30' },
+  manual: { label: 'Manual price', classes: 'bg-secondary text-muted-foreground border-border' },
 };
 
 /**
@@ -169,10 +169,10 @@ interface InboxResponse {
 }
 
 const URGENCY_BADGE: Record<Urgency, { label: string; classes: string }> = {
-  critical: { label: 'Critical', classes: 'bg-red-100 text-red-800 border-red-200' },
-  high: { label: 'High', classes: 'bg-amber-100 text-amber-800 border-amber-200' },
-  normal: { label: 'Normal', classes: 'bg-slate-100 text-slate-700 border-slate-200' },
-  low: { label: 'Low', classes: 'bg-slate-50 text-slate-500 border-slate-200' },
+  critical: { label: 'Critical', classes: 'bg-destructive/10 text-destructive border-destructive/30' },
+  high: { label: 'High', classes: 'bg-warning/10 text-warning border-warning/30' },
+  normal: { label: 'Normal', classes: 'bg-secondary text-foreground border-border' },
+  low: { label: 'Low', classes: 'bg-secondary text-muted-foreground border-border' },
 };
 
 /**
@@ -240,7 +240,7 @@ function ProposalMarkers({
       )}
 
       {markers.map((m, i) => (
-        <p key={`${m.path}-${i}`} className="text-xs text-slate-500">
+        <p key={`${m.path}-${i}`} className="text-xs text-muted-foreground">
           {m.reason}
         </p>
       ))}
@@ -405,12 +405,12 @@ export function InboxPage() {
     <div className="h-full overflow-y-auto">
       <div className="max-w-4xl mx-auto px-4 md:px-6 py-6 md:py-8">
         <div className="mb-6">
-          <h1 className="text-xl font-semibold text-slate-900">Inbox</h1>
-          <p className="text-sm text-slate-500">
+          <h1 className="text-xl font-semibold text-foreground">Inbox</h1>
+          <p className="text-sm text-muted-foreground">
             Proposals waiting for your approval, urgency-sorted.
           </p>
           {summary && summary.totalCount > 0 && (
-            <p className="text-xs text-slate-500 mt-1">
+            <p className="text-xs text-muted-foreground mt-1">
               {summary.totalCount} waiting
               {summary.criticalCount > 0 && ` · ${summary.criticalCount} urgent`}
               {summary.truncated && ' (showing first 100)'}
@@ -418,13 +418,13 @@ export function InboxPage() {
           )}
         </div>
 
-        {isLoading && <p className="text-sm text-slate-500">Loading…</p>}
-        {error && <p className="text-sm text-red-600">{error}</p>}
+        {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
+        {error && <p className="text-sm text-destructive">{error}</p>}
 
         {!isLoading && !error && rows.length === 0 && expired.length === 0 && (
-          <div className="rounded-xl border border-slate-200 bg-white px-6 py-12 text-center">
-            <p className="text-sm text-slate-700 font-medium">Nothing waiting.</p>
-            <p className="text-xs text-slate-500 mt-1">
+          <div className="rounded-xl border border-border bg-card px-6 py-12 text-center">
+            <p className="text-sm text-foreground font-medium">Nothing waiting.</p>
+            <p className="text-xs text-muted-foreground mt-1">
               When the voice agent or the system needs your approval, it'll show up here.
             </p>
           </div>
@@ -448,7 +448,7 @@ export function InboxPage() {
               <li
                 key={row.proposal.id}
                 data-testid="inbox-row"
-                className="rounded-xl border border-slate-200 bg-white px-4 py-3"
+                className="rounded-xl border border-border bg-card px-4 py-3"
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
@@ -456,27 +456,27 @@ export function InboxPage() {
                       <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${badge.classes}`}>
                         {badge.label}
                       </span>
-                      <span className="text-xs text-slate-500">{row.proposal.proposalType}</span>
+                      <span className="text-xs text-muted-foreground">{row.proposal.proposalType}</span>
                     </div>
-                    <p className="text-sm text-slate-900 font-medium truncate">{row.proposal.summary}</p>
+                    <p className="text-sm text-foreground font-medium truncate">{row.proposal.summary}</p>
                     {holdExpiryLine(row, tz) && (
-                      <p className="text-xs text-amber-700 mt-0.5">{holdExpiryLine(row, tz)}</p>
+                      <p className="text-xs text-warning mt-0.5">{holdExpiryLine(row, tz)}</p>
                     )}
-                    {row.reason && <p className="text-xs text-slate-500 mt-0.5">{row.reason}</p>}
+                    {row.reason && <p className="text-xs text-muted-foreground mt-0.5">{row.reason}</p>}
                     <ProposalMarkers row={row} onResolveLine={resolveLine} />
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <button
                       type="button"
                       onClick={() => actOnProposal(row.proposal.id, 'reject')}
-                      className="rounded-lg border border-slate-200 bg-white text-slate-700 text-sm px-3 py-1.5 hover:bg-slate-50"
+                      className="rounded-lg border border-border bg-card text-foreground text-sm px-3 py-1.5 hover:bg-secondary"
                     >
                       Reject
                     </button>
                     <button
                       type="button"
                       onClick={() => actOnProposal(row.proposal.id, 'approve')}
-                      className="rounded-lg bg-slate-900 text-white text-sm px-3 py-1.5 hover:bg-slate-700"
+                      className="rounded-lg bg-primary text-primary-foreground text-sm px-3 py-1.5 hover:bg-primary/90"
                     >
                       Approve
                     </button>
@@ -490,28 +490,28 @@ export function InboxPage() {
         {/* §5.5 — expired schedule proposal cards, clearly marked and re-proposable. */}
         {expired.length > 0 && (
           <div className="mt-8" data-testid="expired-section">
-            <h2 className="text-sm font-semibold text-slate-700 mb-2">Expired schedule proposals</h2>
+            <h2 className="text-sm font-semibold text-foreground mb-2">Expired schedule proposals</h2>
             <ul className="space-y-2">
               {expired.map((card) => (
                 <li
                   key={card.id}
                   data-testid="expired-row"
-                  className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3"
+                  className="rounded-xl border border-border bg-secondary px-4 py-3"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded border bg-slate-100 text-slate-500 border-slate-200">
+                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded border bg-secondary text-muted-foreground border-border">
                           Expired
                         </span>
-                        <span className="text-xs text-slate-500">{card.proposalType}</span>
+                        <span className="text-xs text-muted-foreground">{card.proposalType}</span>
                       </div>
-                      <p className="text-sm text-slate-700 font-medium truncate">{card.summary}</p>
+                      <p className="text-sm text-foreground font-medium truncate">{card.summary}</p>
                     </div>
                     <button
                       type="button"
                       onClick={() => repropose(card.id)}
-                      className="rounded-lg border border-slate-300 bg-white text-slate-700 text-sm px-3 py-1.5 hover:bg-slate-50 shrink-0"
+                      className="rounded-lg border border-border bg-card text-foreground text-sm px-3 py-1.5 hover:bg-secondary shrink-0"
                     >
                       Re-propose
                     </button>

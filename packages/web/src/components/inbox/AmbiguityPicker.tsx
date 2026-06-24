@@ -42,10 +42,10 @@ export function AmbiguityPicker({ lineDescription, candidates, onPick }: Props) 
 
   return (
     <div
-      className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2"
+      className="mt-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2"
       data-testid="ambiguity-picker"
     >
-      <p className="text-xs text-amber-900">
+      <p className="text-xs text-warning">
         Which item for “{lineDescription}”?
       </p>
       <div className="mt-2 flex flex-col gap-1.5">
@@ -58,10 +58,10 @@ export function AmbiguityPicker({ lineDescription, candidates, onPick }: Props) 
               void pick(c.id);
             }}
             data-testid="ambiguity-option"
-            className="flex min-h-11 w-full items-center justify-between gap-2 rounded-lg border border-amber-200 bg-white px-3 py-2 text-left text-sm text-slate-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex min-h-11 w-full items-center justify-between gap-2 rounded-lg border border-warning/30 bg-card px-3 py-2 text-left text-sm text-foreground hover:bg-warning/10 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <span className="min-w-0 flex-1 truncate">{c.name}</span>
-            <span className="shrink-0 tabular-nums text-slate-600">
+            <span className="shrink-0 tabular-nums text-muted-foreground">
               {pending === c.id ? 'Saving…' : formatCurrency(c.unitPriceCents)}
             </span>
           </button>
