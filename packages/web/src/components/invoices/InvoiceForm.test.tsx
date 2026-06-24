@@ -31,8 +31,8 @@ describe('InvoiceForm (characterization, pre-kit-migration)', () => {
       url === '/api/jobs' ? listResult(jobs) : url === '/api/estimates' ? listResult(estimates) : listResult([]),
     );
     // Default: job-detail enrich GET succeeds (non-fatal either way); POST returns an id.
-    vi.mocked(apiFetch).mockImplementation(async (url: string, opts?: RequestInit) => {
-      if (url === '/api/invoices' && opts?.method === 'POST') {
+    vi.mocked(apiFetch).mockImplementation(async (url: RequestInfo | URL, opts?: RequestInit) => {
+      if (String(url) === '/api/invoices' && opts?.method === 'POST') {
         return { ok: true, status: 201, json: async () => ({ id: 'inv-1' }) } as unknown as Response;
       }
       return { ok: true, status: 200, json: async () => jobs[0] } as unknown as Response;
@@ -76,5 +76,16 @@ describe('InvoiceForm (characterization, pre-kit-migration)', () => {
     fireEvent.click(screen.getByRole('button', { name: /create invoice/i }));
     // The required job <select> blocks submission, so no invoice is POSTed.
     expect(vi.mocked(apiFetch).mock.calls.some((c) => c[0] === '/api/invoices')).toBe(false);
+  });
+
+  it('uses the kit Field/Input wiring and meets the 44px tap target (U9d)', () => {
+    render(<InvoiceForm />);
+    // Field generates a real htmlFor/id pairing; the label resolves the control.
+    const discount = screen.getByLabelText(/Discount/);
+    expect(discount).toHaveAttribute('id');
+    expect(document.querySelector(`label[for="${discount.id}"]`)).toBeTruthy();
+    expect(discount.className).toContain('min-h-11');
+    expect(screen.getByRole('button', { name: /create invoice/i }).className).toContain('min-h-11');
+    expect(screen.getByRole('button', { name: /cancel/i }).className).toContain('min-h-11');
   });
 });
