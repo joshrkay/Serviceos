@@ -2,7 +2,7 @@
 
 **Created:** 2026-06-24
 **Depth:** Deep (comprehensive)
-**Status:** plan
+**Status:** plan (deepened 2026-06-24 — adversarial pass on U6/U8/U9/U13/U15; U1–U3 shipped)
 **Branch:** `claude/gallant-hypatia-eubvga` (PR #624)
 **Companions:** master plan `docs/plans/2026-06-23-001-feat-prototype-redesign-both-apps-plan.md` (R5),
 `docs/solutions/architecture-patterns/brand-rebrand-via-semantic-token-swap.md`,
@@ -196,15 +196,29 @@ re-skin + re-flow.
 - **Dependencies:** U2, U4
 - **Files:** `packages/web/src/components/inbox/InboxPage.tsx`, `ProposalChainCard.tsx`,
   `AmbiguityPicker.tsx` + co-located tests.
-- **Approach:** import `isCaptureProposalType` from `@ai-service-os/shared`;
-  `eligible = rows.filter(r => isCaptureProposalType(r.proposal.proposalType) && r.proposal.payload?._meta?.overallConfidence === 'high')`;
-  render the hero ("N high-confidence eligible…") + confirm step reusing the existing
-  `approveChain` batch transport with `eligible.map(id)`; keep per-chain approve. Confirm copy
-  mirrors mobile honesty (money/comms/irreversible excluded).
-- **Patterns to follow:** mobile `app/approvals.tsx`, `src/proposals/useApproveBatch.ts`; shared
-  `proposal-action-class.ts`.
-- **Test scenarios:** eligible filter excludes money/comms/irreversible + non-high; confirm posts
-  only eligible ids; partial-failure + all-failed messaging; per-chain approve still works.
+- **Approach (deepened):** `InboxPage` fetches `/api/proposals/inbox` inline (no hook); rows are
+  `{ proposal, urgency, reason }`, so the filter lives in the component. **Each serialized proposal
+  carries BOTH `payload._meta.overallConfidence` (4-tier string) AND a top-level
+  `confidenceScore?: number`** (api `proposals/proposal.ts:121`) — the earlier "string only" premise
+  was wrong. `'high'` is rarely stamped literally (only `getConfidenceLevel(score≥0.8)` yields it;
+  many capture drafts have no `_meta` at all), so a string-only gate renders a permanently-empty
+  hero (safe but useless). **Gate on the numeric score** (matches `getConfidenceLevel`'s 0.8 and
+  mobile's `confidenceBand≥0.85`):
+  `eligible = rows.filter(r => isCaptureProposalType(r.proposal.proposalType) && ((r.proposal.confidenceScore ?? (r.proposal.payload?._meta?.overallConfidence === 'high' ? 1 : 0)) >= 0.8))`
+  — capture-class AND (numeric ≥0.8 or explicit `_meta:'high'`); **never** treat absent confidence
+  as high. (Reusing mobile's numeric `isBatchEligible` verbatim is viable since web already has
+  `confidenceScore` — see OQ2.) **Do NOT reuse `approveChain` verbatim for the result:** it discards
+  the `{approved, failed}` body and rolls back the whole optimistic set; add a handler that reads the
+  per-id result (model on mobile `useApproveBatch`) so a partial failure restores only the
+  still-pending rows. Confirm copy mirrors mobile honesty (money/comms/irreversible excluded).
+- **Patterns to follow:** mobile `app/approvals.tsx`, `src/proposals/{useApproveBatch,proposalEvents}.ts`;
+  shared `proposal-action-class.ts`; existing `approveChain` (InboxPage.tsx) only for the POST shape.
+- **Test scenarios** (`packages/web/src/components/inbox/InboxPage.test.tsx` — has NO batch tests today):
+  capture + `_meta:'high'` → eligible; capture + NO `_meta` but `confidenceScore 0.9` → eligible
+  (the common path the string gate would miss); capture + `0.6` → excluded;
+  `record_payment`/`send_invoice`/`cancel_appointment` → excluded even at high; confirm POSTs exactly
+  `eligible.map(id)`; **partial-failure** (`{approved:[a],failed:[{id:b}]}`) restores `b`, removes
+  `a` (fails against a naive `approveChain` reuse — that's the point); per-chain approve still works.
 - **Verification:** web inbox mirrors mobile Approvals; the safety gate is capture+high only.
 
 ### U7. Customers list + detail (B3)
@@ -216,14 +230,29 @@ re-skin + re-flow.
 ### U8. Estimates list + builder (B4)
 - **Files:** `components/estimates/EstimatesPage.tsx`, `NewEstimateFlow.tsx`, `EstimateForm.tsx`,
   `pages/estimates/*` + tests. **Dependencies:** U2, U4. Consider splitting list vs builder into two commits.
-- **Approach:** list rows → description + amount + status badge (mirror mobile); builder → kit
-  fields, integer-cent money. **Heed `docs/solutions/conventions/line-item-price-field-estimate-vs-invoice.md`.**
-- **Test scenarios:** line-item math (integer cents), good-better-best, convert-to-invoice behavior preserved.
+- **Approach (deepened):** list rows → description + amount + status badge (mirror mobile). The
+  price-field gotcha is in the proposal EDITOR/REVIEW components (`InvoiceProposalEditor/Review.tsx`
+  read `unitPrice ?? unitPriceCents`), **NOT** the create forms — those build via the shared
+  `components/forms/LineItemEditor.tsx`, which always emits `unitPriceCents`+`totalCents` from a
+  local `unitPriceDollars` string via `Math.round(dollars*100)`. `LineItemEditor` is the **single
+  money component for both builders** → any markup re-flow there ripples to estimates AND invoices;
+  preserve the cents conversion, the `totalCents` reducer, and the good-better-best `enableOptions`
+  path. `NewEstimateFlow`'s AI path reads estimate-shaped `unitPrice` while its catalog path reads
+  `unitPriceCents` — keep the dual read.
+- **Test scenarios:** `components/forms/__tests__/LineItemEditor.test.tsx` (Math.round to cents +
+  negative/NaN safety — highest leverage); `pages/estimates/__tests__/EstimateCreate.test.tsx`
+  (asserts `unitPriceCents`); `components/invoices/InvoiceProposalEditor.test.tsx`/`Review.test.tsx`
+  (estimate-shaped `unitPrice` fixtures); `lib/lineItems.test.ts`.
+- **Risk:** `ConvertToInvoiceSheet` and the GBB option-grouping have **no co-located web tests** —
+  add coverage before re-flowing these money-affecting flows.
 
 ### U9. Invoices list + detail (B5)
 - **Files:** `components/invoices/InvoicesPage.tsx`, `pages/invoices/InvoiceDetail.tsx` + tests.
   **Dependencies:** U2, U4.
 - **Approach:** status badge incl. derived overdue; Stripe link/deposit display → tokens; integer cents.
+  The `unitPrice` vs `unitPriceCents` split (see U8) surfaces here in `InvoiceProposalEditor.tsx`
+  (`unitPrice ?? unitPriceCents`) — don't normalize to one field. Reuse the shared `entityStatus`
+  invoice-badge logic from mobile for the overdue derivation.
 
 ### U10. Jobs (B6)
 - **Files:** `components/jobs/{JobDetail,TechJobView,JobsList}.tsx` + sheets + tests. **Dependencies:** U2, U4.
@@ -245,14 +274,22 @@ re-skin + re-flow.
 - **Approach:** grouped brand sections per mobile Settings. **`AIApprovalRulesSheet.test.tsx`
   asserts `border-indigo-500`** — re-point to `border-primary` or a `data-selected` attribute.
 
-### U13. Public / portal — customer-facing (B9)  ⚠ see OQ1
+### U13. Public / portal — customer-facing (B9)  ⚠ OQ1 RESOLVED → tenant-neutral
 - **Files:** `components/customer/{EstimateApprovalPage,InvoicePaymentPage,BookingPage,IntakeFormPage,
   FeedbackPage}.tsx`, `pages/portal/*` + `*.layout.test.tsx`/`*.deposit/.validity/.error.test.tsx`.
   **Dependencies:** U2.
-- **Approach:** brand-sensitive money surfaces. **Resolve OQ1 first** (Path A vs tenant-neutral).
-  Preserve the `.layout.test.tsx` grid/`break-words`/`min-h-11` invariants exactly; QA on real
-  Stripe/signature flows. Do this cluster deliberately, not last-minute.
-- **Test scenarios:** layout invariants preserved; approve/decline/pay/deposit behavior unchanged.
+- **Approach (deepened — OQ1 resolved):** the "tenant brand shows through" comment in
+  `PortalShell.tsx` is **aspirational** — there is no tenant-color mechanism (`PortalCustomer`
+  carries only `companyName`; no brandColor/logoUrl). So apply **shape + typography only** (Path A
+  neutrals/structure, **NOT** Path A blue): going blue would make these read as ServiceOS, not the
+  tenant (`businessName`/`estimateLabel` already flow through). **Stripe seam:** `InvoicePaymentPage`
+  sets `appearance: { theme: 'stripe' }` (default), independent of Tailwind — either leave the
+  payment surface visually untouched or coordinate the Stripe `appearance` API; decide explicitly.
+  Preserve the `.layout.test.tsx` invariants EXACTLY: `minmax(0,1fr)`, `min-w-0`, `break-words`,
+  `tabular-nums` on the 3 money columns, 4 cells/row, `min-h-11` on show-more + Download PDF, the
+  Quote/Estimate label swap. Do this cluster deliberately, not last-minute.
+- **Test scenarios:** `EstimateApprovalPage.{layout,deposit,validity,error}.test.tsx`,
+  `BookingPage.layout.test.tsx`, `InvoicePaymentPage.test.tsx` all stay green (behavior/layout, no color).
 
 ### U14. Onboarding (B10)
 - **Files:** `components/onboarding/v2/OnboardingShell.tsx`, `Sidebar.tsx`, `steps/*` + tests.
@@ -262,11 +299,20 @@ re-skin + re-flow.
 ### U15. Dispatch board (B11)  ⚠ bespoke BEM
 - **Files:** `pages/dispatch/DispatchBoard.tsx`, `components/dispatch/*`, the dispatch BEM block in
   `index.css` + `TechnicianLane.test.tsx`/`AppointmentCard.test.tsx`/`styles/*`. **Dependencies:** U2.
-- **Approach:** convert in-CSS hex (`#0f172a`, `#dbeafe`, …) to token vars **without renaming
-  selectors**; decide whether to define the missing `.dispatch-board__*` rules or move to
-  utilities; **keep the 2.75rem tap target**. BEM state-class names (`--drag-over`, `__status--*`)
-  preserved (tests assert them).
-- **Test scenarios:** BEM state tests + the `index.css` source-string test stay green.
+- **Approach (deepened):** (1) FIRST map the **undefined** `--surface`/`--accent-soft` `var()`
+  references in the dispatch block to real tokens (`--card`/`--background`, `--accent`) — they
+  currently fall through to hardcoded fallbacks, the only place the board silently renders
+  off-palette. (2) Convert remaining inline hex in `.technician-lane*`/`.appointment-card*` rules to
+  `var(--token)` keeping every selector head byte-stable; map the six `.appointment-card__status--*`
+  fg/bg pairs to U1's `--success`/`--warning`/`--destructive`/`--muted`. (3) `.dispatch-board__*`
+  rules **definitively do not exist** (orphaned BEM rendered by `DispatchBoard.tsx:648-732`) — prefer
+  moving the board layout to utilities, but AUDIT each container's existing utility coverage before
+  removing reliance (no source-string guard → silent layout regression). Preserve BEM state classes
+  (`--drag-over`/`--dragging`/`--conflict` — tests assert them).
+- **Test scenarios:** `styles/dispatch-conversation-styles.test.ts` (matcher only checks selector
+  head + the one `2.75rem` substring → hex→`var()` is test-safe), `TechnicianLane.test.tsx`,
+  `AppointmentCard.test.tsx` stay green. **Risk:** add a class-contract/screenshot check for the
+  `.dispatch-board__*` layout before removing utility reliance.
 
 ### U16. Marketing (B12)
 - **Files:** `components/marketing/*` (LandingPage, Pricing, Features, About, …) + `MarketingPages.layout.test.tsx`.
@@ -280,19 +326,31 @@ re-skin + re-flow.
 
 - **R-scope:** mis-read as a token swap → estimate off by an order of magnitude. Gate "done" on
   the `/design` Showcase + preview rendering in brand, not on tokens existing.
-- **R-portal (OQ1):** applying Path A blue to the customer portal may conflict with its
-  deliberate "tenant brand shows through" stance. Decide before U13.
-- **R-dispatch:** bespoke BEM hex + source-string test + missing `.dispatch-board__*` rules.
-- **R-tailwind-v4:** `bg-success` needs `@theme inline` entry (U1); arbitrary `bg-[#hex]` bypasses
-  tokens — grep for stray brand hex after U2.
-- **R-confidence-mismatch (OQ2):** never import mobile `isBatchEligible` verbatim (fails open/closed).
+- **R-portal (OQ1 resolved):** the "tenant brand shows through" stance is aspirational (no
+  tenant-color mechanism exists) → portal/customer pages get shape+typography only, not Path A blue.
+  Watch the Stripe `appearance` seam on the payment page.
+- **R-dispatch:** bespoke BEM hex + undefined `--surface`/`--accent-soft` vars + **definitively
+  missing** `.dispatch-board__*` rules with no source-string guard (silent layout-regression risk).
+- **R-tailwind-v4:** `bg-success` needs the `@theme inline` entry (U1 ✓ done); arbitrary `bg-[#hex]`
+  bypasses tokens — grep for stray brand hex after each cluster.
+- **R-confidence (reframed):** web rows carry BOTH `_meta.overallConfidence` AND numeric
+  `confidenceScore`; `'high'` is rarely stamped, so gate on the numeric ≥0.8 (not the string) to
+  avoid a permanently-empty hero. Never treat absent confidence as eligible.
+- **R-untested-money-flows:** `ConvertToInvoiceSheet` + GBB option-grouping lack web tests — add
+  coverage before re-flowing U8/U9.
 
-## Open Questions (resolve before the relevant unit)
+## Open Questions
 
-- **OQ1 (before U13):** Does Path A apply to the customer portal/public flows, or do those stay
-  tenant-neutral (shape + typography only, color tenant-driven)? Product decision.
-- **OQ2 (follow-up):** Add numeric `confidenceScore` to the inbox serialization so web can reuse
-  the shared `isBatchEligible` literally? Ticket, not a blocker.
+- **OQ1 (RESOLVED → tenant-neutral, see U13):** Path A blue does NOT apply to the portal/customer
+  pages — no tenant-color mechanism exists today, so they get a shape+typography pass and stay
+  tenant-neutral.
+- **OQ1-b (separate ticket):** Should the portal contract (`api/.../portal` `PortalCustomer`) gain
+  real tenant brand fields (color/logo) + a matching Stripe `appearance` mapping so "brand shows
+  through" becomes true? Server+contract change, out of this front-end redesign's scope.
+- **OQ2 (RESOLVED / reframed):** `confidenceScore` is ALREADY serialized on the inbox proposal
+  (`proposals/proposal.ts:121`) and already consumed by mobile — no serialization change needed. The
+  real choice is whether web reuses mobile's numeric `isBatchEligible` (recommended) vs a bespoke
+  gate; U6 uses the numeric ≥0.8 gate either way.
 
 ## Sources & Research
 - Explore inventory of `packages/web` (routes, kit, screens, tests) — 2026-06-24.
