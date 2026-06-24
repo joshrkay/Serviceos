@@ -71,13 +71,27 @@ describe('TechJobView delay acknowledgement prompt', () => {
     expect(chip60).toBeEnabled();
 
     fireEvent.click(chip20);
-    expect(chip20).toHaveClass('bg-indigo-600');
+    // Path A (U10c): the selected chip is the brand primary, not raw indigo.
+    expect(chip20).toHaveClass('bg-primary');
 
     fireEvent.click(noButton);
     expect(chip10).toBeDisabled();
     expect(chip15).toBeDisabled();
     expect(chip20).toBeDisabled();
     expect(chip60).toBeDisabled();
-    expect(chip20).not.toHaveClass('bg-indigo-600');
+    expect(chip20).not.toHaveClass('bg-primary');
+  });
+
+  // U10c — Path A class contract: the tech view renders on brand tokens only.
+  it('renders on Path A tokens — no raw Tailwind palette leaks', async () => {
+    const { container } = render(
+      <MemoryRouter>
+        <TechJobView id="j1" />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText('Running behind?')).toBeInTheDocument());
+    expect(container.innerHTML).not.toMatch(
+      /(bg|text|border|border-l|placeholder|ring|divide|shadow|from|to|via)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
+    );
   });
 });

@@ -7,6 +7,7 @@ import {
   MessageSquare, Check, Pencil,
 } from 'lucide-react';
 import { useNavigate } from 'react-router';
+import { Textarea } from '../ui';
 import { ActivityTimeline } from './ActivityTimeline';
 import { CancelNoShowSheet } from './CancelNoShowSheet';
 import { CallScreen, TextSheet } from './JobSheets';
@@ -70,11 +71,11 @@ const STATUS_FLOW: {
   dotColor: string; ctaBg: string;
   apiStatus: string;
 }[] = [
-  { key: 'en_route',    label: 'En Route',          cta: "I've Arrived",    dotColor: 'bg-blue-500',   ctaBg: 'bg-blue-600   hover:bg-blue-700',   apiStatus: 'in_progress' },
-  { key: 'on_site',     label: 'On Site',            cta: 'Start Job',       dotColor: 'bg-green-500',  ctaBg: 'bg-green-600  hover:bg-green-700',  apiStatus: 'in_progress' },
-  { key: 'in_progress', label: 'In Progress',        cta: 'Mark Complete',   dotColor: 'bg-indigo-500', ctaBg: 'bg-indigo-600 hover:bg-indigo-700', apiStatus: 'in_progress' },
-  { key: 'waiting',     label: 'Waiting for Parts',  cta: 'Resume Job',      dotColor: 'bg-amber-500',  ctaBg: 'bg-amber-600  hover:bg-amber-700',  apiStatus: 'in_progress' },
-  { key: 'complete',    label: 'Complete',            cta: '',                dotColor: 'bg-green-500',  ctaBg: '', apiStatus: 'completed' },
+  { key: 'en_route',    label: 'En Route',          cta: "I've Arrived",    dotColor: 'bg-primary',   ctaBg: 'bg-primary   hover:bg-primary',   apiStatus: 'in_progress' },
+  { key: 'on_site',     label: 'On Site',            cta: 'Start Job',       dotColor: 'bg-success',  ctaBg: 'bg-success  hover:bg-success',  apiStatus: 'in_progress' },
+  { key: 'in_progress', label: 'In Progress',        cta: 'Mark Complete',   dotColor: 'bg-primary', ctaBg: 'bg-primary hover:bg-primary', apiStatus: 'in_progress' },
+  { key: 'waiting',     label: 'Waiting for Parts',  cta: 'Resume Job',      dotColor: 'bg-warning',  ctaBg: 'bg-warning  hover:bg-warning',  apiStatus: 'in_progress' },
+  { key: 'complete',    label: 'Complete',            cta: '',                dotColor: 'bg-success',  ctaBg: '', apiStatus: 'completed' },
 ];
 
 // Map API status → TechStatus
@@ -172,7 +173,7 @@ function Waveform({ active }: { active: boolean }) {
     <div className="flex items-center justify-center gap-[3px] h-7">
       {Array.from({ length: 24 }).map((_, i) => (
         <div key={i}
-          className={`w-[2.5px] rounded-full ${active ? 'bg-red-400' : 'bg-slate-300'}`}
+          className={`w-[2.5px] rounded-full ${active ? 'bg-destructive' : 'bg-muted'}`}
           style={{
             animation: active ? 'waveBar 0.65s ease-in-out infinite' : 'none',
             animationDelay: `${i * 0.03}s`, height: '100%',
@@ -276,22 +277,22 @@ function VoiceHero({
   if (phase === 'idle') return (
     <div className="flex flex-col items-center gap-4 py-6">
       {micError && (
-        <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-600">
+        <div className="rounded-lg bg-destructive/10 border border-destructive/30 px-3 py-2 text-xs text-destructive">
           {micError}
         </div>
       )}
       <button onClick={() => void startRecording()}
         className="group relative flex flex-col items-center gap-2.5">
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <div className="size-24 rounded-full bg-slate-900/5 scale-0 group-hover:scale-100 transition-transform duration-300" />
+          <div className="size-24 rounded-full bg-primary/5 scale-0 group-hover:scale-100 transition-transform duration-300" />
         </div>
-        <div className="relative flex size-20 items-center justify-center rounded-full bg-slate-900 shadow-xl shadow-slate-900/25
-          hover:bg-slate-700 active:scale-95 transition-all">
-          <Mic size={28} className="text-white" />
+        <div className="relative flex size-20 items-center justify-center rounded-full bg-primary shadow-xl shadow-border/25
+          hover:bg-primary/90 active:scale-95 transition-all">
+          <Mic size={28} className="text-primary-foreground" />
         </div>
         <div className="text-center">
-          <p className="text-sm text-slate-800">Tap to add by voice</p>
-          <p className="text-xs text-slate-400 mt-0.5">note · part · status update</p>
+          <p className="text-sm text-foreground">Tap to add by voice</p>
+          <p className="text-xs text-muted-foreground mt-0.5">note · part · status update</p>
         </div>
       </button>
     </div>
@@ -300,61 +301,61 @@ function VoiceHero({
   if (phase === 'recording') return (
     <div className="flex flex-col items-center gap-3 py-5">
       <div className="flex items-center gap-2">
-        <span className="size-2.5 rounded-full bg-red-500 animate-pulse" />
-        <span className="text-sm text-red-600">{fmt(seconds)} · Listening…</span>
+        <span className="size-2.5 rounded-full bg-destructive animate-pulse" />
+        <span className="text-sm text-destructive">{fmt(seconds)} · Listening…</span>
       </div>
       <Waveform active />
       <button onClick={stopRecording}
-        className="flex items-center gap-2 bg-red-500 text-white rounded-full px-6 py-2.5 text-sm hover:bg-red-600 active:scale-95 transition-all shadow-lg shadow-red-500/30">
+        className="flex items-center gap-2 bg-destructive text-primary-foreground rounded-full px-6 py-2.5 text-sm hover:bg-destructive active:scale-95 transition-all shadow-lg shadow-destructive/30">
         <StopCircle size={15} /> Done talking
       </button>
-      <p className="text-xs text-slate-400">Auto-stops at 30s</p>
+      <p className="text-xs text-muted-foreground">Auto-stops at 30s</p>
     </div>
   );
 
   if (phase === 'processing') return (
     <div className="flex flex-col items-center gap-3 py-8">
-      <div className="flex size-10 items-center justify-center rounded-full bg-indigo-100">
-        <Sparkles size={18} className="text-indigo-600 animate-pulse" />
+      <div className="flex size-10 items-center justify-center rounded-full bg-primary/15">
+        <Sparkles size={18} className="text-primary animate-pulse" />
       </div>
-      <p className="text-sm text-slate-600">Transcribing…</p>
+      <p className="text-sm text-foreground">Transcribing…</p>
     </div>
   );
 
   if (phase === 'result' && result) return (
     <div className="flex flex-col gap-3 py-3" style={{ animation: 'fadeUp 0.2s ease' }}>
       <div className="flex items-start gap-2.5">
-        <div className="flex size-7 items-center justify-center rounded-full bg-slate-800 shrink-0">
-          <Mic size={11} className="text-white" />
+        <div className="flex size-7 items-center justify-center rounded-full bg-primary shrink-0">
+          <Mic size={11} className="text-primary-foreground" />
         </div>
-        <div className="flex-1 bg-slate-100 rounded-2xl rounded-tl-sm px-3.5 py-2.5">
-          <p className="text-xs text-slate-400 mb-0.5">Transcript</p>
-          <p className="text-sm text-slate-700 italic leading-relaxed">"{result.transcript}"</p>
+        <div className="flex-1 bg-secondary rounded-2xl rounded-tl-sm px-3.5 py-2.5">
+          <p className="text-xs text-muted-foreground mb-0.5">Transcript</p>
+          <p className="text-sm text-foreground italic leading-relaxed">"{result.transcript}"</p>
         </div>
       </div>
 
-      <div className="rounded-xl border border-indigo-100 bg-indigo-50 px-4 py-3 flex flex-col gap-2">
-        <p className="text-xs text-indigo-500">AI parsed</p>
+      <div className="rounded-xl border border-primary/20 bg-primary/10 px-4 py-3 flex flex-col gap-2">
+        <p className="text-xs text-primary">AI parsed</p>
         {result.statusUpdate && (
           <div className="flex items-center gap-2">
-            <CheckCircle2 size={13} className="text-indigo-600 shrink-0" />
-            <p className="text-sm text-indigo-900">
+            <CheckCircle2 size={13} className="text-primary shrink-0" />
+            <p className="text-sm text-primary">
               Status → <span className="font-medium">{STATUS_FLOW.find(s => s.key === result.statusUpdate)?.label}</span>
             </p>
           </div>
         )}
         {result.notes.map(n => (
           <div key={n.id} className="flex items-start gap-2">
-            <FileText size={13} className="text-indigo-600 shrink-0 mt-0.5" />
-            <p className="text-sm text-indigo-900 leading-snug">{n.text.length > 80 ? n.text.slice(0, 80) + '…' : n.text}</p>
+            <FileText size={13} className="text-primary shrink-0 mt-0.5" />
+            <p className="text-sm text-primary leading-snug">{n.text.length > 80 ? n.text.slice(0, 80) + '…' : n.text}</p>
           </div>
         ))}
         {result.parts.map(p => (
           <div key={p.id} className="flex items-center gap-2">
-            <Package size={13} className="text-indigo-600 shrink-0" />
-            <p className="text-sm text-indigo-900">
-              {p.name} <span className="text-indigo-500">× {p.qty}</span>
-              <span className="text-indigo-500 ml-1">· ${(p.qty * p.unitCost).toFixed(2)}</span>
+            <Package size={13} className="text-primary shrink-0" />
+            <p className="text-sm text-primary">
+              {p.name} <span className="text-primary">× {p.qty}</span>
+              <span className="text-primary ml-1">· ${(p.qty * p.unitCost).toFixed(2)}</span>
             </p>
           </div>
         ))}
@@ -362,11 +363,11 @@ function VoiceHero({
 
       <div className="flex gap-2">
         <button onClick={discard}
-          className="flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-600 hover:bg-slate-50 transition-colors">
+          className="flex items-center gap-1.5 rounded-xl border border-border px-3 py-2.5 text-sm text-foreground hover:bg-secondary transition-colors">
           <RotateCcw size={12} /> Discard
         </button>
         <button onClick={confirm}
-          className="flex-1 flex items-center justify-center gap-1.5 rounded-xl bg-slate-900 text-white py-2.5 text-sm hover:bg-slate-700 transition-colors">
+          className="flex-1 flex items-center justify-center gap-1.5 rounded-xl bg-primary text-primary-foreground py-2.5 text-sm hover:bg-primary/90 transition-colors">
           <Check size={14} /> Add all
         </button>
       </div>
@@ -390,63 +391,63 @@ function NotesSection({ notes, onAdd }: {
   }
 
   return (
-    <div className="rounded-2xl bg-white border border-slate-200 overflow-hidden">
+    <div className="rounded-2xl bg-card border border-border overflow-hidden">
       <button onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-slate-50 transition-colors">
-        <div className="flex size-7 items-center justify-center rounded-lg bg-slate-100 shrink-0">
-          <FileText size={13} className="text-slate-600" />
+        className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-secondary transition-colors">
+        <div className="flex size-7 items-center justify-center rounded-lg bg-secondary shrink-0">
+          <FileText size={13} className="text-foreground" />
         </div>
-        <p className="flex-1 text-sm text-slate-800">Notes</p>
+        <p className="flex-1 text-sm text-foreground">Notes</p>
         {notes.length > 0 && (
-          <span className="text-xs bg-slate-100 text-slate-600 rounded-full px-2 py-0.5">{notes.length}</span>
+          <span className="text-xs bg-secondary text-foreground rounded-full px-2 py-0.5">{notes.length}</span>
         )}
-        {open ? <ChevronUp size={14} className="text-slate-400 shrink-0" /> : <ChevronDown size={14} className="text-slate-400 shrink-0" />}
+        {open ? <ChevronUp size={14} className="text-muted-foreground shrink-0" /> : <ChevronDown size={14} className="text-muted-foreground shrink-0" />}
       </button>
 
       {open && (
-        <div className="border-t border-slate-100">
+        <div className="border-t border-border">
           {notes.length === 0 && !typing && (
-            <p className="text-xs text-slate-400 px-4 py-3 italic">No notes yet — use voice or type below</p>
+            <p className="text-xs text-muted-foreground px-4 py-3 italic">No notes yet — use voice or type below</p>
           )}
           {notes.map((n, i) => (
-            <div key={n.id} className={`flex items-start gap-3 px-4 py-3 ${i > 0 ? 'border-t border-slate-50' : ''}`}>
+            <div key={n.id} className={`flex items-start gap-3 px-4 py-3 ${i > 0 ? 'border-t border-border' : ''}`}>
               <div className={`flex size-6 items-center justify-center rounded-full shrink-0 mt-0.5 ${
-                n.source === 'voice' ? 'bg-indigo-100' : 'bg-slate-100'
+                n.source === 'voice' ? 'bg-primary/15' : 'bg-secondary'
               }`}>
                 {n.source === 'voice'
-                  ? <Mic size={10} className="text-indigo-600" />
-                  : <Pencil size={10} className="text-slate-500" />
+                  ? <Mic size={10} className="text-primary" />
+                  : <Pencil size={10} className="text-muted-foreground" />
                 }
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-sm text-slate-700 leading-relaxed">{n.text}</p>
-                <p className="text-xs text-slate-400 mt-0.5">{n.time}</p>
+                <p className="text-sm text-foreground leading-relaxed">{n.text}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">{n.time}</p>
               </div>
             </div>
           ))}
           {typing ? (
-            <div className="border-t border-slate-100 p-3 flex flex-col gap-2">
-              <textarea
+            <div className="border-t border-border p-3 flex flex-col gap-2">
+              <Textarea
                 autoFocus value={draft} onChange={e => setDraft(e.target.value)}
                 placeholder="Type your note…" rows={3}
-                className="w-full text-sm text-slate-700 placeholder-slate-400 border border-slate-200 rounded-xl px-3 py-2.5 focus:outline-none focus:border-blue-400 resize-none"
+                className="min-h-11 resize-none"
                 onKeyDown={e => { if (e.key === 'Enter' && e.metaKey) submit(); }}
               />
               <div className="flex gap-2">
                 <button onClick={() => { setTyping(false); setDraft(''); }}
-                  className="flex-1 rounded-xl border border-slate-200 py-2 text-sm text-slate-600 hover:bg-slate-50">
+                  className="flex-1 rounded-xl border border-border py-2 text-sm text-foreground hover:bg-secondary">
                   Cancel
                 </button>
                 <button onClick={submit} disabled={!draft.trim()}
-                  className="flex-1 rounded-xl bg-slate-900 text-white py-2 text-sm disabled:opacity-40 hover:bg-slate-700">
+                  className="flex-1 rounded-xl bg-primary text-primary-foreground py-2 text-sm disabled:opacity-40 hover:bg-primary/90">
                   Add note
                 </button>
               </div>
             </div>
           ) : (
-            <div className="border-t border-slate-100 px-4 py-2.5">
+            <div className="border-t border-border px-4 py-2.5">
               <button onClick={() => setTyping(true)}
-                className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-700 transition-colors">
+                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
                 <Pencil size={11} /> Type a note
               </button>
             </div>
@@ -459,8 +460,8 @@ function NotesSection({ notes, onAdd }: {
 
 // ─── Photos section ────────────────────────────────────────────────────────────
 const PHOTO_COLORS = [
-  'bg-slate-700', 'bg-slate-600', 'bg-slate-500', 'bg-slate-800',
-  'bg-zinc-700',  'bg-neutral-700', 'bg-stone-700', 'bg-gray-700',
+  'bg-primary', 'bg-muted-foreground', 'bg-muted-foreground', 'bg-primary',
+  'bg-primary',  'bg-primary', 'bg-primary', 'bg-primary',
 ];
 const PHOTO_LABELS = ['Before – overview', 'Equipment close-up', 'Problem area', 'After – overview',
                       'Parts removed',     'Access point',       'Customer sig.', 'Detail shot'];
@@ -472,21 +473,21 @@ function PhotosSection({ media, onAdd }: {
   const [open, setOpen] = useState(true);
 
   return (
-    <div className="rounded-2xl bg-white border border-slate-200 overflow-hidden">
+    <div className="rounded-2xl bg-card border border-border overflow-hidden">
       <button onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-slate-50 transition-colors">
-        <div className="flex size-7 items-center justify-center rounded-lg bg-sky-100 shrink-0">
-          <Camera size={13} className="text-sky-600" />
+        className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-secondary transition-colors">
+        <div className="flex size-7 items-center justify-center rounded-lg bg-primary/15 shrink-0">
+          <Camera size={13} className="text-primary" />
         </div>
-        <p className="flex-1 text-sm text-slate-800">Photos</p>
+        <p className="flex-1 text-sm text-foreground">Photos</p>
         {media.length > 0 && (
-          <span className="text-xs bg-sky-100 text-sky-700 rounded-full px-2 py-0.5">{media.length}</span>
+          <span className="text-xs bg-primary/15 text-primary rounded-full px-2 py-0.5">{media.length}</span>
         )}
-        {open ? <ChevronUp size={14} className="text-slate-400 shrink-0" /> : <ChevronDown size={14} className="text-slate-400 shrink-0" />}
+        {open ? <ChevronUp size={14} className="text-muted-foreground shrink-0" /> : <ChevronDown size={14} className="text-muted-foreground shrink-0" />}
       </button>
 
       {open && (
-        <div className="border-t border-slate-100 p-3">
+        <div className="border-t border-border p-3">
           <div className="grid grid-cols-3 gap-2">
             {media.map(ph => (
               <div key={ph.id}
@@ -495,22 +496,22 @@ function PhotosSection({ media, onAdd }: {
                 {ph.isReal && ph.url
                   ? <img src={ph.url} className="w-full h-full object-cover" alt="" />
                   : <>
-                      <Camera size={16} className="text-white/50" />
-                      <p className="text-white/50 mt-1" style={{ fontSize: 9 }}>{ph.label}</p>
+                      <Camera size={16} className="text-primary-foreground/50" />
+                      <p className="text-primary-foreground/50 mt-1" style={{ fontSize: 9 }}>{ph.label}</p>
                     </>
                 }
               </div>
             ))}
             {media.length < 8 && (
               <button onClick={onAdd}
-                className="aspect-square rounded-xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center gap-1 hover:border-sky-400 hover:bg-sky-50 active:bg-sky-100 transition-colors">
-                <Camera size={18} className="text-slate-400" />
-                <p className="text-xs text-slate-400">Add</p>
+                className="aspect-square rounded-xl border-2 border-dashed border-border flex flex-col items-center justify-center gap-1 hover:border-primary hover:bg-primary/10 active:bg-primary/15 transition-colors">
+                <Camera size={18} className="text-muted-foreground" />
+                <p className="text-xs text-muted-foreground">Add</p>
               </button>
             )}
           </div>
           {media.length === 0 && (
-            <p className="text-xs text-slate-400 text-center mt-2">No photos yet</p>
+            <p className="text-xs text-muted-foreground text-center mt-2">No photos yet</p>
           )}
         </div>
       )}
@@ -535,67 +536,67 @@ function MaterialsSection({ materials, onUpdate }: {
   function remove(id: string) { onUpdate(materials.filter(m => m.id !== id)); }
 
   const CATEGORY_COLORS: Record<string, string> = {
-    Part:      'bg-blue-100 text-blue-700',
-    Material:  'bg-green-100 text-green-700',
-    Labor:     'bg-purple-100 text-purple-700',
-    Equipment: 'bg-amber-100 text-amber-700',
+    Part:      'bg-primary/15 text-primary',
+    Material:  'bg-success/15 text-success',
+    Labor:     'bg-primary/15 text-primary',
+    Equipment: 'bg-warning/15 text-warning',
   };
 
   return (
-    <div className="rounded-2xl bg-white border border-slate-200 overflow-hidden">
+    <div className="rounded-2xl bg-card border border-border overflow-hidden">
       <button onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-slate-50 transition-colors">
-        <div className="flex size-7 items-center justify-center rounded-lg bg-amber-100 shrink-0">
-          <Package size={13} className="text-amber-600" />
+        className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-secondary transition-colors">
+        <div className="flex size-7 items-center justify-center rounded-lg bg-warning/15 shrink-0">
+          <Package size={13} className="text-warning" />
         </div>
-        <p className="flex-1 text-sm text-slate-800">Materials &amp; Parts</p>
+        <p className="flex-1 text-sm text-foreground">Materials &amp; Parts</p>
         {materials.length > 0 && (
-          <span className="text-xs bg-amber-100 text-amber-700 rounded-full px-2 py-0.5">{materials.length}</span>
+          <span className="text-xs bg-warning/15 text-warning rounded-full px-2 py-0.5">{materials.length}</span>
         )}
-        {open ? <ChevronUp size={14} className="text-slate-400 shrink-0" /> : <ChevronDown size={14} className="text-slate-400 shrink-0" />}
+        {open ? <ChevronUp size={14} className="text-muted-foreground shrink-0" /> : <ChevronDown size={14} className="text-muted-foreground shrink-0" />}
       </button>
 
       {open && (
-        <div className="border-t border-slate-100">
+        <div className="border-t border-border">
           {materials.length === 0 ? (
-            <p className="text-xs text-slate-400 px-4 py-3 italic">No parts logged yet — use voice to add</p>
+            <p className="text-xs text-muted-foreground px-4 py-3 italic">No parts logged yet — use voice to add</p>
           ) : (
             <>
-              <div className="divide-y divide-slate-50">
+              <div className="divide-y divide-border">
                 {materials.map(m => (
                   <div key={m.id} className="flex items-center gap-3 px-4 py-3">
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm text-slate-800 leading-snug">{m.name}</p>
+                      <p className="text-sm text-foreground leading-snug">{m.name}</p>
                       <div className="flex items-center gap-2 mt-1">
-                        <span className={`text-xs rounded-full px-2 py-0.5 ${CATEGORY_COLORS[m.category] ?? 'bg-slate-100 text-slate-500'}`}>
+                        <span className={`text-xs rounded-full px-2 py-0.5 ${CATEGORY_COLORS[m.category] ?? 'bg-secondary text-muted-foreground'}`}>
                           {m.category}
                         </span>
-                        <span className="text-xs text-slate-400">${m.unitCost.toFixed(2)}/ea</span>
+                        <span className="text-xs text-muted-foreground">${m.unitCost.toFixed(2)}/ea</span>
                       </div>
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
                       <button onClick={() => setQty(m.id, -1)}
-                        className="flex size-7 items-center justify-center rounded-lg border border-slate-200 hover:bg-slate-100 active:scale-90 transition-all">
-                        <Minus size={11} className="text-slate-600" />
+                        className="flex size-7 items-center justify-center rounded-lg border border-border hover:bg-secondary active:scale-90 transition-all">
+                        <Minus size={11} className="text-foreground" />
                       </button>
-                      <span className="w-6 text-center text-sm text-slate-800">{m.qty}</span>
+                      <span className="w-6 text-center text-sm text-foreground">{m.qty}</span>
                       <button onClick={() => setQty(m.id, +1)}
-                        className="flex size-7 items-center justify-center rounded-lg border border-slate-200 hover:bg-slate-100 active:scale-90 transition-all">
-                        <Plus size={11} className="text-slate-600" />
+                        className="flex size-7 items-center justify-center rounded-lg border border-border hover:bg-secondary active:scale-90 transition-all">
+                        <Plus size={11} className="text-foreground" />
                       </button>
                     </div>
-                    <p className="w-14 text-right text-sm text-slate-800 shrink-0">
+                    <p className="w-14 text-right text-sm text-foreground shrink-0">
                       ${(m.qty * m.unitCost).toFixed(2)}
                     </p>
-                    <button onClick={() => remove(m.id)} className="text-slate-300 hover:text-red-400 transition-colors shrink-0">
+                    <button onClick={() => remove(m.id)} className="text-muted-foreground hover:text-destructive transition-colors shrink-0">
                       <X size={13} />
                     </button>
                   </div>
                 ))}
               </div>
-              <div className="flex items-center justify-between px-4 py-3 border-t border-slate-100 bg-slate-50">
-                <p className="text-xs text-slate-500">Total materials</p>
-                <p className="text-sm text-slate-900">${total.toFixed(2)}</p>
+              <div className="flex items-center justify-between px-4 py-3 border-t border-border bg-secondary">
+                <p className="text-xs text-muted-foreground">Total materials</p>
+                <p className="text-sm text-foreground">${total.toFixed(2)}</p>
               </div>
             </>
           )}
@@ -608,9 +609,9 @@ function MaterialsSection({ materials, onUpdate }: {
 // ─── SVC config maps ────────────────────────────────────────────────────────────
 const SVC_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 const SVC_BG: Record<string, string> = {
-  HVAC:     'bg-blue-900/40',
-  Plumbing: 'bg-green-900/40',
-  Painting: 'bg-violet-900/40',
+  HVAC:     'bg-primary/40',
+  Plumbing: 'bg-success/40',
+  Painting: 'bg-primary/40',
 };
 const DELAY_OPTIONS = [10, 15, 20, 60] as const;
 type DelayOption = (typeof DELAY_OPTIONS)[number];
@@ -675,7 +676,7 @@ export function TechJobView({ id }: { id: string }) {
   if (isLoading) {
     return (
       <div className="flex h-full items-center justify-center">
-        <div className="text-slate-400 text-sm">Loading job…</div>
+        <div className="text-muted-foreground text-sm">Loading job…</div>
       </div>
     );
   }
@@ -683,8 +684,8 @@ export function TechJobView({ id }: { id: string }) {
   if (loadError || !jobData) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3">
-        <p className="text-slate-400 text-sm">{loadError ?? 'Job not found'}</p>
-        <button onClick={() => navigate(-1)} className="text-xs text-blue-600 hover:underline">← Back</button>
+        <p className="text-muted-foreground text-sm">{loadError ?? 'Job not found'}</p>
+        <button onClick={() => navigate(-1)} className="text-xs text-primary hover:underline">← Back</button>
       </div>
     );
   }
@@ -818,23 +819,23 @@ export function TechJobView({ id }: { id: string }) {
 
   return (
     <>
-      <div className="flex flex-col h-full bg-slate-50 overflow-hidden">
+      <div className="flex flex-col h-full bg-secondary overflow-hidden">
 
         {/* ── Top bar ── */}
-        <div className="shrink-0 bg-slate-900 px-4 py-3 flex items-center justify-between">
+        <div className="shrink-0 bg-primary px-4 py-3 flex items-center justify-between">
           <button onClick={() => navigate(`/jobs/${id}`)}
-            className="flex items-center gap-1.5 text-slate-400 hover:text-white text-sm transition-colors">
+            className="flex items-center gap-1.5 text-muted-foreground hover:text-primary-foreground text-sm transition-colors">
             <ArrowLeft size={14} /> Owner view
           </button>
           <div className="flex items-center gap-2">
             {jobData.priority === 'urgent' && (
-              <span className="flex items-center gap-1 text-xs bg-red-500 text-white rounded-full px-2 py-0.5">
+              <span className="flex items-center gap-1 text-xs bg-destructive text-primary-foreground rounded-full px-2 py-0.5">
                 <Zap size={10} /> Urgent
               </span>
             )}
-            <span className="text-xs text-slate-400">#{jobData.jobNumber}</span>
+            <span className="text-xs text-muted-foreground">#{jobData.jobNumber}</span>
             <span
-              className="flex size-7 items-center justify-center rounded-full text-white text-xs"
+              className="flex size-7 items-center justify-center rounded-full text-primary-foreground text-xs"
               style={{ background: techColor }}>
               {techInitials}
             </span>
@@ -846,19 +847,19 @@ export function TechJobView({ id }: { id: string }) {
           <div className="max-w-lg mx-auto">
 
             {/* ── Job hero ── */}
-            <div className={`${SVC_BG[svcType] ?? SVC_BG.HVAC} bg-slate-900 px-5 pt-5 pb-6`}>
+            <div className={`${SVC_BG[svcType] ?? SVC_BG.HVAC} bg-primary px-5 pt-5 pb-6`}>
               <div className="flex items-start gap-3 mb-3">
                 <span className="text-3xl">{SVC_ICON[svcType] ?? '🔧'}</span>
                 <div className="flex-1 min-w-0">
-                  <h2 className="text-white leading-tight">{customerName}</h2>
+                  <h2 className="text-primary-foreground leading-tight">{customerName}</h2>
                   <div className="flex items-center gap-1.5 mt-1">
-                    <MapPin size={12} className="text-slate-400 shrink-0" />
-                    <p className="text-slate-300 text-sm truncate">{address || 'No address on file'}</p>
+                    <MapPin size={12} className="text-muted-foreground shrink-0" />
+                    <p className="text-muted-foreground text-sm truncate">{address || 'No address on file'}</p>
                   </div>
                   {jobData.scheduledStart && (
                     <div className="flex items-center gap-1.5 mt-1">
-                      <Clock size={12} className="text-slate-400 shrink-0" />
-                      <p className="text-slate-300 text-sm">
+                      <Clock size={12} className="text-muted-foreground shrink-0" />
+                      <p className="text-muted-foreground text-sm">
                         {new Date(jobData.scheduledStart).toLocaleDateString([], { month: 'short', day: 'numeric' })}
                         {' · '}
                         {new Date(jobData.scheduledStart).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -868,48 +869,48 @@ export function TechJobView({ id }: { id: string }) {
                 </div>
               </div>
 
-              <div className="bg-white/10 rounded-xl px-3.5 py-2.5 mb-4">
-                <p className="text-xs text-slate-400 mb-0.5">Job description</p>
-                <p className="text-sm text-white leading-relaxed">{jobData.summary}</p>
+              <div className="bg-card/10 rounded-xl px-3.5 py-2.5 mb-4">
+                <p className="text-xs text-muted-foreground mb-0.5">Job description</p>
+                <p className="text-sm text-primary-foreground leading-relaxed">{jobData.summary}</p>
                 {jobData.problemDescription && (
-                  <p className="text-xs text-slate-300 mt-1 leading-relaxed">{jobData.problemDescription}</p>
+                  <p className="text-xs text-muted-foreground mt-1 leading-relaxed">{jobData.problemDescription}</p>
                 )}
               </div>
 
               {/* Customer notes (access notes, preferences) */}
               {customerNotes && (
-                <div className="flex items-start gap-2 bg-amber-500/20 border border-amber-400/30 rounded-xl px-3.5 py-2.5 mb-4">
-                  <AlertTriangle size={13} className="text-amber-400 shrink-0 mt-0.5" />
-                  <p className="text-sm text-amber-200 leading-relaxed">{customerNotes}</p>
+                <div className="flex items-start gap-2 bg-warning/20 border border-warning/30 rounded-xl px-3.5 py-2.5 mb-4">
+                  <AlertTriangle size={13} className="text-warning shrink-0 mt-0.5" />
+                  <p className="text-sm text-warning leading-relaxed">{customerNotes}</p>
                 </div>
               )}
 
               {/* Contact row */}
               <div className="grid grid-cols-2 gap-2">
                 <a href={mapsUrl} target="_blank" rel="noreferrer"
-                  className="flex items-center gap-2 rounded-xl bg-white/10 hover:bg-white/20 px-3 py-2.5 transition-colors">
-                  <Navigation size={15} className="text-violet-300 shrink-0" />
+                  className="flex items-center gap-2 rounded-xl bg-card/10 hover:bg-card/20 px-3 py-2.5 transition-colors">
+                  <Navigation size={15} className="text-primary shrink-0" />
                   <div className="min-w-0">
-                    <p className="text-xs text-slate-400">Directions</p>
-                    <p className="text-xs text-white truncate">{address.split(',')[0] || 'Navigate'}</p>
+                    <p className="text-xs text-muted-foreground">Directions</p>
+                    <p className="text-xs text-primary-foreground truncate">{address.split(',')[0] || 'Navigate'}</p>
                   </div>
                 </a>
                 <button onClick={() => setSheet('call')}
-                  className="flex items-center gap-2 rounded-xl bg-white/10 hover:bg-white/20 px-3 py-2.5 transition-colors text-left">
-                  <Phone size={15} className="text-green-300 shrink-0" />
+                  className="flex items-center gap-2 rounded-xl bg-card/10 hover:bg-card/20 px-3 py-2.5 transition-colors text-left">
+                  <Phone size={15} className="text-success shrink-0" />
                   <div className="min-w-0">
-                    <p className="text-xs text-slate-400">Call</p>
-                    <p className="text-xs text-white truncate">{customerPhone}</p>
+                    <p className="text-xs text-muted-foreground">Call</p>
+                    <p className="text-xs text-primary-foreground truncate">{customerPhone}</p>
                   </div>
                 </button>
               </div>
             </div>
 
             {/* ── Status bar ── */}
-            <div className="bg-white border-b border-slate-100 px-5 py-4">
+            <div className="bg-card border-b border-border px-5 py-4">
               <div className="flex items-center justify-between mb-3">
-                <p className="text-xs text-slate-500">Status</p>
-                <span className={`text-xs px-2.5 py-0.5 rounded-full text-white ${currentStatus.ctaBg.split(' ')[0]}`}>
+                <p className="text-xs text-muted-foreground">Status</p>
+                <span className={`text-xs px-2.5 py-0.5 rounded-full text-primary-foreground ${currentStatus.ctaBg.split(' ')[0]}`}>
                   {currentStatus.label}
                 </span>
               </div>
@@ -919,32 +920,32 @@ export function TechJobView({ id }: { id: string }) {
                   const done = statusIdx >= sIdx;
                   return (
                     <div key={s.key} className="flex items-center flex-1">
-                      <div className={`size-2.5 rounded-full shrink-0 transition-all duration-300 ${done ? s.dotColor : 'bg-slate-200'}`} />
-                      {i < 3 && <div className={`flex-1 h-px transition-colors duration-300 ${done && statusIdx > sIdx ? 'bg-green-400' : 'bg-slate-200'}`} />}
+                      <div className={`size-2.5 rounded-full shrink-0 transition-all duration-300 ${done ? s.dotColor : 'bg-border'}`} />
+                      {i < 3 && <div className={`flex-1 h-px transition-colors duration-300 ${done && statusIdx > sIdx ? 'bg-success' : 'bg-border'}`} />}
                     </div>
                   );
                 })}
               </div>
               {!isComplete ? (
                 <button onClick={() => void advanceStatus()}
-                  className={`flex items-center justify-center gap-2 w-full py-3.5 rounded-xl text-white text-sm transition-colors ${currentStatus.ctaBg}`}>
+                  className={`flex items-center justify-center gap-2 w-full py-3.5 rounded-xl text-primary-foreground text-sm transition-colors ${currentStatus.ctaBg}`}>
                   <CheckCircle2 size={16} /> {currentStatus.cta}
                 </button>
               ) : (
-                <div className="flex items-center justify-center gap-2 w-full py-3.5 rounded-xl bg-green-50 text-green-700 text-sm border border-green-200">
+                <div className="flex items-center justify-center gap-2 w-full py-3.5 rounded-xl bg-success/10 text-success text-sm border border-success/30">
                   <CheckCircle2 size={16} /> Job complete!
                 </div>
               )}
             </div>
 
             {/* ── VOICE HERO ── */}
-            <div className="mx-4 mt-4 rounded-2xl bg-white border-2 border-slate-200 px-5 py-2 overflow-hidden">
+            <div className="mx-4 mt-4 rounded-2xl bg-card border-2 border-border px-5 py-2 overflow-hidden">
               <div className="flex items-center justify-between mb-1">
                 <div className="flex items-center gap-2">
-                  <div className="flex size-6 items-center justify-center rounded-full bg-indigo-100">
-                    <Sparkles size={11} className="text-indigo-600" />
+                  <div className="flex size-6 items-center justify-center rounded-full bg-primary/15">
+                    <Sparkles size={11} className="text-primary" />
                   </div>
-                  <p className="text-xs text-slate-500">Voice add — fastest in the field</p>
+                  <p className="text-xs text-muted-foreground">Voice add — fastest in the field</p>
                 </div>
               </div>
               <VoiceHero
@@ -957,8 +958,8 @@ export function TechJobView({ id }: { id: string }) {
 
             {/* ── Quick action chips ── */}
             <div className="px-4 mt-3">
-              <div className="rounded-2xl border border-slate-200 bg-white p-3.5 mb-3">
-                <p className="text-xs text-slate-500 mb-2.5">Running behind?</p>
+              <div className="rounded-2xl border border-border bg-card p-3.5 mb-3">
+                <p className="text-xs text-muted-foreground mb-2.5">Running behind?</p>
                 <div className="flex items-center gap-2">
                   {(['Yes', 'No'] as const).map((label) => {
                     const selected =
@@ -974,8 +975,8 @@ export function TechJobView({ id }: { id: string }) {
                         }}
                         className={`rounded-full px-3 py-1.5 text-xs border transition-colors ${
                           selected
-                            ? 'bg-slate-900 text-white border-slate-900'
-                            : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                            ? 'bg-primary text-primary-foreground border-primary'
+                            : 'bg-card text-foreground border-border hover:bg-secondary'
                         }`}
                       >
                         {label}
@@ -991,22 +992,22 @@ export function TechJobView({ id }: { id: string }) {
                       disabled={isRunningBehind !== true}
                       className={`rounded-full px-3 py-1.5 text-xs border transition-colors ${
                         delayMinutes === minutes
-                          ? 'bg-indigo-600 text-white border-indigo-600'
-                          : 'bg-white text-slate-600 border-slate-200'
-                      } ${isRunningBehind === true ? 'hover:bg-slate-50' : 'opacity-50 cursor-not-allowed'}`}
+                          ? 'bg-primary text-primary-foreground border-primary'
+                          : 'bg-card text-foreground border-border'
+                      } ${isRunningBehind === true ? 'hover:bg-secondary' : 'opacity-50 cursor-not-allowed'}`}
                     >
                       {minutes}
                     </button>
                   ))}
                 </div>
               </div>
-              <p className="text-xs text-slate-400 mb-2 px-1">Or tap to add manually</p>
+              <p className="text-xs text-muted-foreground mb-2 px-1">Or tap to add manually</p>
               <div className="grid grid-cols-4 gap-2">
                 {[
-                  { icon: Pencil,        label: 'Note',    bg: 'bg-slate-100',  color: 'text-slate-700', onClick: () => {} },
-                  { icon: Camera,        label: 'Photo',   bg: 'bg-sky-100',    color: 'text-sky-700',   onClick: () => setCam(true) },
-                  { icon: Package,       label: 'Parts',   bg: 'bg-amber-100',  color: 'text-amber-700', onClick: () => {} },
-                  { icon: AlertTriangle, label: 'Issue',   bg: 'bg-red-100',    color: 'text-red-700',   onClick: () => setSheet('cancel') },
+                  { icon: Pencil,        label: 'Note',    bg: 'bg-secondary',  color: 'text-foreground', onClick: () => {} },
+                  { icon: Camera,        label: 'Photo',   bg: 'bg-primary/15',    color: 'text-primary',   onClick: () => setCam(true) },
+                  { icon: Package,       label: 'Parts',   bg: 'bg-warning/15',  color: 'text-warning', onClick: () => {} },
+                  { icon: AlertTriangle, label: 'Issue',   bg: 'bg-destructive/15',    color: 'text-destructive',   onClick: () => setSheet('cancel') },
                 ].map(({ icon: Icon, label, bg, color, onClick }) => (
                   <button key={label} onClick={onClick}
                     className={`flex flex-col items-center gap-1.5 rounded-xl py-3 ${bg} hover:opacity-80 active:scale-95 transition-all`}>
@@ -1024,8 +1025,8 @@ export function TechJobView({ id }: { id: string }) {
               <MaterialsSection materials={materials} onUpdate={setMaterials} />
 
               {activities.length > 0 && (
-                <div className="rounded-2xl bg-white border border-slate-200 px-4 py-4">
-                  <p className="text-sm text-slate-700 mb-3">Activity log</p>
+                <div className="rounded-2xl bg-card border border-border px-4 py-4">
+                  <p className="text-sm text-foreground mb-3">Activity log</p>
                   <ActivityTimeline activities={activities.slice(-6)} compact />
                 </div>
               )}
@@ -1036,17 +1037,17 @@ export function TechJobView({ id }: { id: string }) {
 
         {/* ── Bottom CTA ── */}
         {!isComplete && (
-          <div className="shrink-0 fixed bottom-0 left-0 right-0 md:absolute bg-white/90 backdrop-blur border-t border-slate-200 px-5 py-4 flex gap-3">
+          <div className="shrink-0 fixed bottom-0 left-0 right-0 md:absolute bg-card/90 backdrop-blur border-t border-border px-5 py-4 flex gap-3">
             <button onClick={() => setSheet('call')}
-              className="flex size-12 items-center justify-center rounded-xl bg-slate-100 hover:bg-slate-200 transition-colors shrink-0">
-              <Phone size={18} className="text-slate-700" />
+              className="flex size-12 items-center justify-center rounded-xl bg-secondary hover:bg-border transition-colors shrink-0">
+              <Phone size={18} className="text-foreground" />
             </button>
             <button onClick={() => setCam(true)}
-              className="flex size-12 items-center justify-center rounded-xl bg-slate-100 hover:bg-slate-200 transition-colors shrink-0">
-              <Camera size={18} className="text-slate-700" />
+              className="flex size-12 items-center justify-center rounded-xl bg-secondary hover:bg-border transition-colors shrink-0">
+              <Camera size={18} className="text-foreground" />
             </button>
             <button onClick={() => void advanceStatus()}
-              className={`flex-1 flex items-center justify-center gap-2 rounded-xl text-white text-sm py-3 transition-colors ${currentStatus.ctaBg}`}>
+              className={`flex-1 flex items-center justify-center gap-2 rounded-xl text-primary-foreground text-sm py-3 transition-colors ${currentStatus.ctaBg}`}>
               <CheckCircle2 size={16} /> {currentStatus.cta}
             </button>
           </div>
