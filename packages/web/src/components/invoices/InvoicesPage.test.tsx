@@ -40,7 +40,10 @@ const mockInvoices = [
     invoiceNumber: 'INV-001',
     status: 'open',
     totals: totalsOf(120000),
-    dueDate: '2026-03-20',
+    // Far-future due date so this open invoice reads 'Unpaid', not the derived
+    // 'Overdue' (the overdue derivation is exercised by its own test below,
+    // which uses Date.now() — a fixed past date would be wall-clock fragile).
+    dueDate: '2099-12-31',
     issuedAt: '2026-03-01T00:00:00Z',
     customer: { id: 'c1', displayName: 'Alice Smith' },
   },
@@ -193,6 +196,51 @@ describe('InvoicesPage', () => {
     renderPage();
     // only open invoice: $1,200.00 outstanding (may appear multiple times)
     expect(screen.getAllByText('$1,200.00').length).toBeGreaterThan(0);
+  });
+
+  // U9b — derived overdue: an open invoice past its due date surfaces the
+  // (previously unreachable) Overdue banner + reminder, via the shared rule.
+  function renderDetail(over: Record<string, unknown>) {
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: {
+        id: 'i-od',
+        invoiceNumber: 'INV-OD',
+        status: 'open',
+        lineItems: [],
+        totals: totalsOf(120000),
+        amountDueCents: 120000,
+        customer: { id: 'c1', displayName: 'Overdue Customer' },
+        ...over,
+      },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    return render(
+      <MemoryRouter>
+        <InvoicesPage defaultSelectedId="i-od" />
+      </MemoryRouter>,
+    );
+  }
+
+  it('derives Overdue for an open invoice past its due date (banner + badge)', () => {
+    renderDetail({ status: 'open', dueDate: '2020-01-15' }); // robustly past
+    // The (previously unreachable) overdue banner now renders.
+    expect(screen.getByText(/Payment was due/i)).toBeInTheDocument();
+    expect(screen.getAllByText('Overdue').length).toBeGreaterThan(0);
+  });
+
+  it('does NOT mark an open invoice overdue before its due date', () => {
+    renderDetail({ status: 'open', dueDate: '2099-12-31' }); // far future
+    expect(screen.queryByText(/Payment was due/i)).not.toBeInTheDocument();
+    expect(screen.queryAllByText('Overdue')).toHaveLength(0);
+  });
+
+  it('renders on Path A tokens — no raw Tailwind palette leaks', () => {
+    const { container } = renderPage();
+    expect(container.innerHTML).not.toMatch(
+      /(bg|text|border|ring|divide)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
+    );
   });
 
   it('shows total invoice count', () => {
