@@ -3,6 +3,7 @@ import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-nati
 import { useMe, type Mode } from '../src/hooks/useMe';
 import { useMoneyDashboard } from '../src/hooks/useMoneyDashboard';
 import { usePendingProposals } from '../src/hooks/usePendingProposals';
+import { hoursUntilExpiry } from '../src/proposals/proposalEvents';
 import { formatMoneyShort, formatWeekdayDate } from '../src/lib/format';
 import { greetingForDate } from '../src/lib/greeting';
 import { ErrorState } from '../src/components/ErrorState';
@@ -24,14 +25,6 @@ const QUICK_LINKS: Array<{ label: string; route: Href }> = [
 
 // The dashboard previews the top of the queue; the full list is one tap away.
 const MAX_APPROVAL_ROWS = 3;
-
-/** Whole hours until `iso`, clamped at 0; null when there's no expiry to show. */
-function hoursUntil(iso: string | undefined): number | null {
-  if (!iso) return null;
-  const ms = new Date(iso).getTime() - Date.now();
-  if (Number.isNaN(ms)) return null;
-  return Math.max(0, Math.round(ms / 3_600_000));
-}
 
 // Home / Today: the owner's at-a-glance dashboard — what's waiting for approval
 // (the human gate, front and center), this month's money, and quick links —
@@ -114,7 +107,7 @@ export default function Home() {
         {topProposals.length > 0 ? (
           <View className="mt-3 border-t border-border">
             {topProposals.map((p) => {
-              const hrs = hoursUntil(p.expiresAt);
+              const hrs = hoursUntilExpiry(p.expiresAt);
               return (
                 <Pressable
                   key={p.id}

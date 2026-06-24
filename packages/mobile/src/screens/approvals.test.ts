@@ -70,6 +70,43 @@ describe('Approvals screen', () => {
     expect(getByText('Payment')).toBeTruthy();
   });
 
+  it('badges each card with its confidence band and time-to-expiry', () => {
+    h.proposals = [
+      {
+        id: 'a',
+        summary: 'Invoice #12 for Acme',
+        proposalType: 'draft_invoice',
+        createdAt: '2026-06-20T00:00:00Z',
+        confidenceScore: 0.92,
+        expiresAt: new Date(Date.now() + 5 * 3_600_000).toISOString(),
+      },
+      {
+        id: 'b',
+        summary: 'Record $200 payment',
+        proposalType: 'record_payment',
+        createdAt: '2026-06-20T00:00:00Z',
+        confidenceScore: 0.45,
+      },
+    ];
+    h.count = 2;
+    const { getByText, getAllByText } = render(createElement(Approvals));
+    expect(getByText('High')).toBeTruthy(); // 0.92 → high
+    expect(getByText('Low')).toBeTruthy(); // 0.45 → low
+    // The first card carries a "<n>h" countdown; the second (no expiry) does not.
+    expect(getAllByText(/^\d+h$/).length).toBe(1);
+  });
+
+  it('omits the confidence badge when a proposal has no score', () => {
+    h.proposals = [
+      { id: 'a', summary: 'No score', proposalType: 'add_note', createdAt: '2026-06-20T00:00:00Z' },
+    ];
+    h.count = 1;
+    const { queryByText } = render(createElement(Approvals));
+    expect(queryByText('High')).toBeNull();
+    expect(queryByText('Medium')).toBeNull();
+    expect(queryByText('Low')).toBeNull();
+  });
+
   it('opens the review screen when a proposal card is tapped', () => {
     h.proposals = [
       { id: 'prop-1', summary: 'Invoice #12 for Acme', proposalType: 'draft_invoice', createdAt: '2026-06-20T00:00:00Z' },

@@ -9,6 +9,8 @@ export interface PendingProposalSummary {
   proposalType: string;
   createdAt: string;
   expiresAt?: string;
+  /** 0–1 AI confidence, when the proposal carries one (drives the inbox badge). */
+  confidenceScore?: number;
 }
 
 export const CRITICAL_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -20,12 +22,32 @@ export function isCriticalProposal(p: PendingProposalSummary, now: number = Date
   return ms > 0 && ms <= CRITICAL_WINDOW_MS;
 }
 
+/** Whole hours until `iso`, clamped at 0; null when there's no expiry to show.
+ *  Shared by the Home dashboard preview and the Approvals cards. */
+export function hoursUntilExpiry(iso: string | undefined, now: number = Date.now()): number | null {
+  if (!iso) return null;
+  const ms = new Date(iso).getTime() - now;
+  if (Number.isNaN(ms)) return null;
+  return Math.max(0, Math.round(ms / 3_600_000));
+}
+
+export type ConfidenceBand = 'high' | 'medium' | 'low';
+
+/** Bucket a 0–1 confidence score for display; null when there's no score. */
+export function confidenceBand(score: number | undefined): ConfidenceBand | null {
+  if (score === undefined || Number.isNaN(score)) return null;
+  if (score >= 0.85) return 'high';
+  if (score >= 0.6) return 'medium';
+  return 'low';
+}
+
 interface RawProposal {
   id: string;
   summary: string;
   proposalType: string;
   createdAt: string | number | Date;
   expiresAt?: string | number | Date;
+  confidenceScore?: number;
 }
 
 /** `GET /api/proposals/inbox` wraps each proposal in a prioritized envelope. */
@@ -45,6 +67,7 @@ function toSummary(p: RawProposal): PendingProposalSummary {
         : typeof p.expiresAt === 'string'
           ? p.expiresAt
           : new Date(p.expiresAt).toISOString(),
+    confidenceScore: p.confidenceScore,
   };
 }
 

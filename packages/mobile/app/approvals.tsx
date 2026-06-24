@@ -2,10 +2,30 @@ import { useRouter } from 'expo-router';
 import { ActivityIndicator, FlatList, Pressable, RefreshControl, Text, View } from 'react-native';
 import { usePendingProposals } from '../src/hooks/usePendingProposals';
 import { typeLabel } from '../src/proposals/proposalReview';
+import {
+  type ConfidenceBand,
+  confidenceBand,
+  hoursUntilExpiry,
+} from '../src/proposals/proposalEvents';
 import { ErrorState } from '../src/components/ErrorState';
 
+const BAND_LABEL: Record<ConfidenceBand, string> = {
+  high: 'High',
+  medium: 'Medium',
+  low: 'Low',
+};
+
+// Confidence steers the eye: high reads calm (success), low reads "look at me"
+// (destructive) — the opposite of urgency, so the operator triages by trust.
+const BAND_TONE: Record<ConfidenceBand, string> = {
+  high: 'text-success',
+  medium: 'text-warning',
+  low: 'text-destructive',
+};
+
 // Approvals inbox: the AI's pending drafts (from voice capture etc.), polled
-// live. Tapping a proposal opens the review screen (approve with a 5s undo).
+// live. Each card shows its confidence and time-to-expiry; tapping opens the
+// review screen (approve with a 5s undo).
 export default function Approvals() {
   const router = useRouter();
   const { proposals, count, isLoading, error, refresh } = usePendingProposals();
@@ -42,17 +62,35 @@ export default function Approvals() {
             </Text>
           )
         }
-        renderItem={({ item }) => (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Review ${typeLabel(item.proposalType)}: ${item.summary}`}
-            onPress={() => router.push(`/proposals/${item.id}`)}
-            className="mb-3 min-h-11 rounded-lg border border-border p-4"
-          >
-            <Text className="text-sm text-mutedForeground">{typeLabel(item.proposalType)}</Text>
-            <Text className="mt-1 text-base text-foreground">{item.summary}</Text>
-          </Pressable>
-        )}
+        renderItem={({ item }) => {
+          const band = confidenceBand(item.confidenceScore);
+          const hrs = hoursUntilExpiry(item.expiresAt);
+          return (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Review ${typeLabel(item.proposalType)}: ${item.summary}`}
+              onPress={() => router.push(`/proposals/${item.id}`)}
+              className="mb-3 min-h-11 rounded-lg border border-border bg-card p-4"
+            >
+              <View className="flex-row items-center justify-between">
+                <Text className="text-sm text-mutedForeground">{typeLabel(item.proposalType)}</Text>
+                <View className="flex-row items-center">
+                  {band ? (
+                    <Text
+                      className={`rounded-full bg-secondary px-2 py-0.5 text-xs font-medium ${BAND_TONE[band]}`}
+                    >
+                      {BAND_LABEL[band]}
+                    </Text>
+                  ) : null}
+                  {hrs !== null ? (
+                    <Text className="ml-2 text-xs text-mutedForeground">{hrs}h</Text>
+                  ) : null}
+                </View>
+              </View>
+              <Text className="mt-1 text-base text-foreground">{item.summary}</Text>
+            </Pressable>
+          );
+        }}
       />
     </View>
   );

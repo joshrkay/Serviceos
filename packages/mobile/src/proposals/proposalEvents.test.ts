@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   CRITICAL_WINDOW_MS,
   computeProposalEvents,
+  confidenceBand,
+  hoursUntilExpiry,
   isCriticalProposal,
   mapInboxResponse,
   type PendingProposalSummary,
@@ -69,6 +71,40 @@ describe('mapInboxResponse', () => {
 
   it('handles a missing `data` field', () => {
     expect(mapInboxResponse({})).toEqual([]);
+  });
+
+  it('carries the proposal confidence score through for the inbox badge', () => {
+    const list = mapInboxResponse({
+      data: [
+        {
+          proposal: {
+            id: 'c',
+            summary: 's',
+            proposalType: 'draft_invoice',
+            createdAt: NOW,
+            confidenceScore: 0.92,
+          },
+        },
+      ],
+    });
+    expect(list[0].confidenceScore).toBe(0.92);
+  });
+});
+
+describe('hoursUntilExpiry', () => {
+  it('rounds whole hours until expiry, clamps at 0, and is null without an expiry', () => {
+    expect(hoursUntilExpiry(new Date(NOW + 3 * 3_600_000).toISOString(), NOW)).toBe(3);
+    expect(hoursUntilExpiry(new Date(NOW - 3_600_000).toISOString(), NOW)).toBe(0); // past
+    expect(hoursUntilExpiry(undefined, NOW)).toBeNull();
+  });
+});
+
+describe('confidenceBand', () => {
+  it('buckets a 0–1 score, null when absent', () => {
+    expect(confidenceBand(0.92)).toBe('high');
+    expect(confidenceBand(0.7)).toBe('medium');
+    expect(confidenceBand(0.4)).toBe('low');
+    expect(confidenceBand(undefined)).toBeNull();
   });
 });
 
