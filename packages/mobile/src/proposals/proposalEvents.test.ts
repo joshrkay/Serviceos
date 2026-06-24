@@ -4,6 +4,7 @@ import {
   computeProposalEvents,
   confidenceBand,
   hoursUntilExpiry,
+  isBatchEligible,
   isCriticalProposal,
   mapInboxResponse,
   type PendingProposalSummary,
@@ -105,6 +106,35 @@ describe('confidenceBand', () => {
     expect(confidenceBand(0.7)).toBe('medium');
     expect(confidenceBand(0.4)).toBe('low');
     expect(confidenceBand(undefined)).toBeNull();
+  });
+});
+
+describe('isBatchEligible', () => {
+  const base = { id: 'x', summary: 's', createdAt: new Date(NOW).toISOString() };
+
+  it('is true only for a high-confidence capture-class proposal', () => {
+    expect(isBatchEligible({ ...base, proposalType: 'draft_invoice', confidenceScore: 0.95 })).toBe(
+      true,
+    );
+  });
+
+  it('excludes money / comms / irreversible classes even at high confidence', () => {
+    expect(isBatchEligible({ ...base, proposalType: 'record_payment', confidenceScore: 0.99 })).toBe(
+      false,
+    ); // money
+    expect(isBatchEligible({ ...base, proposalType: 'send_invoice', confidenceScore: 0.99 })).toBe(
+      false,
+    ); // comms
+    expect(
+      isBatchEligible({ ...base, proposalType: 'cancel_appointment', confidenceScore: 0.99 }),
+    ).toBe(false); // irreversible
+  });
+
+  it('excludes capture-class proposals that are not high confidence (or unscored)', () => {
+    expect(isBatchEligible({ ...base, proposalType: 'draft_invoice', confidenceScore: 0.6 })).toBe(
+      false,
+    );
+    expect(isBatchEligible({ ...base, proposalType: 'draft_invoice' })).toBe(false);
   });
 });
 

@@ -2,6 +2,7 @@
 // response, the critical-urgency test, and the baseline/diff that fires
 // new/critical events exactly once. Ported from web's usePendingProposals;
 // kept pure so it unit-tests without a React renderer.
+import { isCaptureProposalType } from '@ai-service-os/shared';
 
 export interface PendingProposalSummary {
   id: string;
@@ -39,6 +40,18 @@ export function confidenceBand(score: number | undefined): ConfidenceBand | null
   if (score >= 0.85) return 'high';
   if (score >= 0.6) return 'medium';
   return 'low';
+}
+
+/**
+ * Safe for one-tap BATCH approval: the auto-safe (capture) action lane AND high
+ * confidence. Money / customer-comms / irreversible proposals, and anything
+ * below high confidence, are excluded — they must be reviewed individually
+ * (CLAUDE.md "Never auto-execute"). `isCaptureProposalType` comes from the
+ * shared taxonomy that's parity-tested against the API's authoritative switch,
+ * so the safe lane can't drift; the server re-checks every id on approve.
+ */
+export function isBatchEligible(p: PendingProposalSummary): boolean {
+  return isCaptureProposalType(p.proposalType) && confidenceBand(p.confidenceScore) === 'high';
 }
 
 interface RawProposal {

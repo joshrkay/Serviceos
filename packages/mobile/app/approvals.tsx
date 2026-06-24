@@ -1,13 +1,17 @@
+import { useState } from 'react';
 import { useRouter } from 'expo-router';
 import { ActivityIndicator, FlatList, Pressable, RefreshControl, Text, View } from 'react-native';
 import { usePendingProposals } from '../src/hooks/usePendingProposals';
+import { useApproveBatch } from '../src/proposals/useApproveBatch';
 import { typeLabel } from '../src/proposals/proposalReview';
 import {
   type ConfidenceBand,
   confidenceBand,
   hoursUntilExpiry,
+  isBatchEligible,
 } from '../src/proposals/proposalEvents';
 import { ErrorState } from '../src/components/ErrorState';
+import { useToast } from '../src/components/Toast';
 
 const BAND_LABEL: Record<ConfidenceBand, string> = {
   high: 'High',
@@ -25,10 +29,37 @@ const BAND_TONE: Record<ConfidenceBand, string> = {
 
 // Approvals inbox: the AI's pending drafts (from voice capture etc.), polled
 // live. Each card shows its confidence and time-to-expiry; tapping opens the
-// review screen (approve with a 5s undo).
+// review screen (approve with a 5s undo). High-confidence capture-class
+// proposals can be approved in one tap via "Approve all" — money, customer
+// sends, and anything needing review are excluded and stay individual.
 export default function Approvals() {
   const router = useRouter();
   const { proposals, count, isLoading, error, refresh } = usePendingProposals();
+  const approveBatch = useApproveBatch();
+  const { showToast, showErrorToast } = useToast();
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  const eligible = proposals.filter(isBatchEligible);
+
+  async function onConfirmApproveAll(): Promise<void> {
+    setSubmitting(true);
+    try {
+      const result = await approveBatch(eligible.map((p) => p.id));
+      const failed = result.failed.length;
+      showToast({
+        title: `Approved ${result.approved.length}`,
+        body: failed > 0 ? `${failed} couldn't be approved — review individually.` : undefined,
+        tone: 'info',
+      });
+      setSheetOpen(false);
+      await refresh();
+    } catch (err) {
+      showErrorToast(err); // keep the sheet open so the operator can retry
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
   return (
     <View className="flex-1 bg-background pt-16">
@@ -46,6 +77,20 @@ export default function Approvals() {
           {count === 0 ? 'Nothing waiting' : `${count} waiting for you`}
         </Text>
         {error ? <ErrorState error={error} showRetry={false} className="mt-3" /> : null}
+
+        {eligible.length > 0 ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Approve all eligible"
+            onPress={() => setSheetOpen(true)}
+            className="mt-3 min-h-11 flex-row items-center justify-between rounded-lg border border-border bg-card px-4 py-2"
+          >
+            <Text className="flex-1 pr-3 text-sm text-foreground">
+              {eligible.length} high-confidence eligible for one-tap approval
+            </Text>
+            <Text className="text-sm font-semibold text-primary">Approve all</Text>
+          </Pressable>
+        ) : null}
       </View>
 
       <FlatList
@@ -92,6 +137,49 @@ export default function Approvals() {
           );
         }}
       />
+
+      {sheetOpen ? (
+        <View className="absolute bottom-0 left-0 right-0 top-0">
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Cancel approve all"
+            onPress={() => setSheetOpen(false)}
+            className="absolute bottom-0 left-0 right-0 top-0 bg-black/50"
+          />
+          <View className="absolute bottom-0 left-0 right-0 rounded-t-xl bg-card px-6 pb-8 pt-4">
+            <Text className="text-base font-semibold text-foreground">
+              Approve {eligible.length} high-confidence?
+            </Text>
+            <Text className="mt-1 text-sm text-mutedForeground">
+              Money, customer messages, and anything needing review are excluded — approve those
+              individually.
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Confirm approve all"
+              disabled={submitting}
+              onPress={() => void onConfirmApproveAll()}
+              className="mt-4 min-h-11 items-center justify-center rounded-md bg-primary px-4 py-3"
+            >
+              {submitting ? (
+                <ActivityIndicator color="#ffffff" />
+              ) : (
+                <Text className="text-base font-semibold text-primaryForeground">
+                  Approve {eligible.length} eligible
+                </Text>
+              )}
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Dismiss"
+              onPress={() => setSheetOpen(false)}
+              className="mt-2 min-h-11 items-center justify-center"
+            >
+              <Text className="text-base text-mutedForeground">Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
     </View>
   );
 }
