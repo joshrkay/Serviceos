@@ -92,4 +92,21 @@ describe('NewJobFlow', () => {
     expect(existingCustomerRow).not.toBeNull();
     expect(await within(existingCustomerRow as HTMLElement).findByText('old address')).toBeInTheDocument();
   });
+
+  it('renders the customer step on Path A tokens with kit inputs — no raw palette leaks', async () => {
+    const user = userEvent.setup();
+    const { container } = renderFlow();
+
+    await user.click(screen.getByText('Fill it in'));
+    await user.click(screen.getByRole('button', { name: /create new customer/i }));
+
+    // The migrated new-customer fields are kit inputs with a ≥44px target.
+    expect(screen.getByPlaceholderText('Full name *')).toHaveClass('min-h-11');
+    expect(screen.getByPlaceholderText('Address *')).toHaveClass('min-h-11');
+
+    // No raw Tailwind palette classes survive the Path A migration.
+    expect(container.innerHTML).not.toMatch(
+      /(bg|text|border|border-l|placeholder|ring|divide|shadow)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
+    );
+  });
 });
