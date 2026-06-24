@@ -7,7 +7,11 @@ import {
   Proposal,
   decideInitialStatus,
   actionClassForProposalType,
+  isMessageProposalType,
+  isExpirableProposalType,
 } from '../../src/proposals/proposal';
+import { AuditingProposalRepository, AUTO_APPROVE_POLICY_ACTOR_ID } from '../../src/proposals/proposal-persistence';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { ConflictError } from '../../src/shared/errors';
 
 describe('P2-001 — Proposal entity and core schema', () => {
@@ -651,7 +655,7 @@ describe('§5.5 — schedule proposals carry a 48h expiry at creation', () => {
     },
   );
 
-  it('leaves expiresAt unset for non-schedule proposal types (they persist)', () => {
+  it('leaves expiresAt unset for persistent proposal types', () => {
     for (const proposalType of ['draft_estimate', 'send_invoice', 'create_customer', 'record_payment'] as const) {
       const p = createProposal({
         tenantId: 'tenant-1',
@@ -663,6 +667,25 @@ describe('§5.5 — schedule proposals carry a 48h expiry at creation', () => {
       expect(p.expiresAt, `${proposalType} should persist`).toBeUndefined();
     }
   });
+
+  it.each(['send_payment_reminder', 'notify_delay', 'send_estimate_nudge', 'request_feedback'] as const)(
+    'defaults expiresAt to ~48h for message type %s',
+    (proposalType) => {
+      expect(isMessageProposalType(proposalType)).toBe(true);
+      expect(isExpirableProposalType(proposalType)).toBe(true);
+      const before = Date.now();
+      const p = createProposal({
+        tenantId: 'tenant-1',
+        proposalType,
+        payload: {},
+        summary: 's',
+        createdBy: 'u1',
+      });
+      expect(p.expiresAt).toBeInstanceOf(Date);
+      const delta = p.expiresAt!.getTime() - before;
+      expect(delta).toBeGreaterThanOrEqual(FORTY_EIGHT_H_MS - 5000);
+    },
+  );
 
   it('honors an explicit expiresAt over the 48h default', () => {
     const explicit = new Date('2030-01-01T00:00:00Z');
@@ -713,5 +736,46 @@ describe('§5.5 — InMemoryProposalRepository.findExpiredScheduleProposals', ()
     const capped = await repo.findExpiredScheduleProposals('tenant-1', types, since, 1);
     expect(capped).toHaveLength(1);
     expect(capped[0].summary).toBe('create_appointment@3600000');
+  });
+});
+
+describe('Governed Autonomy — auto-approval audit at persist', () => {
+  it('emits policy-actor proposal.approved when a proposal is auto-approved at birth', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    const inner = new InMemoryProposalRepository();
+    const repo = new AuditingProposalRepository(inner, auditRepo);
+
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'add_note',
+      payload: { message: 'note', _meta: { overallConfidence: 'high' } },
+      summary: 'Add note',
+      confidenceScore: 0.95,
+      sourceTrustTier: 'autonomous',
+      supervisorPresent: true,
+      createdBy: 'u1',
+    });
+    expect(proposal.status).toBe('approved');
+
+    const stored = await repo.create(proposal);
+    const events = await auditRepo.findByEntity('tenant-1', 'proposal', stored.id);
+    const approval = events.find((e) => e.eventType === 'proposal.approved');
+    expect(approval?.actorId).toBe(AUTO_APPROVE_POLICY_ACTOR_ID);
+    expect(approval?.metadata).toMatchObject({ channel: 'auto', confidenceScore: 0.95 });
+  });
+
+  it('does not emit auto-approval audit for draft proposals', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    const repo = new AuditingProposalRepository(new InMemoryProposalRepository(), auditRepo);
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'add_note',
+      payload: { message: 'note' },
+      summary: 'Add note',
+      createdBy: 'u1',
+    });
+    await repo.create(proposal);
+    const events = await auditRepo.findByEntity('tenant-1', 'proposal', proposal.id);
+    expect(events.some((e) => e.eventType === 'proposal.approved')).toBe(false);
   });
 });

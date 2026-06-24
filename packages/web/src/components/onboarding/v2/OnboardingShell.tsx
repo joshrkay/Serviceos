@@ -16,6 +16,7 @@ import { BillingStep } from './steps/BillingStep';
 import { AiCheckStep } from './steps/AiCheckStep';
 import { TestCallStep } from './steps/TestCallStep';
 import type { OnboardingStepId } from '../../../types/onboarding';
+import { VoiceBar } from '../../shared/VoiceBar';
 
 /**
  * Maps the real wizard steps onto the launch-funnel's spec step names.
@@ -206,9 +207,10 @@ export function OnboardingShell() {
   const activeId: OnboardingStepId = activeStepId ?? 'test_call';
 
   return (
-    <div className="flex min-h-screen bg-white">
+    <div className="flex min-h-screen bg-white flex-col">
+      <div className="flex flex-1 min-h-0">
       <Sidebar status={data} activeId={activeId} onSelect={setOverride} />
-      <main className="flex-1">
+      <main className="flex-1 pb-24">
         <MobileProgress status={data} activeId={activeId} />
         <div className="p-6 md:p-8 max-w-3xl">
           {activeId === 'identity' && <IdentityStep onSaved={() => void refetch()} />}
@@ -239,6 +241,10 @@ export function OnboardingShell() {
           )}
         </div>
       </main>
+      </div>
+      <div className="fixed bottom-0 left-0 right-0 z-40 md:pl-64">
+        <VoiceBar variant="mobile" />
+      </div>
     </div>
   );
 }

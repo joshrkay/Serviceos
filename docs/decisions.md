@@ -29,10 +29,17 @@ When implementing a story and facing an architectural choice not covered by the 
 **Constraints:** All API inputs/outputs use cents. Frontend handles display formatting (cents → dollars).
 
 ### D-004: Proposal-first AI safety model
-**Date:** Pre-Phase 0
-**Decision:** AI never writes directly to operational entities. All AI output goes through typed proposals that require human approval before deterministic execution.
-**Rationale:** Trust is the product's core differentiator in a market where service businesses don't trust software with their money and schedules.
-**Constraints:** No auto-execution in beta, even for high-confidence proposals.
+**Date:** Pre-Phase 0 (amended 2026-06-22 — Governed Autonomy, D-014)
+**Decision:** AI never writes directly to operational entities. All AI output goes through typed proposals that require human approval before deterministic execution — **except** narrowly-fenced governed auto-approve for capture-class proposals when all safety gates pass (supervisor present, confidence ≥ threshold, catalog-grounded, etc.).
+**Rationale:** Trust is the product's core differentiator in a market where service businesses don't trust software with their money and schedules. Throughput-sensitive capture workflows (draft estimates, appointments) benefit from a audited machine-approval path without weakening comms/money/irreversible gates.
+**Constraints:** Comms, money, and irreversible proposals never auto-approve. Every machine approval emits a policy-actor audit event with provenance. A 5-second undo window applies after auto-approve.
+
+### D-014: Governed Autonomy — auto-approve with audit attribution
+**Date:** 2026-06-22
+**Decision:** Keep the shipped auto-approve path for capture-class proposals; reconcile docs and emit explicit `proposal.approved` audit events attributing actor `auto-approve-policy` with provenance metadata (supervisor mode, threshold, confidence, undo window).
+**Rationale:** Ripping out auto-approve regresses throughput for supervised tenants; docs-only reconciliation leaves the audit trail dishonest. Behavioral gates in `auto-approve.ts` / `decideInitialStatus()` are unchanged.
+**Story:** Interaction Model reconciliation (U1–U2)
+**Alternatives rejected:** Docs-only (audit gap remains); strict tap-only (product regression).
 
 ### D-005: Provider-agnostic LLM gateway
 **Date:** Phase 2 planning
@@ -178,7 +185,7 @@ source of truth — a false "not built" understates the product.
 **Follow-up:** §6.5, §6.12, and §8 (P23) still call QuickBooks "Wave 3" — refresh for
 internal consistency in a later pass.
 
-### D-014: [Template — copy for new decisions]
+### D-015: [Template — copy for new decisions]
 **Date:** YYYY-MM-DD
 **Decision:** [What was decided]
 **Rationale:** [Why this choice over alternatives]

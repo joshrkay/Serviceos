@@ -11,6 +11,8 @@ import { payloadHeadlineCents } from './payload-money';
 import { getSupervisorCreationHook } from './supervisor/hook';
 import { payloadWithSupervisorMarker } from './supervisor/marker';
 import { capInitialStatus, type InitialProposalStatus } from './supervisor/policy';
+import { UNDO_WINDOW_MS } from './lifecycle';
+import type { ProposalConfidenceMeta } from './contracts';
 
 export type ProposalStatus =
   | 'draft'
@@ -92,6 +94,14 @@ export const SCHEDULE_PROPOSAL_TYPES: readonly ProposalType[] = [
   'reschedule_appointment',
 ];
 
+/** Time-sensitive comms proposals that go stale like schedule holds. */
+export const MESSAGE_PROPOSAL_TYPES: readonly ProposalType[] = [
+  'send_payment_reminder',
+  'notify_delay',
+  'send_estimate_nudge',
+  'request_feedback',
+];
+
 /** §5.5 — 48 hours, in milliseconds. */
 export const SCHEDULE_PROPOSAL_EXPIRY_MS = 48 * 60 * 60 * 1000;
 
@@ -99,13 +109,22 @@ export function isScheduleProposalType(type: ProposalType): boolean {
   return SCHEDULE_PROPOSAL_TYPES.includes(type);
 }
 
+export function isMessageProposalType(type: ProposalType): boolean {
+  return MESSAGE_PROPOSAL_TYPES.includes(type);
+}
+
+export function isExpirableProposalType(type: ProposalType): boolean {
+  return isScheduleProposalType(type) || isMessageProposalType(type);
+}
+
 /**
- * §5.5 Default expiry for a newly created proposal: schedule proposals get a
- * 48-hour TTL from `now`; everything else persists (returns undefined). An
- * explicit `expiresAt` supplied by the caller always takes precedence.
+ * §5.5 Default expiry for a newly created proposal: schedule + time-sensitive
+ * message proposals get a 48-hour TTL from `now`; everything else persists
+ * (returns undefined). An explicit `expiresAt` supplied by the caller always
+ * takes precedence.
  */
 export function defaultProposalExpiry(type: ProposalType, now: Date): Date | undefined {
-  return isScheduleProposalType(type)
+  return isExpirableProposalType(type)
     ? new Date(now.getTime() + SCHEDULE_PROPOSAL_EXPIRY_MS)
     : undefined;
 }
@@ -688,10 +707,30 @@ export function createProposal(input: CreateProposalInput): Proposal {
   const approvedAt = status === 'approved' ? now : undefined;
   // missingFields rides in sourceContext so we avoid a DB schema
   // change. `missingFieldsFor(proposal)` is the typed reader.
-  const sourceContext =
+  let sourceContext =
     input.missingFields && input.missingFields.length > 0
       ? { ...(input.sourceContext ?? {}), missingFields: input.missingFields }
       : input.sourceContext;
+  if (status === 'approved') {
+    const threshold = resolveAutoApproveThreshold({
+      supervisorMode: input.supervisorMode,
+      supervisorPresent: input.supervisorPresent,
+      tenantOverride: input.tenantThresholdOverride,
+    });
+    const overallConfidence = (payload as { _meta?: ProposalConfidenceMeta })._meta
+      ?.overallConfidence;
+    sourceContext = {
+      ...(sourceContext ?? {}),
+      autoApprovalProvenance: {
+        supervisorMode: input.supervisorMode,
+        threshold,
+        confidenceScore: input.confidenceScore,
+        overallConfidence,
+        undoWindowMs: UNDO_WINDOW_MS,
+        sourceTrustTier: input.sourceTrustTier,
+      },
+    };
+  }
   const proposal: Proposal = {
     id: uuidv4(),
     tenantId: input.tenantId,

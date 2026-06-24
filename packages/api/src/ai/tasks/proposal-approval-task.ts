@@ -214,6 +214,7 @@ export interface VoiceApprovalDeps {
     Partial<Pick<ProposalSmsEventRepository, 'create'>>;
   /** Lets a rejected create_booking release its held calendar slot. */
   appointmentRepo?: AppointmentRepository;
+  catalogRepo?: import('../../catalog/catalog-item').CatalogItemRepository;
   /** One-tap SMS fallback for refused money/irreversible approvals. */
   oneTapFallback?: OneTapFallbackDeps;
   /**
@@ -1048,6 +1049,8 @@ export async function startVoiceEdit(
           'owner',
           delta,
           deps.auditRepo,
+          undefined,
+          deps.catalogRepo,
         );
         const speak = composeEditedReadback(updated);
         // Clears hasUnappliedEditRequest (insertion order decides). When the

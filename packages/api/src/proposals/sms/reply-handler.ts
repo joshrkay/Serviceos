@@ -86,6 +86,7 @@ export interface ProposalSmsReplyDeps {
   /** Resolves the backup supervisor's mobile. Optional — owner_phone still works. */
   userRepo?: UserRepository;
   auditRepo?: AuditRepository;
+  catalogRepo?: import('../../catalog/catalog-item').CatalogItemRepository;
   /** Outbound reply seam. Absent (dev without Twilio): actions still apply, replies are skipped. */
   sendSms?: (to: string, body: string) => Promise<void>;
   /** Lets a rejected create_booking release its held calendar slot. */
@@ -753,6 +754,8 @@ async function applyEditInstruction(
           'owner',
           edits,
           deps.auditRepo,
+          undefined,
+          deps.catalogRepo,
         );
         // Shared with the voice-edit re-render (proposal-approval-task):
         // echoes the owner's instruction so the change is explicit and the
