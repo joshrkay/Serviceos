@@ -10,6 +10,7 @@ interface Customer {
   lastName?: string;
   primaryPhone?: string;
   email?: string;
+  accountType?: 'residential' | 'b2b' | 'property_manager';
 }
 
 const h = vi.hoisted(() => ({
@@ -70,6 +71,9 @@ describe('Customers screen', () => {
     expect(getByText('Beta Builders')).toBeTruthy(); // derived from first/last name
     expect(getByText('555-0100')).toBeTruthy(); // primaryPhone preferred as secondary
     expect(getByText('beta@example.com')).toBeTruthy(); // email fallback
+    // Leading avatar initials (first + last word).
+    expect(getByText('AP')).toBeTruthy();
+    expect(getByText('BB')).toBeTruthy();
 
     const row = getByText('Acme Plumbing').closest('button')!;
     expect(row.className).toMatch(/\bmin-h-11\b/);
@@ -86,6 +90,19 @@ describe('Customers screen', () => {
     h.data = [{ id: 'c3' }];
     const { getByText } = render(createElement(Customers));
     expect(getByText('Unnamed customer')).toBeTruthy();
+  });
+
+  it('tags non-residential accounts and leaves residential clean', () => {
+    h.data = [
+      { id: 'b', displayName: 'Globex Corp', accountType: 'b2b' },
+      { id: 'p', displayName: 'Hill Property Mgmt', accountType: 'property_manager' },
+      { id: 'r', displayName: 'Jane Doe', accountType: 'residential' },
+    ];
+    const { getByText, queryAllByText } = render(createElement(Customers));
+    expect(getByText('Business')).toBeTruthy();
+    expect(getByText('Property mgr')).toBeTruthy();
+    // Residential carries no segment tag.
+    expect(queryAllByText('Business')).toHaveLength(1);
   });
 
   it('surfaces a fetch error', () => {
