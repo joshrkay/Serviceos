@@ -259,12 +259,12 @@ describe('runOverdueInvoiceSweep', () => {
       expect(reminders).toHaveLength(2); // not 4
     });
 
-    it('falls back to the default cadence (single 3-day SMS) when no config exists', async () => {
+    it('falls back to the default 3/7/14 cadence when no config exists', async () => {
       await seedOverdueInvoice('t1');
       const proposalRepo = new InMemoryProposalRepository();
       const dunningEventRepo = new InMemoryDunningEventRepository();
 
-      // No dunningConfigRepo → defaultDunningConfig.
+      // No dunningConfigRepo → defaultDunningConfig (PRD US-370: 3/7/14).
       await runOverdueInvoiceSweep({
         ...deps(async () => ['t1']),
         proposalRepo,
@@ -274,8 +274,11 @@ describe('runOverdueInvoiceSweep', () => {
       const reminders = (await proposalRepo.findByStatus('t1', 'ready_for_review')).filter(
         (p) => p.proposalType === 'send_payment_reminder',
       );
-      expect(reminders).toHaveLength(1);
-      expect(reminders[0].payload.stepKey).toBe('3:sms');
+      // The seeded invoice is 13 days overdue → day-3 and day-7 steps are due;
+      // the day-14 step is not yet (13 < 14).
+      expect(reminders).toHaveLength(2);
+      const stepKeys = reminders.map((p) => p.payload.stepKey).sort();
+      expect(stepKeys).toEqual(['3:sms', '7:sms']);
     });
 
     it('raises a late fee as a money proposal and NEVER applies money in the sweep', async () => {
