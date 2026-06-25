@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter, Routes, Route } from 'react-router';
 
@@ -23,6 +23,13 @@ function jsonResponse(body: unknown): Response {
     text: async () => JSON.stringify(body),
   } as unknown as Response;
 }
+
+// Mirror fmtFriendlyDate's formatting so the date assertions don't depend on the
+// runner's timezone: compute the expected string from the same instant the
+// component formats. (toLocaleDateString resolves the calendar day in the
+// runtime tz, so a bare 'Mar 15, 2026' literal would flip at UTC+13/+14.)
+const friendly = (iso: string) =>
+  new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
 // An already-accepted estimate → EstimateApprovalPage flips to SuccessScreen on
 // load (view.status === 'accepted' calls setAccept(true)). Mirrors the accepted
@@ -76,16 +83,19 @@ describe('EstimateApprovalPage — SuccessScreen tenant branding (QA-004)', () =
 
     // Real tenant name shows in both the page header and the job card.
     expect(screen.getAllByText('Acme HVAC').length).toBeGreaterThanOrEqual(2);
-    // The old hardcoded brand and "F" avatar are gone.
+    // The old hardcoded brand is gone, and both avatars (header + job card)
+    // show the tenant's derived initial — never the old hardcoded "F".
     expect(screen.queryAllByText(/Fieldly Pro Services/i)).toHaveLength(0);
-    expect(screen.queryAllByText('F')).toHaveLength(0);
-    // Avatar shows the tenant's initial, derived from businessName.
-    expect(screen.getAllByText('A').length).toBeGreaterThanOrEqual(1);
+    const initials = screen.getAllByTestId('tenant-initial');
+    expect(initials).toHaveLength(2);
+    initials.forEach((el) => expect(el).toHaveTextContent('A'));
     // Phone link is wired to the real businessPhone (digits only).
     expect(container.querySelector('a[href="tel:5125550100"]')).not.toBeNull();
     // The acceptance date is the real acceptedAt, and the fabricated date +
     // mock job number are gone.
-    expect(screen.getByText(/Mar 15, 2026 · Estimate approved/)).toBeInTheDocument();
+    expect(
+      screen.getByText(`${friendly('2026-03-15T12:00:00Z')} · Estimate approved`),
+    ).toBeInTheDocument();
     expect(screen.queryAllByText(/March 10, 2026/)).toHaveLength(0);
     expect(screen.queryAllByText('JOB-1053')).toHaveLength(0);
   });
@@ -95,9 +105,10 @@ describe('EstimateApprovalPage — SuccessScreen tenant branding (QA-004)', () =
     await screen.findByText('Estimate accepted!');
 
     expect(screen.getAllByText('Zephyr Plumbing').length).toBeGreaterThanOrEqual(2);
-    expect(screen.getAllByText('Z').length).toBeGreaterThanOrEqual(1);
-    // Not the prior fixture's "A" initial — proves the value is derived.
-    expect(screen.queryAllByText('A')).toHaveLength(0);
+    // Both avatars derive 'Z' from the business name — not a hardcoded letter.
+    const initials = screen.getAllByTestId('tenant-initial');
+    expect(initials).toHaveLength(2);
+    initials.forEach((el) => expect(el).toHaveTextContent('Z'));
   });
 
   it('omits the phone link and date row when the tenant has no businessPhone or acceptedAt', async () => {
@@ -120,9 +131,9 @@ describe('EstimateApprovalPage — SuccessScreen tenant branding (QA-004)', () =
       // A still-open (sent, actionable) estimate so the Accept CTA renders.
       renderAccepted(acceptedView({ status: 'sent', isActionable: true }));
       const acceptBtn = await screen.findByRole('button', { name: /accept this/i });
-      acceptBtn.click();
+      fireEvent.click(acceptBtn);
       // The signing sheet stamps today (frozen), not the old "March 10, 2026".
-      expect(await screen.findByText('Jul 4, 2026')).toBeInTheDocument();
+      expect(await screen.findByText(friendly('2026-07-04T12:00:00Z'))).toBeInTheDocument();
       expect(screen.queryAllByText(/March 10, 2026/)).toHaveLength(0);
     } finally {
       vi.useRealTimers();

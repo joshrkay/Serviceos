@@ -386,7 +386,7 @@ function SuccessScreen({
         <div className="max-w-lg mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="flex size-8 items-center justify-center rounded-xl bg-slate-900">
-              <span className="text-white" style={{ fontSize: 13 }}>{businessName.charAt(0).toUpperCase()}</span>
+              <span data-testid="tenant-initial" className="text-white" style={{ fontSize: 13 }}>{businessName.charAt(0).toUpperCase()}</span>
             </div>
             <div>
               <p className="text-sm text-slate-800">{businessName}</p>
@@ -465,7 +465,7 @@ function SuccessScreen({
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
                 <div className="size-6 rounded-lg bg-white/10 flex items-center justify-center">
-                  <span className="text-white" style={{ fontSize: 11 }}>{businessName.charAt(0).toUpperCase()}</span>
+                  <span data-testid="tenant-initial" className="text-white" style={{ fontSize: 11 }}>{businessName.charAt(0).toUpperCase()}</span>
                 </div>
                 <p className="text-sm text-white">{businessName}</p>
               </div>
