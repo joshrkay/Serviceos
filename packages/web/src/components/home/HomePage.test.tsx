@@ -384,4 +384,13 @@ describe('HomePage', () => {
     expect(screen.getByText('Estimate sent')).toBeInTheDocument();
     expect(screen.getAllByText('Overdue').length).toBeGreaterThanOrEqual(1);
   });
+
+  it('renders the populated dashboard on Path A tokens — no raw palette leaks', () => {
+    const { container } = renderPage();
+    // The today/estimates/invoices sections use divide-y between rows; pins
+    // those (and everything else) to semantic tokens, not the slate palette.
+    expect(container.innerHTML).not.toMatch(
+      /(bg|text|border|border-l|border-t|placeholder|ring|divide|shadow)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
+    );
+  });
 });

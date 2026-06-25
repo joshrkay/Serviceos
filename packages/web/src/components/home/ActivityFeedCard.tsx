@@ -91,7 +91,7 @@ export function ActivityFeedCard() {
         <Activity size={14} className="text-muted-foreground" />
         <p className="text-sm text-foreground">Recent activity</p>
       </div>
-      <div className="overflow-hidden rounded-xl border border-border bg-card divide-y divide-slate-100">
+      <div className="overflow-hidden rounded-xl border border-border bg-card divide-y divide-border">
         {items.map((item) => {
           const meta = ACTOR_META[item.actorKind];
           const ActorIcon = meta.icon;

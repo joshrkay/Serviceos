@@ -441,10 +441,10 @@ export function HomePage() {
         <TimeGivenBackCard />
 
         {/* ── Two-column layout ── */}
-        <div className="flex flex-col md:grid md:grid-cols-[1fr_320px] md:items-start divide-y md:divide-y-0 md:divide-x divide-slate-100">
+        <div className="flex flex-col md:grid md:grid-cols-[1fr_320px] md:items-start divide-y md:divide-y-0 md:divide-x divide-border">
 
           {/* ─── Left: Operational ─── */}
-          <div className="flex flex-col divide-y divide-slate-100">
+          <div className="flex flex-col divide-y divide-border">
 
             {/* Today's jobs */}
             <section className="px-4 md:px-6 py-5">
@@ -483,7 +483,7 @@ export function HomePage() {
                       <ArrowRight size={13} className="shrink-0" />
                     </button>
                   )}
-                  <div className="rounded-xl bg-card border border-border overflow-hidden divide-y divide-slate-100">
+                  <div className="rounded-xl bg-card border border-border overflow-hidden divide-y divide-border">
                     {todayJobs.map(job => (
                       <JobRow key={job.id} job={job} onClick={() => navigate(`/jobs/${job.id}`)} />
                     ))}
@@ -500,7 +500,7 @@ export function HomePage() {
           </div>
 
           {/* ─── Right: Financial & Attention ─── */}
-          <div className="flex flex-col divide-y divide-slate-100">
+          <div className="flex flex-col divide-y divide-border">
 
             {/* Leads pipeline widget */}
             <section className="px-4 py-5">
@@ -526,7 +526,7 @@ export function HomePage() {
                   || 'Lead';
                 return (
                   <div className="rounded-xl bg-card border border-border overflow-hidden">
-                    <div className="flex divide-x divide-slate-100">
+                    <div className="flex divide-x divide-border">
                       {[
                         { label: 'New', count: leads.filter((l) => l.stage === 'new').length, color: 'text-primary', dot: 'bg-primary' },
                         { label: 'Contacted', count: leads.filter((l) => l.stage === 'contacted').length, color: 'text-warning', dot: 'bg-warning' },
@@ -608,7 +608,7 @@ export function HomePage() {
                     onRetry={() => estimatesQuery.refetch()}
                   />
                 ) : (
-                  <div className="rounded-xl bg-card border border-border divide-y divide-slate-100 overflow-hidden">
+                  <div className="rounded-xl bg-card border border-border divide-y divide-border overflow-hidden">
                     {pendingEsts.map(est => (
                       <button
                         key={est.id}
@@ -660,7 +660,7 @@ export function HomePage() {
                     onRetry={() => invoicesQuery.refetch()}
                   />
                 ) : (
-                  <div className="rounded-xl bg-card border border-border divide-y divide-slate-100 overflow-hidden">
+                  <div className="rounded-xl bg-card border border-border divide-y divide-border overflow-hidden">
                     {unpaidInvs.map(inv => {
                       const overdue = isOverdue(inv);
                       return (

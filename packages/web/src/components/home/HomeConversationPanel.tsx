@@ -152,7 +152,7 @@ export function HomeConversationPanel() {
               onKeyDown={handleKeyDown}
               placeholder={dictation.isRecording ? 'Listening…' : 'Ask anything or give a command…'}
               aria-label="Message the assistant"
-              className="flex-1 bg-transparent text-sm text-foreground placeholder-slate-400 outline-none min-w-0 py-2"
+              className="flex-1 bg-transparent text-sm text-foreground placeholder-muted-foreground outline-none min-w-0 py-2"
             />
             <button
               type="button"
