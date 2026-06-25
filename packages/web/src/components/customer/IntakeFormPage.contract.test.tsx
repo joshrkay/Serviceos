@@ -8,8 +8,9 @@
  * what must never appear is the ServiceOS brand blue.
  */
 import React from 'react';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
+import { expectTenantNeutral } from './tenantNeutralContract';
 
 vi.mock('../../api/public-intake', () => ({
   submitIntakeLead: vi.fn(),
@@ -27,16 +28,6 @@ const TENANT_INFO = {
   serviceTypes: [{ verticalType: 'hvac', displayName: 'HVAC Services' }],
 };
 
-const RAW_PALETTE =
-  /(bg|text|border|border-l|border-r|border-t|border-b|placeholder|ring|divide|shadow|from|via|to)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/;
-
-function expectNeutral(html: string) {
-  expect(html).not.toMatch(RAW_PALETTE);
-  expect(html).not.toMatch(/\b(bg|text|border|ring)-primary\b/);
-  expect(html).not.toMatch(/\bring-ring\b/);
-  expect(html).not.toMatch(/\b(bg|text|border)-accent\b|accent-foreground/);
-}
-
 describe('IntakeFormPage — tenant-neutral class contract', () => {
   beforeEach(() => {
     vi.mocked(submitIntakeLead).mockResolvedValue({ ok: true, leadId: 'lead-1' });
@@ -50,7 +41,7 @@ describe('IntakeFormPage — tenant-neutral class contract', () => {
 
     // Step 1 — service select.
     fireEvent.click(await screen.findByTestId('intake-service-hvac'));
-    expectNeutral(container.innerHTML);
+    expectTenantNeutral(container.innerHTML);
     fireEvent.click(screen.getByTestId('intake-cta'));
 
     // Step 2 — description (kit Textarea), urgency severity, business-hours hint.
@@ -58,16 +49,16 @@ describe('IntakeFormPage — tenant-neutral class contract', () => {
       target: { value: 'AC stopped blowing cold air yesterday.' },
     });
     fireEvent.click(screen.getByText('🚨 Emergency'));
-    expectNeutral(container.innerHTML);
+    expectTenantNeutral(container.innerHTML);
     fireEvent.click(screen.getByTestId('intake-cta'));
 
     // Step 3 — contact (kit Inputs).
     fireEvent.change(screen.getByTestId('intake-field-name'), { target: { value: 'Sandra Wu' } });
     fireEvent.change(screen.getByTestId('intake-field-phone'), { target: { value: '(512) 555-0191' } });
-    expectNeutral(container.innerHTML);
+    expectTenantNeutral(container.innerHTML);
     fireEvent.click(screen.getByTestId('intake-cta'));
 
     // Step 4 — review.
-    expectNeutral(container.innerHTML);
+    expectTenantNeutral(container.innerHTML);
   });
 });

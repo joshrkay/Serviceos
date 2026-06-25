@@ -21,6 +21,7 @@ vi.mock('../../utils/api-fetch', () => ({
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 import { EstimateApprovalPage } from './EstimateApprovalPage';
+import { expectTenantNeutral } from './tenantNeutralContract';
 
 function jsonResponse(body: unknown): Response {
   return {
@@ -63,9 +64,6 @@ function renderPage() {
   );
 }
 
-const RAW_PALETTE =
-  /(bg|text|border|border-l|border-r|border-t|border-b|placeholder|ring|divide|shadow|from|via|to)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/;
-
 describe('EstimateApprovalPage — tenant-neutral class contract', () => {
   beforeEach(() => {
     apiFetchMock.mockReset();
@@ -75,19 +73,10 @@ describe('EstimateApprovalPage — tenant-neutral class contract', () => {
     });
   });
 
-  it('renders no raw Tailwind palette classes', async () => {
+  it('renders no raw palette and no ServiceOS brand blue', async () => {
     const { container } = renderPage();
     await screen.findByText('Acme HVAC');
-    expect(container.innerHTML).not.toMatch(RAW_PALETTE);
-  });
-
-  it('renders no ServiceOS brand blue (primary / ring / accent) — tenant-neutral', async () => {
-    const { container } = renderPage();
-    await screen.findByText('Acme HVAC');
-    const html = container.innerHTML;
-    expect(html).not.toMatch(/\b(bg|text|border|ring)-primary\b/);
-    expect(html).not.toMatch(/\bring-ring\b/);
-    expect(html).not.toMatch(/\b(bg|text|border)-accent\b|accent-foreground/);
+    expectTenantNeutral(container.innerHTML);
   });
 
   it('shows cents on round-dollar selectable add-on prices (fmtUsd, not bare toLocaleString)', async () => {

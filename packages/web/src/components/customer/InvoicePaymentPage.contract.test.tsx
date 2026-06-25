@@ -7,9 +7,10 @@
  * Regression tripwire only — the source grep is authoritative.
  */
 import React from 'react';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, beforeEach, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
+import { expectTenantNeutral } from './tenantNeutralContract';
 
 vi.mock('@stripe/react-stripe-js', () => ({
   Elements: ({ children }: { children: React.ReactNode }) => (
@@ -64,19 +65,12 @@ function renderPage() {
   );
 }
 
-const RAW_PALETTE =
-  /(bg|text|border|border-l|border-r|border-t|border-b|placeholder|ring|divide|shadow|from|via|to)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/;
-
 describe('InvoicePaymentPage — tenant-neutral class contract', () => {
   beforeEach(() => vi.restoreAllMocks());
 
   it('renders no raw palette and no ServiceOS brand blue once the invoice loads', async () => {
     const { container } = renderPage();
     await screen.findByText('HVAC Pro');
-    const html = container.innerHTML;
-    expect(html).not.toMatch(RAW_PALETTE);
-    expect(html).not.toMatch(/\b(bg|text|border|ring)-primary\b/);
-    expect(html).not.toMatch(/\bring-ring\b/);
-    expect(html).not.toMatch(/\b(bg|text|border)-accent\b|accent-foreground/);
+    expectTenantNeutral(container.innerHTML);
   });
 });
