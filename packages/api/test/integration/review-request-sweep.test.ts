@@ -100,16 +100,22 @@ describe('review-request sweep (US-345, DB-level)', () => {
   it('enqueues feedback_send only for the eligible job, stamps it, and is idempotent', async () => {
     const send = vi.fn(async () => 'msg');
 
-    const first = await runReviewRequestSweep({ pool, jobRepo, queue: { send }, logger, now });
+    await runReviewRequestSweep({ pool, jobRepo, queue: { send }, logger, now });
 
-    // Only the >24h job under the opted-in tenant.
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(send).toHaveBeenCalledWith(
+    // runReviewRequestSweep is a GLOBAL cross-tenant sweep, so in the full
+    // integration suite other files' eligible jobs also enqueue here. Scope the
+    // count to THIS test's two tenants: exactly the >24h opted-in job (jobOldA)
+    // enqueues — never the <24h job (jobRecentA) or the opted-out tenant's job.
+    const ourCalls = send.mock.calls.filter(
+      ([, payload]: [unknown, { tenantId: string }]) =>
+        payload.tenantId === tenantA.tenantId || payload.tenantId === tenantB.tenantId,
+    );
+    expect(ourCalls).toHaveLength(1);
+    expect(ourCalls[0]).toEqual([
       'feedback_send',
       { tenantId: tenantA.tenantId, jobId: jobOldA },
       `${tenantA.tenantId}:${jobOldA}:feedback_send`,
-    );
-    expect(first.enqueued).toBe(1);
+    ]);
 
     // Stamp persisted (real column).
     const stamped = await pool.query<{ review_request_sent_at: Date | null }>(
@@ -125,10 +131,14 @@ describe('review-request sweep (US-345, DB-level)', () => {
     );
     expect(untouched.rows.map((r) => r.id).sort()).toEqual([jobRecentA, jobOldB].sort());
 
-    // Second sweep: the stamped job is no longer eligible → no new enqueue.
+    // Second sweep: the stamped job is no longer eligible → our tenants enqueue
+    // nothing new (scoped, since other files' jobs may still be in play globally).
     send.mockClear();
-    const second = await runReviewRequestSweep({ pool, jobRepo, queue: { send }, logger, now });
-    expect(send).not.toHaveBeenCalled();
-    expect(second.enqueued).toBe(0);
+    await runReviewRequestSweep({ pool, jobRepo, queue: { send }, logger, now });
+    const ourSecondCalls = send.mock.calls.filter(
+      ([, payload]: [unknown, { tenantId: string }]) =>
+        payload.tenantId === tenantA.tenantId || payload.tenantId === tenantB.tenantId,
+    );
+    expect(ourSecondCalls).toHaveLength(0);
   });
 });
