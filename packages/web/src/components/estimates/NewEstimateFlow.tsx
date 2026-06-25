@@ -535,7 +535,7 @@ function VoiceInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
         Describe what needs to be done — parts, problems, scope. AI builds the estimate from your words.
       </p>
       <button onClick={start} className="group flex flex-col items-center gap-3">
-        <div className="relative flex size-20 items-center justify-center rounded-full bg-primary shadow-xl shadow-slate-900/20 hover:bg-primary/90 active:scale-95 transition-all">
+        <div className="relative flex size-20 items-center justify-center rounded-full bg-primary shadow-xl shadow-border/20 hover:bg-primary/90 active:scale-95 transition-all">
           <Mic size={28} className="text-primary-foreground" />
           <div className="absolute inset-0 rounded-full border-2 border-primary/20 scale-110 group-hover:scale-125 transition-transform" />
         </div>
@@ -552,7 +552,7 @@ function VoiceInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
       </div>
       <Waveform active />
       <button onClick={stop}
-        className="flex items-center gap-2 rounded-xl bg-destructive text-primary-foreground px-6 py-3 text-sm hover:bg-destructive active:scale-95 transition-all shadow-lg shadow-red-500/30">
+        className="flex items-center gap-2 rounded-xl bg-destructive text-primary-foreground px-6 py-3 text-sm hover:bg-destructive active:scale-95 transition-all shadow-lg shadow-destructive/30">
         <StopCircle size={16} /> Tap to stop
       </button>
       <p className="text-xs text-muted-foreground">Auto-stops at 10s</p>
@@ -563,7 +563,7 @@ function VoiceInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
     <div className="flex flex-col items-center gap-3 py-10">
       <Waveform active={false} />
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
-        <span className="size-4 rounded-full border-2 border-border border-t-slate-600 animate-spin" />
+        <span className="size-4 rounded-full border-2 border-border border-t-border animate-spin" />
         Transcribing…
       </div>
     </div>
@@ -954,7 +954,7 @@ function PhotoInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
       ) : (
         phase === 'analyzing' ? (
           <div className="flex items-center justify-center gap-2 py-4">
-            <span className="size-4 rounded-full border-2 border-primary/30 border-t-indigo-600 animate-spin" />
+            <span className="size-4 rounded-full border-2 border-primary/30 border-t-primary animate-spin" />
             <p className="text-sm text-foreground">Analyzing {photos.length} photo{photos.length > 1 ? 's' : ''}…</p>
           </div>
         ) : (
@@ -989,7 +989,7 @@ function InlineCustomerPicker({ selectedId, onSelect, customers }: {
           <Search size={12} className="text-warning shrink-0" />
           <input value={search} onChange={e => setSearch(e.target.value)}
             placeholder="Search…"
-            className="flex-1 bg-transparent text-sm text-foreground placeholder-amber-400/70 outline-none" />
+            className="flex-1 bg-transparent text-sm text-foreground placeholder-warning/70 outline-none" />
         </div>
         <div className="flex flex-wrap gap-1.5">
           {filtered.map(c => (

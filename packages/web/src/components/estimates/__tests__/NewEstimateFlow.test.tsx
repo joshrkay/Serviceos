@@ -59,6 +59,9 @@ describe('NewEstimateFlow', () => {
 
   // U8e — Path A class contract: the entry screen (the most-recolored surface,
   // with the two build-mode cards) renders on brand tokens only.
+  // Regex covers the full prefix set (shadow/border-t/placeholder included) —
+  // the narrow original missed `shadow-*`/`border-t-*`/`placeholder-*`, which is
+  // how 5 raw classes survived on deeper flow states until the U5 cleanup.
   it('renders on Path A tokens — no raw Tailwind palette leaks', () => {
     const { container } = render(
       <MemoryRouter>
@@ -66,7 +69,7 @@ describe('NewEstimateFlow', () => {
       </MemoryRouter>,
     );
     expect(container.innerHTML).not.toMatch(
-      /(bg|text|border|ring|divide)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
+      /(bg|text|border|border-l|border-t|placeholder|ring|divide|shadow)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
     );
   });
 });
