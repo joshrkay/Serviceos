@@ -5216,6 +5216,31 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ALTER COLUMN appointment_reminder_offsets_hours SET DEFAULT '[24, 2]'::jsonb;
   `,
+
+  // PRD US-345 — auto review request 24h after job completion. Mirrors the
+  // thank-you-SMS pattern (migration 194):
+  //   - jobs.review_request_sent_at: per-job idempotency stamp. The 24h sweep
+  //     enqueues feedback_send (the existing gated review/feedback delivery)
+  //     once per job, then stamps this; suppressed reasons stamp it too so the
+  //     sweep never re-checks the row.
+  //   - tenant_settings.send_review_request: opt-out per tenant. Default ON to
+  //     match the PRD's auto_send_review_request default + preserve the current
+  //     "every completed job gets a request" audience (just at 24h, not
+  //     immediately — the immediate enqueue in routes/jobs.ts is removed).
+  // Backfill: pre-existing 'completed' jobs get review_request_sent_at =
+  // COALESCE(completed_at, updated_at) so the first sweep after deploy doesn't
+  // blast customers for jobs finished long ago.
+  '214_review_request_sweep': `
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS review_request_sent_at TIMESTAMPTZ;
+    ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS send_review_request BOOLEAN NOT NULL DEFAULT TRUE;
+    UPDATE jobs
+      SET review_request_sent_at = COALESCE(completed_at, updated_at)
+      WHERE status = 'completed'
+        AND review_request_sent_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_jobs_review_request_eligibility
+      ON jobs (tenant_id, completed_at)
+      WHERE review_request_sent_at IS NULL AND completed_at IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

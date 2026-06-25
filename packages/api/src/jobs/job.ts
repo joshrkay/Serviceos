@@ -115,6 +115,13 @@ export interface Job {
    * so existing completed rows don't trigger a backlog of texts.
    */
   thankYouSmsSentAt?: Date;
+  /**
+   * Idempotency stamp for the 24h post-completion review request (PRD US-345).
+   * Non-null means "already handled" (sent or suppressed). Backfilled to
+   * COALESCE(completed_at, updated_at) by migration 214 so existing completed
+   * rows don't trigger a backlog of review requests.
+   */
+  reviewRequestSentAt?: Date;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;

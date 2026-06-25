@@ -248,6 +248,13 @@ export interface TenantSettings {
    */
   sendThankYouSms?: boolean;
   /**
+   * Post-job review request: when true (default), a review/feedback request is
+   * auto-sent 24h after a job completes (PRD US-345). Idempotent on
+   * `jobs.review_request_sent_at`. Reuses the gated feedback-send delivery
+   * (4★+ customers are shown the configured Google/Yelp review link).
+   */
+  sendReviewRequest?: boolean;
+  /**
    * Feature (launch) — when true, an auto-drafted invoice recomputes its labor
    * line from ACTUAL logged time entries instead of the estimated hours.
    * Default false (opt-in); with no tracked time the estimate is billed as-is.
@@ -532,6 +539,8 @@ export interface UpdateSettingsInput {
   autoInvoiceOnCompletion?: boolean;
   /** Post-job 2hr thank-you SMS. Default true. */
   sendThankYouSms?: boolean;
+  /** Post-job 24h review request (PRD US-345). Default true. */
+  sendReviewRequest?: boolean;
   /** Feature (launch) — recompute auto-invoice labor from actual time entries. */
   billLaborFromTimeEntries?: boolean;
   /** P21-003 — opt into the daily batch-invoice proposal sweep. */

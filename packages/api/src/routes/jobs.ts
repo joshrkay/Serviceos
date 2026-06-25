@@ -76,6 +76,9 @@ export function createJobRouter(
   // Dispatcher is intentionally passed through router wiring so this API
   // surface aligns with app-level dependency injection for feedback_send.
   void feedbackDispatcher;
+  // `queue` is retained in the signature (app-level DI) but the on-completion
+  // review-request enqueue moved to the 24h review-request sweep (US-345).
+  void queue;
 
   router.post(
     '/',
@@ -343,11 +346,11 @@ export function createJobRouter(
         );
 
         if (status === 'completed') {
-          await queue.send(
-            'feedback_send',
-            { tenantId: req.auth!.tenantId, jobId: req.params.id },
-            `${req.auth!.tenantId}:${req.params.id}:feedback_send`
-          );
+          // PRD US-345 — the review/feedback request now fires 24h after
+          // completion via the leader-locked review-request sweep
+          // (workers/review-request-worker.ts), not immediately here, so the
+          // ask lands the day after the visit. The sweep enqueues feedback_send
+          // with the same idempotency key the immediate enqueue used.
 
           // P20-001 — auto-draft an invoice (opt-in, gated inside). Best-effort:
           // a drafting failure must never fail the completion the owner just made.

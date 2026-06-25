@@ -73,6 +73,7 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // Migration 194 — DEFAULT TRUE at the column level so legacy rows
     // surface as `true` (matches the "built-in, included" framing).
     sendThankYouSms: row.send_thank_you_sms as boolean | undefined,
+    sendReviewRequest: row.send_review_request as boolean | undefined,
     billLaborFromTimeEntries: row.bill_labor_from_time_entries as boolean | undefined,
     batchInvoiceEnabled: row.batch_invoice_enabled as boolean | undefined,
     milestoneBillingEnabled: row.milestone_billing_enabled as boolean | undefined,
@@ -326,6 +327,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         autoInvoiceOnCompletion: 'auto_invoice_on_completion',
         // Migration 194.
         sendThankYouSms: 'send_thank_you_sms',
+        // Migration 214 — post-job 24h review request opt-out.
+        sendReviewRequest: 'send_review_request',
         billLaborFromTimeEntries: 'bill_labor_from_time_entries',
         batchInvoiceEnabled: 'batch_invoice_enabled',
         milestoneBillingEnabled: 'milestone_billing_enabled',

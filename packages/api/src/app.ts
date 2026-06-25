@@ -365,6 +365,7 @@ import {
 } from './metrics/hfcr-weekly-send';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
 import { runThankYouSmsSweep } from './workers/thank-you-sms-worker';
+import { runReviewRequestSweep } from './workers/review-request-worker';
 import { createLifecycleEmailWorker } from './workers/lifecycle-email-worker';
 import { runSetupReminderSweep } from './workers/setup-reminder-sweep';
 import { runTrialReminderSweep } from './workers/trial-reminder-sweep';
@@ -1874,6 +1875,8 @@ export function createApp(): express.Express {
     proposalExpiry: 590019,
     // Epic 12.6 — weekly feedback email sweep (590019 taken by proposalExpiry on main).
     weeklyFeedback: 590020,
+    // PRD US-345 — 24h post-completion review-request sweep.
+    reviewRequest: 590021,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -4930,6 +4933,28 @@ export function createApp(): express.Express {
       });
     }).catch((err) => {
       thankYouSmsLogger.error('Thank-you SMS sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 10 * 60_000));
+
+  // Post-job review request (PRD US-345) — fires 24h after completion via the
+  // same P0-009 leader-locked sweep idiom; reuses the feedback_send worker for
+  // gated delivery (the immediate on-completion enqueue was removed).
+  const reviewRequestLogger = createLogger({
+    service: 'review-request-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.reviewRequest, async () => {
+      await runReviewRequestSweep({
+        pool: pool ?? null,
+        jobRepo,
+        queue,
+        logger: reviewRequestLogger,
+      });
+    }).catch((err) => {
+      reviewRequestLogger.error('Review-request sweep failed', {
         error: err instanceof Error ? err.message : String(err),
       });
     });
