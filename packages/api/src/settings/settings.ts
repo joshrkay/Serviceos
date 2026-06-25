@@ -8,14 +8,16 @@ import { isValidTimezone } from '../shared/timezone';
  *  settings→ai module dependency. */
 export type Language = 'en' | 'es';
 
-/** Story 10.2 — default reminder cadence: a single reminder 24h before. */
-export const DEFAULT_REMINDER_OFFSETS_HOURS: readonly number[] = [24];
+/** Story 10.2 / PRD US-340+US-341 — default reminder cadence: 24h AND 2h
+ *  before the appointment. normalizeReminderOffsets sorts descending, so the
+ *  soonest (2h) fires last. Tenants can override the cadence in settings. */
+export const DEFAULT_REMINDER_OFFSETS_HOURS: readonly number[] = [24, 2];
 
 /**
  * Story 10.2 — sanitize tenant-supplied reminder offsets into a safe,
  * deterministic list: integer hours in [1, 720], deduped, sorted descending
  * (soonest-configured reminder fires last), capped at 5. Anything invalid or
- * empty falls back to the conservative default [24]. Used on both the write
+ * empty falls back to the default [24, 2]. Used on both the write
  * path (before persist) and the read path (defensive), so the worker never
  * sees garbage.
  */

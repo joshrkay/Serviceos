@@ -45,7 +45,7 @@ describe('Postgres integration — settings', () => {
       expect(found!.timezone).toBe('America/Chicago');
     });
 
-    it('defaults reminder offsets to [24] and normalizes on update (Story 10.2)', async () => {
+    it('defaults reminder offsets to [24, 2] and normalizes on update (PRD US-340+US-341)', async () => {
       const tenant = await createTestTenant(pool);
       const now = new Date();
       await settingsRepo.create({
@@ -62,9 +62,9 @@ describe('Postgres integration — settings', () => {
         updatedAt: now,
       });
 
-      // DB default column value.
+      // DB default column value (migration 213 → [24, 2]).
       const created = await settingsRepo.findByTenant(tenant.tenantId);
-      expect(created!.appointmentReminderOffsetsHours).toEqual([24]);
+      expect(created!.appointmentReminderOffsetsHours).toEqual([24, 2]);
 
       // Update normalizes: dedupe + clamp + sort descending.
       const updated = await settingsRepo.update(tenant.tenantId, {

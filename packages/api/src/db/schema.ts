@@ -5206,6 +5206,16 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS weekly_feedback_enabled BOOLEAN NOT NULL DEFAULT true;
   `,
+
+  // PRD US-340 + US-341 — default the reminder cadence to T-24h AND T-2h.
+  // Migration 211 created the column with DEFAULT '[24]' (the legacy single
+  // reminder); this changes the column default for NEW tenant_settings rows to
+  // '[24, 2]'. Existing rows are left untouched — a tenant's explicit cadence
+  // is never overwritten. Idempotent (SET DEFAULT re-runs safely).
+  '213_tenant_settings_reminder_offsets_default': `
+    ALTER TABLE tenant_settings
+      ALTER COLUMN appointment_reminder_offsets_hours SET DEFAULT '[24, 2]'::jsonb;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
