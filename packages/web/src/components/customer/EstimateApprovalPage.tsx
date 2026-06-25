@@ -376,7 +376,7 @@ function SuccessScreen({
   const firstName = customer.split(' ')[0];
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-background">
       {/* Branded header */}
       <div className="bg-white border-b border-slate-200 px-5 py-4">
         <div className="max-w-lg mx-auto flex items-center justify-between">
@@ -865,7 +865,7 @@ export function EstimateApprovalPage() {
 
   return (
     <>
-      <div className="min-h-screen bg-slate-50">
+      <div className="min-h-screen bg-background">
         {revised && (
           <div className="bg-amber-50 border-b border-amber-200 px-5 py-3 text-center">
             <p className="text-sm text-amber-800 max-w-lg mx-auto">
@@ -1165,7 +1165,7 @@ export function EstimateApprovalPage() {
               <div className="max-w-lg mx-auto">
                 <button
                   onClick={() => setAppr(true)}
-                  className="w-full flex items-center justify-center gap-2 rounded-2xl bg-slate-900 text-white py-4 text-sm hover:bg-slate-700 active:scale-[0.98] transition-all shadow-xl shadow-slate-900/20"
+                  className="w-full flex items-center justify-center gap-2 rounded-2xl bg-primary text-primary-foreground py-4 text-sm hover:opacity-90 active:scale-[0.98] transition-all shadow-xl"
                 >
                   <Check size={16} /> Accept this {estimateLabel.toLowerCase()}
                 </button>

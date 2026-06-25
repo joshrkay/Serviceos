@@ -1,31 +1,26 @@
 import { type Href, useRouter } from 'expo-router';
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
-import { useMe, type Mode } from '../src/hooks/useMe';
-import { useMoneyDashboard } from '../src/hooks/useMoneyDashboard';
-import { usePendingProposals } from '../src/hooks/usePendingProposals';
-import { formatMoneyShort, formatWeekdayDate } from '../src/lib/format';
-import { greetingForDate } from '../src/lib/greeting';
-import { ErrorState } from '../src/components/ErrorState';
-import { PushDeniedNotice } from '../src/components/PushDeniedNotice';
-import { useToast } from '../src/components/Toast';
-import { useReconnectRetry } from '../src/lib/useReconnectRetry';
+import { useMe, type Mode } from '../../src/hooks/useMe';
+import { useMoneyDashboard } from '../../src/hooks/useMoneyDashboard';
+import { usePendingProposals } from '../../src/hooks/usePendingProposals';
+import { formatMoneyShort, formatWeekdayDate } from '../../src/lib/format';
+import { greetingForDate } from '../../src/lib/greeting';
+import { ErrorState } from '../../src/components/ErrorState';
+import { PushDeniedNotice } from '../../src/components/PushDeniedNotice';
+import { useToast } from '../../src/components/Toast';
+import { useReconnectRetry } from '../../src/lib/useReconnectRetry';
 
 const MODES: Mode[] = ['supervisor', 'both', 'tech'];
 
-// Secondary destinations — the approval inbox + money are surfaced as hero
-// cards above, so the grid is the remaining read screens.
-const NAV: Array<{ label: string; route: Href }> = [
+const SECONDARY: Array<{ label: string; route: Href }> = [
   { label: 'Messages', route: '/messages' },
-  { label: 'Customers', route: '/customers' },
   { label: 'Schedule', route: '/schedule' },
   { label: 'Estimates', route: '/estimates' },
   { label: 'Invoices', route: '/invoices' },
-  { label: 'Jobs', route: '/jobs' },
-  { label: 'Settings', route: '/settings' },
+  { label: 'Approvals', route: '/approvals' },
+  { label: 'Notifications', route: '/notifications' },
 ];
 
-// Home / Today: the owner's at-a-glance pulse — speak an action, what's
-// waiting for approval, and this month's money — over the existing API.
 export default function Home() {
   const router = useRouter();
   const { me, isLoading, error, switchMode, refetch } = useMe();
@@ -33,7 +28,6 @@ export default function Home() {
   const money = useMoneyDashboard();
   const { showErrorToast } = useToast();
 
-  // If /api/me failed while offline, heal Home on reconnect without a manual tap.
   useReconnectRetry(refetch, Boolean(error));
 
   if (isLoading) {
@@ -57,9 +51,9 @@ export default function Home() {
   return (
     <ScrollView
       className="flex-1 bg-background"
-      contentContainerStyle={{ paddingHorizontal: 24, paddingTop: 64, paddingBottom: 48 }}
+      contentContainerStyle={{ paddingHorizontal: 24, paddingTop: 96, paddingBottom: 96 }}
     >
-      <Text className="text-2xl font-semibold text-foreground">{greetingForDate()}</Text>
+      <Text className="font-heading text-2xl font-semibold text-foreground">{greetingForDate()}</Text>
       <Text className="mt-1 text-base text-mutedForeground">{formatWeekdayDate(new Date())}</Text>
 
       <Pressable
@@ -71,16 +65,15 @@ export default function Home() {
         <Text className="text-base font-semibold text-primaryForeground">Speak an action</Text>
       </Pressable>
 
-      <Text className="mt-7 mb-2 text-xs font-medium uppercase tracking-wide text-mutedForeground">
+      <Text className="mb-2 mt-7 text-xs font-medium uppercase tracking-wide text-mutedForeground">
         Money &amp; approvals
       </Text>
 
-      {/* Approval inbox — the human-approval gate, with a live count. */}
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Approval inbox"
         onPress={() => router.push('/approvals')}
-        className="min-h-11 flex-row items-center justify-between rounded-lg border border-border p-4"
+        className="min-h-11 flex-row items-center justify-between rounded-lg border border-border bg-card p-4"
       >
         <View className="flex-1 pr-3">
           <Text className="text-base font-medium text-foreground">Approval inbox</Text>
@@ -101,13 +94,12 @@ export default function Home() {
         ) : null}
       </Pressable>
 
-      {/* This month's money — hidden entirely when the report isn't configured. */}
       {money.notConfigured ? null : (
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Money summary"
           onPress={() => router.push('/invoices')}
-          className="mt-3 min-h-11 rounded-lg border border-border p-4"
+          className="mt-3 min-h-11 rounded-lg border border-border bg-card p-4"
         >
           <Text className="text-base font-medium text-foreground">This month</Text>
           {money.isLoading ? (
@@ -135,7 +127,7 @@ export default function Home() {
         </Pressable>
       )}
 
-      <Text className="mt-7 mb-2 text-xs font-medium uppercase tracking-wide text-mutedForeground">
+      <Text className="mb-2 mt-7 text-xs font-medium uppercase tracking-wide text-mutedForeground">
         Switch mode
       </Text>
       <View className="flex-row gap-2">
@@ -163,17 +155,17 @@ export default function Home() {
 
       <PushDeniedNotice className="mt-6" />
 
-      <Text className="mt-7 mb-2 text-xs font-medium uppercase tracking-wide text-mutedForeground">
-        More
+      <Text className="mb-2 mt-7 text-xs font-medium uppercase tracking-wide text-mutedForeground">
+        Quick links
       </Text>
       <View className="flex-row flex-wrap justify-between">
-        {NAV.map((n) => (
+        {SECONDARY.map((n) => (
           <Pressable
             key={n.label}
             accessibilityRole="button"
             accessibilityLabel={n.label}
             onPress={() => router.push(n.route)}
-            className="mb-3 min-h-11 items-center justify-center rounded-md border border-border px-4 py-3"
+            className="mb-3 min-h-11 items-center justify-center rounded-md border border-border bg-card px-4 py-3"
             style={{ width: '47%' }}
           >
             <Text className="text-base text-foreground">{n.label}</Text>

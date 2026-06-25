@@ -12,6 +12,7 @@ export type ReviewPhase =
   | 'approved' // within the undo window
   | 'undoing'
   | 'undone'
+  | 'rejecting'
   | 'committed' // undo window elapsed; the action will execute
   | 'error';
 
@@ -22,6 +23,8 @@ export interface UseProposalReviewResult {
   /** Whole seconds left in the undo window (0 outside 'approved'). */
   secondsLeft: number;
   approve: () => Promise<void>;
+  reject: (reason: string, details?: string) => Promise<void>;
+  resolveLine: (lineIndex: number, catalogItemId: string) => Promise<void>;
   undo: () => Promise<void>;
   reload: () => Promise<void>;
 }
@@ -37,6 +40,10 @@ function normalize(raw: Record<string, unknown>): ReviewProposal {
     payload:
       raw.payload && typeof raw.payload === 'object'
         ? (raw.payload as Record<string, unknown>)
+        : undefined,
+    sourceContext:
+      raw.sourceContext && typeof raw.sourceContext === 'object'
+        ? (raw.sourceContext as Record<string, unknown>)
         : undefined,
     approvedAt: typeof raw.approvedAt === 'string' ? raw.approvedAt : null,
   };
@@ -132,6 +139,48 @@ export function useProposalReview(id: string): UseProposalReviewResult {
     }
   }, [api, id]);
 
+  const reject = useCallback(
+    async (reason: string, details?: string) => {
+      setPhase('rejecting');
+      setError(null);
+      try {
+        const res = await api(`/api/proposals/${id}/reject`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason, ...(details ? { details } : {}) }),
+        });
+        if (!res.ok) throw new Error((await decodeError(res)).message);
+        setProposal(normalize(await res.json()));
+        setPhase('undone');
+      } catch (e) {
+        setError(message(e));
+        setPhase('error');
+      }
+    },
+    [api, id],
+  );
+
+  const resolveLine = useCallback(
+    async (lineIndex: number, catalogItemId: string) => {
+      setError(null);
+      try {
+        const res = await api(`/api/proposals/${id}/resolve-line`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lineIndex, catalogItemId }),
+        });
+        if (!res.ok) throw new Error((await decodeError(res)).message);
+        const p = normalize(await res.json());
+        setProposal(p);
+        setPhase(phaseForStatus(p.status, p.approvedAt ?? null));
+      } catch (e) {
+        setError(message(e));
+        setPhase('error');
+      }
+    },
+    [api, id],
+  );
+
   const undo = useCallback(async () => {
     setPhase('undoing');
     setError(null);
@@ -166,5 +215,5 @@ export function useProposalReview(id: string): UseProposalReviewResult {
     return () => clearInterval(interval);
   }, [phase]);
 
-  return { proposal, phase, error, secondsLeft, approve, undo, reload };
+  return { proposal, phase, error, secondsLeft, approve, reject, resolveLine, undo, reload };
 }
