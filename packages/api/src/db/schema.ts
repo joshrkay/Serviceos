@@ -5281,6 +5281,52 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_delay_notice_state ON delay_notice_state
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+  // Least-privilege runtime role for RLS enforcement. The app connects as a
+  // privileged principal (needs to run migrations + own the view-token
+  // SECURITY DEFINER functions), so RLS is a runtime no-op today. This role is
+  // RLS-SUBJECT (NOT superuser, NOT BYPASSRLS, never a table owner): when the
+  // app `SET ROLE`s into it for tenant-scoped queries (gated by RLS_RUNTIME_ROLE),
+  // every policy actually enforces. Grants are broad (ALL TABLES + future via
+  // ALTER DEFAULT PRIVILEGES) so RLS — not the grant — is what isolates tenants;
+  // a narrow grant list would 500 a query the day someone adds a table.
+  // Self-degrading: a deploy principal without CREATEROLE/GRANT logs a NOTICE
+  // and continues (enforcement simply stays off until the role is provisioned).
+  '217_create_rls_app_runtime_role': `
+    DO $rls$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rls_app_runtime') THEN
+        CREATE ROLE rls_app_runtime NOLOGIN;
+      END IF;
+      GRANT USAGE ON SCHEMA public TO rls_app_runtime;
+      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO rls_app_runtime;
+      GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO rls_app_runtime;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO rls_app_runtime;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT USAGE, SELECT ON SEQUENCES TO rls_app_runtime;
+      -- Let the app's connection principal assume the role.
+      EXECUTE format('GRANT rls_app_runtime TO %I', current_user);
+    EXCEPTION WHEN insufficient_privilege THEN
+      RAISE NOTICE 'rls_app_runtime not provisioned (insufficient privilege); RLS runtime role stays disabled until provisioned by an admin';
+    END
+    $rls$;
+  `,
+  // Close the two tenant tables that carry tenant_id but had no RLS policy, so
+  // the rls_app_runtime role enforces isolation across the whole tenant surface.
+  //   - oauth_states: always accessed via withTenant (the OAuth callback is
+  //     Clerk-authenticated, so a tenant GUC is set) — add the standard policy.
+  //   - platform_deprovision_log: an intentional exemption (ops/audit log, no
+  //     tenant FK, written via the privileged connection, must survive a tenant
+  //     purge). Record the exemption durably as a table comment rather than a policy.
+  '218_rls_coverage_oauth_states': `
+    ALTER TABLE oauth_states ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE oauth_states FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_oauth_states ON oauth_states;
+    CREATE POLICY tenant_isolation_oauth_states ON oauth_states
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+    COMMENT ON TABLE platform_deprovision_log IS
+      'Intentionally NOT under RLS: ops/audit log with no tenant FK, written via the privileged connection (withClient/pool.query), and must survive a tenant purge. Do not add a tenant_isolation policy.';
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
