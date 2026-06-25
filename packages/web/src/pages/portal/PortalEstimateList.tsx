@@ -31,10 +31,10 @@ export function PortalEstimateList({ token }: { token: string }) {
     };
   }, [token]);
 
-  if (!loaded) return <div className="text-slate-500">Loading estimates…</div>;
-  if (error) return <div className="text-rose-600 text-sm">{error}</div>;
+  if (!loaded) return <div className="text-muted-foreground">Loading estimates…</div>;
+  if (error) return <div className="text-destructive text-sm">{error}</div>;
   if (estimates.length === 0) {
-    return <div className="text-slate-500 text-sm">No estimates yet.</div>;
+    return <div className="text-muted-foreground text-sm">No estimates yet.</div>;
   }
 
   return (
@@ -56,21 +56,21 @@ export function PortalEstimateList({ token }: { token: string }) {
             subtitle={`Status: ${e.status.replace(/_/g, ' ')}`}
             trailing={
               <div className="text-right">
-                <div className="text-base font-semibold text-slate-900">
+                <div className="text-base font-semibold text-foreground">
                   {formatPortalCents(e.totalCents)}
                 </div>
                 {e.depositPayable ? (
-                  <div className="text-xs text-rose-600">
+                  <div className="text-xs text-destructive">
                     {formatPortalCents(depositRemainingCents)} deposit due
                   </div>
                 ) : depositPaid ? (
-                  <div className="text-xs text-emerald-600">Deposit paid</div>
+                  <div className="text-xs text-success">Deposit paid</div>
                 ) : null}
               </div>
             }
           >
             <div className="flex items-center justify-between gap-2">
-              <div className="min-w-0 text-xs text-slate-500">
+              <div className="min-w-0 text-xs text-muted-foreground">
                 Created {new Date(e.createdAt).toLocaleDateString()}
                 {e.validUntil
                   ? ` · valid until ${new Date(e.validUntil).toLocaleDateString()}`
@@ -83,8 +83,8 @@ export function PortalEstimateList({ token }: { token: string }) {
                   rel="noreferrer"
                   className={
                     e.depositPayable
-                      ? 'inline-flex min-h-11 items-center rounded-lg bg-slate-900 px-3 text-sm font-medium text-white hover:bg-slate-800'
-                      : 'inline-flex min-h-11 items-center text-sm font-medium text-slate-900 underline'
+                      ? 'inline-flex min-h-11 items-center rounded-lg bg-foreground px-3 text-sm font-medium text-white hover:bg-foreground/90'
+                      : 'inline-flex min-h-11 items-center text-sm font-medium text-foreground underline'
                   }
                 >
                   {e.depositPayable ? 'Pay deposit' : 'View & respond'}

@@ -27,10 +27,10 @@ export function PortalJobList({ token }: { token: string }) {
     };
   }, [token]);
 
-  if (!loaded) return <div className="text-slate-500">Loading jobs…</div>;
-  if (error) return <div className="text-rose-600 text-sm">{error}</div>;
+  if (!loaded) return <div className="text-muted-foreground">Loading jobs…</div>;
+  if (error) return <div className="text-destructive text-sm">{error}</div>;
   if (jobs.length === 0) {
-    return <div className="text-slate-500 text-sm">No service jobs yet.</div>;
+    return <div className="text-muted-foreground text-sm">No service jobs yet.</div>;
   }
 
   return (
@@ -41,12 +41,12 @@ export function PortalJobList({ token }: { token: string }) {
           title={`${j.jobNumber} · ${j.summary}`}
           subtitle={`Priority: ${j.priority}`}
           trailing={
-            <span className="text-sm font-medium text-slate-700">
+            <span className="text-sm font-medium text-foreground">
               {j.status.replace(/_/g, ' ')}
             </span>
           }
         >
-          <div className="text-xs text-slate-500">
+          <div className="text-xs text-muted-foreground">
             Opened {new Date(j.createdAt).toLocaleDateString()}
           </div>
         </PortalCard>
