@@ -41,18 +41,27 @@ test.describe('smoke — ui', () => {
 
     await page.goto('/login');
 
-    await expect(page.getByText('Fieldly').first()).toBeVisible();
-    await expect(page.getByText(/© 2026 Fieldly/)).toBeVisible();
+    await expect(page.getByText('Rivet', { exact: true })).toBeVisible();
+    await expect(page.getByText(/© 2026 Rivet/)).toBeVisible();
+    await expect(page.getByRole('heading', { name: /sign in/i })).toBeVisible();
     expect(consoleErrors).toEqual([]);
   });
 
   test('signup page renders', async ({ page }) => {
     await page.goto('/signup');
-    await expect(page.getByText('Fieldly').first()).toBeVisible();
+    await expect(page.getByText('Rivet', { exact: true })).toBeVisible();
+    await expect(page.getByText(/© 2026 Rivet/)).toBeVisible();
+    await expect(page.getByRole('heading', { name: /sign up|create/i })).toBeVisible();
   });
 
-  test('protected route redirects to login when unauthenticated', async ({ page }) => {
+  test('signed-out root shows the public landing page', async ({ page }) => {
     await page.goto('/');
+    await expect(page).toHaveURL('/');
+    await expect(page.getByRole('heading', { name: /your ai dispatcher/i })).toBeVisible();
+  });
+
+  test('signed-out app route redirects to login', async ({ page }) => {
+    await page.goto('/jobs');
     await expect(page).toHaveURL(/\/login/, { timeout: 10_000 });
   });
 });

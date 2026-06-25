@@ -43,7 +43,7 @@ test.describe('Journey 1 — signup to first estimate', () => {
 
     // 2. Land on signup page.
     await page.goto('/signup');
-    await expect(page.getByText('Fieldly').first()).toBeVisible();
+    await expect(page.getByText('Rivet', { exact: true })).toBeVisible();
 
     // 3. Fill the Clerk-hosted signup form with a Clerk *test* email address.
     //    Any email containing the `+clerk_test` subaddress is automatically

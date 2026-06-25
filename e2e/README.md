@@ -23,9 +23,10 @@ First run downloads Chromium (~90MB). Cached after that.
 ## What's covered today
 
 ### Smoke (`smoke.spec.ts`)
-- `/login` page renders without errors
-- `/signup` page renders without errors
-- Unauthenticated visit to `/` redirects to `/login`
+- `/login` page renders without errors (Rivet chrome + Clerk sign-in widget)
+- `/signup` page renders without errors (Rivet chrome + Clerk sign-up widget)
+- Unauthenticated visit to `/` shows the public marketing landing page
+- Unauthenticated visit to `/jobs` redirects to `/login`
 - API `/health` endpoint responds 200
 
 These always run. If any fail, something basic is broken in the stack.
@@ -72,6 +73,37 @@ npm run e2e
 ```
 
 When `E2E_BASE_URL` is set, Playwright does NOT start local servers.
+
+## Full matrix / runbook
+
+The smoke suite above is the lightweight gate. The full beta-verification
+runbook chains DB seeding, HMAC token minting, qa-runner stages (§1–17), and
+the Playwright QA matrix (tenant isolation). It requires operator-provided
+secrets — without them `npm run qa:doctor` correctly reports blocked checks.
+
+**Required env vars** (see `scripts/qa-runbook-run.sh` for where to obtain each):
+
+| Variable | Purpose |
+|----------|---------|
+| `E2E_DB_URL_READWRITE` | Postgres URL for seeding Tenant A + B |
+| `E2E_DB_URL_READONLY` | Read-only Postgres URL (defaults to READWRITE) |
+| `E2E_CLERK_HMAC_SECRET` | API `CLERK_SECRET_KEY` for HMAC JWT mint |
+
+**Deployed API flag:** `CLERK_DEV_HMAC_TOKENS=true` on the target API service
+(Railway → Variables). Without it, minted tokens return 401 even when the
+secret matches.
+
+**Run the full runbook:**
+
+```bash
+E2E_DB_URL_READWRITE='postgres://…' \
+E2E_DB_URL_READONLY='postgres://…' \
+E2E_CLERK_HMAC_SECRET='sk_test_…' \
+  npm run qa:runbook
+```
+
+Optional overrides: `E2E_BASE_URL`, `E2E_API_URL` (default to Railway dev).
+Reports land in `qa-runner/reports/` and `playwright-report/`.
 
 ## Why most journeys are skipped
 
