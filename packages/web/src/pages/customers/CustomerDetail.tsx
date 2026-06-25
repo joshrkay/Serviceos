@@ -11,6 +11,7 @@ import { LanguageBadge } from '../../components/customers/LanguageBadge';
 import { ContactsPanel } from '../../components/customers/ContactsPanel';
 import { TagsPanel } from '../../components/customers/TagsPanel';
 import { CustomFieldsPanel } from '../../components/customers/CustomFieldsPanel';
+import { CustomerRecordsPanel } from '../../components/customers/CustomerRecordsPanel';
 import { MergeCustomerPanel } from '../../components/customers/MergeCustomerPanel';
 import { apiFetch } from '../../utils/api-fetch';
 import {
@@ -330,6 +331,12 @@ export function CustomerDetail({
               </Button>
             </div>
           ),
+        },
+        {
+          // US-069 — the customer's Jobs / Estimates / Invoices + lifetime
+          // revenue. Messages are in the Activity section's CommunicationTimeline.
+          title: 'Records',
+          content: <CustomerRecordsPanel customerId={customerId} />,
         },
         {
           title: 'Contact Information',
