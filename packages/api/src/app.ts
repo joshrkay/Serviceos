@@ -3666,6 +3666,7 @@ export function createApp(): express.Express {
       locationRepo,
       enRouteCoordinator: delayNotificationCoordinator,
       proposalRepo,
+      userRepo,
       boardEventsDeps: {
         authUserIdFromRequest: async (req) =>
           (req as { auth?: { userId?: string } }).auth?.userId ?? null,
