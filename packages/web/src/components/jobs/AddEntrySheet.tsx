@@ -225,7 +225,7 @@ export function AddEntrySheet({ author, authorInitials, authorColor, onClose, on
                 <p className="text-sm text-muted-foreground text-center">Tap to start recording your voice note</p>
                 <button
                   onClick={() => { setRecording(true); setRecSeconds(0); }}
-                  className="flex size-20 items-center justify-center rounded-full bg-primary hover:bg-primary active:scale-95 transition-all shadow-lg"
+                  className="flex size-20 items-center justify-center rounded-full bg-primary hover:bg-primary/90 active:scale-95 transition-all shadow-lg"
                 >
                   <Mic size={30} className="text-primary-foreground" />
                 </button>
@@ -254,7 +254,7 @@ export function AddEntrySheet({ author, authorInitials, authorColor, onClose, on
               </div>
               <button
                 onClick={stopRecording}
-                className="flex size-16 items-center justify-center rounded-full bg-destructive hover:bg-destructive active:scale-95 transition-all"
+                className="flex size-16 items-center justify-center rounded-full bg-destructive hover:bg-destructive/90 active:scale-95 transition-all"
               >
                 <Square size={18} className="text-primary-foreground fill-current" />
               </button>

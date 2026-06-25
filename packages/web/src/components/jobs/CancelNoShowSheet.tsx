@@ -218,7 +218,7 @@ export function CancelNoShowSheet({ job, customerName, customerPhone, onClose }:
           <button
             onClick={handleSubmit}
             disabled={!reason}
-            className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-destructive text-primary-foreground text-sm hover:bg-destructive transition-colors disabled:opacity-40"
+            className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-destructive text-primary-foreground text-sm hover:bg-destructive/90 transition-colors disabled:opacity-40"
           >
             <AlertTriangle size={14} /> Mark job
           </button>

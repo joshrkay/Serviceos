@@ -71,10 +71,10 @@ const STATUS_FLOW: {
   dotColor: string; ctaBg: string;
   apiStatus: string;
 }[] = [
-  { key: 'en_route',    label: 'En Route',          cta: "I've Arrived",    dotColor: 'bg-primary',   ctaBg: 'bg-primary   hover:bg-primary',   apiStatus: 'in_progress' },
-  { key: 'on_site',     label: 'On Site',            cta: 'Start Job',       dotColor: 'bg-success',  ctaBg: 'bg-success  hover:bg-success',  apiStatus: 'in_progress' },
-  { key: 'in_progress', label: 'In Progress',        cta: 'Mark Complete',   dotColor: 'bg-primary', ctaBg: 'bg-primary hover:bg-primary', apiStatus: 'in_progress' },
-  { key: 'waiting',     label: 'Waiting for Parts',  cta: 'Resume Job',      dotColor: 'bg-warning',  ctaBg: 'bg-warning  hover:bg-warning',  apiStatus: 'in_progress' },
+  { key: 'en_route',    label: 'En Route',          cta: "I've Arrived",    dotColor: 'bg-primary',   ctaBg: 'bg-primary   hover:bg-primary/90',   apiStatus: 'in_progress' },
+  { key: 'on_site',     label: 'On Site',            cta: 'Start Job',       dotColor: 'bg-success',  ctaBg: 'bg-success  hover:bg-success/90',  apiStatus: 'in_progress' },
+  { key: 'in_progress', label: 'In Progress',        cta: 'Mark Complete',   dotColor: 'bg-primary', ctaBg: 'bg-primary hover:bg-primary/90', apiStatus: 'in_progress' },
+  { key: 'waiting',     label: 'Waiting for Parts',  cta: 'Resume Job',      dotColor: 'bg-warning',  ctaBg: 'bg-warning  hover:bg-warning/90',  apiStatus: 'in_progress' },
   { key: 'complete',    label: 'Complete',            cta: '',                dotColor: 'bg-success',  ctaBg: '', apiStatus: 'completed' },
 ];
 
@@ -306,7 +306,7 @@ function VoiceHero({
       </div>
       <Waveform active />
       <button onClick={stopRecording}
-        className="flex items-center gap-2 bg-destructive text-primary-foreground rounded-full px-6 py-2.5 text-sm hover:bg-destructive active:scale-95 transition-all shadow-lg shadow-destructive/30">
+        className="flex items-center gap-2 bg-destructive text-primary-foreground rounded-full px-6 py-2.5 text-sm hover:bg-destructive/90 active:scale-95 transition-all shadow-lg shadow-destructive/30">
         <StopCircle size={15} /> Done talking
       </button>
       <p className="text-xs text-muted-foreground">Auto-stops at 30s</p>

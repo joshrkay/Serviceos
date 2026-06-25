@@ -93,7 +93,7 @@ export function CallScreen({ name, phone, initials, color, onEnd }: {
         </div>
         <button
           onClick={onEnd}
-          className="flex items-center justify-center gap-2 w-full py-4 rounded-full bg-destructive text-primary-foreground hover:bg-destructive transition-colors"
+          className="flex items-center justify-center gap-2 w-full py-4 rounded-full bg-destructive text-primary-foreground hover:bg-destructive/90 transition-colors"
         >
           <PhoneOff size={22} /><span className="text-sm">End call</span>
         </button>
@@ -167,7 +167,7 @@ export function TextSheet({ name, phone, onClose }: { name: string; phone: strin
           <button
             onClick={() => { if (!message.trim()) return; setSent(true); setTimeout(onClose, 1500); }}
             disabled={!message.trim()}
-            className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-primary text-primary-foreground text-sm hover:bg-primary transition-colors disabled:opacity-40"
+            className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-primary text-primary-foreground text-sm hover:bg-primary/90 transition-colors disabled:opacity-40"
           >
             <Send size={14} /> Send message
           </button>
@@ -298,7 +298,7 @@ export function InvoiceSheet({ invoiceId, customerName, customerPhone, onClose }
           ) : (
             <button
               onClick={() => setSent(true)}
-              className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-primary text-primary-foreground text-sm hover:bg-primary transition-colors"
+              className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-primary text-primary-foreground text-sm hover:bg-primary/90 transition-colors"
             >
               <Send size={14} /> Send invoice now
             </button>

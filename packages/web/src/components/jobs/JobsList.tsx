@@ -21,7 +21,7 @@ const STATUS_BORDER: Partial<Record<string, string>> = {
   'New':          'border-l-border',
   'In Progress':  'border-l-primary',
   'Scheduled':    'border-l-primary',
-  'Completed':    'border-l-border',
+  'Completed':    'border-l-success',
   'Canceled':     'border-l-destructive',
 };
 

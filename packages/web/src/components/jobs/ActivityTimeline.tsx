@@ -146,7 +146,7 @@ export function ActivityTimeline({ activities, onAddEntry, compact = false }: Pr
                 ) : event.type === 'system' ? (
                   <p className="text-xs text-muted-foreground italic mt-0.5">{event.content}</p>
                 ) : (
-                  <p className={`text-sm mt-0.5 ${event.type === 'status_change' ? 'text-foreground' : 'text-foreground'}`}>
+                  <p className="text-sm mt-0.5 text-foreground">
                     {event.content}
                   </p>
                 )}

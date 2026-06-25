@@ -820,7 +820,7 @@ export function NewJobFlow({
                 onClick={() => setStep('voice')}
                 className="flex items-start gap-4 rounded-2xl border-2 border-border bg-card px-5 py-4 text-left hover:border-primary/30 hover:shadow-sm active:bg-secondary transition-all group"
               >
-                <div className="flex size-11 items-center justify-center rounded-2xl bg-primary shrink-0 group-hover:bg-primary transition-colors">
+                <div className="flex size-11 items-center justify-center rounded-2xl bg-primary shrink-0 group-hover:bg-primary/90 transition-colors">
                   <Mic size={20} className="text-primary-foreground" />
                 </div>
                 <div>
@@ -882,7 +882,7 @@ export function NewJobFlow({
                   </div>
                   <Waveform active />
                   <button onClick={stopRecording}
-                    className="flex items-center gap-2 rounded-xl bg-destructive text-primary-foreground px-6 py-3 text-sm hover:bg-destructive active:scale-95 transition-all shadow-lg shadow-destructive/30">
+                    className="flex items-center gap-2 rounded-xl bg-destructive text-primary-foreground px-6 py-3 text-sm hover:bg-destructive/90 active:scale-95 transition-all shadow-lg shadow-destructive/30">
                     <StopCircle size={16} /> Tap to stop
                   </button>
                   <p className="text-xs text-muted-foreground">Auto-stops at 10s</p>
@@ -921,7 +921,7 @@ export function NewJobFlow({
                         <RotateCcw size={13} /> Re-record
                       </button>
                       <button onClick={buildFromVoice}
-                        className="flex-1 flex items-center justify-center gap-1.5 rounded-xl bg-primary text-primary-foreground py-2.5 text-sm hover:bg-primary transition-colors">
+                        className="flex-1 flex items-center justify-center gap-1.5 rounded-xl bg-primary text-primary-foreground py-2.5 text-sm hover:bg-primary/90 transition-colors">
                         <Sparkles size={14} /> Parse this job
                       </button>
                     </div>
@@ -1414,7 +1414,7 @@ export function NewJobFlow({
               className="flex items-center justify-center gap-2 w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm disabled:opacity-40 hover:bg-primary/90 transition-colors"
             >
               {creating
-                ? <><span className="size-4 rounded-full border-2 border-primary-foreground/30 border-t-white animate-spin" /> Creating job…</>
+                ? <><span className="size-4 rounded-full border-2 border-primary-foreground/30 border-t-primary-foreground animate-spin" /> Creating job…</>
                 : <><Check size={14} /> Create job {parsed.scheduledDate ? `· ${parsed.scheduledDate}` : ''}</>
               }
             </button>
@@ -1465,7 +1465,7 @@ export function NewJobFlow({
               className="flex items-center justify-center gap-2 w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm disabled:opacity-40 hover:bg-primary/90 transition-colors"
             >
               {creating
-                ? <><span className="size-4 rounded-full border-2 border-primary-foreground/30 border-t-white animate-spin" /> Creating job…</>
+                ? <><span className="size-4 rounded-full border-2 border-primary-foreground/30 border-t-primary-foreground animate-spin" /> Creating job…</>
                 : <>
                     <Check size={14} />
                     Create job{draft.scheduledDate

@@ -765,11 +765,11 @@ function getAIHints(job: Job, materials: MaterialItem[], customer: Customer | un
 }
 
 const HINT_CFG: Record<string, { bg: string; icon: string; btn: string }> = {
-  amber:  { bg: 'bg-warning/10',  icon: 'text-warning',  btn: 'bg-warning  hover:bg-warning'  },
-  blue:   { bg: 'bg-primary/10',   icon: 'text-primary',   btn: 'bg-primary   hover:bg-primary'   },
-  violet: { bg: 'bg-primary/10', icon: 'text-primary', btn: 'bg-primary hover:bg-primary' },
-  indigo: { bg: 'bg-primary/10', icon: 'text-primary', btn: 'bg-primary hover:bg-primary' },
-  green:  { bg: 'bg-success/10',  icon: 'text-success',  btn: 'bg-success  hover:bg-success'  },
+  amber:  { bg: 'bg-warning/10',  icon: 'text-warning',  btn: 'bg-warning  hover:bg-warning/90'  },
+  blue:   { bg: 'bg-primary/10',   icon: 'text-primary',   btn: 'bg-primary   hover:bg-primary/90'   },
+  violet: { bg: 'bg-primary/10', icon: 'text-primary', btn: 'bg-primary hover:bg-primary/90' },
+  indigo: { bg: 'bg-primary/10', icon: 'text-primary', btn: 'bg-primary hover:bg-primary/90' },
+  green:  { bg: 'bg-success/10',  icon: 'text-success',  btn: 'bg-success  hover:bg-success/90'  },
 };
 
 function AIHintsPanel({ hints, onAction }: { hints: AIHint[]; onAction: (a: Modal) => void }) {
@@ -1336,9 +1336,9 @@ export function JobDetailView({ id }: { id: string }) {
           {/* Primary actions */}
           <div className="grid grid-cols-3 gap-2 mb-4">
             {[
-              { icon: Phone,         label: 'Call',       sub: customerPhone.split(' ')[0],  onClick: () => setModal('call'),              bg: 'bg-success  hover:bg-success'  },
-              { icon: MessageSquare, label: 'Text',       sub: 'Send message',                onClick: () => setModal('text'),              bg: 'bg-primary   hover:bg-primary'   },
-              { icon: Navigation,    label: 'Directions', sub: job.address.split(',')[0],     onClick: () => window.open(mapsUrl, '_blank'), bg: 'bg-primary hover:bg-primary' },
+              { icon: Phone,         label: 'Call',       sub: customerPhone.split(' ')[0],  onClick: () => setModal('call'),              bg: 'bg-success  hover:bg-success/90'  },
+              { icon: MessageSquare, label: 'Text',       sub: 'Send message',                onClick: () => setModal('text'),              bg: 'bg-primary   hover:bg-primary/90'   },
+              { icon: Navigation,    label: 'Directions', sub: job.address.split(',')[0],     onClick: () => window.open(mapsUrl, '_blank'), bg: 'bg-primary hover:bg-primary/90' },
             ].map(({ icon: Icon, label, sub, onClick, bg }) => (
               <button
                 key={label}
